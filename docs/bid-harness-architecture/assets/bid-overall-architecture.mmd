@@ -1,0 +1,50 @@
+flowchart TB
+    U[用户：上传资料、确认目录、提出修改] --> UI[Web Client：文件上传、阶段进度、目录确认、章节查看、产物下载]
+
+    subgraph CONTROL[控制面：确定性业务流程]
+      P[Stage Policy\n定义目标、输入、允许工具、禁止项和必须产物]
+      O[Bid Orchestrator\n读取阶段、启动任务、等待用户、章节循环、阶段转换]
+      V[Stage Validator\n校验真实产物，通过才进入下一阶段]
+      P --> O
+      V --> O
+    end
+
+    UI --> O
+
+    subgraph DATA[数据面：Workspace 内容与证据检索]
+      D[Document Pipeline\n上传校验 → 解析 → 拆块 → block-index]
+      K[Workspace Knowledge\ninput / parsed / blocks / manifest / index]
+      R[证据检索\nbid_search：LLM 扩词 + rg 定位\nbid_read_context：回读完整上下文]
+      D --> K --> R
+    end
+
+    subgraph EXEC[执行面：Agent 阶段内自主完成]
+      B[Bid Agent Preset\n静态标书规则]
+      T[当前阶段任务单\n每次只告诉当前一步]
+      G[阶段工具与 Guard\n只开放允许能力]
+      A[Harness Agent Loop\n检索、回读、推理、目录设计、正文写作]
+      M[可配置模型]
+      B --> A
+      T --> A
+      G --> A
+      A <--> M
+    end
+
+    O --> D
+    O --> T
+    O --> G
+    A <--> R
+
+    subgraph STORE[产物与持久化：状态和内容分离]
+      S[Session Event Log\n业务状态唯一事实来源]
+      F[阶段产物\nrequirements → evidence-map → outline → sections → 技术标]
+      W[Workspace Files\n内容唯一事实来源]
+    end
+
+    O --> S
+    A --> F --> V
+    D --> W
+    K --> W
+    F --> W
+    S --> UI
+    F --> UI

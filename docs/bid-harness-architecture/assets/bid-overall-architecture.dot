@@ -1,0 +1,155 @@
+digraph BidHarnessArchitecture {
+  graph [
+    rankdir=TB,
+    bgcolor="#FFFFFF",
+    pad="0.35",
+    nodesep="0.55",
+    ranksep="0.70",
+    splines=polyline,
+    fontname="Noto Sans CJK SC",
+    fontsize=20,
+    labelloc="t",
+    label="Bid Harness 总体架构\n确定性控制面 + Agent 自主执行面 + Workspace 数据面"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Noto Sans CJK SC",
+    fontsize=12,
+    color="#B8C4D3",
+    penwidth=1.25,
+    fillcolor="#F8FAFC",
+    fontcolor="#172033",
+    margin="0.18,0.12"
+  ];
+
+  edge [
+    color="#65758B",
+    penwidth=1.35,
+    arrowsize=0.75,
+    fontname="Noto Sans CJK SC",
+    fontsize=10,
+    fontcolor="#41536B"
+  ];
+
+  user [label="用户\n上传资料 · 确认目录 · 提出修改", fillcolor="#EDF5FF", color="#7DA7D9"];
+
+  subgraph cluster_ui {
+    label="交互层｜Web Client";
+    color="#BFD3EA";
+    style="rounded,filled";
+    fillcolor="#F7FAFF";
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#2B4F77";
+
+    ui [label="聊天工作台\n文件上传 · 阶段进度 · 目录确认 · 章节查看 · 产物下载", fillcolor="#F0F6FF"];
+  }
+
+  subgraph cluster_control {
+    label="控制面｜确定性业务流程";
+    color="#9FD0B5";
+    style="rounded,filled";
+    fillcolor="#F4FBF7";
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#245C45";
+
+    orchestrator [label="Bid Orchestrator\n读取当前阶段 · 启动任务 · 等待用户 · 章节循环 · 阶段转换", fillcolor="#DDF5E7", color="#45A771", penwidth=1.9];
+    policy [label="Stage Policy\n定义本阶段目标、输入、允许工具、禁止项和必须产物"];
+    validator [label="Stage Validator\n校验真实产物\n通过才进入下一阶段", fillcolor="#FFF6E4", color="#E2AF4E", penwidth=1.6];
+
+    {rank=same; policy; orchestrator; validator;}
+    policy -> orchestrator [label="约束"];
+    validator -> orchestrator [label="通过 / 留在当前阶段"];
+  }
+
+  subgraph cluster_agent {
+    label="执行面｜Agent 阶段内自主完成";
+    color="#C5BDE9";
+    style="rounded,filled";
+    fillcolor="#FAF9FF";
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#514A82";
+
+    preset [label="Bid Agent Preset\n静态标书规则"];
+    stage_task [label="当前阶段任务单\n每次只告诉 Agent 当前一步", fillcolor="#F0EDFF", color="#9588D0"];
+    tools [label="阶段工具与 Guard\n只展示并允许当前阶段能力"];
+    loop [label="Harness Agent Loop\n检索 · 回读 · 推理 · 目录设计 · 正文写作", fillcolor="#EAE6FF", color="#7669BF", penwidth=1.9];
+    model [label="可配置模型\nDeepSeek · OpenAI · Anthropic · 自定义"];
+
+    {rank=same; preset; stage_task; tools;}
+    preset -> loop;
+    stage_task -> loop;
+    tools -> loop;
+    loop -> model [dir=both, label="模型轮次"];
+  }
+
+  subgraph cluster_data {
+    label="数据面｜Workspace 内容与检索";
+    color="#D8C3A3";
+    style="rounded,filled";
+    fillcolor="#FFFCF7";
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#6A5234";
+
+    pipeline [label="Document Pipeline\n上传校验 → 解析 → 结构化拆块 → block-index", fillcolor="#FFF8EE", color="#D2A86E"];
+    knowledge [label="Workspace Knowledge\ninput/ · parsed/ · blocks/ · manifest/index"];
+    retrieval [label="证据检索\nbid_search：LLM 扩词 + rg 定位\nbid_read_context：回读父标题、前后块和完整表格"];
+
+    pipeline -> knowledge;
+    knowledge -> retrieval [dir=both];
+  }
+
+  subgraph cluster_artifact {
+    label="产物与持久化｜状态和内容分离";
+    color="#C8CFD9";
+    style="rounded,filled";
+    fillcolor="#FAFBFC";
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#49566A";
+
+    artifacts [label="阶段产物\nrequirements.json → evidence-map.json → outline.json\n→ sections/*.md → 技术标.md → 技术标.docx", fillcolor="#FFF4E4", color="#D8A24F"];
+    session [label="Session Event Log\n保存阶段、失败、确认和章节进度\n业务状态唯一事实来源"];
+    workspace [label="Workspace Files\n保存原始资料、文档块和全部产物\n内容唯一事实来源"];
+
+    {rank=same; session; artifacts; workspace;}
+  }
+
+  principles [
+    shape=note,
+    label="总指导思想\l\l1. 程序决定现在做哪一步\l2. Agent 决定这一步具体怎么做\l3. Validator 决定这一步是否完成\l4. 用户确认目录等关键业务节点\l5. 搜索只负责定位，必须回读完整上下文\l6. 评分要求贯穿检索、目录、正文和审核\l7. Session Event 保存状态，Workspace 保存内容\l8. 只保留一条写作链路，不复制平行流程\l",
+    fillcolor="#172033",
+    color="#172033",
+    fontcolor="#FFFFFF",
+    fontsize=12,
+    margin="0.24,0.18"
+  ];
+
+  user -> ui;
+  ui -> orchestrator [label="用户意图"];
+
+  orchestrator -> pipeline [label="文件处理"];
+  orchestrator -> stage_task [label="注入当前阶段"];
+  orchestrator -> tools [label="限制能力"];
+  orchestrator -> session [label="记录业务事件"];
+
+  loop -> retrieval [dir=both, label="定位并回读证据"];
+  loop -> artifacts [label="提交阶段产物"];
+  artifacts -> validator [label="结构与覆盖校验"];
+
+  pipeline -> workspace;
+  knowledge -> workspace;
+  artifacts -> workspace;
+  session -> ui [label="投影真实进度"];
+  artifacts -> ui [label="目录、章节和下载"];
+
+  {rank=sink; principles;}
+  session -> principles [style=invis];
+  artifacts -> principles [style=invis];
+  workspace -> principles [style=invis];
+}
