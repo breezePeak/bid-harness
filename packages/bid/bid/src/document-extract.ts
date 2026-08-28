@@ -4,14 +4,11 @@
  * chunk, upload, or interpret bid content.
  */
 
-import { access, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { basename, extname, resolve } from 'node:path'
-import { randomBytes } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import mammoth from 'mammoth'
-
-const execFileAsync = promisify(execFile)
+import WordExtractor from 'word-extractor'
 
 /** Accepted source and destination paths for one extraction. */
 export interface ExtractDocumentInput {
@@ -69,7 +66,11 @@ interface ParsedDocument {
   parserVersion: string | null
 }
 
-/** Convert a PDF, DOCX, or DOC at `sourcePath` into three UTF-8 corpus files. */
+/**
+ * Convert a PDF, DOCX, or DOC into three UTF-8 corpus files without modifying the source.
+ * @param input - Source file and destination corpus directory.
+ * @returns Paths and status; recognized parse failures resolve as `failed` instead of rejecting.
+ */
 export async function extractDocument(input: ExtractDocumentInput): Promise<ExtractDocumentResult> {
   const sourcePath = resolve(input.sourcePath)
   const outputDir = resolve(input.outputDir)
@@ -84,30 +85,35 @@ export async function extractDocument(input: ExtractDocumentInput): Promise<Extr
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return failure(sourceFile, sourcePath, fileType, 'failed', 'FILE_NOT_FOUND', 'The source file does not exist.')
     return failure(sourceFile, sourcePath, fileType, 'failed', 'SOURCE_READ_FAILED', 'The source file could not be inspected.')
   }
+  let parsed: ParsedDocument
   try {
-    const parsed = await parseDocument(sourcePath, fileType)
-    const status: DocumentParseStatus = parsed.needsOcr ? 'needs_ocr' : 'success'
-    const metadata: DocumentMetadata = {
-      schema_version: 1, source_file: sourceFile, source_path: sourcePath, file_type: fileType,
-      page_count: parsed.pageCount, parse_status: status, needs_ocr: parsed.needsOcr,
-      parser: parsed.parser, parser_version: parsed.parserVersion,
-    }
+    parsed = await parseDocument(sourcePath, fileType)
+  } catch {
+    const code = fileType === 'pdf' ? 'PDF_PARSE_FAILED' : fileType === 'docx' ? 'DOCX_PARSE_FAILED' : 'DOC_PARSE_FAILED'
+    return failure(sourceFile, sourcePath, fileType, 'failed', code, `The ${fileType.toUpperCase()} source could not be parsed.`)
+  }
+  const status: DocumentParseStatus = parsed.needsOcr ? 'needs_ocr' : 'success'
+  const metadata: DocumentMetadata = {
+    schema_version: 1, source_file: sourceFile, source_path: sourcePath, file_type: fileType,
+    page_count: parsed.pageCount, parse_status: status, needs_ocr: parsed.needsOcr,
+    parser: parsed.parser, parser_version: parsed.parserVersion,
+  }
+  try {
     await mkdir(outputDir, { recursive: true })
     const documentPath = resolve(outputDir, 'document.md')
     const structurePath = resolve(outputDir, 'structure.json')
     const metadataPath = resolve(outputDir, 'metadata.json')
     await Promise.all([
-      atomicWrite(documentPath, parsed.markdown),
-      atomicWrite(structurePath, `${JSON.stringify({ sections: sectionsFromMarkdown(parsed.markdown) }, null, 2)}\n`),
-      atomicWrite(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`),
+      writeFileAtomic(documentPath, parsed.markdown, { mode: 0o600, dirMode: 0o700 }),
+      writeFileAtomic(structurePath, `${JSON.stringify({ sections: sectionsFromMarkdown(parsed.markdown) }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 }),
+      writeFileAtomic(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 }),
     ])
     return {
       sourceFile, sourcePath, documentPath, structurePath, metadataPath, fileType,
       pageCount: parsed.pageCount, parseStatus: status, needsOcr: parsed.needsOcr,
     }
-  } catch (error) {
-    const code = fileType === 'pdf' ? 'PDF_PARSE_FAILED' : fileType === 'docx' ? 'DOCX_PARSE_FAILED' : error instanceof DocumentExtractError ? error.code : 'DOC_PARSE_FAILED'
-    return failure(sourceFile, sourcePath, fileType, 'failed', code, error instanceof Error ? error.message : 'The document could not be parsed.')
+  } catch {
+    return failure(sourceFile, sourcePath, fileType, 'failed', 'OUTPUT_WRITE_FAILED', 'The extracted corpus could not be written.')
   }
 }
 
@@ -120,13 +126,14 @@ async function parseDocument(sourcePath: string, fileType: 'pdf' | 'docx' | 'doc
 async function parsePdf(sourcePath: string): Promise<ParsedDocument> {
   const bytes = new Uint8Array(await readFile(sourcePath))
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const pdf = await pdfjs.getDocument({ data: bytes }).promise
+  const standardFontDataUrl = new URL('./standard_fonts/', import.meta.resolve('pdfjs-dist/package.json')).href
+  const pdf = await pdfjs.getDocument({ data: bytes, standardFontDataUrl }).promise
   const pages: string[] = []
   let characters = 0
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
     const page = await pdf.getPage(pageNumber)
     const content = await page.getTextContent()
-    const text = content.items.map(item => 'str' in item ? item.str : '').join(' ').replace(/\s+/gu, ' ').trim()
+    const text = pdfPageText(content.items)
     characters += text.length
     pages.push(`<!-- source: ${basename(sourcePath)} -->\n<!-- page: ${pageNumber} -->${text ? `\n\n${text}` : ''}`)
   }
@@ -140,14 +147,58 @@ async function parseDocx(sourcePath: string): Promise<ParsedDocument> {
 }
 
 async function parseDoc(sourcePath: string): Promise<ParsedDocument> {
-  try {
-    await access(sourcePath)
-    const result = await execFileAsync('antiword', ['-m', 'UTF-8.txt', sourcePath], { encoding: 'utf8', windowsHide: true })
-    return { markdown: `${plainTextToMarkdown(result.stdout).trim()}\n`, pageCount: null, needsOcr: false, parser: 'antiword', parserVersion: null }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new DocumentExtractError('DOC_CONVERTER_NOT_AVAILABLE', 'DOC extraction requires antiword on PATH.')
-    throw error
+  const extractor = new WordExtractor()
+  const document = await extractor.extract(sourcePath)
+  return { markdown: `${plainTextToMarkdown(document.getBody()).trim()}\n`, pageCount: null, needsOcr: false, parser: 'word-extractor', parserVersion: '1.0.4' }
+}
+
+interface PdfTextItem {
+  str: string
+  transform: readonly [number, number, number, number, number, number, ...number[]]
+  width: number
+  height: number
+  hasEOL?: boolean
+}
+
+function isPdfTextItem(item: unknown): item is PdfTextItem {
+  if (typeof item !== 'object' || item === null) return false
+  const candidate = item as Partial<PdfTextItem>
+  return typeof candidate.str === 'string' && Array.isArray(candidate.transform)
+    && candidate.transform.length >= 6 && typeof candidate.transform[4] === 'number' && typeof candidate.transform[5] === 'number'
+    && typeof candidate.width === 'number' && typeof candidate.height === 'number'
+}
+
+/** @internal Convert PDF.js text items into physical lines. */
+export function pdfPageText(items: readonly unknown[]): string {
+  const lines: string[] = []
+  let current = ''
+  let baseline: number | null = null
+  let endX: number | null = null
+  let lineHeight = 0
+  const flush = (): void => {
+    const line = current.trimEnd()
+    if (line.length > 0) lines.push(line)
+    current = ''
+    baseline = null
+    endX = null
+    lineHeight = 0
   }
+  for (const item of items) {
+    if (!isPdfTextItem(item) || item.str.length === 0) continue
+    const x = item.transform[4]
+    const y = item.transform[5]
+    if (baseline !== null && Math.abs(y - baseline) > Math.max(2, lineHeight * 0.5, item.height * 0.5)) flush()
+    if (baseline === null) baseline = y
+    const gap = endX === null ? 0 : x - endX
+    if (current.length > 0 && gap > Math.max(8, item.height)) current += '\t'
+    else if (current.length > 0 && gap > Math.max(1, item.height * 0.15)) current += ' '
+    current += item.str
+    endX = x + item.width
+    lineHeight = Math.max(lineHeight, item.height)
+    if (item.hasEOL) flush()
+  }
+  flush()
+  return lines.join('\n')
 }
 
 function htmlToMarkdown(html: string): string {
@@ -170,11 +221,14 @@ function tableToMarkdown(table: string): string {
   const rows = [...table.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/giu)].map(([, row]) =>
     [...(row ?? '').matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/giu)].map(([, cell]) => escapeCell(stripHtml(cell ?? ''))),
   ).filter(row => row.length > 0)
+  /* v8 ignore next -- mammoth emits a table element only when the Word table has at least one row. */
   if (rows.length === 0) return ''
   const width = Math.max(...rows.map(row => row.length))
   const render = (row: string[]) => `| ${Array.from({ length: width }, (_, index) => row[index] ?? '').join(' | ')} |`
   const [header, ...body] = rows
-  return `\n\n${render(header ?? [])}\n| ${Array.from({ length: width }, () => '---').join(' | ')} |${body.map(row => `\n${render(row)}`).join('')}\n\n`
+  /* v8 ignore next -- rows.length is positive here, so destructuring always produces the header. */
+  if (header === undefined) return ''
+  return `\n\n${render(header)}\n| ${Array.from({ length: width }, () => '---').join(' | ')} |${body.map(row => `\n${render(row)}`).join('')}\n\n`
 }
 
 function stripHtml(value: string): string {
@@ -187,41 +241,42 @@ function plainTextToMarkdown(value: string): string {
 
 function escapeCell(value: string): string { return value.replaceAll('|', '\\|').replaceAll('\n', '<br>') }
 
-function sectionsFromMarkdown(markdown: string): DocumentSection[] {
+/** @internal Build the heading index used by the corpus writer. */
+export function sectionsFromMarkdown(markdown: string): DocumentSection[] {
   const sections: DocumentSection[] = []
   const stack: DocumentSection[] = []
   let page: number | null = null
   for (const line of markdown.split('\n')) {
     const pageMatch = /^<!-- page: (\d+) -->$/u.exec(line.trim())
-    if (pageMatch) { page = Number(pageMatch[1]); continue }
+    if (pageMatch) {
+      page = Number(pageMatch[1])
+      continue
+    }
     const heading = /^(#{1,6})\s+(.+?)\s*$/u.exec(line)
-    if (!heading) continue
+    if (!heading) {
+      if (page !== null && line.trim().length > 0) for (const open of stack) open.page_end = page
+      continue
+    }
     const [, markers, title] = heading
-    const level = markers?.length ?? 0
-    while (stack.length > 0 && (stack.at(-1)?.level ?? 0) >= level) stack.pop()
+    /* v8 ignore next -- both capture groups are mandatory in the heading expression. */
+    if (markers === undefined || title === undefined) continue
+    const level = markers.length
+    while (stack.length > 0) {
+      const open = stack.at(-1)
+      /* v8 ignore next -- stack.length is positive, so the final entry exists. */
+      if (open === undefined || open.level < level) break
+      stack.pop()
+    }
+    if (page !== null) for (const open of stack) open.page_end = page
     const parent = stack.at(-1) ?? null
-    const sectionTitle = title ?? ''
+    const sectionTitle = title
     const section: DocumentSection = { id: `section_${String(sections.length + 1).padStart(3, '0')}`, parent_id: parent?.id ?? null, level, title: sectionTitle, page_start: page, page_end: page, heading_path: [...stack.map(item => item.title), sectionTitle], order: sections.length + 1 }
     sections.push(section)
     stack.push(section)
   }
-  for (let index = sections.length - 1; index >= 0; index--) {
-    const section = sections[index]
-    if (section === undefined) continue
-    const descendant = sections.slice(index + 1).find(candidate => candidate.level > section.level && candidate.page_end !== null)
-    if (section.page_end === null && descendant) section.page_end = descendant.page_end
-  }
   return sections
-}
-
-async function atomicWrite(path: string, content: string): Promise<void> {
-  const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`
-  try { await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path) }
-  catch (error) { await rm(temporary, { force: true }); throw error }
 }
 
 function failure(sourceFile: string, sourcePath: string, fileType: ExtractDocumentResult['fileType'], parseStatus: DocumentParseStatus, code: string, message: string): ExtractDocumentResult {
   return { sourceFile, sourcePath, fileType, pageCount: null, parseStatus, needsOcr: false, error: { code, message } }
 }
-
-class DocumentExtractError extends Error { constructor(readonly code: string, message: string) { super(message) } }
