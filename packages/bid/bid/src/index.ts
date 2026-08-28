@@ -276,3 +276,5 @@ function textOf(node: { children?: unknown[]; value?: string }): string {
 }
 
 export default BidWorkspace
+
+export * from './document-extract.ts'
