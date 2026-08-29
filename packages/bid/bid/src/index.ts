@@ -25,8 +25,11 @@ export { BID_CLIENT_ACTIONS, BID_STAGES, STAGE_RUN_STATUSES } from './control-pl
 export type {
   BidClientAction,
   BidClientProjection,
+
   BidComposerReason,
   BidPromptAdmission,
+  BidComposerCapability,
+
   BidRuntimeState,
   BidStage,
   BidStageExecutor,

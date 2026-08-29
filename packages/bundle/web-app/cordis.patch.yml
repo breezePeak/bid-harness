@@ -216,6 +216,10 @@
     - id: ui-attachment
       name: '@deepseek-ai/dsh-client-ui-attachment'
 
+    # Bid Sessions: projection-driven stage panel and composer capability.
+    - id: ui-bid
+      name: '@deepseek-ai/dsh-client-ui-bid'
+
     # Tool call tree, generic fallback, and keyed business Tool views.
     - id: ui-tool
       name: '@deepseek-ai/dsh-client-ui-tool'

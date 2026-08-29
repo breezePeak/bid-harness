@@ -4,6 +4,7 @@
  * @module @deepseek-ai/dsh-bid/control-plane
  */
 
+/** Browser-safe Bid control-plane constants and types. */
 export {
   BID_CLIENT_ACTIONS,
   BID_STAGES,
@@ -33,3 +34,8 @@ export {
   getBidStagePolicy,
   reduceBidRuntimeState,
 } from './runtime-state.ts'
+  BidComposerCapability,
+  BidRuntimeState,
+  BidStage,
+  StageRunStatus,
+} from './control-plane-contract.ts'

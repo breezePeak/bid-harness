@@ -18,6 +18,7 @@ The browser side of the dsh web GUI: shell boot, browser-host communication, sha
 | [`ui-theme/`](ui-theme/README.md) | Applies the selected color theme. |
 | [`ui-primitives/`](ui-primitives/README.md) | Provides shared React controls, icons, and content renderers. |
 | [`ui-attachment/`](ui-attachment/README.md) | Registers composer and message-image attachment presentation. |
+| [`ui-bid/`](ui-bid/README.md) | Renders the Host-computed Bid Session stage and admitted actions. |
 | [`ui-layout/`](ui-layout/README.md) | Arranges the main application regions. |
 | [`ui-sidebar/`](ui-sidebar/README.md) | Presents workspace and session navigation. |
 | [`ui-brand-official/`](ui-brand-official/README.md) | Fills the generic browser-brand slots with the official name and marks. |
