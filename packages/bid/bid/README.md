@@ -29,7 +29,7 @@ The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-s
 
 `BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `drive()` builds a `BidStageTask` from each of the eight fixed `BidStagePolicy` values, invokes the injected executor and validator ports, and continues until the workflow waits for the user, fails, or completes. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
 
-`registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions and composer capability. The Host plugin registers this projection and globally rejects generic prompt admission for sessions whose resolved preset is `bid`.
+`registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and the Host-configured `allowedExtensions`, `maxFiles`, `maxFileBytes`, and `maxTotalBytes` limits. The Host plugin registers this projection and globally rejects generic prompt admission for sessions whose resolved preset is `bid`.
 
 The package defines the control-plane runtime and its executor and validator ports. It does not provide business Agent executors, a Tender Analysis prompt, or concrete Stage Validators.
 

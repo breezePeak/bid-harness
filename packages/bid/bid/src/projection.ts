@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { BidRuntimeState } from './control-plane-contract.ts'
+import type { BidClientProjection, BidRuntimeState } from './control-plane-contract.ts'
 import { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
@@ -47,9 +47,16 @@ const clientProjectionSchema = z.object({
 /**
  * Register the whole-value `bid.runtime` unit with the shared session projection registry.
  * @param registry - host projection registry that owns event driving and client delivery.
+ * @param fileLimits - Host-configured file constraints included in every client view.
  * @returns the registration disposer.
  */
-export function registerBidRuntimeProjection(registry: SessionProjectionRegistry): () => void {
+export function registerBidRuntimeProjection(
+  registry: SessionProjectionRegistry,
+  fileLimits: Pick<
+    BidClientProjection,
+    'allowedExtensions' | 'maxFiles' | 'maxFileBytes' | 'maxTotalBytes'
+  > = {},
+): () => void {
   return registry.register({
     key: BID_RUNTIME_PROJECTION_KEY,
     stateSchema: runtimeSchema,
@@ -57,8 +64,8 @@ export function registerBidRuntimeProjection(registry: SessionProjectionRegistry
     apply: reduceBidRuntimeState,
     wire: {
       viewSchema: clientProjectionSchema,
-      view: getBidClientProjection,
+      view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 1,
+    stateVersion: 2,
   })
 }

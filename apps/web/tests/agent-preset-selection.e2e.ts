@@ -218,6 +218,8 @@ describe('web e2e: agent-preset selection', () => {
     // the id alone never said what a preset does.
     expect(snapshot).toContain('Minimal mode')
     expect(snapshot).toContain('Creator mode')
+    expect(snapshot).toContain('标书模式')
+    expect(snapshot).toContain('通过 Host Bid control plane 生成技术标')
     await page.keyboard.press('Escape')
   })
 

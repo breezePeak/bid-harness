@@ -180,13 +180,14 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
     case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed')
+      return event.data.stage === state.stage
+        && getBidStagePolicy(state.stage).executor !== 'user'
+        && (state.status === 'pending' || state.status === 'failed')
         ? { stage: state.stage, status: 'running' }
         : state
     case 'bid.stage.failed':
       return event.data.stage === state.stage
-        && (state.status === 'running'
-          || (state.stage === 'outline_confirmation' && state.status === 'waiting_user'))
+        && state.status === 'running'
         ? { stage: state.stage, status: 'failed' }
         : state
     case 'bid.user_confirmation.required':
@@ -197,15 +198,19 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : state
     case 'bid.stage.completed': {
       if (event.data.stage !== state.stage) return state
-      if (state.status !== 'running'
-        && !(state.stage === 'outline_confirmation' && state.status === 'waiting_user')) return state
+      if (state.status !== 'running') return state
       const nextStage = getBidStagePolicy(event.data.stage).nextStage
       return nextStage === null
         ? { stage: event.data.stage, status: 'completed' }
         : { stage: nextStage, status: 'pending' }
     }
     case 'bid.user_confirmation.received':
-      return state
+      return event.data.stage === 'outline_confirmation'
+        && state.stage === 'outline_confirmation'
+        && state.status === 'waiting_user'
+        && event.data.confirmed
+        ? { stage: state.stage, status: 'running' }
+        : state
     default:
       return state
   }
@@ -214,19 +219,31 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
 /**
  * Project host-owned Bid action and composer decisions for a client.
  * @param runtime - current state derived from the session log.
+ * @param fileLimits - Host-configured file constraints exposed to the browser.
  * @returns a detached whole-value client projection.
  */
-export function getBidClientProjection(runtime: BidRuntimeState): BidClientProjection {
+export function getBidClientProjection(
+  runtime: BidRuntimeState,
+  fileLimits: Pick<
+    BidClientProjection,
+    'allowedExtensions' | 'maxFiles' | 'maxFileBytes' | 'maxTotalBytes'
+  > = {},
+): BidClientProjection {
+  const fileView = fileLimits.allowedExtensions === undefined
+    ? { ...fileLimits }
+    : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (runtime.status === 'failed') return {
     runtime: { ...runtime },
     allowedActions: [],
     composer: { enabled: false, reason: 'bid.stage_failed' },
+    ...fileView,
   }
   if (runtime.status === 'running') {
     return {
       runtime: { ...runtime },
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_running' },
+      ...fileView,
     }
   }
   if (runtime.status === 'completed') {
@@ -234,6 +251,7 @@ export function getBidClientProjection(runtime: BidRuntimeState): BidClientProje
       runtime: { ...runtime },
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.completed' },
+      ...fileView,
     }
   }
   if (runtime.stage === 'file_intake' && runtime.status === 'pending') {
@@ -241,6 +259,7 @@ export function getBidClientProjection(runtime: BidRuntimeState): BidClientProje
       runtime: { ...runtime },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.upload_required' },
+      ...fileView,
     }
   }
   if (runtime.stage === 'outline_confirmation' && runtime.status === 'waiting_user') {
@@ -248,11 +267,13 @@ export function getBidClientProjection(runtime: BidRuntimeState): BidClientProje
       runtime: { ...runtime },
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
+      ...fileView,
     }
   }
   return {
     runtime: { ...runtime },
     allowedActions: [],
     composer: { enabled: false, reason: 'bid.stage_pending' },
+    ...fileView,
   }
 }

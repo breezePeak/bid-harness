@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-client-ui-bid",
-  "description": "Bid Session panel over the Host-computed bid projection",
+  "description": "Bid Session panel over Host-resolved identity and the bid.runtime projection",
   "version": "0.1.1-rc.2",
   "publishConfig": {
     "access": "public"

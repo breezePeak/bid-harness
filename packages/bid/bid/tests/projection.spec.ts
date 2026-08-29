@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
+  BID_RUNTIME_PROJECTION_KEY,
   getBidClientProjection,
   registerBidRuntimeProjection,
 } from '@deepseek-ai/dsh-bid'
@@ -43,14 +44,14 @@ describe('Bid client projection', () => {
     registerBidRuntimeProjection(ctx.sessionProjections)
     const session = ctx.sessions.create()
 
-    expect(ctx.sessionProjections.snapshot(session).values['bid.runtime']).toEqual({
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
       runtime: { stage: 'file_intake', status: 'pending' },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.upload_required' },
     })
 
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    expect(ctx.sessionProjections.snapshot(session).values['bid.runtime']).toEqual({
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
       runtime: { stage: 'file_intake', status: 'running' },
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_running' },

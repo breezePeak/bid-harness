@@ -1,0 +1,15 @@
+- region "技术标生成":
+  - heading "技术标生成" [level=2]
+  - text: 等待处理
+  - list:
+    - listitem: 1 文件接入 等待处理
+    - listitem: 2 招标分析
+    - listitem: 3 证据映射
+    - listitem: 4 目录生成
+    - listitem: 5 目录确认
+  - status: 请上传本次招标文件
+  - paragraph: 支持 .pdf, .docx, .doc, .xlsx, .xls, .txt, .md，最多 20 个文件
+  - button "Choose File"
+  - button "上传招标文件":
+    - img
+    - text: 上传招标文件

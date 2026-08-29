@@ -80,7 +80,7 @@ describe('Bid runtime state and policies', () => {
     expect(getBidStagePolicy('tender_analysis').requiredInputs).not.toContain('mutated')
   })
 
-  it('starts at file intake and returns the same state reference for non-Bid events and confirmations', () => {
+  it('starts at file intake and ignores unrelated or out-of-state confirmation events', () => {
     const state = BID_INITIAL_RUNTIME_STATE
     const unrelated = reduceBidRuntimeState(state, {
       type: 'turn/start',
@@ -97,6 +97,59 @@ describe('Bid runtime state and policies', () => {
     expect(state).toEqual({ stage: 'file_intake', status: 'pending' })
     expect(unrelated).toBe(state)
     expect(decision).toBe(state)
+  })
+
+  it('requires an accepted waiting-user confirmation before outline completion can advance', () => {
+    const outlinePending = { stage: 'outline_confirmation', status: 'pending' } as const
+    const forgedStart = reduceBidRuntimeState(outlinePending, {
+      type: 'bid.stage.started',
+      seq: 0,
+      time: 0,
+      data: { stage: 'outline_confirmation', status: 'running' },
+    })
+    const waiting = reduceBidRuntimeState(outlinePending, {
+      type: 'bid.user_confirmation.required',
+      seq: 1,
+      time: 0,
+      data: { stage: 'outline_confirmation', status: 'waiting_user' },
+    })
+    const rejected = reduceBidRuntimeState(waiting, {
+      type: 'bid.user_confirmation.received',
+      seq: 2,
+      time: 0,
+      data: { stage: 'outline_confirmation', confirmed: false },
+    })
+    const premature = reduceBidRuntimeState(rejected, {
+      type: 'bid.stage.completed',
+      seq: 3,
+      time: 0,
+      data: { stage: 'outline_confirmation', status: 'completed', artifacts: [] },
+    })
+    const forgedFailure = reduceBidRuntimeState(waiting, {
+      type: 'bid.stage.failed',
+      seq: 4,
+      time: 0,
+      data: { stage: 'outline_confirmation', status: 'failed', reason: 'forged' },
+    })
+    const accepted = reduceBidRuntimeState(waiting, {
+      type: 'bid.user_confirmation.received',
+      seq: 5,
+      time: 0,
+      data: { stage: 'outline_confirmation', confirmed: true },
+    })
+    const advanced = reduceBidRuntimeState(accepted, {
+      type: 'bid.stage.completed',
+      seq: 6,
+      time: 0,
+      data: { stage: 'outline_confirmation', status: 'completed', artifacts: [] },
+    })
+
+    expect(forgedStart).toBe(outlinePending)
+    expect(rejected).toBe(waiting)
+    expect(premature).toBe(waiting)
+    expect(forgedFailure).toBe(waiting)
+    expect(accepted).toEqual({ stage: 'outline_confirmation', status: 'running' })
+    expect(advanced).toEqual({ stage: 'chapter_writing', status: 'pending' })
   })
 
   it('folds valid transitions and ignores completion events from an illegal stage or status', () => {

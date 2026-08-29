@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import * as controlPlane from '../src/control-plane.ts'
+import * as controlPlane from '@deepseek-ai/dsh-bid/control-plane'
 
 describe('browser-safe Bid control-plane export', () => {
   it('serves pure data contracts without the document pipeline entry', () => {

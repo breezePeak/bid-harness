@@ -1,5 +1,5 @@
 /**
- * Bid Session browser plugin. It renders the Host-computed `bid` projection
+ * Bid Session browser plugin. It renders the Host-computed `bid.runtime` projection
  * in `conversation.input.dock` and mirrors only `projection.composer` into the
  * existing per-session composer block registry. It folds no Bid events and
  * owns no Bid stage, status, or permission state.

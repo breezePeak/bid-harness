@@ -512,7 +512,7 @@ Bid 只需要定义不同 Stage：
 
 ## 10.10 Document Pipeline
 
-**状态：🟡 部分完成**
+**状态：✅ 本地文档处理链已完成**
 
 已完成：
 
@@ -526,35 +526,31 @@ TXT/MD
 document.md
 structure.json
 metadata.json
-```
-
-还缺：
-
-```text
 document_chunk
+chunks/*.md
 chunks/index.json
 ```
 
-所以 S1 仍未完整完成。
+`BidWorkspace.import()` 会在解析成功后生成分块正文和索引。浏览器文件上传到 Host、S1 Validator 和 Orchestrator drive 尚未接入。
 
 ---
 
 ## 10.11 Workspace Knowledge
 
-**状态：🟡 基础完成**
+**状态：🟡 语料工作区已完成**
 
 已有：
 
 ```text
 input/
 corpus/
+corpus/<file>/chunks/
 manifest
 ```
 
 后续逐步增加：
 
 ```text
-chunks/
 analysis/
 outline/
 drafts/
@@ -612,6 +608,8 @@ manifest
 document
 structure
 metadata
+chunks
+chunks/index.json
 ```
 
 还未定义：
@@ -1038,14 +1036,14 @@ MVP 到这里完成。
 
 | 总体架构模块 | 状态 |
 |---|---|
-| Web Client Bid UI | ✅ Session UI Shell |
-| Bid Orchestrator | ✅ 控制面 runtime |
-| Stage Policy | ✅ 八个固定阶段策略 |
+| UI Bid Shell | ✅ Session UI Shell |
+| T2 Orchestrator Core | ✅ 控制面 runtime |
+| T2 Stage Policy | ✅ 八个固定阶段策略 |
 | Stage Validator | 🟡 Port 已完成，真实业务 Validator 未实现 |
-| Bid Client Projection | ✅ `bid.runtime` |
-| Bid Host Runtime Binding | ✅ Web Host composition |
-| Bid Prompt Admission | ✅ 后端 guard |
-| Bid Agent Preset | ✅ `bid` |
+| T2 Bid Projection | ✅ `bid.runtime` |
+| T2 Host Runtime Binding | ✅ Web Host composition |
+| T2 Bid Prompt Guard | ✅ 后端 guard |
+| Bid Preset | ✅ `bid` |
 | StageTask 构建 | ✅ 后端确定性构建 |
 | StageTask 注入 | ⬜ |
 | Stage Tools / Guard | ⬜ |
@@ -1056,11 +1054,14 @@ MVP 到这里完成。
 | Document Pipeline - chunk | ✅ |
 | Workspace 基础 | ✅ |
 | DSH grep/read | ✅ |
-| Bid Control Plane Contract | ✅ |
-| Bid Session Events | ✅ |
+| T1 Control Plane Contract | ✅ |
+| T2 Session Event Replay | ✅ |
 | S1 Artifact | ✅ |
 | 真实 S1 Upload | ⬜ |
 | 真实 S1 Host Integration | ⬜ |
+| Tender Analysis Agent | ⬜ |
+| Evidence Agent | ⬜ |
+| Outline Agent | ⬜ |
 | S2 Artifact | ⬜ |
 | S3 Artifact | ⬜ |
 | S4 Artifact | ⬜ |

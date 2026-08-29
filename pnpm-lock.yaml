@@ -942,6 +942,9 @@ importers:
 
   packages/bid/bid:
     dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
       docx:
         specifier: ^9.5.1
         version: 9.7.1

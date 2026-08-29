@@ -41,6 +41,7 @@
     "lib/types/**/*.d.ts"
   ],
   "dependencies": {
+    "@deepseek-ai/schemastery": "workspace:^",
     "docx": "^9.5.1",
     "mammoth": "^1.10.0",
     "mdast-util-from-markdown": "^2.0.3",

@@ -10,9 +10,9 @@ A Bid Session needs a stage panel, file selection, and user actions in the exist
 
 ## Decision
 
-The browser-safe `@deepseek-ai/dsh-bid/control-plane` export owns `BidClientProjection`, `BidClientAction`, and composer capability types without importing workspace parsing code. The Host publishes the whole `bid` projection through the generic Session projection channel; projection absence means the Session has no Bid UI capability.
+The browser-safe `@deepseek-ai/dsh-bid/control-plane` export owns `BidClientProjection`, `BidClientAction`, and composer capability types without importing workspace parsing code. The Host publishes the whole `bid.runtime` projection through the generic Session projection channel. The Host-resolved Session preset is the Bid identity; projection presence alone does not classify a Session because the registry is process-wide.
 
-`@deepseek-ai/dsh-client-ui-bid` contributes one `BidStagePanel` entry to `conversation.input.dock`. The component reads `useProjection('bid')`, maps the first five `BidStage` values to localized labels, and shows controls only for actions listed by the Host. It does not fold events, infer completed stages, derive permissions from runtime status, or apply optimistic stage and status changes.
+`@deepseek-ai/dsh-client-ui-bid` contributes one `BidStagePanel` entry to `conversation.input.dock`. The component requires the resolved `bid` preset, reads `useProjection(BID_RUNTIME_PROJECTION_KEY)`, maps the first five `BidStage` values to localized labels, and shows controls only for actions listed by the Host. It does not fold events, infer completed stages, derive permissions from runtime status, or apply optimistic stage and status changes.
 
 The panel maps only `projection.composer` into the existing per-session composer block registry. Browser-selected `File` objects and request-pending or error feedback are component-local UI state. File selection never reaches `session.prompt()`; Host upload and action calls remain explicit injected callbacks, so their absence cannot fall back to ordinary chat admission.
 
@@ -30,4 +30,4 @@ The shipped `bid` Agent Preset supplies the roster identity and “标书模式�
 
 ## Consequences
 
-Non-Bid Sessions render and submit through the existing conversation without a Bid block or attachment change. Bid Sessions cannot appear until the Host publishes the projection, and unavailable Host actions remain disabled rather than simulated. The UI can be developed independently of the orchestrator, but final upload, retry, confirmation, and Bid message admission require the Host action API to supply the injected callbacks.
+Non-Bid Sessions render and submit through the existing conversation without a Bid block or attachment change even though the Host registry contains `bid.runtime`. Bid Sessions require both the resolved preset identity and projection, and unavailable Host actions remain disabled rather than simulated. Final upload, retry, confirmation, and Bid message admission require the Host action API to supply the injected callbacks.

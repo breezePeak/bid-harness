@@ -91,7 +91,7 @@ function fileRules(projection: BidClientProjection, t: TranslateBid): string | u
  * limited to browser-selected files and request feedback; actions never
  * mutate the projected stage or status.
  * @param props - standard projection hook, Host-action callbacks, and locale.
- * @returns the Bid panel, or null when the `bid` projection is absent.
+ * @returns the Bid panel, or null for a non-Bid Session or unavailable projection.
  */
 export function BidStagePanel({
   sessionId,

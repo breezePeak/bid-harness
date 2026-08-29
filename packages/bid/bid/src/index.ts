@@ -9,6 +9,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
+import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
@@ -62,24 +63,6 @@ export type {
 } from './orchestrator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
-export const name = 'bid-host-runtime'
-export const inject = ['sessionProjections']
-
-/** Register the Bid projection and reject generic prompts for Bid sessions. */
-export function apply(ctx: Context): void {
-  registerBidRuntimeProjection(ctx.sessionProjections)
-  ctx.on('session/prompt-admission', ({ session }) => {
-    if (resolveSessionPreset(session) !== 'bid') return
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    const projection = getBidClientProjection(runtime)
-    const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
-    return {
-      reason,
-      message: `Bid session prompt rejected by Host admission: ${reason}`,
-    }
-  }, { global: true })
-}
-
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'
 
@@ -114,6 +97,51 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   bodySize: 22,
   headingSize: 32,
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
+}
+
+/** Client-visible file limits configured for the Bid Host runtime. */
+export interface Config {
+  allowedExtensions: string[]
+  maxFiles: number
+  maxFileBytes: number
+  maxTotalBytes: number
+}
+
+const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
+  allowedExtensions: [...DEFAULT_BID_CONFIG.allowedExtensions],
+  maxFiles: DEFAULT_BID_CONFIG.maxFiles,
+  maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
+  maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
+}
+
+/** Validated Bid Host runtime configuration. */
+export const Config: z<Config> = z.object({
+  allowedExtensions: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.allowedExtensions),
+  maxFiles: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFiles),
+  maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
+  maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
+})
+
+export const name = 'bid-host-runtime'
+export const inject = ['sessionProjections']
+
+/**
+ * Register the Bid projection and reject generic prompts for Bid Sessions.
+ * @param ctx - Host Context that owns projections and prompt admission.
+ * @param config - validated file limits published with every Bid projection.
+ */
+export function apply(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG): void {
+  registerBidRuntimeProjection(ctx.sessionProjections, config)
+  ctx.on('session/prompt-admission', ({ session }) => {
+    if (resolveSessionPreset(session) !== 'bid') return
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    const projection = getBidClientProjection(runtime)
+    const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
+    return {
+      reason,
+      message: `Bid session prompt rejected by Host admission: ${reason}`,
+    }
+  }, { global: true })
 }
 
 /** Durable manifest entry for one imported file. */

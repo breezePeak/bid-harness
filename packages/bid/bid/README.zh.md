@@ -29,7 +29,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 `BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`drive()` 按八个固定 `BidStagePolicy` 构建 `BidStageTask`，调用注入的 Executor Port 与 Validator Port，并自动执行到等待用户、失败或最终完成。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
 
-`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions` 与 composer 能力由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
+`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 

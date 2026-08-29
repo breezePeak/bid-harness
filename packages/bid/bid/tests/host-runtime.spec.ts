@@ -57,8 +57,12 @@ describe('Bid Host runtime composition', () => {
     const { ctx, api } = await harness()
     const { agent, followup, steer } = attach(ctx, 'bid')
 
-    expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
+    expect(ctx.sessionProjections.snapshot(agent.session).values[BidHostRuntime.BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'pending' },
+      allowedExtensions: BidHostRuntime.DEFAULT_BID_CONFIG.allowedExtensions,
+      maxFiles: BidHostRuntime.DEFAULT_BID_CONFIG.maxFiles,
+      maxFileBytes: BidHostRuntime.DEFAULT_BID_CONFIG.maxFileBytes,
+      maxTotalBytes: BidHostRuntime.DEFAULT_BID_CONFIG.maxTotalBytes,
     })
     const response = await api.sessions.prompt(request({
       sessionId: agent.id,
