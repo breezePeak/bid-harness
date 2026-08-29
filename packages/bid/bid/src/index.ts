@@ -15,9 +15,12 @@ import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import * as XLSX from 'xlsx'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
+import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 
 export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
+export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.ts'
+export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'
@@ -37,6 +40,7 @@ export interface BidConfig {
   font: string
   bodySize: number
   headingSize: number
+  documentChunk: DocumentChunkConfig
 }
 
 /** Conservative defaults matching the documented MVP limits. */
@@ -51,6 +55,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   font: 'Microsoft YaHei',
   bodySize: 22,
   headingSize: 32,
+  documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
 /** Durable manifest entry for one imported file. */
@@ -62,6 +67,8 @@ export interface ManifestFile {
   documentPath: string | null
   structurePath: string | null
   metadataPath: string | null
+  chunksPath: string | null
+  chunkIndexPath: string | null
   mediaType: string
   size: number
   sha256: string
@@ -70,7 +77,7 @@ export interface ManifestFile {
 }
 
 /** Versioned session manifest for imported bid files. */
-export interface BidManifest { version: 2; files: ManifestFile[] }
+export interface BidManifest { version: 3; files: ManifestFile[] }
 
 /** File bytes and browser-supplied metadata accepted by the importer. */
 export interface IncomingFile { name: string; type?: string; bytes: Uint8Array }
@@ -81,6 +88,8 @@ export interface ImportedFile extends ManifestFile {
   absoluteDocumentPath: string | null
   absoluteStructurePath: string | null
   absoluteMetadataPath: string | null
+  absoluteChunksPath: string | null
+  absoluteChunkIndexPath: string | null
 }
 
 const MEDIA_TYPES: Record<string, string> = {
@@ -120,7 +129,11 @@ export function within(root: string, candidate: string): string {
 
 function validateConfig(config: BidConfig): void {
   if (!config.sessionDirectory || !config.outputDirectory || config.maxFileBytes <= 0
-    || config.maxFiles <= 0 || config.maxTotalBytes <= 0) {
+    || config.maxFiles <= 0 || config.maxTotalBytes <= 0
+    || !Number.isInteger(config.documentChunk.minChars) || !Number.isInteger(config.documentChunk.targetChars)
+    || !Number.isInteger(config.documentChunk.maxChars) || config.documentChunk.minChars <= 0
+    || config.documentChunk.minChars > config.documentChunk.targetChars
+    || config.documentChunk.targetChars > config.documentChunk.maxChars) {
     throw new Error('bid-invalid-config')
   }
 }
@@ -234,7 +247,7 @@ export class BidWorkspace {
       await atomicBytes(input, file.bytes)
       const hash = createHash('sha256').update(file.bytes).digest('hex')
       const record: ManifestFile = { id: hash as BidFileId, originalName, inputPath, corpusPath: null,
-        documentPath: null, structurePath: null, metadataPath: null,
+        documentPath: null, structurePath: null, metadataPath: null, chunksPath: null, chunkIndexPath: null,
         mediaType: MEDIA_TYPES[extension] ?? file.type ?? 'application/octet-stream', size: file.bytes.byteLength, sha256: hash, parseStatus: 'pending', parseError: null }
       try {
         const corpusPath = `corpus/${storedName}`
@@ -259,6 +272,18 @@ export class BidWorkspace {
           record.documentPath = documentPath
           record.parseStatus = 'success'
         }
+        if (record.parseStatus === 'success') {
+          const chunksPath = `${corpusPath}/chunks`
+          await chunkDocument({
+            documentPath: within(this.sessionRoot, documentPath),
+            structurePath: record.structurePath === null ? null : within(this.sessionRoot, record.structurePath),
+            metadataPath: record.metadataPath === null ? null : within(this.sessionRoot, record.metadataPath),
+            outputDir: within(this.sessionRoot, chunksPath),
+            config: this.config.documentChunk,
+          })
+          record.chunksPath = chunksPath
+          record.chunkIndexPath = `${chunksPath}/index.json`
+        }
       } catch (error) {
         record.parseStatus = 'failed'
         /* v8 ignore next -- every parser and filesystem operation in this block throws Error instances. */
@@ -271,6 +296,8 @@ export class BidWorkspace {
         absoluteDocumentPath: record.documentPath === null ? null : within(this.sessionRoot, record.documentPath),
         absoluteStructurePath: record.structurePath === null ? null : within(this.sessionRoot, record.structurePath),
         absoluteMetadataPath: record.metadataPath === null ? null : within(this.sessionRoot, record.metadataPath),
+        absoluteChunksPath: record.chunksPath === null ? null : within(this.sessionRoot, record.chunksPath),
+        absoluteChunkIndexPath: record.chunkIndexPath === null ? null : within(this.sessionRoot, record.chunkIndexPath),
       })
     }
     await writeFileAtomic(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
@@ -279,15 +306,15 @@ export class BidWorkspace {
 
   /**
    * Read the durable manifest, treating a missing session as empty.
-   * @returns The current version 2 manifest.
+   * @returns The current version 3 manifest.
    */
   async readManifest(): Promise<BidManifest> {
     try {
       const manifest = JSON.parse(await readFile(this.manifestPath, 'utf8')) as { version?: unknown }
-      if (manifest.version !== 2) throw new Error('bid-unsupported-manifest-version')
+      if (manifest.version !== 3) throw new Error('bid-unsupported-manifest-version')
       return manifest as BidManifest
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, files: [] }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 3, files: [] }
       throw error
     }
   }
@@ -301,9 +328,10 @@ export class BidWorkspace {
     const manifest = await this.readManifest()
     const files = manifest.files.map((file, index) => {
       const document = file.documentPath === null ? '无' : this.relative(file.documentPath)
+      const chunks = file.chunksPath === null ? '无' : this.relative(file.chunksPath)
       const structure = file.structurePath === null ? '无' : this.relative(file.structurePath)
       const status = file.parseStatus === 'success' ? '成功' : file.parseStatus === 'needs_ocr' ? '需要 OCR' : `失败：${file.parseError ?? '未知错误'}`
-      return `${index + 1}. ${file.originalName}\n   原始文件：${this.relative(file.inputPath)}\n   解析正文：${document}\n   文档结构：${structure}\n   解析状态：${status}`
+      return `${index + 1}. ${file.originalName}\n   原始文件：${this.relative(file.inputPath)}\n   完整正文：${document}\n   搜索语料：${chunks}\n   文档结构：${structure}\n   解析状态：${status}`
     }).join('\n\n')
     return `用户已上传以下项目文件：\n\n${files}\n\n用户要求：\n${request}`
   }

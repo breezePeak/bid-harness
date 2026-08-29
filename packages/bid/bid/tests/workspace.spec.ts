@@ -29,6 +29,8 @@ describe('BidWorkspace', () => {
     const file = (await bid.import([{ name: '公司资料.txt', type: 'text/plain', bytes: new TextEncoder().encode('企业资料') }]))[0]!
     expect(file.parseStatus).toBe('success')
     expect(await readFile(file.absoluteDocumentPath!, 'utf8')).toBe('企业资料')
+    expect(file.chunksPath).toBe('corpus/公司资料.txt/chunks')
+    expect(JSON.parse(await readFile(file.absoluteChunkIndexPath!, 'utf8'))).toMatchObject({ schema_version: 1, chunk_count: 1 })
     const inventory = await bid.messageInventory('编写技术标')
     expect(inventory).toContain('.bid-harness/sessions/session_1/input/公司资料.txt')
     expect(inventory).toContain('.bid-harness/sessions/session_1/corpus/公司资料.txt/document.md')
@@ -49,12 +51,14 @@ describe('BidWorkspace', () => {
       expect(file.documentPath).toBe(`corpus/${file.originalName}/document.md`)
       expect(file.structurePath).toBe(`corpus/${file.originalName}/structure.json`)
       expect(file.metadataPath).toBe(`corpus/${file.originalName}/metadata.json`)
+      expect(file.chunksPath).toBe(`corpus/${file.originalName}/chunks`)
+      expect(file.chunkIndexPath).toBe(`corpus/${file.originalName}/chunks/index.json`)
       await expect(readFile(file.absoluteDocumentPath!, 'utf8')).resolves.toContain('项目实施管理')
       await expect(readFile(file.absoluteStructurePath!, 'utf8')).resolves.toContain('sections')
       await expect(readFile(file.absoluteMetadataPath!, 'utf8')).resolves.toContain('parse_status')
     }
     const manifest = await bid.readManifest()
-    expect(manifest.version).toBe(2)
+    expect(manifest.version).toBe(3)
     expect(manifest.files).toMatchObject([
       { originalName: '历史投标书.doc', mediaType: 'application/msword', documentPath: 'corpus/历史投标书.doc/document.md' },
       { originalName: '招标文件.docx', documentPath: 'corpus/招标文件.docx/document.md' },
@@ -66,7 +70,12 @@ describe('BidWorkspace', () => {
     const bid = new BidWorkspace(root, 'session_search')
     const imported = (await bid.import([{ name: '招标文件.pdf', bytes: await readFile(fixture('bid-document.pdf')) }]))[0]!
     expect(imported.parseStatus).toBe('success')
-    const modelDocumentPath = `.bid-harness/sessions/session_search/${imported.documentPath}`
+    const modelChunksPath = `.bid-harness/sessions/session_search/${imported.chunksPath}`
+    const chunkIndex = JSON.parse(await readFile(imported.absoluteChunkIndexPath!, 'utf8')) as { chunks: { path: string; prev_chunk: string | null }[] }
+    const chunkContents = await Promise.all(chunkIndex.chunks.map(entry => readFile(join(imported.absoluteChunksPath!, entry.path), 'utf8')))
+    const matchingIndex = chunkContents.findIndex((value, index) => value.includes('项目实施管理') && chunkIndex.chunks[index]!.prev_chunk !== null)
+    expect(matchingIndex).toBeGreaterThanOrEqual(0)
+    const modelChunkPath = `${modelChunksPath}/${chunkIndex.chunks[matchingIndex]!.path}`
 
     const ctx = new Context()
     const fibers = []
@@ -78,15 +87,22 @@ describe('BidWorkspace', () => {
       fibers.push(await ctx.plugin(ToolFsSearch, { sampleOverCapGlobResults: true }))
       fibers.push(await ctx.plugin(ToolFs))
       const agent = { session: { header: { id: 'session_search', cwd: root } } } as never
-      const grep = await ctx.tools.execute({ signal, callId: CallId('bid-grep'), name: 'grep', arguments: { pattern: '项目实施管理', path: modelDocumentPath }, agent })
+      const grep = await ctx.tools.execute({ signal, callId: CallId('bid-grep'), name: 'grep', arguments: { pattern: '项目实施管理', path: modelChunksPath }, agent })
       if (grep.isError) throw new Error(JSON.stringify({ error: grep.error, text: text(grep) }))
-      expect(text(grep)).toContain(modelDocumentPath)
+      expect(text(grep)).toContain(chunkIndex.chunks[matchingIndex]!.path)
       expect(text(grep)).toContain('项目实施管理')
 
-      const read = await ctx.tools.execute({ signal, callId: CallId('bid-read'), name: 'read', arguments: { file_path: modelDocumentPath }, agent })
+      const read = await ctx.tools.execute({ signal, callId: CallId('bid-read'), name: 'read', arguments: { file_path: modelChunkPath }, agent })
       expect(read.isError).toBe(false)
       expect(text(read)).toContain('项目实施管理')
-      expect(text(read)).toContain('<!-- page: 1 -->')
+      expect(text(read)).toContain('<!-- pages: 2 -->')
+
+      const previous = chunkIndex.chunks[matchingIndex]!.prev_chunk
+      expect(previous).not.toBeNull()
+      const previousRead = await ctx.tools.execute({ signal, callId: CallId('bid-read-previous'), name: 'read', arguments: { file_path: `${modelChunksPath}/${previous}` }, agent })
+      expect(previousRead.isError).toBe(false)
+      expect(text(previousRead)).toContain('<!-- next_chunk:')
+      expect(text(previousRead)).toContain('本项目采用分阶段交付')
     } finally {
       for (const fiber of fibers.reverse()) await fiber.dispose()
     }
@@ -111,6 +127,7 @@ describe('BidWorkspace', () => {
     expect(() => new BidWorkspace(root, 'bad session')).toThrow('bid-invalid-session-id')
     for (const patch of [
       { sessionDirectory: '' }, { outputDirectory: '' }, { maxFileBytes: 0 }, { maxFiles: 0 }, { maxTotalBytes: 0 },
+      { documentChunk: { minChars: 10, targetChars: 5, maxChars: 20 } },
     ]) expect(() => new BidWorkspace(root, 'session', { ...DEFAULT_BID_CONFIG, ...patch })).toThrow('bid-invalid-config')
 
     const limited = new BidWorkspace(root, 'limited', { ...DEFAULT_BID_CONFIG, maxFiles: 1, maxFileBytes: 1, maxTotalBytes: 1 })
@@ -169,9 +186,19 @@ describe('BidWorkspace', () => {
     expect(imported[2]).toMatchObject({ mediaType: 'application/custom', parseError: 'bid-unsupported-file-type' })
     expect(imported[3]).toMatchObject({ mediaType: 'application/octet-stream' })
     const inventory = await bid.messageInventory('继续')
-    expect(inventory).toContain('解析正文：无')
+    expect(inventory).toContain('完整正文：无')
+    expect(inventory).toContain('搜索语料：无')
     expect(inventory).toContain('文档结构：无')
     expect(inventory).toContain('失败：')
+  })
+
+  it('does not chunk a corpus that needs OCR', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root, 'needs_ocr')
+    const imported = (await bid.import([{ name: '扫描件.pdf', bytes: await readFile(fixture('scanned-document.pdf')) }]))[0]!
+    expect(imported).toMatchObject({ parseStatus: 'needs_ocr', chunksPath: null, chunkIndexPath: null })
+    expect(imported.absoluteChunksPath).toBeNull()
+    expect(await bid.messageInventory('识别')).toContain('搜索语料：无')
   })
 
   it('rejects invalid manifests and renders needs-OCR inventory', async () => {
@@ -182,13 +209,15 @@ describe('BidWorkspace', () => {
     await expect(bid.readManifest()).rejects.toThrow()
     await writeFile(bid.manifestPath, JSON.stringify({ version: 1, files: [] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-unsupported-manifest-version')
-    await writeFile(bid.manifestPath, JSON.stringify({ version: 2, files: [{
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 3, files: [{
       id: 'id', originalName: 'scan.pdf', inputPath: 'input/scan.pdf', corpusPath: 'corpus/scan.pdf',
       documentPath: 'corpus/scan.pdf/document.md', structurePath: 'corpus/scan.pdf/structure.json', metadataPath: 'corpus/scan.pdf/metadata.json',
+      chunksPath: null, chunkIndexPath: null,
       mediaType: 'application/pdf', size: 1, sha256: 'hash', parseStatus: 'needs_ocr', parseError: null,
     }, {
       id: 'failed', originalName: 'failed.pdf', inputPath: 'input/failed.pdf', corpusPath: null,
       documentPath: null, structurePath: null, metadataPath: null, mediaType: 'application/pdf', size: 1,
+      chunksPath: null, chunkIndexPath: null,
       sha256: 'failed', parseStatus: 'failed', parseError: null,
     }] }))
     await expect(bid.messageInventory('识别')).resolves.toContain('需要 OCR')
