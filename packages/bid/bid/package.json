@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-bid",
   "version": "0.1.1-rc.2",
-  "description": "Workspace-scoped document intake, deterministic text extraction, and DOCX export for bid-writing agents",
+  "description": "Workspace-scoped bid document primitives and shared control-plane contracts",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -44,13 +44,15 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-atomic-write": "workspace:^",
-    "@deepseek-ai/dsh-invariants": "workspace:^"
+    "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-atomic-write": "workspace:^",
     "@deepseek-ai/dsh-fs-local": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-subprocess-local": "workspace:^",
     "@deepseek-ai/dsh-system-prompt": "workspace:^",

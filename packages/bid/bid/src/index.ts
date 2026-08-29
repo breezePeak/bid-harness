@@ -21,6 +21,20 @@ export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
+export { BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
+export type {
+  BidRuntimeState,
+  BidStage,
+  BidStageExecutor,
+  BidStagePolicy,
+  BidStageTask,
+  StageArtifact,
+  StageRunStatus,
+  StageValidationIssue,
+  StageValidationResult,
+} from './control-plane-contract.ts'
+export { BID_SESSION_EVENT_TYPES } from './bid-events.ts'
+export type { BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'

@@ -6,6 +6,7 @@
     { "path": "../../../vendor/cosmokit" },
     { "path": "../../../vendor/cordis" },
     { "path": "../../util/atomic-write" },
+    { "path": "../../core/session" },
     { "path": "../../runtime-diagnostics/invariants" }
   ]
 }

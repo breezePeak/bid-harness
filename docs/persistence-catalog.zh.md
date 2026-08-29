@@ -241,6 +241,71 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/core/session/src/types.ts:277`](../packages/core/session/src/types.ts)
 
+### `bid.stage.completed/*`
+
+<a id="bidstagecompleted--log-only"></a>
+
+#### `bid.stage.completed` — log-only
+
+```ts persistence-catalog
+/** A stage passed validation; artifacts remain in the workspace at these references. */
+'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
+```
+
+来源：[`packages/bid/bid/src/bid-events.ts:21`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.stage.failed/*`
+
+<a id="bidstagefailed--log-only"></a>
+
+#### `bid.stage.failed` — log-only
+
+```ts persistence-catalog
+/** A stage failed before validation could authorize a transition. */
+'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string }
+```
+
+来源：[`packages/bid/bid/src/bid-events.ts:23`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.stage.started/*`
+
+<a id="bidstagestarted--log-only"></a>
+
+#### `bid.stage.started` — log-only
+
+```ts persistence-catalog
+/** A stage began execution and is the control plane's current running stage. */
+'bid.stage.started': { stage: BidStage; status: 'running' }
+```
+
+来源：[`packages/bid/bid/src/bid-events.ts:19`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.user_confirmation.received/*`
+
+<a id="biduser_confirmationreceived--log-only"></a>
+
+#### `bid.user_confirmation.received` — log-only
+
+```ts persistence-catalog
+/** The explicit user decision received for a stage. */
+'bid.user_confirmation.received': { stage: BidStage; confirmed: boolean }
+```
+
+来源：[`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.user_confirmation.required/*`
+
+<a id="biduser_confirmationrequired--log-only"></a>
+
+#### `bid.user_confirmation.required` — log-only
+
+```ts persistence-catalog
+/** A stage is waiting for an explicit user decision. */
+'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
+```
+
+来源：[`packages/bid/bid/src/bid-events.ts:25`](../packages/bid/bid/src/bid-events.ts)
+
 ### `command/*`
 
 <a id="commanddone--log-only"></a>
