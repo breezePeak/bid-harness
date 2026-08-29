@@ -1053,13 +1053,14 @@ MVP 到这里完成。
 
 | 总体架构模块 | 状态 |
 |---|---|
-| Web Client Bid UI | ⬜ |
+| Web Client Bid UI | ✅ Session UI Shell |
 | Bid Orchestrator | ✅ 控制面 runtime |
 | Stage Policy | ✅ 八个固定阶段策略 |
 | Stage Validator | 🟡 Port 已完成，真实业务 Validator 未实现 |
 | Bid Client Projection | ✅ `bid.runtime` |
+| Bid Host Runtime Binding | ✅ Web Host composition |
 | Bid Prompt Admission | ✅ 后端 guard |
-| Bid Agent Preset | ⬜ |
+| Bid Agent Preset | ✅ `bid` |
 | StageTask 构建 | ✅ 后端确定性构建 |
 | StageTask 注入 | ⬜ |
 | Stage Tools / Guard | ⬜ |
@@ -1073,6 +1074,8 @@ MVP 到这里完成。
 | Bid Control Plane Contract | ✅ |
 | Bid Session Events | ✅ |
 | S1 Artifact | ✅ |
+| 真实 S1 Upload | ⬜ |
+| 真实 S1 Host Integration | ⬜ |
 | S2 Artifact | ⬜ |
 | S3 Artifact | ⬜ |
 | S4 Artifact | ⬜ |

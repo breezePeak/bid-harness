@@ -10,7 +10,7 @@ The Bid browser projection used two keys, exported Host runtime functions throug
 
 ## Decision
 
-`@deepseek-ai/dsh-bid/control-plane` exports only browser-safe constants and types, and `bid.runtime` is the sole Bid projection key. The Bid Host plugin registers that projection and rejects generic prompt admission for sessions whose resolved preset is `bid` before `createUserMessage`, follow-up, or steering can run. Until dedicated action routes exist, the projection advertises only file upload and keeps the composer disabled with a canonical reason. The reducer accepts only transitions for the current stage and ignores illegal jumps.
+`@deepseek-ai/dsh-bid/control-plane` exports only browser-safe constants and types, and `bid.runtime` is the sole Bid projection key. The Bid Host plugin registers that projection and rejects generic prompt admission for sessions whose resolved preset is `bid` before `createUserMessage`, follow-up, or steering can run. Until dedicated action routes exist, the projection advertises only file upload and keeps the composer disabled with a canonical reason. The reducer accepts completion only from the current running stage or the waiting outline-confirmation stage and ignores other completion events.
 
 ## Alternatives considered
 

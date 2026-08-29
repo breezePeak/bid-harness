@@ -197,6 +197,8 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : state
     case 'bid.stage.completed': {
       if (event.data.stage !== state.stage) return state
+      if (state.status !== 'running'
+        && !(state.stage === 'outline_confirmation' && state.status === 'waiting_user')) return state
       const nextStage = getBidStagePolicy(event.data.stage).nextStage
       return nextStage === null
         ? { stage: event.data.stage, status: 'completed' }

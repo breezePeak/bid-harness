@@ -99,29 +99,43 @@ describe('Bid runtime state and policies', () => {
     expect(decision).toBe(state)
   })
 
-  it('folds valid transitions and ignores events that jump to another stage', () => {
-    const next = reduceBidRuntimeState(BID_INITIAL_RUNTIME_STATE, {
+  it('folds valid transitions and ignores completion events from an illegal stage or status', () => {
+    const premature = reduceBidRuntimeState(BID_INITIAL_RUNTIME_STATE, {
       type: 'bid.stage.completed',
       seq: 0,
       time: 0,
       data: { stage: 'file_intake', status: 'completed', artifacts: [] },
     })
+    expect(premature).toBe(BID_INITIAL_RUNTIME_STATE)
+
+    const running = reduceBidRuntimeState(BID_INITIAL_RUNTIME_STATE, {
+      type: 'bid.stage.started',
+      seq: 1,
+      time: 0,
+      data: { stage: 'file_intake', status: 'running' },
+    })
+    const next = reduceBidRuntimeState(running, {
+      type: 'bid.stage.completed',
+      seq: 2,
+      time: 0,
+      data: { stage: 'file_intake', status: 'completed', artifacts: [] },
+    })
     const illegal = reduceBidRuntimeState(next, {
       type: 'bid.stage.completed',
-      seq: 1,
+      seq: 3,
       time: 0,
       data: { stage: 'docx_export', status: 'completed', artifacts: [] },
     })
     expect(next).toEqual({ stage: 'tender_analysis', status: 'pending' })
     expect(illegal).toBe(next)
 
-    const running = reduceBidRuntimeState(next, {
+    const tenderRunning = reduceBidRuntimeState(next, {
       type: 'bid.stage.started',
-      seq: 2,
+      seq: 4,
       time: 0,
       data: { stage: 'tender_analysis', status: 'running' },
     })
-    expect(running).toEqual({ stage: 'tender_analysis', status: 'running' })
+    expect(tenderRunning).toEqual({ stage: 'tender_analysis', status: 'running' })
   })
 })
 
@@ -267,6 +281,10 @@ describe('BidOrchestrator', () => {
     expect(orchestrator.admitPrompt('analyze this')).toEqual({ admitted: false, reason: 'bid.upload_required' })
     expect(() => { orchestrator.admitAction('retry_stage') }).toThrow(BidOrchestratorError)
 
+    session.append('bid.stage.started', {
+      stage: 'file_intake',
+      status: 'running',
+    })
     session.append('bid.stage.completed', {
       stage: 'file_intake',
       status: 'completed',

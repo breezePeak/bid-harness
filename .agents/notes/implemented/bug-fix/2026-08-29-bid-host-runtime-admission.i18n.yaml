@@ -1,3 +1,6 @@
-# Bilingual-pair consistency record (docs/i18n/README.md).
-2026-08-29-bid-host-runtime-admission.md: 2623c27383e35271910e5c1bf8f055804e3c5827
-2026-08-29-bid-host-runtime-admission.zh.md: ae3fb009270aed17ac4eef8af078442536397e3e
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-29-bid-host-runtime-admission.md
+2026-08-29-bid-host-runtime-admission.md: c33b8337ef26cd087affce30a836a3f57aa8e7c9
+2026-08-29-bid-host-runtime-admission.zh.md: ff98f9c21bb84091cd7eb065ce67495c4d9d6823
