@@ -21,11 +21,15 @@ export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
-export { BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
+export { BID_CLIENT_ACTIONS, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 export type {
   BidClientAction,
   BidClientProjection,
+
+  BidComposerReason,
+  BidPromptAdmission,
   BidComposerCapability,
+
   BidRuntimeState,
   BidStage,
   BidStageExecutor,
@@ -38,6 +42,20 @@ export type {
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES } from './bid-events.ts'
 export type { BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
+export {
+  BID_INITIAL_RUNTIME_STATE,
+  buildBidStageTask,
+  getBidClientProjection,
+  getBidStagePolicy,
+  reduceBidRuntimeState,
+} from './runtime-state.ts'
+export { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
+export type {
+  BidOrchestratorErrorCode,
+  BidStageExecutorPort,
+  BidStageValidatorPort,
+} from './orchestrator.ts'
+export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'

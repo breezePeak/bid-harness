@@ -1054,21 +1054,25 @@ MVP 到这里完成。
 | 总体架构模块 | 状态 |
 |---|---|
 | Web Client Bid UI | ⬜ |
-| Bid Orchestrator | ⬜ |
-| Stage Policy | ⬜ |
-| Stage Validator | ⬜ |
+| Bid Orchestrator | ✅ 控制面 runtime |
+| Stage Policy | ✅ 八个固定阶段策略 |
+| Stage Validator | 🟡 Port 已完成，真实业务 Validator 未实现 |
+| Bid Client Projection | ✅ `bid.runtime` |
+| Bid Prompt Admission | ✅ 后端 guard |
 | Bid Agent Preset | ⬜ |
+| StageTask 构建 | ✅ 后端确定性构建 |
 | StageTask 注入 | ⬜ |
 | Stage Tools / Guard | ⬜ |
 | Harness Agent Loop | ✅ DSH 已有 |
 | Model Provider | ✅ DSH 已有 |
 | Document Pipeline - intake | ✅ |
 | Document Pipeline - extract | ✅ |
-| Document Pipeline - chunk | ⬜ |
+| Document Pipeline - chunk | ✅ |
 | Workspace 基础 | ✅ |
 | DSH grep/read | ✅ |
-| Bid Session Events | ⬜ |
-| S1 Artifact | 🟡 |
+| Bid Control Plane Contract | ✅ |
+| Bid Session Events | ✅ |
+| S1 Artifact | ✅ |
 | S2 Artifact | ⬜ |
 | S3 Artifact | ⬜ |
 | S4 Artifact | ⬜ |
@@ -1076,27 +1080,22 @@ MVP 到这里完成。
 
 ---
 
-# 25. 当前真正应该做的两件事
+# 25. 当前可并行开发项
 
-现在立刻并行：
+以下共享基础已经完成：
 
 ```text
-A. Document Chunk
-   → 完成总体架构 Data Plane 的 S1
-
-B. Control Plane Contract
-   → Stage / Status
-   → StagePolicy
-   → StageTask
-   → Artifact
-   → Validator result
-   → Bid Session Events
+Document Chunk
+Control Plane Contract
+Bid Session Events
+Bid Orchestrator Runtime
+Stage Policy
+Bid Client Projection
 ```
 
-B 完成后再并行展开：
+以下开发线可以继续并行：
 
 ```text
-Bid Orchestrator
 Agent Execution
 Artifact + Validator
 Web Client
