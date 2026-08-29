@@ -58,7 +58,7 @@ describe('file-intake validator', () => {
       .toContain('FILE_INTAKE_MANIFEST_VERSION_UNSUPPORTED')
 
     const incomplete = await textBatch('unrecorded.txt')
-    await writeFile(incomplete.workspace.manifestPath, JSON.stringify({ version: 3, files: [] }))
+    await writeFile(incomplete.workspace.manifestPath, JSON.stringify({ version: 4, files: [] }))
     expect(issueCodes(await validateFileIntake(incomplete.workspace, incomplete.imported, 'file_intake', [...artifact])))
       .toContain('FILE_INTAKE_MANIFEST_RECORD_MISSING')
     expect(issueCodes(await validateFileIntake(incomplete.workspace, [], 'file_intake', [...artifact])))

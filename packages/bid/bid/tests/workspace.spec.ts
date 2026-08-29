@@ -69,7 +69,7 @@ describe('BidWorkspace', () => {
       await expect(readFile(file.absoluteMetadataPath!, 'utf8')).resolves.toContain('parse_status')
     }
     const manifest = await bid.readManifest()
-    expect(manifest.version).toBe(3)
+    expect(manifest.version).toBe(4)
     expect(manifest.files).toMatchObject([
       { originalName: '历史投标书.doc', mediaType: 'application/msword', documentPath: 'corpus/历史投标书.doc/document.md' },
       { originalName: '招标文件.docx', documentPath: 'corpus/招标文件.docx/document.md' },
@@ -232,15 +232,15 @@ describe('BidWorkspace', () => {
     await expect(bid.readManifest()).rejects.toThrow()
     await writeFile(bid.manifestPath, JSON.stringify({ version: 1, files: [] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-unsupported-manifest-version')
-    await writeFile(bid.manifestPath, JSON.stringify({ version: 3, files: [{ originalName: 'missing-fields.txt' }] }))
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 4, files: [{ originalName: 'missing-fields.txt' }] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-invalid-manifest')
-    await writeFile(bid.manifestPath, JSON.stringify({ version: 3, files: [{
-      id: 'id', originalName: 'scan.pdf', inputPath: 'input/scan.pdf', corpusPath: 'corpus/scan.pdf',
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 4, files: [{
+      id: 'id', role: 'tender', originalName: 'scan.pdf', inputPath: 'input/scan.pdf', corpusPath: 'corpus/scan.pdf',
       documentPath: 'corpus/scan.pdf/document.md', structurePath: 'corpus/scan.pdf/structure.json', metadataPath: 'corpus/scan.pdf/metadata.json',
       chunksPath: null, chunkIndexPath: null,
       mediaType: 'application/pdf', size: 1, sha256: 'hash', parseStatus: 'needs_ocr', parseError: null,
     }, {
-      id: 'failed', originalName: 'failed.pdf', inputPath: 'input/failed.pdf', corpusPath: null,
+      id: 'failed', role: 'tender', originalName: 'failed.pdf', inputPath: 'input/failed.pdf', corpusPath: null,
       documentPath: null, structurePath: null, metadataPath: null, mediaType: 'application/pdf', size: 1,
       chunksPath: null, chunkIndexPath: null,
       sha256: 'failed', parseStatus: 'failed', parseError: null,

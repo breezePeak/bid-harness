@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-投标写作 profile 的工作区本地入库能力与共享控制面类型。`BidWorkspace` 把支持的 PDF、DOCX、DOC、XLSX、XLS、TXT 和 Markdown 文件保存在 `.bid-harness/sessions/<session>/` 下。每个入库文件都会获得 `corpus/<stored-name>/document.md`；PDF、DOCX 和 DOC 还会从 `extractDocument()` 获得 `structure.json` 与 `metadata.json`。Manifest 版本 3 记录语料和产物路径。调用方将 `messageInventory()` 与用户请求一起持久化，因此 agent 只会看到工作区相对的原文件、正文、分块与结构路径，并可使用常规 `grep` 和 `read` 工具。
+投标写作 profile 的工作区本地入库能力与共享控制面类型。`BidWorkspace` 把支持的 PDF、DOCX、DOC、XLSX、XLS、TXT 和 Markdown 文件保存在 `.bid-harness/sessions/<session>/` 下。每个入库文件都会获得 `corpus/<stored-name>/document.md`；PDF、DOCX 和 DOC 还会从 `extractDocument()` 获得 `structure.json` 与 `metadata.json`。Manifest 版本 4 记录文件角色、语料和产物路径。调用方将 `messageInventory()` 与用户请求一起持久化，因此 Agent 只会看到工作区相对的原文件、正文、分块与结构路径，并可使用常规 `grep` 和 `read` 工具。
 
 PDF、DOCX 和 DOC 共享一个 parser 入口：
 
@@ -27,15 +27,15 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 ## 控制面 Runtime
 
-`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`runCurrentProgramStage()` 只执行一次 pending 或 failed 的程序阶段，`drive()` 则从后续自动阶段继续执行到等待用户、失败或最终完成。新建 Session 的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
+`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`runCurrentProgramStage()` 只执行一次 pending 或 failed 的程序阶段，`runCurrentAutomaticStage()` 只执行一个自动阶段，`drive()` 则从后续自动阶段继续执行到等待用户、失败或最终完成。新建 Session 的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 
-生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库，校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，刷新终态事件，并返回稳定业务错误。成功请求记录 `file_intake` started 与 completed，并停在 `tender_analysis/pending`；失败入库仍允许重新上传。
+生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库，校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，再把同一 Session 交给实时 Agent 执行一个招标分析阶段。成功请求记录 S1 与 S2 的 started 和 completed，并停在 `evidence_mapping/pending`；失败入库仍允许重新上传。
 
-本包只提供文件接入的程序 Executor 与 Validator，不提供 Tender Analysis 模型执行、对应 Prompt 或后续阶段 Validator。
+Tender Analysis Executor 通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并只允许本轮使用现有 `grep`、`read` 和 `write` 工具。Agent idle 后，Validator 检查 `analysis/project.json`、`analysis/requirements.json`、`analysis/scoring.json` 与 `analysis/compliance.json` 的严格 schema、条目标识符唯一性、成功招标文件完整覆盖，以及每条引用的文件角色、分块路径和行号。Agent idle 本身不代表阶段完成；只有 Validator 通过才会推进。本包仍不提供 S3 及后续阶段 Executor 或 Validator。
 
 ## Model Experience
 

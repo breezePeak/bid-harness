@@ -8,6 +8,8 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type {} from '@deepseek-ai/dsh-bid'
+import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk, ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   acknowledgeReloadConnectionLoss,
@@ -28,6 +30,109 @@ const INTAKE_FIXTURE = fileURLToPath(new URL(
   import.meta.url,
 ))
 const INTAKE_FILE_NAME = 'tender-notice.md'
+
+interface AnalysisManifestFile {
+  id: string
+  role: string
+  parseStatus: string
+  chunksPath: string | null
+  chunkIndexPath: string | null
+}
+
+/** Deterministic model that drives S2 through the real Agent tool loop. */
+class BidAnalysisAdapter extends LlmAdapter {
+  readonly toolNames: string[] = []
+  private call = 0
+  private session: { cwd: string; id: string } | undefined
+
+  setSession(cwd: string, id: string): void {
+    this.session = { cwd, id }
+  }
+
+  private *toolCalls(calls: Array<{ name: string; args: Record<string, unknown> }>): Generator<StreamChunk> {
+    for (const [index, call] of calls.entries()) {
+      const id = CallId(`bid-analysis-${String(this.call)}-${String(index)}`)
+      const block: ToolCallBlock = {
+        type: 'tool-call',
+        id,
+        name: call.name,
+        arguments: JSON.stringify(call.args),
+      }
+      this.toolNames.push(call.name)
+      yield { type: 'block-start', index, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: block.arguments }
+      yield { type: 'block-end', index, block }
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+
+  override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const session = this.session
+    if (session === undefined) throw new Error('Bid analysis adapter has no Session')
+    this.call += 1
+    const base = `.bid-harness/sessions/${session.id}`
+    if (this.call === 1) {
+      yield* this.toolCalls([
+        { name: 'read', args: { file_path: `${base}/manifest.json` } },
+        { name: 'grep', args: { pattern: '交付|评分|必须', path: `${base}/corpus` } },
+        { name: 'read', args: { file_path: `${base}/corpus/${INTAKE_FILE_NAME}/chunks/index.json` } },
+      ])
+      return
+    }
+    if (this.call === 2) {
+      const sessionRoot = join(session.cwd, '.bid-harness', 'sessions', session.id)
+      const manifest = JSON.parse(await readFile(join(sessionRoot, 'manifest.json'), 'utf8')) as {
+        files: AnalysisManifestFile[]
+      }
+      const tenderFiles = manifest.files.filter(file => file.role === 'tender' && file.parseStatus === 'success')
+      const refs = await Promise.all(tenderFiles.map(async (file) => {
+        if (file.chunksPath === null || file.chunkIndexPath === null) throw new Error('Tender file has no chunks')
+        const index = JSON.parse(await readFile(join(sessionRoot, file.chunkIndexPath), 'utf8')) as {
+          chunks: Array<{ path: string }>
+        }
+        const chunk = index.chunks[0]
+        if (chunk === undefined) throw new Error('Tender file has no chunk entry')
+        return { file_id: file.id, chunk: `${file.chunksPath}/${chunk.path}`, line_start: 1, line_end: 1 }
+      }))
+      const ref = refs[0]
+      if (ref === undefined) throw new Error('Bid analysis needs a tender source')
+      const documents = {
+        'project.json': {
+          schema_version: 1, project_name: '示例项目', tender_name: '示例招标', purchaser: null, owner: null,
+          project_scope: ['完成项目交付'], technical_scope: [], delivery_scope: ['按期交付'],
+          source_refs: refs, analyzed_tender_files: tenderFiles.map(file => file.id),
+        },
+        'requirements.json': {
+          schema_version: 1,
+          requirements: [{
+            id: 'REQ-1', category: 'delivery', raw_text: '按期交付', normalized_requirement: '按期交付',
+            mandatory: true, source_refs: [ref],
+          }],
+        },
+        'scoring.json': {
+          schema_version: 1,
+          scoring_items: [{
+            id: 'SCORE-1', parent: null, group: null, title: '交付能力', raw_text: '按期交付',
+            criterion: '满足交付期限', score: null, score_range: null, must_answer: true, source_refs: [ref],
+          }],
+        },
+        'compliance.json': {
+          schema_version: 1,
+          compliance_items: [{
+            id: 'COMP-1', type: 'delivery', raw_text: '按期交付', normalized_rule: '必须按期交付',
+            severity: 'mandatory', source_refs: [ref],
+          }],
+        },
+      }
+      yield* this.toolCalls(Object.entries(documents).map(([name, document]) => ({
+        name: 'write',
+        args: { file_path: `${base}/analysis/${name}`, content: `${JSON.stringify(document, null, 2)}\n` },
+      })))
+      return
+    }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
 
 interface ListedSession {
   readonly sessionId: string
@@ -68,11 +173,14 @@ describe('web e2e: Bid file intake', () => {
   let browser: Browser
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
+  let analysisAdapter: BidAnalysisAdapter
   const consoleErrors: string[] = []
 
   beforeAll(async () => {
+    analysisAdapter = new BidAnalysisAdapter()
     scaffold = await launchWebScaffold({
       agentPresets: { roots: [{ path: SHIPPED_PRESETS, trust: 'system' }], default: 'standard' },
+      modelAdapter: analysisAdapter,
     })
     browser = await chromium.launch()
     page = await browser.newPage({
@@ -110,6 +218,12 @@ describe('web e2e: Bid file intake', () => {
     const bid = (await listedSessions(scaffold.baseUrl))[0]
     expect(bid?.sessionId).toBe(standard?.sessionId)
     expect(page.url()).toBe(urlBeforeSelection)
+    if (bid?.sessionId === undefined) throw new Error('Bid session id is unavailable')
+    const bidAgent = scaffold.ctx.agents.get(SessionId(bid.sessionId))
+    if (bidAgent === undefined) throw new Error(`Bid session ${bid.sessionId} has no live Agent`)
+    const bidCwd = bidAgent.session.header.cwd
+    if (bidCwd === undefined) throw new Error('Bid session has no workspace cwd')
+    analysisAdapter.setSession(bidCwd, bid.sessionId)
 
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
@@ -144,13 +258,14 @@ describe('web e2e: Bid file intake', () => {
     await panel.getByText('文件接入', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await uploadResponse).status()).toBe(200)
 
-    await page.getByText('文件接入完成，等待招标分析', { exact: true })
+    await page.getByText('招标分析完成，等待证据映射', { exact: true })
       .waitFor({ timeout: 30_000 })
-    await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('证据映射', { exact: true }).waitFor({ timeout: 15_000 })
     await panel.getByText('等待处理', { exact: true }).waitFor({ timeout: 15_000 })
 
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
+    expect(analysisAdapter.toolNames).toEqual(['read', 'grep', 'read', 'write', 'write', 'write', 'write'])
 
     if (bid?.sessionId === undefined) throw new Error('Bid session id is unavailable')
     const sessionId = SessionId(bid.sessionId)
@@ -159,6 +274,8 @@ describe('web e2e: Bid file intake', () => {
     expect(bidStageLifecycle(agent.session.events)).toEqual([
       { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
+      { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
+      { type: 'bid.stage.completed', stage: 'tender_analysis', status: 'completed' },
     ])
 
     const sessionCwd = agent.session.header.cwd
@@ -214,11 +331,16 @@ describe('web e2e: Bid file intake', () => {
     for (const chunk of chunkIndex.chunks) {
       expect((await stat(join(sessionRoot, chunksPath, chunk.path))).isFile()).toBe(true)
     }
+    for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
+      expect((await stat(join(sessionRoot, 'analysis', name))).isFile()).toBe(true)
+    }
 
     const persisted = await scaffold.ctx.sessionPersistence.readFrom(sessionId, 0)
     expect(bidStageLifecycle(persisted.events)).toEqual([
       { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
+      { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
+      { type: 'bid.stage.completed', stage: 'tender_analysis', status: 'completed' },
     ])
 
     const warningStart = tripwire.warnings.length
@@ -226,9 +348,9 @@ describe('web e2e: Bid file intake', () => {
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
-    await page.getByText('文件接入完成，等待招标分析', { exact: true }).waitFor({ timeout: 15_000 })
+    await page.getByText('招标分析完成，等待证据映射', { exact: true }).waitFor({ timeout: 15_000 })
     await page.getByRole('region', { name: '技术标生成' })
-      .getByText('招标分析', { exact: true }).waitFor({ timeout: 15_000 })
+      .getByText('证据映射', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await listedSessions(scaffold.baseUrl))[0]?.sessionId).toBe(sessionId)
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
@@ -250,7 +372,7 @@ describe('web e2e: Bid file intake', () => {
     if (standardSession === undefined) throw new Error('fresh standard Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(standardSession.sessionId))
     if (agent === undefined) throw new Error(`standard Session ${standardSession.sessionId} has no live Agent`)
-    agent.session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await scaffold.ctx.sessions.flush(agent.session)
 

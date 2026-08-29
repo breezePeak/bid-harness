@@ -92,7 +92,7 @@ describe('BidStagePanel', () => {
       target: { files: [new File(['bid'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
-    expect(screen.getByText('招标资料')).toBeTruthy()
+    expect(screen.getAllByText('招标资料')).toHaveLength(2)
     expect(screen.getByRole('button', { name: '上传并解析' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' }))
     expect(screen.queryByText('招标文件.pdf')).toBeNull()

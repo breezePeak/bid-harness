@@ -129,7 +129,13 @@ const OBJECTIVES: { readonly [K in BidStage]: string } = {
 
 const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
   file_intake: ['只使用已入库的工作区文件。', '不得调用 Agent。'],
-  tender_analysis: ['只写入要求的分析 Artifact。', '不得虚构招标要求。'],
+  tender_analysis: [
+    '首先读取 manifest.json，并覆盖全部成功解析的 tender 文件。',
+    '只把 tender 资料作为招标要求、评分项和合规规则的权威来源。',
+    '搜索命中后必须读取原文，不得一次读取完整 document.md。',
+    '只写入要求的分析 Artifact。',
+    '不得虚构招标要求或评分语义。',
+  ],
   evidence_mapping: ['只引用工作区中存在的证据。', '只写入要求的证据映射。'],
   outline_generation: ['覆盖已记录的全部要求和评分项。', '只写入要求的目录 Artifact。'],
   outline_confirmation: ['必须取得用户的明确决定。', '不得调用 Agent。'],

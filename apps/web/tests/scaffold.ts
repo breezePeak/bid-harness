@@ -193,6 +193,8 @@ export interface WebScaffold {
 
 /** Options for {@link launchWebScaffold}. */
 export interface LaunchOptions {
+  /** Deterministic adapter for a scenario that must exercise the live Agent loop without a replay fixture. */
+  modelAdapter?: LlmAdapter
   /**
    * Optional product overlay applied after the shipped Web surface and before
    * the scaffold's hermetic test patches, matching the launcher's `--patch`
@@ -622,7 +624,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
       // issues no model calls, and one that slipped in must not pass quietly.
       ctx.effect(() => ctx.llm.registerAdapter(
         replayProviders(options.replayContextWindow).map(provider => provider.id),
-        new RouteOnlyAdapter(replayProviders(options.replayContextWindow)),
+        options.modelAdapter ?? new RouteOnlyAdapter(replayProviders(options.replayContextWindow)),
       ), 'web e2e scaffold: route-only adapter')
     }
   } catch (error) {

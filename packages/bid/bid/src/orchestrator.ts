@@ -42,6 +42,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_ACTION_NOT_ALLOWED'
   | 'BID_CONFIRM_NOT_ALLOWED'
   | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RETRY_NOT_ALLOWED'
 
@@ -130,6 +131,27 @@ export class BidOrchestrator {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+      )
+    }
+    return this.begin(async () => {
+      await this.executeStage(state.stage)
+      return this.state
+    })
+  }
+
+  /**
+   * Execute the current pending automatic stage once and stop at its successor.
+   * @returns the state after one executor and Validator settlement.
+   * @throws {@link BidOrchestratorError} unless an idle non-user, non-file-intake stage is pending.
+   */
+  runCurrentAutomaticStage(): Promise<BidRuntimeState> {
+    this.assertIdle()
+    const state = this.state
+    const policy = getBidStagePolicy(state.stage)
+    if (state.status !== 'pending' || state.stage === 'file_intake' || policy.executor === 'user') {
+      throw new BidOrchestratorError(
+        'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
+        `cannot run Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {

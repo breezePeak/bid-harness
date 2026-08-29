@@ -12,7 +12,7 @@ The Bid panel could select files, but S1 had no production route from browser by
 
 The Bid package exposes browser-safe upload request and result types and generates one Typert Remote, `bid/uploadFiles`. The Host resolves the live Session, requires its resolved preset to be `bid`, takes the workspace root only from `Session.header.cwd`, applies Host-configured file limits, and serializes intake with a per-Session lock. The MVP request carries one complete batch as canonical base64 JSON.
 
-After all bytes pass admission, the Host starts the current program-owned `file_intake` stage and delegates persistence, extraction, and chunking to `BidWorkspace.import()`. The file-intake validator reads the current `manifest.json`, matches each record from that exact batch, and checks the original file, parsed document, required extraction sidecars, chunk index, and every indexed chunk. The orchestrator records completion or failure, the Session projection derives client state, and terminal events are flushed before the Remote returns. Success stops at `tender_analysis/pending`; a failed intake retains its durable records and accepts a new upload attempt.
+After all bytes pass admission, the Host starts the current program-owned `file_intake` stage and delegates persistence, extraction, and chunking to `BidWorkspace.import()`. The file-intake validator reads the current `manifest.json`, matches each record from that exact batch, and checks the original file, parsed document, required extraction sidecars, chunk index, and every indexed chunk. The orchestrator records completion or failure, the Session projection derives client state, and terminal events are flushed before the Remote returns. Successful intake immediately hands the same Session to the implemented Tender Analysis stage, then the Host stops at `evidence_mapping/pending`; a failed intake retains its durable records and accepts a new upload attempt.
 
 The browser keeps only selection and request feedback locally. It calls the generated Remote after an explicit upload click and never derives workflow completion or falls back to `session.prompt()`.
 
@@ -26,4 +26,4 @@ The browser keeps only selection and request feedback locally. It calls the gene
 
 ## Consequences
 
-S1 has one Host-owned intake path with stable business errors and deterministic replay. The JSON/base64 MVP buffers the encoded batch within configured limits. Tender Analysis and all later business execution remain unimplemented.
+S1 has one Host-owned intake path with stable business errors and deterministic replay. The JSON/base64 MVP buffers the encoded batch within configured limits. The [Tender Analysis Agent stage](2026-08-30-bid-tender-analysis-agent-stage.md) owns S2; later business execution remains unimplemented.

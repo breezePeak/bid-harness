@@ -25,6 +25,8 @@ import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 import { validateFileIntake } from './file-intake-validator.ts'
+import { executeTenderAnalysis } from './tender-analysis-executor.ts'
+import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -80,6 +82,9 @@ export type {
   BidStageValidatorPort,
 } from './orchestrator.ts'
 export { validateFileIntake }
+export * from './tender-analysis-artifacts.ts'
+export { executeTenderAnalysis, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
+export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -230,7 +235,7 @@ function intakeError(error: unknown): BidFileIntakeResult {
 
 /** Host service for Bid projection, prompt admission, and dedicated file intake. */
 export class BidHostRuntime extends TypertRemoteService {
-  static inject = ['sessionProjections', 'sessions']
+  static inject = ['agents', 'sessionProjections', 'sessions']
   static Config = Config
 
   private readonly config: Config
@@ -282,27 +287,37 @@ export class BidHostRuntime extends TypertRemoteService {
 
       const incoming = decodeUploadFiles(files, this.config)
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) throw new Error('Bid Session has no live Agent')
       validateBidFileBatch(incoming, workspace.config)
       let imported: ImportedFile[] = []
       const orchestrator = new BidOrchestrator(
         session,
         {
           execute: async (task) => {
-            if (task.stage !== 'file_intake') throw new Error('file intake received an invalid stage assignment')
-            try {
-              imported = await workspace.import(incoming)
-            } catch {
-              throw new Error('file intake could not persist the selected files')
+            if (task.stage === 'file_intake') {
+              try {
+                imported = await workspace.import(incoming)
+              } catch {
+                throw new Error('file intake could not persist the selected files')
+              }
+              const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
+              return [artifact]
             }
-            const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
-            return [artifact]
+            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task)
+            throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
         {
-          validate: (stage, artifacts) => validateFileIntake(workspace, imported, stage, artifacts),
+          validate: (stage, artifacts) => stage === 'file_intake'
+            ? validateFileIntake(workspace, imported, stage, artifacts)
+            : validateTenderAnalysis(workspace, stage, artifacts),
         },
       )
-      const next = await orchestrator.runCurrentProgramStage()
+      let next = await orchestrator.runCurrentProgramStage()
+      if (next.stage === 'tender_analysis' && next.status === 'pending') {
+        next = await orchestrator.runCurrentAutomaticStage()
+      }
       await this.ctx.sessions.flush(session)
       if (next.status === 'failed') {
         return intakeRejected(
@@ -389,7 +404,7 @@ const bidManifestSchema = zod.object({
 /**
  * Parse one durable Bid manifest through the canonical runtime validation.
  * @param value - untrusted JSON-compatible value read from `manifest.json`.
- * @returns a validated version 3 manifest.
+ * @returns a validated current-version manifest.
  * @throws a stable manifest error when the version or required fields are invalid.
  */
 export function parseBidManifest(value: unknown): BidManifest {
@@ -637,7 +652,7 @@ export class BidWorkspace {
 
   /**
    * Read the durable manifest, treating a missing session as empty.
-   * @returns The current version 3 manifest.
+   * @returns The current manifest version.
    */
   async readManifest(): Promise<BidManifest> {
     try {

@@ -235,6 +235,22 @@ describe('BidOrchestrator', () => {
     )
   })
 
+  it('runs tender analysis once and stops at evidence mapping pending', async () => {
+    const session = createSession('bid-run-tender-analysis')
+    const executor = new RecordingExecutor()
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await orchestrator.runCurrentProgramStage()
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'evidence_mapping',
+      status: 'pending',
+    })
+    expect(executor.tasks.map(task => task.stage)).toEqual(['file_intake', 'tender_analysis'])
+    expect(session.events.map(event => event.type)).toEqual([
+      'bid.stage.started', 'bid.stage.completed', 'bid.stage.started', 'bid.stage.completed',
+    ])
+  })
+
   it('automatically executes successful stages until outline confirmation waits for the user', async () => {
     const session = createSession('bid-drive-success')
     const executor = new RecordingExecutor()
