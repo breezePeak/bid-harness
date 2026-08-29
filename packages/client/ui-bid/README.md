@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversation-declared `conversation.input.dock` list and renders only when the Host-resolved Session preset is `bid` and the `bid.runtime` projection is available. The five MVP stages are presentation labels over `projection.runtime`; the client does not fold Bid events, advance stages, derive permissions, or keep a local stage or status.
+Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversation-declared `conversation.input.dock` list and renders only when the Host-resolved Session preset is `bid` and the `bid.runtime` projection is available. The compact dock row uses the existing DSH composer geometry, state indicator, typography, and button primitives to show only the current `projection.runtime` stage and status; DSH transcript, Todo, and tool renderers remain the execution-progress UI. The client does not fold Bid events, advance stages, derive permissions, or keep a local stage or status.
 
 `projection.allowedActions` controls which upload, retry, and outline-confirmation controls appear, and the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. The upload control encodes those bytes for the generated `bid/uploadFiles` Remote; it never calls `session.prompt()`, and only the refreshed Host projection reports stage success or failure. Retry and confirmation callbacks remain unavailable, so those admitted controls render disabled rather than bypassing Host admission.
 
@@ -20,4 +20,4 @@ None. Rendering a projection and selecting local files do not change the model r
 
 - **Only file intake has a Bid action route** — retry and outline-confirmation remain disabled until their Host Remotes are implemented.
 - **File intake uses one JSON/base64 request** — browser and Host memory include the encoded batch within the configured limits.
-- **The panel shows only the five MVP stages** — later Host stages keep the panel visible without introducing a second client stage model.
+- **The panel is a business-status row** — it does not duplicate the DSH task list or tool-call tree.

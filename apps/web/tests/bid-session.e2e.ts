@@ -97,7 +97,7 @@ describe('web e2e: Bid file intake', () => {
 
     const standard = await listedSession(scaffold.baseUrl)
     expect(standard?.agentPreset).toBe('standard')
-    expect(await page.getByRole('heading', { name: '技术标生成' }).count()).toBe(0)
+    expect(await page.getByRole('region', { name: '技术标生成' }).count()).toBe(0)
 
     const urlBeforeSelection = page.url()
     await page.getByRole('button', { name: '标准模式' }).click()
@@ -110,10 +110,9 @@ describe('web e2e: Bid file intake', () => {
     expect(bid?.sessionId).toBe(standard?.sessionId)
     expect(page.url()).toBe(urlBeforeSelection)
 
-    await page.getByRole('heading', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
-    for (const stage of ['文件接入', '招标分析', '证据映射', '目录生成', '目录确认']) {
-      await page.getByText(stage, { exact: true }).waitFor()
-    }
+    const panel = page.getByRole('region', { name: '技术标生成' })
+    await panel.waitFor({ timeout: 15_000 })
+    await panel.getByText('文件接入', { exact: true }).waitFor()
     await page.getByText('请上传本次招标文件', { exact: true }).waitFor()
     await page.getByText('等待处理', { exact: true }).first().waitFor()
 
@@ -135,26 +134,19 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('button', { name: '上传并解析' }).waitFor()
     expect(await page.getByText('请上传本次招标文件', { exact: true }).count()).toBe(1)
 
-    const panel = page.locator('[aria-labelledby="bid-stage-title"]')
     const uploadResponse = page.waitForResponse(response => (
       response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/bid/uploadFiles'
     ))
     await page.getByRole('button', { name: '上传并解析' }).click()
     await page.getByText('正在上传并解析文件', { exact: true }).waitFor({ timeout: 15_000 })
-    await expect.poll(
-      () => panel.locator('[aria-current="step"]').textContent(),
-      { timeout: 15_000 },
-    ).toContain('文件接入')
+    await panel.getByText('文件接入', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await uploadResponse).status()).toBe(200)
 
     await page.getByText('文件接入完成，等待招标分析', { exact: true })
       .waitFor({ timeout: 30_000 })
-    await expect.poll(
-      () => panel.locator('[aria-current="step"]').textContent(),
-      { timeout: 15_000 },
-    ).toContain('招标分析')
-    expect(await panel.locator('[aria-current="step"]').textContent()).toContain('等待处理')
+    await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('等待处理', { exact: true }).waitFor({ timeout: 15_000 })
 
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
@@ -229,13 +221,11 @@ describe('web e2e: Bid file intake', () => {
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
-    await page.getByRole('heading', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
+    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     await page.getByText('文件接入完成，等待招标分析', { exact: true }).waitFor({ timeout: 15_000 })
-    await expect.poll(
-      () => page.locator('[aria-current="step"]').textContent(),
-      { timeout: 15_000 },
-    ).toContain('招标分析')
+    await page.getByRole('region', { name: '技术标生成' })
+      .getByText('招标分析', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await listedSession(scaffold.baseUrl))?.sessionId).toBe(sessionId)
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)

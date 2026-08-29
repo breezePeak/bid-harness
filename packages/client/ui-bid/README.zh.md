@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。五个 MVP 阶段只是 `projection.runtime` 的展示标签；客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
+标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只显示当前 `projection.runtime` 阶段与状态；执行进度继续由 DSH Transcript、Todo 和工具视图展示。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 `projection.allowedActions` 控制上传、重试和目录确认控件是否出现，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件为生成的 `bid/uploadFiles` Remote 编码这些字节；它绝不调用 `session.prompt()`，只有刷新的 Host Projection 才会报告阶段成功或失败。重试与确认回调仍不可用，因此 Host 允许的控件以禁用态呈现，不绕过 Host 准入。
 
@@ -20,4 +20,4 @@
 
 - **只有文件接入具备 Bid action route**——重试与目录确认会保持禁用，直到对应 Host Remote 实现。
 - **文件接入使用单次 JSON/base64 请求**——浏览器与 Host 内存会在配置限制内持有编码后的整个批次。
-- **面板只展示五个 MVP 阶段**——Host 进入后续阶段时面板仍然显示，但不会创建第二套客户端阶段模型。
+- **面板只显示业务状态**——它不重复 DSH 的任务列表和工具调用树。

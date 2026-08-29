@@ -49,11 +49,11 @@ describe('BidStagePanel', () => {
   it('stays absent without the Host projection and follows runtime updates', () => {
     const setComposerBlock = vi.fn()
     const view = render(<BidStagePanel {...props(undefined, { setComposerBlock })} />)
-    expect(screen.queryByText('技术标生成')).toBeNull()
+    expect(screen.queryByRole('region', { name: '技术标生成' })).toBeNull()
     expect(setComposerBlock).not.toHaveBeenCalled()
 
     view.rerender(<BidStagePanel {...props(projection(), { setComposerBlock })} />)
-    expect(screen.getByText('技术标生成')).toBeTruthy()
+    expect(screen.getByRole('region', { name: '技术标生成' })).toBeTruthy()
     expect(screen.getByText('请上传本次招标文件')).toBeTruthy()
 
     view.rerender(<BidStagePanel {...props(projection({
@@ -72,7 +72,7 @@ describe('BidStagePanel', () => {
     const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
       selector({ byId: { session_bid: { agentPreset: 'standard' } } })
     render(<BidStagePanel {...props(projection(), { useSessions } as Partial<BidStagePanelProps>)} />)
-    expect(screen.queryByText('技术标生成')).toBeNull()
+    expect(screen.queryByRole('region', { name: '技术标生成' })).toBeNull()
   })
 
   it('shows file selection only when upload_files is admitted', () => {
@@ -200,7 +200,9 @@ describe('ui-bid browser plugin', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
     }), BidStagePanel)
-    const options = register.mock.calls[0][0] as {
+    const registration = register.mock.calls[0]
+    if (registration === undefined) throw new Error('Bid dock registration is unavailable')
+    const options = registration[0] as {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly File[]) => Promise<void>

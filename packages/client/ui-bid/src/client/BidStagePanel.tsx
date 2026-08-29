@@ -6,9 +6,11 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import {
   Button,
   IconCheckOutline14,
+  IconChecklistOutline14,
   IconCloseOutline16,
   IconPaperclipOutline16,
   IconRefreshOutline16,
+  StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -22,19 +24,23 @@ export type BidStagePanelProps =
   & InjectFace<BidStagePanelInjected>
   & PropsLocale<'bid'>
 
-const MVP_STAGES = [
-  'file_intake',
-  'tender_analysis',
-  'evidence_mapping',
-  'outline_generation',
-  'outline_confirmation',
-] as const satisfies readonly BidStage[]
-
 type PendingAction = 'upload' | 'retry' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 
-function stageKey(stage: typeof MVP_STAGES[number]): BidKey {
+function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
+}
+
+function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'error' | undefined {
+  switch (status) {
+    case 'pending': return undefined
+    case 'waiting_user': return 'warning'
+    case 'running': return 'ongoing'
+    case 'failed': return 'error'
+    case 'completed': return 'done'
+  }
+  const exhaustive: never = status
+  return exhaustive
 }
 
 function statusKey(status: StageRunStatus): BidKey {
@@ -166,46 +172,30 @@ export function BidStagePanel({
   const hostFailureReason = projection.runtime.status === 'failed'
     ? projection.runtime.failureReason
     : undefined
+  const dotState = statusDot(projection.runtime.status)
 
   return (
-    <section className={css.panel} aria-labelledby="bid-stage-title">
-      <header className={css.header}>
-        <h2 id="bid-stage-title" className={css.title}>{t('title')}</h2>
-        <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
-      </header>
+    <section className={css.root} aria-label={t('title')}>
+      <div className={css.body}>
+        <div className={css.statusRow}>
+          {dotState === undefined
+            ? <IconChecklistOutline14 className={css.lead} />
+            : <StateDot state={dotState} />}
+          <span className={css.stage}>{t(stageKey(projection.runtime.stage))}</span>
+          <span className={css.message} role="status">
+            {t(promptKey(projection.runtime.stage, projection.runtime.status))}
+          </span>
+          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
+        </div>
 
-      <ol className={css.stages}>
-        {MVP_STAGES.map((stage, index) => {
-          const active = stage === projection.runtime.stage
-          return (
-            <li
-              key={stage}
-              className={active ? `${css.stage} ${css.stageActive}` : css.stage}
-              aria-current={active ? 'step' : undefined}
-            >
-              <span className={css.stageNumber}>{index + 1}</span>
-              <span className={css.stageLabel}>{t(stageKey(stage))}</span>
-              {active && <span className={css.stageDot} aria-hidden />}
-              {active && <span className={css.stageStatus}>{t(statusKey(projection.runtime.status))}</span>}
-            </li>
-          )
-        })}
-      </ol>
+        {hostFailureReason !== undefined && (
+          <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
+        )}
 
-      <div className={css.message} role="status">
-        {t(promptKey(projection.runtime.stage, projection.runtime.status))}
-      </div>
+        {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
-      {hostFailureReason !== undefined && (
-        <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
-      )}
-
-      {rules !== undefined && <p className={css.rules}>{rules}</p>}
-
-      {selectedFiles.length > 0 && (
-        <div className={css.files}>
-          <div className={css.filesTitle}>{t('file.selected')}</div>
-          <ul className={css.fileList}>
+        {selectedFiles.length > 0 && (
+          <ul className={css.fileList} aria-label={t('file.selected')}>
             {selectedFiles.map((file, index) => (
               <li key={`${file.name}:${file.size}:${file.lastModified}`} className={css.fileRow}>
                 <IconPaperclipOutline16 className={css.fileIcon} />
@@ -225,78 +215,83 @@ export function BidStagePanel({
               </li>
             ))}
           </ul>
-        </div>
-      )}
+        )}
 
-      <div className={css.actions}>
-        {canUpload && (
-          <>
-            <input
-              ref={fileInput}
-              className={css.fileInput}
-              type="file"
-              multiple
-              accept={accept}
-              onChange={selected}
-            />
-            <Button
-              variant="outline"
-              icon={<IconPaperclipOutline16 />}
-              disabled={requestPending !== null}
-              onClick={() => { fileInput.current?.click() }}
-            >
-              {t('action.choose')}
-            </Button>
-            {selectedFiles.length > 0 && (
+        <div className={css.actions}>
+          {canUpload && (
+            <>
+              <input
+                ref={fileInput}
+                className={css.fileInput}
+                type="file"
+                multiple
+                accept={accept}
+                onChange={selected}
+              />
               <Button
-                variant="primary"
+                size="sm"
+                variant="outline"
+                icon={<IconPaperclipOutline16 />}
                 disabled={requestPending !== null}
-                onClick={() => {
-                  invoke('upload', () => uploadFiles(selectedFiles))
-                }}
+                onClick={() => { fileInput.current?.click() }}
               >
-                {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
+                {t('action.choose')}
               </Button>
-            )}
-          </>
-        )}
-        {canRetry && (
-          <Button
-            variant="outline"
-            icon={<IconRefreshOutline16 />}
-            disabled={requestPending !== null || retryStage === undefined}
-            title={retryStage === undefined ? t('action.unavailable') : undefined}
-            onClick={() => { invoke('retry', retryStage) }}
-          >
-            {t('action.retry')}
-          </Button>
-        )}
-        {canConfirm && (
-          <>
+              {selectedFiles.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={requestPending !== null}
+                  onClick={() => {
+                    invoke('upload', () => uploadFiles(selectedFiles))
+                  }}
+                >
+                  {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
+                </Button>
+              )}
+            </>
+          )}
+          {canRetry && (
             <Button
-              variant="primary"
-              icon={<IconCheckOutline14 />}
-              disabled={requestPending !== null || confirmOutline === undefined}
-              title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-              onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(true)) }}
-            >
-              {t('action.confirm')}
-            </Button>
-            <Button
+              size="sm"
               variant="outline"
-              disabled={requestPending !== null || confirmOutline === undefined}
-              title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-              onClick={() => { invoke('revise', confirmOutline === undefined ? undefined : () => confirmOutline(false)) }}
+              icon={<IconRefreshOutline16 />}
+              disabled={requestPending !== null || retryStage === undefined}
+              title={retryStage === undefined ? t('action.unavailable') : undefined}
+              onClick={() => { invoke('retry', retryStage) }}
             >
-              {t('action.revise')}
+              {t('action.retry')}
             </Button>
-          </>
+          )}
+          {canConfirm && (
+            <>
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<IconCheckOutline14 />}
+                disabled={requestPending !== null || confirmOutline === undefined}
+                title={confirmOutline === undefined ? t('action.unavailable') : undefined}
+                onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(true)) }}
+              >
+                {t('action.confirm')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={requestPending !== null || confirmOutline === undefined}
+                title={confirmOutline === undefined ? t('action.unavailable') : undefined}
+                onClick={() => { invoke('revise', confirmOutline === undefined ? undefined : () => confirmOutline(false)) }}
+              >
+                {t('action.revise')}
+              </Button>
+            </>
+          )}
+        </div>
+
+        {requestError !== null && (
+          <p className={css.error} role="alert">{requestError}</p>
         )}
       </div>
-
-      {requestError !== null && (
-        <p className={css.error} role="alert">{requestError}</p>
-      )}
     </section>
   )
 }
