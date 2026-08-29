@@ -30,6 +30,13 @@ describe('Bid client projection', () => {
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
+    expect(getBidClientProjection({
+      stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
+    })).toEqual({
+      runtime: { stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR' },
+      allowedActions: ['upload_files'],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+    })
     expect(getBidClientProjection({ stage: 'book_review', status: 'failed' })).toEqual({
       runtime: { stage: 'book_review', status: 'failed' },
       allowedActions: [],
@@ -56,5 +63,23 @@ describe('Bid client projection', () => {
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_running' },
     })
+
+    session.append('bid.stage.failed', {
+      stage: 'file_intake', status: 'failed', reason: 'document needs OCR',
+    })
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+      runtime: { stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR' },
+      allowedActions: ['upload_files'],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+    })
+
+    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
+      runtime: { stage: 'file_intake', status: 'running' },
+      allowedActions: [],
+    })
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
+      'runtime.failureReason',
+    )
   })
 })

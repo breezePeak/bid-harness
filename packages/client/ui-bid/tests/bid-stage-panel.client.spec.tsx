@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { BidClientProjection } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -57,10 +57,15 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('请上传本次招标文件')).toBeTruthy()
 
     view.rerender(<BidStagePanel {...props(projection({
-      runtime: { stage: 'tender_analysis', status: 'running' },
+      runtime: { stage: 'file_intake', status: 'running' },
     }), { setComposerBlock })} />)
-    expect(screen.getByText('正在分析招标文件')).toBeTruthy()
+    expect(screen.getByText('正在上传并解析文件')).toBeTruthy()
     expect(screen.getAllByText('正在处理…').length).toBeGreaterThan(0)
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'pending' },
+    }), { setComposerBlock })} />)
+    expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
   it('stays absent for a non-Bid session even when a projection is available', () => {
@@ -72,22 +77,68 @@ describe('BidStagePanel', () => {
 
   it('shows file selection only when upload_files is admitted', () => {
     const view = render(<BidStagePanel {...props(projection())} />)
-    expect(screen.queryByRole('button', { name: '上传招标文件' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '选择招标文件' })).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
-    }))} />)
-    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
+    }), { uploadFiles: vi.fn(async () => {}) })} />)
+    expect(screen.getByRole('button', { name: '选择招标文件' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '上传并解析' })).toBeNull()
     const input = view.container.querySelector('input[type="file"]')
     expect(input).not.toBeNull()
     fireEvent.change(input!, {
       target: { files: [new File(['bid'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传并解析' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' }))
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
+    expect(screen.queryByRole('button', { name: '上传并解析' })).toBeNull()
+  })
+
+  it('submits the selected files once and keeps them available after a Host refusal', async () => {
+    const first = Promise.withResolvers<undefined>()
+    const uploadFiles = vi.fn<(_: readonly File[]) => Promise<void>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(undefined)
+    const view = render(<BidStagePanel {...props(projection({
+      allowedActions: ['upload_files'],
+      allowedExtensions: ['.md'],
+      maxFiles: 2,
+    }), { uploadFiles })} />)
+    const file = new File(['# 招标要求'], 'requirements.md', { type: 'text/markdown' })
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [file] },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
+    expect(uploadFiles).toHaveBeenCalledOnce()
+    expect(uploadFiles).toHaveBeenCalledWith([file])
+    expect(screen.getByRole('button', { name: '正在上传…' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '选择招标文件' })).toHaveProperty('disabled', true)
+    expect(screen.getByText('请上传本次招标文件')).toBeTruthy()
+
+    act(() => { first.reject(new Error('BID_FILE_INTAKE_NOT_ALLOWED')) })
+    await screen.findByRole('alert')
+    expect(screen.getByRole('alert').textContent).toContain('BID_FILE_INTAKE_NOT_ALLOWED')
+    expect(screen.getByText('requirements.md')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
+    await waitFor(() => { expect(uploadFiles).toHaveBeenCalledTimes(2) })
+  })
+
+  it('shows the Host failure reason and keeps failed file intake uploadable', () => {
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'file_intake', status: 'failed', failureReason: '文档无法解析' },
+      allowedActions: ['upload_files'],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+    }), { uploadFiles: vi.fn(async () => {}) })} />)
+
+    expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
+    expect(screen.getByRole('button', { name: '选择招标文件' })).toBeTruthy()
   })
 
   it('mirrors only projection.composer into the session block', async () => {
@@ -126,13 +177,19 @@ describe('BidStagePanel', () => {
 })
 
 describe('ui-bid browser plugin', () => {
-  it('registers the Bid input-dock entry and scopes composer blocks by session', () => {
+  it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
+    const remoteUpload = vi.fn<(_sessionId: string, _files: readonly unknown[]) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'tender_analysis' as const, status: 'pending' as const } },
+      })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
+      remote: { bid: { uploadFiles: remoteUpload } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -143,13 +200,37 @@ describe('ui-bid browser plugin', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
     }), BidStagePanel)
-    const options = register.mock.calls[0]![0] as unknown as {
-      inject: (sessionId: string) => { setComposerBlock: (reason: string | undefined) => void }
+    const options = register.mock.calls[0][0] as {
+      inject: (sessionId: string) => {
+        setComposerBlock: (reason: string | undefined) => void
+        uploadFiles: (files: readonly File[]) => Promise<void>
+      }
     }
     const injected = options.inject('session_bid')
     injected.setComposerBlock('请先上传')
     expect(set).toHaveBeenLastCalledWith('session_bid', { reason: '请先上传' })
     injected.setComposerBlock(undefined)
     expect(set).toHaveBeenLastCalledWith('session_bid', undefined)
+
+    const file = new File([Uint8Array.of(1, 2, 3)], 'requirements.md', { type: 'text/markdown' })
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: async () => Uint8Array.of(1, 2, 3).buffer,
+    })
+    await injected.uploadFiles([file])
+    expect(remoteUpload).toHaveBeenCalledWith('session_bid', [{
+      name: 'requirements.md',
+      mediaType: 'text/markdown',
+      size: 3,
+      data: 'AQID',
+    }])
+
+    remoteUpload.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ok: false,
+        error: { code: 'BID_FILE_TYPE_UNSUPPORTED', message: '不支持该文件类型' },
+      },
+    })
+    await expect(injected.uploadFiles([file])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
   })
 })

@@ -16,6 +16,9 @@ export type {
   BidClientProjection,
   BidComposerCapability,
   BidComposerReason,
+  BidFileIntakeErrorCode,
+  BidFileIntakeFailure,
+  BidFileIntakeResult,
   BidPromptAdmission,
   BidRuntimeState,
   BidStage,
@@ -26,4 +29,5 @@ export type {
   StageRunStatus,
   StageValidationIssue,
   StageValidationResult,
+  BidUploadFile,
 } from './control-plane-contract.ts'

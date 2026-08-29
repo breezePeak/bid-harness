@@ -20,14 +20,14 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     requiredInputs: [],
     allowedTools: [],
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
-    requiredArtifacts: ['corpus/chunks/index.json'],
+    requiredArtifacts: ['manifest.json'],
     validator: 'file-intake-validator',
     nextStage: 'tender_analysis',
   },
   tender_analysis: {
     stage: 'tender_analysis',
     executor: 'agent',
-    requiredInputs: ['corpus/chunks/index.json'],
+    requiredInputs: ['manifest.json'],
     allowedTools: ['grep', 'read', 'write'],
     forbiddenTools: ['bash', 'web_search'],
     requiredArtifacts: [
@@ -188,7 +188,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
     case 'bid.stage.failed':
       return event.data.stage === state.stage
         && state.status === 'running'
-        ? { stage: state.stage, status: 'failed' }
+        ? { stage: state.stage, status: 'failed', failureReason: event.data.reason }
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === 'outline_confirmation'
@@ -232,11 +232,13 @@ export function getBidClientProjection(
   const fileView = fileLimits.allowedExtensions === undefined
     ? { ...fileLimits }
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
-  if (runtime.status === 'failed') return {
-    runtime: { ...runtime },
-    allowedActions: [],
-    composer: { enabled: false, reason: 'bid.stage_failed' },
-    ...fileView,
+  if (runtime.status === 'failed') {
+    return {
+      runtime: { ...runtime },
+      allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : [],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+      ...fileView,
+    }
   }
   if (runtime.status === 'running') {
     return {

@@ -30,7 +30,7 @@ const MVP_STAGES = [
   'outline_confirmation',
 ] as const satisfies readonly BidStage[]
 
-type PendingAction = 'retry' | 'confirm' | 'revise'
+type PendingAction = 'upload' | 'retry' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 
 function stageKey(stage: typeof MVP_STAGES[number]): BidKey {
@@ -49,10 +49,14 @@ function statusKey(status: StageRunStatus): BidKey {
   return exhaustive
 }
 
-function promptKey(stage: BidStage): BidKey {
+function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
   switch (stage) {
-    case 'file_intake': return 'prompt.file_intake'
-    case 'tender_analysis': return 'prompt.tender_analysis'
+    case 'file_intake':
+      if (status === 'running') return 'prompt.file_intake_running'
+      if (status === 'failed') return 'prompt.file_intake_failed'
+      return 'prompt.file_intake'
+    case 'tender_analysis':
+      return status === 'pending' ? 'prompt.tender_analysis_pending' : 'prompt.tender_analysis'
     case 'evidence_mapping': return 'prompt.evidence_mapping'
     case 'outline_generation': return 'prompt.outline_generation'
     case 'outline_confirmation': return 'prompt.outline_confirmation'
@@ -98,16 +102,18 @@ export function BidStagePanel({
   useProjection,
   useSessions,
   setComposerBlock,
+  uploadFiles,
   retryStage,
   confirmOutline,
   t,
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
-  const [files, setFiles] = useState<readonly File[]>([])
-  const [pending, setPending] = useState<PendingAction | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<readonly File[]>([])
+  const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
+  const [requestError, setRequestError] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
 
   useEffect(() => {
@@ -135,23 +141,31 @@ export function BidStagePanel({
   const rules = fileRules(projection, t)
 
   const invoke = (kind: PendingAction, action: (() => Promise<void>) | undefined): void => {
-    if (action === undefined || pending !== null) return
-    setPending(kind)
-    setError(null)
+    if (action === undefined || pendingAction.current !== null) return
+    pendingAction.current = kind
+    setRequestPending(kind)
+    setRequestError(null)
     void action().then(() => {
       if (!alive.current) return
-      setPending(null)
+      pendingAction.current = null
+      setRequestPending(null)
     }, (reason: unknown) => {
       if (!alive.current) return
-      setPending(null)
-      setError(t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }))
+      pendingAction.current = null
+      setRequestPending(null)
+      setRequestError(t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }))
     })
   }
 
   const selected = (event: ChangeEvent<HTMLInputElement>): void => {
-    setFiles(Array.from(event.currentTarget.files ?? []))
+    setSelectedFiles(Array.from(event.currentTarget.files ?? []))
+    setRequestError(null)
     event.currentTarget.value = ''
   }
+
+  const hostFailureReason = projection.runtime.status === 'failed'
+    ? projection.runtime.failureReason
+    : undefined
 
   return (
     <section className={css.panel} aria-labelledby="bid-stage-title">
@@ -179,16 +193,20 @@ export function BidStagePanel({
       </ol>
 
       <div className={css.message} role="status">
-        {t(promptKey(projection.runtime.stage))}
+        {t(promptKey(projection.runtime.stage, projection.runtime.status))}
       </div>
+
+      {hostFailureReason !== undefined && (
+        <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
+      )}
 
       {rules !== undefined && <p className={css.rules}>{rules}</p>}
 
-      {files.length > 0 && (
+      {selectedFiles.length > 0 && (
         <div className={css.files}>
           <div className={css.filesTitle}>{t('file.selected')}</div>
           <ul className={css.fileList}>
-            {files.map((file, index) => (
+            {selectedFiles.map((file, index) => (
               <li key={`${file.name}:${file.size}:${file.lastModified}`} className={css.fileRow}>
                 <IconPaperclipOutline16 className={css.fileIcon} />
                 <span className={css.fileName} title={file.name}>{file.name}</span>
@@ -196,7 +214,11 @@ export function BidStagePanel({
                   type="button"
                   className={css.removeFile}
                   aria-label={`${t('file.remove')}: ${file.name}`}
-                  onClick={() => { setFiles(current => current.filter((_, itemIndex) => itemIndex !== index)) }}
+                  disabled={requestPending !== null}
+                  onClick={() => {
+                    setSelectedFiles(current => current.filter((_, itemIndex) => itemIndex !== index))
+                    setRequestError(null)
+                  }}
                 >
                   <IconCloseOutline16 />
                 </button>
@@ -218,19 +240,31 @@ export function BidStagePanel({
               onChange={selected}
             />
             <Button
-              variant="primary"
+              variant="outline"
               icon={<IconPaperclipOutline16 />}
+              disabled={requestPending !== null}
               onClick={() => { fileInput.current?.click() }}
             >
-              {t('action.upload')}
+              {t('action.choose')}
             </Button>
+            {selectedFiles.length > 0 && (
+              <Button
+                variant="primary"
+                disabled={requestPending !== null}
+                onClick={() => {
+                  invoke('upload', () => uploadFiles(selectedFiles))
+                }}
+              >
+                {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
+              </Button>
+            )}
           </>
         )}
         {canRetry && (
           <Button
             variant="outline"
             icon={<IconRefreshOutline16 />}
-            disabled={pending !== null || retryStage === undefined}
+            disabled={requestPending !== null || retryStage === undefined}
             title={retryStage === undefined ? t('action.unavailable') : undefined}
             onClick={() => { invoke('retry', retryStage) }}
           >
@@ -242,7 +276,7 @@ export function BidStagePanel({
             <Button
               variant="primary"
               icon={<IconCheckOutline14 />}
-              disabled={pending !== null || confirmOutline === undefined}
+              disabled={requestPending !== null || confirmOutline === undefined}
               title={confirmOutline === undefined ? t('action.unavailable') : undefined}
               onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(true)) }}
             >
@@ -250,7 +284,7 @@ export function BidStagePanel({
             </Button>
             <Button
               variant="outline"
-              disabled={pending !== null || confirmOutline === undefined}
+              disabled={requestPending !== null || confirmOutline === undefined}
               title={confirmOutline === undefined ? t('action.unavailable') : undefined}
               onClick={() => { invoke('revise', confirmOutline === undefined ? undefined : () => confirmOutline(false)) }}
             >
@@ -260,7 +294,9 @@ export function BidStagePanel({
         )}
       </div>
 
-      {error !== null && <p className={css.error} role="alert">{error}</p>}
+      {requestError !== null && (
+        <p className={css.error} role="alert">{requestError}</p>
+      )}
     </section>
   )
 }

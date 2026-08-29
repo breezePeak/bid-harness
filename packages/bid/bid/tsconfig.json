@@ -10,6 +10,7 @@
     { "path": "../../session/session-projection" },
     { "path": "../../preset/agent-presets" },
     { "path": "../../host/apiproxy" },
+    { "path": "../../typert/protocol" },
     { "path": "../../runtime-diagnostics/invariants" }
   ]
 }

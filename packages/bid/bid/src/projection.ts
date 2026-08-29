@@ -19,6 +19,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 const runtimeSchema = z.object({
   stage: z.enum(BID_STAGES),
   status: z.enum(STAGE_RUN_STATUSES),
+  failureReason: z.string().optional(),
 })
 
 const clientProjectionSchema = z.object({
@@ -66,6 +67,6 @@ export function registerBidRuntimeProjection(
       viewSchema: clientProjectionSchema,
       view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 2,
+    stateVersion: 3,
   })
 }

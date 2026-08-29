@@ -88,6 +88,8 @@ When required `gh`, `pnpm`, build, test, or generator commands fail because the 
 
 Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/SKILL.md); report only commands run. After `gh stack sync`, validate immediately; do not merge before checks pass.
 
+- 项目检查、流程说明和交付信息统一使用中文；不要求创建或维护英文对照、翻译记录或双语配对。
+
 - Match evidence to the surface: focused tests for behavior, snapshots for model or user output, narrow documentation checks for changed docs, build/hygiene and built smokes for published paths, and real-API e2e for provider behavior.
 - Do not run `pnpm run doc-sync` as a commit or push prerequisite. Run it only when the user explicitly requests the full documentation gate suite.
 - Never default to the full suite or repeat a passing check for commit or push. CI owns exhaustive coverage and the platform matrix; rehearse all locally only by explicit request, for CI diagnosis, or for an irreducibly repository-wide change.

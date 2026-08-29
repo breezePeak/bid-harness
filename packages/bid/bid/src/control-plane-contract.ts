@@ -29,6 +29,8 @@ export type StageRunStatus = typeof STAGE_RUN_STATUSES[number]
 export interface BidRuntimeState {
   stage: BidStage
   status: StageRunStatus
+  /** Host-recorded reason for the current failed stage. */
+  readonly failureReason?: string | undefined
 }
 
 /** The sole client-visible projection key for Bid runtime state. */
@@ -114,6 +116,37 @@ export interface BidClientProjection {
   maxFileBytes?: number | undefined
   maxTotalBytes?: number | undefined
 }
+
+/** One browser-selected file encoded for the dedicated Bid Host action. */
+export interface BidUploadFile {
+  readonly name: string
+  readonly mediaType?: string
+  readonly size: number
+  readonly data: string
+}
+
+/** Stable business rejection codes returned by Bid file intake. */
+export type BidFileIntakeErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_FILE_INTAKE_NOT_ALLOWED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_FILE_COUNT_LIMIT'
+  | 'BID_FILE_SIZE_LIMIT'
+  | 'BID_TOTAL_SIZE_LIMIT'
+  | 'BID_FILE_TYPE_UNSUPPORTED'
+  | 'BID_FILE_NAME_INVALID'
+  | 'BID_FILE_INTAKE_FAILED'
+
+/** Sanitized Bid file-intake business failure. */
+export interface BidFileIntakeFailure {
+  readonly code: BidFileIntakeErrorCode
+  readonly message: string
+}
+
+/** Result returned after one dedicated Bid file-intake request settles. */
+export type BidFileIntakeResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =

@@ -10,7 +10,7 @@ The Bid browser projection used two keys, exported Host runtime functions throug
 
 ## Decision
 
-`@deepseek-ai/dsh-bid/control-plane` exports only browser-safe constants and types, and `bid.runtime` is the sole Bid projection key. The Bid Host plugin registers that projection with its configured file limits and rejects generic prompt admission for sessions whose resolved preset is `bid` before `createUserMessage`, follow-up, or steering can run. ApiProxy dispatches prompt admission from the root Context so sibling Host composition plugins participate in the same Host-wide decision. Until dedicated action routes exist, the projection advertises only file upload and keeps the composer disabled with a canonical reason. The reducer accepts stage completion only from the current running stage; outline confirmation enters that state only after a required confirmation receives `confirmed: true`. Projection state version 2 invalidates cache entries derived under the earlier transition rules.
+`@deepseek-ai/dsh-bid/control-plane` exports only browser-safe constants and types, and `bid.runtime` is the sole Bid projection key. The Bid Host plugin registers that projection with its configured file limits and rejects generic prompt admission for sessions whose resolved preset is `bid` before `createUserMessage`, follow-up, or steering can run. ApiProxy dispatches prompt admission from the root Context so sibling Host composition plugins participate in the same Host-wide decision. The projection advertises only actions with Host routes: file upload is available while `file_intake` is pending or failed, and the composer remains disabled with a canonical reason. The reducer accepts stage completion only from the current running stage; outline confirmation enters that state only after a required confirmation receives `confirmed: true`. Projection state version 3 includes the durable failure reason and invalidates cache entries derived under the earlier transition rules.
 
 ## Alternatives considered
 
@@ -22,4 +22,4 @@ The Bid browser projection used two keys, exported Host runtime functions throug
 
 ## Consequences
 
-Bid sessions cannot use the generic composer until a production Bid action route is implemented. Standard sessions retain generic prompt delivery. Browser code no longer imports Node-backed Bid runtime modules, and replay cannot advance from unrelated or out-of-order stage events.
+Bid sessions cannot use the generic composer. They upload intake files through the dedicated Bid Remote, while Standard sessions retain generic prompt delivery. Browser code does not import Node-backed Bid runtime modules, and replay cannot advance from unrelated or out-of-order stage events.

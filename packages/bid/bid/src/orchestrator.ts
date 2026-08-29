@@ -42,6 +42,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_ACTION_NOT_ALLOWED'
   | 'BID_CONFIRM_NOT_ALLOWED'
   | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RETRY_NOT_ALLOWED'
 
 /** Host-side rejection for an operation that is invalid in current session state. */
@@ -79,7 +80,8 @@ export class BidOrchestrator {
   }
 
   /**
-   * Drive pending stages until user input, failure, or final completion. Concurrent callers share the same drive.
+   * Drive pending stages after file intake until user input, failure, or final completion. Concurrent callers share the same drive.
+   * A fresh file-intake stage waits for {@link runCurrentProgramStage} because its executor requires user files.
    * @returns the state at the stopping point.
    */
   drive(): Promise<BidRuntimeState> {
@@ -89,13 +91,14 @@ export class BidOrchestrator {
 
   /**
    * Retry the current failed stage and continue automatic execution after success.
+   * File intake requires a new upload through {@link runCurrentProgramStage}.
    * @returns the state at the next stopping point.
-   * @throws {@link BidOrchestratorError} unless the session is failed and idle.
+   * @throws {@link BidOrchestratorError} unless a non-file-intake stage is failed and idle.
    */
   retry(): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'failed') {
+    if (state.status !== 'failed' || state.stage === 'file_intake') {
       throw new BidOrchestratorError(
         'BID_RETRY_NOT_ALLOWED',
         `cannot retry Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -111,6 +114,27 @@ export class BidOrchestrator {
       }
       const completed = await this.executeStage(state.stage)
       return completed ? this.driveLoop() : this.state
+    })
+  }
+
+  /**
+   * Execute the current program-owned stage once without driving its successor.
+   * @returns the log-derived state after the stage records completion or failure.
+   * @throws {@link BidOrchestratorError} unless the current stage is an idle pending or failed program stage.
+   */
+  runCurrentProgramStage(): Promise<BidRuntimeState> {
+    this.assertIdle()
+    const state = this.state
+    const policy = getBidStagePolicy(state.stage)
+    if (policy.executor !== 'program' || (state.status !== 'pending' && state.status !== 'failed')) {
+      throw new BidOrchestratorError(
+        'BID_PROGRAM_STAGE_NOT_ALLOWED',
+        `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+      )
+    }
+    return this.begin(async () => {
+      await this.executeStage(state.stage)
+      return this.state
     })
   }
 
@@ -204,6 +228,7 @@ export class BidOrchestrator {
     while (true) {
       const state = this.state
       if (state.status !== 'pending') return state
+      if (state.stage === 'file_intake') return state
       const policy = getBidStagePolicy(state.stage)
       if (policy.executor === 'user') {
         this.session.append('bid.user_confirmation.required', {

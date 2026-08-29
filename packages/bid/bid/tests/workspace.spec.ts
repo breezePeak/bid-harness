@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +35,17 @@ describe('BidWorkspace', () => {
     expect(inventory).toContain('.bid-harness/sessions/session_1/input/公司资料.txt')
     expect(inventory).toContain('.bid-harness/sessions/session_1/corpus/公司资料.txt/document.md')
     expect(inventory).not.toContain(root)
+  })
+
+  it('rejects linked workspace ancestors before writing outside the workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-bid-outside-'))
+    await symlink(outside, join(root, '.bid-harness'), process.platform === 'win32' ? 'junction' : 'dir')
+    const bid = new BidWorkspace(root, 'linked')
+
+    await expect(bid.import([{ name: '要求.txt', bytes: new TextEncoder().encode('内容') }]))
+      .rejects.toThrow('bid-workspace-symbolic-link')
+    await expect(access(join(outside, 'sessions'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('imports DOC and DOCX through corpus manifests', async () => {
@@ -120,6 +131,18 @@ describe('BidWorkspace', () => {
     const bid = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-')), 'session_2')
     await expect(bid.import([{ name: 'x.exe', bytes: new Uint8Array([1]) }])).rejects.toThrow('bid-unsupported-file-type')
     await expect(bid.import([{ name: 'x.txt', bytes: new Uint8Array() }])).rejects.toThrow('bid-empty-file')
+  })
+
+  it('preflights the complete batch before writing any valid prefix', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root, 'preflight')
+
+    await expect(bid.import([
+      { name: 'valid.txt', bytes: new TextEncoder().encode('valid') },
+      { name: '../invalid.txt', bytes: new TextEncoder().encode('invalid') },
+    ])).rejects.toThrow('bid-invalid-file-name')
+    await expect(readFile(bid.manifestPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(bid.inputRoot, 'valid.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('validates workspace configuration and every import limit', async () => {
@@ -209,6 +232,8 @@ describe('BidWorkspace', () => {
     await expect(bid.readManifest()).rejects.toThrow()
     await writeFile(bid.manifestPath, JSON.stringify({ version: 1, files: [] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-unsupported-manifest-version')
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 3, files: [{ originalName: 'missing-fields.txt' }] }))
+    await expect(bid.readManifest()).rejects.toThrow('bid-invalid-manifest')
     await writeFile(bid.manifestPath, JSON.stringify({ version: 3, files: [{
       id: 'id', originalName: 'scan.pdf', inputPath: 'input/scan.pdf', corpusPath: 'corpus/scan.pdf',
       documentPath: 'corpus/scan.pdf/document.md', structurePath: 'corpus/scan.pdf/structure.json', metadataPath: 'corpus/scan.pdf/metadata.json',

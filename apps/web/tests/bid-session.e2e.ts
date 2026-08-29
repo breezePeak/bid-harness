@@ -1,18 +1,18 @@
-// Web e2e scenario: a Bid Session remains an ordinary DSH Session while the
-// Host-owned preset identity and projection add the Bid input-dock surface.
-// File selection is deliberately browser-local in this task: no prompt or
-// upload route is called, and no stage transition is simulated.
+// Web e2e scenario: the dedicated Bid action carries a real browser-selected
+// document through Host admission, workspace intake, stage events, projection,
+// persistence, and reload without routing file bytes through session.prompt.
+import { readFile, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import type {} from '@deepseek-ai/dsh-bid'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
-  captureStableAria,
-  compareOrRefreshGolden,
+  acknowledgeReloadConnectionLoss,
   launchWebScaffold,
   watchConsole,
-  webSnapshotMode,
   type WebScaffold,
 } from './scaffold.ts'
 import {
@@ -23,11 +23,11 @@ import {
 
 /** The shipped roster, including the Host-recognized `bid` preset. */
 const SHIPPED_PRESETS = fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url))
-const PANEL_EXPECTED = join(
-  fileURLToPath(new URL('./snapshots/bid-session', import.meta.url)),
-  'panel.expected.md',
-)
-const MODE = webSnapshotMode()
+const INTAKE_FIXTURE = fileURLToPath(new URL(
+  '../../../packages/client/ui-bid/tests/fixtures/tender-notice.md',
+  import.meta.url,
+))
+const INTAKE_FILE_NAME = 'tender-notice.md'
 
 interface ListedSession {
   readonly sessionId: string
@@ -49,7 +49,20 @@ async function listedSession(baseUrl: string): Promise<ListedSession | undefined
   return body.result.value?.items[0]
 }
 
-describe('web e2e: Bid Session shell', () => {
+function bidStageLifecycle(events: readonly SessionEvent[]): Array<{
+  type: 'bid.stage.started' | 'bid.stage.completed' | 'bid.stage.failed'
+  stage: string
+  status: string
+}> {
+  return events.flatMap((event) => {
+    if (event.type !== 'bid.stage.started'
+      && event.type !== 'bid.stage.completed'
+      && event.type !== 'bid.stage.failed') return []
+    return [{ type: event.type, stage: event.data.stage, status: event.data.status }]
+  })
+}
+
+describe('web e2e: Bid file intake', () => {
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
@@ -78,7 +91,7 @@ describe('web e2e: Bid Session shell', () => {
     await scaffold?.close()
   })
 
-  it('selects Bid mode and keeps PDF selection local to the unchanged Session', async () => {
+  it('uploads a Markdown tender through the Host and restores the advanced stage', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session'))
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
 
@@ -103,36 +116,132 @@ describe('web e2e: Bid Session shell', () => {
     }
     await page.getByText('请上传本次招标文件', { exact: true }).waitFor()
     await page.getByText('等待处理', { exact: true }).first().waitFor()
-    const panelSnapshot = await captureStableAria(
-      page,
-      '[aria-labelledby="bid-stage-title"]',
-      scaffold.workspaceCwd,
-    )
-    await compareOrRefreshGolden(PANEL_EXPECTED, panelSnapshot, MODE)
 
     let promptPosts = 0
+    let uploadPosts = 0
     page.on('request', (request) => {
-      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/session.prompt') {
-        promptPosts += 1
-      }
+      if (request.method() !== 'POST') return
+      const path = new URL(request.url()).pathname
+      if (path === '/api/session.prompt') promptPosts += 1
+      if (path === '/api/bid/uploadFiles') uploadPosts += 1
     })
 
     const chooserReady = page.waitForEvent('filechooser')
-    await page.getByRole('button', { name: '上传招标文件' }).click()
+    await page.getByRole('button', { name: '选择招标文件' }).click()
     const chooser = await chooserReady
-    await chooser.setFiles({
-      name: '招标文件.pdf',
-      mimeType: 'application/pdf',
-      buffer: Buffer.from('%PDF-1.4\n% browser-local Bid fixture\n'),
-    })
+    await chooser.setFiles(INTAKE_FIXTURE)
 
-    await page.getByText('招标文件.pdf', { exact: true }).waitFor()
+    await page.getByText(INTAKE_FILE_NAME, { exact: true }).waitFor()
+    await page.getByRole('button', { name: '上传并解析' }).waitFor()
     expect(await page.getByText('请上传本次招标文件', { exact: true }).count()).toBe(1)
-    expect(await page.getByText('处理完成', { exact: true }).count()).toBe(0)
-    await page.waitForTimeout(100)
+
+    const panel = page.locator('[aria-labelledby="bid-stage-title"]')
+    const uploadResponse = page.waitForResponse(response => (
+      response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/bid/uploadFiles'
+    ))
+    await page.getByRole('button', { name: '上传并解析' }).click()
+    await page.getByText('正在上传并解析文件', { exact: true }).waitFor({ timeout: 15_000 })
+    await expect.poll(
+      () => panel.locator('[aria-current="step"]').textContent(),
+      { timeout: 15_000 },
+    ).toContain('文件接入')
+    expect((await uploadResponse).status()).toBe(200)
+
+    await page.getByText('文件接入完成，等待招标分析', { exact: true })
+      .waitFor({ timeout: 30_000 })
+    await expect.poll(
+      () => panel.locator('[aria-current="step"]').textContent(),
+      { timeout: 15_000 },
+    ).toContain('招标分析')
+    expect(await panel.locator('[aria-current="step"]').textContent()).toContain('等待处理')
+
+    expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
+
+    if (bid?.sessionId === undefined) throw new Error('Bid session id is unavailable')
+    const sessionId = SessionId(bid.sessionId)
+    const agent = scaffold.ctx.agents.get(sessionId)
+    if (agent === undefined) throw new Error(`Bid session ${sessionId} has no live Agent`)
+    expect(bidStageLifecycle(agent.session.events)).toEqual([
+      { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
+      { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
+    ])
+
+    const sessionCwd = agent.session.header.cwd
+    if (sessionCwd === undefined) throw new Error('Bid session has no workspace cwd')
+    const sessionRoot = join(sessionCwd, '.bid-harness', 'sessions', sessionId)
+    const manifestPath = join(sessionRoot, 'manifest.json')
+    expect((await stat(manifestPath)).isFile()).toBe(true)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      version: number
+      files: Array<{
+        originalName: string
+        inputPath: string
+        documentPath: string | null
+        chunksPath: string | null
+        chunkIndexPath: string | null
+        parseStatus: string
+      }>
+    }
+    expect(manifest.version).toBe(3)
+    expect(manifest.files).toHaveLength(1)
+    const imported = manifest.files[0]
+    const documentPath = imported?.documentPath
+    const chunksPath = imported?.chunksPath
+    const chunkIndexRelativePath = imported?.chunkIndexPath
+    if (imported === undefined
+      || documentPath === null
+      || documentPath === undefined
+      || chunksPath === null
+      || chunksPath === undefined
+      || chunkIndexRelativePath === null
+      || chunkIndexRelativePath === undefined) {
+      throw new Error('Bid manifest has no complete imported Markdown record')
+    }
+    expect(imported).toMatchObject({
+      originalName: INTAKE_FILE_NAME,
+      inputPath: `input/${INTAKE_FILE_NAME}`,
+      parseStatus: 'success',
+    })
+    const fixtureBytes = await readFile(INTAKE_FIXTURE)
+    expect(await readFile(join(sessionRoot, imported.inputPath))).toEqual(fixtureBytes)
+    expect(await readFile(join(sessionRoot, documentPath))).toEqual(fixtureBytes)
+
+    const chunkIndexPath = join(sessionRoot, chunkIndexRelativePath)
+    expect((await stat(chunkIndexPath)).isFile()).toBe(true)
+    const chunkIndex = JSON.parse(await readFile(chunkIndexPath, 'utf8')) as {
+      chunk_count: number
+      chunks: Array<{ path: string }>
+    }
+    expect(chunkIndex.chunk_count).toBeGreaterThan(0)
+    expect(chunkIndex.chunks).toHaveLength(chunkIndex.chunk_count)
+    for (const chunk of chunkIndex.chunks) {
+      expect((await stat(join(sessionRoot, chunksPath, chunk.path))).isFile()).toBe(true)
+    }
+
+    const persisted = await scaffold.ctx.sessionPersistence.readFrom(sessionId, 0)
+    expect(bidStageLifecycle(persisted.events)).toEqual([
+      { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
+      { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
+    ])
+
+    const warningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    await page.getByRole('heading', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
+    acknowledgeReloadConnectionLoss(tripwire, warningStart)
+    await page.getByText('文件接入完成，等待招标分析', { exact: true }).waitFor({ timeout: 15_000 })
+    await expect.poll(
+      () => page.locator('[aria-current="step"]').textContent(),
+      { timeout: 15_000 },
+    ).toContain('招标分析')
+    expect((await listedSession(scaffold.baseUrl))?.sessionId).toBe(sessionId)
+    expect(uploadPosts).toBe(1)
+    expect(promptPosts).toBe(0)
+
     expect(consoleErrors).toEqual([])
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
-  }, 60_000)
+  }, 120_000)
 })

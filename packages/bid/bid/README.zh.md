@@ -21,19 +21,21 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 ## 控制面类型
 
-本包导出固定的 `BidStage` 与 `StageRunStatus` 值，以及 `BidRuntimeState`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 `BidClientProjection`、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。`BID_STAGES` 与 `STAGE_RUN_STATUSES` 是供 validator 和 client 使用的运行时枚举；从它们派生的联合类型阻止出现第二套阶段或状态名称。
+本包导出固定的 `BidStage` 与 `StageRunStatus` 值，以及 `BidRuntimeState`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 `BidClientProjection`、`BidUploadFile` 请求、`BidFileIntakeResult` 响应、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。`BID_STAGES` 与 `STAGE_RUN_STATUSES` 是供 validator 和 client 使用的运行时枚举；从它们派生的联合类型阻止出现第二套阶段或状态名称。
 
 五类 `bid.*` 记录通过声明合并接入现有 `@deepseek-ai/dsh-session` `SessionEventMap`，且仅写入日志。它们记录阶段转换、工作区产物引用、失败原因和用户确认，不保存文档或生成内容正文。
 
 ## 控制面 Runtime
 
-`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`drive()` 按八个固定 `BidStagePolicy` 构建 `BidStageTask`，调用注入的 Executor Port 与 Validator Port，并自动执行到等待用户、失败或最终完成。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
+`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`runCurrentProgramStage()` 只执行一次 pending 或 failed 的程序阶段，`drive()` 则从后续自动阶段继续执行到等待用户、失败或最终完成。新建 Session 的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 
-本包只定义控制面 Runtime 及其执行、校验 Port，不提供真实业务 Agent Executor、Tender Analysis Prompt 或具体 Stage Validator。
+生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库，校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，刷新终态事件，并返回稳定业务错误。成功请求记录 `file_intake` started 与 completed，并停在 `tender_analysis/pending`；失败入库仍允许重新上传。
+
+本包只提供文件接入的程序 Executor 与 Validator，不提供 Tender Analysis 模型执行、对应 Prompt 或后续阶段 Validator。
 
 ## Model Experience
 

@@ -5,6 +5,7 @@
  * a model request.
  */
 
+import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
@@ -13,19 +14,32 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
+import type { Session } from '@deepseek-ai/dsh-session'
+import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import * as XLSX from 'xlsx'
+import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
+import { validateFileIntake } from './file-intake-validator.ts'
+import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
+import { assertNoLinkedPath } from './workspace-path.ts'
+import type {
+  BidFileIntakeErrorCode,
+  BidFileIntakeResult,
+  BidRuntimeState,
+  BidUploadFile,
+  StageArtifact,
+} from './control-plane-contract.ts'
 
 export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
-export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.ts'
+export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 export type {
@@ -35,6 +49,9 @@ export type {
   BidComposerReason,
   BidPromptAdmission,
   BidComposerCapability,
+  BidFileIntakeErrorCode,
+  BidFileIntakeFailure,
+  BidFileIntakeResult,
 
   BidRuntimeState,
   BidStage,
@@ -45,6 +62,7 @@ export type {
   StageRunStatus,
   StageValidationIssue,
   StageValidationResult,
+  BidUploadFile,
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES } from './bid-events.ts'
 export type { BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
@@ -55,16 +73,20 @@ export {
   getBidStagePolicy,
   reduceBidRuntimeState,
 } from './runtime-state.ts'
-export { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
+export { BidOrchestrator, BidOrchestratorError }
 export type {
   BidOrchestratorErrorCode,
   BidStageExecutorPort,
   BidStageValidatorPort,
 } from './orchestrator.ts'
+export { validateFileIntake }
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'
+
+/** Current durable Bid workspace manifest version. */
+export const BID_MANIFEST_VERSION = 3 as const
 
 /** SHA-256-derived identifier for an imported bid file. */
 export type BidFileId = string & { readonly __bidFileId: unique symbol }
@@ -122,27 +144,187 @@ export const Config: z<Config> = z.object({
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
 })
 
-export const name = 'bid-host-runtime'
-export const inject = ['sessionProjections']
-
-/**
- * Register the Bid projection and reject generic prompts for Bid Sessions.
- * @param ctx - Host Context that owns projections and prompt admission.
- * @param config - validated file limits published with every Bid projection.
- */
-export function apply(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG): void {
-  registerBidRuntimeProjection(ctx.sessionProjections, config)
-  ctx.on('session/prompt-admission', ({ session }) => {
-    if (resolveSessionPreset(session) !== 'bid') return
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    const projection = getBidClientProjection(runtime)
-    const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
-    return {
-      reason,
-      message: `Bid session prompt rejected by Host admission: ${reason}`,
-    }
-  }, { global: true })
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Dedicated Host actions and runtime admission for Bid Sessions. */
+    bid: BidHostRuntime
+  }
 }
+
+/** Build the workspace configuration governed by the Host file limits. */
+function workspaceConfig(config: Config): BidConfig {
+  return {
+    ...DEFAULT_BID_CONFIG,
+    allowedExtensions: [...config.allowedExtensions],
+    maxFiles: config.maxFiles,
+    maxFileBytes: config.maxFileBytes,
+    maxTotalBytes: config.maxTotalBytes,
+  }
+}
+
+/** Build one immutable success result. */
+function intakeSuccess(value: BidRuntimeState): BidFileIntakeResult {
+  return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
+}
+
+/** Build one immutable, sanitized business rejection. */
+function intakeRejected(code: BidFileIntakeErrorCode, message: string): BidFileIntakeResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message }) })
+}
+
+/** Convert canonical browser base64 into importer bytes after size admission. */
+function decodeUploadFiles(files: readonly BidUploadFile[], config: Config): IncomingFile[] {
+  if (files.length === 0 || files.length > config.maxFiles) throw new Error('bid-file-count-limit')
+  let declaredTotal = 0
+  for (const file of files) {
+    if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > config.maxFileBytes) {
+      throw new Error('bid-file-size-limit')
+    }
+    declaredTotal += file.size
+    if (!Number.isSafeInteger(declaredTotal) || declaredTotal > config.maxTotalBytes) {
+      throw new Error('bid-total-size-limit')
+    }
+  }
+  return files.map((file) => {
+    const extension = extname(safeFileName(file.name)).toLocaleLowerCase('en-US')
+    if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
+    const expectedLength = Math.ceil(file.size / 3) * 4
+    if (file.data.length !== expectedLength
+      || file.data.length % 4 !== 0
+      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(file.data)) {
+      throw new Error('bid-invalid-file-data')
+    }
+    const bytes = Buffer.from(file.data, 'base64')
+    if (bytes.byteLength !== file.size || bytes.toString('base64') !== file.data) {
+      throw new Error('bid-invalid-file-data')
+    }
+    return {
+      name: file.name,
+      ...(file.mediaType === undefined ? {} : { type: file.mediaType }),
+      bytes,
+    }
+  })
+}
+
+/** Translate an expected admission rejection into the public business vocabulary. */
+function intakeError(error: unknown): BidFileIntakeResult {
+  const message = error instanceof Error ? error.message : String(error)
+  switch (message) {
+    case 'bid-file-count-limit':
+      return intakeRejected('BID_FILE_COUNT_LIMIT', 'The selected file count exceeds the Bid Host limit.')
+    case 'bid-file-size-limit':
+    case 'bid-empty-file':
+      return intakeRejected('BID_FILE_SIZE_LIMIT', 'A selected file is empty or exceeds the Bid Host size limit.')
+    case 'bid-total-size-limit':
+      return intakeRejected('BID_TOTAL_SIZE_LIMIT', 'The selected files exceed the Bid Host total-size limit.')
+    case 'bid-unsupported-file-type':
+      return intakeRejected('BID_FILE_TYPE_UNSUPPORTED', 'A selected file type is not accepted by the Bid Host.')
+    case 'bid-invalid-file-name':
+    case 'bid-reserved-file-name':
+      return intakeRejected('BID_FILE_NAME_INVALID', 'A selected file name is not valid for the Bid workspace.')
+    default:
+      return intakeRejected('BID_FILE_INTAKE_FAILED', 'The Bid Host could not import and validate the selected files.')
+  }
+}
+
+/** Host service for Bid projection, prompt admission, and dedicated file intake. */
+export class BidHostRuntime extends TypertRemoteService {
+  static inject = ['sessionProjections', 'sessions']
+  static Config = Config
+
+  private readonly config: Config
+  private readonly inFlight = new Set<string>()
+
+  /**
+   * @param ctx - Host Context that owns Sessions and their Bid projection.
+   * @param config - validated file limits used for admission and import.
+   */
+  constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
+    super(ctx, 'bid')
+    this.config = config
+    ctx.effect(
+      () => registerBidRuntimeProjection(ctx.sessionProjections, config),
+      'bid: runtime projection',
+    )
+    ctx.on('session/prompt-admission', ({ session }) => {
+      if (resolveSessionPreset(session) !== 'bid') return
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const projection = getBidClientProjection(runtime)
+      const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
+      return {
+        reason,
+        message: `Bid session prompt rejected by Host admission: ${reason}`,
+      }
+    }, { global: true })
+  }
+
+  /**
+   * Import and validate one browser-selected file batch for the current Bid stage.
+   * @param session - Host-resolved live Session; only its header supplies workspace identity.
+   * @param files - Browser file metadata and canonical base64 bytes.
+   * @returns the next runtime state or one stable business rejection.
+   */
+  @Remote('uploadFiles')
+  async uploadFiles(session: Session, files: readonly BidUploadFile[]): Promise<BidFileIntakeResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return intakeRejected('BID_SESSION_REQUIRED', 'File intake requires a Bid Session with a Host workspace.')
+    }
+    if (this.inFlight.has(session.id)) {
+      return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
+    }
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
+        return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
+      }
+
+      const incoming = decodeUploadFiles(files, this.config)
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      validateBidFileBatch(incoming, workspace.config)
+      let imported: ImportedFile[] = []
+      const orchestrator = new BidOrchestrator(
+        session,
+        {
+          execute: async (task) => {
+            if (task.stage !== 'file_intake') throw new Error('file intake received an invalid stage assignment')
+            try {
+              imported = await workspace.import(incoming)
+            } catch {
+              throw new Error('file intake could not persist the selected files')
+            }
+            const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
+            return [artifact]
+          },
+        },
+        {
+          validate: (stage, artifacts) => validateFileIntake(workspace, imported, stage, artifacts),
+        },
+      )
+      const next = await orchestrator.runCurrentProgramStage()
+      await this.ctx.sessions.flush(session)
+      if (next.status === 'failed') {
+        return intakeRejected(
+          'BID_FILE_INTAKE_FAILED',
+          next.failureReason ?? 'The Bid Host rejected the imported file artifacts.',
+        )
+      }
+      return intakeSuccess(next)
+    } catch (error: unknown) {
+      if (error instanceof BidOrchestratorError) {
+        if (error.code === 'BID_OPERATION_IN_PROGRESS') {
+          return intakeRejected('BID_OPERATION_IN_PROGRESS', error.message)
+        }
+        return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', error.message)
+      }
+      return intakeError(error)
+    } finally {
+      this.inFlight.delete(session.id)
+    }
+  }
+}
+
+export default BidHostRuntime
 
 /** Durable manifest entry for one imported file. */
 export interface ManifestFile {
@@ -163,7 +345,7 @@ export interface ManifestFile {
 }
 
 /** Versioned session manifest for imported bid files. */
-export interface BidManifest { version: 3; files: ManifestFile[] }
+export interface BidManifest { version: typeof BID_MANIFEST_VERSION; files: ManifestFile[] }
 
 /** File bytes and browser-supplied metadata accepted by the importer. */
 export interface IncomingFile { name: string; type?: string; bytes: Uint8Array }
@@ -176,6 +358,42 @@ export interface ImportedFile extends ManifestFile {
   absoluteMetadataPath: string | null
   absoluteChunksPath: string | null
   absoluteChunkIndexPath: string | null
+}
+
+const nullablePathSchema = zod.string().min(1).nullable()
+const manifestFileSchema = zod.object({
+  id: zod.string().min(1),
+  originalName: zod.string().min(1),
+  inputPath: zod.string().min(1),
+  corpusPath: nullablePathSchema,
+  documentPath: nullablePathSchema,
+  structurePath: nullablePathSchema,
+  metadataPath: nullablePathSchema,
+  chunksPath: nullablePathSchema,
+  chunkIndexPath: nullablePathSchema,
+  mediaType: zod.string().min(1),
+  size: zod.number().int().positive(),
+  sha256: zod.string().min(1),
+  parseStatus: zod.enum(['pending', 'success', 'needs_ocr', 'failed']),
+  parseError: zod.string().nullable(),
+}).strict()
+const bidManifestSchema = zod.object({
+  version: zod.literal(BID_MANIFEST_VERSION),
+  files: zod.array(manifestFileSchema),
+}).strict()
+
+/**
+ * Parse one durable Bid manifest through the canonical runtime validation.
+ * @param value - untrusted JSON-compatible value read from `manifest.json`.
+ * @returns a validated version 3 manifest.
+ * @throws a stable manifest error when the version or required fields are invalid.
+ */
+export function parseBidManifest(value: unknown): BidManifest {
+  const record = typeof value === 'object' && value !== null ? value as { version?: unknown } : undefined
+  if (record?.version !== BID_MANIFEST_VERSION) throw new Error('bid-unsupported-manifest-version')
+  const parsed = bidManifestSchema.safeParse(value)
+  if (!parsed.success) throw new Error('bid-invalid-manifest')
+  return parsed.data as BidManifest
 }
 
 const MEDIA_TYPES: Record<string, string> = {
@@ -197,6 +415,24 @@ export function safeFileName(name: string): string {
   }
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/iu.test(trimmed)) throw new Error('bid-reserved-file-name')
   return trimmed
+}
+
+/**
+ * Validate every file in one import batch before any workspace write begins.
+ * @param files - complete browser-decoded file batch.
+ * @param config - Host-owned import limits and accepted extensions.
+ */
+export function validateBidFileBatch(files: readonly IncomingFile[], config: BidConfig): void {
+  if (files.length === 0 || files.length > config.maxFiles) throw new Error('bid-file-count-limit')
+  const total = files.reduce((sum, file) => sum + file.bytes.byteLength, 0)
+  if (!Number.isSafeInteger(total) || total > config.maxTotalBytes) throw new Error('bid-total-size-limit')
+  for (const file of files) {
+    const originalName = safeFileName(file.name)
+    const extension = extname(originalName).toLocaleLowerCase('en-US')
+    if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
+    if (file.bytes.byteLength === 0) throw new Error('bid-empty-file')
+    if (file.bytes.byteLength > config.maxFileBytes) throw new Error('bid-file-size-limit')
+  }
 }
 
 /**
@@ -224,8 +460,10 @@ function validateConfig(config: BidConfig): void {
   }
 }
 
-async function atomicBytes(target: string, bytes: Uint8Array): Promise<void> {
+async function atomicBytes(root: string, target: string, bytes: Uint8Array): Promise<void> {
+  await assertNoLinkedPath(root, target)
   await mkdir(resolve(target, '..'), { recursive: true, mode: 0o700 })
+  await assertNoLinkedPath(root, target)
   const temporary = `${target}.${randomBytes(6).toString('hex')}.tmp`
   try {
     await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
@@ -315,22 +553,18 @@ export class BidWorkspace {
    * @returns Manifest entries with process-local absolute paths.
    */
   async import(files: readonly IncomingFile[]): Promise<ImportedFile[]> {
-    if (files.length === 0 || files.length > this.config.maxFiles) throw new Error('bid-file-count-limit')
-    const total = files.reduce((sum, file) => sum + file.bytes.byteLength, 0)
-    if (total > this.config.maxTotalBytes) throw new Error('bid-total-size-limit')
+    validateBidFileBatch(files, this.config)
+    await assertNoLinkedPath(this.root, this.manifestPath)
     const manifest = await this.readManifest()
     const used = new Set(manifest.files.map(file => basename(file.inputPath).toLocaleLowerCase('en-US')))
     const imported: ImportedFile[] = []
     for (const file of files) {
       const originalName = safeFileName(file.name)
       const extension = extname(originalName).toLocaleLowerCase('en-US')
-      if (!this.config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
-      if (file.bytes.byteLength === 0) throw new Error('bid-empty-file')
-      if (file.bytes.byteLength > this.config.maxFileBytes) throw new Error('bid-file-size-limit')
       const storedName = uniqueName(originalName, used)
       const inputPath = `input/${storedName}`
       const input = within(this.sessionRoot, inputPath)
-      await atomicBytes(input, file.bytes)
+      await atomicBytes(this.root, input, file.bytes)
       const hash = createHash('sha256').update(file.bytes).digest('hex')
       const record: ManifestFile = { id: hash as BidFileId, originalName, inputPath, corpusPath: null,
         documentPath: null, structurePath: null, metadataPath: null, chunksPath: null, chunkIndexPath: null,
@@ -340,7 +574,9 @@ export class BidWorkspace {
         const documentPath = `${corpusPath}/document.md`
         record.corpusPath = corpusPath
         if (extension === '.pdf' || extension === '.docx' || extension === '.doc') {
-          const result = await extractDocument({ sourcePath: input, outputDir: within(this.sessionRoot, corpusPath) })
+          const corpus = within(this.sessionRoot, corpusPath)
+          await assertNoLinkedPath(this.root, corpus)
+          const result = await extractDocument({ sourcePath: input, outputDir: corpus })
           if (result.parseStatus === 'failed' || result.parseStatus === 'unsupported_format') {
             /* v8 ignore next -- extractDocument always supplies both fields for a non-success result. */
             throw new Error(`${result.error?.code ?? 'DOCUMENT_PARSE_FAILED'}: ${result.error?.message ?? 'Document extraction failed.'}`)
@@ -350,8 +586,10 @@ export class BidWorkspace {
           record.metadataPath = `${corpusPath}/metadata.json`
           record.parseStatus = result.parseStatus
         } else {
+          const document = within(this.sessionRoot, documentPath)
+          await assertNoLinkedPath(this.root, document)
           await writeFileAtomic(
-            within(this.sessionRoot, documentPath),
+            document,
             parseDeterministic(extension, file.bytes),
             { mode: 0o600, dirMode: 0o700 },
           )
@@ -360,11 +598,13 @@ export class BidWorkspace {
         }
         if (record.parseStatus === 'success') {
           const chunksPath = `${corpusPath}/chunks`
+          const chunks = within(this.sessionRoot, chunksPath)
+          await assertNoLinkedPath(this.root, chunks)
           await chunkDocument({
             documentPath: within(this.sessionRoot, documentPath),
             structurePath: record.structurePath === null ? null : within(this.sessionRoot, record.structurePath),
             metadataPath: record.metadataPath === null ? null : within(this.sessionRoot, record.metadataPath),
-            outputDir: within(this.sessionRoot, chunksPath),
+            outputDir: chunks,
             config: this.config.documentChunk,
           })
           record.chunksPath = chunksPath
@@ -386,6 +626,7 @@ export class BidWorkspace {
         absoluteChunkIndexPath: record.chunkIndexPath === null ? null : within(this.sessionRoot, record.chunkIndexPath),
       })
     }
+    await assertNoLinkedPath(this.root, this.manifestPath)
     await writeFileAtomic(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     return imported
   }
@@ -396,11 +637,9 @@ export class BidWorkspace {
    */
   async readManifest(): Promise<BidManifest> {
     try {
-      const manifest = JSON.parse(await readFile(this.manifestPath, 'utf8')) as { version?: unknown }
-      if (manifest.version !== 3) throw new Error('bid-unsupported-manifest-version')
-      return manifest as BidManifest
+      return parseBidManifest(JSON.parse(await readFile(this.manifestPath, 'utf8')))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 3, files: [] }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: BID_MANIFEST_VERSION, files: [] }
       throw error
     }
   }
@@ -440,7 +679,7 @@ export class BidWorkspace {
       footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER,
         children: [new TextRun('第 '), new TextRun({ children: [PageNumber.CURRENT] }), new TextRun(' 页')],
       })] }) }, children: body }] })
-    await atomicBytes(destinationPath, await Packer.toBuffer(document))
+    await atomicBytes(this.root, destinationPath, await Packer.toBuffer(document))
     return this.relative(destination)
   }
 

@@ -21,17 +21,19 @@ Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A 
 
 ## Control plane types
 
-The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
+The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, the `BidUploadFile` request and `BidFileIntakeResult` response, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
 
 The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
 
 ## Control plane runtime
 
-`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `drive()` builds a `BidStageTask` from each of the eight fixed `BidStagePolicy` values, invokes the injected executor and validator ports, and continues until the workflow waits for the user, fails, or completes. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
+`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `runCurrentProgramStage()` executes the pending or failed program-owned stage once, while `drive()` continues later automatic stages until the workflow waits for the user, fails, or completes. Fresh file intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
 
 `registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and the Host-configured `allowedExtensions`, `maxFiles`, `maxFileBytes`, and `maxTotalBytes` limits. The Host plugin registers this projection and globally rejects generic prompt admission for sessions whose resolved preset is `bid`.
 
-The package defines the control-plane runtime and its executor and validator ports. It does not provide business Agent executors, a Tender Analysis prompt, or concrete Stage Validators.
+The generated `bid/uploadFiles` Remote resolves the live Session and uses only its Host-resolved preset and `header.cwd`. It admits the complete browser batch under a per-Session lock, decodes canonical base64 after checking declared limits, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, flushes terminal events, and returns stable business errors. A successful request records `file_intake` started and completed and stops at `tender_analysis/pending`; failed imports remain eligible for a new upload.
+
+The package provides only the file-intake program executor and validator. It does not provide Tender Analysis model execution, its prompt, or validators for later stages.
 
 ## Model Experience
 

@@ -11,6 +11,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
+import { z } from 'zod'
 
 /** Character-based limits applied after structural Markdown boundaries. */
 export interface DocumentChunkConfig {
@@ -58,6 +59,60 @@ export interface DocumentChunkIndex {
   chunk_count: number
   chunk_config: DocumentChunkConfig
   chunks: DocumentChunkEntry[]
+}
+
+const documentChunkConfigSchema = z.object({
+  minChars: z.number().int().positive(),
+  targetChars: z.number().int().positive(),
+  maxChars: z.number().int().positive(),
+}).strict().refine(
+  config => config.minChars <= config.targetChars && config.targetChars <= config.maxChars,
+  { message: 'chunk limits must be ordered' },
+)
+
+const nullablePageSchema = z.number().int().positive().nullable()
+
+const documentChunkEntrySchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  order: z.number().int().positive(),
+  heading_path: z.array(z.string()),
+  page_start: nullablePageSchema,
+  page_end: nullablePageSchema,
+  source_line_start: z.number().int().positive(),
+  source_line_end: z.number().int().positive(),
+  char_count: z.number().int().nonnegative(),
+  prev_chunk: z.string().min(1).nullable(),
+  next_chunk: z.string().min(1).nullable(),
+  oversized: z.boolean(),
+}).strict().refine(
+  entry => entry.source_line_start <= entry.source_line_end
+    && (entry.page_start === null || entry.page_end === null || entry.page_start <= entry.page_end),
+  { message: 'chunk ranges must be ordered' },
+)
+
+const documentChunkIndexSchema = z.object({
+  schema_version: z.literal(1),
+  source_document: z.string().min(1),
+  chunk_count: z.number().int().nonnegative(),
+  chunk_config: documentChunkConfigSchema,
+  chunks: z.array(documentChunkEntrySchema),
+}).strict().refine(
+  index => index.chunk_count === index.chunks.length
+    && index.chunks.every((entry, offset) => entry.order === offset + 1),
+  { message: 'chunk count and order must match the entries' },
+)
+
+/**
+ * Parse one durable chunk index through the canonical runtime validation.
+ * @param value - untrusted JSON-compatible value read from `index.json`.
+ * @returns a validated chunk index.
+ * @throws `document-chunk-invalid-index` when any required field or invariant is invalid.
+ */
+export function parseDocumentChunkIndex(value: unknown): DocumentChunkIndex {
+  const parsed = documentChunkIndexSchema.safeParse(value)
+  if (!parsed.success) throw new Error('document-chunk-invalid-index')
+  return parsed.data
 }
 
 /** Paths and manifest returned after atomically replacing a chunk directory. */

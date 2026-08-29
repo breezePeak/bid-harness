@@ -2,7 +2,11 @@ import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { chunkDocument } from '../src/document-chunk.ts'
+import {
+  chunkDocument,
+  parseDocumentChunkIndex,
+  type DocumentChunkIndex,
+} from '../src/document-chunk.ts'
 
 function bodyOf(chunk: string): string {
   const separator = chunk.indexOf('\n\n')
@@ -10,6 +14,41 @@ function bodyOf(chunk: string): string {
 }
 
 describe('chunkDocument', () => {
+  it('parses the canonical durable index and rejects invalid structures', () => {
+    const index = {
+      schema_version: 1,
+      source_document: '../document.md',
+      chunk_count: 1,
+      chunk_config: { minChars: 10, targetChars: 20, maxChars: 30 },
+      chunks: [{
+        id: 'chunk_0001',
+        path: 'chunk_0001.md',
+        order: 1,
+        heading_path: ['第一章'],
+        page_start: 1,
+        page_end: 2,
+        source_line_start: 1,
+        source_line_end: 10,
+        char_count: 100,
+        prev_chunk: null,
+        next_chunk: null,
+        oversized: true,
+      }],
+    } satisfies DocumentChunkIndex
+
+    expect(parseDocumentChunkIndex(index)).toEqual(index)
+    for (const invalid of [
+      null,
+      { ...index, schema_version: 2 },
+      { ...index, chunk_count: 0 },
+      { ...index, chunk_config: { minChars: 20, targetChars: 10, maxChars: 30 } },
+      { ...index, chunks: [{ ...index.chunks[0], order: 2 }] },
+      { ...index, chunks: [{ ...index.chunks[0], source_line_start: 11 }] },
+      { ...index, chunks: [{ ...index.chunks[0], page_start: 3 }] },
+      { ...index, unexpected: true },
+    ]) expect(() => parseDocumentChunkIndex(invalid)).toThrow('document-chunk-invalid-index')
+  })
+
   it('preserves headings, pages, lists, tables, source coverage, and deterministic adjacency', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-document-chunk-'))
     const documentPath = join(root, 'document.md')
@@ -34,6 +73,7 @@ describe('chunkDocument', () => {
     const secondFiles = await Promise.all(second.index.chunks.map(entry => readFile(join(outputDir, entry.path), 'utf8')))
 
     expect(second.index).toEqual(first.index)
+    expect(parseDocumentChunkIndex(JSON.parse(firstIndex))).toEqual(first.index)
     expect(await readFile(second.indexPath, 'utf8')).toBe(firstIndex)
     expect(secondFiles).toEqual(firstFiles)
     expect(firstFiles.map(bodyOf).join('')).toBe(markdown)

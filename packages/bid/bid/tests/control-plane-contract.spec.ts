@@ -36,7 +36,7 @@ describe('bid control-plane public contract', () => {
     const policy: BidStagePolicy = {
       stage: 'tender_analysis',
       executor: 'agent',
-      requiredInputs: ['corpus/chunks/index.json'],
+      requiredInputs: ['manifest.json'],
       allowedTools: ['grep', 'read', 'write'],
       forbiddenTools: ['bash'],
       requiredArtifacts: ['analysis/requirements.json'],
