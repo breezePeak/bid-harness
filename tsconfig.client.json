@@ -51,6 +51,7 @@
     { "path": "./packages/compaction/compaction" },
     { "path": "./packages/client/ui-slots" },
     { "path": "./packages/client/ui-attachment" },
+    { "path": "./packages/client/ui-bid" },
     { "path": "./packages/client/ui-primitives" },
     { "path": "./packages/client/modules" },
     { "path": "./packages/client/hmr" },
