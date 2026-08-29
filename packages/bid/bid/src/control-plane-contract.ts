@@ -109,10 +109,10 @@ export interface BidClientProjection {
   allowedActions: readonly BidClientAction[]
   composer: BidComposerCapability
   /** File-name suffixes accepted by the Host, including the leading dot. */
-  allowedExtensions?: readonly string[]
-  maxFiles?: number
-  maxFileBytes?: number
-  maxTotalBytes?: number
+  allowedExtensions?: readonly string[] | undefined
+  maxFiles?: number | undefined
+  maxFileBytes?: number | undefined
+  maxTotalBytes?: number | undefined
 }
 
 /** Result of host admission for an ordinary Bid composer message. */

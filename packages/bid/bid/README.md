@@ -23,7 +23,15 @@ Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A 
 
 The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
 
-The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies. This package defines no orchestrator, validator implementation, transition logic, or event store.
+The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
+
+## Control plane runtime
+
+`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `drive()` builds a `BidStageTask` from each of the eight fixed `BidStagePolicy` values, invokes the injected executor and validator ports, and continues until the workflow waits for the user, fails, or completes. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
+
+`registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions and composer capability. The Host plugin registers this projection and globally rejects generic prompt admission for sessions whose resolved preset is `bid`.
+
+The package defines the control-plane runtime and its executor and validator ports. It does not provide business Agent executors, a Tender Analysis prompt, or concrete Stage Validators.
 
 ## Model Experience
 

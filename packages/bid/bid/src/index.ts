@@ -77,7 +77,7 @@ export function apply(ctx: Context): void {
       reason,
       message: `Bid session prompt rejected by Host admission: ${reason}`,
     }
-  })
+  }, { global: true })
 }
 
 /** Durable result of parsing one imported bid file. */

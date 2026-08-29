@@ -11,7 +11,7 @@ import {
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Replayable Bid state derived from the shared session log. */
-    'bid.runtime': BidRuntimeState
+    [BID_RUNTIME_PROJECTION_KEY]: BidRuntimeState
   }
 
 }
@@ -38,6 +38,10 @@ const clientProjectionSchema = z.object({
       ]),
     }),
   ]),
+  allowedExtensions: z.array(z.string()).optional(),
+  maxFiles: z.number().int().positive().optional(),
+  maxFileBytes: z.number().int().positive().optional(),
+  maxTotalBytes: z.number().int().positive().optional(),
 })
 
 /**

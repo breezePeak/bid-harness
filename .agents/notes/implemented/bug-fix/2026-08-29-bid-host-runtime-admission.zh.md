@@ -10,7 +10,7 @@ Bid 浏览器投影曾使用两个键，并通过浏览器入口导出 Host 运�
 
 ## Decision
 
-`@deepseek-ai/dsh-bid/control-plane` 只导出浏览器安全的常量和类型，`bid.runtime` 是唯一的 Bid 投影键。Bid Host 插件注册该投影，并在 `createUserMessage`、follow-up 或 steer 执行前，根据 Session 解析出的 `bid` preset 拒绝通用提示词准入。在专用操作路由完成前，投影只暴露文件上传，并使用规范原因禁用输入框。Reducer 仅接受当前运行阶段或等待确认的目录确认阶段完成，并忽略其他完成事件。
+`@deepseek-ai/dsh-bid/control-plane` 只导出浏览器安全的常量和类型，`bid.runtime` 是唯一的 Bid 投影键。Bid Host 插件注册该投影，并在 `createUserMessage`、follow-up 或 steer 执行前，根据 Session 解析出的 `bid` preset 拒绝通用提示词准入。ApiProxy 从根 Context 分发 Prompt 准入事件，使同一 Host composition 中的同级插件参与统一决策。在专用操作路由完成前，投影只暴露文件上传，并使用规范原因禁用输入框。Reducer 仅接受当前运行阶段或等待确认的目录确认阶段完成，并忽略其他完成事件。
 
 ## Alternatives considered
 

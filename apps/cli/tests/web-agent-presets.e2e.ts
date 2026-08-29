@@ -12,6 +12,8 @@ import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { resolveSessionPreset, SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-agent-presets'
+import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid'
+import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { applyChildComposition, childSessionMeta } from '@deepseek-ai/dsh-subagent'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-compaction-basic'
@@ -43,7 +45,7 @@ const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 /**
  * Boot the shipped Web composition, minus the rows that would bind a port,
  * touch the network, or write outside the test. Everything that decides an
- * agent's capabilities is the real thing, including both shipped presets.
+ * agent's capabilities is the real thing, including every shipped preset.
  */
 async function bootWeb(
   settingsFile: string,
@@ -216,12 +218,49 @@ describe('the shipped Web composition', () => {
     }
   })
 
-  it('supplies both shipped presets, and only those, from the system root', async () => {
+  it('supplies every shipped preset, and only those, from the system root', async () => {
     const listed = await ctx.agentPresets.list()
 
-    expect(listed.map(preset => preset.id).sort()).toEqual(['code', 'cordis', 'minimal', 'standard'])
+    expect(listed.map(preset => preset.id).sort()).toEqual(['bid', 'code', 'cordis', 'minimal', 'standard'])
     expect(listed.every(preset => preset.trust === 'system')).toBe(true)
     expect(ctx.agentPresets.defaultId).toBe('standard')
+  })
+
+  it('mounts the Bid Host runtime and rejects a direct Bid prompt', async () => {
+    const projections = ctx.get('sessionProjections')
+    if (projections === undefined) throw new Error('the Web composition must compose a projection registry')
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-runtime'),
+      meta: { agentPreset: 'bid' },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    try {
+      expect(resolveSessionPreset(handle.agent.session)).toBe('bid')
+      expect(projections.snapshot(handle.agent.session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
+        runtime: { stage: 'file_intake', status: 'pending' },
+        allowedActions: ['upload_files'],
+        composer: { enabled: false, reason: 'bid.upload_required' },
+      })
+
+      const response = await ctx.apiProxy.sessions.prompt({
+        rpcId: RpcId('preset-bid-prompt'),
+        payload: {
+          sessionId: handle.agent.id,
+          mode: 'queue',
+          content: [{ type: 'text' as const, text: 'bypass the workflow' }],
+        },
+      })
+      expect(response.result).toMatchObject({
+        ok: false,
+        error: {
+          code: 'prompt-admission-rejected',
+          details: { reason: 'bid.upload_required' },
+        },
+      })
+      expect(handle.agent.session.events.some(event => event.type === 'user/message')).toBe(false)
+    } finally {
+      await handle.dispose()
+    }
   })
 
   it('composes the full agent from `standard`', async () => {

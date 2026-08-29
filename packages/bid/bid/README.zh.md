@@ -31,6 +31,8 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions` 与 composer 能力由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
+Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
+
 本包只定义控制面 Runtime 及其执行、校验 Port，不提供真实业务 Agent Executor、Tender Analysis Prompt 或具体 Stage Validator。
 
 ## Model Experience

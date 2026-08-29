@@ -391,7 +391,7 @@ Orchestrator 不通过“Agent 说完成了”判断状态。
 
 ## 10.1 Web Client
 
-**状态：⬜ 未开发 Bid 接入**
+**状态：✅ Bid Session UI Shell 已接入**
 
 总体架构职责：
 
@@ -403,17 +403,17 @@ Orchestrator 不通过“Agent 说完成了”判断状态。
 产物下载
 ```
 
-当前 Bid 专用 Web 接入尚未完成。
+当前 Web 在原 Session 页面内按 Host 解析出的 `agentPreset=bid` 显示 Bid Stage Panel，并只消费 Host 的 `bid.runtime` Projection。初始面板显示文件接入阶段、上传提示和本地文件选择按钮；选择文件不会发送 Prompt、切换 Stage 或声明解析完成。真实上传路由、进度数据、目录交互、正文查看和产物下载仍属于后续阶段。
 
 ---
 
 ## 10.2 Bid Orchestrator
 
-**状态：⬜ 未实现**
+**状态：✅ Control Plane Core 已实现**
 
-当前总体架构已有设计，但没有对应 Bid Orchestrator 生产实现。
+当前 `@deepseek-ai/dsh-bid` 已实现固定 Stage Policy、StageTask 构造、事件驱动状态归约、Artifact Validator Port 和合法阶段推进。Host Runtime 在真实 Web composition 中注册该控制面能力。
 
-需要负责：
+后续 Stage Executor 需要负责：
 
 ```text
 读取当前阶段
@@ -422,18 +422,17 @@ Orchestrator 不通过“Agent 说完成了”判断状态。
 调用执行者
 等待结果
 调用 Validator
-记录状态
-阶段切换
-等待用户确认
+提交开始、失败和完成事件
+提供真实 Artifact Validator
 ```
 
 ---
 
 ## 10.3 Stage Policy
 
-**状态：⬜ 未实现**
+**状态：✅ 已实现**
 
-需要定义八个固定阶段的：
+八个固定阶段已定义：
 
 ```text
 executor
@@ -448,35 +447,23 @@ next stage
 
 ## 10.4 Stage Validator
 
-**状态：⬜ 未实现**
+**状态：🟡 Validator Port 已实现**
 
-目前还没有完整的 Bid Stage Validator 系统。
-
-应按 Artifact 校验。
+Orchestrator 已要求完成阶段前通过 Artifact Validator，并在校验失败时记录失败事件。各阶段的真实 Artifact Validator 尚未实现。
 
 ---
 
 ## 10.5 Bid Agent Preset
 
-**状态：⬜ 未实现**
+**状态：✅ 已实现并接入系统 Preset Root**
 
-DSH Preset 基础设施已有。
-
-需要补：
-
-```text
-Bid Agent 静态规则
-```
-
-只放长期稳定的标书规则。
-
-不能把每个阶段具体任务全部塞进 Preset。
+`apps/cli/config/agent-presets/bid/agent.cordis.yml` 只承载长期稳定的标书规则，动态阶段任务由 Orchestrator 和 Stage Policy 生成。Host 解析出的 Preset Identity 写入 Session，并作为 Prompt Guard 与 Web 显示判断的依据。
 
 ---
 
 ## 10.6 当前阶段任务单
 
-**状态：⬜ 未实现**
+**状态：✅ 确定性构造已实现**
 
 StageTask 应由：
 
@@ -484,7 +471,7 @@ StageTask 应由：
 Orchestrator + Stage Policy
 ```
 
-动态生成。
+动态生成。当前已提供纯构造函数；把任务单注入真实 Stage Executor 属于后续阶段。
 
 ---
 
@@ -608,11 +595,9 @@ read_chunk
 
 ## 10.13 Session Event Log
 
-**状态：🟡 DSH 已有基础，Bid 业务事件未实现**
+**状态：✅ Bid 业务事件与 Replay 已实现**
 
-无需重新开发 Event Log。
-
-需要补 Bid Stage 事件。
+Bid 使用共享 Session Event Log 记录 Stage started/completed/failed 和用户确认事件，`bid.runtime` 由这些事件重新归约。非法或乱序事件保持状态不变，不会触发跳阶段。
 
 ---
 

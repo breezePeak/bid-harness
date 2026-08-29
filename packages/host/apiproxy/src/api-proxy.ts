@@ -2374,7 +2374,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
         const agent = resolved.agent
-        const rejected = await ctx.serial('session/prompt-admission', {
+        const rejected = await ctx.root.serial('session/prompt-admission', {
           session: agent.session,
           mode,
           content,
