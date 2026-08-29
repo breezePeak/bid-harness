@@ -342,7 +342,8 @@ export interface SessionsApi {
   Promise<RpcResponse<{ sessionId: SessionId }>>
 
   /**
-   * Sends text and temporary image bytes to an ordinary session Agent after durable host admission.
+   * Sends text and temporary image bytes to an ordinary session Agent after Host prompt admission.
+   * A domain policy may reject with `prompt-admission-rejected` before message creation or Agent dispatch.
    * Browser callers attach their current IANA zone;
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains
    * valid for non-browser callers. Session-backed subagents reject with `agent-busy` and use

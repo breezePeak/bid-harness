@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
+import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidStage, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -69,9 +70,11 @@ function composerReason(projection: BidClientProjection, t: TranslateBid): strin
   switch (projection.composer.reason) {
     case 'bid.upload_required': return t('reason.bid.upload_required')
     case 'bid.stage_running': return t('reason.bid.stage_running')
-    case 'bid.confirmation_required': return t('reason.bid.confirmation_required')
-    case undefined: return t('composer.disabled')
-    default: return projection.composer.reason
+    case 'bid.stage_pending': return t('reason.bid.stage_pending')
+    case 'bid.outline_confirmation_required': return t('reason.bid.outline_confirmation_required')
+    case 'bid.stage_failed': return t('reason.bid.stage_failed')
+    case 'bid.completed': return t('reason.bid.completed')
+    default: return t('composer.disabled')
   }
 }
 
@@ -91,13 +94,16 @@ function fileRules(projection: BidClientProjection, t: TranslateBid): string | u
  * @returns the Bid panel, or null when the `bid` projection is absent.
  */
 export function BidStagePanel({
+  sessionId,
   useProjection,
+  useSessions,
   setComposerBlock,
   retryStage,
   confirmOutline,
   t,
 }: BidStagePanelProps) {
-  const projection = useProjection('bid')
+  const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [files, setFiles] = useState<readonly File[]>([])
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -113,14 +119,14 @@ export function BidStagePanel({
     () => projection === undefined ? undefined : composerReason(projection, t),
     [projection, t],
   )
-  const hasProjection = projection !== undefined
+  const hasProjection = isBidSession && projection !== undefined
   useEffect(() => {
     if (!hasProjection) return
     setComposerBlock(blockedReason)
     return () => { setComposerBlock(undefined) }
   }, [blockedReason, hasProjection, setComposerBlock])
 
-  if (projection === undefined) return null
+  if (!isBidSession || projection === undefined) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const canRetry = projection.allowedActions.includes('retry_stage')

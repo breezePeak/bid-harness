@@ -16,8 +16,8 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'pending' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'pending' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
+      allowedActions: [],
+      composer: { enabled: false, reason: 'bid.stage_pending' },
     })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'running' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'running' },
@@ -26,12 +26,12 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'outline_confirmation', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
+      allowedActions: [],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
     expect(getBidClientProjection({ stage: 'book_review', status: 'failed' })).toEqual({
       runtime: { stage: 'book_review', status: 'failed' },
-      allowedActions: ['retry_stage'],
+      allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
   })

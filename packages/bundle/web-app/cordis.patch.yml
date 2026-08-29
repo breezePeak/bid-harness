@@ -82,6 +82,10 @@
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
 
+    # Host authority for Bid projection and prompt admission.
+    - id: bid-host-runtime
+      name: '@deepseek-ai/dsh-bid'
+
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
 

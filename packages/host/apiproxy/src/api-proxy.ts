@@ -110,6 +110,7 @@ import {
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+import type {} from './prompt-admission.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -2373,6 +2374,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
         const agent = resolved.agent
+        const rejected = await ctx.serial('session/prompt-admission', {
+          session: agent.session,
+          mode,
+          content,
+        })
+        if (rejected !== undefined) {
+          return err(request, {
+            code: 'prompt-admission-rejected',
+            message: rejected.message,
+            details: { reason: rejected.reason },
+          })
+        }
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',

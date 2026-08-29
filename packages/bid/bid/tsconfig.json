@@ -8,6 +8,8 @@
     { "path": "../../util/atomic-write" },
     { "path": "../../core/session" },
     { "path": "../../session/session-projection" },
+    { "path": "../../preset/agent-presets" },
+    { "path": "../../host/apiproxy" },
     { "path": "../../runtime-diagnostics/invariants" }
   ]
 }

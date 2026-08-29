@@ -180,18 +180,30 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
     case 'bid.stage.started':
-      return { stage: event.data.stage, status: 'running' }
+      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed')
+        ? { stage: state.stage, status: 'running' }
+        : state
     case 'bid.stage.failed':
-      return { stage: event.data.stage, status: 'failed' }
+      return event.data.stage === state.stage
+        && (state.status === 'running'
+          || (state.stage === 'outline_confirmation' && state.status === 'waiting_user'))
+        ? { stage: state.stage, status: 'failed' }
+        : state
     case 'bid.user_confirmation.required':
-      return { stage: event.data.stage, status: 'waiting_user' }
+      return event.data.stage === 'outline_confirmation'
+        && state.stage === 'outline_confirmation'
+        && (state.status === 'pending' || state.status === 'failed')
+        ? { stage: state.stage, status: 'waiting_user' }
+        : state
     case 'bid.stage.completed': {
+      if (event.data.stage !== state.stage) return state
       const nextStage = getBidStagePolicy(event.data.stage).nextStage
       return nextStage === null
         ? { stage: event.data.stage, status: 'completed' }
         : { stage: nextStage, status: 'pending' }
     }
     case 'bid.user_confirmation.received':
+      return state
     default:
       return state
   }
@@ -203,12 +215,10 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
  * @returns a detached whole-value client projection.
  */
 export function getBidClientProjection(runtime: BidRuntimeState): BidClientProjection {
-  if (runtime.status === 'failed') {
-    return {
-      runtime: { ...runtime },
-      allowedActions: ['retry_stage'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
-    }
+  if (runtime.status === 'failed') return {
+    runtime: { ...runtime },
+    allowedActions: [],
+    composer: { enabled: false, reason: 'bid.stage_failed' },
   }
   if (runtime.status === 'running') {
     return {
@@ -234,15 +244,8 @@ export function getBidClientProjection(runtime: BidRuntimeState): BidClientProje
   if (runtime.stage === 'outline_confirmation' && runtime.status === 'waiting_user') {
     return {
       runtime: { ...runtime },
-      allowedActions: ['confirm_outline'],
+      allowedActions: [],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
-    }
-  }
-  if (runtime.status === 'pending' && getBidStagePolicy(runtime.stage).executor === 'agent') {
-    return {
-      runtime: { ...runtime },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
     }
   }
   return {

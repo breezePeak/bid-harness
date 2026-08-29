@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { BidClientProjection, BidRuntimeState } from './control-plane-contract.ts'
-import { BID_CLIENT_ACTIONS, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
+import type { BidRuntimeState } from './control-plane-contract.ts'
+import { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
   getBidClientProjection,
@@ -14,10 +14,6 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'bid.runtime': BidRuntimeState
   }
 
-  interface SessionProjectionMap {
-    /** Host-authorized Bid state and client capabilities. */
-    'bid.runtime': BidClientProjection
-  }
 }
 
 const runtimeSchema = z.object({
@@ -51,7 +47,7 @@ const clientProjectionSchema = z.object({
  */
 export function registerBidRuntimeProjection(registry: SessionProjectionRegistry): () => void {
   return registry.register({
-    key: 'bid.runtime',
+    key: BID_RUNTIME_PROJECTION_KEY,
     stateSchema: runtimeSchema,
     init: () => BID_INITIAL_RUNTIME_STATE,
     apply: reduceBidRuntimeState,

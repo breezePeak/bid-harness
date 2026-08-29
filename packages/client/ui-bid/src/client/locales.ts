@@ -30,7 +30,10 @@ export const zh = {
   'composer.disabled': '当前阶段暂不可输入',
   'reason.bid.upload_required': '请先上传本次招标文件',
   'reason.bid.stage_running': '当前阶段正在处理，请稍候',
-  'reason.bid.confirmation_required': '请先完成目录确认',
+  'reason.bid.stage_pending': '当前阶段尚未接入执行通道',
+  'reason.bid.outline_confirmation_required': '请先完成目录确认',
+  'reason.bid.stage_failed': '当前阶段处理失败',
+  'reason.bid.completed': '技术标流程已完成',
   'error.action': '操作失败：{message}',
 } satisfies Record<string, string>
 
@@ -67,6 +70,9 @@ export const en = {
   'composer.disabled': 'Messaging is unavailable during this stage',
   'reason.bid.upload_required': 'Upload the tender documents first',
   'reason.bid.stage_running': 'This stage is processing; please wait',
-  'reason.bid.confirmation_required': 'Confirm the outline before continuing',
+  'reason.bid.stage_pending': 'This stage is not connected to an execution route yet',
+  'reason.bid.outline_confirmation_required': 'Confirm the outline before continuing',
+  'reason.bid.stage_failed': 'This stage failed',
+  'reason.bid.completed': 'The technical bid workflow is complete',
   'error.action': 'Action failed: {message}',
 } satisfies Record<BidKey, string>

@@ -31,6 +31,9 @@ export interface BidRuntimeState {
   status: StageRunStatus
 }
 
+/** The sole client-visible projection key for Bid runtime state. */
+export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
+
 /** User actions the Bid Host may admit for the current projection. */
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
@@ -41,25 +44,6 @@ export const BID_CLIENT_ACTIONS = [
 
 /** One user action admitted by the Bid Host. */
 export type BidClientAction = typeof BID_CLIENT_ACTIONS[number]
-
-/** Host-owned composer capability for a Bid Session. */
-export interface BidComposerCapability {
-  enabled: boolean
-  /** Stable reason code rendered by the client while input is disabled. */
-  reason?: string
-}
-
-/** Browser-safe, Host-computed state consumed by the Bid UI. */
-export interface BidClientProjection {
-  runtime: BidRuntimeState
-  allowedActions: readonly BidClientAction[]
-  composer: BidComposerCapability
-  /** File-name suffixes accepted by the Host, including the leading dot. */
-  allowedExtensions?: readonly string[]
-  maxFiles?: number
-  maxFileBytes?: number
-  maxTotalBytes?: number
-}
 
 /** The kinds of executor that may own a bid stage. */
 export type BidStageExecutor = 'program' | 'agent' | 'user'
@@ -105,17 +89,6 @@ export type StageValidationResult =
   | { ok: true }
   | { ok: false; issues: StageValidationIssue[] }
 
-/** Bid actions that a host may expose to a client for the current runtime state. */
-export const BID_CLIENT_ACTIONS = [
-  'upload_files',
-  'retry_stage',
-  'confirm_outline',
-  'send_message',
-] as const
-
-/** One host-authorized action that a Bid client may present. */
-export type BidClientAction = typeof BID_CLIENT_ACTIONS[number]
-
 /** Stable host reason codes for a disabled Bid composer. */
 export type BidComposerReason =
   | 'bid.upload_required'
@@ -125,16 +98,31 @@ export type BidComposerReason =
   | 'bid.stage_failed'
   | 'bid.completed'
 
+/** Host-owned composer capability for a Bid Session. */
+export type BidComposerCapability =
+  | { enabled: true }
+  | { enabled: false; reason: BidComposerReason }
+
 /** Host-produced client view of Bid runtime state and currently admitted actions. */
 export interface BidClientProjection {
   runtime: BidRuntimeState
-  allowedActions: BidClientAction[]
-  composer:
-    | { enabled: true }
-    | { enabled: false; reason: BidComposerReason }
+  allowedActions: readonly BidClientAction[]
+  composer: BidComposerCapability
+  /** File-name suffixes accepted by the Host, including the leading dot. */
+  allowedExtensions?: readonly string[]
+  maxFiles?: number
+  maxFileBytes?: number
+  maxTotalBytes?: number
 }
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =
   | { admitted: true; stage: BidStage; input: string }
   | { admitted: false; reason: BidComposerReason | 'bid.prompt_empty' }
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** Host-authorized Bid state and client capabilities. */
+    [BID_RUNTIME_PROJECTION_KEY]: BidClientProjection
+  }
+}

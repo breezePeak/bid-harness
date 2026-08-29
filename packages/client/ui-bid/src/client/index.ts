@@ -4,7 +4,6 @@
  * existing per-session composer block registry. It folds no Bid events and
  * owns no Bid stage, status, or permission state.
  */
-import type { BidClientProjection } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -14,13 +13,6 @@ import { BidStagePanel } from './BidStagePanel.tsx'
 import { en, zh, type BidKey } from './locales.ts'
 
 export type { BidKey } from './locales.ts'
-
-declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionMap {
-    /** Host-computed Bid Session state; absence means this is not a Bid Session. */
-    bid: BidClientProjection
-  }
-}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {

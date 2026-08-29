@@ -1,4 +1,4 @@
-# The `bid` agent preset: the full coding agent used by Bid Sessions.
+# The `bid` agent preset: the document-production agent used by Bid Sessions.
 # Bid workflow state, admission, and projection remain Host-owned; this
 # composition supplies the agent capabilities selected by the session roster.
 #
@@ -27,7 +27,7 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     text: >-
-      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+      You are a technical-bid drafting specialist powered by the {{model}} model. Work only on the Host-assigned Bid stage in {{cwd}}. Treat tender requirements and workspace evidence as authoritative, never invent evidence, write only the required stage artifacts, and leave workflow state transitions to the Host Runtime.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

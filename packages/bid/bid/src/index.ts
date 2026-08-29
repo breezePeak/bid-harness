@@ -9,6 +9,9 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
+import type { Context } from '@deepseek-ai/cordis'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
@@ -16,12 +19,14 @@ import { gfm } from 'micromark-extension-gfm'
 import * as XLSX from 'xlsx'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
+import { registerBidRuntimeProjection } from './projection.ts'
+import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 
 export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
-export { BID_CLIENT_ACTIONS, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
+export { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 export type {
   BidClientAction,
   BidClientProjection,
@@ -56,6 +61,24 @@ export type {
   BidStageValidatorPort,
 } from './orchestrator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
+
+export const name = 'bid-host-runtime'
+export const inject = ['sessionProjections']
+
+/** Register the Bid projection and reject generic prompts for Bid sessions. */
+export function apply(ctx: Context): void {
+  registerBidRuntimeProjection(ctx.sessionProjections)
+  ctx.on('session/prompt-admission', ({ session }) => {
+    if (resolveSessionPreset(session) !== 'bid') return
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    const projection = getBidClientProjection(runtime)
+    const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
+    return {
+      reason,
+      message: `Bid session prompt rejected by Host admission: ${reason}`,
+    }
+  })
+}
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'

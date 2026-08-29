@@ -99,21 +99,29 @@ describe('Bid runtime state and policies', () => {
     expect(decision).toBe(state)
   })
 
-  it('folds completion through the fixed policy and completes the final stage', () => {
+  it('folds valid transitions and ignores events that jump to another stage', () => {
     const next = reduceBidRuntimeState(BID_INITIAL_RUNTIME_STATE, {
       type: 'bid.stage.completed',
       seq: 0,
       time: 0,
       data: { stage: 'file_intake', status: 'completed', artifacts: [] },
     })
-    const final = reduceBidRuntimeState(next, {
+    const illegal = reduceBidRuntimeState(next, {
       type: 'bid.stage.completed',
       seq: 1,
       time: 0,
       data: { stage: 'docx_export', status: 'completed', artifacts: [] },
     })
     expect(next).toEqual({ stage: 'tender_analysis', status: 'pending' })
-    expect(final).toEqual({ stage: 'docx_export', status: 'completed' })
+    expect(illegal).toBe(next)
+
+    const running = reduceBidRuntimeState(next, {
+      type: 'bid.stage.started',
+      seq: 2,
+      time: 0,
+      data: { stage: 'tender_analysis', status: 'running' },
+    })
+    expect(running).toEqual({ stage: 'tender_analysis', status: 'running' })
   })
 })
 
@@ -264,12 +272,11 @@ describe('BidOrchestrator', () => {
       status: 'completed',
       artifacts: [],
     })
-    expect(orchestrator.admitPrompt('  ')).toEqual({ admitted: false, reason: 'bid.prompt_empty' })
+    expect(orchestrator.admitPrompt('  ')).toEqual({ admitted: false, reason: 'bid.stage_pending' })
     expect(orchestrator.admitPrompt('Use the uploaded tender.')).toEqual({
-      admitted: true,
-      stage: 'tender_analysis',
-      input: 'Use the uploaded tender.',
+      admitted: false,
+      reason: 'bid.stage_pending',
     })
-    expect(() => { orchestrator.admitAction('send_message') }).not.toThrow()
+    expect(() => { orchestrator.admitAction('send_message') }).toThrow(BidOrchestratorError)
   })
 })

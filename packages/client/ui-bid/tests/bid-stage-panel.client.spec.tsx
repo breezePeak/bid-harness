@@ -33,8 +33,12 @@ function props(
 ): BidStagePanelProps {
   const useProjection = (_key: string, selector?: (item: BidClientProjection | undefined) => unknown) =>
     selector === undefined ? value : selector(value)
+  const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
+    selector({ byId: { session_bid: { agentPreset: 'bid' } } })
   return {
+    sessionId: 'session_bid',
     useProjection,
+    useSessions,
     setComposerBlock: vi.fn(),
     t,
     ...patch,
@@ -57,6 +61,13 @@ describe('BidStagePanel', () => {
     }), { setComposerBlock })} />)
     expect(screen.getByText('正在分析招标文件')).toBeTruthy()
     expect(screen.getAllByText('正在处理…').length).toBeGreaterThan(0)
+  })
+
+  it('stays absent for a non-Bid session even when a projection is available', () => {
+    const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
+      selector({ byId: { session_bid: { agentPreset: 'standard' } } })
+    render(<BidStagePanel {...props(projection(), { useSessions } as Partial<BidStagePanelProps>)} />)
+    expect(screen.queryByText('技术标生成')).toBeNull()
   })
 
   it('shows file selection only when upload_files is admitted', () => {
