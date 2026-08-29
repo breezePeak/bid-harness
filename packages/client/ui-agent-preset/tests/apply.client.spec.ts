@@ -151,6 +151,7 @@ function workspacesDouble() {
   return {
     starts,
     startSession: (workspaceId?: unknown) => { starts.push(workspaceId ?? null) },
+    startFreshSession: async () => { throw new Error('fresh session was not configured') },
   }
 }
 
@@ -454,6 +455,65 @@ describe('ui-agent-preset apply', () => {
     // A session created before the deployment composed presets records none;
     // reading that as "already runs it" would drop the pick on the floor.
     expect(calls).toContain('select:minimal')
+  })
+
+  it('creates and selects a fresh Session for a started Session pick', async () => {
+    const { ctx, slots, calls } = await bench()
+    declareRoot(slots)
+    declareConversation(slots)
+    ctx.provide('conversation', {} as never)
+    const state = {
+      current: 'standard-session',
+      byId: {
+        'standard-session': { id: 'standard-session', blank: false, agentPreset: 'standard' },
+      },
+    }
+    const sessions = sessionsDouble(state)
+    const workspaces = workspacesDouble()
+    workspaces.startFreshSession = async () => {
+      state.current = 'bid-session'
+      state.byId['bid-session'] = { id: 'bid-session', blank: true, agentPreset: 'standard' }
+      sessions.notify()
+    }
+    ctx.provide('sessions', sessions as never)
+    ctx.provide('workspaces', workspaces as never)
+    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
+      .inject as unknown as () => AgentPresetSeatInjected)()
+
+    await chip.load()
+    await chip.select('bid')
+
+    expect(workspaces.starts).toEqual([])
+    expect(calls).toContain('select:bid')
+    expect(state.byId['standard-session'].agentPreset).toBe('standard')
+    expect(chip.hooks.agentPresetSeat.getSnapshot().current).toBe('bid')
+  })
+
+  it('restores the started Session preset when fresh Session creation fails', async () => {
+    const { ctx, slots } = await bench()
+    declareRoot(slots)
+    declareConversation(slots)
+    ctx.provide('conversation', {} as never)
+    const state = {
+      current: 'standard-session',
+      byId: {
+        'standard-session': { id: 'standard-session', blank: false, agentPreset: 'standard' },
+      },
+    }
+    ctx.provide('sessions', sessionsDouble(state) as never)
+    ctx.provide('workspaces', workspacesDouble() as never)
+    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
+      .inject as unknown as () => AgentPresetSeatInjected)()
+
+    await chip.load()
+    await chip.select('bid')
+
+    const snapshot = chip.hooks.agentPresetSeat.getSnapshot()
+    expect(snapshot.current).toBe('standard')
+    expect(snapshot.error).toBe('fresh session was not configured')
+    expect(snapshot.busy).toBe(false)
   })
 
   it('forgets the stage once it has been spent', async () => {

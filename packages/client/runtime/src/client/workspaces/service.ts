@@ -192,6 +192,25 @@ export class WorkspaceRuntime implements IWorkspaces {
   }
 
   /**
+   * Create a new blank Session in the Workspace of the current Session.
+   * This bypasses blank-session reuse for flows that must give the new Session
+   * a different initial composition.
+   * @returns completion after the new Session is current.
+   * @throws when the current Session has no Workspace or Host creation fails.
+   */
+  async startFreshSession(): Promise<void> {
+    const current = this.sessions.list.getSnapshot().current
+    const workspace = current === undefined
+      ? undefined
+      : this.list.getSnapshot().items.find(item => item.sessionIds.includes(current))
+    if (workspace === undefined) {
+      throw new Error('workspaces.startFreshSession: current session has no workspace')
+    }
+    const sessionId = await this.sessions.create({ workspaceId: workspace.workspaceId })
+    this.sessions.open(sessionId)
+  }
+
+  /**
    * Register an existing path as a Workspace.
    * @param input - the Host create payload.
    * @returns the created or idempotently resolved Workspace.

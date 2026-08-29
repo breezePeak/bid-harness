@@ -109,6 +109,7 @@ async function readRequiredManifest(
 /** Whether the durable manifest entry is the exact record returned for this batch. */
 function sameRecord(record: ManifestFile, imported: ImportedFile): boolean {
   return record.id === imported.id
+    && record.role === imported.role
     && record.originalName === imported.originalName
     && record.inputPath === imported.inputPath
     && record.sha256 === imported.sha256

@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidUploadFile } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocumentRole, BidUploadFile } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -36,7 +36,7 @@ export interface BidStagePanelInjected {
    * @param files - complete file batch selected for one intake attempt.
    * @returns after Host admission, import, validation, and persistence settle.
    */
-  uploadFiles: (files: readonly File[]) => Promise<void>
+  uploadFiles: (files: readonly BidSelectedFile[]) => Promise<void>
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
@@ -57,9 +57,13 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** Encode one immutable browser File for the JSON-safe Bid Remote request. */
-async function encodeFile(file: File): Promise<BidUploadFile> {
+/** Browser material paired with its selected business role. */
+export interface BidSelectedFile { readonly file: File; readonly role: BidDocumentRole }
+
+async function encodeFile({ file, role }: BidSelectedFile): Promise<BidUploadFile> {
   return {
     name: file.name,
+    role,
     ...(file.type === '' ? {} : { mediaType: file.type }),
     size: file.size,
     data: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
@@ -67,7 +71,7 @@ async function encodeFile(file: File): Promise<BidUploadFile> {
 }
 
 /** Encode the selected batch serially so browser memory never holds every source ArrayBuffer at once. */
-async function encodeFiles(files: readonly File[]): Promise<BidUploadFile[]> {
+async function encodeFiles(files: readonly BidSelectedFile[]): Promise<BidUploadFile[]> {
   const encoded: BidUploadFile[] = []
   for (const file of files) encoded.push(await encodeFile(file))
   return encoded

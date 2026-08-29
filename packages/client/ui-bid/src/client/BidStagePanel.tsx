@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidStage, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidStage, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -14,7 +14,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { BidStagePanelInjected } from './index.ts'
+import type { BidSelectedFile, BidStagePanelInjected } from './index.ts'
 import type { BidKey } from './locales.ts'
 import css from './BidStagePanel.module.css'
 
@@ -115,7 +115,8 @@ export function BidStagePanel({
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
-  const [selectedFiles, setSelectedFiles] = useState<readonly File[]>([])
+  const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
+  const [selectedRole, setSelectedRole] = useState<BidDocumentRole>('tender')
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -164,7 +165,7 @@ export function BidStagePanel({
   }
 
   const selected = (event: ChangeEvent<HTMLInputElement>): void => {
-    setSelectedFiles(Array.from(event.currentTarget.files ?? []))
+    setSelectedFiles(current => [...current, ...Array.from(event.currentTarget.files ?? []).map(file => ({ file, role: selectedRole }))])
     setRequestError(null)
     event.currentTarget.value = ''
   }
@@ -196,10 +197,11 @@ export function BidStagePanel({
 
         {selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
-            {selectedFiles.map((file, index) => (
-              <li key={`${file.name}:${file.size}:${file.lastModified}`} className={css.fileRow}>
+            {selectedFiles.map(({ file, role }, index) => (
+              <li key={`${file.name}:${file.size}:${file.lastModified}:${index}`} className={css.fileRow}>
                 <IconPaperclipOutline16 className={css.fileIcon} />
                 <span className={css.fileName} title={file.name}>{file.name}</span>
+                <span>{t(`file.role.${role}`)}</span>
                 <button
                   type="button"
                   className={css.removeFile}
@@ -228,6 +230,18 @@ export function BidStagePanel({
                 accept={accept}
                 onChange={selected}
               />
+              <label>
+                {t('file.role.label')}
+                <select
+                  aria-label={t('file.role.label')}
+                  disabled={requestPending !== null}
+                  value={selectedRole}
+                  onChange={(event) => { setSelectedRole(event.currentTarget.value as BidDocumentRole) }}
+                >
+                  <option value="tender">{t('file.role.tender')}</option>
+                  <option value="reference">{t('file.role.reference')}</option>
+                </select>
+              </label>
               <Button
                 size="sm"
                 variant="outline"

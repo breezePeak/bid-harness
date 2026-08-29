@@ -32,10 +32,11 @@ const INTAKE_FILE_NAME = 'tender-notice.md'
 interface ListedSession {
   readonly sessionId: string
   readonly agentPreset?: string
+  readonly blank: boolean
 }
 
-/** Read the sole Session in this scenario from the Host list projection. */
-async function listedSession(baseUrl: string): Promise<ListedSession | undefined> {
+/** Read the Host Session list projection. */
+async function listedSessions(baseUrl: string): Promise<readonly ListedSession[]> {
   const response = await fetch(`${baseUrl}/api/session.list`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -46,7 +47,7 @@ async function listedSession(baseUrl: string): Promise<ListedSession | undefined
   const body = await response.json() as {
     result: { value?: { items: ListedSession[] } }
   }
-  return body.result.value?.items[0]
+  return body.result.value?.items ?? []
 }
 
 function bidStageLifecycle(events: readonly SessionEvent[]): Array<{
@@ -95,7 +96,7 @@ describe('web e2e: Bid file intake', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session'))
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
 
-    const standard = await listedSession(scaffold.baseUrl)
+    const standard = (await listedSessions(scaffold.baseUrl))[0]
     expect(standard?.agentPreset).toBe('standard')
     expect(await page.getByRole('region', { name: '技术标生成' }).count()).toBe(0)
 
@@ -103,17 +104,17 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('button', { name: '标准模式' }).click()
     await page.getByRole('menuitem', { name: /标书模式/ }).click()
 
-    await expect.poll(async () => (await listedSession(scaffold.baseUrl))?.agentPreset, {
+    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))[0]?.agentPreset, {
       timeout: 15_000,
     }).toBe('bid')
-    const bid = await listedSession(scaffold.baseUrl)
+    const bid = (await listedSessions(scaffold.baseUrl))[0]
     expect(bid?.sessionId).toBe(standard?.sessionId)
     expect(page.url()).toBe(urlBeforeSelection)
 
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
     await panel.getByText('文件接入', { exact: true }).waitFor()
-    await page.getByText('请上传本次招标文件', { exact: true }).waitFor()
+    await page.getByText('请添加本项目资料', { exact: true }).waitFor()
     await page.getByText('等待处理', { exact: true }).first().waitFor()
 
     let promptPosts = 0
@@ -126,13 +127,13 @@ describe('web e2e: Bid file intake', () => {
     })
 
     const chooserReady = page.waitForEvent('filechooser')
-    await page.getByRole('button', { name: '选择招标文件' }).click()
+    await page.getByRole('button', { name: '添加项目资料' }).click()
     const chooser = await chooserReady
     await chooser.setFiles(INTAKE_FIXTURE)
 
     await page.getByText(INTAKE_FILE_NAME, { exact: true }).waitFor()
     await page.getByRole('button', { name: '上传并解析' }).waitFor()
-    expect(await page.getByText('请上传本次招标文件', { exact: true }).count()).toBe(1)
+    expect(await page.getByText('请添加本项目资料', { exact: true }).count()).toBe(1)
 
     const uploadResponse = page.waitForResponse(response => (
       response.request().method() === 'POST'
@@ -174,9 +175,10 @@ describe('web e2e: Bid file intake', () => {
         chunksPath: string | null
         chunkIndexPath: string | null
         parseStatus: string
+        role: string
       }>
     }
-    expect(manifest.version).toBe(3)
+    expect(manifest.version).toBe(4)
     expect(manifest.files).toHaveLength(1)
     const imported = manifest.files[0]
     const documentPath = imported?.documentPath
@@ -193,6 +195,7 @@ describe('web e2e: Bid file intake', () => {
     }
     expect(imported).toMatchObject({
       originalName: INTAKE_FILE_NAME,
+      role: 'tender',
       inputPath: `input/${INTAKE_FILE_NAME}`,
       parseStatus: 'success',
     })
@@ -226,12 +229,42 @@ describe('web e2e: Bid file intake', () => {
     await page.getByText('文件接入完成，等待招标分析', { exact: true }).waitFor({ timeout: 15_000 })
     await page.getByRole('region', { name: '技术标生成' })
       .getByText('招标分析', { exact: true }).waitFor({ timeout: 15_000 })
-    expect((await listedSession(scaffold.baseUrl))?.sessionId).toBe(sessionId)
+    expect((await listedSessions(scaffold.baseUrl))[0]?.sessionId).toBe(sessionId)
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
 
     expect(consoleErrors).toEqual([])
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
+  }, 120_000)
+
+  it('moves a started standard Session to a new Bid Session in the same Workspace', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-started-session'))
+    await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
+    await page.getByRole('button', { name: '标准模式' }).waitFor({ timeout: 15_000 })
+
+    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
+      .find(session => session.agentPreset === 'standard' && session.blank), { timeout: 15_000 }).toBeDefined()
+    const standardSession = (await listedSessions(scaffold.baseUrl))
+      .find(session => session.agentPreset === 'standard' && session.blank)
+    if (standardSession === undefined) throw new Error('fresh standard Session is unavailable')
+    const agent = scaffold.ctx.agents.get(SessionId(standardSession.sessionId))
+    if (agent === undefined) throw new Error(`standard Session ${standardSession.sessionId} has no live Agent`)
+    agent.session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await scaffold.ctx.sessions.flush(agent.session)
+
+    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
+      .find(session => session.sessionId === standardSession.sessionId)?.blank, { timeout: 15_000 }).toBe(false)
+    await page.getByRole('button', { name: '标准模式' }).click()
+    await page.getByRole('menuitem', { name: /标书模式/ }).click()
+
+    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
+      .find(session => session.agentPreset === 'bid' && session.blank), { timeout: 15_000 }).toBeDefined()
+    const sessions = await listedSessions(scaffold.baseUrl)
+    const freshBid = sessions.find(session => session.agentPreset === 'bid' && session.blank)
+    expect(freshBid?.sessionId).not.toBe(standardSession.sessionId)
+    expect(sessions.find(session => session.sessionId === standardSession.sessionId)?.agentPreset).toBe('standard')
+    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
   }, 120_000)
 })

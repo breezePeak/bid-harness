@@ -16,6 +16,7 @@ export type {
   BidClientProjection,
   BidComposerCapability,
   BidComposerReason,
+  BidDocumentRole,
   BidFileIntakeErrorCode,
   BidFileIntakeFailure,
   BidFileIntakeResult,

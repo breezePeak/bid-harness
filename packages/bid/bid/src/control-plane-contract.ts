@@ -120,10 +120,15 @@ export interface BidClientProjection {
 /** One browser-selected file encoded for the dedicated Bid Host action. */
 export interface BidUploadFile {
   readonly name: string
+  /** Business purpose of this project material. */
+  readonly role: BidDocumentRole
   readonly mediaType?: string
   readonly size: number
   readonly data: string
 }
+
+/** Business purpose assigned to one imported project material. */
+export type BidDocumentRole = 'tender' | 'reference'
 
 /** Stable business rejection codes returned by Bid file intake. */
 export type BidFileIntakeErrorCode =

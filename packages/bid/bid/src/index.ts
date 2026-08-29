@@ -86,7 +86,7 @@ export { registerBidRuntimeProjection } from './projection.ts'
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'
 
 /** Current durable Bid workspace manifest version. */
-export const BID_MANIFEST_VERSION = 3 as const
+export const BID_MANIFEST_VERSION = 4 as const
 
 /** SHA-256-derived identifier for an imported bid file. */
 export type BidFileId = string & { readonly __bidFileId: unique symbol }
@@ -200,6 +200,7 @@ function decodeUploadFiles(files: readonly BidUploadFile[], config: Config): Inc
     }
     return {
       name: file.name,
+      role: file.role,
       ...(file.mediaType === undefined ? {} : { type: file.mediaType }),
       bytes,
     }
@@ -329,6 +330,8 @@ export default BidHostRuntime
 /** Durable manifest entry for one imported file. */
 export interface ManifestFile {
   id: BidFileId
+  /** `tender` supplies S2 requirements; S3 may use both roles. */
+  role: import('./control-plane-contract.ts').BidDocumentRole
   originalName: string
   inputPath: string
   corpusPath: string | null
@@ -348,7 +351,7 @@ export interface ManifestFile {
 export interface BidManifest { version: typeof BID_MANIFEST_VERSION; files: ManifestFile[] }
 
 /** File bytes and browser-supplied metadata accepted by the importer. */
-export interface IncomingFile { name: string; type?: string; bytes: Uint8Array }
+export interface IncomingFile { name: string; role?: import('./control-plane-contract.ts').BidDocumentRole; type?: string; bytes: Uint8Array }
 
 /** Manifest entry plus absolute paths available to the importing process. */
 export interface ImportedFile extends ManifestFile {
@@ -363,6 +366,7 @@ export interface ImportedFile extends ManifestFile {
 const nullablePathSchema = zod.string().min(1).nullable()
 const manifestFileSchema = zod.object({
   id: zod.string().min(1),
+  role: zod.enum(['tender', 'reference']),
   originalName: zod.string().min(1),
   inputPath: zod.string().min(1),
   corpusPath: nullablePathSchema,
@@ -566,7 +570,7 @@ export class BidWorkspace {
       const input = within(this.sessionRoot, inputPath)
       await atomicBytes(this.root, input, file.bytes)
       const hash = createHash('sha256').update(file.bytes).digest('hex')
-      const record: ManifestFile = { id: hash as BidFileId, originalName, inputPath, corpusPath: null,
+      const record: ManifestFile = { id: hash as BidFileId, role: file.role ?? 'tender', originalName, inputPath, corpusPath: null,
         documentPath: null, structurePath: null, metadataPath: null, chunksPath: null, chunkIndexPath: null,
         mediaType: MEDIA_TYPES[extension] ?? file.type ?? 'application/octet-stream', size: file.bytes.byteLength, sha256: hash, parseStatus: 'pending', parseError: null }
       try {
@@ -656,7 +660,7 @@ export class BidWorkspace {
       const chunks = file.chunksPath === null ? '无' : this.relative(file.chunksPath)
       const structure = file.structurePath === null ? '无' : this.relative(file.structurePath)
       const status = file.parseStatus === 'success' ? '成功' : file.parseStatus === 'needs_ocr' ? '需要 OCR' : `失败：${file.parseError ?? '未知错误'}`
-      return `${index + 1}. ${file.originalName}\n   原始文件：${this.relative(file.inputPath)}\n   完整正文：${document}\n   搜索语料：${chunks}\n   文档结构：${structure}\n   解析状态：${status}`
+      return `${index + 1}. ${file.originalName}\n   资料类型：${file.role === 'tender' ? '招标资料' : '参考资料'}\n   原始文件：${this.relative(file.inputPath)}\n   完整正文：${document}\n   搜索语料：${chunks}\n   文档结构：${structure}\n   解析状态：${status}`
     }).join('\n\n')
     return `用户已上传以下项目文件：\n\n${files}\n\n用户要求：\n${request}`
   }

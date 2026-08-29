@@ -66,6 +66,8 @@ export class AgentPresetSeatController {
     private readonly api: Pick<IApiClient, 'agentPresets'>,
     /** The session the hero is about to hand over to, when there is one. */
     private readonly currentSession: () => SeatSessionSummary | undefined,
+    /** Create and open a fresh Session when a started Session cannot switch. */
+    private readonly startFreshSession: () => Promise<void>,
     /**
      * Publish an applied switch into the session list, so the header label
      * moves with the composition instead of waiting for the next full list
@@ -93,13 +95,10 @@ export class AgentPresetSeatController {
       this.fallback = presets.find(preset => preset.isDefault)?.id ?? presets[0]?.id ?? ''
       this.set({
         options: presetOptions(presets),
-        // Staged pick first, then the composition the current session
-        // already carries, then the deployment default. The middle term is
-        // what keeps a late-landing load from regressing the display after
-        // an applied stage was consumed — the chip mounts (and loads) only
-        // once the flow's session is current, so the reply can arrive after
-        // apply() already composed it.
-        current: this.staged ?? this.currentSession()?.agentPreset ?? this.fallback,
+        // A current Session is authoritative. A staged pick appears only on
+        // the no-session screen, where it is genuinely the next Session's
+        // composition rather than an uncommitted claim about this one.
+        current: this.currentSession()?.agentPreset ?? this.staged ?? this.fallback,
         error: null,
       })
     } catch (error) {
@@ -132,7 +131,7 @@ export class AgentPresetSeatController {
    */
   stage(id: string, introduce = false): void {
     this.staged = id
-    this.set({ current: id, error: null, introduce })
+    this.set({ current: this.currentSession()?.agentPreset ?? id, error: null, introduce })
   }
 
   /** Acknowledge the introduction cue once the chip has played it. */
@@ -149,13 +148,27 @@ export class AgentPresetSeatController {
    * @returns once the switch settled, or immediately when there is nothing to do.
    */
   async apply(): Promise<void> {
+    if (this.store.getSnapshot().busy) return
     const staged = this.staged
     const session = this.currentSession()
     if (staged === undefined || session === undefined) return
-    // A started session's history was produced under its own composition; the
-    // host refuses the swap, so the stage is no longer meaningful.
-    if (!session.blank || session.agentPreset === staged) {
+    if (session.agentPreset === staged) {
       this.staged = undefined
+      this.set({ current: session.agentPreset, busy: false })
+      return
+    }
+    // A started Session keeps its composition. Create another Session in the
+    // same Workspace, then let the list observer apply this stage there.
+    if (!session.blank) {
+      this.set({ busy: true, error: null, current: session.agentPreset ?? this.fallback })
+      try {
+        await this.startFreshSession()
+        this.set({ busy: false })
+        await this.apply()
+      } catch (error) {
+        this.staged = undefined
+        this.set({ busy: false, error: messageOf(error), current: this.currentSession()?.agentPreset ?? this.fallback })
+      }
       return
     }
     this.set({ busy: true, error: null })
@@ -163,7 +176,7 @@ export class AgentPresetSeatController {
       const response = await this.api.agentPresets.select({ sessionId: session.id, agentPreset: staged })
       this.staged = undefined
       if (!response.result.ok) {
-        this.set({ busy: false, error: response.result.error.message, current: this.fallback })
+        this.set({ busy: false, error: response.result.error.message, current: session.agentPreset ?? this.fallback })
         return
       }
       // Consumed: the next new session opens on the deployment default again.
@@ -171,7 +184,7 @@ export class AgentPresetSeatController {
       this.onApplied?.(session.id, response.result.value.agentPreset)
     } catch (error) {
       this.staged = undefined
-      this.set({ busy: false, error: messageOf(error), current: this.fallback })
+      this.set({ busy: false, error: messageOf(error), current: session.agentPreset ?? this.fallback })
     }
   }
 }

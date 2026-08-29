@@ -111,7 +111,7 @@ export function apply(ctx: ClientContext): void {
           blank: summary.blank,
           ...summary.agentPreset === undefined ? {} : { agentPreset: summary.agentPreset },
         }
-    }, (sessionId, agentPreset) => {
+    }, () => scope.workspaces.startFreshSession(), (sessionId, agentPreset) => {
       scope.sessions.noteAgentPreset(sessionId as never, agentPreset)
     })
 
