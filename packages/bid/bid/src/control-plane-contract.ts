@@ -74,3 +74,37 @@ export interface StageValidationIssue {
 export type StageValidationResult =
   | { ok: true }
   | { ok: false; issues: StageValidationIssue[] }
+
+/** Bid actions that a host may expose to a client for the current runtime state. */
+export const BID_CLIENT_ACTIONS = [
+  'upload_files',
+  'retry_stage',
+  'confirm_outline',
+  'send_message',
+] as const
+
+/** One host-authorized action that a Bid client may present. */
+export type BidClientAction = typeof BID_CLIENT_ACTIONS[number]
+
+/** Stable host reason codes for a disabled Bid composer. */
+export type BidComposerReason =
+  | 'bid.upload_required'
+  | 'bid.stage_pending'
+  | 'bid.stage_running'
+  | 'bid.outline_confirmation_required'
+  | 'bid.stage_failed'
+  | 'bid.completed'
+
+/** Host-produced client view of Bid runtime state and currently admitted actions. */
+export interface BidClientProjection {
+  runtime: BidRuntimeState
+  allowedActions: BidClientAction[]
+  composer:
+    | { enabled: true }
+    | { enabled: false; reason: BidComposerReason }
+}
+
+/** Result of host admission for an ordinary Bid composer message. */
+export type BidPromptAdmission =
+  | { admitted: true; stage: BidStage; input: string }
+  | { admitted: false; reason: BidComposerReason | 'bid.prompt_empty' }
