@@ -1,0 +1,3 @@
+name: 标书模式
+description: 通过 Host Bid control plane 生成技术标，界面只消费会话投影与允许操作。
+order: 5

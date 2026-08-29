@@ -23,6 +23,9 @@ export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG } from './document-chunk.t
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
 export type {
+  BidClientAction,
+  BidClientProjection,
+  BidComposerCapability,
   BidRuntimeState,
   BidStage,
   BidStageExecutor,

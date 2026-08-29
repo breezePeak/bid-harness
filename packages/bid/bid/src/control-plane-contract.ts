@@ -31,6 +31,36 @@ export interface BidRuntimeState {
   status: StageRunStatus
 }
 
+/** User actions the Bid Host may admit for the current projection. */
+export const BID_CLIENT_ACTIONS = [
+  'upload_files',
+  'retry_stage',
+  'confirm_outline',
+  'send_message',
+] as const
+
+/** One user action admitted by the Bid Host. */
+export type BidClientAction = typeof BID_CLIENT_ACTIONS[number]
+
+/** Host-owned composer capability for a Bid Session. */
+export interface BidComposerCapability {
+  enabled: boolean
+  /** Stable reason code rendered by the client while input is disabled. */
+  reason?: string
+}
+
+/** Browser-safe, Host-computed state consumed by the Bid UI. */
+export interface BidClientProjection {
+  runtime: BidRuntimeState
+  allowedActions: readonly BidClientAction[]
+  composer: BidComposerCapability
+  /** File-name suffixes accepted by the Host, including the leading dot. */
+  allowedExtensions?: readonly string[]
+  maxFiles?: number
+  maxFileBytes?: number
+  maxTotalBytes?: number
+}
+
 /** The kinds of executor that may own a bid stage. */
 export type BidStageExecutor = 'program' | 'agent' | 'user'
 
