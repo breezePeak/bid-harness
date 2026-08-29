@@ -213,13 +213,13 @@ function htmlToMarkdown(html: string): string {
 }
 
 function listToMarkdown(list: string, ordered: boolean): string {
-  const items = [...list.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/giu)].map(([, item]) => stripHtml(item ?? ''))
+  const items = [...list.matchAll(/<li[^>]*>[\s\S]*?<\/li>/giu)].map(match => stripHtml(match[0]))
   return items.map((item, index) => `${ordered ? `${index + 1}.` : '-'} ${item}`).join('\n')
 }
 
 function tableToMarkdown(table: string): string {
-  const rows = [...table.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/giu)].map(([, row]) =>
-    [...(row ?? '').matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/giu)].map(([, cell]) => escapeCell(stripHtml(cell ?? ''))),
+  const rows = [...table.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/giu)].map(row =>
+    [...row[0].matchAll(/<t[hd][^>]*>[\s\S]*?<\/t[hd]>/giu)].map(cell => escapeCell(stripHtml(cell[0]))),
   ).filter(row => row.length > 0)
   /* v8 ignore next -- mammoth emits a table element only when the Word table has at least one row. */
   if (rows.length === 0) return ''

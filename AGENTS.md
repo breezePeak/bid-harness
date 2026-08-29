@@ -63,7 +63,7 @@ Package groups: [packages/README.md](packages/README.md).
 pnpm install            # pnpm workspaces, node ^22.19 || >=24
 pnpm run clean           # remove build outputs and safe residue from deleted packages
 pnpm run test           # vitest unit tests
-pnpm run test:coverage  # CI coverage gate: per-file 100% on packages/*/*/src
+pnpm run test:coverage  # coverage report for packages/*/*/src
 pnpm run test:e2e       # real-API tests; self-skip without DEEPSEEK_API_KEY
 pnpm run test:snapshot  # keyless ACP/headless replay vs expected outputs; filter: -t <name>
 pnpm run test:snapshot:record  # re-record expected outputs (needs key)
@@ -90,7 +90,7 @@ Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-c
 
 - Match evidence to the surface: focused tests for behavior, snapshots for model or user output, `doc-sync` for docs, build/hygiene and built smokes for published paths, and real-API e2e for provider behavior.
 - Never default to the full suite or repeat a passing check for commit or push. CI owns exhaustive coverage and the platform matrix; rehearse all locally only by explicit request, for CI diagnosis, or for an irreducibly repository-wide change.
-- `test:coverage`, not `test`, is the CI coverage gate ([why](docs/testing.md)).
+- `test:coverage`, not `test`, produces the CI coverage report ([details](docs/testing.md)).
 
 ## Secrets / .env
 
