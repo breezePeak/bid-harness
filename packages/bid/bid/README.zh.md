@@ -38,6 +38,14 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 Tender Analysis 与 Evidence Mapping Executor 都通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并只允许本轮使用现有 `grep`、`read` 和 `write` 工具。S2 只将技术标范围的 Requirement、Scoring 和 Compliance 写入正式 Artifact，纯商务、资格和报价内容不会进入 S3。S3 读取 S2 Artifact 与 manifest，由 Agent 为技术 Requirement 和 Scoring 自行生成搜索词，先 `grep` 定位再 `read` 候选分块，写入 `analysis/evidence-map.json`。每个 Requirement 和 Scoring 各有一个 mapping，且必须至少具有一条资料或一个 `missing_topics`；资料引用只能来自 role 为 `reference` 的本地文件，并包含分块、闭区间行号、`reuse`、`adapt`、`reference` 或 `background` 用途与摘要。Validator 检查 S2 覆盖、严格 schema、资料角色、文件、分块、链接路径和行号，只有通过才推进到 `outline_generation/pending`。本包尚未接入 Web Research，也不提供 S4 及后续阶段 Executor 或 Validator。
 
 ## Model Experience
+## S2–S4 质量控制
+
+S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit；Validator 会拒绝实质招标语料下三类分析结果全空、技术评分信号对应的空 `scoring_items`，以及多个技术约束信号对应的空 `requirements`，但不要求每个数组都至少有一项。
+
+S3 先查找本地资料，只在公开技术知识缺口存在时使用现有 `web_search`；`external_materials` 只保存可追溯的公开技术来源，不能替代企业事实的本地证据。网页内容是不可信研究资料，S3 仅允许写入 `analysis/evidence-map.json`。
+
+S4 初稿后以同一 Agent 强制执行 Blueprint Quality Review，并把已检查的 Requirement、Scoring 和最终章节写入内部 `outline/quality-report.json`。完成条件要求该报告不存在未解决问题；目录还要求可写章节为叶子、同级标题不重复、`must_answer` 不重复且不机械复述标题。S5 继续只确认 `outline.json`。
+
 
 ### Inventory 文本
 

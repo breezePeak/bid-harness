@@ -3,6 +3,9 @@ import { z } from 'zod'
 /** Version of the technical-writing blueprint Artifact. */
 export const OUTLINE_GENERATION_SCHEMA_VERSION = 1 as const
 
+/** Version of the internal Blueprint Quality Review record. */
+export const OUTLINE_QUALITY_REPORT_SCHEMA_VERSION = 1 as const
+
 /** Strict schema shared by generated and user-confirmed technical-bid sections. */
 export const outlineSectionSchema = z.object({
   id: z.string().min(1),
@@ -37,12 +40,32 @@ export const outlineArtifactSchema = z.object({
   sections: z.array(outlineSectionSchema).min(1),
 }).strict()
 
+/** Strict record of the mandatory quality review performed after S4 drafting. */
+export const outlineQualityReportSchema = z.object({
+  schema_version: z.literal(OUTLINE_QUALITY_REPORT_SCHEMA_VERSION),
+  scope: z.literal('technical_bid'),
+  checked_requirement_ids: z.array(z.string().min(1)),
+  checked_scoring_ids: z.array(z.string().min(1)),
+  reviewed_section_ids: z.array(z.string().min(1)),
+  issues: z.array(z.string().min(1)),
+}).strict()
+
 /** One independently writable or structural node in a technical bid outline. */
 export type OutlineSection = z.infer<typeof outlineSectionSchema>
 /** Parsed technical-writing blueprint. */
 export type OutlineArtifact = z.infer<typeof outlineArtifactSchema>
+/** Parsed internal Blueprint Quality Review record. */
+export type OutlineQualityReport = z.infer<typeof outlineQualityReportSchema>
 
 /** Parse a technical-writing blueprint through the current strict schema. */
 export function parseOutlineArtifact(value: unknown): OutlineArtifact {
   return outlineArtifactSchema.parse(value)
+}
+
+/** Parse the internal S4 quality-review record through its strict schema.
+ * @param value Untrusted JSON value read from `outline/quality-report.json`.
+ * @returns Validated quality-review record.
+ */
+export function parseOutlineQualityReport(value: unknown): OutlineQualityReport {
+  return outlineQualityReportSchema.parse(value)
 }

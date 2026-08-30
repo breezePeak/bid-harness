@@ -158,8 +158,18 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
     schema_version: 1,
-    requirement_mappings: requirements.requirements.map(item => ({ requirement_id: item.id, materials, external_materials: [], missing_topics })),
-    scoring_mappings: scoring.scoring_items.map(item => ({ scoring_id: item.id, materials, external_materials: [], missing_topics })),
+    requirement_mappings: requirements.requirements.map(item => ({
+      requirement_id: item.id,
+      materials,
+      external_materials: [],
+      missing_topics,
+    })),
+    scoring_mappings: scoring.scoring_items.map(item => ({
+      scoring_id: item.id,
+      materials,
+      external_materials: [],
+      missing_topics,
+    })),
   }, null, 2)}\n`, 'utf8')
 }
 
@@ -174,6 +184,18 @@ async function writeOutlineArtifact(cwd: string, sessionId: string): Promise<voi
   }, null, 2)}\n`, 'utf8')
 }
 
+async function writeOutlineQualityReport(cwd: string, sessionId: string, sectionIds: readonly string[] = ['SEC-1']): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), `${JSON.stringify({
+    schema_version: 1,
+    scope: 'technical_bid',
+    checked_requirement_ids: ['REQ-1'],
+    checked_scoring_ids: ['SCORE-1'],
+    reviewed_section_ids: sectionIds,
+    issues: [],
+  }, null, 2)}\n`, 'utf8')
+}
+
 async function writeChapterArtifact(cwd: string, sessionId: string): Promise<void> {
   const workspace = new Bid.BidWorkspace(cwd, sessionId)
   await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
@@ -184,11 +206,16 @@ async function writeChapterArtifact(cwd: string, sessionId: string): Promise<voi
   }, null, 2)}\n`, 'utf8')
 }
 
+function promptText(message: unknown): string {
+  const content = (message as { content?: Array<{ type: string; text?: string }> }).content ?? []
+  return content.flatMap(block => block.type === 'text' && block.text !== undefined ? [block.text] : []).join('\n')
+}
+
 function attach(
   ctx: Context,
   agentPreset?: string,
   cwd = '/workspace',
-  analysisWriter?: (cwd: string, sessionId: string, attempt: number) => Promise<void>,
+  analysisWriter?: (cwd: string, sessionId: string, attempt: number, prompt: string) => Promise<void>,
 ): {
   agent: Agent
   followup: ReturnType<typeof vi.fn>
@@ -201,20 +228,30 @@ function attach(
   const steer = vi.fn()
   let analysisPending = false
   let analysisAttempt = 0
-  followup.mockImplementation(() => {
+  let currentPrompt = ''
+  followup.mockImplementation((message: unknown) => {
     analysisPending = true
+    currentPrompt = promptText(message)
   })
   const whenIdle = vi.fn(async () => {
     if (!analysisPending || agentPreset !== 'bid') return
     analysisPending = false
+    const prompt = currentPrompt
+    currentPrompt = ''
     if (analysisWriter === undefined) {
-      if (analysisAttempt === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
+      if (prompt.includes('当前阶段：tender_analysis / Coverage Audit')) {
+        await writeTenderAnalysisArtifacts(cwd, session.id)
+        return
+      } else if (prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) {
+        await writeOutlineQualityReport(cwd, session.id)
+        return
+      } else if (analysisAttempt === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
       else if (analysisAttempt === 1) await writeEvidenceMappingArtifact(cwd, session.id)
       else if (analysisAttempt === 2) await writeOutlineArtifact(cwd, session.id)
       else await writeChapterArtifact(cwd, session.id)
       analysisAttempt++
     } else {
-      await analysisWriter(cwd, session.id, analysisAttempt++)
+      await analysisWriter(cwd, session.id, analysisAttempt++, prompt)
     }
   })
   const agent = {
@@ -394,23 +431,30 @@ describe('Bid Host runtime composition', () => {
   it('returns an S2 failure as runtime state and drives the generic retry', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
-    const writer = async (cwd: string, sessionId: string, attempt: number): Promise<void> => {
+    let tenderRuns = 0
+    const writer = async (cwd: string, sessionId: string, _attempt: number, prompt: string): Promise<void> => {
       const workspace = new Bid.BidWorkspace(cwd, sessionId)
-      if (attempt === 1) {
+      if (prompt.includes('当前阶段：tender_analysis / Coverage Audit') || prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) return
+      if (prompt.includes('当前阶段：evidence_mapping')) {
+        await writeEvidenceMappingArtifact(cwd, sessionId)
+        return
+      }
+      if (prompt.includes('当前阶段：outline_generation')) return
+      if (tenderRuns > 0) {
         for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
           await expect(readFile(join(workspace.sessionRoot, 'analysis', name), 'utf8'))
             .rejects.toMatchObject({ code: 'ENOENT' })
         }
       }
-      if (attempt === 2) await writeEvidenceMappingArtifact(cwd, sessionId)
-      else await writeTenderAnalysisArtifacts(cwd, sessionId)
-      if (attempt === 0) {
+      await writeTenderAnalysisArtifacts(cwd, sessionId)
+      if (tenderRuns === 0) {
         await writeFile(
           join(workspace.sessionRoot, 'analysis/requirements.json'),
           '{ invalid json',
           'utf8',
         )
       }
+      tenderRuns++
     }
     const { agent } = attach(ctx, 'bid', root, writer)
     const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
