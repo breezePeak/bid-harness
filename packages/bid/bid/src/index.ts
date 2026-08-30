@@ -8,7 +8,7 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, extname, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,7 +39,7 @@ import { validateConfirmedOutline, validateOutlineConfirmation } from './outline
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
-import { assertNoLinkedPath } from './workspace-path.ts'
+import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeResult,
@@ -638,13 +638,7 @@ export function validateBidFileBatch(files: readonly IncomingFile[], config: Bid
  * @param candidate - Relative path supplied by the caller.
  * @returns The resolved absolute path inside root.
  */
-export function within(root: string, candidate: string): string {
-  if (isAbsolute(candidate) || /^[a-z]:/iu.test(candidate) || /^\\\\/u.test(candidate)) throw new Error('bid-absolute-path')
-  const target = resolve(root, candidate)
-  const rel = relative(root, target)
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('bid-path-traversal')
-  return target
-}
+export { within } from './workspace-path.ts'
 
 function validateConfig(config: BidConfig): void {
   if (!config.sessionDirectory || !config.outputDirectory || config.maxFileBytes <= 0

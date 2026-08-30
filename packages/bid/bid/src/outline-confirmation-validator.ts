@@ -1,11 +1,10 @@
 import { lstat, readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
-import { within } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { validateOutlineReferences, validateOutlineTree } from './outline-generation-validator.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
-import { assertNoLinkedPath } from './workspace-path.ts'
+import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 const CONFIRMED_OUTLINE = 'outline/confirmed-outline.json'
 const CONFIRMATION = 'outline/confirmation.json'

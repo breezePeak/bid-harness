@@ -380,7 +380,7 @@ describe('Bid Host runtime composition', () => {
     expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
   })
 
-  it('returns an S2 failure as runtime state and retries only S2', async () => {
+  it('returns an S2 failure as runtime state and drives the generic retry', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
     const writer = async (cwd: string, sessionId: string, attempt: number): Promise<void> => {
@@ -424,12 +424,18 @@ describe('Bid Host runtime composition', () => {
 
     await expect(ctx.bid.retryStage(agent.session)).resolves.toEqual({
       ok: true,
-      value: { stage: 'evidence_mapping', status: 'pending' },
+      value: {
+        stage: 'outline_generation',
+        status: 'failed',
+        failureReason: expect.stringContaining('OUTLINE_GENERATION_INPUT_INVALID'),
+      },
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.failed',
       'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.failed',
     ])
   })
 
