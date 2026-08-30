@@ -20,6 +20,7 @@ export type {
   BidFileIntakeErrorCode,
   BidFileIntakeFailure,
   BidFileIntakeResult,
+  BidOutlineConfirmationResult,
   BidPromptAdmission,
   BidRetryErrorCode,
   BidRetryFailure,
@@ -35,3 +36,5 @@ export type {
   StageValidationResult,
   BidUploadFile,
 } from './control-plane-contract.ts'
+export type { OutlineEditOperation } from './outline-confirmation-edits.ts'
+export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'

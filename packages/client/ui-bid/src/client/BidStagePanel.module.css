@@ -162,3 +162,34 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+.outline {
+  display: flex;
+  max-height: 280px;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.outlineSection {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+}
+
+.outlineSection input,
+.outlineSection textarea {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-l1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.outlineSection textarea { min-height: 48px; resize: vertical; }
+
+.mapping { color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); }

@@ -23,7 +23,8 @@ async function parseJson(workspace: BidWorkspace, path: string, issues: StageVal
 
 function unique(values: readonly string[]): boolean { return new Set(values).size === values.length }
 
-function validateTree(sections: readonly OutlineSection[], issues: StageValidationIssue[]): void {
+/** Validate the shared flat outline-tree invariants for generated and confirmed outlines. */
+export function validateOutlineTree(sections: readonly OutlineSection[], issues: StageValidationIssue[]): void {
   const byId = new Map<string, OutlineSection>()
   for (const section of sections) {
     if (byId.has(section.id)) reject(issues, 'OUTLINE_GENERATION_SECTION_ID_DUPLICATE', 'Section ids must be unique.')
@@ -57,7 +58,8 @@ function validateTree(sections: readonly OutlineSection[], issues: StageValidati
   }
 }
 
-function validateReferences(
+/** Validate S2 identifier coverage for generated and confirmed outlines. */
+export function validateOutlineReferences(
   sections: readonly OutlineSection[],
   globalCompliance: readonly string[],
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>,
@@ -106,8 +108,8 @@ export async function validateOutlineGeneration(
     const requirements = parseTenderRequirementsArtifact(requirementsRaw)
     const scoring = parseTenderScoringArtifact(scoringRaw)
     const compliance = parseTenderComplianceArtifact(complianceRaw)
-    validateTree(outline.sections, issues)
-    validateReferences(outline.sections, outline.global_compliance_ids, requirements, scoring, compliance, issues)
+    validateOutlineTree(outline.sections, issues)
+    validateOutlineReferences(outline.sections, outline.global_compliance_ids, requirements, scoring, compliance, issues)
   } catch { reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', 'The outline Artifact has invalid fields.') }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

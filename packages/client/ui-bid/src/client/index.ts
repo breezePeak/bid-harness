@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidDocumentRole, BidUploadFile } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocumentRole, BidUploadFile, OutlineArtifact, OutlineEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -40,7 +40,8 @@ export interface BidStagePanelInjected {
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
-  confirmOutline?: (confirmed: boolean) => Promise<void>
+  getOutlineForConfirmation?: () => Promise<OutlineArtifact>
+  confirmOutline?: (operations: readonly OutlineEditOperation[]) => Promise<void>
 }
 
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
@@ -101,6 +102,16 @@ export function apply(ctx: ClientContext): void {
       },
       retryStage: async () => {
         const result = await ctx.remote.bid.retryStage(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      getOutlineForConfirmation: async () => {
+        const result = await ctx.remote.bid.getOutlineForConfirmation(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
+      confirmOutline: async (operations) => {
+        const result = await ctx.remote.bid.confirmOutline(sessionId, operations)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },

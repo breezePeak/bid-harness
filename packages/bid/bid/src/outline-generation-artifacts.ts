@@ -3,7 +3,8 @@ import { z } from 'zod'
 /** Version of the technical-writing blueprint Artifact. */
 export const OUTLINE_GENERATION_SCHEMA_VERSION = 1 as const
 
-const sectionSchema = z.object({
+/** Strict schema shared by generated and user-confirmed technical-bid sections. */
+export const outlineSectionSchema = z.object({
   id: z.string().min(1),
   parent_id: z.string().min(1).nullable(),
   order: z.number().int().positive(),
@@ -27,20 +28,21 @@ const sectionSchema = z.object({
   }
 })
 
-const outlineSchema = z.object({
+/** Strict schema shared by generated and user-confirmed technical-bid outlines. */
+export const outlineArtifactSchema = z.object({
   schema_version: z.literal(OUTLINE_GENERATION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   document_title: z.string().min(1),
   global_compliance_ids: z.array(z.string().min(1)),
-  sections: z.array(sectionSchema).min(1),
+  sections: z.array(outlineSectionSchema).min(1),
 }).strict()
 
 /** One independently writable or structural node in a technical bid outline. */
-export type OutlineSection = z.infer<typeof sectionSchema>
+export type OutlineSection = z.infer<typeof outlineSectionSchema>
 /** Parsed technical-writing blueprint. */
-export type OutlineArtifact = z.infer<typeof outlineSchema>
+export type OutlineArtifact = z.infer<typeof outlineArtifactSchema>
 
 /** Parse a technical-writing blueprint through the current strict schema. */
 export function parseOutlineArtifact(value: unknown): OutlineArtifact {
-  return outlineSchema.parse(value)
+  return outlineArtifactSchema.parse(value)
 }
