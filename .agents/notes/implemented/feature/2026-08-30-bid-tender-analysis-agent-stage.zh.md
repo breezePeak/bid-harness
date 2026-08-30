@@ -10,7 +10,7 @@ Bid 文件接入已经生成持久语料库，但招标分析没有生产执行�
 
 ## Decision
 
-文件接入成功后以及每次触发 `agent/session-start` 时，Bid Host 都调用同一个 `BidOrchestrator.drive()`。该循环从 Session 日志归约当前阶段，读取对应 `StagePolicy`，并且只在生产 Executor 返回 `canExecute(stage)` 时执行。生产 Executor 只支持 `tender_analysis`，因此当前实现停在 `evidence_mapping/pending`，不会记录 S3 started Event。
+文件接入成功后以及每次触发 `agent/session-start` 时，Bid Host 都调用同一个 `BidOrchestrator.drive()`。该循环从 Session 日志归约当前阶段，读取对应 `StagePolicy`，并且只在生产 Executor 返回 `canExecute(stage)` 时执行。S2 通过校验后，驱动器继续执行后续自动阶段；S2 失败时不会推进到 S3。
 
 对于 `tender_analysis`，Host 解析实时 Session Agent，等待已有工作静止，删除该阶段负责的四个输出文件，把本轮工具限制为 `grep`、`read` 和 `write`，注入动态 follow-up，再等待 Agent 回到 idle。任务文本包含 Session 工作区、四个严格 JSON schema、只以招标文件为权限来源的规则以及规定停止点。Preset 文本保持稳定；Session 路径和当前阶段数据只进入动态任务。S1 完成后发生的 S2 失败作为成功的 `uploadFiles` Remote 响应返回真实 `tender_analysis/failed` RuntimeState，不得归类为文件接入失败。
 
@@ -18,7 +18,11 @@ Agent 写入 `analysis/project.json`、`analysis/requirements.json`、`analysis/
 
 完成判定属于 Validator，而不是 Agent idle。Validator 拒绝缺失或多余 Artifact、无效 JSON 或 schema 字段、重复条目标识符、招标文件覆盖不完整、指向非招标文件或解析失败文件的引用、未知分块路径、链接路径、超出分块范围的行号，以及无法在引用行文本中匹配的 `raw_text`。文本匹配只统一换行和连续空白，不使用 LLM，也不允许结构化摘要代替招标原文。只有通过校验的输出才记录 `bid.stage.completed`；失败记录 `bid.stage.failed`。
 
-`tender_analysis/failed` Projection 只开放 `retry_stage`。Client 只向 `bid/retryStage` Remote 提交重试意图；Host 重新读取 Session 日志并执行准入，复用当前 Agent、工作区、Executor 和 Validator。重试会再次删除四个 S2 Artifact，并向同一 Agent 的文件观测策略记录这些路径不存在，使 `write` 能在读后写保护下重新创建文件。Orchestrator 只执行 `tender_analysis` 一次，成功后停在 `evidence_mapping/pending`，失败则留在 `tender_analysis/failed`，两种结果都不会启动 S3。
+`tender_analysis/failed` Projection 只开放 `retry_stage`。Client 只向 `bid/retryStage` Remote 提交重试意图；Host 重新读取 Session 日志并执行准入，复用当前 Agent、工作区、Executor 和 Validator。重试会再次删除四个 S2 Artifact，并向同一 Agent 的文件观测策略记录这些路径不存在，使 `write` 能在读后写保护下重新创建文件。S2 重试成功后由同一驱动器继续后续自动阶段；失败则保持 `tender_analysis/failed`，不会启动 S3。
+
+首次提取完成后，Host 在同一轮工具限制内向同一 live Agent 注入一次 Coverage Audit follow-up，并在第二次 idle 后再验证四个 Artifact。审计根据当前招标文件动态重查技术要求、技术评分、技术否决和必须响应项，发现遗漏时直接修正既有 Artifact。
+
+Validator 还读取成功解析 tender 的分块文本：实质文本下 Requirements、Scoring 和 Compliance 同时为空会失败；技术评分、评审或评价信号对应空 Scoring 会失败；多个技术约束信号对应空 Requirements 会失败。商业评分不触发技术评分保护，任何单个数组仍可在招标文件确实缺少该类内容时为空。
 
 ## Alternatives considered
 
@@ -32,4 +36,4 @@ Agent 写入 `analysis/project.json`、`analysis/requirements.json`、`analysis/
 
 ## Consequences
 
-S2 与普通 Harness 工作共用 Agent Loop、工具注册表、Session 日志和工作区，同时由确定性校验保留工作流状态权限。上传与 Session 恢复共用同一条与阶段名无关的推进路径；以后接入 S3 只需补充其 Executor、Validator，并让 `canExecute('evidence_mapping')` 返回 `true`，不再增加 Host 阶段分支。Validator 会在 Agent 轮次后读取引用行并校验原文，每次重试都会替换全部四个 S2 Artifact。当前 `uploadFiles` 请求会持续到 S2 Agent 与 Validator 完成；在后续长阶段接入前，需要单独决定后台执行方式，本实现不引入任务队列或第二套状态机。S3 仍不可用。
+S2 与普通 Harness 工作共用 Agent Loop、工具注册表、Session 日志和工作区，同时由确定性校验保留工作流状态权限。上传与 Session 恢复共用同一条与阶段名无关的推进路径；新增 Coverage Audit 不增加阶段或模型客户端。Validator 会在两次 Agent idle 后读取分块和引用行，每次重试都会替换全部四个 S2 Artifact。当前 `uploadFiles` 请求会持续到所有可执行自动阶段达到用户确认、失败或完成状态，本实现不引入任务队列或第二套状态机。

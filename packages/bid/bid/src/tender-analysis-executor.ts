@@ -50,6 +50,28 @@ export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, 
   ].join('\n')
 }
 
+function renderTenderAnalysisCoverageAuditTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
+  if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
+  const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const manifestPath = `${workspacePath}/manifest.json`
+  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
+  return [
+    `当前阶段：${task.stage} / Coverage Audit`,
+    `Bid Session：${agent.id}`,
+    `Session Workspace：${workspacePath}`,
+    '首次提取已经结束。执行一次完整性自审，只检查 manifest 中 role=tender 且 parseStatus=success 的文件；reference 资料不得用于补全或证明招标要求。',
+    `重新读取：${manifestPath}`,
+    '重新读取并在需要时修正以下四个 Artifact：',
+    ...artifactPaths.map(path => `- ${path}`),
+    `本阶段仍只允许调用：${task.allowedTools.join(', ')}。`,
+    '使用 grep 定位候选 chunk，再用 read 阅读原文；根据招标文件的章节、术语和表格内容动态形成搜索词，不得把固定关键词当作正式 Requirement、Scoring 或 Compliance。',
+    '重点重查技术要求、技术参数、功能要求、性能要求、接口要求、实施要求、安全要求、测试、验收、培训、运维、售后技术服务、技术评分、技术评审、技术评价、评分标准、评分表、技术否决项和必须响应项。',
+    '检查每一类内容是否已在 requirements.json、scoring.json 或 compliance.json 中以可追溯的原文和 source_refs 表达。发现遗漏时直接修正现有四个文件；不得创建其他 Artifact。',
+    '继续只保留技术标内容。投标报价、价格评分、付款、财务、资格、保证金和纯商务材料不得写入分析 Artifact。',
+    '审计结束后停止。Host 会独立验证最终 Artifact、引用和异常空结果。',
+  ].join('\n')
+}
+
 /**
  * Execute S2 through the live Harness Agent and return expected Artifact references after quiescence.
  * @param agent Live Agent that owns the Bid Session.
@@ -84,6 +106,11 @@ export async function executeTenderAnalysis(
   try {
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: renderTenderAnalysisTask(agent, workspace, task) }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+    }))
+    await agent.whenIdle()
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: renderTenderAnalysisCoverageAuditTask(agent, workspace, task) }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
     await agent.whenIdle()

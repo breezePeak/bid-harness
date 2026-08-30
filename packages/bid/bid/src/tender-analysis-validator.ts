@@ -26,6 +26,22 @@ type ParsedArtifacts = {
   compliance: TenderComplianceArtifact
 }
 
+const SUBSTANTIVE_TENDER_TEXT_MINIMUM_CHARACTERS = 80
+const MULTIPLE_TECHNICAL_CONSTRAINT_SIGNALS = 2
+const TECHNICAL_CONSTRAINT_SIGNALS: readonly RegExp[] = [
+  /技术\s*(?:要求|参数|指标|规范)/u,
+  /功能\s*(?:要求|参数|指标|规范)/u,
+  /性能\s*(?:要求|参数|指标|规范)/u,
+  /接口\s*(?:要求|参数|协议|规范)/u,
+  /实施\s*(?:要求|方案|计划|流程)/u,
+  /(?:数据|网络|信息)\s*安全\s*(?:要求|规范|措施|保障)/u,
+  /(?:测试|验收|培训|运维|售后(?:技术)?服务)\s*(?:要求|方案|计划|标准|保障)/u,
+  /(?:系统|平台|软件|硬件|接口|数据|网络)\s*(?:应当|应|须|必须|需(?:要)?|不得|支持|具备|满足)/u,
+]
+const TECHNICAL_SCORING_SIGNAL = /(?:技术(?:部分)?|技术方案)\s*(?:(?:评分|评审|评价)(?:标准|办法|表)?|分值|得分|满分)/u
+const TECHNICAL_SCORING_CONTEXT = /(?:技术(?:部分|方案|要求|参数|指标|规范)?|功能|性能|接口|实施|安全|测试|验收|培训|运维|售后(?:技术)?服务)/u
+const GENERIC_SCORING_SIGNAL = /(?:评分|评审|评价)(?:标准|办法|表)?|分值|得分|满分/u
+
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
 }
@@ -64,6 +80,79 @@ function duplicateIds(values: readonly { id: string }[]): string[] {
 
 function tenderRecords(manifest: BidManifest): ManifestFile[] {
   return manifest.files.filter(file => file.role === 'tender' && file.parseStatus === 'success')
+}
+
+async function readTenderCorpusText(workspace: BidWorkspace, manifest: BidManifest): Promise<string> {
+  const texts = await Promise.all(tenderRecords(manifest).map(async (record) => {
+    if (record.chunksPath === null || record.chunkIndexPath === null) return ''
+    const chunksPath = record.chunksPath
+    const indexPath = within(workspace.sessionRoot, record.chunkIndexPath)
+    await assertNoLinkedPath(workspace.root, indexPath)
+    const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+    const chunks = await Promise.all(index.chunks.map(async (entry) => {
+      const chunkPath = within(workspace.sessionRoot, posix.join(chunksPath, entry.path))
+      await assertNoLinkedPath(workspace.root, chunkPath)
+      return readFile(chunkPath, 'utf8')
+    }))
+    return chunks.join('\n')
+  }))
+  return texts.join('\n')
+}
+
+function stripTenderChunkMetadata(value: string): string {
+  return value.replace(/<!--[\s\S]*?-->/gu, ' ')
+}
+
+function normalizeTenderCorpusText(value: string): string {
+  return stripTenderChunkMetadata(value).replace(/\s+/gu, ' ').trim()
+}
+
+function hasSubstantiveTenderText(value: string): boolean {
+  return (value.match(/[\p{L}\p{N}]/gu)?.length ?? 0) >= SUBSTANTIVE_TENDER_TEXT_MINIMUM_CHARACTERS
+}
+
+function hasTechnicalScoringSignal(value: string): boolean {
+  if (TECHNICAL_SCORING_SIGNAL.test(value)) return true
+  return value.split(/\r?\n\s*\r?\n/gu).some(block => (
+    GENERIC_SCORING_SIGNAL.test(block) && TECHNICAL_SCORING_CONTEXT.test(block)
+  ))
+}
+
+function validateCompleteness(
+  artifacts: ParsedArtifacts,
+  tenderCorpus: string,
+  issues: StageValidationIssue[],
+): void {
+  const corpus = stripTenderChunkMetadata(tenderCorpus)
+  const normalizedCorpus = normalizeTenderCorpusText(tenderCorpus)
+  const requirementsEmpty = artifacts.requirements.requirements.length === 0
+  const scoringEmpty = artifacts.scoring.scoring_items.length === 0
+  const complianceEmpty = artifacts.compliance.compliance_items.length === 0
+  if (requirementsEmpty && scoringEmpty && complianceEmpty && hasSubstantiveTenderText(normalizedCorpus)) {
+    reject(
+      issues,
+      'TENDER_ANALYSIS_CATASTROPHICALLY_EMPTY',
+      'Substantive parsed tender text produced no requirements, scoring items, or compliance items.',
+      'analysis',
+    )
+  }
+  if (scoringEmpty && hasTechnicalScoringSignal(corpus)) {
+    reject(
+      issues,
+      'TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY',
+      'Tender text contains technical-scoring signals but scoring_items is empty.',
+      'analysis/scoring.json',
+    )
+  }
+  const technicalConstraintSignals = TECHNICAL_CONSTRAINT_SIGNALS.filter(signal => signal.test(corpus)).length
+  if (requirementsEmpty && technicalConstraintSignals >= MULTIPLE_TECHNICAL_CONSTRAINT_SIGNALS) {
+    reject(
+      issues,
+      'TENDER_ANALYSIS_REQUIREMENTS_SUSPICIOUSLY_EMPTY',
+      'Tender text contains multiple technical-constraint signals but requirements is empty.',
+      'analysis/requirements.json',
+    )
+  }
 }
 
 async function validateSourceRef(
@@ -219,6 +308,7 @@ export async function validateTenderAnalysis(
     compliance: compliance as TenderComplianceArtifact,
   }
   validateCoverage(parsed.project, manifest, issues)
+  validateCompleteness(parsed, await readTenderCorpusText(workspace, manifest), issues)
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
     ['analysis/scoring.json', parsed.scoring.scoring_items],

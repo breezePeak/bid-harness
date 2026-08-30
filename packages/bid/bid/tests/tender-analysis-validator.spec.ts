@@ -21,7 +21,7 @@ const artifacts: StageArtifact[] = [
   { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
 ]
 
-async function fixture(): Promise<{
+async function fixture(tenderText = '# 项目\n\n必须按期交付，技术方案得 10 分。'): Promise<{
   workspace: BidWorkspace
   tenderId: string
   referenceId: string
@@ -31,7 +31,7 @@ async function fixture(): Promise<{
   const root = await mkdtemp(join(tmpdir(), 'dsh-tender-analysis-'))
   const workspace = new BidWorkspace(root, 'session')
   const [tender, reference] = await workspace.import([
-    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('# 项目\n\n必须按期交付，技术方案得 10 分。') },
+    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('# 历史材料\n\n旧项目要求。') },
   ])
   if (tender === undefined || reference === undefined
@@ -119,6 +119,98 @@ describe('tender-analysis validator', () => {
   it('accepts complete Artifacts whose source refs cover the tender corpus', async () => {
     const value = await fixture()
     await publish(value.workspace, documents(value.tenderId, value.source))
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('rejects a substantive tender when every extracted technical Artifact is empty', async () => {
+    const value = await fixture([
+      '# 项目说明',
+      '本项目面向多个业务部门建设统一管理平台，需完成现状调研、方案设计、系统部署、数据迁移、联调试运行、用户培训、运行维护和验收交付，并提供持续的技术支持和现场服务。项目实施期间应形成完整文档，按计划组织协调并保障系统稳定运行。',
+    ].join('\n\n'))
+    const docs = documents(value.tenderId, value.source)
+    ;(docs['requirements.json'] as { requirements: unknown[] }).requirements = []
+    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
+    await publish(value.workspace, docs)
+
+    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
+      .toContain('TENDER_ANALYSIS_CATASTROPHICALLY_EMPTY')
+  })
+
+  it.each([
+    ['技术评分', '技术评分标准：技术方案完整性满分 10 分，并按实施方案的合理性评分。'],
+    ['技术评审', '技术评审办法：技术方案完整性满分 10 分。'],
+    ['技术评价', '技术评价标准：实施方案的合理性满分 10 分。'],
+    ['技术部分评审', '技术部分评审：技术方案完整性满分 10 分。'],
+    ['技术上下文中的评分办法和分值', '评分办法：技术方案分值 10 分，得分按完整性评定，满分 10 分。'],
+  ])('rejects an empty scoring Artifact when tender text contains %s', async (_signal, sourceText) => {
+    const value = await fixture(`# 技术评分\n\n${sourceText}`)
+    const docs = documents(value.tenderId, value.source)
+    const requirements = docs['requirements.json'] as {
+      requirements: Array<{ raw_text: string; normalized_requirement: string }>
+    }
+    const compliance = docs['compliance.json'] as { compliance_items: Array<{ raw_text: string }> }
+    requirements.requirements[0]!.raw_text = sourceText
+    requirements.requirements[0]!.normalized_requirement = '技术方案应完整响应评分标准'
+    compliance.compliance_items[0]!.raw_text = sourceText
+    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    await publish(value.workspace, docs)
+
+    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
+      .toContain('TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY')
+  })
+
+  it('rejects an empty requirements Artifact when tender text has multiple technical constraints', async () => {
+    const functionRequirement = '系统功能要求：应支持统一身份认证和审计日志。'
+    const performanceRequirement = '性能要求：在峰值并发时保持稳定响应。'
+    const value = await fixture(`# 技术要求\n\n${functionRequirement}\n\n${performanceRequirement}`)
+    const docs = documents(value.tenderId, value.source)
+    const scoring = docs['scoring.json'] as { scoring_items: Array<{ raw_text: string }> }
+    const compliance = docs['compliance.json'] as { compliance_items: Array<{ raw_text: string }> }
+    scoring.scoring_items[0]!.raw_text = functionRequirement
+    compliance.compliance_items[0]!.raw_text = performanceRequirement
+    ;(docs['requirements.json'] as { requirements: unknown[] }).requirements = []
+    await publish(value.workspace, docs)
+
+    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
+      .toContain('TENDER_ANALYSIS_REQUIREMENTS_SUSPICIOUSLY_EMPTY')
+  })
+
+  it('allows an empty scoring Artifact when the tender has no technical-scoring signal', async () => {
+    const sourceText = '系统功能要求：应支持日志审计和权限控制。'
+    const value = await fixture(`# 技术要求\n\n${sourceText}`)
+    const docs = documents(value.tenderId, value.source)
+    const requirements = docs['requirements.json'] as {
+      requirements: Array<{ raw_text: string; normalized_requirement: string }>
+    }
+    requirements.requirements[0]!.raw_text = sourceText
+    requirements.requirements[0]!.normalized_requirement = '系统支持日志审计和权限控制'
+    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
+    await publish(value.workspace, docs)
+
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('does not treat purely commercial scoring as a technical-scoring signal', async () => {
+    const technicalRequirement = '系统功能要求：应支持日志审计和权限控制。'
+    const commercialScoring = '报价评分办法：价格得分满分 10 分。'
+    const value = await fixture([
+      '# 技术要求',
+      technicalRequirement,
+      '# 商务评分',
+      commercialScoring,
+    ].join('\n\n'))
+    const docs = documents(value.tenderId, value.source)
+    const requirements = docs['requirements.json'] as {
+      requirements: Array<{ raw_text: string; normalized_requirement: string }>
+    }
+    requirements.requirements[0]!.raw_text = technicalRequirement
+    requirements.requirements[0]!.normalized_requirement = '系统支持日志审计和权限控制'
+    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
+    await publish(value.workspace, docs)
+
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
   })
 
