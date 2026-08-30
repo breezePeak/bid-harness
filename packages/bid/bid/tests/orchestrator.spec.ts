@@ -24,7 +24,14 @@ const artifactsFor = (task: BidStageTask): StageArtifact[] => task.requiredArtif
 class RecordingExecutor implements BidStageExecutorPort {
   readonly tasks: BidStageTask[] = []
 
-  constructor(private readonly run: (task: BidStageTask) => Promise<StageArtifact[]> = async task => artifactsFor(task)) {}
+  constructor(
+    private readonly run: (task: BidStageTask) => Promise<StageArtifact[]> = async task => artifactsFor(task),
+    private readonly executableStages: readonly BidStage[] = BID_STAGES,
+  ) {}
+
+  canExecute(stage: BidStage): boolean {
+    return this.executableStages.includes(stage)
+  }
 
   async execute(task: BidStageTask): Promise<StageArtifact[]> {
     this.tasks.push(task)
@@ -306,7 +313,11 @@ describe('BidOrchestrator', () => {
 
   it('automatically executes successful stages until outline confirmation waits for the user', async () => {
     const session = createSession('bid-drive-success')
-    const executor = new RecordingExecutor()
+    const executor = new RecordingExecutor(undefined, [
+      'tender_analysis',
+      'evidence_mapping',
+      'outline_generation',
+    ])
     const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
 
     await expect(orchestrator.runCurrentProgramStage()).resolves.toEqual({
@@ -456,6 +467,19 @@ describe('BidOrchestrator', () => {
     const replayed = Session.create(SessionId('bid-replayed'), source.events)
     const restored = new BidOrchestrator(replayed, new RecordingExecutor(), new StageValidator())
     expect(restored.state).toEqual(orchestrator.state)
+  })
+
+  it('continues a restored executable stage without depending on its name', async () => {
+    const source = createSession('bid-restored-executable-source')
+    const initial = new BidOrchestrator(source, new RecordingExecutor(), new StageValidator())
+    await initial.runCurrentProgramStage()
+    await initial.runCurrentAutomaticStage()
+    const replayed = Session.create(SessionId('bid-restored-executable'), source.events)
+    const executor = new RecordingExecutor(undefined, ['evidence_mapping'])
+    const restored = new BidOrchestrator(replayed, executor, new StageValidator())
+
+    await expect(restored.drive()).resolves.toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(executor.tasks.map(task => task.stage)).toEqual(['evidence_mapping'])
   })
 
   it('coalesces concurrent drive calls before the executor can run twice', async () => {

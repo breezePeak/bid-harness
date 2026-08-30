@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import { Context, Service } from '@deepseek-ai/cordis'
+import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -16,6 +16,31 @@ import BidHostRuntime, * as Bid from '@deepseek-ai/dsh-bid'
 
 let nextRpc = 1
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
+
+class TestFileSystem extends Service {
+  constructor(ctx: Context) {
+    super(ctx, 'fs')
+  }
+
+  resolve(path: string): Promise<{ targetKey: string; displayPath: string }> {
+    return Promise.resolve({ targetKey: path, displayPath: path })
+  }
+}
+
+class TestTools extends Service {
+  constructor(ctx: Context) {
+    super(ctx, 'tools')
+  }
+
+  restrict(): () => void {
+    return () => {}
+  }
+
+  guard(): () => void {
+    return () => {}
+  }
+}
+
 function request<P>(payload: P): RpcRequest<P> {
   return { rpcId: RpcId(`bid-host-${String(nextRpc++)}`), payload }
 }
@@ -26,6 +51,8 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(TestFileSystem)
+  await ctx.plugin(TestTools)
   await ctx.plugin(BidHostRuntime, config)
   return {
     ctx,
@@ -133,13 +160,6 @@ function attach(
   followup.mockImplementation(() => {
     analysisPending = true
   })
-  const restrict = vi.fn(() => vi.fn())
-  const guard = vi.fn(() => vi.fn())
-  Object.defineProperty(ctx, 'tools', { value: { restrict, guard }, configurable: true })
-  Object.defineProperty(ctx, 'fs', {
-    value: { resolve: async (path: string) => ({ targetKey: path, displayPath: path }) },
-    configurable: true,
-  })
   const whenIdle = vi.fn(async () => {
     if (!analysisPending || agentPreset !== 'bid') return
     analysisPending = false
@@ -229,6 +249,10 @@ describe('Bid Host runtime composition', () => {
       'bid.stage.started',
       'bid.stage.completed',
     ])
+    expect(agent.session.events).not.toContainEqual(expect.objectContaining({
+      type: 'bid.stage.started',
+      data: expect.objectContaining({ stage: 'evidence_mapping' }),
+    }))
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toEqual({ stage: 'evidence_mapping', status: 'pending' })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
@@ -244,6 +268,63 @@ describe('Bid Host runtime composition', () => {
       .resolves.toContain('"schema_version": 1')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/project.json'), 'utf8'))
       .resolves.toContain('"analyzed_tender_files"')
+  })
+
+  it('drives a restored tender-analysis stage through agent/session-start', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    await workspace.import([{ name: '招标要求.md', role: 'tender', type: 'text/markdown', bytes }])
+    agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    agent.session.append('bid.stage.completed', {
+      stage: 'file_intake',
+      status: 'completed',
+      artifacts: [{ stage: 'file_intake', type: 'manifest', path: 'manifest.json' }],
+    })
+
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'resume' })
+
+    await vi.waitFor(() => {
+      expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+        .toEqual({ stage: 'evidence_mapping', status: 'pending' })
+    })
+    expect(agent.session.events.map(event => event.type)).toEqual([
+      'bid.stage.started',
+      'bid.stage.completed',
+      'bid.stage.started',
+      'bid.stage.completed',
+    ])
+  })
+
+  it('drives a restored executable stage through the same session-start entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    for (const stage of ['file_intake', 'tender_analysis'] as const) {
+      agent.session.append('bid.stage.started', { stage, status: 'running' })
+      agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    const runtime = ctx.bid as unknown as {
+      automaticOrchestrator(agent: Agent, workspace: Bid.BidWorkspace): Bid.BidOrchestrator
+    }
+    const execute = vi.fn(async (task: Bid.BidStageTask): Promise<Bid.StageArtifact[]> =>
+      task.requiredArtifacts.map(path => ({ stage: task.stage, type: path, path })))
+    vi.spyOn(runtime, 'automaticOrchestrator').mockImplementation(currentAgent => new Bid.BidOrchestrator(
+      currentAgent.session,
+      { canExecute: stage => stage === 'evidence_mapping', execute },
+      { validate: async () => ({ ok: true }) },
+    ))
+
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'resume' })
+
+    await vi.waitFor(() => {
+      expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+        .toEqual({ stage: 'outline_generation', status: 'pending' })
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
   })
 
   it('returns an S2 failure as runtime state and retries only S2', async () => {

@@ -65,15 +65,18 @@ export async function executeTenderAnalysis(
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
+  const fs = agent.ctx.get('fs')
+  const tools = agent.ctx.get('tools')
+  if (fs === undefined || tools === undefined) throw new Error('Bid tender analysis requires fs and tools services')
   await Promise.all(task.requiredArtifacts.map(async (path) => {
     const artifactPath = join(workspace.sessionRoot, path)
     await rm(artifactPath, { force: true })
-    const target = await agent.ctx.fs.resolve(artifactPath)
+    const target = await fs.resolve(artifactPath)
     agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
   }))
   const allowed = new Set(task.allowedTools)
-  const liftRestriction = agent.ctx.tools.restrict({ allow: task.allowedTools })
-  const liftGuard = agent.ctx.tools.guard(exec => allowed.has(exec.name)
+  const liftRestriction = tools.restrict({ allow: task.allowedTools })
+  const liftGuard = tools.guard(exec => allowed.has(exec.name)
     ? undefined
     : `Bid stage ${task.stage} allows only ${task.allowedTools.join(', ')}`)
   try {

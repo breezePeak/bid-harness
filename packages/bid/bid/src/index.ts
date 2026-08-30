@@ -12,6 +12,7 @@ import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -277,6 +278,41 @@ export class BidHostRuntime extends TypertRemoteService {
         message: `Bid session prompt rejected by Host admission: ${reason}`,
       }
     }, { global: true })
+    ctx.on('agent/session-start', ({ agent }) => {
+      const cwd = agent.session.header.cwd
+      if (resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
+      return this.driveStartedSession(agent, cwd)
+    }, { global: true })
+  }
+
+  /** Continue implemented automatic stages after a Bid Session starts or resumes. */
+  private async driveStartedSession(agent: Agent, cwd: string): Promise<void> {
+    const { session } = agent
+    if (this.inFlight.has(session.id)) return
+    this.inFlight.add(session.id)
+    try {
+      const workspace = new BidWorkspace(cwd, session.id, workspaceConfig(this.config))
+      await this.automaticOrchestrator(agent, workspace).drive()
+      await this.ctx.sessions.flush(session)
+    } finally {
+      this.inFlight.delete(session.id)
+    }
+  }
+
+  /** Build the production executor and Validator for implemented automatic stages. */
+  private automaticOrchestrator(agent: Agent, workspace: BidWorkspace): BidOrchestrator {
+    return new BidOrchestrator(
+      agent.session,
+      {
+        canExecute: stage => stage === 'tender_analysis',
+        execute: task => task.stage === 'tender_analysis'
+          ? executeTenderAnalysis(agent, workspace, task)
+          : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+      },
+      {
+        validate: (stage, artifacts) => validateTenderAnalysis(workspace, stage, artifacts),
+      },
+    )
   }
 
   /**
@@ -309,6 +345,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
+          canExecute: stage => stage === 'tender_analysis',
           execute: async (task) => {
             if (task.stage === 'file_intake') {
               try {
@@ -329,10 +366,8 @@ export class BidHostRuntime extends TypertRemoteService {
             : validateTenderAnalysis(workspace, stage, artifacts),
         },
       )
-      let next = await orchestrator.runCurrentProgramStage()
-      if (next.stage === 'tender_analysis' && next.status === 'pending') {
-        next = await orchestrator.runCurrentAutomaticStage()
-      }
+      await orchestrator.runCurrentProgramStage()
+      const next = await orchestrator.drive()
       await this.ctx.sessions.flush(session)
       if (next.status === 'failed') {
         if (next.stage === 'file_intake') {
@@ -379,17 +414,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-      const orchestrator = new BidOrchestrator(
-        session,
-        {
-          execute: (task) => task.stage === 'tender_analysis'
-            ? executeTenderAnalysis(agent, workspace, task)
-            : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
-        },
-        {
-          validate: (stage, artifacts) => validateTenderAnalysis(workspace, stage, artifacts),
-        },
-      )
+      const orchestrator = this.automaticOrchestrator(agent, workspace)
       const next = await orchestrator.retryCurrentAutomaticStage()
       await this.ctx.sessions.flush(session)
       return retrySuccess(next)

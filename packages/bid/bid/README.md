@@ -27,13 +27,13 @@ The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-s
 
 ## Control plane runtime
 
-`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `runCurrentProgramStage()` executes the pending or failed program-owned stage once, while `drive()` continues later automatic stages until the workflow waits for the user, fails, or completes. Fresh file intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
+`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `runCurrentProgramStage()` executes the pending or failed program-owned stage once. `drive()` follows each current `StagePolicy` while the Executor reports `canExecute(stage)`, and stops at user input, an unsupported pending stage, failure, or final completion. Fresh file intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
 
 `registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and the Host-configured `allowedExtensions`, `maxFiles`, `maxFileBytes`, and `maxTotalBytes` limits. The Host plugin registers this projection and globally rejects generic prompt admission for sessions whose resolved preset is `bid`.
 
-The generated `bid/uploadFiles` Remote resolves the live Session and uses only its Host-resolved preset and `header.cwd`. It admits the complete browser batch under a per-Session lock, decodes canonical base64 after checking declared limits, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, flushes terminal events, and returns stable business errors. A successful request records `file_intake` started and completed and stops at `tender_analysis/pending`; failed imports remain eligible for a new upload.
+The generated `bid/uploadFiles` Remote resolves the live Session and uses only its Host-resolved preset and `header.cwd`. It admits the complete browser batch under a per-Session lock, decodes canonical base64 after checking declared limits, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. The Host also calls `drive()` on `agent/session-start`, so creation and resume use the same log-derived continuation. The production Executor supports only `tender_analysis`; successful intake therefore completes S2 and stops at `evidence_mapping/pending`, while failed imports remain eligible for a new upload.
 
-The package provides only the file-intake program executor and validator. It does not provide Tender Analysis model execution, its prompt, or validators for later stages.
+The package provides the file-intake program Executor and Validator plus Tender Analysis execution and validation. It does not provide Executors or Validators for S3 and later stages.
 
 ## Model Experience
 

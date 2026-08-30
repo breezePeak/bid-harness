@@ -24,9 +24,10 @@ describe('tender-analysis Agent executor', () => {
     const emit = vi.fn()
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {})
+    const services = { tools: { guard, restrict }, fs: { resolve } }
     const agent = {
       id: 'session',
-      ctx: { tools: { guard, restrict }, fs: { resolve }, emit },
+      ctx: { get: (name: keyof typeof services) => services[name], emit },
       followup,
       whenIdle,
     } as unknown as Agent
@@ -42,7 +43,7 @@ describe('tender-analysis Agent executor', () => {
     expect(emit).toHaveBeenCalledTimes(4)
     expect(emit).toHaveBeenCalledWith(
       'fs/observed',
-      expect.objectContaining({ displayPath: expect.stringContaining('analysis/project.json') }),
+      expect.objectContaining({ displayPath: expect.stringContaining(join('analysis', 'project.json')) }),
       { kind: 'absent' },
       { agent },
     )

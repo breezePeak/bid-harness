@@ -10,7 +10,9 @@ Bid 文件接入已经生成持久语料库，但招标分析没有生产执行�
 
 ## Decision
 
-Bid Host 在文件接入成功后只启动一个自动阶段。对于 `tender_analysis`，Host 解析实时 Session Agent，等待已有工作静止，删除该阶段负责的四个输出文件，把本轮工具限制为 `grep`、`read` 和 `write`，注入动态 follow-up，再等待 Agent 回到 idle。任务文本包含 Session 工作区、四个严格 JSON schema、只以招标文件为权限来源的规则以及规定停止点。Preset 文本保持稳定；Session 路径和当前阶段数据只进入动态任务。S1 完成后发生的 S2 失败作为成功的 `uploadFiles` Remote 响应返回真实 `tender_analysis/failed` RuntimeState，不得归类为文件接入失败。
+文件接入成功后以及每次触发 `agent/session-start` 时，Bid Host 都调用同一个 `BidOrchestrator.drive()`。该循环从 Session 日志归约当前阶段，读取对应 `StagePolicy`，并且只在生产 Executor 返回 `canExecute(stage)` 时执行。生产 Executor 只支持 `tender_analysis`，因此当前实现停在 `evidence_mapping/pending`，不会记录 S3 started Event。
+
+对于 `tender_analysis`，Host 解析实时 Session Agent，等待已有工作静止，删除该阶段负责的四个输出文件，把本轮工具限制为 `grep`、`read` 和 `write`，注入动态 follow-up，再等待 Agent 回到 idle。任务文本包含 Session 工作区、四个严格 JSON schema、只以招标文件为权限来源的规则以及规定停止点。Preset 文本保持稳定；Session 路径和当前阶段数据只进入动态任务。S1 完成后发生的 S2 失败作为成功的 `uploadFiles` Remote 响应返回真实 `tender_analysis/failed` RuntimeState，不得归类为文件接入失败。
 
 Agent 写入 `analysis/project.json`、`analysis/requirements.json`、`analysis/scoring.json` 和 `analysis/compliance.json`。每个提取事实都引用 manifest 文件标识符、已索引分块路径和闭区间行号。`project.json` 还声明分析覆盖的全部成功解析招标文件。
 
@@ -24,10 +26,10 @@ Agent 写入 `analysis/project.json`、`analysis/requirements.json`、`analysis/
 
 **新增 Bid 专用搜索工具。** 不采用，因为现有文件系统 `grep`、`read` 和 `write` 工具已经能够读取语料库，同时保留正常 Agent Loop 和工具日志。
 
-**上传后运行全部剩余自动阶段。** 不采用，因为 S3 及后续阶段尚无生产 Executor 和 Validator；因此 Host 桥接每次显式调用只推进一个自动阶段。
+**在每个 Host 入口按阶段名分派。** 不采用，因为每增加一个 Executor，上传和 Session 恢复都要各加一个分支。`StagePolicy`、`canExecute()` 和日志归约出的 RuntimeState 已经能够完整决定是否继续。
 
 **重试时保留既有 S2 输出。** 不采用，因为不完整重试可能借用上次遗留文件通过校验。
 
 ## Consequences
 
-S2 与普通 Harness 工作共用 Agent Loop、工具注册表、Session 日志和工作区，同时由确定性校验保留工作流状态权限。Validator 会在 Agent 轮次后读取引用行并校验原文，每次重试都会替换全部四个 S2 Artifact。当前 `uploadFiles` 请求会持续到 S2 Agent 与 Validator 完成；在后续长阶段接入前，需要单独决定后台执行方式，本实现不引入任务队列或第二套状态机。S3 仍不可用。
+S2 与普通 Harness 工作共用 Agent Loop、工具注册表、Session 日志和工作区，同时由确定性校验保留工作流状态权限。上传与 Session 恢复共用同一条与阶段名无关的推进路径；以后接入 S3 只需补充其 Executor、Validator，并让 `canExecute('evidence_mapping')` 返回 `true`，不再增加 Host 阶段分支。Validator 会在 Agent 轮次后读取引用行并校验原文，每次重试都会替换全部四个 S2 Artifact。当前 `uploadFiles` 请求会持续到 S2 Agent 与 Validator 完成；在后续长阶段接入前，需要单独决定后台执行方式，本实现不引入任务队列或第二套状态机。S3 仍不可用。

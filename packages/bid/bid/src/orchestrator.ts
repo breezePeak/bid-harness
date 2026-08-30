@@ -19,6 +19,13 @@ import {
 /** Executor port used by program and agent stages. */
 export interface BidStageExecutorPort {
   /**
+   * Report whether this executor implements one automatic stage.
+   * @param stage - stage considered for automatic execution.
+   * @returns whether {@link execute} can execute the stage.
+   */
+  canExecute(stage: BidStage): boolean
+
+  /**
    * Execute one host-created stage assignment.
    * @param task - immutable-in-intent assignment derived from the stage policy.
    * @returns workspace artifact references produced by the executor.
@@ -281,6 +288,7 @@ export class BidOrchestrator {
         })
         return this.state
       }
+      if (!this.executor.canExecute(state.stage)) return state
       if (!await this.executeStage(state.stage)) return this.state
     }
   }

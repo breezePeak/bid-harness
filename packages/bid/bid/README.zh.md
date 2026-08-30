@@ -27,13 +27,13 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 ## 控制面 Runtime
 
-`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`runCurrentProgramStage()` 只执行一次 pending 或 failed 的程序阶段，`runCurrentAutomaticStage()` 只执行一个自动阶段，`retryCurrentAutomaticStage()` 只重试失败的招标分析一次，`drive()` 则从后续自动阶段继续执行到等待用户、失败或最终完成。新建 Session 的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
+`BidOrchestrator` 绑定单个 DSH Session，并通过唯一的 `reduceBidRuntimeState()` 从 `Session.events` 恢复状态。`runCurrentProgramStage()` 只执行一次 pending 或 failed 的程序阶段。`drive()` 根据当前 `StagePolicy` 推进 Executor 声明 `canExecute(stage)` 的阶段，并在等待用户、当前 pending 阶段不受支持、失败或最终完成时停止。新建 Session 的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。`retry()`、`confirm()`、`admitAction()` 与 `admitPrompt()` 在后端执行状态和权限校验；用户拒绝目录不会推进阶段，用户接受目录也必须在 confirmation Artifact 通过 Validator 后才能继续。
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 
-生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库，校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，再把同一 Session 交给实时 Agent 执行一个招标分析阶段。S1 失败返回文件接入业务错误；S1 完成后的 S2 失败返回成功分支中的真实 `tender_analysis/failed` RuntimeState。生成的 `bid/retryStage` Remote 按 Session 日志和 Projection 重新准入失败的 S2，复用同一 Agent、工作区、Executor 与 Validator，并在一次重试后停止。
+生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。生产 Executor 只支持 `tender_analysis`，所以 S1 和 S2 成功后停在 `evidence_mapping/pending`；S1 完成后的 S2 失败返回成功分支中的真实 `tender_analysis/failed` RuntimeState。生成的 `bid/retryStage` Remote 按 Session 日志和 Projection 重新准入失败的 S2，复用同一 Agent、工作区、Executor 与 Validator，并在一次重试后停止。
 
 Tender Analysis Executor 通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并只允许本轮使用现有 `grep`、`read` 和 `write` 工具。每次执行会先删除四个阶段 Artifact，并向同一 Agent 的文件观测策略记录对应路径不存在，保证重试可通过受保护的 `write` 重新创建文件。Agent idle 后，Validator 检查 `analysis/project.json`、`analysis/requirements.json`、`analysis/scoring.json` 与 `analysis/compliance.json` 的严格 schema、条目标识符唯一性、成功招标文件完整覆盖，以及每条引用的文件角色、分块路径和行号。Requirements、scoring 和 compliance 条目的 `raw_text` 还必须在引用行文本中经换行与连续空白规范化后找到。Agent idle 本身不代表阶段完成；只有 Validator 通过才会推进。本包仍不提供 S3 及后续阶段 Executor 或 Validator。
 
