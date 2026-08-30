@@ -30,6 +30,8 @@ import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
+import { executeOutlineGeneration } from './outline-generation-executor.ts'
+import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -96,6 +98,9 @@ export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
 export { executeEvidenceMapping, renderEvidenceMappingTask } from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
+export * from './outline-generation-artifacts.ts'
+export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline-generation-executor.ts'
+export { validateOutlineGeneration } from './outline-generation-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -309,17 +314,21 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping',
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation',
         execute: task => task.stage === 'tender_analysis'
           ? executeTenderAnalysis(agent, workspace, task)
           : task.stage === 'evidence_mapping'
             ? executeEvidenceMapping(agent, workspace, task)
-            : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+            : task.stage === 'outline_generation'
+              ? executeOutlineGeneration(agent, workspace, task)
+              : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
       },
       {
         validate: (stage, artifacts) => stage === 'tender_analysis'
           ? validateTenderAnalysis(workspace, stage, artifacts)
-          : validateEvidenceMapping(workspace, stage, artifacts),
+          : stage === 'evidence_mapping'
+            ? validateEvidenceMapping(workspace, stage, artifacts)
+            : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
   }
@@ -354,7 +363,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation',
           execute: async (task) => {
             if (task.stage === 'file_intake') {
               try {
@@ -367,6 +376,7 @@ export class BidHostRuntime extends TypertRemoteService {
             }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
+            if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
@@ -375,7 +385,9 @@ export class BidHostRuntime extends TypertRemoteService {
             ? validateFileIntake(workspace, imported, stage, artifacts)
             : stage === 'tender_analysis'
               ? validateTenderAnalysis(workspace, stage, artifacts)
-              : validateEvidenceMapping(workspace, stage, artifacts),
+              : stage === 'evidence_mapping'
+                ? validateEvidenceMapping(workspace, stage, artifacts)
+                : validateOutlineGeneration(workspace, stage, artifacts),
         },
       )
       await orchestrator.runCurrentProgramStage()
