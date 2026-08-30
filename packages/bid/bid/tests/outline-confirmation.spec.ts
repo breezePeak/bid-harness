@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyOutlineEdits,
+  buildOutlineView,
   outlineArtifactSha256,
   parseOutlineEditOperations,
   parseOutlineConfirmationArtifact,
@@ -60,5 +61,17 @@ describe('outline confirmation artifacts', () => {
     expect(moved.sections.find(section => section.id === 'B')).toMatchObject({ parent_id: 'E', level: 3 })
     expect(moved.sections.find(section => section.id === 'C')).toMatchObject({ level: 4 })
     expect(() => applyOutlineEdits(tree, [{ type: 'move_section', section_id: 'A', parent_id: 'C', order: 1 }])).toThrow('descendant')
+  })
+
+  it('inserts moved and added siblings at their requested positions', () => {
+    const tree: OutlineArtifact = { ...outline, sections: [
+      { ...outline.sections[0]!, id: 'A', title: 'A', order: 1 },
+      { ...outline.sections[0]!, id: 'B', title: 'B', order: 2 },
+      { ...outline.sections[0]!, id: 'C', title: 'C', order: 3 },
+    ] }
+    const moved = applyOutlineEdits(tree, [{ type: 'move_section', section_id: 'C', parent_id: null, order: 2 }])
+    expect(buildOutlineView(moved.sections).map(item => `${item.number} ${item.section.title}`)).toEqual(['1 A', '2 C', '3 B'])
+    const added = applyOutlineEdits(tree, [{ type: 'add_section', parent_id: null, order: 2, writable: true, title: '新增', purpose: '补充', must_answer: ['待补充'] }])
+    expect(buildOutlineView(added.sections).map(item => `${item.number} ${item.section.title}`)).toEqual(['1 A', '2 新增', '3 B', '4 C'])
   })
 })

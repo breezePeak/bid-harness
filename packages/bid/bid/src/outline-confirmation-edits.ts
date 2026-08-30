@@ -38,8 +38,60 @@ export function parseOutlineEditOperations(value: unknown): OutlineEditOperation
   return z.array(operationSchema).parse(value) as OutlineEditOperation[]
 }
 
+/** A section paired with its derived position in the displayed outline tree. */
+export interface OutlineViewSection {
+  readonly section: OutlineSection
+  readonly number: string
+  readonly depth: number
+}
+
+/**
+ * Flatten an outline in display order with numbers derived from its tree.
+ * @param sections - Outline sections whose parent and sibling order define the tree.
+ * @returns Sections in tree order with non-persistent display numbers.
+ */
+export function buildOutlineView(sections: readonly OutlineSection[]): OutlineViewSection[] {
+  const children = new Map<string | null, OutlineSection[]>()
+  for (const section of sections) children.set(section.parent_id, [...(children.get(section.parent_id) ?? []), section])
+  for (const siblings of children.values()) siblings.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+  const view: OutlineViewSection[] = []
+  const visit = (parentId: string | null, prefix: readonly number[]): void => {
+    for (const [index, section] of (children.get(parentId) ?? []).entries()) {
+      const position = [...prefix, index + 1]
+      view.push({ section, number: position.join('.'), depth: position.length })
+      visit(section.id, position)
+    }
+  }
+  visit(null, [])
+  return view
+}
+
+function normalizeSiblingOrders(sections: readonly OutlineSection[]): void {
+  const siblings = new Map<string | null, OutlineSection[]>()
+  for (const section of sections) siblings.set(section.parent_id, [...(siblings.get(section.parent_id) ?? []), section])
+  for (const group of siblings.values()) group
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .forEach((section, index) => { section.order = index + 1 })
+}
+
+function updateLevels(sections: readonly OutlineSection[]): void {
+  const byParent = new Map<string | null, OutlineSection[]>()
+  for (const section of sections) byParent.set(section.parent_id, [...(byParent.get(section.parent_id) ?? []), section])
+  const visit = (parentId: string | null, level: number): void => {
+    for (const section of byParent.get(parentId) ?? []) {
+      section.level = level
+      visit(section.id, level + 1)
+    }
+  }
+  visit(null, 1)
+}
+
 /** Apply browser operations without permitting browser edits to business references. */
-export function applyOutlineEdits(source: OutlineArtifact, operations: readonly OutlineEditOperation[]): OutlineArtifact {
+export function applyOutlineEdits(
+  source: OutlineArtifact,
+  operations: readonly OutlineEditOperation[],
+  allocateSectionId?: () => string,
+): OutlineArtifact {
   const sections = source.sections.map(section => ({ ...section, must_answer: [...section.must_answer] }))
   const byId = new Map(sections.map(section => [section.id, section]))
   let nextId = sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
@@ -51,7 +103,8 @@ export function applyOutlineEdits(source: OutlineArtifact, operations: readonly 
       if (operation.purpose !== undefined) section.purpose = operation.purpose
       if (operation.must_answer !== undefined) section.must_answer = [...operation.must_answer]
     } else if (operation.type === 'add_section') {
-      const id = `SEC-${String(++nextId).padStart(3, '0')}`
+      const id = allocateSectionId?.() ?? `SEC-${String(++nextId).padStart(3, '0')}`
+      if (byId.has(id)) throw new Error(`duplicate outline section ${id}`)
       const parent = operation.parent_id === null ? undefined : byId.get(operation.parent_id)
       if (operation.parent_id !== null && parent === undefined) {
         throw new Error(`unknown outline parent ${operation.parent_id}`)
@@ -64,6 +117,10 @@ export function applyOutlineEdits(source: OutlineArtifact, operations: readonly 
       }
       sections.push(section)
       byId.set(id, section)
+      const siblings = sections.filter(candidate => candidate.parent_id === operation.parent_id && candidate.id !== id)
+        .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+      siblings.splice(Math.min(operation.order - 1, siblings.length), 0, section)
+      siblings.forEach((candidate, index) => { candidate.order = index + 1 })
     } else if (operation.type === 'delete_section') {
       if (!byId.has(operation.section_id)) throw new Error(`unknown outline section ${operation.section_id}`)
       const remove = new Set<string>([operation.section_id])
@@ -98,32 +155,17 @@ export function applyOutlineEdits(source: OutlineArtifact, operations: readonly 
         }
       }
       if (operation.parent_id !== null && descendants.has(operation.parent_id)) throw new Error('a section cannot move into its descendant')
+      const sourceSiblings = sections.filter(candidate => candidate.parent_id === section.parent_id && candidate.id !== section.id)
+        .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+      sourceSiblings.forEach((candidate, index) => { candidate.order = index + 1 })
       section.parent_id = operation.parent_id
-      section.order = operation.order
-      const levels = new Map<string, number>([[section.id, parent === undefined ? 1 : parent.level + 1]])
-      for (let changed = true; changed;) {
-        changed = false
-        for (const candidate of sections) {
-          const level = levels.get(candidate.parent_id ?? '')
-          if (candidate.parent_id !== null && level !== undefined && levels.get(candidate.id) !== level + 1) {
-            levels.set(candidate.id, level + 1)
-            changed = true
-          }
-        }
-      }
-      for (const [id, level] of levels) {
-        const candidate = byId.get(id)
-        if (candidate !== undefined) candidate.level = level
-      }
+      const destinationSiblings = sections.filter(candidate => candidate.parent_id === operation.parent_id && candidate.id !== section.id)
+        .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+      destinationSiblings.splice(Math.min(operation.order - 1, destinationSiblings.length), 0, section)
+      destinationSiblings.forEach((candidate, index) => { candidate.order = index + 1 })
     }
+    normalizeSiblingOrders(sections)
+    updateLevels(sections)
   }
-  const siblings = new Map<string, OutlineSection[]>()
-  for (const section of sections) {
-    const key = section.parent_id ?? ''
-    siblings.set(key, [...(siblings.get(key) ?? []), section])
-  }
-  for (const group of siblings.values()) group
-    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
-    .forEach((section, index) => { section.order = index + 1 })
   return { ...source, sections }
 }

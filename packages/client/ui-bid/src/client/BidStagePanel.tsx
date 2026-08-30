@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/src/outline-confirmation-edits.ts'
 import type { BidClientProjection, BidDocumentRole, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -121,13 +122,14 @@ export function BidStagePanel({
   const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
-  const [outline, setOutline] = useState<OutlineArtifact | null>(null)
+  const [previewOutline, setPreviewOutline] = useState<OutlineArtifact | null>(null)
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly BidSelectedFile[]>([])
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
+  const temporarySectionId = useRef(0)
 
   useEffect(() => {
     alive.current = true
@@ -148,7 +150,11 @@ export function BidStagePanel({
 
   useEffect(() => {
     if (!canConfirm || getOutlineForConfirmation === undefined) return
-    void getOutlineForConfirmation().then((value) => { if (alive.current) setOutline(value) }, (reason: unknown) => {
+    void getOutlineForConfirmation().then((value) => { if (alive.current) {
+      temporarySectionId.current = 0
+      setOperations([])
+      setPreviewOutline(value)
+    } }, (reason: unknown) => {
       if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
   }, [canConfirm, getOutlineForConfirmation, t])
@@ -197,10 +203,10 @@ export function BidStagePanel({
   const dotState = statusDot(projection.runtime.status)
 
   const updateSection = (sectionId: string, patch: SectionEdit): void => {
-    if (outline === null) return
+    if (previewOutline === null || sectionId.startsWith('tmp-')) return
     const operation: OutlineEditOperation = { type: 'update_section', section_id: sectionId, ...patch }
     setOperations(current => [...current, operation])
-    setOutline(current => current === null ? null : {
+    setPreviewOutline(current => current === null ? null : {
       ...current,
       sections: current.sections.map(section => section.id === sectionId
         ? {
@@ -215,13 +221,27 @@ export function BidStagePanel({
 
   const structureOperation = (operation: OutlineEditOperation): void => {
     setOperations(current => [...current, operation])
+    setPreviewOutline(current => current === null ? null : applyOutlineEdits(current, [operation], () => `tmp-${String(++temporarySectionId.current)}`))
     setRequestError(null)
   }
 
   const indentSection = (sectionId: string): void => {
-    const position = outline?.sections.findIndex(section => section.id === sectionId) ?? -1
-    const parent = position > 0 ? outline?.sections[position - 1] : undefined
+    const section = previewOutline?.sections.find(candidate => candidate.id === sectionId)
+    const siblings = previewOutline?.sections.filter(candidate => candidate.parent_id === section?.parent_id)
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)) ?? []
+    const position = siblings.findIndex(candidate => candidate.id === sectionId)
+    const parent = position > 0 ? siblings[position - 1] : undefined
     if (parent !== undefined) structureOperation({ type: 'move_section', section_id: sectionId, parent_id: parent.id, order: 1 })
+  }
+
+  const outdentSection = (sectionId: string): void => {
+    const section = previewOutline?.sections.find(candidate => candidate.id === sectionId)
+    const parent = section?.parent_id === null || section === undefined
+      ? undefined
+      : previewOutline?.sections.find(candidate => candidate.id === section.parent_id)
+    if (parent !== undefined) {
+      structureOperation({ type: 'move_section', section_id: sectionId, parent_id: parent.parent_id, order: parent.order + 1 })
+    }
   }
 
   return (
@@ -244,25 +264,30 @@ export function BidStagePanel({
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
-        {canConfirm && outline !== null && (
+        {canConfirm && previewOutline !== null && (
           <div className={css.outline} aria-label="技术标目录">
-            {outline.sections.map((section, index) => (
-              <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((section.level - 1) * 16)}px` }}>
-                <input aria-label={`${section.id} 标题`} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
-                <textarea aria-label={`${section.id} 目的`} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
-                {section.writable && <textarea aria-label={`${section.id} 必答内容`} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
+            {buildOutlineView(previewOutline.sections).map(({ section, number, depth }) => {
+              const isTemporary = section.id.startsWith('tmp-')
+              const siblings = previewOutline.sections.filter(candidate => candidate.parent_id === section.parent_id)
+                .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+              const index = siblings.findIndex(candidate => candidate.id === section.id)
+              return <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((depth - 1) * 16)}px` }}>
+                <span aria-label={`${section.id} 章节编号`}>{number}</span>
+                <input aria-label={`${section.id} 标题`} disabled={isTemporary} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
+                <textarea aria-label={`${section.id} 目的`} disabled={isTemporary} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
+                {section.writable && <textarea aria-label={`${section.id} 必答内容`} disabled={isTemporary} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
                 <div className={css.actions}>
-                  <button type="button" onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
-                  <button type="button" onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
-                  <button type="button" onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
-                  <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: Math.max(1, section.order - 1) })}>上移</button>
-                  <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: section.order + 1 })}>下移</button>
-                  {index > 0 && <button type="button" onClick={() => indentSection(section.id)}>缩进</button>}
-                  {section.parent_id !== null && <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: null, order: section.order })}>取消缩进</button>}
+                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
+                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
+                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
+                  <button type="button" disabled={isTemporary || index === 0} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })}>上移</button>
+                  <button type="button" disabled={isTemporary || index === siblings.length - 1} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })}>下移</button>
+                  <button type="button" disabled={isTemporary || index === 0} onClick={() => indentSection(section.id)}>缩进</button>
+                  <button type="button" disabled={isTemporary || section.parent_id === null} onClick={() => outdentSection(section.id)}>取消缩进</button>
                 </div>
                 <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
               </article>
-            ))}
+            })}
           </div>
         )}
 

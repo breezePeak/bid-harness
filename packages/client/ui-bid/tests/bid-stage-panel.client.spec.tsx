@@ -202,14 +202,38 @@ describe('BidStagePanel', () => {
     })} />)
     const title = await screen.findByLabelText('SEC-1 标题')
     fireEvent.change(title, { target: { value: '更新标题' } })
-    fireEvent.click(screen.getByRole('button', { name: '新增同级' }))
-    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]!)
     fireEvent.click(screen.getByRole('button', { name: '确认' }))
     await waitFor(() => expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
       expect.objectContaining({ type: 'add_section' }),
       expect.objectContaining({ type: 'delete_section', section_id: 'SEC-1' }),
     ])))
+  })
+
+  it('immediately previews hierarchy, order, and derived section numbers', async () => {
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      allowedActions: ['confirm_outline'],
+    }), {
+      confirmOutline: vi.fn(async () => {}),
+      getOutlineForConfirmation: async () => ({
+        schema_version: 1, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
+          id, parent_id: null, order: index + 1, level: 1, title: id, purpose: `${id} purpose`, writable: true,
+          must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+        })),
+      }),
+    })} />)
+    await screen.findByLabelText('C 标题')
+    expect(screen.getByLabelText('C 章节编号').textContent).toBe('3')
+    fireEvent.click(screen.getAllByRole('button', { name: '上移' })[2]!)
+    expect(screen.getByLabelText('C 章节编号').textContent).toBe('2')
+    expect(screen.getByLabelText('B 章节编号').textContent).toBe('3')
+    fireEvent.click(screen.getAllByRole('button', { name: '缩进' })[2]!)
+    expect(screen.getByLabelText('B 章节编号').textContent).toBe('2.1')
+    fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
+    expect(await screen.findByLabelText('tmp-1 章节编号')).toBeTruthy()
   })
 })
 
