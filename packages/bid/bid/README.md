@@ -35,6 +35,8 @@ The generated `bid/uploadFiles` Remote resolves the live Session and uses only i
 
 The package provides the file-intake program Executor and Validator plus Tender Analysis and Evidence Mapping execution and validation. S2 writes only technical-bid Requirements, Scoring, and Compliance items; commercial, qualification, and price-only material never reaches S3. S3 reads those Artifacts and the manifest, uses the normal Agent `grep` then `read` loop to select local reference chunks, and writes `analysis/evidence-map.json`. Each Requirement and Scoring mapping is covered exactly once and must contain either material or a missing topic; materials identify an indexed `reference`-role local chunk, inclusive lines, a `reuse`, `adapt`, `reference`, or `background` use, and a summary. The Validator verifies S2 coverage and every material's role, manifest file, indexed chunk, linked-path safety, and line range before the Host advances the stage. Web research is not implemented.
 
+S6 derives an ordered worklist from the confirmed outline and invokes the live DSH Agent once for each writable section. Each task receives only the current blueprint, selected S2 records, relevant S3 material references, and a compact project context. The Agent writes one Markdown body and one metadata sidecar; the Executor rebuilds `chapters/manifest.json` after every chapter has settled. The Validator requires exact writable-section coverage, non-empty non-linked bodies, the confirmed-outline hash, matching mappings and must-answer metadata, and indexed local Evidence line ranges. Chapter retries delete the prior `chapters/` tree before starting again. Web research remains unavailable.
+
 ## Model Experience
 
 ### Inventory text

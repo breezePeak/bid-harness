@@ -174,6 +174,16 @@ async function writeOutlineArtifact(cwd: string, sessionId: string): Promise<voi
   }, null, 2)}\n`, 'utf8')
 }
 
+async function writeChapterArtifact(cwd: string, sessionId: string): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
+  await mkdir(join(workspace.sessionRoot, 'chapters/meta'), { recursive: true })
+  await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '交付计划覆盖项目阶段和保障措施。\n', 'utf8')
+  await writeFile(join(workspace.sessionRoot, 'chapters/meta/0001.json'), `${JSON.stringify({
+    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], evidence_used: [], additional_materials: [], unresolved_topics: [],
+  }, null, 2)}\n`, 'utf8')
+}
+
 function attach(
   ctx: Context,
   agentPreset?: string,
@@ -200,7 +210,8 @@ function attach(
     if (analysisWriter === undefined) {
       if (analysisAttempt === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
       else if (analysisAttempt === 1) await writeEvidenceMappingArtifact(cwd, session.id)
-      else await writeOutlineArtifact(cwd, session.id)
+      else if (analysisAttempt === 2) await writeOutlineArtifact(cwd, session.id)
+      else await writeChapterArtifact(cwd, session.id)
       analysisAttempt++
     } else {
       await analysisWriter(cwd, session.id, analysisAttempt++)
@@ -555,7 +566,7 @@ describe('Bid Host runtime composition', () => {
     ])
     const draft = await ctx.bid.getOutlineForConfirmation(agent.session)
     const result = await ctx.bid.confirmOutline(agent.session, [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }])
-    expect(result).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'pending' } })
+    expect(result).toEqual({ ok: true, value: { stage: 'book_review', status: 'pending' } })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(draft)
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
@@ -569,6 +580,7 @@ describe('Bid Host runtime composition', () => {
         { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
         { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
       ] } })
+    await expect(readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')).resolves.toContain('SEC-1')
   })
 
   it('keeps S5 waiting when deletion removes mandatory coverage', async () => {

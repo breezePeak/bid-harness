@@ -36,6 +36,8 @@ import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation
 import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
+import { executeChapterWriting } from './chapter-writing-executor.ts'
+import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -109,6 +111,9 @@ export * from './outline-confirmation-edits.ts'
 export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline-generation-executor.ts'
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
+export * from './chapter-writing-artifacts.ts'
+export { buildChapterWorklist, executeChapterWriting, renderChapterWritingTask } from './chapter-writing-executor.ts'
+export { validateChapterWriting } from './chapter-writing-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -322,14 +327,16 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation',
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: task => task.stage === 'tender_analysis'
           ? executeTenderAnalysis(agent, workspace, task)
           : task.stage === 'evidence_mapping'
             ? executeEvidenceMapping(agent, workspace, task)
             : task.stage === 'outline_generation'
               ? executeOutlineGeneration(agent, workspace, task)
-              : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+              : task.stage === 'chapter_writing'
+                ? executeChapterWriting(agent, workspace, task)
+                : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
       },
       {
         validate: (stage, artifacts) => stage === 'tender_analysis'
@@ -337,7 +344,8 @@ export class BidHostRuntime extends TypertRemoteService {
           : stage === 'evidence_mapping'
             ? validateEvidenceMapping(workspace, stage, artifacts)
             : stage === 'outline_confirmation' ? validateOutlineConfirmation(workspace, stage, artifacts)
-              : validateOutlineGeneration(workspace, stage, artifacts),
+              : stage === 'chapter_writing' ? validateChapterWriting(workspace, stage, artifacts)
+                : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
   }
@@ -372,7 +380,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
           execute: async (task) => {
             if (task.stage === 'file_intake') {
               try {
@@ -386,6 +394,7 @@ export class BidHostRuntime extends TypertRemoteService {
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task)
+            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
@@ -396,7 +405,11 @@ export class BidHostRuntime extends TypertRemoteService {
               ? validateTenderAnalysis(workspace, stage, artifacts)
               : stage === 'evidence_mapping'
                 ? validateEvidenceMapping(workspace, stage, artifacts)
-                : validateOutlineGeneration(workspace, stage, artifacts),
+                : stage === 'outline_generation'
+                  ? validateOutlineGeneration(workspace, stage, artifacts)
+                  : stage === 'chapter_writing'
+                    ? validateChapterWriting(workspace, stage, artifacts)
+                    : validateOutlineConfirmation(workspace, stage, artifacts),
         },
       )
       await orchestrator.runCurrentProgramStage()
