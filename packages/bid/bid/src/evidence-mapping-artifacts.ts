@@ -20,7 +20,9 @@ const materialSchema = z.object({
 const mappingSchema = z.object({
   materials: z.array(materialSchema),
   missing_topics: z.array(z.string().min(1)),
-}).strict()
+}).strict().refine(mapping => mapping.materials.length > 0 || mapping.missing_topics.length > 0, {
+  message: 'a mapping requires material or a missing topic',
+})
 
 const requirementMappingSchema = mappingSchema.extend({ requirement_id: z.string().min(1) }).strict()
 const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()

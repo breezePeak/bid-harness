@@ -30,6 +30,11 @@ describe('evidence-map Artifact schema', () => {
     })).toThrow()
     expect(() => parseEvidenceMapArtifact({
       schema_version: 1,
+      requirement_mappings: [{ requirement_id: 'R', materials: [], missing_topics: [] }],
+      scoring_mappings: [],
+    })).toThrow()
+    expect(() => parseEvidenceMapArtifact({
+      schema_version: 1,
       requirement_mappings: [],
       scoring_mappings: [{
         scoring_id: 'S',
@@ -53,5 +58,22 @@ describe('evidence-mapping validator', () => {
     const result = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['EVIDENCE_MAPPING_REQUIREMENT_UNKNOWN', 'EVIDENCE_MAPPING_REQUIREMENT_MISSING', 'EVIDENCE_MAPPING_SCORING_MISSING', 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN']))
+  })
+
+  it('rejects material from a tender file', async () => {
+    const value = await fixture()
+    const manifest = await value.workspace.readManifest()
+    const tender = manifest.files.find(file => file.role === 'tender')
+    if (tender === undefined || tender.chunksPath === null || tender.chunkIndexPath === null) throw new Error('fixture tender missing')
+    const index = JSON.parse(await readFile(join(value.workspace.sessionRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+    const chunk = `${tender.chunksPath}/${index.chunks[0]!.path}`
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
+      schema_version: 1,
+      requirement_mappings: [{ requirement_id: 'R-1', materials: [{ file_id: tender.id, chunk, line_start: 1, line_end: 1, usage: 'reference', summary: '招标原文。' }], missing_topics: [] }],
+      scoring_mappings: [{ scoring_id: 'S-1', materials: [], missing_topics: ['缺少技术资料。'] }],
+    }))
+    const result = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_SOURCE_FILE_NOT_REFERENCE')
   })
 })

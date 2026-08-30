@@ -140,6 +140,29 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
     writeFile(join(analysisRoot, name), `${JSON.stringify(document, null, 2)}\n`, 'utf8')))
 }
 
+async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const manifest = await workspace.readManifest()
+  const [requirements, scoring] = await Promise.all([
+    readFile(join(workspace.sessionRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse) as Promise<{ requirements: Array<{ id: string }> }>,
+    readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse) as Promise<{ scoring_items: Array<{ id: string }> }>,
+  ])
+  const reference = manifest.files.find(file => file.role === 'reference' && file.parseStatus === 'success')
+  let materials: unknown[] = []
+  if (reference !== undefined && reference.chunksPath !== null && reference.chunkIndexPath !== null) {
+    const index = JSON.parse(await readFile(join(workspace.sessionRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+    const chunk = `${reference.chunksPath}/${index.chunks[0]!.path}`
+    const lines = (await readFile(join(workspace.sessionRoot, chunk), 'utf8')).split('\n').length
+    materials = [{ file_id: reference.id, chunk, line_start: 1, line_end: lines, usage: 'adapt', summary: '可复用技术资料。' }]
+  }
+  const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
+    schema_version: 1,
+    requirement_mappings: requirements.requirements.map(item => ({ requirement_id: item.id, materials, missing_topics })),
+    scoring_mappings: scoring.scoring_items.map(item => ({ scoring_id: item.id, materials, missing_topics })),
+  }, null, 2)}\n`, 'utf8')
+}
+
 function attach(
   ctx: Context,
   agentPreset?: string,
@@ -164,7 +187,8 @@ function attach(
     if (!analysisPending || agentPreset !== 'bid') return
     analysisPending = false
     if (analysisWriter === undefined) {
-      await writeTenderAnalysisArtifacts(cwd, session.id)
+      if (analysisAttempt++ === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
+      else await writeEvidenceMappingArtifact(cwd, session.id)
     } else {
       await analysisWriter(cwd, session.id, analysisAttempt++)
     }
@@ -228,7 +252,7 @@ describe('Bid Host runtime composition', () => {
     expect(steer).not.toHaveBeenCalled()
   })
 
-  it('imports a real batch, runs S2, and stops before S3', async () => {
+  it('imports a real batch, runs S2 and S3, then stops at outline generation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
     const { agent } = attach(ctx, 'bid', root)
@@ -240,34 +264,40 @@ describe('Bid Host runtime composition', () => {
       mediaType: 'text/markdown',
       size: bytes.byteLength,
       data: bytes.toString('base64'),
+    }, {
+      name: '技术资料.md',
+      role: 'reference',
+      mediaType: 'text/markdown',
+      size: bytes.byteLength,
+      data: bytes.toString('base64'),
     }])
 
-    expect(result).toEqual({ ok: true, value: { stage: 'evidence_mapping', status: 'pending' } })
+    expect(result).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'pending' } })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',
       'bid.stage.completed',
+      'bid.stage.started',
+      'bid.stage.completed',
     ])
-    expect(agent.session.events).not.toContainEqual(expect.objectContaining({
-      type: 'bid.stage.started',
-      data: expect.objectContaining({ stage: 'evidence_mapping' }),
-    }))
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
-      .toEqual({ stage: 'evidence_mapping', status: 'pending' })
+      .toEqual({ stage: 'outline_generation', status: 'pending' })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
     const manifest = JSON.parse(await readFile(workspace.manifestPath, 'utf8')) as Bid.BidManifest
-    expect(manifest.files).toMatchObject([{
+    expect(manifest.files[0]).toMatchObject({
       originalName: '招标要求.md',
       parseStatus: 'success',
       inputPath: 'input/招标要求.md',
       documentPath: 'corpus/招标要求.md/document.md',
       chunkIndexPath: 'corpus/招标要求.md/chunks/index.json',
-    }])
+    })
     await expect(readFile(join(workspace.sessionRoot, manifest.files[0]!.chunkIndexPath!), 'utf8'))
       .resolves.toContain('"schema_version": 1')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/project.json'), 'utf8'))
       .resolves.toContain('"analyzed_tender_files"')
+    await expect(readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8'))
+      .resolves.toContain('"requirement_mappings"')
   })
 
   it('drives a restored tender-analysis stage through agent/session-start', async () => {
@@ -288,9 +318,11 @@ describe('Bid Host runtime composition', () => {
 
     await vi.waitFor(() => {
       expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
-        .toEqual({ stage: 'evidence_mapping', status: 'pending' })
+        .toEqual({ stage: 'outline_generation', status: 'pending' })
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
+      'bid.stage.started',
+      'bid.stage.completed',
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',
@@ -338,7 +370,8 @@ describe('Bid Host runtime composition', () => {
             .rejects.toMatchObject({ code: 'ENOENT' })
         }
       }
-      await writeTenderAnalysisArtifacts(cwd, sessionId)
+      if (attempt === 2) await writeEvidenceMappingArtifact(cwd, sessionId)
+      else await writeTenderAnalysisArtifacts(cwd, sessionId)
       if (attempt === 0) {
         await writeFile(
           join(workspace.sessionRoot, 'analysis/requirements.json'),
@@ -412,7 +445,7 @@ describe('Bid Host runtime composition', () => {
     expect(success.ok).toBe(true)
     await expect(ctx.bid.uploadFiles(bid, [{ name: 'y.txt', role: 'tender', size: 1, data: one.toString('base64') }]))
       .resolves.toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_NOT_ALLOWED' } })
-    expect(bid.events).toHaveLength(4)
+    expect(bid.events).toHaveLength(6)
   })
 
   it('rejects only concurrent work for the same Session', async () => {
@@ -450,10 +483,12 @@ describe('Bid Host runtime composition', () => {
       role: 'tender',
       size: replacement.byteLength,
       data: replacement.toString('base64'),
-    }])).resolves.toEqual({ ok: true, value: { stage: 'evidence_mapping', status: 'pending' } })
+    }])).resolves.toEqual({ ok: true, value: { stage: 'outline_generation', status: 'pending' } })
     expect(session.events.map(event => event.type)).toEqual([
       'bid.stage.started',
       'bid.stage.failed',
+      'bid.stage.started',
+      'bid.stage.completed',
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',

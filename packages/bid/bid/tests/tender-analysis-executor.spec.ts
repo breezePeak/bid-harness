@@ -56,6 +56,8 @@ describe('tender-analysis Agent executor', () => {
     expect(message.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
     expect(message.content[0]?.text).toContain('首先读取：.bid-harness/sessions/session/manifest.json')
     expect(message.content[0]?.text).toContain('只把 manifest 中 role=tender')
+    expect(message.content[0]?.text).toContain('当前只分析技术标')
+    expect(message.content[0]?.text).toContain('投标报价、价格评分')
     expect(result.map(artifact => artifact.path)).toEqual(task.requiredArtifacts)
   })
 

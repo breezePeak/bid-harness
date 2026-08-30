@@ -47,8 +47,13 @@ function validateCoverage(
 async function validateMaterial(
   workspace: BidWorkspace, manifest: BidManifest, material: EvidenceMaterial, issues: StageValidationIssue[],
 ): Promise<void> {
-  const file = manifest.files.find(record => record.id === material.file_id)
-  if (file === undefined) { reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN', 'A material references no manifest file.', material.chunk); return }
+  const matchingFiles = manifest.files.filter(record => record.id === material.file_id)
+  if (matchingFiles.length === 0) { reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN', 'A material references no manifest file.', material.chunk); return }
+  const file = matchingFiles.find(record => record.role === 'reference')
+  if (file === undefined) {
+    reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_NOT_REFERENCE', 'A material must reference a reference-role file.', material.chunk)
+    return
+  }
   if (file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) {
     reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_INVALID', 'A material references an unparsed file.', material.chunk)
     return
