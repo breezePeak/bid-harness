@@ -116,10 +116,11 @@ export function BidStagePanel({
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
-  const [selectedRole, setSelectedRole] = useState<BidDocumentRole>('tender')
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<string | null>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
+  const tenderFileInput = useRef<HTMLInputElement>(null)
+  const referenceFileInput = useRef<HTMLInputElement>(null)
+  const selectedFilesRef = useRef<readonly BidSelectedFile[]>([])
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
 
@@ -164,8 +165,16 @@ export function BidStagePanel({
     })
   }
 
-  const selected = (event: ChangeEvent<HTMLInputElement>): void => {
-    setSelectedFiles(current => [...current, ...Array.from(event.currentTarget.files ?? []).map(file => ({ file, role: selectedRole }))])
+  const selected = (role: BidDocumentRole, event: ChangeEvent<HTMLInputElement>): void => {
+    const files = Array.from(event.currentTarget.files ?? []).map(file => ({ file, role }))
+    if (files.length === 0) return
+    const tender = files[0]
+    if (tender === undefined) return
+    const next = role === 'tender'
+      ? [...selectedFilesRef.current.filter(item => item.role !== 'tender'), tender]
+      : [...selectedFilesRef.current, ...files]
+    selectedFilesRef.current = next
+    setSelectedFiles(next)
     setRequestError(null)
     event.currentTarget.value = ''
   }
@@ -208,7 +217,9 @@ export function BidStagePanel({
                   aria-label={`${t('file.remove')}: ${file.name}`}
                   disabled={requestPending !== null}
                   onClick={() => {
-                    setSelectedFiles(current => current.filter((_, itemIndex) => itemIndex !== index))
+                    const next = selectedFilesRef.current.filter((_, itemIndex) => itemIndex !== index)
+                    selectedFilesRef.current = next
+                    setSelectedFiles(next)
                     setRequestError(null)
                   }}
                 >
@@ -223,46 +234,50 @@ export function BidStagePanel({
           {canUpload && (
             <>
               <input
-                ref={fileInput}
+                ref={tenderFileInput}
+                className={css.fileInput}
+                type="file"
+                accept={accept}
+                onChange={(event) => { selected('tender', event) }}
+              />
+              <input
+                ref={referenceFileInput}
                 className={css.fileInput}
                 type="file"
                 multiple
                 accept={accept}
-                onChange={selected}
+                onChange={(event) => { selected('reference', event) }}
               />
-              <label>
-                {t('file.role.label')}
-                <select
-                  aria-label={t('file.role.label')}
-                  disabled={requestPending !== null}
-                  value={selectedRole}
-                  onChange={(event) => { setSelectedRole(event.currentTarget.value as BidDocumentRole) }}
-                >
-                  <option value="tender">{t('file.role.tender')}</option>
-                  <option value="reference">{t('file.role.reference')}</option>
-                </select>
-              </label>
               <Button
                 size="sm"
                 variant="outline"
                 icon={<IconPaperclipOutline16 />}
                 disabled={requestPending !== null}
-                onClick={() => { fileInput.current?.click() }}
+                onClick={() => { tenderFileInput.current?.click() }}
               >
-                {t('action.choose')}
+                {t('action.upload_tender')}
               </Button>
-              {selectedFiles.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={requestPending !== null}
-                  onClick={() => {
-                    invoke('upload', () => uploadFiles(selectedFiles))
-                  }}
-                >
-                  {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
-                </Button>
-              )}
+              <Button
+                size="sm"
+                variant="outline"
+                icon={<IconPaperclipOutline16 />}
+                disabled={requestPending !== null}
+                onClick={() => { referenceFileInput.current?.click() }}
+              >
+                {t('action.upload_reference')}
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={
+                  requestPending !== null
+                  || !selectedFiles.some(item => item.role === 'tender')
+                  || !selectedFiles.some(item => item.role === 'reference')
+                }
+                onClick={() => { invoke('upload', () => uploadFiles(selectedFilesRef.current)) }}
+              >
+                {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
+              </Button>
             </>
           )}
           {canRetry && (

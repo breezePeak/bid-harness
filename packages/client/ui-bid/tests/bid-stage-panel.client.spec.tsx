@@ -77,26 +77,31 @@ describe('BidStagePanel', () => {
 
   it('shows file selection only when upload_files is admitted', () => {
     const view = render(<BidStagePanel {...props(projection())} />)
-    expect(screen.queryByRole('button', { name: '添加项目资料' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '上传标书' })).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
     }), { uploadFiles: vi.fn(async () => {}) })} />)
-    expect(screen.getByRole('button', { name: '添加项目资料' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '上传并解析' })).toBeNull()
-    const input = view.container.querySelector('input[type="file"]')
-    expect(input).not.toBeNull()
-    fireEvent.change(input!, {
+    expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '相关资料' })).toBeTruthy()
+    const inputs = view.container.querySelectorAll('input[type="file"]')
+    expect(inputs).toHaveLength(2)
+    fireEvent.change(inputs[0]!, {
       target: { files: [new File(['bid'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
-    expect(screen.getAllByText('招标资料')).toHaveLength(2)
+    expect(screen.getAllByText('招标资料')).toHaveLength(1)
     expect(screen.getByRole('button', { name: '上传并解析' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
+    fireEvent.change(inputs[1]!, {
+      target: { files: [new File(['reference'], '项目资料.pdf', { type: 'application/pdf' })] },
+    })
+    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', false)
     fireEvent.click(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' }))
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
-    expect(screen.queryByRole('button', { name: '上传并解析' })).toBeNull()
+    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
   })
 
   it('submits the selected files once and keeps them available after a Host refusal', async () => {
@@ -110,15 +115,22 @@ describe('BidStagePanel', () => {
       maxFiles: 2,
     }), { uploadFiles })} />)
     const file = new File(['# 招标要求'], 'requirements.md', { type: 'text/markdown' })
-    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+    const inputs = view.container.querySelectorAll('input[type="file"]')
+    fireEvent.change(inputs[0]!, {
       target: { files: [file] },
+    })
+    fireEvent.change(inputs[1]!, {
+      target: { files: [new File(['project'], 'project.md', { type: 'text/markdown' })] },
     })
 
     fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
     expect(uploadFiles).toHaveBeenCalledOnce()
-    expect(uploadFiles).toHaveBeenCalledWith([{ file, role: 'tender' }])
+    expect(uploadFiles).toHaveBeenCalledWith([
+      { file, role: 'tender' },
+      expect.objectContaining({ file: expect.any(File), role: 'reference' }),
+    ])
     expect(screen.getByRole('button', { name: '正在上传…' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '添加项目资料' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '上传标书' })).toHaveProperty('disabled', true)
     expect(screen.getByText('请添加本项目资料')).toBeTruthy()
 
     act(() => { first.reject(new Error('BID_FILE_INTAKE_NOT_ALLOWED')) })
@@ -139,7 +151,7 @@ describe('BidStagePanel', () => {
 
     expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
-    expect(screen.getByRole('button', { name: '添加项目资料' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
   })
 
   it('mirrors only projection.composer into the session block', async () => {
