@@ -46,7 +46,7 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'book_review', status: 'failed' })).toEqual({
       runtime: { stage: 'book_review', status: 'failed' },
-      allowedActions: [],
+      allowedActions: ['retry_stage'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
   })

@@ -44,6 +44,15 @@ export interface BidStagePanelInjected {
   confirmOutline?: (operations: readonly OutlineEditOperation[]) => Promise<void>
 }
 
+/** Structured Bid Host rejection retained for actionable panel feedback. */
+export class BidActionError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly issues: readonly { readonly code: string; readonly message: string }[] = [],
+  ) { super(message) }
+}
+
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
 export const inject = ['slots', 'locale', 'conversation', 'remote', 'remote.bid']
 
@@ -78,8 +87,12 @@ async function encodeFiles(files: readonly BidSelectedFile[]): Promise<BidUpload
   return encoded
 }
 
-function actionFailure(error: { readonly code: string; readonly message: string }): Error {
-  return new Error(`${error.message} (${error.code})`)
+function actionFailure(error: {
+  readonly code: string
+  readonly message: string
+  readonly issues?: readonly { readonly code: string; readonly message: string }[]
+}): Error {
+  return new BidActionError(error.code, `${error.message} (${error.code})`, error.issues)
 }
 
 /**

@@ -558,6 +558,11 @@ describe('Bid Host runtime composition', () => {
     expect(confirmation).toMatchObject({ scope: 'technical_bid', decision: 'confirmed' })
     expect(confirmation.source_outline_sha256).toBe(Bid.outlineArtifactSha256(draft))
     expect(confirmation.confirmed_outline_sha256).toBe(Bid.outlineArtifactSha256(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8'))))
+    expect(agent.session.events.find(event => event.type === 'bid.stage.completed' && event.data.stage === 'outline_confirmation'))
+      .toMatchObject({ data: { artifacts: [
+        { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
+        { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
+      ] } })
   })
 
   it('keeps S5 waiting when deletion removes mandatory coverage', async () => {

@@ -10,9 +10,9 @@ S4 产出 Agent 草稿，而后续写作需要保留草稿并验证用户修改�
 
 ## Decision
 
-S5 只在 `outline_confirmation/waiting_user` 读取 `outline/outline.json`，由 Host 应用编辑操作，并写入 `outline/confirmed-outline.json` 与 `outline/confirmation.json`。草稿和正式目录复用同一严格 Schema。确认记录只保存确认决定及两份产物的 SHA-256。
+S5 只在 `outline_confirmation/waiting_user` 读取 `outline/outline.json`，由 Host 对运行时校验过的编辑操作进行应用，并写入 `outline/confirmed-outline.json` 与 `outline/confirmation.json`。草稿和正式目录复用同一严格 Schema。确认记录保存确认决定及两份产物的 SHA-256。
 
-Host 控制章节 ID 以及 Requirement、Scoring、Compliance 映射 ID。写入 S5 产物前复用 S4 树结构与覆盖率校验。无效用户修改返回可展示问题并保持等待编辑；成功确认记录既有用户确认和阶段完成事件，使 Projection 推进到 `chapter_writing/pending`。
+Host 控制章节 ID 以及 Requirement、Scoring、Compliance 映射 ID。写入 S5 产物前复用 S4 树结构与覆盖率校验。完成校验器通过工作区安全的普通文件读取重新读取两份 S5 产物、S4 草稿和 S2 分析产物，校验 Schema、目录树、覆盖率、产物集合和两份哈希，随后才授权记录两份 S5 产物的完成事件。无效用户修改返回可展示问题并保持等待编辑；失败的 S5 用户阶段重试后恢复为等待编辑；成功确认使 Projection 推进到 `chapter_writing/pending`。
 
 ## Alternatives considered
 
@@ -24,4 +24,4 @@ Host 控制章节 ID 以及 Requirement、Scoring、Compliance 映射 ID。写�
 
 ## Consequences
 
-S6 可消费唯一的正式技术标目录，而不会把 S4 草稿作为最终版本。Host 只接受已定义编辑操作；更丰富的浏览器编辑仍由客户端负责。
+S6 可消费唯一的正式技术标目录，而不会把 S4 草稿作为最终版本。Host 只接受已定义编辑操作，移动后重排同级顺序并重算整棵移动子树的层级。浏览器保留并展示结构化修改问题，并提供基础新增、删除、排序和取消缩进操作。

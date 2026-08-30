@@ -185,6 +185,32 @@ describe('BidStagePanel', () => {
     await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith([]) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
   })
+
+  it('edits outline text and emits basic structural operations', async () => {
+    const confirmOutline = vi.fn(async (_operations: readonly unknown[]) => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      allowedActions: ['confirm_outline'],
+    }), {
+      confirmOutline,
+      getOutlineForConfirmation: async () => ({
+        schema_version: 1, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
+          id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
+          must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+        }],
+      }),
+    })} />)
+    const title = await screen.findByLabelText('SEC-1 标题')
+    fireEvent.change(title, { target: { value: '更新标题' } })
+    fireEvent.click(screen.getByRole('button', { name: '新增同级' }))
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认' }))
+    await waitFor(() => expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
+      expect.objectContaining({ type: 'add_section' }),
+      expect.objectContaining({ type: 'delete_section', section_id: 'SEC-1' }),
+    ])))
+  })
 })
 
 describe('ui-bid browser plugin', () => {

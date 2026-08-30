@@ -429,11 +429,10 @@ describe('BidOrchestrator', () => {
       event.type === 'bid.stage.completed' && event.data.stage === 'outline_confirmation')
     expect(confirmationCompletion).toMatchObject({
       data: {
-        artifacts: [{
-          stage: 'outline_confirmation',
-          type: 'outline_confirmation',
-          path: 'outline/confirmation.json',
-        }],
+        artifacts: [
+          { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
+          { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
+        ],
       },
     })
   })

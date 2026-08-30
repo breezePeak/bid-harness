@@ -84,9 +84,14 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     stage: 'chapter_writing',
     executor: 'agent',
     requiredInputs: [
+      'manifest.json',
+      'analysis/project.json',
+      'analysis/requirements.json',
+      'analysis/scoring.json',
+      'analysis/compliance.json',
+      'analysis/evidence-map.json',
       'outline/confirmed-outline.json',
       'outline/confirmation.json',
-      'analysis/evidence-map.json',
     ],
     allowedTools: ['grep', 'read', 'write'],
     forbiddenTools: ['bash', 'web_search'],
@@ -149,7 +154,7 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
     '只写入要求的目录 Artifact。',
   ],
   outline_confirmation: ['必须取得用户的明确决定。', '必须固化已确认目录。', '不得调用 Agent。'],
-  chapter_writing: ['遵循已确认的目录。', '所有主张必须以证据映射为依据。'],
+  chapter_writing: ['遵循已确认的目录。', '企业事实、产品参数、人员经验和既有能力必须有本地 Evidence。', '技术方案设计可依据招标要求、Blueprint、Evidence 和通用技术知识。', '没有可靠依据时不得虚构数字、标准号或企业能力。'],
   book_review: ['在要求的审核 Artifact 中记录未解决缺陷。', '不得改写控制面状态。'],
   docx_export: ['只导出已通过校验的章节内容。', '不得调用 Agent。'],
 }
@@ -251,10 +256,7 @@ export function getBidClientProjection(
   if (runtime.status === 'failed') {
     return {
       runtime: { ...runtime },
-      allowedActions: runtime.stage === 'file_intake'
-        ? ['upload_files']
-        : runtime.stage === 'tender_analysis' || runtime.stage === 'evidence_mapping' || runtime.stage === 'outline_generation'
-          ? ['retry_stage'] : [],
+      allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
       ...fileView,
     }
