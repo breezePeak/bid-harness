@@ -241,7 +241,9 @@ export function getBidClientProjection(
   if (runtime.status === 'failed') {
     return {
       runtime: { ...runtime },
-      allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : [],
+      allowedActions: runtime.stage === 'file_intake'
+        ? ['upload_files']
+        : runtime.stage === 'tender_analysis' ? ['retry_stage'] : [],
       composer: { enabled: false, reason: 'bid.stage_failed' },
       ...fileView,
     }

@@ -45,14 +45,17 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
       chunks: Array<{ path: string }>
     }
     const chunk = index.chunks[0]!
+    const chunkPath = join(workspace.sessionRoot, file.chunksPath!, chunk.path)
+    const lineCount = (await readFile(chunkPath, 'utf8')).split('\n').length
     return {
       file_id: file.id,
       chunk: `${file.chunksPath!}/${chunk.path}`,
       line_start: 1,
-      line_end: 1,
+      line_end: lineCount,
     }
   }))
   const firstRef = refs[0]!
+  const sourceText = (await readFile(join(workspace.sessionRoot, firstRef.chunk), 'utf8')).trim()
   const documents = {
     'project.json': {
       schema_version: 1,
@@ -71,7 +74,7 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
       requirements: [{
         id: 'REQ-1',
         category: 'delivery',
-        raw_text: '按期交付。',
+        raw_text: sourceText,
         normalized_requirement: '按期交付',
         mandatory: true,
         source_refs: [firstRef],
@@ -84,7 +87,7 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
         parent: null,
         group: null,
         title: '交付能力',
-        raw_text: '按期交付。',
+        raw_text: sourceText,
         criterion: '满足交付期限',
         score: null,
         score_range: null,
@@ -97,7 +100,7 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
       compliance_items: [{
         id: 'COMP-1',
         type: 'delivery',
-        raw_text: '按期交付。',
+        raw_text: sourceText,
         normalized_rule: '必须按期交付',
         severity: 'mandatory',
         source_refs: [firstRef],
@@ -110,7 +113,12 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
     writeFile(join(analysisRoot, name), `${JSON.stringify(document, null, 2)}\n`, 'utf8')))
 }
 
-function attach(ctx: Context, agentPreset?: string, cwd = '/workspace'): {
+function attach(
+  ctx: Context,
+  agentPreset?: string,
+  cwd = '/workspace',
+  analysisWriter?: (cwd: string, sessionId: string, attempt: number) => Promise<void>,
+): {
   agent: Agent
   followup: ReturnType<typeof vi.fn>
   steer: ReturnType<typeof vi.fn>
@@ -121,16 +129,25 @@ function attach(ctx: Context, agentPreset?: string, cwd = '/workspace'): {
   const followup = vi.fn()
   const steer = vi.fn()
   let analysisPending = false
+  let analysisAttempt = 0
   followup.mockImplementation(() => {
     analysisPending = true
   })
   const restrict = vi.fn(() => vi.fn())
   const guard = vi.fn(() => vi.fn())
   Object.defineProperty(ctx, 'tools', { value: { restrict, guard }, configurable: true })
+  Object.defineProperty(ctx, 'fs', {
+    value: { resolve: async (path: string) => ({ targetKey: path, displayPath: path }) },
+    configurable: true,
+  })
   const whenIdle = vi.fn(async () => {
     if (!analysisPending || agentPreset !== 'bid') return
     analysisPending = false
-    await writeTenderAnalysisArtifacts(cwd, session.id)
+    if (analysisWriter === undefined) {
+      await writeTenderAnalysisArtifacts(cwd, session.id)
+    } else {
+      await analysisWriter(cwd, session.id, analysisAttempt++)
+    }
   })
   const agent = {
     id: session.id,
@@ -227,6 +244,58 @@ describe('Bid Host runtime composition', () => {
       .resolves.toContain('"schema_version": 1')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/project.json'), 'utf8'))
       .resolves.toContain('"analyzed_tender_files"')
+  })
+
+  it('returns an S2 failure as runtime state and retries only S2', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const writer = async (cwd: string, sessionId: string, attempt: number): Promise<void> => {
+      const workspace = new Bid.BidWorkspace(cwd, sessionId)
+      if (attempt === 1) {
+        for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
+          await expect(readFile(join(workspace.sessionRoot, 'analysis', name), 'utf8'))
+            .rejects.toMatchObject({ code: 'ENOENT' })
+        }
+      }
+      await writeTenderAnalysisArtifacts(cwd, sessionId)
+      if (attempt === 0) {
+        await writeFile(
+          join(workspace.sessionRoot, 'analysis/requirements.json'),
+          '{ invalid json',
+          'utf8',
+        )
+      }
+    }
+    const { agent } = attach(ctx, 'bid', root, writer)
+    const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
+    const files = [{
+      name: '招标要求.md',
+      role: 'tender' as const,
+      mediaType: 'text/markdown',
+      size: bytes.byteLength,
+      data: bytes.toString('base64'),
+    }]
+
+    await expect(ctx.bid.uploadFiles(agent.session, files)).resolves.toEqual({
+      ok: true,
+      value: { stage: 'tender_analysis', status: 'failed', failureReason: expect.stringContaining('TENDER_ANALYSIS_ARTIFACT_INVALID') },
+    })
+    expect(agent.session.events.map(event => event.type)).toEqual([
+      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.failed',
+    ])
+    expect(ctx.sessionProjections.snapshot(agent.session).values[Bid.BID_RUNTIME_PROJECTION_KEY])
+      .toMatchObject({ runtime: { stage: 'tender_analysis', status: 'failed' }, allowedActions: ['retry_stage'] })
+
+    await expect(ctx.bid.retryStage(agent.session)).resolves.toEqual({
+      ok: true,
+      value: { stage: 'evidence_mapping', status: 'pending' },
+    })
+    expect(agent.session.events.map(event => event.type)).toEqual([
+      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.failed',
+      'bid.stage.started', 'bid.stage.completed',
+    ])
   })
 
   it('rejects non-Bid, invalid, and no-longer-admitted batches before a stage starts', async () => {

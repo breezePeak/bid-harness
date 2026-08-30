@@ -99,6 +99,11 @@ export function apply(ctx: ClientContext): void {
           reason === undefined ? undefined : { reason },
         )
       },
+      retryStage: async () => {
+        const result = await ctx.remote.bid.retryStage(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
       uploadFiles: async (files) => {
         const result = await ctx.remote.bid.uploadFiles(
           sessionId,

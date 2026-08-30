@@ -34,6 +34,8 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeResult,
+  BidRetryErrorCode,
+  BidRetryResult,
   BidRuntimeState,
   BidUploadFile,
   StageArtifact,
@@ -54,6 +56,9 @@ export type {
   BidFileIntakeErrorCode,
   BidFileIntakeFailure,
   BidFileIntakeResult,
+  BidRetryErrorCode,
+  BidRetryFailure,
+  BidRetryResult,
 
   BidRuntimeState,
   BidStage,
@@ -175,6 +180,16 @@ function intakeSuccess(value: BidRuntimeState): BidFileIntakeResult {
 /** Build one immutable, sanitized business rejection. */
 function intakeRejected(code: BidFileIntakeErrorCode, message: string): BidFileIntakeResult {
   return Object.freeze({ ok: false, error: Object.freeze({ code, message }) })
+}
+
+/** Build one immutable, sanitized retry rejection. */
+function retryRejected(code: BidRetryErrorCode, message: string): BidRetryResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message }) })
+}
+
+/** Build one immutable retry success result from the Host's log-derived state. */
+function retrySuccess(value: BidRuntimeState): BidRetryResult {
+  return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
 }
 
 /** Convert canonical browser base64 into importer bytes after size admission. */
@@ -320,10 +335,13 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       await this.ctx.sessions.flush(session)
       if (next.status === 'failed') {
-        return intakeRejected(
-          'BID_FILE_INTAKE_FAILED',
-          next.failureReason ?? 'The Bid Host rejected the imported file artifacts.',
-        )
+        if (next.stage === 'file_intake') {
+          return intakeRejected(
+            'BID_FILE_INTAKE_FAILED',
+            next.failureReason ?? 'The Bid Host rejected the imported file artifacts.',
+          )
+        }
+        return intakeSuccess(next)
       }
       return intakeSuccess(next)
     } catch (error: unknown) {
@@ -334,6 +352,55 @@ export class BidHostRuntime extends TypertRemoteService {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', error.message)
       }
       return intakeError(error)
+    } finally {
+      this.inFlight.delete(session.id)
+    }
+  }
+
+  /**
+   * Retry the failed tender-analysis stage through the live Bid Agent.
+   * @param session - Host-resolved live Session whose event log authorizes the retry.
+   * @returns the post-retry runtime state, including a failed S2 state when validation rejects again.
+   */
+  @Remote('retryStage')
+  async retryStage(session: Session): Promise<BidRetryResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return retryRejected('BID_SESSION_REQUIRED', 'Retry requires a Bid Session with a Host workspace.')
+    }
+    if (this.inFlight.has(session.id)) {
+      return retryRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
+    }
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('retry_stage')) {
+        return retryRejected('BID_RETRY_NOT_ALLOWED', 'Retry is not allowed in the current Bid stage state.')
+      }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const orchestrator = new BidOrchestrator(
+        session,
+        {
+          execute: (task) => task.stage === 'tender_analysis'
+            ? executeTenderAnalysis(agent, workspace, task)
+            : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+        },
+        {
+          validate: (stage, artifacts) => validateTenderAnalysis(workspace, stage, artifacts),
+        },
+      )
+      const next = await orchestrator.retryCurrentAutomaticStage()
+      await this.ctx.sessions.flush(session)
+      return retrySuccess(next)
+    } catch (error: unknown) {
+      if (error instanceof BidOrchestratorError) {
+        if (error.code === 'BID_OPERATION_IN_PROGRESS') {
+          return retryRejected('BID_OPERATION_IN_PROGRESS', error.message)
+        }
+        return retryRejected('BID_RETRY_NOT_ALLOWED', error.message)
+      }
+      return retryRejected('BID_RETRY_FAILED', 'The Bid Host could not retry the current stage.')
     } finally {
       this.inFlight.delete(session.id)
     }

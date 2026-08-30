@@ -37,6 +37,13 @@ describe('Bid client projection', () => {
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
+    expect(getBidClientProjection({
+      stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation',
+    })).toEqual({
+      runtime: { stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation' },
+      allowedActions: ['retry_stage'],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+    })
     expect(getBidClientProjection({ stage: 'book_review', status: 'failed' })).toEqual({
       runtime: { stage: 'book_review', status: 'failed' },
       allowedActions: [],

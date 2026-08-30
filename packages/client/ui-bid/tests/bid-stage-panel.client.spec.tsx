@@ -186,11 +186,16 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'tender_analysis' as const, status: 'pending' as const } },
       })
+    const remoteRetry = vi.fn<(_sessionId: string) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'pending' as const } },
+      })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
-      remote: { bid: { uploadFiles: remoteUpload } },
+      remote: { bid: { uploadFiles: remoteUpload, retryStage: remoteRetry } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -207,6 +212,7 @@ describe('ui-bid browser plugin', () => {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'reference' }[]) => Promise<void>
+        retryStage: () => Promise<void>
       }
     }
     const injected = options.inject('session_bid')
@@ -236,5 +242,8 @@ describe('ui-bid browser plugin', () => {
       },
     })
     await expect(injected.uploadFiles([{ file, role: 'reference' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
+
+    await injected.retryStage()
+    expect(remoteRetry).toHaveBeenCalledWith('session_bid')
   })
 })

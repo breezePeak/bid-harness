@@ -41,12 +41,16 @@ async function fixture(): Promise<{
   }
   const tenderIndex = JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
   const referenceIndex = JSON.parse(await readFile(reference.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
+  const tenderChunk = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
+  const tenderChunkLineEnd = (await readFile(join(workspace.sessionRoot, tenderChunk), 'utf8')).split('\n').length
+  const referenceChunk = `${reference.chunksPath}/${referenceIndex.chunks[0]!.path}`
+  const referenceChunkLineEnd = (await readFile(join(workspace.sessionRoot, referenceChunk), 'utf8')).split('\n').length
   return {
     workspace,
     tenderId: tender.id,
     referenceId: reference.id,
-    source: { file_id: tender.id, chunk: `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`, line_start: 1, line_end: 1 },
-    referenceSource: { file_id: reference.id, chunk: `${reference.chunksPath}/${referenceIndex.chunks[0]!.path}`, line_start: 1, line_end: 1 },
+    source: { file_id: tender.id, chunk: tenderChunk, line_start: 1, line_end: tenderChunkLineEnd },
+    referenceSource: { file_id: reference.id, chunk: referenceChunk, line_start: 1, line_end: referenceChunkLineEnd },
   }
 }
 
@@ -116,6 +120,21 @@ describe('tender-analysis validator', () => {
     const value = await fixture()
     await publish(value.workspace, documents(value.tenderId, value.source))
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it.each([
+    ['requirements.json', 'requirements'],
+    ['scoring.json', 'scoring_items'],
+    ['compliance.json', 'compliance_items'],
+  ])('rejects %s raw_text that is absent from its cited source range', async (artifactName, itemKey) => {
+    const value = await fixture()
+    const docs = documents(value.tenderId, value.source)
+    const artifact = docs[artifactName] as Record<string, unknown>
+    const items = artifact[itemKey] as Array<Record<string, unknown>>
+    items[0]!.raw_text = '必须建设三座数据中心。'
+    await publish(value.workspace, docs)
+    const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
+    expect(codes(result)).toContain('TENDER_ANALYSIS_SOURCE_TEXT_MISMATCH')
   })
 
   it('rejects missing files and invalid JSON', async () => {

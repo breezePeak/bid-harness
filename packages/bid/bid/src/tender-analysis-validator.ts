@@ -62,15 +62,6 @@ function duplicateIds(values: readonly { id: string }[]): string[] {
   return [...duplicates]
 }
 
-function refsOf(artifacts: ParsedArtifacts): TenderSourceRef[] {
-  return [
-    ...artifacts.project.source_refs,
-    ...artifacts.requirements.requirements.flatMap(item => item.source_refs),
-    ...artifacts.scoring.scoring_items.flatMap(item => item.source_refs),
-    ...artifacts.compliance.compliance_items.flatMap(item => item.source_refs),
-  ]
-}
-
 function tenderRecords(manifest: BidManifest): ManifestFile[] {
   return manifest.files.filter(file => file.role === 'tender' && file.parseStatus === 'success')
 }
@@ -80,19 +71,19 @@ async function validateSourceRef(
   manifest: BidManifest,
   ref: TenderSourceRef,
   issues: StageValidationIssue[],
-): Promise<void> {
+): Promise<string | null> {
   const candidates = manifest.files.filter(file => file.id === ref.file_id)
   if (candidates.length === 0) {
     reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN', 'A source reference names no manifest file.', ref.chunk)
-    return
+    return null
   }
   if (candidates.every(file => file.role !== 'tender')) {
     reject(issues, 'TENDER_ANALYSIS_SOURCE_ROLE_INVALID', 'A reference file cannot authorize tender requirements.', ref.chunk)
-    return
+    return null
   }
   if (candidates.every(file => file.parseStatus !== 'success')) {
     reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_INVALID', 'A source reference names an unparsed tender file.', ref.chunk)
-    return
+    return null
   }
   for (const record of candidates) {
     if (record.role !== 'tender' || record.parseStatus !== 'success'
@@ -111,16 +102,46 @@ async function validateSourceRef(
     try {
       const chunkPath = within(workspace.sessionRoot, ref.chunk)
       await assertNoLinkedPath(workspace.root, chunkPath)
-      const lineCount = (await readFile(chunkPath, 'utf8')).split('\n').length
+      const chunk = await readFile(chunkPath, 'utf8')
+      const lines = chunk.split('\n')
+      const lineCount = lines.length
       if (ref.line_start > lineCount || ref.line_end > lineCount) {
         reject(issues, 'TENDER_ANALYSIS_SOURCE_LINE_INVALID', 'A source line range leaves its chunk.', ref.chunk)
       }
-      return
+      return ref.line_start > lineCount || ref.line_end > lineCount
+        ? null
+        : lines.slice(ref.line_start - 1, ref.line_end).join('\n')
     } catch {
       break
     }
   }
   reject(issues, 'TENDER_ANALYSIS_SOURCE_CHUNK_INVALID', 'A source reference does not name a real chunk owned by its tender file.', ref.chunk)
+  return null
+}
+
+function normalizeSourceText(value: string): string {
+  return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').replace(/\s+/gu, ' ').trim()
+}
+
+async function validateRawText(
+  workspace: BidWorkspace,
+  manifest: BidManifest,
+  artifact: string,
+  rawText: string,
+  refs: readonly TenderSourceRef[],
+  issues: StageValidationIssue[],
+): Promise<void> {
+  const normalizedRawText = normalizeSourceText(rawText)
+  const sourceRanges = await Promise.all(refs.map(ref => validateSourceRef(workspace, manifest, ref, issues)))
+  if (sourceRanges.some(range => range !== null && normalizeSourceText(range).includes(normalizedRawText))) return
+  if (sourceRanges.some(range => range !== null)) {
+    reject(
+      issues,
+      'TENDER_ANALYSIS_SOURCE_TEXT_MISMATCH',
+      'An Artifact raw_text does not occur in its cited tender source range.',
+      artifact,
+    )
+  }
 }
 
 function validateCoverage(
@@ -207,6 +228,17 @@ export async function validateTenderAnalysis(
       reject(issues, 'TENDER_ANALYSIS_DUPLICATE_ID', `Artifact contains duplicate id ${JSON.stringify(id)}.`, path)
     }
   }
-  await Promise.all(refsOf(parsed).map(ref => validateSourceRef(workspace, manifest, ref, issues)))
+  await Promise.all([
+    ...parsed.project.source_refs.map(ref => validateSourceRef(workspace, manifest, ref, issues)),
+    ...parsed.requirements.requirements.map(item => validateRawText(
+      workspace, manifest, 'analysis/requirements.json', item.raw_text, item.source_refs, issues,
+    )),
+    ...parsed.scoring.scoring_items.map(item => validateRawText(
+      workspace, manifest, 'analysis/scoring.json', item.raw_text, item.source_refs, issues,
+    )),
+    ...parsed.compliance.compliance_items.map(item => validateRawText(
+      workspace, manifest, 'analysis/compliance.json', item.raw_text, item.source_refs, issues,
+    )),
+  ])
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

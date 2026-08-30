@@ -251,6 +251,59 @@ describe('BidOrchestrator', () => {
     ])
   })
 
+  it('retries only failed tender analysis and stops before evidence mapping execution', async () => {
+    const session = createSession('bid-retry-single-stage')
+    let tenderAttempts = 0
+    const executor = new RecordingExecutor(async (task) => {
+      if (task.stage === 'tender_analysis' && tenderAttempts++ === 0) throw new Error('invalid artifacts')
+      return artifactsFor(task)
+    })
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await orchestrator.runCurrentProgramStage()
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'tender_analysis', status: 'failed', failureReason: 'executor failed: Error: invalid artifacts',
+    })
+    await expect(orchestrator.retryCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'evidence_mapping', status: 'pending',
+    })
+
+    expect(executor.tasks.map(task => task.stage)).toEqual([
+      'file_intake', 'tender_analysis', 'tender_analysis',
+    ])
+    expect(session.events.map(event => event.type)).toEqual([
+      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.failed',
+      'bid.stage.started', 'bid.stage.completed',
+    ])
+    expect(() => orchestrator.retryCurrentAutomaticStage()).toThrow(
+      expect.objectContaining({ code: 'BID_RETRY_NOT_ALLOWED' }),
+    )
+  })
+
+  it('keeps tender analysis failed when its single retry fails again', async () => {
+    const session = createSession('bid-retry-single-stage-failed')
+    const executor = new RecordingExecutor(async (task) => {
+      if (task.stage === 'tender_analysis') throw new Error('still invalid')
+      return artifactsFor(task)
+    })
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await orchestrator.runCurrentProgramStage()
+    await orchestrator.runCurrentAutomaticStage()
+    await expect(orchestrator.retryCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'tender_analysis', status: 'failed', failureReason: 'executor failed: Error: still invalid',
+    })
+    expect(executor.tasks.map(task => task.stage)).toEqual([
+      'file_intake', 'tender_analysis', 'tender_analysis',
+    ])
+    expect(session.events.map(event => event.type)).toEqual([
+      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.failed',
+      'bid.stage.started', 'bid.stage.failed',
+    ])
+  })
+
   it('automatically executes successful stages until outline confirmation waits for the user', async () => {
     const session = createSession('bid-drive-success')
     const executor = new RecordingExecutor()

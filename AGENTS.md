@@ -84,6 +84,10 @@ pnpm run demo:acp       # ACP automation server (needs DEEPSEEK_API_KEY)
 
 When required `gh`, `pnpm`, build, test, or generator commands fail because the agent sandbox blocks credentials, network, IPC, file watching, or nested `sandbox-exec`, retry unchanged with the narrowest host escalation before diagnosing authentication or project failure. Require sandbox evidence; never bypass genuine test failures or the product sandbox under test.
 
+### Dependency installation
+
+除非用户明确要求安装、升级或修复依赖，否则不得运行 `pnpm install`、重建 `node_modules` 或执行会隐式安装依赖的命令。新增对仓库现有 workspace package 的直接引用时，只修改必要的 package manifest 和锁文件记录；本地依赖缺失或损坏时报告阻塞，不得自行修复。
+
 ### Run relevant checks locally
 
 Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/SKILL.md); report only commands run. After `gh stack sync`, validate immediately; do not merge before checks pass.

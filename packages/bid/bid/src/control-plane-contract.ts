@@ -153,6 +153,24 @@ export type BidFileIntakeResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
+/** Stable business rejection codes returned by the Bid retry action. */
+export type BidRetryErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_RETRY_NOT_ALLOWED'
+  | 'BID_RETRY_FAILED'
+
+/** Sanitized Bid retry business failure. */
+export interface BidRetryFailure {
+  readonly code: BidRetryErrorCode
+  readonly message: string
+}
+
+/** Result returned after one dedicated Bid retry request settles. */
+export type BidRetryResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: BidRetryFailure }
+
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =
   | { admitted: true; stage: BidStage; input: string }

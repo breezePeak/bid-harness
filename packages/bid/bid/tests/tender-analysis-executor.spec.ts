@@ -20,11 +20,13 @@ describe('tender-analysis Agent executor', () => {
       policy = next
       return liftGuard
     })
+    const resolve = vi.fn(async (path: string) => ({ targetKey: path, displayPath: path }))
+    const emit = vi.fn()
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {})
     const agent = {
       id: 'session',
-      ctx: { tools: { guard, restrict } },
+      ctx: { tools: { guard, restrict }, fs: { resolve }, emit },
       followup,
       whenIdle,
     } as unknown as Agent
@@ -36,6 +38,14 @@ describe('tender-analysis Agent executor', () => {
     expect(whenIdle).toHaveBeenCalledTimes(2)
     expect(restrict).toHaveBeenCalledWith({ allow: ['grep', 'read', 'write'] })
     expect(guard).toHaveBeenCalledOnce()
+    expect(resolve).toHaveBeenCalledTimes(4)
+    expect(emit).toHaveBeenCalledTimes(4)
+    expect(emit).toHaveBeenCalledWith(
+      'fs/observed',
+      expect.objectContaining({ displayPath: expect.stringContaining('analysis/project.json') }),
+      { kind: 'absent' },
+      { agent },
+    )
     expect(policy({ name: 'read' })).toBeUndefined()
     expect(policy({ name: 'bash' })).toContain('allows only grep, read, write')
     expect(liftGuard).toHaveBeenCalledOnce()

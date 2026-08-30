@@ -1,6 +1,7 @@
 import { mkdir, rm } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
@@ -64,7 +65,12 @@ export async function executeTenderAnalysis(
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
-  await Promise.all(task.requiredArtifacts.map(path => rm(join(workspace.sessionRoot, path), { force: true })))
+  await Promise.all(task.requiredArtifacts.map(async (path) => {
+    const artifactPath = join(workspace.sessionRoot, path)
+    await rm(artifactPath, { force: true })
+    const target = await agent.ctx.fs.resolve(artifactPath)
+    agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
+  }))
   const allowed = new Set(task.allowedTools)
   const liftRestriction = agent.ctx.tools.restrict({ allow: task.allowedTools })
   const liftGuard = agent.ctx.tools.guard(exec => allowed.has(exec.name)
