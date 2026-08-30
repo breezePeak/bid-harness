@@ -76,7 +76,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     requiredInputs: ['outline/outline.json'],
     allowedTools: [],
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
-    requiredArtifacts: ['outline/confirmation.json'],
+    requiredArtifacts: ['outline/confirmed-outline.json', 'outline/confirmation.json'],
     validator: 'outline-confirmation-validator',
     nextStage: 'chapter_writing',
   },
@@ -84,7 +84,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     stage: 'chapter_writing',
     executor: 'agent',
     requiredInputs: [
-      'outline/outline.json',
+      'outline/confirmed-outline.json',
       'outline/confirmation.json',
       'analysis/evidence-map.json',
     ],
@@ -121,7 +121,7 @@ const OBJECTIVES: { readonly [K in BidStage]: string } = {
   tender_analysis: '提取招标项目、要求、评分项和合规规则。',
   evidence_mapping: '为技术标要求和评分项映射可用的本地技术写作素材。',
   outline_generation: '生成可直接指导后续章节写作的详细技术标 Blueprint。',
-  outline_confirmation: '记录用户对投标目录的确认决定。',
+  outline_confirmation: '确认技术标目录并固化供章节写作使用的最终版本。',
   chapter_writing: '依据证据映射编写已确认目录中的全部章节。',
   book_review: '审核整本投标文件的完整性和内部一致性。',
   docx_export: '把已通过校验的投标内容导出为 DOCX。',
@@ -148,7 +148,7 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
     '不得使用 Web Search、grep 或生成章节正文。',
     '只写入要求的目录 Artifact。',
   ],
-  outline_confirmation: ['必须取得用户的明确决定。', '不得调用 Agent。'],
+  outline_confirmation: ['必须取得用户的明确决定。', '必须固化已确认目录。', '不得调用 Agent。'],
   chapter_writing: ['遵循已确认的目录。', '所有主张必须以证据映射为依据。'],
   book_review: ['在要求的审核 Artifact 中记录未解决缺陷。', '不得改写控制面状态。'],
   docx_export: ['只导出已通过校验的章节内容。', '不得调用 Agent。'],
@@ -253,7 +253,8 @@ export function getBidClientProjection(
       runtime: { ...runtime },
       allowedActions: runtime.stage === 'file_intake'
         ? ['upload_files']
-        : getBidStagePolicy(runtime.stage).executor !== 'user' ? ['retry_stage'] : [],
+        : runtime.stage === 'tender_analysis' || runtime.stage === 'evidence_mapping' || runtime.stage === 'outline_generation'
+          ? ['retry_stage'] : [],
       composer: { enabled: false, reason: 'bid.stage_failed' },
       ...fileView,
     }
@@ -285,7 +286,7 @@ export function getBidClientProjection(
   if (runtime.stage === 'outline_confirmation' && runtime.status === 'waiting_user') {
     return {
       runtime: { ...runtime },
-      allowedActions: [],
+      allowedActions: ['confirm_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
       ...fileView,
     }

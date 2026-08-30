@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidStage, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -26,6 +26,7 @@ export type BidStagePanelProps =
 
 type PendingAction = 'upload' | 'retry' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
+type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 
 function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
@@ -111,6 +112,7 @@ export function BidStagePanel({
   uploadFiles,
   retryStage,
   confirmOutline,
+  getOutlineForConfirmation,
   t,
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
@@ -118,6 +120,8 @@ export function BidStagePanel({
   const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<string | null>(null)
+  const [outline, setOutline] = useState<OutlineArtifact | null>(null)
+  const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly BidSelectedFile[]>([])
@@ -134,17 +138,24 @@ export function BidStagePanel({
     [projection, t],
   )
   const hasProjection = isBidSession && projection !== undefined
+  const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
   useEffect(() => {
     if (!hasProjection) return
     setComposerBlock(blockedReason)
     return () => { setComposerBlock(undefined) }
   }, [blockedReason, hasProjection, setComposerBlock])
 
+  useEffect(() => {
+    if (!canConfirm || getOutlineForConfirmation === undefined) return
+    void getOutlineForConfirmation().then((value) => { if (alive.current) setOutline(value) }, (reason: unknown) => {
+      if (alive.current) setRequestError(t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }))
+    })
+  }, [canConfirm, getOutlineForConfirmation, t])
+
   if (!isBidSession || projection === undefined) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const canRetry = projection.allowedActions.includes('retry_stage')
-  const canConfirm = projection.allowedActions.includes('confirm_outline')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -184,6 +195,23 @@ export function BidStagePanel({
     : undefined
   const dotState = statusDot(projection.runtime.status)
 
+  const updateSection = (sectionId: string, patch: SectionEdit): void => {
+    if (outline === null) return
+    const operation: OutlineEditOperation = { type: 'update_section', section_id: sectionId, ...patch }
+    setOperations(current => [...current, operation])
+    setOutline(current => current === null ? null : {
+      ...current,
+      sections: current.sections.map(section => section.id === sectionId
+        ? {
+          ...section,
+          ...(patch.title === undefined ? {} : { title: patch.title }),
+          ...(patch.purpose === undefined ? {} : { purpose: patch.purpose }),
+          ...(patch.must_answer === undefined ? {} : { must_answer: [...patch.must_answer] }),
+        }
+        : section),
+    })
+  }
+
   return (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
@@ -203,6 +231,19 @@ export function BidStagePanel({
         )}
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
+
+        {canConfirm && outline !== null && (
+          <div className={css.outline} aria-label="技术标目录">
+            {outline.sections.map(section => (
+              <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((section.level - 1) * 16)}px` }}>
+                <input aria-label={`${section.id} 标题`} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
+                <textarea aria-label={`${section.id} 目的`} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
+                {section.writable && <textarea aria-label={`${section.id} 必答内容`} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
+                <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
+              </article>
+            ))}
+          </div>
+        )}
 
         {selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
@@ -300,18 +341,9 @@ export function BidStagePanel({
                 icon={<IconCheckOutline14 />}
                 disabled={requestPending !== null || confirmOutline === undefined}
                 title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-                onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(true)) }}
+                onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(operations)) }}
               >
                 {t('action.confirm')}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={requestPending !== null || confirmOutline === undefined}
-                title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-                onClick={() => { invoke('revise', confirmOutline === undefined ? undefined : () => confirmOutline(false)) }}
-              >
-                {t('action.revise')}
               </Button>
             </>
           )}

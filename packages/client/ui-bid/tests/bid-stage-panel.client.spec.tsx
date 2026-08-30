@@ -168,7 +168,7 @@ describe('BidStagePanel', () => {
 
   it('dispatches retry and confirmation without changing projected runtime', async () => {
     const retryStage = vi.fn(async () => {})
-    const confirmOutline = vi.fn(async (_confirmed: boolean) => {})
+    const confirmOutline = vi.fn(async (_operations: readonly unknown[]) => {})
     const retryProjection = projection({ allowedActions: ['retry_stage'] })
     const view = render(<BidStagePanel {...props(retryProjection, { retryStage, confirmOutline })} />)
 
@@ -182,9 +182,7 @@ describe('BidStagePanel', () => {
     })
     view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline })} />)
     fireEvent.click(screen.getByRole('button', { name: '确认' }))
-    await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith(true) })
-    fireEvent.click(screen.getByRole('button', { name: '需要修改' }))
-    await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith(false) })
+    await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith([]) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
   })
 })

@@ -32,6 +32,10 @@ import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
+import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { applyOutlineEdits, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
+import { validateConfirmedOutline } from './outline-confirmation-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -39,6 +43,7 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeResult,
+  BidOutlineConfirmationResult,
   BidRetryErrorCode,
   BidRetryResult,
   BidRuntimeState,
@@ -99,8 +104,11 @@ export * from './evidence-mapping-artifacts.ts'
 export { executeEvidenceMapping, renderEvidenceMappingTask } from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
+export * from './outline-confirmation-artifacts.ts'
+export * from './outline-confirmation-edits.ts'
 export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline-generation-executor.ts'
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
+export { validateConfirmedOutline } from './outline-confirmation-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -328,7 +336,8 @@ export class BidHostRuntime extends TypertRemoteService {
           ? validateTenderAnalysis(workspace, stage, artifacts)
           : stage === 'evidence_mapping'
             ? validateEvidenceMapping(workspace, stage, artifacts)
-            : validateOutlineGeneration(workspace, stage, artifacts),
+            : stage === 'outline_confirmation' ? Promise.resolve({ ok: true })
+              : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
   }
@@ -453,6 +462,52 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       this.inFlight.delete(session.id)
     }
+  }
+
+  /** Read the S4 draft only while its user-confirmation stage owns the session. */
+  @Remote('getOutlineForConfirmation')
+  async getOutlineForConfirmation(session: Session): Promise<OutlineArtifact> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== 'outline_confirmation' || runtime.status !== 'waiting_user') throw new Error('Outline confirmation is not allowed in the current Bid stage state.')
+    const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+    const path = within(workspace.sessionRoot, 'outline/outline.json')
+    await assertNoLinkedPath(workspace.root, path)
+    return parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+  }
+
+  /** Apply and validate user operations before atomically publishing S5 artifacts. */
+  @Remote('confirmOutline')
+  async confirmOutline(session: Session, operations: readonly OutlineEditOperation[]): Promise<BidOutlineConfirmationResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
+    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const sourcePath = within(workspace.sessionRoot, 'outline/outline.json')
+      await assertNoLinkedPath(workspace.root, sourcePath)
+      const source = parseOutlineArtifact(JSON.parse(await readFile(sourcePath, 'utf8')))
+      const candidate = applyOutlineEdits(source, operations)
+      const analysis = await Promise.all(['analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json'].map(async path => JSON.parse(await readFile(within(workspace.sessionRoot, path), 'utf8'))))
+      const [requirements, scoring, compliance] = analysis
+      const validation = validateConfirmedOutline(candidate, requirements, scoring, compliance)
+      if (!validation.ok) return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The edited outline does not satisfy the required structure or coverage.', issues: validation.issues } }
+      const confirmedPath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
+      const confirmationPath = within(workspace.sessionRoot, 'outline/confirmation.json')
+      await assertNoLinkedPath(workspace.root, confirmedPath)
+      await assertNoLinkedPath(workspace.root, confirmationPath)
+      await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      await writeFileAtomic(confirmationPath, `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineArtifactSha256(source), confirmed_outline_sha256: outlineArtifactSha256(candidate) }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      const next = await this.automaticOrchestrator(agent, workspace).confirm(true)
+      await this.ctx.sessions.flush(session)
+      return { ok: true, value: next }
+    } catch {
+      return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the outline.' } }
+    } finally { this.inFlight.delete(session.id) }
   }
 }
 

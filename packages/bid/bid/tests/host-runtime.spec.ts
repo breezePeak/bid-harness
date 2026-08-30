@@ -537,4 +537,41 @@ describe('Bid Host runtime composition', () => {
     expect(session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toMatchObject({ stage: 'file_intake', status: 'failed' })
   })
+
+  it('persists a user-edited confirmed outline and advances S5 without replacing S4', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const bytes = Buffer.from('技术标资料', 'utf8')
+    await ctx.bid.uploadFiles(agent.session, [
+      { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+    ])
+    const draft = await ctx.bid.getOutlineForConfirmation(agent.session)
+    const result = await ctx.bid.confirmOutline(agent.session, [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }])
+    expect(result).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'pending' } })
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(draft)
+    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
+      .toMatchObject({ sections: [{ id: 'SEC-1', title: '已确认交付方案' }] })
+    const confirmation = Bid.parseOutlineConfirmationArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmation.json'), 'utf8')))
+    expect(confirmation).toMatchObject({ scope: 'technical_bid', decision: 'confirmed' })
+    expect(confirmation.source_outline_sha256).toBe(Bid.outlineArtifactSha256(draft))
+    expect(confirmation.confirmed_outline_sha256).toBe(Bid.outlineArtifactSha256(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8'))))
+  })
+
+  it('keeps S5 waiting when deletion removes mandatory coverage', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const bytes = Buffer.from('技术标资料', 'utf8')
+    await ctx.bid.uploadFiles(agent.session, [
+      { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+    ])
+    await expect(ctx.bid.confirmOutline(agent.session, [{ type: 'delete_section', section_id: 'SEC-1' }]))
+      .resolves.toMatchObject({ ok: false, error: { code: 'BID_INVALID_USER_OUTLINE' } })
+    expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+      .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
+  })
 })

@@ -153,6 +153,11 @@ export type BidFileIntakeResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
+/** Stable result of an S5 outline-confirmation request. */
+export type BidOutlineConfirmationResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+
 /** Stable business rejection codes returned by the Bid retry action. */
 export type BidRetryErrorCode =
   | 'BID_SESSION_REQUIRED'
