@@ -265,7 +265,9 @@ describe('the new-session chip controller', () => {
         },
       },
     } as unknown as IApiClient
-    return new AgentPresetSeatController(api, () => current as SeatSessionSummary | undefined)
+    return new AgentPresetSeatController(api, () => current as SeatSessionSummary | undefined, async () => {
+      throw new Error('fresh session was not configured')
+    })
   }
 
   const ROSTER: { id: string; trust: 'system' | 'user'; isDefault: boolean }[] = [

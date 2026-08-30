@@ -70,6 +70,12 @@ export class TestWorkspaces implements IWorkspaces {
     this.stubs.get('startSession')?.(workspaceId)
   }
 
+  /** Create and open a fresh Session in the current Workspace (recorded; default no-op). */
+  async startFreshSession(): Promise<void> {
+    this.calls.push({ method: 'startFreshSession', args: [] })
+    await (this.stubs.get('startFreshSession')?.() as Promise<void> | undefined)
+  }
+
   /**
    * Create a Workspace (recorded). The default echoes a view derived from
    * the input; stub for failure or list-coupled flows.

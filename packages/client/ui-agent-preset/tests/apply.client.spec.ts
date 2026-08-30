@@ -151,7 +151,7 @@ function workspacesDouble() {
   return {
     starts,
     startSession: (workspaceId?: unknown) => { starts.push(workspaceId ?? null) },
-    startFreshSession: async () => { throw new Error('fresh session was not configured') },
+    startFreshSession: async (): Promise<void> => { throw new Error('fresh session was not configured') },
   }
 }
 
@@ -462,7 +462,10 @@ describe('ui-agent-preset apply', () => {
     declareRoot(slots)
     declareConversation(slots)
     ctx.provide('conversation', {} as never)
-    const state = {
+    const state: {
+      current: string
+      byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
+    } = {
       current: 'standard-session',
       byId: {
         'standard-session': { id: 'standard-session', blank: false, agentPreset: 'standard' },
@@ -486,7 +489,7 @@ describe('ui-agent-preset apply', () => {
 
     expect(workspaces.starts).toEqual([])
     expect(calls).toContain('select:bid')
-    expect(state.byId['standard-session'].agentPreset).toBe('standard')
+    expect(state.byId['standard-session']?.agentPreset).toBe('standard')
     expect(chip.hooks.agentPresetSeat.getSnapshot().current).toBe('bid')
   })
 
