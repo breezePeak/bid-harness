@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyOutlineEdits,
   outlineArtifactSha256,
+  parseOutlineEditOperations,
   parseOutlineConfirmationArtifact,
   type OutlineArtifact,
 } from '@deepseek-ai/dsh-bid'
@@ -39,5 +40,25 @@ describe('outline confirmation artifacts', () => {
   it('assigns Host-controlled ids to added sections', () => {
     const edited = applyOutlineEdits(outline, [{ type: 'add_section', parent_id: null, order: 2, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['补充内容'] }])
     expect(edited.sections[1]).toMatchObject({ id: 'SEC-002', parent_id: null, level: 1 })
+  })
+
+  it('rejects malformed browser operations and unknown edits', () => {
+    expect(() => parseOutlineEditOperations([{ type: 'add_section', parent_id: null, order: 1, writable: true, title: '新增', purpose: '补充', must_answer: [] }])).toThrow()
+    expect(() => parseOutlineEditOperations([{ type: 'unknown', section_id: 'SEC-001' }])).toThrow()
+    expect(() => applyOutlineEdits(outline, [{ type: 'delete_section', section_id: 'SEC-404' }])).toThrow('unknown outline section')
+  })
+
+  it('updates every descendant level and keeps sibling orders unique after a move', () => {
+    const tree: OutlineArtifact = { ...outline, sections: [
+      { ...outline.sections[0]!, id: 'A', order: 1, level: 1 },
+      { ...outline.sections[0]!, id: 'B', parent_id: 'A', order: 1, level: 2 },
+      { ...outline.sections[0]!, id: 'C', parent_id: 'B', order: 1, level: 3 },
+      { ...outline.sections[0]!, id: 'D', parent_id: null, order: 2, level: 1 },
+      { ...outline.sections[0]!, id: 'E', parent_id: 'D', order: 1, level: 2 },
+    ] }
+    const moved = applyOutlineEdits(tree, [{ type: 'move_section', section_id: 'B', parent_id: 'E', order: 1 }])
+    expect(moved.sections.find(section => section.id === 'B')).toMatchObject({ parent_id: 'E', level: 3 })
+    expect(moved.sections.find(section => section.id === 'C')).toMatchObject({ level: 4 })
+    expect(() => applyOutlineEdits(tree, [{ type: 'move_section', section_id: 'A', parent_id: 'C', order: 1 }])).toThrow('descendant')
   })
 })

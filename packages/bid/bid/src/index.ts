@@ -8,7 +8,7 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, extname, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
@@ -33,13 +33,13 @@ import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
-import { applyOutlineEdits, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
-import { validateConfirmedOutline } from './outline-confirmation-validator.ts'
+import { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
-import { assertNoLinkedPath } from './workspace-path.ts'
+import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeResult,
@@ -108,7 +108,7 @@ export * from './outline-confirmation-artifacts.ts'
 export * from './outline-confirmation-edits.ts'
 export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline-generation-executor.ts'
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
-export { validateConfirmedOutline } from './outline-confirmation-validator.ts'
+export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -336,7 +336,7 @@ export class BidHostRuntime extends TypertRemoteService {
           ? validateTenderAnalysis(workspace, stage, artifacts)
           : stage === 'evidence_mapping'
             ? validateEvidenceMapping(workspace, stage, artifacts)
-            : stage === 'outline_confirmation' ? Promise.resolve({ ok: true })
+            : stage === 'outline_confirmation' ? validateOutlineConfirmation(workspace, stage, artifacts)
               : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
@@ -448,7 +448,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const orchestrator = this.automaticOrchestrator(agent, workspace)
-      const next = await orchestrator.retryCurrentAutomaticStage()
+      const next = await orchestrator.retry()
       await this.ctx.sessions.flush(session)
       return retrySuccess(next)
     } catch (error: unknown) {
@@ -491,8 +491,15 @@ export class BidHostRuntime extends TypertRemoteService {
       const sourcePath = within(workspace.sessionRoot, 'outline/outline.json')
       await assertNoLinkedPath(workspace.root, sourcePath)
       const source = parseOutlineArtifact(JSON.parse(await readFile(sourcePath, 'utf8')))
-      const candidate = applyOutlineEdits(source, operations)
-      const analysis = await Promise.all(['analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json'].map(async path => JSON.parse(await readFile(within(workspace.sessionRoot, path), 'utf8'))))
+      let candidate: OutlineArtifact
+      try { candidate = applyOutlineEdits(source, parseOutlineEditOperations(operations)) } catch (error: unknown) {
+        return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The requested outline edits are invalid.', issues: [{ code: 'OUTLINE_EDIT_INVALID', message: error instanceof Error ? error.message : 'The requested outline edits are invalid.' }] } }
+      }
+      const analysis = await Promise.all(['analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json'].map(async (path) => {
+        const absolute = within(workspace.sessionRoot, path)
+        await assertNoLinkedPath(workspace.root, absolute)
+        return JSON.parse(await readFile(absolute, 'utf8'))
+      }))
       const [requirements, scoring, compliance] = analysis
       const validation = validateConfirmedOutline(candidate, requirements, scoring, compliance)
       if (!validation.ok) return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The edited outline does not satisfy the required structure or coverage.', issues: validation.issues } }
@@ -631,13 +638,7 @@ export function validateBidFileBatch(files: readonly IncomingFile[], config: Bid
  * @param candidate - Relative path supplied by the caller.
  * @returns The resolved absolute path inside root.
  */
-export function within(root: string, candidate: string): string {
-  if (isAbsolute(candidate) || /^[a-z]:/iu.test(candidate) || /^\\\\/u.test(candidate)) throw new Error('bid-absolute-path')
-  const target = resolve(root, candidate)
-  const rel = relative(root, target)
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('bid-path-traversal')
-  return target
-}
+export { within } from './workspace-path.ts'
 
 function validateConfig(config: BidConfig): void {
   if (!config.sessionDirectory || !config.outputDirectory || config.maxFileBytes <= 0

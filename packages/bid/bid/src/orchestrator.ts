@@ -205,17 +205,16 @@ export class BidOrchestrator {
       })
       if (!confirmed) return this.state
 
-      const artifact: StageArtifact = {
-        stage: 'outline_confirmation',
-        type: 'outline_confirmation',
-        path: 'outline/confirmation.json',
-      }
-      const validation = await this.validate('outline_confirmation', [artifact])
+      const artifacts: StageArtifact[] = [
+        { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
+        { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
+      ]
+      const validation = await this.validate('outline_confirmation', artifacts)
       if (!validation.ok) return this.state
       this.session.append('bid.stage.completed', {
         stage: 'outline_confirmation',
         status: 'completed',
-        artifacts: [artifact],
+        artifacts,
       })
       return this.driveLoop()
     })

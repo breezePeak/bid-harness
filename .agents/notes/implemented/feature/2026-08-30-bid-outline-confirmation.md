@@ -10,9 +10,9 @@ S4 produces an agent draft, while later writing needs a durable user-approved di
 
 ## Decision
 
-S5 reads `outline/outline.json` only in `outline_confirmation/waiting_user`, applies Host-owned edit operations, and writes `outline/confirmed-outline.json` plus `outline/confirmation.json`. Both draft and confirmed outlines use the same strict schema. The confirmation record contains the confirmed decision and SHA-256 values for both artifacts.
+S5 reads `outline/outline.json` only in `outline_confirmation/waiting_user`, applies runtime-validated Host-owned edit operations, and writes `outline/confirmed-outline.json` plus `outline/confirmation.json`. Both draft and confirmed outlines use the same strict schema. The confirmation record contains the confirmed decision and SHA-256 values for both artifacts.
 
-The Host retains control of section identifiers and mapped Requirement, Scoring, and Compliance IDs. It reuses S4 tree and coverage checks before writing either S5 artifact. Invalid user changes return actionable issues and leave the stage waiting for another edit. A successful confirmation records the normal user-confirmation and stage-completion events, so the existing projection advances to `chapter_writing/pending`.
+The Host retains control of section identifiers and mapped Requirement, Scoring, and Compliance IDs. It reuses S4 tree and coverage checks before writing either S5 artifact. The completion validator rereads both S5 artifacts, the S4 draft, and S2 analysis artifacts through workspace-safe regular-file reads, checks their schemas, tree, coverage, artifact set, and both hashes, then authorizes an event that records both S5 artifacts. Invalid user changes return actionable issues and leave the stage waiting for another edit; retry returns a failed S5 user stage to waiting. A successful confirmation advances the projection to `chapter_writing/pending`.
 
 ## Alternatives considered
 
@@ -24,4 +24,4 @@ The Host retains control of section identifiers and mapped Requirement, Scoring,
 
 ## Consequences
 
-S6 can consume one formal technical-bid outline without treating the S4 draft as final. The Host accepts only the defined editing operation set; richer browser editing remains a client concern.
+S6 can consume one formal technical-bid outline without treating the S4 draft as final. The Host accepts only the defined editing operation set, normalizes sibling order after moves, and recomputes moved subtree levels. The browser retains structured user-edit issues for display and offers basic section add, delete, ordering, and outdent actions.

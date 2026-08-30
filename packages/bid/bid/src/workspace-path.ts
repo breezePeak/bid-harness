@@ -3,6 +3,15 @@
 import { lstat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
+/** Resolve a relative workspace path only when it remains below its owning root. */
+export function within(root: string, candidate: string): string {
+  if (isAbsolute(candidate) || /^[a-z]:/iu.test(candidate) || /^\\\\/u.test(candidate)) throw new Error('bid-absolute-path')
+  const target = resolve(root, candidate)
+  const rel = relative(root, target)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('bid-path-traversal')
+  return target
+}
+
 /**
  * Reject an existing symbolic link or junction anywhere below an owning root.
  * @param root - lexical root whose own spelling may itself be a Host-selected alias.

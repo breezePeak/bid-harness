@@ -14,7 +14,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { BidSelectedFile, BidStagePanelInjected } from './index.ts'
+import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from './index.ts'
 import type { BidKey } from './locales.ts'
 import css from './BidStagePanel.module.css'
 
@@ -27,6 +27,7 @@ export type BidStagePanelProps =
 type PendingAction = 'upload' | 'retry' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
+type RequestError = { message: string; issues: readonly { readonly code: string; readonly message: string }[] }
 
 function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
@@ -119,7 +120,7 @@ export function BidStagePanel({
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
-  const [requestError, setRequestError] = useState<string | null>(null)
+  const [requestError, setRequestError] = useState<RequestError | null>(null)
   const [outline, setOutline] = useState<OutlineArtifact | null>(null)
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const tenderFileInput = useRef<HTMLInputElement>(null)
@@ -148,7 +149,7 @@ export function BidStagePanel({
   useEffect(() => {
     if (!canConfirm || getOutlineForConfirmation === undefined) return
     void getOutlineForConfirmation().then((value) => { if (alive.current) setOutline(value) }, (reason: unknown) => {
-      if (alive.current) setRequestError(t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }))
+      if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
   }, [canConfirm, getOutlineForConfirmation, t])
 
@@ -172,7 +173,7 @@ export function BidStagePanel({
       if (!alive.current) return
       pendingAction.current = null
       setRequestPending(null)
-      setRequestError(t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }))
+      setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: reason instanceof BidActionError ? reason.issues : [] })
     })
   }
 
@@ -212,6 +213,17 @@ export function BidStagePanel({
     })
   }
 
+  const structureOperation = (operation: OutlineEditOperation): void => {
+    setOperations(current => [...current, operation])
+    setRequestError(null)
+  }
+
+  const indentSection = (sectionId: string): void => {
+    const position = outline?.sections.findIndex(section => section.id === sectionId) ?? -1
+    const parent = position > 0 ? outline?.sections[position - 1] : undefined
+    if (parent !== undefined) structureOperation({ type: 'move_section', section_id: sectionId, parent_id: parent.id, order: 1 })
+  }
+
   return (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
@@ -234,11 +246,20 @@ export function BidStagePanel({
 
         {canConfirm && outline !== null && (
           <div className={css.outline} aria-label="技术标目录">
-            {outline.sections.map(section => (
+            {outline.sections.map((section, index) => (
               <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((section.level - 1) * 16)}px` }}>
                 <input aria-label={`${section.id} 标题`} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
                 <textarea aria-label={`${section.id} 目的`} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
                 {section.writable && <textarea aria-label={`${section.id} 必答内容`} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
+                <div className={css.actions}>
+                  <button type="button" onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
+                  <button type="button" onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
+                  <button type="button" onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
+                  <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: Math.max(1, section.order - 1) })}>上移</button>
+                  <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: section.order + 1 })}>下移</button>
+                  {index > 0 && <button type="button" onClick={() => indentSection(section.id)}>缩进</button>}
+                  {section.parent_id !== null && <button type="button" onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: null, order: section.order })}>取消缩进</button>}
+                </div>
                 <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
               </article>
             ))}
@@ -350,7 +371,7 @@ export function BidStagePanel({
         </div>
 
         {requestError !== null && (
-          <p className={css.error} role="alert">{requestError}</p>
+          <div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map(issue => <p key={`${issue.code}:${issue.message}`}>{`${issue.code}: ${issue.message}`}</p>)}</div>
         )}
       </div>
     </section>
