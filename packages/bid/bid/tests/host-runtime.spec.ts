@@ -158,8 +158,8 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
     schema_version: 1,
-    requirement_mappings: requirements.requirements.map(item => ({ requirement_id: item.id, materials, missing_topics })),
-    scoring_mappings: scoring.scoring_items.map(item => ({ scoring_id: item.id, materials, missing_topics })),
+    requirement_mappings: requirements.requirements.map(item => ({ requirement_id: item.id, materials, external_materials: [], missing_topics })),
+    scoring_mappings: scoring.scoring_items.map(item => ({ scoring_id: item.id, materials, external_materials: [], missing_topics })),
   }, null, 2)}\n`, 'utf8')
 }
 

@@ -1,10 +1,13 @@
 import { z } from 'zod'
 
-/** Version of the local technical-material mapping Artifact. */
+/** Version of the technical-evidence mapping Artifact. */
 export const EVIDENCE_MAPPING_SCHEMA_VERSION = 1 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
+
+/** Allowed ways a later technical proposal may use public external material. */
+export const EXTERNAL_MATERIAL_USAGES = ['reference', 'background'] as const
 
 const materialSchema = z.object({
   file_id: z.string().min(1),
@@ -17,11 +20,32 @@ const materialSchema = z.object({
   message: 'material line range must be ordered',
 })
 
+/** Whether an external source uses the only supported network protocols. */
+function isHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+const externalMaterialSchema = z.object({
+  title: z.string().trim().min(1),
+  url: z.url().refine(isHttpUrl, { message: 'external material URL must use http or https' }),
+  publisher: z.string().trim().min(1).nullable(),
+  published_at: z.string().trim().min(1).nullable(),
+  retrieved_at: z.iso.datetime({ offset: true }),
+  usage: z.enum(EXTERNAL_MATERIAL_USAGES),
+  summary: z.string().trim().min(1),
+}).strict()
+
 const mappingSchema = z.object({
   materials: z.array(materialSchema),
+  external_materials: z.array(externalMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
-}).strict().refine(mapping => mapping.materials.length > 0 || mapping.missing_topics.length > 0, {
-  message: 'a mapping requires material or a missing topic',
+}).strict().refine(mapping => mapping.materials.length > 0 || mapping.external_materials.length > 0 || mapping.missing_topics.length > 0, {
+  message: 'a mapping requires local material, external material, or a missing topic',
 })
 
 const requirementMappingSchema = mappingSchema.extend({ requirement_id: z.string().min(1) }).strict()
@@ -35,6 +59,8 @@ const evidenceMapSchema = z.object({
 
 /** Parsed local material reference. */
 export type EvidenceMaterial = z.infer<typeof materialSchema>
+/** Parsed public technical reference. */
+export type ExternalEvidenceMaterial = z.infer<typeof externalMaterialSchema>
 /** Parsed requirement-to-material mapping. */
 export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema>
 /** Parsed scoring-to-material mapping. */
