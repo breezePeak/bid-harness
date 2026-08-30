@@ -28,6 +28,8 @@ import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig 
 import { validateFileIntake } from './file-intake-validator.ts'
 import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
+import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
+import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -91,6 +93,9 @@ export { validateFileIntake }
 export * from './tender-analysis-artifacts.ts'
 export { executeTenderAnalysis, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
+export * from './evidence-mapping-artifacts.ts'
+export { executeEvidenceMapping, renderEvidenceMappingTask } from './evidence-mapping-executor.ts'
+export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -304,13 +309,17 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis',
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping',
         execute: task => task.stage === 'tender_analysis'
           ? executeTenderAnalysis(agent, workspace, task)
-          : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+          : task.stage === 'evidence_mapping'
+            ? executeEvidenceMapping(agent, workspace, task)
+            : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
       },
       {
-        validate: (stage, artifacts) => validateTenderAnalysis(workspace, stage, artifacts),
+        validate: (stage, artifacts) => stage === 'tender_analysis'
+          ? validateTenderAnalysis(workspace, stage, artifacts)
+          : validateEvidenceMapping(workspace, stage, artifacts),
       },
     )
   }
@@ -345,7 +354,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping',
           execute: async (task) => {
             if (task.stage === 'file_intake') {
               try {
@@ -357,13 +366,16 @@ export class BidHostRuntime extends TypertRemoteService {
               return [artifact]
             }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task)
+            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
         {
           validate: (stage, artifacts) => stage === 'file_intake'
             ? validateFileIntake(workspace, imported, stage, artifacts)
-            : validateTenderAnalysis(workspace, stage, artifacts),
+            : stage === 'tender_analysis'
+              ? validateTenderAnalysis(workspace, stage, artifacts)
+              : validateEvidenceMapping(workspace, stage, artifacts),
         },
       )
       await orchestrator.runCurrentProgramStage()

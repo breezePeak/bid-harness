@@ -33,9 +33,9 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 
-生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。生产 Executor 只支持 `tender_analysis`，所以 S1 和 S2 成功后停在 `evidence_mapping/pending`；S1 完成后的 S2 失败返回成功分支中的真实 `tender_analysis/failed` RuntimeState。生成的 `bid/retryStage` Remote 按 Session 日志和 Projection 重新准入失败的 S2，复用同一 Agent、工作区、Executor 与 Validator，并在一次重试后停止。
+生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。生产 Executor 支持 `tender_analysis` 与 `evidence_mapping`，S3 校验成功后停在 `outline_generation/pending`；S1 完成后的 S2 失败返回成功分支中的真实 `tender_analysis/failed` RuntimeState。生成的 `bid/retryStage` Remote 按 Session 日志和 Projection 重新准入任一失败的自动阶段，复用同一 Agent、工作区、Executor 与 Validator，并在一次重试后停止。
 
-Tender Analysis Executor 通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并只允许本轮使用现有 `grep`、`read` 和 `write` 工具。每次执行会先删除四个阶段 Artifact，并向同一 Agent 的文件观测策略记录对应路径不存在，保证重试可通过受保护的 `write` 重新创建文件。Agent idle 后，Validator 检查 `analysis/project.json`、`analysis/requirements.json`、`analysis/scoring.json` 与 `analysis/compliance.json` 的严格 schema、条目标识符唯一性、成功招标文件完整覆盖，以及每条引用的文件角色、分块路径和行号。Requirements、scoring 和 compliance 条目的 `raw_text` 还必须在引用行文本中经换行与连续空白规范化后找到。Agent idle 本身不代表阶段完成；只有 Validator 通过才会推进。本包仍不提供 S3 及后续阶段 Executor 或 Validator。
+Tender Analysis 与 Evidence Mapping Executor 都通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并只允许本轮使用现有 `grep`、`read` 和 `write` 工具。S3 读取 S2 Artifact 与 manifest，由 Agent 为技术 Requirement 和 Scoring 自行生成搜索词，先 `grep` 定位再 `read` 候选分块，写入 `analysis/evidence-map.json`。每个 Requirement 和 Scoring 各有一个 mapping；资料引用包含本地文件、分块、闭区间行号、`reuse`、`adapt`、`reference` 或 `background` 用途与摘要。没有本地资料时，mapping 通过 `missing_topics` 记录后续技术写作仍需补足的内容。Validator 检查 S2 覆盖、严格 schema、文件、分块、链接路径和行号，只有通过才推进到 `outline_generation/pending`。本包尚未接入 Web Research，也不提供 S4 及后续阶段 Executor 或 Validator。
 
 ## Model Experience
 

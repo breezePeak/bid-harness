@@ -167,17 +167,11 @@ export class BidOrchestrator {
     })
   }
 
-  /**
-   * Retry the current tender-analysis stage once and stop at its successor.
-   * This operation intentionally does not call {@link driveLoop}; the next
-   * automatic stage has no production executor yet.
-   * @returns the state after the retry settles.
-   * @throws {@link BidOrchestratorError} unless tender analysis is failed and idle.
-   */
+  /** Retry one failed automatic stage once and stop at its successor. */
   retryCurrentAutomaticStage(): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state
-    if (state.stage !== 'tender_analysis' || state.status !== 'failed') {
+    if (state.status !== 'failed' || state.stage === 'file_intake' || getBidStagePolicy(state.stage).executor === 'user') {
       throw new BidOrchestratorError(
         'BID_RETRY_NOT_ALLOWED',
         `cannot retry Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,

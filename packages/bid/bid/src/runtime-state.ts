@@ -119,7 +119,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
 const OBJECTIVES: { readonly [K in BidStage]: string } = {
   file_intake: '校验已入库的投标语料和分块索引。',
   tender_analysis: '提取招标项目、要求、评分项和合规规则。',
-  evidence_mapping: '把每项招标要求和评分项映射到可用证据。',
+  evidence_mapping: '为技术标要求和评分项映射可用的本地技术写作素材。',
   outline_generation: '生成投标目录和各章节详细要求。',
   outline_confirmation: '记录用户对投标目录的确认决定。',
   chapter_writing: '依据证据映射编写已确认目录中的全部章节。',
@@ -136,7 +136,12 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
     '只写入要求的分析 Artifact。',
     '不得虚构招标要求或评分语义。',
   ],
-  evidence_mapping: ['只引用工作区中存在的证据。', '只写入要求的证据映射。'],
+  evidence_mapping: [
+    '只处理技术标范围，不得搜索商务、资格或报价资料。',
+    '先 grep 定位候选，再 read 原始 chunk 判断材料用途。',
+    '只引用工作区中存在的本地技术资料；没有材料时记录 missing_topics。',
+    '只写入要求的 evidence-map Artifact。',
+  ],
   outline_generation: ['覆盖已记录的全部要求和评分项。', '只写入要求的目录 Artifact。'],
   outline_confirmation: ['必须取得用户的明确决定。', '不得调用 Agent。'],
   chapter_writing: ['遵循已确认的目录。', '所有主张必须以证据映射为依据。'],
@@ -243,7 +248,7 @@ export function getBidClientProjection(
       runtime: { ...runtime },
       allowedActions: runtime.stage === 'file_intake'
         ? ['upload_files']
-        : runtime.stage === 'tender_analysis' ? ['retry_stage'] : [],
+        : getBidStagePolicy(runtime.stage).executor !== 'user' ? ['retry_stage'] : [],
       composer: { enabled: false, reason: 'bid.stage_failed' },
       ...fileView,
     }
