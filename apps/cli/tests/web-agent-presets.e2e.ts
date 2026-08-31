@@ -236,6 +236,7 @@ describe('the shipped Web composition', () => {
     })
     try {
       expect(resolveSessionPreset(handle.agent.session)).toBe('bid')
+      expect(toolNames(ctx, handle.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
       expect(projections.snapshot(handle.agent.session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
         runtime: { stage: 'file_intake', status: 'pending' },
         allowedActions: ['upload_files'],
@@ -260,6 +261,88 @@ describe('the shipped Web composition', () => {
       expect(handle.agent.session.events.some(event => event.type === 'user/message')).toBe(false)
     } finally {
       await handle.dispose()
+    }
+  })
+
+  it('executes the Bid search-fetch chain through the shipped providers', async () => {
+    const previousKey = process.env.DEEPSEEK_API_KEY
+    process.env.DEEPSEEK_API_KEY = 'bid-search-test-key'
+    const sourceUrl = 'https://official.example/standard'
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/messages')) {
+        return new Response(JSON.stringify({
+          content: [{
+            type: 'web_search_tool_result',
+            content: [{ type: 'web_search_result', url: sourceUrl, title: '官方技术标准' }],
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('<h1>官方技术标准</h1><p>系统必须执行访问控制和审计。</p>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-web-chain'),
+      meta: { agentPreset: 'bid' },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    try {
+      const search = await ctx.tools.execute({
+        callId: CallId('preset-bid-web-search'),
+        name: 'web_search',
+        arguments: { queries: ['访问控制审计标准'] },
+        signal: new AbortController().signal,
+        agent: handle.agent,
+      })
+      expect(search.isError).toBe(false)
+      expect(JSON.stringify(search.content)).toContain(sourceUrl)
+
+      const fetch = await ctx.tools.execute({
+        callId: CallId('preset-bid-web-fetch'),
+        name: 'web_fetch',
+        arguments: { url: sourceUrl },
+        signal: new AbortController().signal,
+        agent: handle.agent,
+      })
+      expect(fetch.isError).toBe(false)
+      expect(JSON.stringify(fetch.content)).toContain('系统必须执行访问控制和审计')
+      expect(fetchMock.mock.calls.map(([input]) => (
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      ))).toEqual([
+        expect.stringMatching(/\/messages$/),
+        sourceUrl,
+      ])
+    } finally {
+      await handle.dispose()
+      vi.unstubAllGlobals()
+      if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY
+      else process.env.DEEPSEEK_API_KEY = previousKey
+    }
+  })
+
+  it('returns a structured Bid fetch failure instead of source content', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('connection refused') }))
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-web-fetch-failure'),
+      meta: { agentPreset: 'bid' },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    try {
+      const result = await ctx.tools.execute({
+        callId: CallId('preset-bid-web-fetch-failure'),
+        name: 'web_fetch',
+        arguments: { url: 'https://unavailable.example/standard' },
+        signal: new AbortController().signal,
+        agent: handle.agent,
+      })
+      expect(result.isError).toBe(true)
+      expect(result.error?.info?.code).toBe('WEB_PROVIDER_ERROR')
+    } finally {
+      await handle.dispose()
+      vi.unstubAllGlobals()
     }
   })
 

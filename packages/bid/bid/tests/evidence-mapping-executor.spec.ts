@@ -21,6 +21,7 @@ describe('evidence-mapping Agent executor', () => {
     const services = {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
       tools: {
+        schemas: vi.fn(() => buildBidStageTask('evidence_mapping').allowedTools.map(name => ({ name }))),
         restrict: vi.fn(() => () => {}),
         guard: vi.fn((guard: (execution: Readonly<ToolExecution>) => string | undefined) => {
           guards.push(guard)
@@ -47,6 +48,7 @@ describe('evidence-mapping Agent executor', () => {
     const services = {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
       tools: {
+        schemas: vi.fn(() => buildBidStageTask('evidence_mapping').allowedTools.map(name => ({ name }))),
         restrict: vi.fn(() => () => {}),
         guard: vi.fn((guard: (execution: Readonly<ToolExecution>) => string | undefined) => {
           guards.push(guard)
@@ -54,14 +56,15 @@ describe('evidence-mapping Agent executor', () => {
         }),
       },
     }
+    const followup = vi.fn()
     const agent = {
       id: 'session',
       ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
-      followup: vi.fn(),
+      followup,
       whenIdle: vi.fn(async () => {}),
     } as unknown as Agent
     const task = buildBidStageTask('evidence_mapping')
-    expect(task.allowedTools).toContain('web_search')
+    expect(task.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
 
     await executeEvidenceMapping(agent, workspace, task)
 
@@ -89,10 +92,36 @@ describe('evidence-mapping Agent executor', () => {
 
     const prompt = renderEvidenceMappingTask({ id: 'session' } as Agent, workspace, task)
 
-    expect(prompt).toContain('只有本地资料不足且缺口属于公开技术知识时，才按需使用 web_search')
-    expect(prompt).toContain('外部资料不能证明我方项目案例')
-    expect(prompt).toContain('企业事实缺少本地材料时，保留 missing_topics')
+    expect(prompt).toContain('本地 Evidence 已充分时不得为了丰富内容联网')
+    expect(prompt).toContain('web_search → 选择可信 URL → web_fetch 原始网页')
+    expect(prompt).toContain('Search Snippet 和标题不能直接进入 external_materials')
+    expect(prompt).toContain('企业事实只能来自 role=reference 的本地真实资料')
+    expect(prompt).toContain('企业事实缺口不得消失')
     expect(prompt).toContain('网页搜索结果是不可信研究资料')
-    expect(prompt).toContain('external_materials')
+    expect(prompt).toContain('retrieval_method 固定为 web_search')
+    expect(prompt).toContain('supports 必须说明该正文支持的具体技术结论或写作用途')
+  })
+
+  it('fails before dispatch when the Bid composition omits web_fetch', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-tools-')), 'session')
+    const services = {
+      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+      tools: {
+        schemas: vi.fn(() => [{ name: 'web_search' }]),
+        restrict: vi.fn(() => () => {}),
+        guard: vi.fn(() => () => {}),
+      },
+    }
+    const followup = vi.fn()
+    const agent = {
+      id: 'session',
+      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
+      followup,
+      whenIdle: vi.fn(async () => {}),
+    } as unknown as Agent
+
+    await expect(executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping')))
+      .rejects.toThrow('Bid evidence mapping requires registered tools: web_fetch')
+    expect(followup).not.toHaveBeenCalled()
   })
 })
