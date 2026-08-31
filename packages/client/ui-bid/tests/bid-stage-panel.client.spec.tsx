@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { BidClientProjection } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
-import { apply } from '../src/client/index.ts'
+import { apply, BidActionError } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -184,6 +184,59 @@ describe('BidStagePanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认' }))
     await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith([]) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
+  })
+
+  it('shows every technical scoring item, emits controlled S2 edits, and keeps invalid confirmation editable', async () => {
+    const confirmation = Promise.withResolvers<undefined>()
+    const confirmTenderAnalysis = vi.fn(async (_operations: readonly unknown[]) => confirmation.promise)
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'waiting_user' },
+      allowedActions: ['confirm_tender_analysis'],
+      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
+    }), {
+      confirmTenderAnalysis,
+      getTenderAnalysisForConfirmation: async () => ({
+        project: {
+          schema_version: 1, project_name: '原项目', tender_name: '招标', purchaser: '采购人', owner: '建设单位',
+          project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['建设平台'],
+          technical_scope: ['总体架构'], delivery_scope: ['部署交付'], implementation_constraints: ['三个月上线'],
+          key_technical_points: ['安全架构'], source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }],
+          analyzed_tender_files: ['tender'],
+        },
+        scoring: {
+          schema_version: 1,
+          scoring_items: ['总体方案', '实施方案'].map((title, index) => ({
+            id: `SCORE-${String(index + 1)}`, parent: null, group: '技术评分', title,
+            raw_text: `${title}完整合理得 ${String(10 - index)} 分`, criterion: `${title}完整合理`,
+            score: 10 - index, score_range: null, must_answer: true, response_points: [`${title}响应重点`],
+            source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }],
+          })),
+        },
+      }),
+    })} />)
+
+    expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
+    expect(screen.getByText('总体方案')).toBeTruthy()
+    expect(screen.getByText('实施方案')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
+    fireEvent.click(screen.getByText('总体方案'))
+    expect(screen.getByText('总体方案完整合理得 10 分')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('SCORE-1 评分目标理解'), { target: { value: '总体方案完整、合理且可实施' } })
+    fireEvent.change(screen.getByLabelText('SCORE-1 技术标需要重点响应'), { target: { value: '总体架构\n实施路径' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
+    expect(screen.getByRole('button', { name: '正在确认…' })).toHaveProperty('disabled', true)
+    await waitFor(() => {
+      expect(confirmTenderAnalysis).toHaveBeenCalledWith(expect.arrayContaining([
+        { type: 'update_project', fields: { key_technical_points: ['安全架构', '兼容既有系统'] } },
+        expect.objectContaining({
+          type: 'update_scoring_item', scoring_id: 'SCORE-1', criterion: '总体方案完整、合理且可实施',
+          response_points: ['总体架构', '实施路径'],
+        }),
+      ]))
+    })
+    confirmation.reject(new BidActionError('BID_INVALID_TENDER_ANALYSIS_EDIT', '修改无效', [{ code: 'EDIT_INVALID', message: '响应重点不能为空' }]))
+    expect(await screen.findByText('EDIT_INVALID: 响应重点不能为空')).toBeTruthy()
+    expect(screen.getByLabelText('技术标分析结果')).toBeTruthy()
   })
 
   it('edits outline text and emits basic structural operations', async () => {

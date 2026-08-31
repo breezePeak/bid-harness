@@ -29,9 +29,13 @@ const projectSchema = z.object({
   tender_name: nullableFactSchema,
   purchaser: nullableFactSchema,
   owner: nullableFactSchema,
+  project_background: z.array(z.string().min(1)),
+  project_objectives: z.array(z.string().min(1)),
   project_scope: z.array(z.string().min(1)),
   technical_scope: z.array(z.string().min(1)),
   delivery_scope: z.array(z.string().min(1)),
+  implementation_constraints: z.array(z.string().min(1)),
+  key_technical_points: z.array(z.string().min(1)),
   source_refs: sourceRefsSchema,
   analyzed_tender_files: z.array(z.string().min(1)),
 }).strict()
@@ -67,6 +71,7 @@ const scoringItemSchema = z.object({
   score: z.number().nullable(),
   score_range: scoreRangeSchema.nullable(),
   must_answer: z.boolean(),
+  response_points: z.array(z.string().min(1)).min(1),
   source_refs: sourceRefsSchema,
 }).strict()
 

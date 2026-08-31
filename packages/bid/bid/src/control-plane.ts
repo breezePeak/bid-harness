@@ -25,6 +25,7 @@ export type {
   BidRetryErrorCode,
   BidRetryFailure,
   BidRetryResult,
+  BidTenderAnalysisConfirmationResult,
   BidRuntimeState,
   BidStage,
   BidStageExecutor,
@@ -38,3 +39,6 @@ export type {
 } from './control-plane-contract.ts'
 export type { OutlineEditOperation } from './outline-confirmation-edits.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
+export { applyTenderAnalysisEdits } from './tender-analysis-confirmation.ts'
+export type { TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from './tender-analysis-confirmation.ts'
+export type { TenderProjectArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'

@@ -62,9 +62,13 @@ function documents(tenderId: string, source: TenderSourceRef): Record<string, un
       tender_name: null,
       purchaser: null,
       owner: null,
+      project_background: ['项目需要按期完成技术建设'],
+      project_objectives: ['形成可交付技术方案'],
       project_scope: ['技术方案'],
       technical_scope: ['方案设计'],
       delivery_scope: ['按期交付'],
+      implementation_constraints: ['按期交付'],
+      key_technical_points: ['技术方案完整性'],
       source_refs: [source],
       analyzed_tender_files: [tenderId],
     },
@@ -79,7 +83,8 @@ function documents(tenderId: string, source: TenderSourceRef): Record<string, un
       schema_version: 1,
       scoring_items: [{
         id: 'SCORE-1', parent: null, group: '技术', title: '技术方案', raw_text: '技术方案得 10 分',
-        criterion: '提供技术方案', score: 10, score_range: null, must_answer: true, source_refs: [source],
+        criterion: '提供技术方案', score: 10, score_range: null, must_answer: true,
+        response_points: ['说明技术方案总体设计'], source_refs: [source],
       }],
     },
     'compliance.json': {
@@ -120,6 +125,37 @@ describe('tender-analysis validator', () => {
     const value = await fixture()
     await publish(value.workspace, documents(value.tenderId, value.source))
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('accepts only technical items from a mixed scoring tender and rejects a classified commercial item', async () => {
+    const technicalScoring = '系统总体技术方案 10 分。项目实施方案 8 分。数据安全方案 7 分。'
+    const value = await fixture([
+      '# 资格评分', '企业资质 5 分。', '# 商务评分', '类似项目业绩 10 分。',
+      '# 技术评分', technicalScoring,
+      '# 价格评分', '报价得分 30 分。',
+    ].join('\n\n'))
+    const citedText = await readFile(join(value.workspace.sessionRoot, value.source.chunk), 'utf8')
+    const docs = documents(value.tenderId, value.source)
+    const requirements = docs['requirements.json'] as { requirements: unknown[] }
+    const compliance = docs['compliance.json'] as { compliance_items: unknown[] }
+    requirements.requirements = []
+    compliance.compliance_items = []
+    const scoring = docs['scoring.json'] as { scoring_items: Array<Record<string, unknown>> }
+    scoring.scoring_items = [
+      { ...scoring.scoring_items[0], id: 'TECH-1', title: '系统总体技术方案', raw_text: citedText, criterion: '总体方案完整合理', score: 10, response_points: ['总体架构', '技术路线'] },
+      { ...scoring.scoring_items[0], id: 'TECH-2', title: '项目实施方案', raw_text: citedText, criterion: '实施方案可行', score: 8, response_points: ['实施阶段', '进度保障'] },
+      { ...scoring.scoring_items[0], id: 'TECH-3', title: '数据安全方案', raw_text: citedText, criterion: '安全措施完整', score: 7, response_points: ['数据保护', '安全审计'] },
+    ]
+    await publish(value.workspace, docs)
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+
+    scoring.scoring_items.push({
+      ...scoring.scoring_items[0], id: 'COMMERCIAL-1', group: '商务评分', title: '类似项目业绩',
+      raw_text: citedText, criterion: '业绩数量', response_points: ['提供业绩'],
+    })
+    await publish(value.workspace, docs)
+    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
+      .toContain('TENDER_ANALYSIS_NON_TECHNICAL_SCORING')
   })
 
   it('rejects a substantive tender when every extracted technical Artifact is empty', async () => {

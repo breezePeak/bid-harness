@@ -1,0 +1,26 @@
+.textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  padding: 7px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  resize: vertical;
+}
+
+.textarea:focus {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.textarea:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.textarea::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}

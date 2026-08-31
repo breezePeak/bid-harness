@@ -40,6 +40,7 @@ export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
   'retry_stage',
+  'confirm_tender_analysis',
   'confirm_outline',
   'send_message',
 ] as const
@@ -59,6 +60,8 @@ export interface BidStagePolicy {
   forbiddenTools?: string[]
   requiredArtifacts: string[]
   validator: string
+  /** Whether a validated automatic result must wait for explicit user confirmation before completion. */
+  requiresUserConfirmationAfterValidation?: boolean
   nextStage: BidStage | null
 }
 
@@ -96,6 +99,7 @@ export type BidComposerReason =
   | 'bid.upload_required'
   | 'bid.stage_pending'
   | 'bid.stage_running'
+  | 'bid.tender_analysis_confirmation_required'
   | 'bid.outline_confirmation_required'
   | 'bid.stage_failed'
   | 'bid.completed'
@@ -157,6 +161,11 @@ export type BidFileIntakeResult =
 export type BidOutlineConfirmationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+
+/** Stable result of an S2 tender-analysis confirmation request. */
+export type BidTenderAnalysisConfirmationResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_TENDER_ANALYSIS_EDIT' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
 
 /** Stable business rejection codes returned by the Bid retry action. */
 export type BidRetryErrorCode =

@@ -19,7 +19,7 @@ async function fixture() {
   const lines = (await readFile(join(workspace.sessionRoot, chunk), 'utf8')).split('\n').length
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'R-1', category: '技术', raw_text: '提供项目实施方案', normalized_requirement: '提供项目实施方案', mandatory: true, source_refs: [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }] }] }))
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify({ schema_version: 1, scoring_items: [{ id: 'S-1', parent: null, group: '技术', title: '架构', raw_text: '技术架构合理得 5 分', criterion: '架构合理', score: 5, score_range: null, must_answer: true, source_refs: [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }] }] }))
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify({ schema_version: 1, scoring_items: [{ id: 'S-1', parent: null, group: '技术', title: '架构', raw_text: '技术架构合理得 5 分', criterion: '架构合理', score: 5, score_range: null, must_answer: true, response_points: ['说明总体技术架构'], source_refs: [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }] }] }))
   return { workspace, reference, chunk, lines }
 }
 

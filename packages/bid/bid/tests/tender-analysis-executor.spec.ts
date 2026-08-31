@@ -59,6 +59,8 @@ describe('tender-analysis Agent executor', () => {
     expect(message.content[0]?.text).toContain('只把 manifest 中 role=tender')
     expect(message.content[0]?.text).toContain('当前只分析技术标')
     expect(message.content[0]?.text).toContain('投标报价、价格评分')
+    expect(message.content[0]?.text).toContain('project_background')
+    expect(message.content[0]?.text).toContain('response_points')
     expect(coverageAudit.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
     expect(coverageAudit.content[0]?.text).toContain('Coverage Audit')
     expect(coverageAudit.content[0]?.text).toContain('技术评分、技术评审、技术评价')
@@ -82,7 +84,7 @@ describe('tender-analysis Agent executor', () => {
     const firstPass = { schema_version: 1, scoring_items: [] }
     const repaired = {
       schema_version: 1,
-      scoring_items: [{ id: 'SCORE-1', title: '技术评分', raw_text: '技术评分标准', criterion: '技术方案完整', score: 10 }],
+      scoring_items: [{ id: 'SCORE-1', title: '技术评分', raw_text: '技术评分标准', criterion: '技术方案完整', score: 10, response_points: ['说明技术方案完整性'] }],
     }
     let idleCount = 0
     let observedFirstPass: unknown

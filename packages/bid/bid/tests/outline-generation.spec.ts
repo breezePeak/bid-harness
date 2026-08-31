@@ -28,7 +28,8 @@ const scoring = {
   schema_version: 1,
   scoring_items: [{
     id: 'SCORE-SCHEDULE', parent: null, group: '技术', title: '实施进度', raw_text: '实施进度合理得分。',
-    criterion: '实施阶段和进度安排合理。', score: 10, score_range: null, must_answer: true, source_refs: [source],
+    criterion: '实施阶段和进度安排合理。', score: 10, score_range: null, must_answer: true,
+    response_points: ['说明实施阶段和进度保障'], source_refs: [source],
   }],
 }
 

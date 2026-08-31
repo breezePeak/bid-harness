@@ -1,0 +1,29 @@
+.root {
+  display: flex;
+  max-height: 520px;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.section { display: flex; flex-direction: column; gap: 8px; }
+.section h3 { margin: 0; color: var(--dsw-alias-label-primary); font: var(--dsw-font-sm-14); }
+.projectGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.field { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
+.field > span:not(:first-child) { width: 100%; }
+.scoringList { display: flex; flex-direction: column; gap: 6px; }
+.summary { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: flex-end; gap: 8px; overflow: hidden; color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); }
+.summary > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scoringBody { display: flex; flex-direction: column; gap: 8px; padding: 8px 28px; }
+.meta { display: flex; gap: 6px; }
+.readOnly { padding: 8px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
+.readOnly p { margin: 4px 0 0; white-space: pre-wrap; }
+.footer { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding-top: 8px; background: var(--dsw-alias-bg-layer-1); }
+
+@media (max-width: 720px) {
+  .projectGrid { grid-template-columns: 1fr; }
+}

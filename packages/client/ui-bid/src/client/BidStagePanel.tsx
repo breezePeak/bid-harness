@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/src/outline-confirmation-edits.ts'
-import type { BidClientProjection, BidDocumentRole, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -17,6 +17,7 @@ import {
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from './index.ts'
 import type { BidKey } from './locales.ts'
+import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
@@ -25,7 +26,7 @@ export type BidStagePanelProps =
   & InjectFace<BidStagePanelInjected>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'retry' | 'confirm' | 'revise'
+type PendingAction = 'upload' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly { readonly code: string; readonly message: string }[] }
@@ -65,7 +66,8 @@ function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
       if (status === 'failed') return 'prompt.file_intake_failed'
       return 'prompt.file_intake'
     case 'tender_analysis':
-      return status === 'pending' ? 'prompt.tender_analysis_pending' : 'prompt.tender_analysis'
+      if (status === 'pending') return 'prompt.tender_analysis_pending'
+      return status === 'waiting_user' ? 'prompt.tender_analysis_confirmation' : 'prompt.tender_analysis'
     case 'evidence_mapping': return 'prompt.evidence_mapping'
     case 'outline_generation': return 'prompt.outline_generation'
     case 'outline_confirmation': return 'prompt.outline_confirmation'
@@ -84,6 +86,7 @@ function composerReason(projection: BidClientProjection, t: TranslateBid): strin
     case 'bid.upload_required': return t('reason.bid.upload_required')
     case 'bid.stage_running': return t('reason.bid.stage_running')
     case 'bid.stage_pending': return t('reason.bid.stage_pending')
+    case 'bid.tender_analysis_confirmation_required': return t('reason.bid.tender_analysis_confirmation_required')
     case 'bid.outline_confirmation_required': return t('reason.bid.outline_confirmation_required')
     case 'bid.stage_failed': return t('reason.bid.stage_failed')
     case 'bid.completed': return t('reason.bid.completed')
@@ -115,6 +118,8 @@ export function BidStagePanel({
   retryStage,
   confirmOutline,
   getOutlineForConfirmation,
+  confirmTenderAnalysis,
+  getTenderAnalysisForConfirmation,
   t,
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
@@ -123,6 +128,7 @@ export function BidStagePanel({
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
   const [previewOutline, setPreviewOutline] = useState<OutlineArtifact | null>(null)
+  const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
@@ -142,6 +148,7 @@ export function BidStagePanel({
   )
   const hasProjection = isBidSession && projection !== undefined
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
+  const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
   useEffect(() => {
     if (!hasProjection) return
     setComposerBlock(blockedReason)
@@ -158,6 +165,13 @@ export function BidStagePanel({
       if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
   }, [canConfirm, getOutlineForConfirmation, t])
+
+  useEffect(() => {
+    if (!canConfirmAnalysis || getTenderAnalysisForConfirmation === undefined) return
+    void getTenderAnalysisForConfirmation().then((value) => { if (alive.current) setTenderAnalysis(value) }, (reason: unknown) => {
+      if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
+    })
+  }, [canConfirmAnalysis, getTenderAnalysisForConfirmation, t])
 
   if (!isBidSession || projection === undefined) return null
 
@@ -289,6 +303,20 @@ export function BidStagePanel({
               </article>
             })}
           </div>
+        )}
+
+        {canConfirmAnalysis && tenderAnalysis !== null && (
+          <TenderAnalysisReview
+            value={tenderAnalysis}
+            pending={requestPending === 'confirm_analysis'}
+            t={t}
+            onConfirm={(operations) => {
+              invoke(
+                'confirm_analysis',
+                confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis(operations),
+              )
+            }}
+          />
         )}
 
         {selectedFiles.length > 0 && (

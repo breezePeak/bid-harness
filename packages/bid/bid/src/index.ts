@@ -28,6 +28,13 @@ import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig 
 import { validateFileIntake } from './file-intake-validator.ts'
 import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
+import { parseTenderProjectArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import {
+  applyTenderAnalysisEdits,
+  parseTenderAnalysisEditOperations,
+  type TenderAnalysisConfirmationView,
+  type TenderAnalysisEditOperation,
+} from './tender-analysis-confirmation.ts'
 import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
@@ -46,6 +53,7 @@ import type {
   BidFileIntakeErrorCode,
   BidFileIntakeResult,
   BidOutlineConfirmationResult,
+  BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryResult,
   BidRuntimeState,
@@ -68,6 +76,7 @@ export type {
   BidFileIntakeErrorCode,
   BidFileIntakeFailure,
   BidFileIntakeResult,
+  BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryFailure,
   BidRetryResult,
@@ -100,6 +109,7 @@ export type {
 } from './orchestrator.ts'
 export { validateFileIntake }
 export * from './tender-analysis-artifacts.ts'
+export * from './tender-analysis-confirmation.ts'
 export { executeTenderAnalysis, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
@@ -475,6 +485,73 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       this.inFlight.delete(session.id)
     }
+  }
+
+  /** Read the editable S2 conclusions only while tender analysis waits for confirmation. */
+  @Remote('getTenderAnalysisForConfirmation')
+  async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== 'tender_analysis' || runtime.status !== 'waiting_user') throw new Error('Tender-analysis confirmation is not allowed in the current Bid stage state.')
+    const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+    const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
+    const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
+    await assertNoLinkedPath(workspace.root, projectPath)
+    await assertNoLinkedPath(workspace.root, scoringPath)
+    const [project, scoring] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8')])
+    return {
+      project: parseTenderProjectArtifact(JSON.parse(project)),
+      scoring: parseTenderScoringArtifact(JSON.parse(scoring)),
+    }
+  }
+
+  /** Apply controlled S2 edits, revalidate canonical artifacts, and continue only after explicit confirmation. */
+  @Remote('confirmTenderAnalysis')
+  async confirmTenderAnalysis(
+    session: Session,
+    operations: readonly TenderAnalysisEditOperation[],
+  ): Promise<BidTenderAnalysisConfirmationResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Tender-analysis confirmation requires a Bid Session with a Host workspace.' } }
+    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('confirm_tender_analysis')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Tender-analysis confirmation is not allowed in the current Bid stage state.' } }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
+      const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
+      await assertNoLinkedPath(workspace.root, projectPath)
+      await assertNoLinkedPath(workspace.root, scoringPath)
+      const [projectRaw, scoringRaw] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8')])
+      let candidate: TenderAnalysisConfirmationView
+      try {
+        candidate = applyTenderAnalysisEdits(
+          {
+            project: parseTenderProjectArtifact(JSON.parse(projectRaw)),
+            scoring: parseTenderScoringArtifact(JSON.parse(scoringRaw)),
+          },
+          parseTenderAnalysisEditOperations(operations),
+        )
+      } catch (error: unknown) {
+        return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The requested tender-analysis edits are invalid.', issues: [{ code: 'TENDER_ANALYSIS_EDIT_INVALID', message: error instanceof Error ? error.message : 'The requested tender-analysis edits are invalid.' }] } }
+      }
+      await writeFileAtomic(projectPath, `${JSON.stringify(candidate.project, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      await writeFileAtomic(scoringPath, `${JSON.stringify(candidate.scoring, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      const artifacts: StageArtifact[] = [
+        { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
+        { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
+        { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
+        { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
+      ]
+      const confirmation = await this.automaticOrchestrator(agent, workspace).confirmValidatedStage('tender_analysis', artifacts)
+      if (!confirmation.ok) return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: confirmation.validation.issues } }
+      await this.ctx.sessions.flush(session)
+      return { ok: true, value: confirmation.state }
+    } catch {
+      return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the tender analysis.' } }
+    } finally { this.inFlight.delete(session.id) }
   }
 
   /** Read the S4 draft only while its user-confirmation stage owns the session. */

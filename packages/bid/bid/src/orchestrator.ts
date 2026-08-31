@@ -44,6 +44,11 @@ export interface BidStageValidatorPort {
   validate(stage: BidStage, artifacts: StageArtifact[]): Promise<StageValidationResult>
 }
 
+/** Result of validating and recording one explicit user-confirmed stage. */
+export type BidStageConfirmationResult =
+  | { readonly ok: true; readonly state: BidRuntimeState }
+  | { readonly ok: false; readonly validation: StageValidationResult & { readonly ok: false } }
+
 /** Stable rejection codes for host-side Bid operation admission. */
 export type BidOrchestratorErrorCode =
   | 'BID_ACTION_NOT_ALLOWED'
@@ -221,6 +226,38 @@ export class BidOrchestrator {
   }
 
   /**
+   * Revalidate canonical artifacts and complete a stage that is waiting after successful automatic validation.
+   * Validation rejection leaves the replayed stage in `waiting_user` so the caller can return issues for another edit.
+   * @param stage - waiting stage whose policy requires post-validation confirmation.
+   * @param artifacts - canonical artifact references reread by the stage validator.
+   * @returns the continued runtime state, or validation issues without a state transition.
+   */
+  confirmValidatedStage(stage: BidStage, artifacts: StageArtifact[]): Promise<BidStageConfirmationResult> {
+    this.assertIdle()
+    const state = this.state
+    const policy = getBidStagePolicy(stage)
+    if (state.stage !== stage || state.status !== 'waiting_user'
+      || policy.requiresUserConfirmationAfterValidation !== true) {
+      throw new BidOrchestratorError(
+        'BID_CONFIRM_NOT_ALLOWED',
+        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
+      )
+    }
+    return this.beginConfirmation(async () => {
+      let validation: StageValidationResult
+      try {
+        validation = await this.validator.validate(stage, artifacts)
+      } catch (error: unknown) {
+        validation = { ok: false, issues: [{ code: 'VALIDATOR_FAILED', message: String(error) }] }
+      }
+      if (!validation.ok) return { ok: false, validation }
+      this.session.append('bid.user_confirmation.received', { stage, confirmed: true })
+      this.session.append('bid.stage.completed', { stage, status: 'completed', artifacts })
+      return { ok: true, state: await this.driveLoop() }
+    })
+  }
+
+  /**
    * Enforce one client business action against current host state.
    * @param action - requested client action.
    * @throws {@link BidOrchestratorError} when the action is not currently admitted.
@@ -261,6 +298,16 @@ export class BidOrchestrator {
     return operation
   }
 
+  /** Install a confirmation operation that may return validation issues instead of a runtime state. */
+  private beginConfirmation(run: () => Promise<BidStageConfirmationResult>): Promise<BidStageConfirmationResult> {
+    const operation = Promise.resolve().then(run)
+    const stateOperation = operation.then(result => result.ok ? result.state : this.state)
+    this.operation = stateOperation
+    return operation.finally(() => {
+      if (this.operation === stateOperation) this.operation = undefined
+    })
+  }
+
   /** Reject a second mutating command while another command owns the session driver. */
   private assertIdle(): void {
     if (this.operation === undefined) return
@@ -298,6 +345,10 @@ export class BidOrchestrator {
     }
     const validation = await this.validate(stage, artifacts)
     if (!validation.ok) return false
+    if (getBidStagePolicy(stage).requiresUserConfirmationAfterValidation === true) {
+      this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      return false
+    }
     this.session.append('bid.stage.completed', {
       stage,
       status: 'completed',

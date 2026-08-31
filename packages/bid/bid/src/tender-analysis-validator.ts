@@ -41,6 +41,7 @@ const TECHNICAL_CONSTRAINT_SIGNALS: readonly RegExp[] = [
 const TECHNICAL_SCORING_SIGNAL = /(?:技术(?:部分)?|技术方案)\s*(?:(?:评分|评审|评价)(?:标准|办法|表)?|分值|得分|满分)/u
 const TECHNICAL_SCORING_CONTEXT = /(?:技术(?:部分|方案|要求|参数|指标|规范)?|功能|性能|接口|实施|安全|测试|验收|培训|运维|售后(?:技术)?服务)/u
 const GENERIC_SCORING_SIGNAL = /(?:评分|评审|评价)(?:标准|办法|表)?|分值|得分|满分/u
+const EXCLUDED_SCORING_GROUP = /(?:资格|商务|价格)(?:评分|部分|得分)?|报价/u
 
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
@@ -152,6 +153,20 @@ function validateCompleteness(
       'Tender text contains multiple technical-constraint signals but requirements is empty.',
       'analysis/requirements.json',
     )
+  }
+}
+
+function validateTechnicalScoring(scoring: TenderScoringArtifact, issues: StageValidationIssue[]): void {
+  for (const item of scoring.scoring_items) {
+    const classification = `${item.group ?? ''} ${item.title}`
+    if (EXCLUDED_SCORING_GROUP.test(classification) && !TECHNICAL_SCORING_CONTEXT.test(classification)) {
+      reject(
+        issues,
+        'TENDER_ANALYSIS_NON_TECHNICAL_SCORING',
+        `Scoring item ${JSON.stringify(item.id)} is classified as non-technical scoring.`,
+        'analysis/scoring.json',
+      )
+    }
   }
 }
 
@@ -309,6 +324,7 @@ export async function validateTenderAnalysis(
   }
   validateCoverage(parsed.project, manifest, issues)
   validateCompleteness(parsed, await readTenderCorpusText(workspace, manifest), issues)
+  validateTechnicalScoring(parsed.scoring, issues)
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
     ['analysis/scoring.json', parsed.scoring.scoring_items],

@@ -90,9 +90,13 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
       tender_name: '测试招标',
       purchaser: null,
       owner: null,
+      project_background: ['项目需要按期交付'],
+      project_objectives: ['完成技术交付'],
       project_scope: ['按期交付'],
       technical_scope: [],
       delivery_scope: ['按期交付'],
+      implementation_constraints: ['交付期限'],
+      key_technical_points: ['交付保障'],
       source_refs: refs,
       analyzed_tender_files: tenderFiles.map(file => file.id),
     },
@@ -119,6 +123,7 @@ async function writeTenderAnalysisArtifacts(cwd: string, sessionId: string): Pro
         score: null,
         score_range: null,
         must_answer: true,
+        response_points: ['说明交付计划和保障措施'],
         source_refs: [firstRef],
       }],
     },
@@ -313,7 +318,7 @@ describe('Bid Host runtime composition', () => {
     expect(steer).not.toHaveBeenCalled()
   })
 
-  it('imports a real batch, runs through S4, then waits for outline confirmation', async () => {
+  it('waits after S2, persists user edits, then runs through S4', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
     const { agent } = attach(ctx, 'bid', root)
@@ -333,18 +338,22 @@ describe('Bid Host runtime composition', () => {
       data: bytes.toString('base64'),
     }])
 
-    expect(result).toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
+    expect(result).toEqual({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
       'bid.user_confirmation.required',
     ])
+    expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+      .toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+    expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'tender_analysis')).toBe(false)
+    const analysis = await ctx.bid.getTenderAnalysisForConfirmation(agent.session)
+    const scoringId = analysis.scoring.scoring_items[0]!.id
+    await expect(ctx.bid.confirmTenderAnalysis(agent.session, [
+      { type: 'update_project', fields: { key_technical_points: ['重点说明按期交付保障'] } },
+      { type: 'update_scoring_item', scoring_id: scoringId, criterion: '重点评价交付保障', response_points: ['交付计划', '进度保障'] },
+    ])).resolves.toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
@@ -359,7 +368,9 @@ describe('Bid Host runtime composition', () => {
     await expect(readFile(join(workspace.sessionRoot, manifest.files[0]!.chunkIndexPath!), 'utf8'))
       .resolves.toContain('"schema_version": 1')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/project.json'), 'utf8'))
-      .resolves.toContain('"analyzed_tender_files"')
+      .resolves.toContain('重点说明按期交付保障')
+    await expect(readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8'))
+      .resolves.toContain('进度保障')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8'))
       .resolves.toContain('"requirement_mappings"')
     await expect(readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))
@@ -384,17 +395,12 @@ describe('Bid Host runtime composition', () => {
 
     await vi.waitFor(() => {
       expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
-        .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
+        .toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
       'bid.user_confirmation.required',
     ])
   })
@@ -479,16 +485,20 @@ describe('Bid Host runtime composition', () => {
 
     await expect(ctx.bid.retryStage(agent.session)).resolves.toEqual({
       ok: true,
+      value: { stage: 'tender_analysis', status: 'waiting_user' },
+    })
+    await expect(ctx.bid.confirmTenderAnalysis(agent.session, [])).resolves.toEqual({
+      ok: true,
       value: {
-        stage: 'outline_generation',
-        status: 'failed',
+        stage: 'outline_generation', status: 'failed',
         failureReason: expect.stringContaining('OUTLINE_GENERATION_INPUT_INVALID'),
       },
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.failed',
-      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.user_confirmation.required',
+      'bid.user_confirmation.received', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.failed',
     ])
@@ -527,7 +537,7 @@ describe('Bid Host runtime composition', () => {
     expect(success.ok).toBe(true)
     await expect(ctx.bid.uploadFiles(bid, [{ name: 'y.txt', role: 'tender', size: 1, data: one.toString('base64') }]))
       .resolves.toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_NOT_ALLOWED' } })
-    expect(bid.events).toHaveLength(9)
+    expect(bid.events).toHaveLength(4)
   })
 
   it('rejects only concurrent work for the same Session', async () => {
@@ -608,6 +618,7 @@ describe('Bid Host runtime composition', () => {
       { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
       { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
     ])
+    await ctx.bid.confirmTenderAnalysis(agent.session, [])
     const draft = await ctx.bid.getOutlineForConfirmation(agent.session)
     const result = await ctx.bid.confirmOutline(agent.session, [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }])
     expect(result).toEqual({ ok: true, value: { stage: 'book_review', status: 'pending' } })
@@ -636,6 +647,7 @@ describe('Bid Host runtime composition', () => {
       { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
       { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
     ])
+    await ctx.bid.confirmTenderAnalysis(agent.session, [])
     await expect(ctx.bid.confirmOutline(agent.session, [{ type: 'delete_section', section_id: 'SEC-1' }]))
       .resolves.toMatchObject({ ok: false, error: { code: 'BID_INVALID_USER_OUTLINE' } })
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))

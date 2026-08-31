@@ -50,6 +50,10 @@ class StageValidator implements BidStageValidatorPort {
 }
 
 const createSession = (id: string): Session => Session.create(SessionId(id))
+const confirmTenderAnalysis = (orchestrator: BidOrchestrator) => orchestrator.confirmValidatedStage(
+  'tender_analysis',
+  artifactsFor(buildBidStageTask('tender_analysis')),
+)
 
 describe('Bid runtime state and policies', () => {
   it('defines the only policy and deterministic task for every fixed stage', () => {
@@ -242,20 +246,22 @@ describe('BidOrchestrator', () => {
     )
   })
 
-  it('runs tender analysis once and stops at evidence mapping pending', async () => {
+  it('runs tender analysis once and stops for user confirmation before evidence mapping', async () => {
     const session = createSession('bid-run-tender-analysis')
     const executor = new RecordingExecutor()
     const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
 
     await orchestrator.runCurrentProgramStage()
     await expect(orchestrator.runCurrentAutomaticStage()).resolves.toEqual({
-      stage: 'evidence_mapping',
-      status: 'pending',
+      stage: 'tender_analysis',
+      status: 'waiting_user',
     })
     expect(executor.tasks.map(task => task.stage)).toEqual(['file_intake', 'tender_analysis'])
     expect(session.events.map(event => event.type)).toEqual([
-      'bid.stage.started', 'bid.stage.completed', 'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.stage.completed', 'bid.stage.started', 'bid.user_confirmation.required',
     ])
+    expect(session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'tender_analysis')).toBe(false)
+    expect(executor.tasks.some(task => task.stage === 'evidence_mapping')).toBe(false)
   })
 
   it('retries only failed tender analysis and stops before evidence mapping execution', async () => {
@@ -272,7 +278,7 @@ describe('BidOrchestrator', () => {
       stage: 'tender_analysis', status: 'failed', failureReason: 'executor failed: Error: invalid artifacts',
     })
     await expect(orchestrator.retryCurrentAutomaticStage()).resolves.toEqual({
-      stage: 'evidence_mapping', status: 'pending',
+      stage: 'tender_analysis', status: 'waiting_user',
     })
 
     expect(executor.tasks.map(task => task.stage)).toEqual([
@@ -281,7 +287,7 @@ describe('BidOrchestrator', () => {
     expect(session.events.map(event => event.type)).toEqual([
       'bid.stage.started', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.failed',
-      'bid.stage.started', 'bid.stage.completed',
+      'bid.stage.started', 'bid.user_confirmation.required',
     ])
     expect(() => orchestrator.retryCurrentAutomaticStage()).toThrow(
       expect.objectContaining({ code: 'BID_RETRY_NOT_ALLOWED' }),
@@ -325,8 +331,15 @@ describe('BidOrchestrator', () => {
       status: 'pending',
     })
     await expect(orchestrator.drive()).resolves.toEqual({
-      stage: 'outline_confirmation',
+      stage: 'tender_analysis',
       status: 'waiting_user',
+    })
+    await expect(confirmTenderAnalysis(orchestrator)).resolves.toMatchObject({
+      ok: true,
+      state: {
+        stage: 'outline_confirmation',
+        status: 'waiting_user',
+      },
     })
     expect(executor.tasks.map(task => task.stage)).toEqual([
       'file_intake',
@@ -377,11 +390,12 @@ describe('BidOrchestrator', () => {
     expect(() => orchestrator.retry()).toThrow(BidOrchestratorError)
     await orchestrator.runCurrentProgramStage()
     await orchestrator.drive()
-    await expect(orchestrator.retry()).resolves.toEqual({
+    await expect(orchestrator.retry()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+    await expect(confirmTenderAnalysis(orchestrator)).resolves.toMatchObject({ ok: true, state: {
       stage: 'evidence_mapping',
       status: 'failed',
       failureReason: 'INVALID_STAGE_ARTIFACTS: evidence_mapping artifacts failed validation',
-    })
+    } })
     expect(executor.tasks.map(task => task.stage)).toEqual([
       'file_intake', 'tender_analysis', 'tender_analysis', 'evidence_mapping',
     ])
@@ -414,6 +428,7 @@ describe('BidOrchestrator', () => {
     const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
     await orchestrator.runCurrentProgramStage()
     await orchestrator.drive()
+    await confirmTenderAnalysis(orchestrator)
 
     await expect(orchestrator.confirm(false)).resolves.toEqual({
       stage: 'outline_confirmation',
@@ -443,6 +458,7 @@ describe('BidOrchestrator', () => {
     const orchestrator = new BidOrchestrator(session, executor, new StageValidator('outline_confirmation'))
     await orchestrator.runCurrentProgramStage()
     await orchestrator.drive()
+    await confirmTenderAnalysis(orchestrator)
     const taskCount = executor.tasks.length
 
     await expect(orchestrator.confirm(true)).resolves.toEqual({
@@ -470,9 +486,10 @@ describe('BidOrchestrator', () => {
 
   it('continues a restored executable stage without depending on its name', async () => {
     const source = createSession('bid-restored-executable-source')
-    const initial = new BidOrchestrator(source, new RecordingExecutor(), new StageValidator())
+    const initial = new BidOrchestrator(source, new RecordingExecutor(undefined, ['tender_analysis']), new StageValidator())
     await initial.runCurrentProgramStage()
     await initial.runCurrentAutomaticStage()
+    await confirmTenderAnalysis(initial)
     const replayed = Session.create(SessionId('bid-restored-executable'), source.events)
     const executor = new RecordingExecutor(undefined, ['evidence_mapping'])
     const restored = new BidOrchestrator(replayed, executor, new StageValidator())

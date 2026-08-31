@@ -37,6 +37,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/compliance.json',
     ],
     validator: 'tender-analysis-validator',
+    requiresUserConfirmationAfterValidation: true,
     nextStage: 'evidence_mapping',
   },
   evidence_mapping: {
@@ -213,9 +214,10 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         ? { stage: state.stage, status: 'failed', failureReason: event.data.reason }
         : state
     case 'bid.user_confirmation.required':
-      return event.data.stage === 'outline_confirmation'
-        && state.stage === 'outline_confirmation'
-        && (state.status === 'pending' || state.status === 'failed')
+      return event.data.stage === state.stage
+        && (getBidStagePolicy(state.stage).executor === 'user'
+          || getBidStagePolicy(state.stage).requiresUserConfirmationAfterValidation === true)
+        && (state.status === 'pending' || state.status === 'running' || state.status === 'failed')
         ? { stage: state.stage, status: 'waiting_user' }
         : state
     case 'bid.stage.completed': {
@@ -227,8 +229,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : { stage: nextStage, status: 'pending' }
     }
     case 'bid.user_confirmation.received':
-      return event.data.stage === 'outline_confirmation'
-        && state.stage === 'outline_confirmation'
+      return event.data.stage === state.stage
         && state.status === 'waiting_user'
         && event.data.confirmed
         ? { stage: state.stage, status: 'running' }
@@ -291,6 +292,14 @@ export function getBidClientProjection(
       runtime: { ...runtime },
       allowedActions: ['confirm_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
+      ...fileView,
+    }
+  }
+  if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') {
+    return {
+      runtime: { ...runtime },
+      allowedActions: ['confirm_tender_analysis'],
+      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
       ...fileView,
     }
   }

@@ -6,6 +6,8 @@
 
 `projection.allowedActions` 控制上传、重试和目录确认控件是否出现，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件为生成的 `bid/uploadFiles` Remote 编码这些字节，重试控件只调用生成的 `bid/retryStage` Remote；两者都不调用 `session.prompt()`，只有刷新的 Host Projection 才会报告阶段成功或失败。目录确认回调仍不可用，因此对应控件保持禁用，不绕过 Host 准入。
 
+`projection.allowedActions` 还控制 S2 分析确认控件。S2 进入 `waiting_user` 后，面板通过专用 Remote 读取项目与技术评分结果，在独立的 `TenderAnalysisReview` 中复用 `Input`、`Textarea`、`DisclosureRow`、`Pill` 和 `Button`；评分原文、分值和来源只读，项目结论、评分目标和响应重点通过受控操作提交。
+
 面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 
 ## 模型体验

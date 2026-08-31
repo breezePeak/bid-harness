@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidDocumentRole, BidUploadFile, OutlineArtifact, OutlineEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocumentRole, BidUploadFile, OutlineArtifact, OutlineEditOperation, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -42,6 +42,9 @@ export interface BidStagePanelInjected {
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
   getOutlineForConfirmation?: () => Promise<OutlineArtifact>
   confirmOutline?: (operations: readonly OutlineEditOperation[]) => Promise<void>
+  /** Host tender-analysis review actions, installed when the Bid action API is composed. */
+  getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
+  confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
 }
 
 /** Structured Bid Host rejection retained for actionable panel feedback. */
@@ -125,6 +128,16 @@ export function apply(ctx: ClientContext): void {
       },
       confirmOutline: async (operations) => {
         const result = await ctx.remote.bid.confirmOutline(sessionId, operations)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      getTenderAnalysisForConfirmation: async () => {
+        const result = await ctx.remote.bid.getTenderAnalysisForConfirmation(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
+      confirmTenderAnalysis: async (operations) => {
+        const result = await ctx.remote.bid.confirmTenderAnalysis(sessionId, operations)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
