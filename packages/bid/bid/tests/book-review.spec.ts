@@ -14,7 +14,7 @@ async function setup(): Promise<BidWorkspace> {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-book-review-')), 'session')
   await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '正文\n')
-  await writeFile(join(workspace.sessionRoot, 'chapters/manifest.json'), `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', confirmed_outline_sha256: 'a'.repeat(64), chapters: [{ section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: [], scoring_ids: [], compliance_ids: [], covered_must_answer: [], evidence_used: [], additional_materials: [], unresolved_topics: [] }] })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'chapters/manifest.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', confirmed_outline_sha256: 'a'.repeat(64), chapters: [{ section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: [], scoring_ids: [], compliance_ids: [], covered_must_answer: [], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [] }] })}\n`)
   return workspace
 }
 
