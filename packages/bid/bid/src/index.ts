@@ -26,7 +26,7 @@ import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 import { validateFileIntake } from './file-intake-validator.ts'
-import { executeTenderAnalysis } from './tender-analysis-executor.ts'
+import { DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS, executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { parseTenderProjectArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import {
@@ -121,10 +121,18 @@ export type {
 export { validateFileIntake }
 export * from './tender-analysis-artifacts.ts'
 export * from './tender-analysis-confirmation.ts'
-export { executeTenderAnalysis, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
+export { DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS, executeTenderAnalysis, renderTenderAnalysisRepairTask, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
+export type { TenderAnalysisExecutionOptions } from './tender-analysis-executor.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
-export { executeEvidenceMapping, renderEvidenceMappingTask } from './evidence-mapping-executor.ts'
+export * from './web-evidence-source-artifacts.ts'
+export {
+  buildEvidenceMappingWebSnapshots,
+  executeEvidenceMapping,
+  renderEvidenceMappingTask,
+  type EvidenceMappingWebObservation,
+  type EvidenceMappingWebSnapshot,
+} from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
 export * from './outline-confirmation-artifacts.ts'
@@ -179,12 +187,13 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
-/** Client-visible file limits configured for the Bid Host runtime. */
+/** Validated file limits and S2 recovery budget for the Bid Host runtime. */
 export interface Config {
   allowedExtensions: string[]
   maxFiles: number
   maxFileBytes: number
   maxTotalBytes: number
+  tenderAnalysisRepairAttempts: number
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -192,6 +201,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxFiles: DEFAULT_BID_CONFIG.maxFiles,
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
+  tenderAnalysisRepairAttempts: DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS,
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -200,6 +210,7 @@ export const Config: z<Config> = z.object({
   maxFiles: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFiles),
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
+  tenderAnalysisRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.tenderAnalysisRepairAttempts),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -354,7 +365,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /**
    * @param ctx - Host Context that owns Sessions and their Bid projection.
-   * @param config - validated file limits used for admission and import.
+   * @param config - validated file limits and S2 recovery budget.
    */
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
@@ -402,7 +413,7 @@ export class BidHostRuntime extends TypertRemoteService {
       {
         canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'book_review',
         execute: task => task.stage === 'tender_analysis'
-          ? executeTenderAnalysis(agent, workspace, task)
+          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.tenderAnalysisRepairAttempts })
           : task.stage === 'evidence_mapping'
             ? executeEvidenceMapping(agent, workspace, task)
             : task.stage === 'outline_generation'
@@ -476,7 +487,7 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
-            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task)
+            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.tenderAnalysisRepairAttempts })
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task)
             if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task)

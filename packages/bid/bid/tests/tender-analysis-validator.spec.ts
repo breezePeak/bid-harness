@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdtemp } from 'node:fs/promises'
@@ -265,15 +265,49 @@ describe('tender-analysis validator', () => {
     expect(codes(result)).toContain('TENDER_ANALYSIS_SOURCE_TEXT_MISMATCH')
   })
 
-  it('rejects missing files and invalid JSON', async () => {
+  it('distinguishes missing files from invalid JSON', async () => {
     const value = await fixture()
     const docs = documents(value.tenderId, value.source)
     await publish(value.workspace, docs)
     await writeFile(join(value.workspace.sessionRoot, 'analysis/scoring.json'), '{')
-    await writeFile(join(value.workspace.sessionRoot, 'analysis/compliance.json'), '')
-    const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts.slice(0, 3))
-    expect(codes(result)).toContain('TENDER_ANALYSIS_ARTIFACT_SET_INVALID')
-    expect(codes(result)).toContain('TENDER_ANALYSIS_ARTIFACT_INVALID')
+    await rm(join(value.workspace.sessionRoot, 'analysis/compliance.json'))
+    const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
+    expect(result).toMatchObject({ ok: false, issues: expect.arrayContaining([
+      {
+        code: 'TENDER_ANALYSIS_JSON_INVALID',
+        artifact: 'analysis/scoring.json',
+        message: expect.stringContaining('JSON 语法无效'),
+      },
+      {
+        code: 'TENDER_ANALYSIS_ARTIFACT_MISSING',
+        artifact: 'analysis/compliance.json',
+        message: '缺少必需的招标分析文件。',
+      },
+    ]) })
+  })
+
+  it.each([
+    ['project.json 缺少字段', 'project.json', (doc: Record<string, unknown>) => { delete doc.project_name }, 'project_name', '缺少必需字段。'],
+    ['project.json 多出字段', 'project.json', (doc: Record<string, unknown>) => { doc.unknown_field = true }, 'unknown_field', '存在 Schema 未定义的字段。'],
+    ['project.json 单值使用空字符串', 'project.json', (doc: Record<string, unknown>) => { doc.owner = '' }, 'owner', '未知值应使用 null，不能使用空字符串。'],
+    ['scoring.json 缺少 response_points', 'scoring.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points }, 'scoring_items[0].response_points', '缺少必需字段。'],
+    ['scoring.json response_points 为空数组', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points = [] }, 'scoring_items[0].response_points', '至少需要一项技术响应重点。'],
+    ['scoring.json score 为字符串', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.score = '10' }, 'scoring_items[0].score', '必须为数字或 null。'],
+    ['scoring.json 缺少 parent', 'scoring.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.parent }, 'scoring_items[0].parent', '缺少必需字段。'],
+    ['compliance.json severity 非法', 'compliance.json', (doc: Record<string, unknown>) => { (doc.compliance_items as Array<Record<string, unknown>>)[0]!.severity = 'critical' }, 'compliance_items[0].severity', '只能使用 fatal、mandatory 或 warning。'],
+    ['source_refs 结构非法', 'requirements.json', (doc: Record<string, unknown>) => { delete ((doc.requirements as Array<Record<string, unknown>>)[0]!.source_refs as Array<Record<string, unknown>>)[0]!.line_end }, 'requirements[0].source_refs[0].line_end', '缺少必需字段。'],
+  ] as const)('returns a browser-safe schema issue for %s', async (_name, artifactName, mutate, path, message) => {
+    const value = await fixture()
+    const docs = documents(value.tenderId, value.source)
+    mutate(docs[artifactName] as Record<string, unknown>)
+    await publish(value.workspace, docs)
+    const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
+    expect(result).toMatchObject({ ok: false, issues: expect.arrayContaining([{
+      code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+      artifact: `analysis/${artifactName}`,
+      path,
+      message,
+    }]) })
   })
 
   it('rejects duplicate item ids', async () => {

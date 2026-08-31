@@ -91,7 +91,7 @@ async function fixture(): Promise<BidWorkspace> {
     writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
     writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
-    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 1, requirement_mappings: [], scoring_mappings: [] })),
+    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [], scoring_mappings: [] })),
   ])
   return workspace
 }

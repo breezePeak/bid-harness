@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   BID_SESSION_EVENT_TYPES,
   BID_STAGES,
+  getBidStagePolicy,
   STAGE_RUN_STATUSES,
   type BidSessionEventMap,
   type BidStagePolicy,
@@ -57,6 +58,13 @@ describe('bid control-plane public contract', () => {
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
   })
 
+  it('limits evidence mapping to local evidence tools and the search-fetch pair', () => {
+    const policy = getBidStagePolicy('evidence_mapping')
+
+    expect(policy.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
+    expect(policy.forbiddenTools).toEqual(['bash'])
+  })
+
   it('distinguishes successful and failed validation with multiple issues', () => {
     const success: StageValidationResult = { ok: true }
     const failure: StageValidationResult = {
@@ -81,6 +89,12 @@ describe('bid control-plane public contract', () => {
       stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
       status: 'failed'
       reason: string
+      issues?: Array<{
+        code: string
+        message: string
+        artifact?: string | undefined
+        path?: string | undefined
+      }>
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<{
       stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'

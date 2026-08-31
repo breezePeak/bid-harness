@@ -1,5 +1,6 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
+import type { z } from 'zod'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace, ManifestFile } from './index.ts'
 import { within } from './index.ts'
@@ -43,8 +44,97 @@ const TECHNICAL_SCORING_CONTEXT = /(?:技术(?:部分|方案|要求|参数|指�
 const GENERIC_SCORING_SIGNAL = /(?:评分|评审|评价)(?:标准|办法|表)?|分值|得分|满分/u
 const EXCLUDED_SCORING_GROUP = /(?:资格|商务|价格)(?:评分|部分|得分)?|报价/u
 
-function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
-  issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
+function reject(
+  issues: StageValidationIssue[],
+  code: string,
+  message: string,
+  artifact?: string,
+  path?: string,
+): void {
+  issues.push({
+    code,
+    message,
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(path === undefined ? {} : { path }),
+  })
+}
+
+function zodPath(path: readonly PropertyKey[]): string | undefined {
+  let result = ''
+  for (const part of path) {
+    if (typeof part === 'number') result += `[${String(part)}]`
+    else if (typeof part === 'string') result += result === '' ? part : `.${part}`
+  }
+  return result === '' ? undefined : result
+}
+
+function valueAtPath(value: unknown, path: readonly PropertyKey[]): unknown {
+  let current = value
+  for (const part of path) {
+    if (typeof part === 'number') {
+      if (!Array.isArray(current)) return undefined
+      current = current[part]
+      continue
+    }
+    if (typeof part !== 'string' || current === null || typeof current !== 'object') return undefined
+    current = (current as Record<string, unknown>)[part]
+  }
+  return current
+}
+
+function zodMessage(issue: z.core.$ZodIssue, path: string | undefined, input: unknown): string {
+  const field = path?.split(/[.[]/u).at(-1)
+  if (issue.code === 'unrecognized_keys') return '存在 Schema 未定义的字段。'
+  if (issue.code === 'invalid_type') {
+    if (input === undefined) return '缺少必需字段。'
+    if (field === 'score') return '必须为数字或 null。'
+    return '字段类型不符合 Schema。'
+  }
+  if (issue.code === 'invalid_value' && field === 'severity') return '只能使用 fatal、mandatory 或 warning。'
+  if (issue.code === 'too_small') {
+    if (field === 'response_points') return '至少需要一项技术响应重点。'
+    if (field !== undefined && ['project_name', 'tender_name', 'purchaser', 'owner'].includes(field)) {
+      return '未知值应使用 null，不能使用空字符串。'
+    }
+    return '至少需要一个非空值。'
+  }
+  if (issue.code === 'custom') return '字段值不符合 Schema 约束。'
+  return '字段值不符合 Schema。'
+}
+
+function appendSchemaIssues(
+  issues: StageValidationIssue[],
+  artifact: keyof typeof TENDER_ANALYSIS_ARTIFACTS,
+  zodIssues: readonly z.core.$ZodIssue[],
+  value: unknown,
+): void {
+  for (const issue of zodIssues) {
+    if (issue.code === 'unrecognized_keys') {
+      for (const key of issue.keys) {
+        const parent = zodPath(issue.path)
+        reject(
+          issues,
+          'TENDER_ANALYSIS_SCHEMA_INVALID',
+          zodMessage(issue, key, undefined),
+          artifact,
+          parent === undefined ? key : `${parent}.${key}`,
+        )
+      }
+      continue
+    }
+    const path = zodPath(issue.path)
+    reject(issues, 'TENDER_ANALYSIS_SCHEMA_INVALID', zodMessage(issue, path, valueAtPath(value, issue.path)), artifact, path)
+  }
+}
+
+function jsonSyntaxMessage(error: unknown): string {
+  const text = error instanceof SyntaxError ? error.message : ''
+  const position = /position\s+(\d+)/iu.exec(text)?.[1]
+  if (position !== undefined) return `JSON 语法无效（位置 ${position}）。`
+  const lineColumn = /line\s+(\d+)\s+column\s+(\d+)/iu.exec(text)
+  return lineColumn === null
+    ? 'JSON 语法无效。'
+    : `JSON 语法无效（第 ${lineColumn[1]} 行，第 ${lineColumn[2]} 列）。`
 }
 
 async function parseArtifact(
@@ -58,15 +148,22 @@ async function parseArtifact(
     await assertNoLinkedPath(workspace.root, absolute)
     if (!(await lstat(absolute)).isFile()) throw new Error('not a regular file')
   } catch {
-    reject(issues, 'TENDER_ANALYSIS_ARTIFACT_MISSING', 'A required tender-analysis Artifact is missing.', path)
+    reject(issues, 'TENDER_ANALYSIS_ARTIFACT_MISSING', '缺少必需的招标分析文件。', path)
     return undefined
   }
+  let value: unknown
   try {
-    return TENDER_ANALYSIS_ARTIFACTS[path].parse(JSON.parse(await readFile(absolute, 'utf8')))
-  } catch {
-    reject(issues, 'TENDER_ANALYSIS_ARTIFACT_INVALID', 'A tender-analysis Artifact has invalid JSON or fields.', path)
+    value = JSON.parse(await readFile(absolute, 'utf8'))
+  } catch (error: unknown) {
+    reject(issues, 'TENDER_ANALYSIS_JSON_INVALID', jsonSyntaxMessage(error), path)
     return undefined
   }
+  const parsed = TENDER_ANALYSIS_ARTIFACTS[path].safeParse(value)
+  if (!parsed.success) {
+    appendSchemaIssues(issues, path, parsed.error.issues, value)
+    return undefined
+  }
+  return parsed.data
 }
 
 function duplicateIds(values: readonly { id: string }[]): string[] {

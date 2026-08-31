@@ -7,6 +7,7 @@ import type {
   BidStageTask,
   StageArtifact,
   StageValidationResult,
+  StageValidationIssue,
 } from './control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
@@ -365,18 +366,31 @@ export class BidOrchestrator {
     let result: StageValidationResult
     try {
       result = await this.validator.validate(stage, artifacts)
-    } catch (error: unknown) {
-      this.fail(stage, `validator failed: ${String(error)}`)
-      return { ok: false, issues: [{ code: 'VALIDATOR_FAILED', message: String(error) }] }
+    } catch {
+      const issues = [{ code: 'VALIDATOR_FAILED', message: 'The stage validator could not complete.' }]
+      this.fail(stage, 'validator failed', issues)
+      return { ok: false, issues }
     }
     if (!result.ok) {
-      this.fail(stage, result.issues.map(issue => `${issue.code}: ${issue.message}`).join('; '))
+      const reason = stage === 'tender_analysis'
+        ? '招标分析结果未通过校验。'
+        : result.issues.map(formatStageValidationIssue).join('; ')
+      this.fail(stage, reason, result.issues)
     }
     return result
   }
 
   /** Append the sole failed-state transition. */
-  private fail(stage: BidStage, reason: string): void {
-    this.session.append('bid.stage.failed', { stage, status: 'failed', reason })
+  private fail(stage: BidStage, reason: string, issues?: StageValidationIssue[]): void {
+    this.session.append('bid.stage.failed', { stage, status: 'failed', reason, ...issues === undefined ? {} : { issues } })
   }
+}
+
+/**
+ * Format one browser-safe issue for compact logs and non-S2 summaries.
+ * @param issue Validation issue with optional Artifact and field paths.
+ * @returns Stable colon-delimited summary without raw values.
+ */
+export function formatStageValidationIssue(issue: StageValidationIssue): string {
+  return [issue.code, issue.artifact, issue.path, issue.message].filter(value => value !== undefined).join(': ')
 }

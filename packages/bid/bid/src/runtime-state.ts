@@ -50,9 +50,9 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/scoring.json',
       'analysis/compliance.json',
     ],
-    allowedTools: ['grep', 'read', 'write', 'web_search'],
-    forbiddenTools: ['bash', 'web_fetch'],
-    requiredArtifacts: ['analysis/evidence-map.json'],
+    allowedTools: ['grep', 'read', 'write', 'web_search', 'web_fetch'],
+    forbiddenTools: ['bash'],
+    requiredArtifacts: ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json'],
     validator: 'evidence-mapping-validator',
     userGate: 'none',
     nextStage: 'outline_generation',
@@ -152,7 +152,7 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
   evidence_mapping: [
     '只处理技术标范围，不得搜索商务、资格或报价资料。',
     '先 grep 定位候选，再 read 原始 chunk 判断材料用途。',
-    '先引用工作区中的本地技术资料；本地不足且属于公开技术知识时才可使用 web_search，并保留可追溯的外部来源。',
+    '先引用工作区中的本地技术资料；本地不足且属于公开技术知识时才可按 web_search、web_fetch 的顺序读取原始来源。',
     '企业事实只能使用本地资料证明；本地缺失时记录 missing_topics。',
     '只写入要求的 evidence-map Artifact。',
   ],
@@ -218,7 +218,12 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
     case 'bid.stage.failed':
       return event.data.stage === state.stage
         && state.status === 'running'
-        ? { stage: state.stage, status: 'failed', failureReason: event.data.reason }
+        ? {
+          stage: state.stage,
+          status: 'failed',
+          failureReason: event.data.reason,
+          ...(event.data.issues === undefined ? {} : { failureIssues: event.data.issues.map(issue => ({ ...issue })) }),
+        }
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage
