@@ -77,10 +77,20 @@ describe('Bid client projection', () => {
     })
 
     session.append('bid.stage.failed', {
-      stage: 'file_intake', status: 'failed', reason: 'document needs OCR',
+      stage: 'file_intake', status: 'failed', reason: 'document needs OCR', issues: [{
+        code: 'DOCUMENT_INVALID',
+        artifact: 'manifest.json',
+        path: 'files[0]',
+        message: 'document cannot be parsed',
+      }],
     })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
-      runtime: { stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR' },
+      runtime: {
+        stage: 'file_intake',
+        status: 'failed',
+        failureReason: 'document needs OCR',
+        failureIssues: [{ code: 'DOCUMENT_INVALID', artifact: 'manifest.json', path: 'files[0]', message: 'document cannot be parsed' }],
+      },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
@@ -92,6 +102,9 @@ describe('Bid client projection', () => {
     })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
       'runtime.failureReason',
+    )
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
+      'runtime.failureIssues',
     )
   })
 })

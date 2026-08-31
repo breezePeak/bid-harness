@@ -438,19 +438,23 @@ describe('Bid Host runtime composition', () => {
     expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
   })
 
-  it('returns an S2 failure as runtime state and drives the generic retry', async () => {
+  it('repairs an invalid S2 Artifact once through the live Agent before waiting for confirmation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
     let tenderRuns = 0
+    let repairRuns = 0
+    const prompts: string[] = []
     const writer = async (cwd: string, sessionId: string, _attempt: number, prompt: string): Promise<void> => {
+      prompts.push(prompt)
       const workspace = new Bid.BidWorkspace(cwd, sessionId)
       if (prompt.includes('当前阶段：tender_analysis / Coverage Audit') || prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) return
+      if (prompt.includes('tender_analysis / Artifact Repair') && ++repairRuns === 1) return
       if (prompt.includes('当前阶段：evidence_mapping')) {
         await writeEvidenceMappingArtifact(cwd, sessionId)
         return
       }
       if (prompt.includes('当前阶段：outline_generation')) return
-      if (tenderRuns > 0) {
+      if (tenderRuns > 0 && !prompt.includes('tender_analysis / Artifact Repair')) {
         for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
           await expect(readFile(join(workspace.sessionRoot, 'analysis', name), 'utf8'))
             .rejects.toMatchObject({ code: 'ENOENT' })
@@ -478,20 +482,20 @@ describe('Bid Host runtime composition', () => {
 
     await expect(ctx.bid.uploadFiles(agent.session, files)).resolves.toEqual({
       ok: true,
-      value: { stage: 'tender_analysis', status: 'failed', failureReason: expect.stringContaining('TENDER_ANALYSIS_ARTIFACT_INVALID') },
+      value: { stage: 'tender_analysis', status: 'waiting_user' },
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started', 'bid.stage.completed',
-      'bid.stage.started', 'bid.stage.failed',
+      'bid.stage.started', 'bid.user_confirmation.required',
     ])
+    expect(prompts.filter(prompt => prompt.includes('tender_analysis / Artifact Repair'))).toHaveLength(2)
     expect(ctx.sessionProjections.snapshot(agent.session).values[Bid.BID_RUNTIME_PROJECTION_KEY])
-      .toMatchObject({ runtime: { stage: 'tender_analysis', status: 'failed' }, allowedActions: ['retry_stage'] })
-
-    await expect(ctx.bid.retryStage(agent.session)).resolves.toEqual({
-      ok: true,
-      value: { stage: 'tender_analysis', status: 'waiting_user' },
+      .toMatchObject({ runtime: { stage: 'tender_analysis', status: 'waiting_user' }, allowedActions: ['confirm_tender_analysis'] })
+    await expect(ctx.bid.getTenderAnalysisForConfirmation(agent.session)).resolves.toMatchObject({
+      project: { project_name: '测试项目' },
+      scoring: { scoring_items: [{ response_points: ['说明交付计划和保障措施'] }] },
     })
-    await expect(ctx.bid.confirmTenderAnalysis(agent.session, [])).resolves.toEqual({
+    await expect(ctx.bid.confirmTenderAnalysis(agent.session, [])).resolves.toMatchObject({
       ok: true,
       value: {
         stage: 'outline_generation', status: 'failed',
@@ -500,12 +504,64 @@ describe('Bid Host runtime composition', () => {
     })
     expect(agent.session.events.map(event => event.type)).toEqual([
       'bid.stage.started', 'bid.stage.completed',
-      'bid.stage.started', 'bid.stage.failed',
       'bid.stage.started', 'bid.user_confirmation.required',
       'bid.user_confirmation.received', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.completed',
       'bid.stage.started', 'bid.stage.failed',
     ])
+  })
+
+  it('projects final S2 issues when the single repair leaves an Artifact invalid', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const prompts: string[] = []
+    const writer = async (cwd: string, sessionId: string, _attempt: number, prompt: string): Promise<void> => {
+      prompts.push(prompt)
+      if (prompt.includes('tender_analysis / Coverage Audit') || prompt.includes('tender_analysis / Artifact Repair')) return
+      await writeTenderAnalysisArtifacts(cwd, sessionId)
+      const workspace = new Bid.BidWorkspace(cwd, sessionId)
+      const scoringPath = join(workspace.sessionRoot, 'analysis/scoring.json')
+      const scoring = JSON.parse(await readFile(scoringPath, 'utf8')) as { scoring_items: Array<Record<string, unknown>> }
+      scoring.scoring_items[0]!.response_points = []
+      await writeFile(scoringPath, `${JSON.stringify(scoring)}\n`, 'utf8')
+    }
+    const { agent } = attach(ctx, 'bid', root, writer)
+    const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
+
+    await expect(ctx.bid.uploadFiles(agent.session, [{
+      name: '招标要求.md',
+      role: 'tender',
+      mediaType: 'text/markdown',
+      size: bytes.byteLength,
+      data: bytes.toString('base64'),
+    }])).resolves.toEqual({
+      ok: true,
+      value: {
+        stage: 'tender_analysis',
+        status: 'failed',
+        failureReason: '招标分析结果未通过校验。',
+        failureIssues: [{
+          code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+          artifact: 'analysis/scoring.json',
+          path: 'scoring_items[0].response_points',
+          message: '至少需要一项技术响应重点。',
+        }],
+      },
+    })
+    expect(prompts.filter(prompt => prompt.includes('tender_analysis / Artifact Repair'))).toHaveLength(3)
+    expect(ctx.sessionProjections.snapshot(agent.session).values[Bid.BID_RUNTIME_PROJECTION_KEY])
+      .toMatchObject({
+        runtime: {
+          stage: 'tender_analysis',
+          status: 'failed',
+          failureIssues: [{
+            artifact: 'analysis/scoring.json',
+            path: 'scoring_items[0].response_points',
+            message: '至少需要一项技术响应重点。',
+          }],
+        },
+        allowedActions: ['retry_stage'],
+      })
   })
 
   it('rejects non-Bid, invalid, and no-longer-admitted batches before a stage starts', async () => {
@@ -515,6 +571,7 @@ describe('Bid Host runtime composition', () => {
       maxFiles: 1,
       maxFileBytes: 4,
       maxTotalBytes: 4,
+      tenderAnalysisRepairAttempts: Bid.DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS,
     })
     const standard = attach(ctx, 'standard', root).agent.session
     const bid = attach(ctx, 'bid', root).agent.session

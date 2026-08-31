@@ -5,7 +5,8 @@ import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
-import type { BidStageTask, StageArtifact } from './control-plane-contract.ts'
+import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
@@ -13,6 +14,15 @@ const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/requirements.json': 'tender_requirements',
   'analysis/scoring.json': 'tender_scoring',
   'analysis/compliance.json': 'tender_compliance',
+}
+
+/** Default number of Validator-guided repair turns before Host failure remains visible. */
+export const DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS = 3
+
+/** Host-owned limits for one S2 execution. */
+export interface TenderAnalysisExecutionOptions {
+  /** Maximum Validator-guided repair turns after initial generation and coverage audit. */
+  maxRepairAttempts: number
 }
 
 /**
@@ -74,16 +84,59 @@ function renderTenderAnalysisCoverageAuditTask(agent: Agent, workspace: BidWorks
 }
 
 /**
+ * Render the sole S2 repair assignment from Host-produced validation issues.
+ * @param agent Live Agent that owns the Bid Session.
+ * @param workspace Session-scoped Bid workspace.
+ * @param task Orchestrator task for the tender-analysis stage.
+ * @param issues Browser-safe issues produced by the S2 Validator.
+ * @returns Dynamic repair assignment for one Agent follow-up.
+ */
+export function renderTenderAnalysisRepairTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: BidStageTask,
+  issues: readonly StageValidationIssue[],
+): string {
+  if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
+  const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
+  return [
+    `当前阶段：${task.stage} / Artifact Repair`,
+    `Bid Session：${agent.id}`,
+    `Session Workspace：${workspacePath}`,
+    '预校验未通过。依据下列 Host Validator 问题修改原正式 Artifact：',
+    ...issues.map(issue => [
+      `- code: ${issue.code}`,
+      `  artifact: ${issue.artifact ?? '未指定'}`,
+      `  path: ${issue.path ?? '未指定'}`,
+      `  message: ${issue.message}`,
+    ].join('\n')),
+    '四个正式 Artifact 路径：',
+    ...artifactPaths.map(path => `- ${path}`),
+    `修复时只允许调用：${task.allowedTools.join(', ')}。`,
+    '只能修改上述四个 S2 Artifact，必须调用 write 覆盖原正式路径；不得创建 final、fixed、new 或 v2 文件，不得推进下一阶段。',
+    'project.json 严格包含 schema_version, project_name, tender_name, purchaser, owner, project_background, project_objectives, project_scope, technical_scope, delivery_scope, implementation_constraints, key_technical_points, source_refs, analyzed_tender_files；未知单值写 null，未知数组写 []。',
+    'requirements.json 每项严格包含 id, category, raw_text, normalized_requirement, mandatory, source_refs。',
+    'scoring.json 每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, response_points, source_refs；parent 和 group 必须存在且可为 null，score 为 number 或 null，score_range 为 {min,max} 或 null，response_points 必须是至少含一项非空字符串的数组。',
+    'compliance.json 每项严格包含 id, type, raw_text, normalized_rule, severity, source_refs；severity 只能是 fatal、mandatory 或 warning。',
+    'source_refs 必须是非空数组，元素严格包含 file_id, chunk, line_start, line_end。需要核对原文或行号时，可以重新 read 对应 chunk。',
+    '必须实际写入修复结果；只回复“已修复”不会改变 Artifact。完成后停止，Host 将执行最终校验。',
+  ].join('\n')
+}
+
+/**
  * Execute S2 through the live Harness Agent and return expected Artifact references after quiescence.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Session-scoped Bid workspace.
  * @param task Orchestrator task for the tender-analysis stage.
+ * @param options Host-owned repair-turn limit for this execution.
  * @returns Expected Artifact references for Validator inspection.
  */
 export async function executeTenderAnalysis(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
+  options: TenderAnalysisExecutionOptions = { maxRepairAttempts: DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   await agent.whenIdle()
@@ -115,13 +168,23 @@ export async function executeTenderAnalysis(
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
     await agent.whenIdle()
+    const artifacts = task.requiredArtifacts.map(path => ({
+      stage: 'tender_analysis' as const,
+      type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
+      path,
+    }))
+    let prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
+    for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, prevalidation.issues) }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+      }))
+      await agent.whenIdle()
+      prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
+    }
+    return artifacts
   } finally {
     liftGuard()
     liftRestriction()
   }
-  return task.requiredArtifacts.map(path => ({
-    stage: 'tender_analysis',
-    type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
-    path,
-  }))
 }

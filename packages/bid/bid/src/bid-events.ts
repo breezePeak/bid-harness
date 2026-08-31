@@ -1,5 +1,5 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
-import type { BidStage, StageArtifact } from './control-plane-contract.ts'
+import type { BidStage, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
@@ -19,8 +19,15 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.stage.started': { stage: BidStage; status: 'running' }
     /** A stage passed validation; artifacts remain in the workspace at these references. */
     'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
-    /** A stage failed before validation could authorize a transition. */
-    'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string }
+    /**
+     * A stage failed before validation could authorize a transition.
+     * @mode broadcast
+     * @param stage Failed stage.
+     * @param status Stable failed status.
+     * @param reason Short user-visible summary.
+     * @param issues Browser-safe validation details when validation rejected Artifacts.
+     */
+    'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
     /** The explicit user decision received for a stage. */

@@ -7,6 +7,7 @@ import {
   BidWorkspace,
   buildBidStageTask,
   executeTenderAnalysis,
+  renderTenderAnalysisRepairTask,
   renderTenderAnalysisTask,
 } from '@deepseek-ai/dsh-bid'
 
@@ -36,7 +37,7 @@ describe('tender-analysis Agent executor', () => {
 
     const result = await executeTenderAnalysis(agent, workspace, task)
 
-    expect(whenIdle).toHaveBeenCalledTimes(3)
+    expect(whenIdle).toHaveBeenCalledTimes(6)
     expect(restrict).toHaveBeenCalledWith({ allow: ['grep', 'read', 'write'] })
     expect(guard).toHaveBeenCalledOnce()
     expect(resolve).toHaveBeenCalledTimes(4)
@@ -51,9 +52,10 @@ describe('tender-analysis Agent executor', () => {
     expect(policy({ name: 'bash' })).toContain('allows only grep, read, write')
     expect(liftGuard).toHaveBeenCalledOnce()
     expect(liftRestriction).toHaveBeenCalledOnce()
-    expect(followup).toHaveBeenCalledTimes(2)
+    expect(followup).toHaveBeenCalledTimes(5)
     const message = followup.mock.calls[0]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
     const coverageAudit = followup.mock.calls[1]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
+    const repair = followup.mock.calls[2]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
     expect(message.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
     expect(message.content[0]?.text).toContain('首先读取：.bid-harness/sessions/session/manifest.json')
     expect(message.content[0]?.text).toContain('只把 manifest 中 role=tender')
@@ -65,6 +67,9 @@ describe('tender-analysis Agent executor', () => {
     expect(coverageAudit.content[0]?.text).toContain('Coverage Audit')
     expect(coverageAudit.content[0]?.text).toContain('技术评分、技术评审、技术评价')
     expect(coverageAudit.content[0]?.text).toContain('动态形成搜索词')
+    expect(repair.content[0]?.text).toContain('Artifact Repair')
+    expect(repair.content[0]?.text).toContain('TENDER_ANALYSIS_TENDER_MISSING')
+    expect(repair.content[0]?.text).toContain('只允许调用：grep, read, write')
     expect(result.map(artifact => artifact.path)).toEqual(task.requiredArtifacts)
   })
 
@@ -93,8 +98,8 @@ describe('tender-analysis Agent executor', () => {
       if (idleCount === 2) await writeFile(scoringPath, `${JSON.stringify(firstPass)}\n`)
       if (idleCount === 3) {
         observedFirstPass = JSON.parse(await readFile(scoringPath, 'utf8'))
-        await writeFile(scoringPath, `${JSON.stringify(repaired)}\n`)
       }
+      if (idleCount === 4) await writeFile(scoringPath, `${JSON.stringify(repaired)}\n`)
     })
     const liftRestriction = vi.fn()
     const liftGuard = vi.fn()
@@ -109,11 +114,31 @@ describe('tender-analysis Agent executor', () => {
       whenIdle,
     } as unknown as Agent
 
-    await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'))
+    await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
 
     expect(observedFirstPass).toEqual(firstPass)
     expect(JSON.parse(await readFile(scoringPath, 'utf8'))).toEqual(repaired)
-    expect(agent.followup).toHaveBeenCalledTimes(2)
+    expect(agent.followup).toHaveBeenCalledTimes(3)
+    const repairMessage = vi.mocked(agent.followup).mock.calls[2]?.[0] as { content: Array<{ text: string }> }
+    expect(repairMessage.content[0]?.text).toContain('analysis/project.json')
+    expect(repairMessage.content[0]?.text).toContain('必须调用 write')
+  })
+
+  it('renders only browser-safe issue fields in the repair assignment', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-repair-task-')), 'session')
+    const text = renderTenderAnalysisRepairTask(
+      { id: 'session' } as Agent,
+      workspace,
+      buildBidStageTask('tender_analysis'),
+      [{
+        code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+        artifact: 'analysis/scoring.json',
+        path: 'scoring_items[2].response_points',
+        message: '至少需要一项技术响应重点。',
+      }],
+    )
+    expect(text).toContain('scoring_items[2].response_points')
+    expect(text).toContain('不得创建 final、fixed、new 或 v2 文件')
   })
 
   it('renders dynamic paths without embedding document bodies', async () => {

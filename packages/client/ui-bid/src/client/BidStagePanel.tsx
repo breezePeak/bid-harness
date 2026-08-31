@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -29,7 +29,7 @@ export type BidStagePanelProps =
 type PendingAction = 'upload' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
-type RequestError = { message: string; issues: readonly { readonly code: string; readonly message: string }[] }
+type RequestError = { message: string; issues: readonly StageValidationIssue[] }
 type SelectedFile = BidSelectedFile & {
   id: number
   progress: number
@@ -264,6 +264,9 @@ export function BidStagePanel({
   const hostFailureReason = projection.runtime.status === 'failed'
     ? projection.runtime.failureReason
     : undefined
+  const hostFailureIssues = projection.runtime.status === 'failed'
+    ? projection.runtime.failureIssues ?? []
+    : []
   const dotState = statusDot(projection.runtime.status)
 
   const updateSection = (sectionId: string, patch: SectionEdit): void => {
@@ -324,6 +327,21 @@ export function BidStagePanel({
 
         {hostFailureReason !== undefined && (
           <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
+        )}
+
+        {hostFailureIssues.length > 0 && (
+          <div className={css.validationIssues} role="alert">
+            <p>{t('validation.count', { count: hostFailureIssues.length })}</p>
+            <ol>
+              {hostFailureIssues.map((issue, index) => (
+                <li key={`${String(index)}:${issue.code}:${issue.artifact ?? ''}:${issue.path ?? ''}`}>
+                  {issue.artifact !== undefined && <span>{t('validation.artifact', { artifact: issue.artifact })}</span>}
+                  {issue.path !== undefined && <span>{t('validation.path', { path: issue.path })}</span>}
+                  <span>{t('validation.message', { message: issue.message })}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
         )}
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
@@ -479,7 +497,7 @@ export function BidStagePanel({
         </div>
 
         {requestError !== null && (
-          <div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map(issue => <p key={`${issue.code}:${issue.message}`}>{`${issue.code}: ${issue.message}`}</p>)}</div>
+          <div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map((issue, index) => <p key={`${String(index)}:${issue.code}:${issue.message}`}>{issue.artifact === undefined && issue.path === undefined ? `${issue.code}: ${issue.message}` : [issue.artifact, issue.path, issue.message].filter(Boolean).join(' · ')}</p>)}</div>
         )}
       </div>
     </section>
