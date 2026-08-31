@@ -140,6 +140,7 @@ export function BidStagePanel({
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly SelectedFile[]>([])
+  const selectedFilesSessionId = useRef(sessionId)
   const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
@@ -167,6 +168,13 @@ export function BidStagePanel({
   useEffect(() => {
     if (projection?.runtime.stage === 'book_review') selectReviewView()
   }, [projection?.runtime.stage, selectReviewView])
+
+  useEffect(() => {
+    if (projection?.runtime.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
+    selectedFilesSessionId.current = sessionId
+    selectedFilesRef.current = []
+    setSelectedFiles([])
+  }, [projection?.runtime.stage, sessionId])
 
   useEffect(() => {
     if (!canConfirm || getOutlineForConfirmation === undefined) return
@@ -393,7 +401,7 @@ export function BidStagePanel({
           />
         )}
 
-        {selectedFiles.length > 0 && (
+        {projection.runtime.stage === 'file_intake' && selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
             {selectedFiles.map(({ file, role, id, progress, status, error }, index) => (
               <li key={id} className={css.fileRow}>

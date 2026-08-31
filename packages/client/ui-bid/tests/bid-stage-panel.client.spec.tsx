@@ -104,6 +104,75 @@ describe('BidStagePanel', () => {
     expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
   })
 
+  it('clears the browser upload queue when file intake advances to tender analysis', () => {
+    const view = render(<BidStagePanel {...props(projection({
+      allowedActions: ['upload_files'],
+    }), { uploadFiles: vi.fn(async () => []) })} />)
+    const inputs = view.container.querySelectorAll('input[type="file"]')
+    fireEvent.change(inputs[0]!, {
+      target: { files: [new File(['tender'], '招标文件.pdf', { type: 'application/pdf' })] },
+    })
+    fireEvent.change(inputs[1]!, {
+      target: { files: [new File(['reference'], '项目资料.pdf', { type: 'application/pdf' })] },
+    })
+    expect(screen.getByText('招标文件.pdf')).toBeTruthy()
+    expect(screen.getByText('项目资料.pdf')).toBeTruthy()
+    expect(screen.getByText('招标资料')).toBeTruthy()
+    expect(screen.getByText('相关资料')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '移除文件: 项目资料.pdf' })).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'file_intake', status: 'running' },
+    }), { uploadFiles: vi.fn(async () => []) })} />)
+
+    expect(screen.getByText('招标文件.pdf')).toBeTruthy()
+    expect(screen.getByText('项目资料.pdf')).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'running' },
+    }), { uploadFiles: vi.fn(async () => []) })} />)
+
+    expect(screen.getByText('招标分析')).toBeTruthy()
+    expect(screen.getByText('正在分析招标文件')).toBeTruthy()
+    expect(screen.queryByText('招标文件.pdf')).toBeNull()
+    expect(screen.queryByText('项目资料.pdf')).toBeNull()
+    expect(screen.queryByText('招标资料')).toBeNull()
+    expect(screen.queryByText('相关资料')).toBeNull()
+    expect(screen.queryByRole('button', { name: '移除文件: 招标文件.pdf' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '移除文件: 项目资料.pdf' })).toBeNull()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      allowedActions: ['upload_files'],
+    }), { uploadFiles: vi.fn(async () => []) })} />)
+
+    expect(screen.queryByText('招标文件.pdf')).toBeNull()
+    expect(screen.queryByText('项目资料.pdf')).toBeNull()
+  })
+
+  it('does not carry a browser upload queue into another file-intake Session', () => {
+    const useSessions = ((selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) => selector({
+      byId: {
+        session_bid: { agentPreset: 'bid' },
+        session_other: { agentPreset: 'bid' },
+      },
+    })) as unknown as BidStagePanelProps['useSessions']
+    const view = render(<BidStagePanel {...props(projection({
+      allowedActions: ['upload_files'],
+    }), { uploadFiles: vi.fn(async () => []), useSessions })} />)
+    const inputs = view.container.querySelectorAll('input[type="file"]')
+    fireEvent.change(inputs[0]!, {
+      target: { files: [new File(['tender'], '上一会话标书.pdf', { type: 'application/pdf' })] },
+    })
+    expect(screen.getByText('上一会话标书.pdf')).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      allowedActions: ['upload_files'],
+    }), { sessionId: 'session_other' as BidStagePanelProps['sessionId'], uploadFiles: vi.fn(async () => []), useSessions })} />)
+
+    expect(screen.queryByText('上一会话标书.pdf')).toBeNull()
+  })
+
   it('submits the selected files once and keeps them available after a Host refusal', async () => {
     const first = Promise.withResolvers<readonly never[]>()
     const uploadFiles = vi.fn(async () => first.promise)
