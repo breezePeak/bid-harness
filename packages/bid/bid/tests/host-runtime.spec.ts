@@ -211,7 +211,7 @@ async function writeChapterArtifact(cwd: string, sessionId: string): Promise<voi
   await mkdir(join(workspace.sessionRoot, 'chapters/meta'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '交付计划覆盖项目阶段和保障措施。\n', 'utf8')
   await writeFile(join(workspace.sessionRoot, 'chapters/meta/0001.json'), `${JSON.stringify({
-    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], evidence_used: [], additional_materials: [], unresolved_topics: [],
+    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
   }, null, 2)}\n`, 'utf8')
 }
 
