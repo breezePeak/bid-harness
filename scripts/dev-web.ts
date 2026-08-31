@@ -28,7 +28,7 @@
  * `watch` through API-level inline config (tsdown workspace mode fills inline
  * keys under each package's file config, and no package config defines it).
  */
-import { globSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execa } from 'execa'
@@ -48,6 +48,9 @@ const SHELL_PACKAGE = '@deepseek-ai/dsh-web-frontend'
  * shell's module graph, so it is not a dev-loop artifact.
  */
 const TEST_INFRASTRUCTURE_PREFIX = 'packages/test-support/'
+
+/** Runtime packages imported directly by the browser shell. */
+const SHELL_RUNTIME_DIRS = ['vendor/cordis', 'vendor/loader'] as const
 
 /**
  * Discover the watch workspace by declaration: every packages/<group>/<name>
@@ -69,14 +72,15 @@ export function discoverPluginDirs(root = repoRoot): string[] {
 }
 
 /**
- * Discover the statically linked library packages: the other half of the same
- * partition {@link discoverPluginDirs} takes. A package that builds through the
+ * Discover the library packages the browser shell reads from `lib/`: the
+ * statically linked client-preset packages plus the vendored Cordis runtime
+ * packages imported by the shell itself. A package that builds through the
  * client preset without declaring `dsh.client` has no loader-delivered browser
  * half, so the compile shell links its `lib/index.js` instead — and an edit to
  * its source reaches the browser only once that bundle is rewritten. Deriving
- * the set from the build preset rather than a hand list keeps it correct when
- * dependency sections move around; deriving it from `dependencies` would not,
- * because client packages declare their build inputs as devDependencies.
+ * the client-package set from the build preset rather than a hand list keeps it
+ * correct when dependency sections move around; the two shell runtime packages
+ * are explicit because they are framework entry points, not client plugins.
  * @param root - repository root containing the grouped package directories.
  * @returns workspace-relative library package directories.
  */
@@ -91,7 +95,7 @@ export function discoverLibraryDirs(root = repoRoot): string[] {
     }
     if (manifest.dsh?.client === undefined) dirs.push(dir)
   }
-  return dirs
+  return [...SHELL_RUNTIME_DIRS.filter(dir => existsSync(join(root, dir, 'package.json'))), ...dirs]
 }
 
 /**

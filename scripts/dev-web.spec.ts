@@ -49,6 +49,20 @@ it('discovers client-preset packages the shell links, excluding loader-delivered
   }
 })
 
+it('discovers the browser shell runtime packages', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-dev-web-runtime-'))
+  try {
+    for (const dir of ['vendor/cordis', 'vendor/loader']) {
+      await mkdir(join(root, dir), { recursive: true })
+      await writeFile(join(root, dir, 'package.json'), '{}')
+    }
+
+    expect(discoverLibraryDirs(root)).toEqual(['vendor/cordis', 'vendor/loader'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('rebuilds a client-plugin bundle after its source changes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-dev-web-watch-'))
   let bundles: TsdownBundle[] = []
