@@ -498,9 +498,9 @@ export interface ConversationInjected {
 export interface ConversationSessionInjected {
   /** Views projected from the `conversation.view` slot ledger. */
   views: {
-    list: () => readonly ViewTab[]
-    subscribe: (fn: () => void) => () => void
-    version: () => number
+    list: (sessionId: SessionId) => readonly ViewTab[]
+    subscribe: (sessionId: SessionId, fn: () => void) => () => void
+    version: (sessionId: SessionId) => string
   }
   /** Release historical image URLs when this rendered session scope unmounts. */
   releaseSessionImages: (sessionId: SessionId) => void
@@ -519,9 +519,9 @@ export interface ConversationSessionInjected {
 export interface ConversationSessionHeaderInjected {
   /** Views projected from the `conversation.view` slot ledger. */
   views: {
-    list: () => readonly ViewTab[]
-    subscribe: (fn: () => void) => () => void
-    version: () => number
+    list: (sessionId: SessionId) => readonly ViewTab[]
+    subscribe: (sessionId: SessionId, fn: () => void) => () => void
+    version: (sessionId: SessionId) => string
   }
   /** Select a real Session through the runtime navigation owner. */
   open: (sessionId: SessionId) => void

@@ -10,7 +10,12 @@ export interface SelectionTarget { turnSeq: number; stepSeq?: number; callId?: C
  * One conversation view tab, projected from a 'conversation.view' slot
  * entry's registration options (label falls back to the entry id).
  */
-export interface ViewTab { id: string; label: string }
+export interface ViewTab {
+  id: string
+  label: string
+  /** Whether this View provides a destination for the resident Chat surface. */
+  embeddedChat: boolean
+}
 
 /**
  * Per-session state shared by conversation, chat-view, and details slots.

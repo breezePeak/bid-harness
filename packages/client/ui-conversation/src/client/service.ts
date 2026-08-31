@@ -20,7 +20,7 @@ import type { QueueAction, QueueItemId } from './contract/queue.ts'
 import type { ComposerBlocks } from './input/blocks.ts'
 import type { DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
 import type { InputSubmitMode } from './contract/composer-submission.ts'
-import type { EmbeddedSurfaceKind } from './embedded-surface.ts'
+import type { EmbeddedSurface, EmbeddedSurfaceKind } from './embedded-surface.ts'
 
 /**
  * The outward conversation face (`ctx.conversation`): the scope-addressed
@@ -60,8 +60,12 @@ export interface IConversation {
   loadOlder(): Promise<void>
   /** Select one registered view for the scoped Session. */
   selectView(viewId: string): void
+  /** Make one registered view selectable or unavailable for the scoped Session. */
+  setViewAvailable(viewId: string, available: boolean): void
   /** Mount one shared conversation surface in the calling feature view. */
   setEmbeddedSurface(kind: EmbeddedSurfaceKind, element: HTMLElement | null): void
+  /** Read a feature-owned portal destination in the scoped Session. */
+  embeddedSurface(kind: EmbeddedSurfaceKind): EmbeddedSurface
 }
 
 /** Create one browser-only draft descriptor; only its id enters input state. */
@@ -116,7 +120,9 @@ export class ConversationController extends Service implements IConversation {
     input: SessionInputResolver
     blocks: ComposerBlocks
     selectView?: (sessionId: SessionId, viewId: string) => void
+    setViewAvailable?: (sessionId: SessionId, viewId: string, available: boolean) => void
     setEmbeddedSurface?: (sessionId: SessionId, kind: EmbeddedSurfaceKind, element: HTMLElement | null) => void
+    embeddedSurface?: (sessionId: SessionId, kind: EmbeddedSurfaceKind) => EmbeddedSurface
   }) {
     super(ctx, 'conversation')
     this.input = config.input
@@ -322,9 +328,21 @@ export class ConversationController extends Service implements IConversation {
     this.config.selectView?.(this.scopeId('selectView'), viewId)
   }
 
+  /** Update one feature view's availability for this scoped Session. */
+  setViewAvailable(viewId: string, available: boolean): void {
+    this.config.setViewAvailable?.(this.scopeId('setViewAvailable'), viewId, available)
+  }
+
   /** Register a React portal destination owned by the current feature view. */
   setEmbeddedSurface(kind: EmbeddedSurfaceKind, element: HTMLElement | null): void {
     this.config.setEmbeddedSurface?.(this.scopeId('setEmbeddedSurface'), kind, element)
+  }
+
+  /** Read one feature-owned portal destination for the current Session. */
+  embeddedSurface(kind: EmbeddedSurfaceKind): EmbeddedSurface {
+    const surface = this.config.embeddedSurface?.(this.scopeId('embeddedSurface'), kind)
+    if (surface !== undefined) return surface
+    return { host: () => null, subscribe: () => () => {} }
   }
 
   /** Resolve the caller scope's session face or throw on root contexts. */

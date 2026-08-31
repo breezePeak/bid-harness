@@ -100,9 +100,11 @@ function mount(
     /** Insert a first-level subagent between the root and selected child. */
     nestedSubagent?: boolean
     /** A composer block another plugin raised for this session. */
-    composerBlock?: { reason: string }
+    composerBlock?: { reason: string; embedded?: boolean }
     /** Mutable view ledger used by registration-order regressions. */
     viewTabs?: ViewTab[]
+    /** Persisted selection before the session body resolves its active View. */
+    initialView?: string
   } = {},
 ) {
   const root = sid('root')
@@ -135,6 +137,7 @@ function mount(
   const useSession = bindSnapshotSelector(session)
   const chat = createChatStore().create()
   chat.actions.setDraft('ordinary draft')
+  if (options.initialView !== undefined) chat.actions.setView(options.initialView)
   const { wiring, sink } = fakeWiring()
   const useInput = bindSnapshotSelector(wiring.state)
   const inputActions = wiring.actions
@@ -143,13 +146,13 @@ function mount(
   const slotCalls: string[] = []
   const lineageOwners: ConversationHeaderLineageOwnerProps[] = []
   const viewTabs = options.viewTabs ?? [
-    { id: 'chat', label: 'Chat' },
-    { id: 'trajectory', label: 'Trajectory' },
+    { id: 'chat', label: 'Chat', embeddedChat: false },
+    { id: 'trajectory', label: 'Trajectory', embeddedChat: false },
   ]
   const views = {
     list: () => viewTabs,
     subscribe: () => () => {},
-    version: () => 1,
+    version: () => '1:0',
   }
   /** Owner share handed to the two composer tool-row seats, per render. */
   const seatOwners: { key: string; owner: unknown }[] = []
@@ -487,13 +490,34 @@ describe('ConversationRoot resident composer', () => {
     const b = mount(conversationSnapshot({ pending: [{} as never] }))
     act(() => { b.chat.actions.setView('trajectory') })
     expect(b.view.getByTestId('view-trajectory')).toBeTruthy()
+    expect(b.view.queryByTestId('view-chat')).toBeNull()
     expect(b.view.getByRole('textbox')).toBeTruthy()
+  })
+
+  it('keeps Chat in the resident area while an embedding View waits for its Portal host', () => {
+    const b = mount(conversationSnapshot(), undefined, undefined, {
+      initialView: 'bid-review',
+      viewTabs: [
+        { id: 'chat', label: 'Chat', embeddedChat: false },
+        { id: 'bid-review', label: 'Review', embeddedChat: true },
+      ],
+    })
+    expect(b.view.getByTestId('view-bid-review')).toBeTruthy()
+    expect(b.view.getByTestId('view-chat')).toBeTruthy()
+  })
+
+  it('keeps the Composer in its resident seat when an embedded host is unavailable', () => {
+    const b = mount(conversationSnapshot(), undefined, undefined, {
+      composerBlock: { reason: '', embedded: true },
+    })
+    expect(b.view.getByRole('textbox')).toBeTruthy()
+    expect(b.view.container.querySelector('[data-conversation-scroll]')?.contains(b.view.getByRole('textbox'))).toBe(true)
   })
 
   it('keeps the Chat fallback selected by id when a view is inserted before it', () => {
     const viewTabs: ViewTab[] = [
-      { id: 'chat', label: 'Chat' },
-      { id: 'trajectory', label: 'Trajectory' },
+      { id: 'chat', label: 'Chat', embeddedChat: false },
+      { id: 'trajectory', label: 'Trajectory', embeddedChat: false },
     ]
     const b = mount(conversationSnapshot(), undefined, undefined, { viewTabs })
     // A removed dynamic view leaves its persisted id behind. The visible
@@ -501,13 +525,22 @@ describe('ConversationRoot resident composer', () => {
     act(() => { b.chat.actions.setView('removed-view') })
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
 
-    viewTabs.unshift({ id: 'new-view', label: 'New view' })
+    viewTabs.unshift({ id: 'new-view', label: 'New view', embeddedChat: false })
     b.rerender()
 
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
     expect(b.view.queryByTestId('view-new-view')).toBeNull()
     expect(b.view.getByRole('tab', { name: 'Chat' }).getAttribute('aria-selected')).toBe('true')
     expect(b.view.getByRole('tab', { name: 'New view' }).getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('replaces an unavailable persisted View selection with Chat', () => {
+    const b = mount(conversationSnapshot(), undefined, undefined, {
+      initialView: 'bid-review',
+      viewTabs: [{ id: 'chat', label: 'Chat', embeddedChat: false }, { id: 'trajectory', label: 'Trajectory', embeddedChat: false }],
+    })
+    expect(b.view.getByTestId('view-chat')).toBeTruthy()
+    expect(b.chat.store.getSnapshot().view).toBe('chat')
   })
 
   it('rolls the pending workspace label back when switching fails', async () => {

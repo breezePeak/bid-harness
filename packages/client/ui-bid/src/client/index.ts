@@ -32,8 +32,12 @@ const NS = 'bid'
 export interface BidStagePanelInjected {
   /** Mirror the Host composer capability into the existing session block. */
   setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
-  /** Switch the current Session to the registered S7 workbench view. */
+  /** Switch the current Session to the registered review-items view. */
   selectReviewView: () => void
+  /** Limit the review-items view to a pending user confirmation. */
+  setReviewViewAvailable: (available: boolean) => void
+  /** Reactive portal destination supplied by the review-items view. */
+  reviewSurface: { host: () => HTMLElement | null; subscribe: (listener: () => void) => () => void }
   /**
    * Submit browser-selected files through the dedicated Bid Host action.
    * @param files - complete file batch selected for one intake attempt.
@@ -138,6 +142,17 @@ export function apply(ctx: ClientContext): void {
         const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
         conversation?.selectView?.('bid-review')
       },
+      setReviewViewAvailable: (available) => {
+        const scoped = ctx.sessions.scope(sessionId)
+        const conversation = scoped?.get('conversation') as { setViewAvailable?: (viewId: string, next: boolean) => void } | undefined
+        conversation?.setViewAvailable?.('bid-review', available)
+      },
+      reviewSurface: (() => {
+        const conversation = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined } | undefined)?.scope?.(sessionId)?.get('conversation') as {
+          embeddedSurface?: (kind: 'review') => { host: () => HTMLElement | null; subscribe: (listener: () => void) => () => void }
+        } | undefined
+        return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
+      })(),
       retryStage: async () => {
         const result = await ctx.remote.bid.retryStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
@@ -186,7 +201,8 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.view',
     id: 'bid-review',
     order: 10,
-    label: () => '技术标审核',
+    label: () => '审核项',
+    embeddedChat: true,
     inject: (sessionId: SessionId) => {
       const remote = ctx.remote.bid as unknown as {
         getReviewWorkbench(id: SessionId): Promise<{ ok: boolean; value: unknown }>
@@ -195,7 +211,7 @@ export function apply(ctx: ClientContext): void {
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
       const conversation = ctx.sessions.scope(sessionId)?.get('conversation') as {
-        setEmbeddedSurface?: (kind: 'chat' | 'composer', element: HTMLElement | null) => void
+        setEmbeddedSurface?: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
       } | undefined
       return {
         getWorkbench: async () => {

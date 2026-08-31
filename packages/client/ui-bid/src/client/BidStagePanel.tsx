@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
@@ -11,6 +11,7 @@ import {
   IconCloseOutline16,
   IconPaperclipOutline16,
   IconRefreshOutline16,
+  Portal,
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
@@ -36,6 +37,8 @@ type SelectedFile = BidSelectedFile & {
   status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
   error: string | undefined
 }
+
+const ABSENT_REVIEW_SURFACE = { host: () => null, subscribe: () => () => {} }
 
 function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
@@ -121,6 +124,8 @@ export function BidStagePanel({
   useSessions,
   setComposerBlock,
   selectReviewView,
+  setReviewViewAvailable,
+  reviewSurface = ABSENT_REVIEW_SURFACE,
   uploadFiles,
   retryStage,
   confirmOutline,
@@ -145,6 +150,7 @@ export function BidStagePanel({
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
   const temporarySectionId = useRef(0)
+  const reviewReady = useRef<string | null>(null)
 
   useEffect(() => {
     alive.current = true
@@ -159,6 +165,10 @@ export function BidStagePanel({
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
   const embedConversation = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
+  const reviewViewAvailable = projection?.runtime.status === 'waiting_user'
+    && (canConfirm || canConfirmAnalysis || projection.runtime.stage === 'book_review')
+  const reviewStateKey = reviewViewAvailable ? `${projection?.runtime.stage}:${projection?.runtime.status}` : null
+  const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   useEffect(() => {
     if (!hasProjection) return
     setComposerBlock(blockedReason, embedConversation)
@@ -166,8 +176,18 @@ export function BidStagePanel({
   }, [blockedReason, embedConversation, hasProjection, setComposerBlock])
 
   useEffect(() => {
-    if (projection?.runtime.stage === 'book_review') selectReviewView()
-  }, [projection?.runtime.stage, selectReviewView])
+    setReviewViewAvailable(reviewViewAvailable)
+  }, [reviewViewAvailable, setReviewViewAvailable])
+
+  useEffect(() => {
+    if (reviewStateKey === null) {
+      reviewReady.current = null
+      return
+    }
+    if (reviewReady.current === reviewStateKey) return
+    reviewReady.current = reviewStateKey
+    selectReviewView()
+  }, [reviewStateKey, selectReviewView])
 
   useEffect(() => {
     if (projection?.runtime.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
@@ -360,46 +380,50 @@ export function BidStagePanel({
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
-        {canConfirm && previewOutline !== null && (
-          <div className={css.outline} aria-label="技术标目录">
-            {buildOutlineView(previewOutline.sections).map(({ section, number, depth }) => {
-              const isTemporary = section.id.startsWith('tmp-')
-              const siblings = previewOutline.sections.filter(candidate => candidate.parent_id === section.parent_id)
-                .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
-              const index = siblings.findIndex(candidate => candidate.id === section.id)
-              return <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((depth - 1) * 16)}px` }}>
-                <span aria-label={`${section.id} 章节编号`}>{number}</span>
-                <input aria-label={`${section.id} 标题`} disabled={isTemporary} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
-                <textarea aria-label={`${section.id} 目的`} disabled={isTemporary} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
-                {section.writable && <textarea aria-label={`${section.id} 必答内容`} disabled={isTemporary} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
-                <div className={css.actions}>
-                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
-                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
-                  <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
-                  <button type="button" disabled={isTemporary || index === 0} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })}>上移</button>
-                  <button type="button" disabled={isTemporary || index === siblings.length - 1} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })}>下移</button>
-                  <button type="button" disabled={isTemporary || index === 0} onClick={() => indentSection(section.id)}>缩进</button>
-                  <button type="button" disabled={isTemporary || section.parent_id === null} onClick={() => outdentSection(section.id)}>取消缩进</button>
-                </div>
-                <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
-              </article>
-            })}
-          </div>
-        )}
+        {reviewHost !== null && (canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
+          <div>
+            {canConfirm && previewOutline !== null && (
+              <div className={css.outline} aria-label="技术标目录">
+                {buildOutlineView(previewOutline.sections).map(({ section, number, depth }) => {
+                  const isTemporary = section.id.startsWith('tmp-')
+                  const siblings = previewOutline.sections.filter(candidate => candidate.parent_id === section.parent_id)
+                    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+                  const index = siblings.findIndex(candidate => candidate.id === section.id)
+                  return <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((depth - 1) * 16)}px` }}>
+                    <span aria-label={`${section.id} 章节编号`}>{number}</span>
+                    <input aria-label={`${section.id} 标题`} disabled={isTemporary} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
+                    <textarea aria-label={`${section.id} 目的`} disabled={isTemporary} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
+                    {section.writable && <textarea aria-label={`${section.id} 必答内容`} disabled={isTemporary} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
+                    <div className={css.actions}>
+                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
+                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
+                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
+                      <button type="button" disabled={isTemporary || index === 0} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })}>上移</button>
+                      <button type="button" disabled={isTemporary || index === siblings.length - 1} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })}>下移</button>
+                      <button type="button" disabled={isTemporary || index === 0} onClick={() => indentSection(section.id)}>缩进</button>
+                      <button type="button" disabled={isTemporary || section.parent_id === null} onClick={() => outdentSection(section.id)}>取消缩进</button>
+                    </div>
+                    <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
+                  </article>
+                })}
+              </div>
+            )}
 
-        {canConfirmAnalysis && tenderAnalysis !== null && (
-          <TenderAnalysisReview
-            value={tenderAnalysis}
-            pending={requestPending === 'confirm_analysis'}
-            t={t}
-            onConfirm={(operations) => {
-              invoke(
-                'confirm_analysis',
-                confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis(operations),
-              )
-            }}
-          />
-        )}
+            {canConfirmAnalysis && tenderAnalysis !== null && (
+              <TenderAnalysisReview
+                value={tenderAnalysis}
+                pending={requestPending === 'confirm_analysis'}
+                t={t}
+                onConfirm={(operations) => {
+                  invoke(
+                    'confirm_analysis',
+                    confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis(operations),
+                  )
+                }}
+              />
+            )}
+          </div>
+        </Portal>}
 
         {projection.runtime.stage === 'file_intake' && selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
@@ -507,6 +531,18 @@ export function BidStagePanel({
                 {t('action.confirm')}
               </Button>
             </>
+          )}
+          {canConfirmAnalysis && (
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<IconCheckOutline14 />}
+              disabled={requestPending !== null || confirmTenderAnalysis === undefined}
+              title={confirmTenderAnalysis === undefined ? t('action.unavailable') : undefined}
+              onClick={() => { invoke('confirm_analysis', confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis([])) }}
+            >
+              {t('action.confirm')}
+            </Button>
           )}
         </div>
 

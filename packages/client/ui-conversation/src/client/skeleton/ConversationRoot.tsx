@@ -183,7 +183,7 @@ export function ConversationRoot({
   // only `.composerStack`: overlay:true renders those as siblings, and sticky
   // on the fallback alone would leave Question/Approval panels at the content
   // end off-screen when the user is not pinned to the floor.
-  const composerSeat = composerBlock?.embedded === true
+  const composerSeat = composerBlock?.embedded === true && embeddedComposerHost !== null
     ? (
       <Portal container={embeddedComposerHost}>
         <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">

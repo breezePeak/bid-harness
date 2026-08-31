@@ -6,9 +6,9 @@
 
 `projection.allowedActions` 控制上传、重试和目录确认控件是否出现，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件为生成的 `bid/uploadFiles` Remote 编码这些字节，重试控件只调用生成的 `bid/retryStage` Remote；两者都不调用 `session.prompt()`，只有刷新的 Host Projection 才会报告阶段成功或失败。目录确认回调仍不可用，因此对应控件保持禁用，不绕过 Host 准入。
 
-`projection.allowedActions` 还控制 S2 分析确认控件。S2 进入 `waiting_user` 后，面板通过专用 Remote 读取项目与技术评分结果，在独立的 `TenderAnalysisReview` 中复用 `Input`、`Textarea`、`DisclosureRow`、`Pill` 和 `Button`；评分原文、分值和来源只读，项目结论、评分目标和响应重点通过受控操作提交。
+需要用户确认时才显示“审核项”标签：S2 招标分析、S5 目录确认和 S7 整本审核都在此展示详情；没有待确认项时标签隐藏。主对话只保留当前阶段与确认按钮。S2 的评分原文、分值和来源只读，项目结论、评分目标和响应重点通过受控操作提交；S5 的目录编辑和确认操作也在审核项中完成。
 
-面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S7 处于 `book_review/waiting_user` 时，面板自动切换到三栏审核工作台：左栏保留同一 Session 的 Transcript 和 Composer，中栏只读渲染章节 Markdown，右栏显示 Host 返回的审核摘要、问题和限制。工作台通过专用 Remote 读取审核报告与章节，并仅在用户明确确认后调用完成审核操作。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
+面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S7 处于 `book_review/waiting_user` 时，审核项自动切换到三栏审核工作台：左栏保留同一 Session 的 Transcript 和 Composer，中栏只读渲染章节 Markdown，右栏显示 Host 返回的审核摘要、问题和限制。工作台通过专用 Remote 读取审核报告与章节，并仅在用户明确确认后调用完成审核操作。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 
 ## 模型体验
 

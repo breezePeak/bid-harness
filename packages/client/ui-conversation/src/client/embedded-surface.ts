@@ -2,7 +2,15 @@
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 
 /** A place in a feature view where one resident conversation surface is rendered. */
-export type EmbeddedSurfaceKind = 'chat' | 'composer'
+export type EmbeddedSurfaceKind = 'chat' | 'composer' | 'review'
+
+/** Reactive read access to a feature-owned portal destination. */
+export interface EmbeddedSurface {
+  /** Return the current portal destination, or null while its view is absent. */
+  host(): HTMLElement | null
+  /** Subscribe to destination changes. */
+  subscribe(listener: () => void): () => void
+}
 
 /** Keeps portal destinations reactive without giving feature plugins access to conversation state. */
 export class EmbeddedSurfaceRegistry {

@@ -9,7 +9,7 @@ export interface BidReviewWorkbenchInjected {
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
   completeReview: () => Promise<void>
   /** Register destinations for the shared ChatView and InputBar React portals. */
-  setEmbeddedSurface: (kind: 'chat' | 'composer', element: HTMLElement | null) => void
+  setEmbeddedSurface: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
   /** Retry framework preparation after a Host-reported S7 failure. */
   retryStage?: () => Promise<void>
 }
@@ -100,7 +100,13 @@ export function BidReviewWorkbench({
     (element: HTMLDivElement | null) => { setEmbeddedSurface('composer', element) },
     [setEmbeddedSurface],
   )
+  const reviewSurfaceRef = useCallback(
+    (element: HTMLDivElement | null) => { setEmbeddedSurface('review', element) },
+    [setEmbeddedSurface],
+  )
   const ready = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
+  const confirmationReady = projection?.runtime.status === 'waiting_user'
+    && (projection.runtime.stage === 'tender_analysis' || projection.runtime.stage === 'outline_confirmation')
 
   const refresh = useCallback((): void => {
     if (!ready) return
@@ -141,7 +147,13 @@ export function BidReviewWorkbench({
     () => outline.filter(({ section }) => section.writable && section.has_content).map(({ section }) => section),
     [outline],
   )
-  if (!isBid || projection?.runtime.stage !== 'book_review') return null
+  if (!isBid || projection === undefined) return null
+  if (confirmationReady) return <section className={css.loading} aria-label="审核项">
+    <h1>审核项</h1>
+    <p>请核对详情后确认，主对话页也可直接确认。</p>
+    <div ref={reviewSurfaceRef} />
+  </section>
+  if (projection.runtime.stage !== 'book_review') return null
   if (projection.runtime.status === 'pending') return <section className={css.loading}>等待准备整本审核框架。</section>
   if (projection.runtime.status === 'running') return <section className={css.loading}>正在读取章节并准备审核工作台。</section>
   if (projection.runtime.status === 'failed') {

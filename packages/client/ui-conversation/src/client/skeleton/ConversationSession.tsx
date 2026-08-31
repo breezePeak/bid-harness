@@ -68,8 +68,11 @@ export function ConversationSessionHeader({
   sessionId, useSession, useSessions, useStore, actions,
   renderSlot, views, open, t,
 }: ConversationSessionHeaderProps) {
-  useSyncExternalStore(views.subscribe, views.version)
-  const tabs = views.list()
+  useSyncExternalStore(
+    listener => views.subscribe(sessionId, listener),
+    () => views.version(sessionId),
+  )
+  const tabs = views.list(sessionId)
   const selectedId = useStore(s => s.view)
   const active = resolveActiveView(tabs, selectedId)
   const ancestry = useSessions(s => deriveAncestry(s, sessionId), equalBreadcrumbs)
@@ -175,8 +178,11 @@ export function ConversationSession({
   sessionId, useSession, useInput, inputActions, useStore, actions,
   renderSlot, views, bindDraftMirror, bindViewActions, releaseSessionImages, embeddedSurface,
 }: ConversationSessionProps) {
-  useSyncExternalStore(views.subscribe, views.version)
-  const tabs = views.list()
+  useSyncExternalStore(
+    listener => views.subscribe(sessionId, listener),
+    () => views.version(sessionId),
+  )
+  const tabs = views.list(sessionId)
   const selectedId = useStore(s => s.view)
   const active = resolveActiveView(tabs, selectedId)
   const composerPhase = useSession(s => s.composerPhase)
@@ -201,6 +207,10 @@ export function ConversationSession({
 
   useEffect(() => bindViewActions(actions), [actions, bindViewActions])
 
+  useEffect(() => {
+    if (selectedId !== null && selectedId !== active?.id) actions.setView(DEFAULT_VIEW_ID)
+  }, [actions, active?.id, selectedId])
+
   useEffect(() => () => {
     releaseSessionImages(sessionId)
   }, [releaseSessionImages, sessionId])
@@ -213,11 +223,9 @@ export function ConversationSession({
   return (
     <div className={css.viewArea}>
       {active !== undefined && renderSlot('conversation.view', viewOwner, { only: active.id })}
-      {active?.id !== 'chat' && (
-        <Portal container={embeddedChatHost}>
-          {renderSlot('conversation.view', viewOwner, { only: 'chat' })}
-        </Portal>
-      )}
+      {active?.embeddedChat === true && (embeddedChatHost === null
+        ? renderSlot('conversation.view', viewOwner, { only: 'chat' })
+        : <Portal container={embeddedChatHost}>{renderSlot('conversation.view', viewOwner, { only: 'chat' })}</Portal>)}
     </div>
   )
 }

@@ -77,11 +77,11 @@ describe('view-ring runtime dual (real ledger)', () => {
     const offBare = slots.register(
       { name: 'conversation.view', id: 'bare', order: 10 }, () => null)
     const tabs = slots.entries('conversation.view')
-      .map(e => ({ id: e.options.id, label: e.options.label ?? e.options.id }))
+      .map(e => ({ id: e.options.id, label: e.options.label ?? e.options.id, embeddedChat: e.options.embeddedChat === true }))
     expect(tabs).toEqual([
-      { id: 'early', label: '早' },
-      { id: 'bare', label: 'bare' },
-      { id: 'z-late', label: '晚' },
+      { id: 'early', label: '早', embeddedChat: false },
+      { id: 'bare', label: 'bare', embeddedChat: false },
+      { id: 'z-late', label: '晚', embeddedChat: false },
     ])
     // Duplicate ids fail loud at load (the ring's uniqueness contract).
     expect(() => slots.register({ name: 'conversation.view', id: 'early' }, () => null))

@@ -40,6 +40,7 @@ import { registerConversationNodes } from './conversation-nodes/register.ts'
 import { registerChatNodeRenderers } from './chat/register-node-renderers.ts'
 import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
 import { EmbeddedSurfaceRegistry } from './embedded-surface.ts'
+import { ViewAvailabilityRegistry } from './view-availability.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -133,6 +134,7 @@ export function apply(ctx: Context): void {
   const chatStore = createChatStore()
   const viewActions = new Map<SessionId, BoundActions<typeof chatStore>>()
   const embeddedSurfaces = new EmbeddedSurfaceRegistry()
+  const viewAvailability = new ViewAvailabilityRegistry()
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
@@ -153,19 +155,28 @@ export function apply(ctx: Context): void {
   // persisted: a fresh page load keeps the open-jump-to-bottom default.
   const chatScrollPositions = new Map<SessionId, ChatScrollPosition>()
 
-  const viewTabs = (): ViewTab[] => {
+  const viewTabs = (sessionId: SessionId): ViewTab[] => {
     const tabs: ViewTab[] = []
     for (const entry of slots.entries('conversation.view')) {
       /* v8 ignore next -- unreachable: list registration validates id at load. */
       if (entry.options.id === undefined) continue
-      tabs.push({ id: entry.options.id, label: resolveSlotLabel(entry.options.label) ?? entry.options.id })
+      if (!viewAvailability.available(sessionId, entry.options.id)) continue
+      tabs.push({
+        id: entry.options.id,
+        label: resolveSlotLabel(entry.options.label) ?? entry.options.id,
+        embeddedChat: entry.options.embeddedChat === true,
+      })
     }
     return tabs
   }
   const views = {
     list: viewTabs,
-    subscribe: (fn: () => void) => slots.subscribe('conversation.view', fn),
-    version: () => slots.getVersion('conversation.view'),
+    subscribe: (sessionId: SessionId, fn: () => void) => {
+      const unwatchSlot = slots.subscribe('conversation.view', fn)
+      const unwatchAvailability = viewAvailability.subscribe(sessionId, fn)
+      return () => { unwatchSlot(); unwatchAvailability() }
+    },
+    version: (sessionId: SessionId) => `${String(slots.getVersion('conversation.view'))}:${String(viewAvailability.version(sessionId))}`,
   }
 
   // The per-session input machine registry (SessionInputResolver face; published as
@@ -453,7 +464,12 @@ export function apply(ctx: Context): void {
     input: inputHub,
     blocks: composerBlocks,
     selectView: (sessionId, viewId) => { viewActions.get(sessionId)?.setView(viewId) },
+    setViewAvailable: (sessionId, viewId, available) => { viewAvailability.set(sessionId, viewId, available) },
     setEmbeddedSurface: (sessionId, kind, element) => { embeddedSurfaces.setHost(sessionId, kind, element) },
+    embeddedSurface: (sessionId, kind) => ({
+      host: () => embeddedSurfaces.host(sessionId, kind),
+      subscribe: listener => embeddedSurfaces.subscribe(sessionId, listener),
+    }),
   })
 
   // The plan strip rides the input dock above the queue rows (same posture).

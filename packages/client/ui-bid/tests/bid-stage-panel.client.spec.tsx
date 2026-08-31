@@ -40,6 +40,9 @@ function props(
     useProjection,
     useSessions,
     setComposerBlock: vi.fn(),
+    setReviewViewAvailable: vi.fn(),
+    selectReviewView: vi.fn(),
+    reviewSurface: { host: () => document.body, subscribe: () => () => {} },
     t,
     ...patch,
   } as unknown as BidStagePanelProps
@@ -273,18 +276,33 @@ describe('BidStagePanel', () => {
   it('moves the composer into the shared S7 workbench only while review waits for the user', async () => {
     const setComposerBlock = vi.fn()
     const selectReviewView = vi.fn()
+    const setReviewViewAvailable = vi.fn()
     const view = render(<BidStagePanel {...props(projection({
       runtime: { stage: 'book_review', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
-    }), { setComposerBlock, selectReviewView })} />)
+    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
     await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith('当前阶段正在处理，请稍候', false) })
+    expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
+    expect(selectReviewView).not.toHaveBeenCalled()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'book_review', status: 'waiting_user' },
+      composer: { enabled: true },
+    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
+    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, true) })
     expect(selectReviewView).toHaveBeenCalledOnce()
 
     view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'book_review', status: 'waiting_user' },
       composer: { enabled: true },
-    }), { setComposerBlock, selectReviewView })} />)
-    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, true) })
+    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
+    expect(selectReviewView).toHaveBeenCalledOnce()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'running' },
+      composer: { enabled: false, reason: 'bid.stage_running' },
+    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
+    expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
   })
 
   it('dispatches retry and confirmation without changing projected runtime', async () => {
