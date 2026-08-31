@@ -128,8 +128,10 @@ export * from './evidence-mapping-artifacts.ts'
 export * from './web-evidence-source-artifacts.ts'
 export {
   buildEvidenceMappingWebSnapshots,
+  collectEvidenceMappingWebObservations,
   executeEvidenceMapping,
   renderEvidenceMappingTask,
+  type EvidenceMappingCapturedWebResult,
   type EvidenceMappingWebObservation,
   type EvidenceMappingWebSnapshot,
 } from './evidence-mapping-executor.ts'
@@ -141,7 +143,7 @@ export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
-export { buildChapterWorklist, executeChapterWriting, renderChapterWritingTask } from './chapter-writing-executor.ts'
+export { buildChapterWorklist, executeChapterWriting, pickChapterContext, renderChapterWritingTask } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export * from './book-review-artifacts.ts'
 export { executeBookReview } from './book-review-executor.ts'

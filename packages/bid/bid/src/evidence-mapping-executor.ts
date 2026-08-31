@@ -56,6 +56,12 @@ export interface EvidenceMappingWebSnapshot {
   readonly content: string
 }
 
+/** Canonical in-process Web outcome captured before durable correlation. */
+export interface EvidenceMappingCapturedWebResult {
+  readonly exec: Readonly<ToolExecution>
+  readonly result: Readonly<ToolExecutionResult>
+}
+
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || item.trim().length === 0)) return undefined
   return value.map(item => (item as string).trim())
@@ -156,10 +162,17 @@ async function removeAttemptPath(path: string): Promise<void> {
   }
 }
 
-function collectAttemptObservations(
+/**
+ * Correlate captured Web outcomes with the current Agent attempt's durable events.
+ * @param agent - Agent whose Session owns the durable Tool events.
+ * @param boundarySeq - last event sequence before the research attempt.
+ * @param captured - canonical in-process Web Tool outcomes keyed by call id.
+ * @returns ordered current-attempt observations with matched call and result events.
+ */
+export function collectEvidenceMappingWebObservations(
   agent: Agent,
   boundarySeq: number,
-  captured: ReadonlyMap<string, { exec: Readonly<ToolExecution>; result: Readonly<ToolExecutionResult> }>,
+  captured: ReadonlyMap<string, EvidenceMappingCapturedWebResult>,
 ): EvidenceMappingWebObservation[] {
   const events = agent.session.events.filter(event => event.seq > boundarySeq)
   const calls = new Map(events.flatMap(event => event.type === 'tool/call' && REQUIRED_WEB_TOOLS.includes(event.data.name as typeof REQUIRED_WEB_TOOLS[number])
@@ -214,7 +227,13 @@ async function writeWebEvidenceArtifacts(
   await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify(ledger, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
 }
 
-/** Render the dynamic S3 assignment for the live Bid Agent. */
+/**
+ * Render the dynamic S3 assignment for the live Bid Agent.
+ * @param agent - live Bid Agent receiving the assignment.
+ * @param workspace - Session-scoped Bid workspace.
+ * @param task - Host-issued evidence-mapping task and Tool policy.
+ * @returns model-visible S3 assignment text.
+ */
 export function renderEvidenceMappingTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
   if (task.stage !== 'evidence_mapping') throw new Error('evidence-mapping-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
@@ -246,7 +265,13 @@ export function renderEvidenceMappingTask(agent: Agent, workspace: BidWorkspace,
   ].join('\n')
 }
 
-/** Execute S3 through the live Agent and return its expected Artifact. */
+/**
+ * Execute S3 through the live Agent and return its expected Artifacts.
+ * @param agent - live Bid Agent used for evidence mapping.
+ * @param workspace - Session-scoped Bid workspace.
+ * @param task - Host-issued evidence-mapping task and Tool policy.
+ * @returns the evidence map and Host-owned Web source ledger descriptors.
+ */
 export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspace, task: BidStageTask): Promise<StageArtifact[]> {
   if (task.stage !== 'evidence_mapping') throw new Error('evidence-mapping-executor-stage-invalid')
   await agent.whenIdle()
@@ -271,7 +296,7 @@ export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspa
   const target = await fs.resolve(artifactPath)
   agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
   const boundarySeq = agent.session.events.at(-1)?.seq ?? -1
-  const captured = new Map<string, { exec: Readonly<ToolExecution>; result: Readonly<ToolExecutionResult> }>()
+  const captured = new Map<string, EvidenceMappingCapturedWebResult>()
   const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
     if (exec.agent === agent && REQUIRED_WEB_TOOLS.includes(exec.name as typeof REQUIRED_WEB_TOOLS[number])) {
       captured.set(String(exec.callId), { exec, result })
@@ -291,7 +316,7 @@ export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspa
     liftGuard()
     liftRestriction()
   }
-  const snapshots = buildEvidenceMappingWebSnapshots(collectAttemptObservations(agent, boundarySeq, captured))
+  const snapshots = buildEvidenceMappingWebSnapshots(collectEvidenceMappingWebObservations(agent, boundarySeq, captured))
   await writeWebEvidenceArtifacts(workspace, snapshots)
   return [
     { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },

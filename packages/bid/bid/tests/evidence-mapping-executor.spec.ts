@@ -43,11 +43,11 @@ function observation(
     ...input,
     resultTime: 1_788_134_400_000,
     result: isError
-      ? { isError: true, error: { message: 'failed' }, content: [{ type: 'text', text: 'failed', isError: true }] }
+      ? { isError: true, error: { message: 'failed' }, content: [{ type: 'text', text: 'failed' }] }
       : {
         isError: false,
         value: input.value as never,
-        content: [{ type: 'text', text: input.content ?? 'ok', isError: false }],
+        content: [{ type: 'text', text: input.content ?? 'ok' }],
         ...(input.statusMeta === undefined ? {} : { meta: input.statusMeta as never }),
       },
   }

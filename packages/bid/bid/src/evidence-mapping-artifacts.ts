@@ -9,7 +9,8 @@ export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as 
 /** Allowed ways a later technical proposal may use public external material. */
 export const EXTERNAL_MATERIAL_USAGES = ['reference', 'background'] as const
 
-const materialSchema = z.object({
+/** Strict schema shared by S3 and later evidence-consuming stages. */
+export const evidenceMaterialSchema = z.object({
   file_id: z.string().min(1),
   chunk: z.string().min(1),
   line_start: z.number().int().positive(),
@@ -30,7 +31,8 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-const externalMaterialSchema = z.object({
+/** Strict schema shared by S3 and later external-evidence consumers. */
+export const externalEvidenceMaterialSchema = z.object({
   title: z.string().trim().min(1),
   url: z.url().refine(isHttpUrl, { message: 'external material URL must use http or https' }),
   publisher: z.string().trim().min(1),
@@ -42,8 +44,8 @@ const externalMaterialSchema = z.object({
 }).strict()
 
 const mappingSchema = z.object({
-  materials: z.array(materialSchema),
-  external_materials: z.array(externalMaterialSchema),
+  materials: z.array(evidenceMaterialSchema),
+  external_materials: z.array(externalEvidenceMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
 }).strict().refine(mapping => mapping.materials.length > 0 || mapping.external_materials.length > 0 || mapping.missing_topics.length > 0, {
   message: 'a mapping requires local material, external material, or a missing topic',
@@ -59,9 +61,9 @@ const evidenceMapSchema = z.object({
 }).strict()
 
 /** Parsed local material reference. */
-export type EvidenceMaterial = z.infer<typeof materialSchema>
+export type EvidenceMaterial = z.infer<typeof evidenceMaterialSchema>
 /** Parsed public technical reference discovered by search and admitted only after a successful source fetch. */
-export type ExternalEvidenceMaterial = z.infer<typeof externalMaterialSchema>
+export type ExternalEvidenceMaterial = z.infer<typeof externalEvidenceMaterialSchema>
 /** Parsed requirement-to-material mapping. */
 export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema>
 /** Parsed scoring-to-material mapping. */
@@ -69,7 +71,11 @@ export type ScoringMaterialMapping = z.infer<typeof scoringMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
 
-/** Parse an evidence map through the current schema. */
+/**
+ * Parse an evidence map through the current schema.
+ * @param value - decoded JSON value.
+ * @returns strict current-version evidence map.
+ */
 export function parseEvidenceMapArtifact(value: unknown): EvidenceMapArtifact {
   return evidenceMapSchema.parse(value)
 }

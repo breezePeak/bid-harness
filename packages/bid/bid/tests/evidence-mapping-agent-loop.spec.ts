@@ -120,7 +120,7 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
         return { url: value.url, statusCode: value.statusCode, truncated: value.truncated }
       },
     },
-    execute: async args => ({ url: args.url, statusCode: 200, body: { kind: 'text', content: '官方标准要求访问控制与安全审计。' }, truncated: false }),
+    execute: async args => ({ url: args.url, statusCode: 200, body: { kind: 'text' as const, content: '官方标准要求访问控制与安全审计。' }, truncated: false }),
   }))
 }
 
