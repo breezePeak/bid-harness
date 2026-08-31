@@ -1,6 +1,7 @@
 /** Strict per-session header/body content inserted into the resident conversation layout. */
 
 import { useEffect, useSyncExternalStore } from 'react'
+import { Portal } from '@deepseek-ai/dsh-client-ui-primitives'
 import clsx from 'clsx'
 import type { SessionId, SessionListState, SessionSummary } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
@@ -172,7 +173,7 @@ export function ConversationSessionHeader({
  */
 export function ConversationSession({
   sessionId, useSession, useInput, inputActions, useStore, actions,
-  renderSlot, views, bindDraftMirror, releaseSessionImages,
+  renderSlot, views, bindDraftMirror, bindViewActions, releaseSessionImages, embeddedSurface,
 }: ConversationSessionProps) {
   useSyncExternalStore(views.subscribe, views.version)
   const tabs = views.list()
@@ -184,6 +185,11 @@ export function ConversationSession({
   const storedDraft = useStore(s => s.draft)
   // `?? null`: persisted snapshots from before the inspect field rehydrate without it.
   const inspect = useStore(s => s.inspect ?? null)
+  const embeddedChatHost = useSyncExternalStore(
+    embeddedSurface.subscribe,
+    () => embeddedSurface.host('chat'),
+    () => null,
+  )
 
   useEffect(() => {
     if (inputState.draft === '' && storedDraft !== '') inputActions.setDraft(storedDraft)
@@ -193,17 +199,25 @@ export function ConversationSession({
     // the machine mirror, not this seed effect.
   }, [inputActions])
 
+  useEffect(() => bindViewActions(actions), [actions, bindViewActions])
+
   useEffect(() => () => {
     releaseSessionImages(sessionId)
   }, [releaseSessionImages, sessionId])
 
   if (blank && composerPhase === 'blank') return null
+  const viewOwner = {
+    inspect,
+    onInspectDone: () => { actions.setInspect(null) },
+  }
   return (
     <div className={css.viewArea}>
-      {active !== undefined && renderSlot('conversation.view', {
-        inspect,
-        onInspectDone: () => { actions.setInspect(null) },
-      }, { only: active.id })}
+      {active !== undefined && renderSlot('conversation.view', viewOwner, { only: active.id })}
+      {active?.id !== 'chat' && (
+        <Portal container={embeddedChatHost}>
+          {renderSlot('conversation.view', viewOwner, { only: 'chat' })}
+        </Portal>
+      )}
     </div>
   )
 }

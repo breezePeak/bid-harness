@@ -64,7 +64,7 @@ describe('Bid runtime state and policies', () => {
       'agent',
       'user',
       'agent',
-      'agent',
+      'program',
       'program',
     ])
     expect(BID_STAGES.map(stage => getBidStagePolicy(stage).nextStage)).toEqual([
@@ -220,6 +220,30 @@ describe('Bid runtime state and policies', () => {
 })
 
 describe('BidOrchestrator', () => {
+  it('waits for explicit completion after validating the deterministic book review', async () => {
+    const session = createSession('bid-book-review-gate')
+    for (const stage of ['file_intake', 'tender_analysis', 'evidence_mapping', 'outline_generation'] as const) {
+      session.append('bid.stage.started', { stage, status: 'running' })
+      if (stage === 'tender_analysis') session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      if (stage === 'tender_analysis') session.append('bid.user_confirmation.received', { stage, confirmed: true })
+      session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    session.append('bid.user_confirmation.required', { stage: 'outline_confirmation', status: 'waiting_user' })
+    session.append('bid.user_confirmation.received', { stage: 'outline_confirmation', confirmed: true })
+    session.append('bid.stage.completed', { stage: 'outline_confirmation', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'chapter_writing', status: 'completed', artifacts: [] })
+    const executor = new RecordingExecutor(undefined, ['book_review'])
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'book_review', status: 'waiting_user' })
+    expect(session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'book_review')).toBe(false)
+    await expect(orchestrator.confirmValidatedStage('book_review', artifactsFor(buildBidStageTask('book_review')))).resolves.toMatchObject({
+      ok: true,
+      state: { stage: 'docx_export', status: 'pending' },
+    })
+  })
+
   it('waits for external input instead of driving a fresh file-intake stage', async () => {
     const session = createSession('bid-drive-waits-for-files')
     const executor = new RecordingExecutor()
@@ -439,7 +463,7 @@ describe('BidOrchestrator', () => {
       data: { confirmed: false },
     })
 
-    await expect(orchestrator.confirm(true)).resolves.toEqual({ stage: 'docx_export', status: 'completed' })
+    await expect(orchestrator.confirm(true)).resolves.toEqual({ stage: 'book_review', status: 'waiting_user' })
     const confirmationCompletion = session.events.find(event =>
       event.type === 'bid.stage.completed' && event.data.stage === 'outline_confirmation')
     expect(confirmationCompletion).toMatchObject({
@@ -472,6 +496,29 @@ describe('BidOrchestrator', () => {
     })
     expect(executor.tasks).toHaveLength(taskCount)
     expect(session.events.at(-1)?.type).toBe('bid.user_confirmation.required')
+  })
+
+  it('retries a failed after-validation stage back to user confirmation', async () => {
+    const session = createSession('bid-review-retry')
+    for (const stage of ['file_intake', 'tender_analysis', 'evidence_mapping', 'outline_generation'] as const) {
+      session.append('bid.stage.started', { stage, status: 'running' })
+      if (stage === 'tender_analysis') session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      if (stage === 'tender_analysis') session.append('bid.user_confirmation.received', { stage, confirmed: true })
+      session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    session.append('bid.user_confirmation.required', { stage: 'outline_confirmation', status: 'waiting_user' })
+    session.append('bid.user_confirmation.received', { stage: 'outline_confirmation', confirmed: true })
+    session.append('bid.stage.completed', { stage: 'outline_confirmation', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'chapter_writing', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'book_review', status: 'running' })
+    session.append('bid.stage.failed', { stage: 'book_review', status: 'failed', reason: 'report unavailable' })
+    const executor = new RecordingExecutor()
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await expect(orchestrator.retry()).resolves.toEqual({ stage: 'book_review', status: 'waiting_user' })
+    expect(executor.tasks.map(task => task.stage)).toEqual(['book_review'])
+    expect(session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'book_review')).toBe(false)
   })
 
   it('replays state entirely from copied session events', async () => {

@@ -1,0 +1,26 @@
+.root { height: 100%; min-height: 0; display: flex; flex-direction: column; background: #f4f6f8; color: #1f2937; }
+.header { display: flex; gap: 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #dbe1e8; background: #fff; }
+.header > button:first-of-type { margin-left: auto; }
+.zoom { display: inline-flex; align-items: center; gap: 6px; }
+.error { padding: 8px 16px; color: #a61b1b; background: #fff1f1; }
+.columns { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(300px, 360px) minmax(520px, 1fr) minmax(280px, 340px); }
+.resizer { cursor: col-resize; background: #eef1f4; }
+.resizer:hover, .resizer:focus-visible { background: #b7d4f5; outline: none; }
+.left, .review { min-height: 0; overflow: auto; background: #fff; border-right: 1px solid #dbe1e8; }
+.review { border-right: 0; border-left: 1px solid #dbe1e8; padding: 16px; }
+.outline { max-height: 40%; overflow: auto; border-bottom: 1px solid #dbe1e8; padding: 8px; display: grid; gap: 4px; }
+.horizontalResizer { height: 8px; cursor: row-resize; background: #eef1f4; }
+.horizontalResizer:hover, .horizontalResizer:focus-visible { background: #b7d4f5; outline: none; }
+.treeRow { display: flex; align-items: center; gap: 2px; }
+.treeRow > button:last-child { min-width: 0; flex: 1; text-align: left; border: 0; background: transparent; padding: 7px; }
+.disclosure { width: 20px; border: 0; background: transparent; }
+.active { background: #e7f0ff !important; }
+.chat { height: 60%; min-height: 0; display: flex; flex-direction: column; }
+.chatTranscript { min-height: 0; flex: 1; overflow: auto; }
+.composerSurface { flex: none; }
+.reader { min-width: 0; overflow: auto; padding: 32px; }
+.reader article { max-width: 800px; min-height: 100%; margin: 0 auto; padding: 56px 72px; background: #fff; box-shadow: 0 1px 5px #0002; }
+.readerActions { display: flex; justify-content: flex-end; gap: 8px; }
+.narrowTabs { display: none; }
+.loading { padding: 24px; }
+@media (max-width: 900px) { .columns { grid-template-columns: minmax(260px, 40%) 8px 1fr !important; } .review, .columns > .resizer:nth-of-type(2) { display: none; } .narrowTabs { display: flex; gap: 4px; padding: 8px; } .left[data-narrow-pane='chat'] .outline, .left[data-narrow-pane='chat'] .horizontalResizer { display: none; } .left[data-narrow-pane='chat'] .chat { height: calc(100% - 44px); } .left[data-narrow-pane='outline'] .chat { display: none; } .left[data-narrow-pane='outline'] .outline { height: calc(100% - 44px) !important; max-height: none; } }

@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BidStagePanel } from './BidStagePanel.tsx'
+import { BidReviewWorkbench, type BidReviewChapterView, type BidReviewWorkbenchView } from './BidReviewWorkbench.tsx'
 import { en, zh, type BidKey } from './locales.ts'
 
 export type { BidKey } from './locales.ts'
@@ -30,7 +31,9 @@ const NS = 'bid'
 /** Callbacks supplied to the Bid panel without exposing client services. */
 export interface BidStagePanelInjected {
   /** Mirror the Host composer capability into the existing session block. */
-  setComposerBlock: (reason: string | undefined) => void
+  setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
+  /** Switch the current Session to the registered S7 workbench view. */
+  selectReviewView: () => void
   /**
    * Submit browser-selected files through the dedicated Bid Host action.
    * @param files - complete file batch selected for one intake attempt.
@@ -124,11 +127,16 @@ export function apply(ctx: ClientContext): void {
     order: -10,
     locale: NS,
     inject: (sessionId: SessionId): BidStagePanelInjected => ({
-      setComposerBlock: (reason) => {
+      setComposerBlock: (reason, embedded) => {
         ctx.conversation.blocks.set(
           sessionId,
-          reason === undefined ? undefined : { reason },
+          reason === undefined && embedded !== true ? undefined : { reason: reason ?? '', ...(embedded === true ? { embedded: true } : {}) },
         )
+      },
+      selectReviewView: () => {
+        const scoped = ctx.sessions.scope(sessionId)
+        const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
+        conversation?.selectView?.('bid-review')
       },
       retryStage: async () => {
         const result = await ctx.remote.bid.retryStage(sessionId)
@@ -174,4 +182,44 @@ export function apply(ctx: ClientContext): void {
       },
     }),
   }, BidStagePanel))
+  ctx.slots.register({
+    name: 'conversation.view',
+    id: 'bid-review',
+    order: 10,
+    label: () => '技术标审核',
+    inject: (sessionId: SessionId) => {
+      const remote = ctx.remote.bid as unknown as {
+        getReviewWorkbench(id: SessionId): Promise<{ ok: boolean; value: unknown }>
+        getReviewChapter(id: SessionId, sectionId: string): Promise<{ ok: boolean; value: unknown }>
+        completeReview(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
+        retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
+      }
+      const conversation = ctx.sessions.scope(sessionId)?.get('conversation') as {
+        setEmbeddedSurface?: (kind: 'chat' | 'composer', element: HTMLElement | null) => void
+      } | undefined
+      return {
+        getWorkbench: async () => {
+          const result = await remote.getReviewWorkbench(sessionId)
+          if (!result.ok) throw new Error('BID_REVIEW_NOT_ALLOWED')
+          return result.value as BidReviewWorkbenchView
+        },
+        getChapter: async (sectionId: string) => {
+          const result = await remote.getReviewChapter(sessionId, sectionId)
+          if (!result.ok) throw new Error('BID_REVIEW_NOT_ALLOWED')
+          return result.value as BidReviewChapterView
+        },
+        completeReview: async () => {
+          const result = await remote.completeReview(sessionId)
+          if (!result.ok) throw new Error('BID_REVIEW_COMPLETE_FAILED')
+          if (!result.value.ok) throw new Error(result.value.error?.message ?? 'BID_REVIEW_COMPLETE_FAILED')
+        },
+        retryStage: async () => {
+          const result = await remote.retryStage(sessionId)
+          if (!result.ok) throw new Error('BID_RETRY_FAILED')
+          if (!result.value.ok) throw new Error(result.value.error?.message ?? 'BID_RETRY_FAILED')
+        },
+        setEmbeddedSurface: (kind, element) => { conversation?.setEmbeddedSurface?.(kind, element) },
+      }
+    },
+  }, BidReviewWorkbench)
 }

@@ -42,6 +42,7 @@ export const BID_CLIENT_ACTIONS = [
   'retry_stage',
   'confirm_tender_analysis',
   'confirm_outline',
+  'complete_review',
   'send_message',
 ] as const
 
@@ -50,6 +51,9 @@ export type BidClientAction = typeof BID_CLIENT_ACTIONS[number]
 
 /** The kinds of executor that may own a bid stage. */
 export type BidStageExecutor = 'program' | 'agent' | 'user'
+
+/** Timing of an explicit user decision relative to automatic work. */
+export type BidStageUserGate = 'none' | 'before_execution' | 'after_validation'
 
 /** Static requirements and transition target for one bid stage. */
 export interface BidStagePolicy {
@@ -60,8 +64,8 @@ export interface BidStagePolicy {
   forbiddenTools?: string[]
   requiredArtifacts: string[]
   validator: string
-  /** Whether a validated automatic result must wait for explicit user confirmation before completion. */
-  requiresUserConfirmationAfterValidation?: boolean
+  /** Explicit user decision timing for this stage. */
+  userGate: BidStageUserGate
   nextStage: BidStage | null
 }
 
@@ -101,6 +105,7 @@ export type BidComposerReason =
   | 'bid.stage_running'
   | 'bid.tender_analysis_confirmation_required'
   | 'bid.outline_confirmation_required'
+  | 'bid.book_review_completion_required'
   | 'bid.stage_failed'
   | 'bid.completed'
 
@@ -194,6 +199,41 @@ export interface BidRetryFailure {
 export type BidRetryResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidRetryFailure }
+
+/** Result of the explicit S7 transition into DOCX export. */
+export type BidReviewCompletionResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REVIEW_NOT_ALLOWED' | 'BID_REVIEW_REPORT_INVALID' | 'BID_REVIEW_CONTENT_CHANGED' | 'BID_REVIEW_COMPLETE_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+
+/** Browser-safe outline and report summary used by the S7 workbench. */
+export interface BidReviewWorkbenchView {
+  readonly schema_version: 1
+  readonly outline: readonly { readonly section_id: string; readonly parent_id: string | null; readonly order: number; readonly title: string; readonly writable: boolean; readonly has_content: boolean; readonly review_status: 'not_evaluated' }[]
+  readonly review: { readonly review_mode: 'framework_only'; readonly quality_gate: 'not_evaluated'; readonly summary: { readonly chapter_count: number; readonly evaluated_chapter_count: 0; readonly issue_count: number; readonly blocking_issue_count: number }; readonly limitations: readonly string[]; readonly issues: readonly BidReviewIssueView[] }
+}
+
+/** Browser-safe generic review finding reserved for later detailed-review rules. */
+export interface BidReviewIssueView {
+  readonly issue_id: string
+  readonly section_id: string
+  readonly category: string
+  readonly severity: 'blocking' | 'warning' | 'info'
+  readonly status: 'open' | 'resolved' | 'dismissed'
+  readonly title: string
+  readonly detail: string
+  readonly suggestion: string
+}
+
+/** Browser-safe body for a selected S7 outline section. */
+export interface BidReviewChapterView {
+  readonly section_id: string
+  readonly title: string
+  readonly number: string
+  readonly heading_path: readonly string[]
+  readonly writable: boolean
+  readonly markdown: string | null
+  readonly review: { readonly status: 'not_evaluated'; readonly issues: readonly BidReviewIssueView[] }
+}
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =

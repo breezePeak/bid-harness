@@ -120,6 +120,7 @@ export function BidStagePanel({
   useProjection,
   useSessions,
   setComposerBlock,
+  selectReviewView,
   uploadFiles,
   retryStage,
   confirmOutline,
@@ -156,11 +157,16 @@ export function BidStagePanel({
   const hasProjection = isBidSession && projection !== undefined
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
+  const embedConversation = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
   useEffect(() => {
     if (!hasProjection) return
-    setComposerBlock(blockedReason)
+    setComposerBlock(blockedReason, embedConversation)
     return () => { setComposerBlock(undefined) }
-  }, [blockedReason, hasProjection, setComposerBlock])
+  }, [blockedReason, embedConversation, hasProjection, setComposerBlock])
+
+  useEffect(() => {
+    if (projection?.runtime.stage === 'book_review') selectReviewView()
+  }, [projection?.runtime.stage, selectReviewView])
 
   useEffect(() => {
     if (!canConfirm || getOutlineForConfirmation === undefined) return

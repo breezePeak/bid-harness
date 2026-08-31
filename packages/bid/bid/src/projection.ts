@@ -34,6 +34,8 @@ const clientProjectionSchema = z.object({
         'bid.stage_pending',
         'bid.stage_running',
         'bid.outline_confirmation_required',
+        'bid.tender_analysis_confirmation_required',
+        'bid.book_review_completion_required',
         'bid.stage_failed',
         'bid.completed',
       ]),

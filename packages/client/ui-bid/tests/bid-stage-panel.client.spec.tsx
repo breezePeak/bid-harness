@@ -157,13 +157,30 @@ describe('BidStagePanel', () => {
   it('mirrors only projection.composer into the session block', async () => {
     const setComposerBlock = vi.fn()
     const view = render(<BidStagePanel {...props(projection(), { setComposerBlock })} />)
-    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith('请先添加本项目资料') })
+    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith('请先添加本项目资料', false) })
 
     view.rerender(<BidStagePanel {...props(projection({
       allowedActions: [],
       composer: { enabled: true },
     }), { setComposerBlock })} />)
-    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined) })
+    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, false) })
+  })
+
+  it('moves the composer into the shared S7 workbench only while review waits for the user', async () => {
+    const setComposerBlock = vi.fn()
+    const selectReviewView = vi.fn()
+    const view = render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'book_review', status: 'running' },
+      composer: { enabled: false, reason: 'bid.stage_running' },
+    }), { setComposerBlock, selectReviewView })} />)
+    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith('当前阶段正在处理，请稍候', false) })
+    expect(selectReviewView).toHaveBeenCalledOnce()
+
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'book_review', status: 'waiting_user' },
+      composer: { enabled: true },
+    }), { setComposerBlock, selectReviewView })} />)
+    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, true) })
   })
 
   it('dispatches retry and confirmation without changing projected runtime', async () => {

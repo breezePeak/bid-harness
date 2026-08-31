@@ -41,6 +41,7 @@ describe('bid control-plane public contract', () => {
       forbiddenTools: ['bash'],
       requiredArtifacts: ['analysis/requirements.json'],
       validator: 'tender-analysis-validator',
+      userGate: 'none',
       nextStage: 'evidence_mapping',
     }
     const task: BidStageTask = {

@@ -45,6 +45,10 @@ import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 import { executeChapterWriting } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
+import { executeBookReview } from './book-review-executor.ts'
+import { validateBookReview } from './book-review-validator.ts'
+import { parseBookReviewReport } from './book-review-artifacts.ts'
+import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -57,6 +61,9 @@ import type {
   BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryResult,
+  BidReviewCompletionResult,
+  BidReviewWorkbenchView,
+  BidReviewChapterView,
   BidRuntimeState,
   BidUploadFile,
   StageArtifact,
@@ -81,6 +88,9 @@ export type {
   BidRetryErrorCode,
   BidRetryFailure,
   BidRetryResult,
+  BidReviewCompletionResult,
+  BidReviewWorkbenchView,
+  BidReviewChapterView,
 
   BidRuntimeState,
   BidStage,
@@ -125,6 +135,9 @@ export { validateConfirmedOutline, validateOutlineConfirmation } from './outline
 export * from './chapter-writing-artifacts.ts'
 export { buildChapterWorklist, executeChapterWriting, renderChapterWritingTask } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
+export * from './book-review-artifacts.ts'
+export { executeBookReview } from './book-review-executor.ts'
+export { validateBookReview } from './book-review-validator.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 
 /** Durable result of parsing one imported bid file. */
@@ -354,6 +367,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (resolveSessionPreset(session) !== 'bid') return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
+      if (projection.composer.enabled) return
       const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
       return {
         reason,
@@ -386,7 +400,7 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'book_review',
         execute: task => task.stage === 'tender_analysis'
           ? executeTenderAnalysis(agent, workspace, task)
           : task.stage === 'evidence_mapping'
@@ -395,7 +409,9 @@ export class BidHostRuntime extends TypertRemoteService {
               ? executeOutlineGeneration(agent, workspace, task)
               : task.stage === 'chapter_writing'
                 ? executeChapterWriting(agent, workspace, task)
-                : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+                : task.stage === 'book_review'
+                  ? executeBookReview(workspace, task)
+                  : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
       },
       {
         validate: (stage, artifacts) => stage === 'tender_analysis'
@@ -404,7 +420,8 @@ export class BidHostRuntime extends TypertRemoteService {
             ? validateEvidenceMapping(workspace, stage, artifacts)
             : stage === 'outline_confirmation' ? validateOutlineConfirmation(workspace, stage, artifacts)
               : stage === 'chapter_writing' ? validateChapterWriting(workspace, stage, artifacts)
-                : validateOutlineGeneration(workspace, stage, artifacts),
+                : stage === 'book_review' ? validateBookReview(workspace, stage, artifacts)
+                  : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
   }
@@ -448,7 +465,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'book_review',
           execute: async (task) => {
             if (task.stage === 'file_intake') {
               try {
@@ -463,6 +480,7 @@ export class BidHostRuntime extends TypertRemoteService {
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task)
             if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task)
+            if (task.stage === 'book_review') return executeBookReview(workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
@@ -477,7 +495,9 @@ export class BidHostRuntime extends TypertRemoteService {
                   ? validateOutlineGeneration(workspace, stage, artifacts)
                   : stage === 'chapter_writing'
                     ? validateChapterWriting(workspace, stage, artifacts)
-                    : validateOutlineConfirmation(workspace, stage, artifacts),
+                    : stage === 'book_review'
+                      ? validateBookReview(workspace, stage, artifacts)
+                      : validateOutlineConfirmation(workspace, stage, artifacts),
         },
       )
       await orchestrator.runCurrentProgramStage()
@@ -559,6 +579,107 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       this.inFlight.delete(session.id)
     }
+  }
+
+  /** Revalidate the deterministic report and record the user's S7 completion decision. */
+  @Remote('completeReview')
+  async completeReview(session: Session): Promise<BidReviewCompletionResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Review completion requires a Bid Session with a Host workspace.' } }
+    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('complete_review')) return { ok: false, error: { code: 'BID_REVIEW_NOT_ALLOWED', message: 'Review completion is not allowed in the current Bid stage state.' } }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const artifacts: StageArtifact[] = [{ stage: 'book_review', type: 'book_review_report', path: 'review/report.json' }]
+      const confirmation = await this.automaticOrchestrator(agent, workspace).confirmValidatedStage('book_review', artifacts)
+      if (!confirmation.ok) {
+        const contentChanged = confirmation.validation.issues.some(issue => issue.code === 'BOOK_REVIEW_CONTENT_CHANGED')
+        return { ok: false, error: { code: contentChanged ? 'BID_REVIEW_CONTENT_CHANGED' : 'BID_REVIEW_REPORT_INVALID', message: 'The review report no longer matches the technical chapters.', issues: confirmation.validation.issues } }
+      }
+      await this.ctx.sessions.flush(session)
+      return { ok: true, value: confirmation.state }
+    } catch { return { ok: false, error: { code: 'BID_REVIEW_COMPLETE_FAILED', message: 'The Bid Host could not complete the review.' } } }
+    finally { this.inFlight.delete(session.id) }
+  }
+
+  /** Read the S7 outline and framework-only summary without disclosing workspace paths. */
+  @Remote('getReviewWorkbench')
+  async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
+    const workspace = this.requireReviewWorkspace(session)
+    const outlinePath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
+    const manifestPath = within(workspace.sessionRoot, 'chapters/manifest.json')
+    const reportPath = within(workspace.sessionRoot, 'review/report.json')
+    await Promise.all([
+      assertNoLinkedPath(workspace.root, outlinePath),
+      assertNoLinkedPath(workspace.root, manifestPath),
+      assertNoLinkedPath(workspace.root, reportPath),
+    ])
+    const [outlineRaw, manifestRaw, reportRaw] = await Promise.all([
+      readFile(outlinePath, 'utf8'),
+      readFile(manifestPath, 'utf8'),
+      readFile(reportPath, 'utf8'),
+    ])
+    const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
+    const manifest = parseChapterWritingManifest(JSON.parse(manifestRaw))
+    const report = parseBookReviewReport(JSON.parse(reportRaw))
+    const chapterIds = new Set(manifest.chapters.map(chapter => chapter.section_id))
+    return {
+      schema_version: 1,
+      outline: outline.sections.map(section => ({
+        section_id: section.id,
+        parent_id: section.parent_id,
+        order: section.order,
+        title: section.title,
+        writable: section.writable,
+        has_content: chapterIds.has(section.id),
+        review_status: 'not_evaluated',
+      })),
+      review: {
+        review_mode: report.review_mode,
+        quality_gate: report.quality_gate,
+        summary: report.summary,
+        limitations: [...report.limitations],
+        issues: report.issues.map(issue => ({ ...issue })),
+      },
+    }
+  }
+
+  /** Read one S7 section through its confirmed identity and manifest entry. */
+  @Remote('getReviewChapter')
+  async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView> {
+    const workspace = this.requireReviewWorkspace(session)
+    const outlinePath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
+    const manifestPath = within(workspace.sessionRoot, 'chapters/manifest.json')
+    await Promise.all([
+      assertNoLinkedPath(workspace.root, outlinePath),
+      assertNoLinkedPath(workspace.root, manifestPath),
+    ])
+    const [outlineRaw, manifestRaw] = await Promise.all([
+      readFile(outlinePath, 'utf8'),
+      readFile(manifestPath, 'utf8'),
+    ])
+    const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
+    const section = outline.sections.find(item => item.id === sectionId)
+    if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
+    const chain = reviewHeadingPath(outline, section.id)
+    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: null, review: { status: 'not_evaluated', issues: [] } }
+    const manifest = parseChapterWritingManifest(JSON.parse(manifestRaw))
+    const chapter = manifest.chapters.find(item => item.section_id === section.id)
+    if (chapter === undefined) throw new Error('BID_REVIEW_CHAPTER_MISSING')
+    const target = within(workspace.sessionRoot, chapter.content_path)
+    await assertNoLinkedPath(workspace.root, target)
+    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown: await readFile(target, 'utf8'), review: { status: 'not_evaluated', issues: [] } }
+  }
+
+  /** Admit only an active S7 workbench request. */
+  private requireReviewWorkspace(session: Session): BidWorkspace {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== 'book_review' || runtime.status !== 'waiting_user') throw new Error('BID_REVIEW_NOT_ALLOWED')
+    return new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
   }
 
   /** Read the editable S2 conclusions only while tender analysis waits for confirmation. */
@@ -683,6 +804,20 @@ export class BidHostRuntime extends TypertRemoteService {
 }
 
 export default BidHostRuntime
+
+/** Build the visible title and ordinal path for one confirmed outline section. */
+function reviewHeadingPath(outline: OutlineArtifact, sectionId: string): { titles: string[]; numbers: number[] } {
+  const sections = new Map(outline.sections.map(section => [section.id, section]))
+  const titles: string[] = []
+  const numbers: number[] = []
+  let current = sections.get(sectionId)
+  while (current !== undefined) {
+    titles.unshift(current.title)
+    numbers.unshift(current.order)
+    current = current.parent_id === null ? undefined : sections.get(current.parent_id)
+  }
+  return { titles, numbers }
+}
 
 /** Durable manifest entry for one imported file. */
 export interface ManifestFile {
