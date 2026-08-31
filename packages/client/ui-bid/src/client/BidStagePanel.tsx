@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent } from 'react'
+import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/src/outline-confirmation-edits.ts'
-import type { BidClientProjection, BidDocumentRole, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -30,6 +30,12 @@ type PendingAction = 'upload' | 'retry' | 'confirm_analysis' | 'confirm' | 'revi
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly { readonly code: string; readonly message: string }[] }
+type SelectedFile = BidSelectedFile & {
+  id: number
+  progress: number
+  status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
+  error: string | undefined
+}
 
 function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
@@ -124,7 +130,7 @@ export function BidStagePanel({
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
-  const [selectedFiles, setSelectedFiles] = useState<readonly BidSelectedFile[]>([])
+  const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
   const [previewOutline, setPreviewOutline] = useState<OutlineArtifact | null>(null)
@@ -132,7 +138,8 @@ export function BidStagePanel({
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
-  const selectedFilesRef = useRef<readonly BidSelectedFile[]>([])
+  const selectedFilesRef = useRef<readonly SelectedFile[]>([])
+  const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
   const temporarySectionId = useRef(0)
@@ -197,8 +204,51 @@ export function BidStagePanel({
     })
   }
 
+  const updateSelectedFiles = (update: (files: readonly SelectedFile[]) => readonly SelectedFile[]): void => {
+    const next = [...update(selectedFilesRef.current)]
+    selectedFilesRef.current = next
+    setSelectedFiles(next)
+  }
+
+  const applyFileResults = (results: readonly BidFileIntakeFileResult[]): void => {
+    const remaining = [...results]
+    updateSelectedFiles(files => files.map((file) => {
+      const resultIndex = remaining.findIndex(result => result.name === file.file.name && result.role === file.role)
+      const result = resultIndex < 0 ? undefined : remaining.splice(resultIndex, 1)[0]
+      if (result === undefined || result.status === 'completed') {
+        return { ...file, progress: 100, status: 'completed', error: undefined }
+      }
+      return { ...file, progress: 100, status: 'failed', error: result.error?.message ?? '文件解析失败' }
+    }))
+  }
+
+  const uploadSelectedFiles = async (): Promise<void> => {
+    const files = selectedFilesRef.current
+    updateSelectedFiles(current => current.map(file => ({ ...file, progress: 5, status: 'encoding', error: undefined })))
+    try {
+      const results = await uploadFiles(
+        files.map(({ file, role }) => ({ file, role })),
+        (file, progress) => updateSelectedFiles(current => current.map(item => item.file === file.file && item.role === file.role
+          ? { ...item, progress, status: progress >= 50 ? 'uploading' : 'encoding' }
+          : item)),
+      )
+      applyFileResults(results ?? [])
+    } catch (reason: unknown) {
+      if (reason instanceof BidActionError && reason.files.length > 0) applyFileResults(reason.files)
+      else updateSelectedFiles(current => current.map(file => ({ ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })))
+      throw reason
+    }
+  }
+
   const selected = (role: BidDocumentRole, event: ChangeEvent<HTMLInputElement>): void => {
-    const files = Array.from(event.currentTarget.files ?? []).map(file => ({ file, role }))
+    const files = Array.from(event.currentTarget.files ?? []).map(file => ({
+      file,
+      role,
+      id: ++nextFileId.current,
+      progress: 0,
+      status: 'selected' as const,
+      error: undefined,
+    }))
     if (files.length === 0) return
     const tender = files[0]
     if (tender === undefined) return
@@ -321,10 +371,17 @@ export function BidStagePanel({
 
         {selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
-            {selectedFiles.map(({ file, role }, index) => (
-              <li key={`${file.name}:${file.size}:${file.lastModified}:${index}`} className={css.fileRow}>
+            {selectedFiles.map(({ file, role, id, progress, status, error }, index) => (
+              <li key={id} className={css.fileRow}>
                 <IconPaperclipOutline16 className={css.fileIcon} />
-                <span className={css.fileName} title={file.name}>{file.name}</span>
+                <span
+                  className={css.fileName}
+                  title={error === undefined ? file.name : `${file.name}: ${error}`}
+                  style={{ '--bid-file-progress': `${String(progress)}%` } as CSSProperties}
+                >
+                  <span>{file.name}</span>
+                  {status === 'failed' && error !== undefined && <span className={css.fileError}>{error}</span>}
+                </span>
                 <span>{t(`file.role.${role}`)}</span>
                 <button
                   type="button"
@@ -332,9 +389,7 @@ export function BidStagePanel({
                   aria-label={`${t('file.remove')}: ${file.name}`}
                   disabled={requestPending !== null}
                   onClick={() => {
-                    const next = selectedFilesRef.current.filter((_, itemIndex) => itemIndex !== index)
-                    selectedFilesRef.current = next
-                    setSelectedFiles(next)
+                    updateSelectedFiles(files => files.filter((_, itemIndex) => itemIndex !== index))
                     setRequestError(null)
                   }}
                 >
@@ -389,7 +444,7 @@ export function BidStagePanel({
                   || !selectedFiles.some(item => item.role === 'tender')
                   || !selectedFiles.some(item => item.role === 'reference')
                 }
-                onClick={() => { invoke('upload', () => uploadFiles(selectedFilesRef.current)) }}
+                onClick={() => { invoke('upload', uploadSelectedFiles) }}
               >
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
               </Button>

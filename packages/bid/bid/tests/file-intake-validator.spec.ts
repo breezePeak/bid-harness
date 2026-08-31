@@ -124,16 +124,23 @@ describe('file-intake validator', () => {
       .toContain('FILE_INTAKE_STRUCTURE_MISSING')
   })
 
-  it('rejects needs-OCR and failed members so every file must succeed', async () => {
+  it('requires one successfully parsed tender but ignores other settled parse failures', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-validator-'))
     const workspace = new BidWorkspace(root, 'non-success')
     const imported = await workspace.import([
       { name: '扫描件.pdf', bytes: await readFile(fixture('scanned-document.pdf')) },
       { name: '损坏.txt', bytes: new Uint8Array([0xff]) },
     ])
-    const codes = issueCodes(await validateFileIntake(workspace, imported, 'file_intake', [...artifact]))
+    expect(issueCodes(await validateFileIntake(workspace, imported, 'file_intake', [...artifact])))
+      .toEqual(['FILE_INTAKE_NO_SUCCESSFUL_TENDER'])
 
-    expect(codes).toContain('FILE_INTAKE_NEEDS_OCR')
-    expect(codes).toContain('FILE_INTAKE_PARSE_FAILED')
+    const mixed = new BidWorkspace(root, 'mixed')
+    const mixedImported = await mixed.import([
+      { name: '有效招标.txt', role: 'tender', bytes: new TextEncoder().encode('有效招标内容') },
+      { name: '扫描件.pdf', role: 'reference', bytes: await readFile(fixture('scanned-document.pdf')) },
+      { name: '损坏.txt', role: 'reference', bytes: new Uint8Array([0xff]) },
+    ])
+    await expect(validateFileIntake(mixed, mixedImported, 'file_intake', [...artifact]))
+      .resolves.toEqual({ ok: true })
   })
 })

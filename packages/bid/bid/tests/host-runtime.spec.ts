@@ -555,38 +555,25 @@ describe('Bid Host runtime composition', () => {
     await expect(firstRequest).resolves.toMatchObject({ ok: true })
   })
 
-  it('records a failed parse and accepts a clean replacement batch', async () => {
+  it('records a failed parse without blocking a valid file in the same batch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
     const session = attach(ctx, 'bid', root).agent.session
 
     const valid = Buffer.from('先成功解析', 'utf8')
-    await expect(ctx.bid.uploadFiles(session, [
+    const result = await ctx.bid.uploadFiles(session, [
       { name: '有效但同批.txt', role: 'tender', size: valid.byteLength, data: valid.toString('base64') },
       { name: '损坏.txt', role: 'tender', size: 1, data: Buffer.from([0xff]).toString('base64') },
-    ])).resolves.toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED' } })
-    expect(session.events.map(event => event.type)).toEqual(['bid.stage.started', 'bid.stage.failed'])
-    expect(Bid.getBidClientProjection(session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE)))
-      .toMatchObject({ runtime: { stage: 'file_intake', status: 'failed' }, allowedActions: ['upload_files'] })
-
-    const replacement = Buffer.from('有效内容', 'utf8')
-    await expect(ctx.bid.uploadFiles(session, [{
-      name: '有效.txt',
-      role: 'tender',
-      size: replacement.byteLength,
-      data: replacement.toString('base64'),
-    }])).resolves.toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
+    ])
+    expect(result).toMatchObject({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
+    expect(result.ok && result.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: '损坏.txt', status: 'failed', error: expect.objectContaining({ code: 'BID_FILE_PARSE_FAILED' }) }),
+      expect.objectContaining({ name: '有效但同批.txt', status: 'completed' }),
+    ]))
     expect(session.events.map(event => event.type)).toEqual([
       'bid.stage.started',
-      'bid.stage.failed',
-      'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
-      'bid.stage.started',
-      'bid.stage.completed',
       'bid.user_confirmation.required',
     ])
   })

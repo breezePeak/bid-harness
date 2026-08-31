@@ -1,4 +1,4 @@
-/** Pure archive-format, triplet, and immutable-manifest helpers. */
+/** Pure archive-format, legacy-pair, and immutable-manifest helpers. */
 
 import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
@@ -94,7 +94,12 @@ function pairMeta(content: string): Map<string, string> | undefined {
   return entries
 }
 
-function validateHeader(path: string, content: Buffer, sourceBase: string, chinese: boolean): string[] {
+function validateHeader(
+  path: string,
+  content: Buffer,
+  sourceBase: string,
+  switcher: 'source' | 'chinese' | undefined,
+): string[] {
   const errors: string[] = []
   const lines = content.toString('utf8').split('\n')
   if (!/^# Agent Note: \S/.test(lines[0] ?? '')) errors.push(`${path}: line 1 must be \`# Agent Note: <title>\``)
@@ -107,14 +112,16 @@ function validateHeader(path: string, content: Buffer, sourceBase: string, chine
     errors.push(`${path}: archive date ${archived} predates the note filename`)
   }
   if (lines[4] !== '') errors.push(`${path}: line 5 must be blank`)
-  const switcher = chinese
+  const expectedSwitcher = switcher === 'chinese'
     ? `[English](${sourceBase}.md) | 中文`
     : `English | [中文](${sourceBase}.zh.md)`
-  if (lines[5] !== switcher) errors.push(`${path}: line 6 must be ${JSON.stringify(switcher)}`)
+  if (switcher !== undefined && lines[5] !== expectedSwitcher) {
+    errors.push(`${path}: line 6 must be ${JSON.stringify(expectedSwitcher)}`)
+  }
   return errors
 }
 
-/** Validate the closed kind tree, implemented/archive headers, and complete bilingual triplets. */
+/** Validate the closed kind tree, archive headers, and complete legacy bilingual records. */
 export function validateArchiveArtifacts(artifacts: ReadonlyMap<string, Buffer>): string[] {
   const errors: string[] = []
   const triplets = new Map<string, Triplet>()
@@ -141,18 +148,23 @@ export function validateArchiveArtifacts(artifacts: ReadonlyMap<string, Buffer>)
     const zhPath = `${key}.zh.md`
     const metaPath = `${key}.i18n.yaml`
     const { source, zh, meta } = triplet
-    const missing = [
-      source === undefined ? sourcePath : undefined,
-      zh === undefined ? zhPath : undefined,
-      meta === undefined ? metaPath : undefined,
-    ].filter((path): path is string => path !== undefined)
-    if (source === undefined || zh === undefined || meta === undefined) {
-      errors.push(`${key}: incomplete archived triplet; missing ${missing.join(', ')}`)
+    if (source === undefined) {
+      errors.push(`${key}: archived record is missing ${sourcePath}`)
       continue
     }
     const sourceBase = basename(key)
-    errors.push(...validateHeader(sourcePath, source, sourceBase, false))
-    errors.push(...validateHeader(zhPath, zh, sourceBase, true))
+    const hasLegacyPair = zh !== undefined || meta !== undefined
+    if (!hasLegacyPair) {
+      errors.push(...validateHeader(sourcePath, source, sourceBase, undefined))
+      continue
+    }
+    if (zh === undefined || meta === undefined) {
+      const missing = zh === undefined ? zhPath : metaPath
+      errors.push(`${key}: incomplete legacy bilingual record; missing ${missing}`)
+      continue
+    }
+    errors.push(...validateHeader(sourcePath, source, sourceBase, 'source'))
+    errors.push(...validateHeader(zhPath, zh, sourceBase, 'chinese'))
     const sourceDate = /^Archived: (\d{4}-\d{2}-\d{2})$/m.exec(source.toString('utf8'))?.[1]
     const zhDate = /^Archived: (\d{4}-\d{2}-\d{2})$/m.exec(zh.toString('utf8'))?.[1]
     if (sourceDate !== undefined && zhDate !== undefined && sourceDate !== zhDate) {

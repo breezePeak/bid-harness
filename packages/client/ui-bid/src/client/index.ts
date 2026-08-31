@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidDocumentRole, BidUploadFile, OutlineArtifact, OutlineEditOperation, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocumentRole, BidFileIntakeFileResult, BidUploadFile, OutlineArtifact, OutlineEditOperation, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -36,7 +36,10 @@ export interface BidStagePanelInjected {
    * @param files - complete file batch selected for one intake attempt.
    * @returns after Host admission, import, validation, and persistence settle.
    */
-  uploadFiles: (files: readonly BidSelectedFile[]) => Promise<void>
+  uploadFiles: (
+    files: readonly BidSelectedFile[],
+    onProgress?: (file: BidSelectedFile, progress: number) => void,
+  ) => Promise<readonly BidFileIntakeFileResult[]>
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
@@ -53,6 +56,7 @@ export class BidActionError extends Error {
     public readonly code: string,
     message: string,
     public readonly issues: readonly { readonly code: string; readonly message: string }[] = [],
+    public readonly files: readonly BidFileIntakeFileResult[] = [],
   ) { super(message) }
 }
 
@@ -73,29 +77,39 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Browser material paired with its selected business role. */
 export interface BidSelectedFile { readonly file: File; readonly role: BidDocumentRole }
 
-async function encodeFile({ file, role }: BidSelectedFile): Promise<BidUploadFile> {
+async function encodeFile({ file, role }: BidSelectedFile, onProgress?: (progress: number) => void): Promise<BidUploadFile> {
+  onProgress?.(10)
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  onProgress?.(30)
   return {
     name: file.name,
     role,
     ...(file.type === '' ? {} : { mediaType: file.type }),
     size: file.size,
-    data: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+    data: bytesToBase64(bytes),
   }
 }
 
 /** Encode the selected batch serially so browser memory never holds every source ArrayBuffer at once. */
-async function encodeFiles(files: readonly BidSelectedFile[]): Promise<BidUploadFile[]> {
+async function encodeFiles(
+  files: readonly BidSelectedFile[],
+  onProgress?: (file: BidSelectedFile, progress: number) => void,
+): Promise<BidUploadFile[]> {
   const encoded: BidUploadFile[] = []
-  for (const file of files) encoded.push(await encodeFile(file))
+  for (const file of files) {
+    encoded.push(await encodeFile(file, progress => onProgress?.(file, progress)))
+    onProgress?.(file, 40)
+  }
   return encoded
 }
 
 function actionFailure(error: {
   readonly code: string
   readonly message: string
-  readonly issues?: readonly { readonly code: string; readonly message: string }[]
+  readonly issues?: readonly { readonly code: string; readonly message: string }[] | undefined
+  readonly files?: readonly BidFileIntakeFileResult[] | undefined
 }): Error {
-  return new BidActionError(error.code, `${error.message} (${error.code})`, error.issues)
+  return new BidActionError(error.code, `${error.message} (${error.code})`, error.issues, error.files)
 }
 
 /**
@@ -141,13 +155,22 @@ export function apply(ctx: ClientContext): void {
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
-      uploadFiles: async (files) => {
+      uploadFiles: async (files, onProgress) => {
+        const encoded = await encodeFiles(files, onProgress)
+        for (const file of files) onProgress?.(file, 50)
         const result = await ctx.remote.bid.uploadFiles(
           sessionId,
-          await encodeFiles(files),
+          encoded,
         )
         if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error)
+        if (!result.value.ok) {
+          throw actionFailure(result.value.error)
+        }
+        const fileResults = result.value.files ?? files.map(({ file, role }) => ({ name: file.name, role, status: 'completed' as const }))
+        for (const file of files) {
+          onProgress?.(file, 100)
+        }
+        return fileResults
       },
     }),
   }, BidStagePanel))

@@ -243,6 +243,8 @@ export async function validateFileIntake(
   }
   if (batch.length === 0) {
     reject(issues, 'FILE_INTAKE_BATCH_EMPTY', 'The current file-intake batch is empty.')
+  } else if (!batch.some(file => file.parseStatus === 'success' && file.role === 'tender')) {
+    reject(issues, 'FILE_INTAKE_NO_SUCCESSFUL_TENDER', 'No tender file was parsed successfully.')
   }
 
   const manifest = await readRequiredManifest(workspace, issues)
@@ -271,17 +273,8 @@ export async function validateFileIntake(
       const input = resolveRecordPath(workspace, record.inputPath, issues)
       if (record.parseStatus !== 'success') {
         if (input !== null) await requireFile(workspace.root, input, record.inputPath, 'FILE_INTAKE_INPUT_MISSING', issues)
-        const code = record.parseStatus === 'needs_ocr'
-          ? 'FILE_INTAKE_NEEDS_OCR'
-          : record.parseStatus === 'pending'
-            ? 'FILE_INTAKE_PARSE_PENDING'
-            : 'FILE_INTAKE_PARSE_FAILED'
-        const message = record.parseStatus === 'needs_ocr'
-          ? 'The file requires OCR before Bid intake can complete.'
-          : record.parseStatus === 'pending'
-            ? 'File parsing did not settle.'
-            : 'File parsing failed.'
-        reject(issues, code, message, record.inputPath)
+        // One file's parser result must not invalidate other successfully imported files.
+        // The Host returns this record's parseError separately so the client can identify it.
         continue
       }
       await validateSuccessfulRecord(workspace, record, issues)

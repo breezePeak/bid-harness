@@ -83,7 +83,7 @@ describe('BidStagePanel', () => {
       allowedActions: ['upload_files'],
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
-    }), { uploadFiles: vi.fn(async () => {}) })} />)
+    }), { uploadFiles: vi.fn(async () => []) })} />)
     expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '相关资料' })).toBeTruthy()
     const inputs = view.container.querySelectorAll('input[type="file"]')
@@ -105,10 +105,10 @@ describe('BidStagePanel', () => {
   })
 
   it('submits the selected files once and keeps them available after a Host refusal', async () => {
-    const first = Promise.withResolvers<undefined>()
-    const uploadFiles = vi.fn<(_: readonly { file: File; role: string }[]) => Promise<void>>()
+    const first = Promise.withResolvers<readonly never[]>()
+    const uploadFiles = vi.fn(async () => first.promise)
       .mockImplementationOnce(() => first.promise)
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce([])
     const view = render(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.md'],
@@ -128,7 +128,7 @@ describe('BidStagePanel', () => {
     expect(uploadFiles).toHaveBeenCalledWith([
       { file, role: 'tender' },
       expect.objectContaining({ file: expect.any(File), role: 'reference' }),
-    ])
+    ], expect.any(Function))
     expect(screen.getByRole('button', { name: '正在上传…' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '上传标书' })).toHaveProperty('disabled', true)
     expect(screen.getByText('请添加本项目资料')).toBeTruthy()
@@ -147,7 +147,7 @@ describe('BidStagePanel', () => {
       runtime: { stage: 'file_intake', status: 'failed', failureReason: '文档无法解析' },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
-    }), { uploadFiles: vi.fn(async () => {}) })} />)
+    }), { uploadFiles: vi.fn(async () => []) })} />)
 
     expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
@@ -258,11 +258,13 @@ describe('BidStagePanel', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]!)
     fireEvent.click(screen.getByRole('button', { name: '确认' }))
-    await waitFor(() => expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
-      expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
-      expect.objectContaining({ type: 'add_section' }),
-      expect.objectContaining({ type: 'delete_section', section_id: 'SEC-1' }),
-    ])))
+    await waitFor(() => {
+      expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
+        expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
+        expect.objectContaining({ type: 'add_section' }),
+        expect.objectContaining({ type: 'delete_section', section_id: 'SEC-1' }),
+      ]))
+    })
   })
 
   it('immediately previews hierarchy, order, and derived section numbers', async () => {

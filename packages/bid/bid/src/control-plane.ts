@@ -18,6 +18,7 @@ export type {
   BidComposerReason,
   BidDocumentRole,
   BidFileIntakeErrorCode,
+  BidFileIntakeFileResult,
   BidFileIntakeFailure,
   BidFileIntakeResult,
   BidOutlineConfirmationResult,
@@ -37,7 +38,8 @@ export type {
   StageValidationResult,
   BidUploadFile,
 } from './control-plane-contract.ts'
-export type { OutlineEditOperation } from './outline-confirmation-edits.ts'
+export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-browser.ts'
+export type { OutlineEditOperation, OutlineViewSection } from './outline-confirmation-browser.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 export { applyTenderAnalysisEdits } from './tender-analysis-confirmation.ts'
 export type { TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from './tender-analysis-confirmation.ts'

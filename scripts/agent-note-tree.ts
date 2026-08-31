@@ -59,8 +59,7 @@ export function walkAgentNoteTree(): { notes: AgentNote[]; errors: string[] } {
       const segs = match.split('/')
       // Allowlisted file directly at the lifecycle root (e.g. implemented/AGENTS.md).
       if (segs.length === 2 && ROOT_ALLOWLIST.has(segs[1] ?? '')) continue
-      // A Chinese counterpart (foo.zh.md, docs/i18n/README.md) is the SAME Agent Note,
-      // indexed via its English filename; the pairing gate owns its consistency.
+      // Legacy Chinese counterparts are compatibility files, not separate Agent Notes.
       if (match.endsWith('.zh.md')) continue
       const cls = segs[1]
       const base = segs[2]

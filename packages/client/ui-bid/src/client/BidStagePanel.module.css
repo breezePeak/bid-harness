@@ -111,10 +111,26 @@
 }
 
 .fileName {
+  display: flex;
   flex: 1 1 auto;
   min-width: 0;
+  flex-direction: column;
   overflow: hidden;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: linear-gradient(
+    90deg,
+    var(--dsw-alias-interactive-bg-hover) var(--bid-file-progress, 0%),
+    transparent var(--bid-file-progress, 0%)
+  );
   color: var(--dsw-alias-label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileError {
+  overflow: hidden;
+  color: var(--dsw-alias-state-error-primary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

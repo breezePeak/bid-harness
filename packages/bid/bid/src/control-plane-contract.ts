@@ -150,11 +150,21 @@ export type BidFileIntakeErrorCode =
 export interface BidFileIntakeFailure {
   readonly code: BidFileIntakeErrorCode
   readonly message: string
+  /** Per-file outcomes when the Host could identify individual failures. */
+  readonly files?: readonly BidFileIntakeFileResult[] | undefined
+}
+
+/** Outcome of one file within a Bid intake request. */
+export interface BidFileIntakeFileResult {
+  readonly name: string
+  readonly role: BidDocumentRole
+  readonly status: 'completed' | 'failed'
+  readonly error?: { readonly code: string; readonly message: string } | undefined
 }
 
 /** Result returned after one dedicated Bid file-intake request settles. */
 export type BidFileIntakeResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: true; readonly value: BidRuntimeState; readonly files?: readonly BidFileIntakeFileResult[] | undefined }
   | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
 /** Stable result of an S5 outline-confirmation request. */

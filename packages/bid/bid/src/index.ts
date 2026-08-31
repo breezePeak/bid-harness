@@ -51,6 +51,7 @@ import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeStat
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type {
   BidFileIntakeErrorCode,
+  BidFileIntakeFileResult,
   BidFileIntakeResult,
   BidOutlineConfirmationResult,
   BidTenderAnalysisConfirmationResult,
@@ -153,9 +154,9 @@ export interface BidConfig {
 /** Conservative defaults matching the documented MVP limits. */
 export const DEFAULT_BID_CONFIG: BidConfig = {
   allowedExtensions: ['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.txt', '.md'],
-  maxFileBytes: 50 * 1024 * 1024,
+  maxFileBytes: 200 * 1024 * 1024,
   maxFiles: 20,
-  maxTotalBytes: 200 * 1024 * 1024,
+  maxTotalBytes: 500 * 1024 * 1024,
   sessionDirectory: '.bid-harness/sessions',
   outputDirectory: 'output',
   enableDocxExport: true,
@@ -207,13 +208,24 @@ function workspaceConfig(config: Config): BidConfig {
 }
 
 /** Build one immutable success result. */
-function intakeSuccess(value: BidRuntimeState): BidFileIntakeResult {
-  return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
+function intakeSuccess(value: BidRuntimeState, files?: readonly BidFileIntakeFileResult[]): BidFileIntakeResult {
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({ ...value }),
+    ...(files === undefined || files.length === 0 ? {} : { files: Object.freeze([...files]) }),
+  })
 }
 
 /** Build one immutable, sanitized business rejection. */
-function intakeRejected(code: BidFileIntakeErrorCode, message: string): BidFileIntakeResult {
-  return Object.freeze({ ok: false, error: Object.freeze({ code, message }) })
+function intakeRejected(code: BidFileIntakeErrorCode, message: string, files?: readonly BidFileIntakeFileResult[]): BidFileIntakeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message,
+      ...(files === undefined || files.length === 0 ? {} : { files: Object.freeze([...files]) }),
+    }),
+  })
 }
 
 /** Build one immutable, sanitized retry rejection. */
@@ -226,60 +238,97 @@ function retrySuccess(value: BidRuntimeState): BidRetryResult {
   return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
 }
 
-/** Convert canonical browser base64 into importer bytes after size admission. */
-function decodeUploadFiles(files: readonly BidUploadFile[], config: Config): IncomingFile[] {
+interface DecodedUploadBatch {
+  incoming: IncomingFile[]
+  failures: BidFileIntakeFileResult[]
+}
+
+/** Convert one canonical browser base64 file into importer bytes after size admission. */
+function decodeUploadFile(file: BidUploadFile): IncomingFile {
+  const expectedLength = Math.ceil(file.size / 3) * 4
+  if (file.data.length !== expectedLength
+    || file.data.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(file.data)) {
+    throw new Error('bid-invalid-file-data')
+  }
+  const bytes = Buffer.from(file.data, 'base64')
+  if (bytes.byteLength !== file.size || bytes.toString('base64') !== file.data) {
+    throw new Error('bid-invalid-file-data')
+  }
+  return {
+    name: file.name,
+    role: file.role,
+    ...(file.mediaType === undefined ? {} : { type: file.mediaType }),
+    bytes,
+  }
+}
+
+/** Convert a rejected internal admission error into a file-level diagnostic. */
+function fileIntakeFailure(file: BidUploadFile, error: unknown): BidFileIntakeFileResult {
+  const mapped = intakeFailure(error)
+  return {
+    name: file.name,
+    role: file.role,
+    status: 'failed',
+    error: mapped,
+  }
+}
+
+/** Map an internal admission or parser failure to the public business vocabulary. */
+function intakeFailure(error: unknown): { code: BidFileIntakeErrorCode; message: string } {
+  const message = error instanceof Error ? error.message : String(error)
+  switch (message) {
+    case 'bid-file-count-limit':
+      return { code: 'BID_FILE_COUNT_LIMIT', message: 'The selected file count exceeds the Bid Host limit.' }
+    case 'bid-file-size-limit':
+    case 'bid-empty-file':
+      return { code: 'BID_FILE_SIZE_LIMIT', message: 'A selected file is empty or exceeds the Bid Host size limit.' }
+    case 'bid-total-size-limit':
+      return { code: 'BID_TOTAL_SIZE_LIMIT', message: 'The selected files exceed the Bid Host total-size limit.' }
+    case 'bid-unsupported-file-type':
+      return { code: 'BID_FILE_TYPE_UNSUPPORTED', message: 'A selected file type is not accepted by the Bid Host.' }
+    case 'bid-invalid-file-name':
+    case 'bid-reserved-file-name':
+      return { code: 'BID_FILE_NAME_INVALID', message: 'A selected file name is not valid for the Bid workspace.' }
+    default:
+      return { code: 'BID_FILE_INTAKE_FAILED', message }
+  }
+}
+
+/** Convert canonical browser base64 into importer bytes while retaining independent file failures. */
+function decodeUploadFiles(files: readonly BidUploadFile[], config: Config): DecodedUploadBatch {
   if (files.length === 0 || files.length > config.maxFiles) throw new Error('bid-file-count-limit')
+  const incoming: IncomingFile[] = []
+  const failures: BidFileIntakeFileResult[] = []
   let declaredTotal = 0
   for (const file of files) {
-    if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > config.maxFileBytes) {
-      throw new Error('bid-file-size-limit')
-    }
-    declaredTotal += file.size
-    if (!Number.isSafeInteger(declaredTotal) || declaredTotal > config.maxTotalBytes) {
-      throw new Error('bid-total-size-limit')
+    try {
+      const extension = extname(safeFileName(file.name)).toLocaleLowerCase('en-US')
+      if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
+      if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > config.maxFileBytes) {
+        throw new Error('bid-file-size-limit')
+      }
+      if (!Number.isSafeInteger(declaredTotal + file.size) || declaredTotal + file.size > config.maxTotalBytes) {
+        throw new Error('bid-total-size-limit')
+      }
+      declaredTotal += file.size
+      incoming.push(decodeUploadFile(file))
+    } catch (error) {
+      failures.push(fileIntakeFailure(file, error))
     }
   }
-  return files.map((file) => {
-    const extension = extname(safeFileName(file.name)).toLocaleLowerCase('en-US')
-    if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
-    const expectedLength = Math.ceil(file.size / 3) * 4
-    if (file.data.length !== expectedLength
-      || file.data.length % 4 !== 0
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(file.data)) {
-      throw new Error('bid-invalid-file-data')
-    }
-    const bytes = Buffer.from(file.data, 'base64')
-    if (bytes.byteLength !== file.size || bytes.toString('base64') !== file.data) {
-      throw new Error('bid-invalid-file-data')
-    }
-    return {
-      name: file.name,
-      role: file.role,
-      ...(file.mediaType === undefined ? {} : { type: file.mediaType }),
-      bytes,
-    }
-  })
+  return { incoming, failures }
 }
 
 /** Translate an expected admission rejection into the public business vocabulary. */
 function intakeError(error: unknown): BidFileIntakeResult {
-  const message = error instanceof Error ? error.message : String(error)
-  switch (message) {
-    case 'bid-file-count-limit':
-      return intakeRejected('BID_FILE_COUNT_LIMIT', 'The selected file count exceeds the Bid Host limit.')
-    case 'bid-file-size-limit':
-    case 'bid-empty-file':
-      return intakeRejected('BID_FILE_SIZE_LIMIT', 'A selected file is empty or exceeds the Bid Host size limit.')
-    case 'bid-total-size-limit':
-      return intakeRejected('BID_TOTAL_SIZE_LIMIT', 'The selected files exceed the Bid Host total-size limit.')
-    case 'bid-unsupported-file-type':
-      return intakeRejected('BID_FILE_TYPE_UNSUPPORTED', 'A selected file type is not accepted by the Bid Host.')
-    case 'bid-invalid-file-name':
-    case 'bid-reserved-file-name':
-      return intakeRejected('BID_FILE_NAME_INVALID', 'A selected file name is not valid for the Bid workspace.')
-    default:
-      return intakeRejected('BID_FILE_INTAKE_FAILED', 'The Bid Host could not import and validate the selected files.')
-  }
+  const failure = intakeFailure(error)
+  return intakeRejected(
+    failure.code,
+    failure.code === 'BID_FILE_INTAKE_FAILED'
+      ? 'The Bid Host could not import and validate the selected files.'
+      : failure.message,
+  )
 }
 
 /** Host service for Bid projection, prompt admission, and dedicated file intake. */
@@ -381,7 +430,16 @@ export class BidHostRuntime extends TypertRemoteService {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
       }
 
-      const incoming = decodeUploadFiles(files, this.config)
+      const decoded = decodeUploadFiles(files, this.config)
+      if (decoded.incoming.length === 0) {
+        const failure = decoded.failures[0]?.error
+        return intakeRejected(
+          (failure?.code as BidFileIntakeErrorCode | undefined) ?? 'BID_FILE_INTAKE_FAILED',
+          failure?.message ?? 'No selected file could be imported.',
+          decoded.failures,
+        )
+      }
+      const incoming = decoded.incoming
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
@@ -425,16 +483,32 @@ export class BidHostRuntime extends TypertRemoteService {
       await orchestrator.runCurrentProgramStage()
       const next = await orchestrator.drive()
       await this.ctx.sessions.flush(session)
+      const fileResults: BidFileIntakeFileResult[] = [
+        ...decoded.failures,
+        ...imported.map((file): BidFileIntakeFileResult => file.parseStatus === 'success'
+          ? { name: file.originalName, role: file.role, status: 'completed' }
+          : {
+            name: file.originalName,
+            role: file.role,
+            status: 'failed',
+            error: {
+              code: file.parseStatus === 'needs_ocr' ? 'BID_FILE_NEEDS_OCR' : 'BID_FILE_PARSE_FAILED',
+              message: file.parseError ?? 'The file could not be parsed.',
+            },
+          }),
+      ]
+      const hasFailedFile = fileResults.some(file => file.status === 'failed')
       if (next.status === 'failed') {
         if (next.stage === 'file_intake') {
           return intakeRejected(
             'BID_FILE_INTAKE_FAILED',
             next.failureReason ?? 'The Bid Host rejected the imported file artifacts.',
+            fileResults,
           )
         }
-        return intakeSuccess(next)
+        return intakeSuccess(next, hasFailedFile ? fileResults : undefined)
       }
-      return intakeSuccess(next)
+      return intakeSuccess(next, hasFailedFile ? fileResults : undefined)
     } catch (error: unknown) {
       if (error instanceof BidOrchestratorError) {
         if (error.code === 'BID_OPERATION_IN_PROGRESS') {
