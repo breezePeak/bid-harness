@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 2 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 3 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -47,15 +47,27 @@ const mappingSchema = z.object({
   materials: z.array(evidenceMaterialSchema),
   external_materials: z.array(externalEvidenceMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
-}).strict().refine(mapping => mapping.materials.length > 0 || mapping.external_materials.length > 0 || mapping.missing_topics.length > 0, {
-  message: 'a mapping requires local material, external material, or a missing topic',
-})
+}).strict()
 
 const requirementMappingSchema = mappingSchema.extend({ requirement_id: z.string().min(1) }).strict()
 const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
+const relatedScoringPointSchema = z.object({
+  scoring_id: z.string().min(1),
+  response_point: z.string().min(1),
+}).strict()
+const researchTopicSchema = mappingSchema.extend({
+  topic_id: z.string().min(1),
+  topic: z.string().min(1),
+  relevance: z.string().min(1),
+  related_requirement_ids: z.array(z.string().min(1)),
+  related_scoring_points: z.array(relatedScoringPointSchema),
+  findings: z.array(z.string().min(1)).min(1),
+  writing_dimensions: z.array(z.string().min(1)).min(1),
+}).strict()
 
 const evidenceMapSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_SCHEMA_VERSION),
+  research_topics: z.array(researchTopicSchema),
   requirement_mappings: z.array(requirementMappingSchema),
   scoring_mappings: z.array(scoringMappingSchema),
 }).strict()
@@ -68,6 +80,8 @@ export type ExternalEvidenceMaterial = z.infer<typeof externalEvidenceMaterialSc
 export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema>
 /** Parsed scoring-to-material mapping. */
 export type ScoringMaterialMapping = z.infer<typeof scoringMappingSchema>
+/** Parsed Agent-authored research that may inform multiple later sections. */
+export type EvidenceResearchTopic = z.infer<typeof researchTopicSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
 

@@ -12,7 +12,7 @@ import {
   collectEvidenceMappingWebObservations,
   type EvidenceMappingCapturedWebResult,
 } from './evidence-mapping-executor.ts'
-import { parseEvidenceMapArtifact, type EvidenceMaterial, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import { parseEvidenceMapArtifact, type EvidenceMaterial, type EvidenceResearchTopic, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -30,6 +30,7 @@ export interface ChapterContext {
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>['requirements']
   scoring: ReturnType<typeof parseTenderScoringArtifact>['scoring_items']
   compliance: ReturnType<typeof parseTenderComplianceArtifact>['compliance_items']
+  researchTopics: EvidenceResearchTopic[]
   evidence: EvidenceMaterial[]
   externalEvidence: ExternalEvidenceMaterial[]
   missingTopics: string[]
@@ -99,6 +100,8 @@ export function pickChapterContext(raw: {
     ...raw.evidence.requirement_mappings.filter(mapping => requirementIds.has(mapping.requirement_id)),
     ...raw.evidence.scoring_mappings.filter(mapping => scoringIds.has(mapping.scoring_id)),
   ]
+  const researchTopics = raw.evidence.research_topics.filter(topic => topic.related_requirement_ids.some(id => requirementIds.has(id))
+    || topic.related_scoring_points.some(point => scoringIds.has(point.scoring_id)))
   return {
     section: raw.section,
     contentPath: `chapters/sections/${String(raw.sequence).padStart(4, '0')}.md`,
@@ -107,9 +110,10 @@ export function pickChapterContext(raw: {
     requirements: raw.requirements.requirements.filter(item => requirementIds.has(item.id)),
     scoring: raw.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
     compliance: raw.compliance.compliance_items.filter(item => complianceIds.has(item.id)),
-    evidence: uniqueBy(mappings.flatMap(mapping => mapping.materials), localIdentity),
-    externalEvidence: uniqueBy(mappings.flatMap(mapping => mapping.external_materials), externalIdentity),
-    missingTopics: [...new Set(mappings.flatMap(mapping => mapping.missing_topics))],
+    researchTopics,
+    evidence: uniqueBy([...mappings, ...researchTopics].flatMap(mapping => mapping.materials), localIdentity),
+    externalEvidence: uniqueBy([...mappings, ...researchTopics].flatMap(mapping => mapping.external_materials), externalIdentity),
+    missingTopics: [...new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.missing_topics))],
   }
 }
 
@@ -182,6 +186,7 @@ export function renderChapterWritingTask(agent: Agent, workspace: BidWorkspace, 
     `Relevant Requirements：${JSON.stringify(context.requirements)}`,
     `Relevant Scoring：${JSON.stringify(context.scoring)}`,
     `Relevant Compliance：${JSON.stringify(context.compliance)}`,
+    `Relevant Research Topics：${JSON.stringify(context.researchTopics)}`,
     `Relevant Local Evidence：${JSON.stringify(context.evidence)}`,
     `Relevant External Evidence：${JSON.stringify(context.externalEvidence)}`,
     `Missing Topics：${JSON.stringify(context.missingTopics)}`,

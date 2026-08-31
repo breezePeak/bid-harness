@@ -12,7 +12,7 @@ Status: implemented
 
 Bid Host 将 `outline_generation` 注册为下一个自动 Agent 阶段。Agent 读取现有 S2 Artifact 和 S3 evidence map，先写入 `outline/outline.json`，再在同一工具限制内收到强制 Blueprint Quality Review follow-up；复核修正目录后写入内部 `outline/quality-report.json`。它不再搜索资料库、不使用 Web Search，也不写技术正文。
 
-严格 Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、简洁 purpose、是否写作、映射和写作指引。结构节点必须有子节点；可写节点必须有具体 `must_answer`。Requirement、Scoring 和 Compliance 保持完整引用；S3 material 仍是权威来源，只转化为简短 writing_notes。
+严格 Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、简洁 purpose、是否写作、映射和写作指引。结构节点必须有子节点；可写节点必须有具体 `must_answer`。Requirement、Scoring 和 Compliance 保持完整引用；S3 的 `research_topics.findings` 与 `writing_dimensions` 是目录结构输入，Agent 自主决定合并、拆分或仅形成写作指引，不能机械地一个 Topic 对应一个章节。
 
 Validator 校验树结构、引用存在性和覆盖率、数组内部重复，以及强制 Requirement 和重点 Scoring 是否落到可写节点。可写章节必须是叶子，同级标题不得重复，`must_answer` 不得重复或机械复述标题。质量报告必须覆盖全部当前 Requirement、Scoring 和最终 section ID，且没有未解决问题。成功后通过现有控制面进入 `outline_confirmation/waiting_user`。
 

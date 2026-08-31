@@ -8,6 +8,7 @@ import {
   parseEvidenceMapArtifact,
   validateEvidenceMapping,
   webEvidenceContentSha256,
+  type EvidenceMapArtifact,
   type StageArtifact,
 } from '@deepseek-ai/dsh-bid'
 
@@ -65,20 +66,23 @@ async function fixture() {
 describe('evidence-map Artifact schema', () => {
   it('rejects invalid material usage and missing mapping identifiers', () => {
     expect(() => parseEvidenceMapArtifact({
-      schema_version: 2,
+      schema_version: 3, research_topics: [],
       requirement_mappings: [{ requirement_id: 'R', materials: [], missing_topics: ['缺少资料。'] }],
       scoring_mappings: [],
     })).toThrow()
     expect(() => parseEvidenceMapArtifact({
-      schema_version: 2, requirement_mappings: [{ materials: [], external_materials: [], missing_topics: [] }], scoring_mappings: [],
-    })).toThrow()
-    expect(() => parseEvidenceMapArtifact({
-      schema_version: 2,
-      requirement_mappings: [{ requirement_id: 'R', materials: [], external_materials: [], missing_topics: [] }],
+      schema_version: 3,
+      research_topics: [],
+      requirement_mappings: [{ materials: [], external_materials: [], missing_topics: [] }],
       scoring_mappings: [],
     })).toThrow()
     expect(() => parseEvidenceMapArtifact({
-      schema_version: 2,
+      schema_version: 3, research_topics: [],
+      requirement_mappings: [{ requirement_id: 'R', materials: [], external_materials: [], missing_topics: [] }],
+      scoring_mappings: [],
+    })).not.toThrow()
+    expect(() => parseEvidenceMapArtifact({
+      schema_version: 3, research_topics: [],
       requirement_mappings: [],
       scoring_mappings: [{
         scoring_id: 'S',
@@ -101,7 +105,7 @@ describe('evidence-map Artifact schema', () => {
       supports: '支持安全控制措施的设计。',
     }
     const mapping = (material: unknown) => ({
-      schema_version: 2,
+      schema_version: 3, research_topics: [],
       requirement_mappings: [{ requirement_id: 'R', materials: [], external_materials: [material], missing_topics: [] }],
       scoring_mappings: [],
     })
@@ -120,15 +124,53 @@ describe('evidence-map Artifact schema', () => {
 describe('evidence-mapping validator', () => {
   it('accepts complete mappings, including a missing technical topic', async () => {
     const value = await fixture()
-    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [{ requirement_id: 'R-1', materials: [{ file_id: value.reference.id, chunk: value.chunk, line_start: 1, line_end: value.lines, usage: 'adapt', summary: '历史项目实施流程。' }], external_materials: [], missing_topics: [] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少本项目架构设计。'] }] }))
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [{ requirement_id: 'R-1', materials: [{ file_id: value.reference.id, chunk: value.chunk, line_start: 1, line_end: value.lines, usage: 'adapt', summary: '历史项目实施流程。' }], external_materials: [], missing_topics: [] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少本项目架构设计。'] }] }))
     await expect(validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('accepts independent project research and reports an exact invalid response-point path', async () => {
+    const value = await fixture()
+    const map: EvidenceMapArtifact = {
+      schema_version: 3,
+      research_topics: [{
+        topic_id: 'RT-1', topic: '项目背景', relevance: '影响目录的总体技术路线。',
+        related_requirement_ids: [], related_scoring_points: [], materials: [], external_materials: [],
+        findings: ['需要以分层架构组织技术方案。'], writing_dimensions: ['总体技术路线'], missing_topics: [],
+      }],
+      requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: [] }],
+      scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: [] }],
+    }
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(map))
+    await expect(validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
+
+    map.research_topics[0]!.related_scoring_points = [{ scoring_id: 'S-1', response_point: '拼错的响应点' }]
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(map))
+    const invalid = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
+    expect(invalid).toMatchObject({ ok: false })
+    if (!invalid.ok) expect(invalid.issues).toContainEqual(expect.objectContaining({
+      code: 'EVIDENCE_MAPPING_RESEARCH_RESPONSE_POINT_UNKNOWN',
+      path: 'research_topics[0].related_scoring_points[0].response_point',
+    }))
+
+    const unverifiedMap = structuredClone(map)
+    unverifiedMap.research_topics[0]!.related_scoring_points = []
+    unverifiedMap.research_topics[0]!.external_materials = [{
+      title: '外部资料', url: 'https://unverified.example/research', publisher: '发布者',
+      retrieved_at: '2026-08-31T00:00:00.000Z', retrieval_method: 'web_search', usage: 'reference',
+      summary: '资料正文。', supports: '支持项目背景研究。',
+    }]
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(unverifiedMap))
+    const unverified = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
+    expect(unverified).toMatchObject({ ok: false })
+    if (!unverified.ok) expect(unverified.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_WEB_SOURCE_UNVERIFIED')
   })
 
   it('accepts a complete mapping supported only by public external material', async () => {
     const value = await fixture()
     await writeWebSource(value.workspace)
     await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 2,
+      schema_version: 3,
+      research_topics: [],
       requirement_mappings: [{
         requirement_id: 'R-1',
         materials: [],
@@ -152,7 +194,8 @@ describe('evidence-mapping validator', () => {
   it('rejects a plausible external material without a current-attempt verified source', async () => {
     const value = await fixture()
     await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 2,
+      schema_version: 3,
+      research_topics: [],
       requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [{
         title: '国家网络安全标准', url: 'https://example.com/standard', publisher: '国家标准机构',
         retrieved_at: '2026-08-31T00:00:00+08:00', retrieval_method: 'web_search', usage: 'reference',
@@ -167,7 +210,7 @@ describe('evidence-mapping validator', () => {
 
   it('rejects a missing ledger and a modified snapshot', async () => {
     const missing = await fixture()
-    await writeFile(join(missing.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
+    await writeFile(join(missing.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
     await rm(join(missing.workspace.sessionRoot, 'analysis/web-evidence-sources.json'))
     const missingResult = await validateEvidenceMapping(missing.workspace, 'evidence_mapping', artifacts)
     expect(missingResult.ok).toBe(false)
@@ -176,7 +219,7 @@ describe('evidence-mapping validator', () => {
     const modified = await fixture()
     await writeWebSource(modified.workspace)
     await writeFile(join(modified.workspace.sessionRoot, 'analysis/web-sources/WEB-0123456789abcdef.md'), 'tampered')
-    await writeFile(join(modified.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
+    await writeFile(join(modified.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
     const modifiedResult = await validateEvidenceMapping(modified.workspace, 'evidence_mapping', artifacts)
     expect(modifiedResult.ok).toBe(false)
     if (!modifiedResult.ok) expect(modifiedResult.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_WEB_SOURCE_HASH_MISMATCH')
@@ -185,7 +228,7 @@ describe('evidence-mapping validator', () => {
   it('rejects a missing or linked Host snapshot', async () => {
     const value = await fixture()
     await writeWebSource(value.workspace)
-    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }], scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少资料。'] }] }))
     const snapshot = join(value.workspace.sessionRoot, 'analysis/web-sources/WEB-0123456789abcdef.md')
     await rm(snapshot)
     const missingResult = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
@@ -203,7 +246,8 @@ describe('evidence-mapping validator', () => {
   it('rejects malformed external material during stage validation', async () => {
     const value = await fixture()
     await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 2,
+      schema_version: 3,
+      research_topics: [],
       requirement_mappings: [{
         requirement_id: 'R-1',
         materials: [],
@@ -229,7 +273,7 @@ describe('evidence-mapping validator', () => {
 
   it('rejects omitted ids, unknown files, and line ranges outside a chunk', async () => {
     const value = await fixture()
-    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [{ requirement_id: 'unknown', materials: [{ file_id: 'missing', chunk: value.chunk, line_start: 1, line_end: value.lines + 1, usage: 'adapt', summary: 'x' }], external_materials: [], missing_topics: [] }], scoring_mappings: [] }))
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [{ requirement_id: 'unknown', materials: [{ file_id: 'missing', chunk: value.chunk, line_start: 1, line_end: value.lines + 1, usage: 'adapt', summary: 'x' }], external_materials: [], missing_topics: [] }], scoring_mappings: [] }))
     const result = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['EVIDENCE_MAPPING_REQUIREMENT_UNKNOWN', 'EVIDENCE_MAPPING_REQUIREMENT_MISSING', 'EVIDENCE_MAPPING_SCORING_MISSING', 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN']))
@@ -243,7 +287,8 @@ describe('evidence-mapping validator', () => {
     const index = JSON.parse(await readFile(join(value.workspace.sessionRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
     const chunk = `${tender.chunksPath}/${index.chunks[0]!.path}`
     await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 2,
+      schema_version: 3,
+      research_topics: [],
       requirement_mappings: [{ requirement_id: 'R-1', materials: [{ file_id: tender.id, chunk, line_start: 1, line_end: 1, usage: 'reference', summary: '招标原文。' }], external_materials: [], missing_topics: [] }],
       scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: ['缺少技术资料。'] }],
     }))

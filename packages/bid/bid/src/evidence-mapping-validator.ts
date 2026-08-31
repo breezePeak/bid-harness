@@ -1,5 +1,6 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
+import { ZodError } from 'zod'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
@@ -20,9 +21,15 @@ const S2_REQUIREMENTS = 'analysis/requirements.json'
 const S2_SCORING = 'analysis/scoring.json'
 
 function reject(
-  issues: StageValidationIssue[], code: string, message: string, artifact?: string,
+  issues: StageValidationIssue[], code: string, message: string, artifact?: string, path?: string,
 ): void {
-  issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
+  issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }), ...(path === undefined ? {} : { path }) })
+}
+
+function zodPath(path: readonly PropertyKey[]): string {
+  return path.reduce<string>((result, segment) => typeof segment === 'number'
+    ? `${result}[${segment}]`
+    : result.length === 0 ? String(segment) : `${result}.${String(segment)}`, '')
 }
 
 async function parseJson(workspace: BidWorkspace, path: string, issues: StageValidationIssue[], code: string): Promise<unknown> {
@@ -115,7 +122,7 @@ function validateExternalMaterials(
     if (requested !== undefined) verifiedUrls.set(requested, source)
     if (final !== undefined) verifiedUrls.set(final, source)
   }
-  for (const mapping of [...map.requirement_mappings, ...map.scoring_mappings]) {
+  for (const mapping of [...map.requirement_mappings, ...map.scoring_mappings, ...map.research_topics]) {
     for (const material of mapping.external_materials) {
       const normalized = normalizeWebEvidenceUrl(material.url)
       if (normalized === undefined || !verifiedUrls.has(normalized)) {
@@ -125,6 +132,33 @@ function validateExternalMaterials(
           `External material URL ${JSON.stringify(material.url)} has no verified current-attempt web_search to web_fetch source.`,
           ARTIFACT,
         )
+      }
+    }
+  }
+}
+
+function validateResearchTopics(
+  map: ReturnType<typeof parseEvidenceMapArtifact>,
+  requirements: ReturnType<typeof parseTenderRequirementsArtifact>,
+  scoring: ReturnType<typeof parseTenderScoringArtifact>,
+  issues: StageValidationIssue[],
+): void {
+  const requirementIds = new Set(requirements.requirements.map(item => item.id))
+  const scoringById = new Map(scoring.scoring_items.map(item => [item.id, item]))
+  const topicIds = new Set<string>()
+  for (const [topicIndex, topic] of map.research_topics.entries()) {
+    if (topicIds.has(topic.topic_id)) reject(issues, 'EVIDENCE_MAPPING_RESEARCH_TOPIC_DUPLICATE', 'Each research topic id must occur once.', ARTIFACT, `research_topics[${topicIndex}].topic_id`)
+    topicIds.add(topic.topic_id)
+    for (const [idIndex, requirementId] of topic.related_requirement_ids.entries()) {
+      if (!requirementIds.has(requirementId)) reject(issues, 'EVIDENCE_MAPPING_RESEARCH_REQUIREMENT_UNKNOWN', `Research topic references unknown requirement id ${JSON.stringify(requirementId)}.`, ARTIFACT, `research_topics[${topicIndex}].related_requirement_ids[${idIndex}]`)
+    }
+    for (const [pointIndex, point] of topic.related_scoring_points.entries()) {
+      const scoringItem = scoringById.get(point.scoring_id)
+      const path = `research_topics[${topicIndex}].related_scoring_points[${pointIndex}]`
+      if (scoringItem === undefined) {
+        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_SCORING_UNKNOWN', `Research topic references unknown scoring id ${JSON.stringify(point.scoring_id)}.`, ARTIFACT, `${path}.scoring_id`)
+      } else if (!scoringItem.response_points.includes(point.response_point)) {
+        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_RESPONSE_POINT_UNKNOWN', `The response point does not exist in scoring item ${point.scoring_id}.`, ARTIFACT, `${path}.response_point`)
       }
     }
   }
@@ -169,8 +203,12 @@ export async function validateEvidenceMapping(
     requirements = parseTenderRequirementsArtifact(rawRequirements)
     scoring = parseTenderScoringArtifact(rawScoring)
   } catch {
-    try { parseEvidenceMapArtifact(rawMap) } catch {
-      reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', 'The evidence-map Artifact has invalid fields.', ARTIFACT)
+    try { parseEvidenceMapArtifact(rawMap) } catch (error) {
+      if (error instanceof ZodError) {
+        for (const issue of error.issues) reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', issue.message, ARTIFACT, zodPath(issue.path))
+      } else {
+        reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', 'The evidence-map Artifact has invalid fields.', ARTIFACT)
+      }
     }
     try { parseWebEvidenceSourcesArtifact(rawWebSources) } catch {
       reject(issues, 'EVIDENCE_MAPPING_WEB_SOURCE_ARTIFACT_INVALID', 'The Host Web source ledger has invalid fields.', WEB_SOURCES_ARTIFACT)
@@ -180,8 +218,9 @@ export async function validateEvidenceMapping(
   }
   validateCoverage(requirements.requirements, map.requirement_mappings.map(item => item.requirement_id), 'REQUIREMENT', issues)
   validateCoverage(scoring.scoring_items, map.scoring_mappings.map(item => item.scoring_id), 'SCORING', issues)
+  validateResearchTopics(map, requirements, scoring, issues)
   await Promise.all(
-    [...map.requirement_mappings, ...map.scoring_mappings]
+    [...map.requirement_mappings, ...map.scoring_mappings, ...map.research_topics]
       .flatMap(mapping => mapping.materials.map(material => validateMaterial(workspace, manifest, material, issues))),
   )
   const validity = await Promise.all(webSources.sources.map(async source => ({

@@ -211,7 +211,11 @@ async function bench(snapshot = historySnapshot(NODES)) {
 /** Tab projection twin of apply's viewTabs (the render-side consumption path). */
 function tabsOf(slots: SlotRegistry): ViewTab[] {
   return slots.entries('conversation.view')
-    .map(e => ({ id: e.options.id!, label: resolveSlotLabel(e.options.label) ?? e.options.id! }))
+    .map(e => ({
+      id: e.options.id!,
+      label: resolveSlotLabel(e.options.label) ?? e.options.id!,
+      embeddedChat: e.options.embeddedChat === true,
+    }))
 }
 
 /** Mount the strict Session header/body over the ring ledger with outlet-faithful render shares. */
@@ -220,9 +224,9 @@ function mount(slots: SlotRegistry, nodes: ConversationSnapshot['nodes'] = NODES
   const useSession = bindSnapshotSelector(sessionSnapshot)
   const chat = createChatStore().create()
   const views = {
-    list: () => tabsOf(slots),
-    subscribe: (fn: () => void) => slots.subscribe('conversation.view', fn),
-    version: () => slots.getVersion('conversation.view'),
+    list: (_sessionId: SessionId) => tabsOf(slots),
+    subscribe: (_sessionId: SessionId, fn: () => void) => slots.subscribe('conversation.view', fn),
+    version: (_sessionId: SessionId) => String(slots.getVersion('conversation.view')),
   }
   const useInput = bindSnapshotSelector(createSnapshotStore({
     draft: '', imageIds: [], draftRev: 0, phase: 'plain', occurrences: [], queue: [],
@@ -304,8 +308,8 @@ describe('plugin registration', () => {
   it('registers trajectory after chat on the ring', async () => {
     const b = await bench()
     expect(tabsOf(b.slots)).toEqual([
-      { id: 'chat', label: 'Chat' },
-      { id: 'trajectory', label: 'Trajectory' },
+      { id: 'chat', label: 'Chat', embeddedChat: false },
+      { id: 'trajectory', label: 'Trajectory', embeddedChat: false },
     ])
   })
 

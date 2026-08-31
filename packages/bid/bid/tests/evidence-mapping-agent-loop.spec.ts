@@ -16,6 +16,7 @@ import {
   buildBidStageTask,
   executeEvidenceMapping,
   parseWebEvidenceSourcesArtifact,
+  parseEvidenceMapArtifact,
   validateEvidenceMapping,
 } from '@deepseek-ai/dsh-bid'
 
@@ -147,7 +148,14 @@ function externalEvidenceMap(s2: { requirementId: string; scoringId: string }, u
     retrieval_method: 'web_search', usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。',
   }
   return JSON.stringify({
-    schema_version: 2,
+    schema_version: 3,
+    research_topics: [{
+      topic_id: 'RT-1', topic: '访问控制方案的技术维度', relevance: '用于细化安全章节。',
+      related_requirement_ids: [s2.requirementId],
+      related_scoring_points: [{ scoring_id: s2.scoringId, response_point: '说明访问控制' }],
+      materials: [], external_materials: [external], findings: ['访问控制需要与审计协同。'],
+      writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
+    }],
     requirement_mappings: [{ requirement_id: s2.requirementId, materials: [], external_materials: [external], missing_topics: [] }],
     scoring_mappings: complete
       ? [{ scoring_id: s2.scoringId, materials: [], external_materials: [{ ...external, supports: '支持安全评分响应。' }], missing_topics: [] }]
@@ -201,6 +209,11 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     await expect(orchestrator.runCurrentAutomaticStage()).resolves.toEqual({ stage: 'outline_generation', status: 'pending' })
     const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
     expect(ledger.sources).toHaveLength(1)
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(map.research_topics[0]).toMatchObject({
+      findings: ['访问控制需要与审计协同。'],
+      writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
+    })
     expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'evidence_mapping')).toBe(true)
     expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([

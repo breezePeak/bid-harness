@@ -7,6 +7,7 @@ import {
   BidWorkspace,
   buildBidStageTask,
   executeOutlineGeneration,
+  renderOutlineGenerationTask,
   validateConfirmedOutline,
   validateOutlineGeneration,
   type OutlineArtifact,
@@ -84,6 +85,17 @@ const coarseOutline: OutlineArtifact = {
   }],
 }
 
+const researchDrivenOutline: OutlineArtifact = {
+  schema_version: 1,
+  scope: 'technical_bid',
+  document_title: '技术投标文件',
+  global_compliance_ids: ['COMP-DELIVERY'],
+  sections: [{
+    id: 'SEC-SECURITY', parent_id: null, order: 1, level: 1, title: '数据安全保障体系', purpose: '响应安全技术要求。', writable: true,
+    must_answer: ['说明数据分类分级、访问控制和安全审计措施。'], requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+  }],
+}
+
 async function fixture(): Promise<BidWorkspace> {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-generation-')), 'session')
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
@@ -91,7 +103,7 @@ async function fixture(): Promise<BidWorkspace> {
     writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
     writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
-    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 2, requirement_mappings: [], scoring_mappings: [] })),
+    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [], scoring_mappings: [] })),
   ])
   return workspace
 }
@@ -116,6 +128,56 @@ function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneratio
 }
 
 describe('outline-generation Blueprint Quality Review', () => {
+  it('gives S3 research findings and writing dimensions to the S4 Agent as structural inputs', async () => {
+    const workspace = await fixture()
+    await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
+      schema_version: 3,
+      research_topics: [{
+        topic_id: 'RT-SECURITY', topic: '数据安全方案的技术维度', relevance: '细化安全章节。',
+        related_requirement_ids: [], related_scoring_points: [], materials: [], external_materials: [],
+        findings: ['需要覆盖分类分级、访问控制和安全审计。'],
+        writing_dimensions: ['数据分类分级', '访问控制', '安全审计'], missing_topics: [],
+      }],
+      requirement_mappings: [], scoring_mappings: [],
+    }))
+    const task = renderOutlineGenerationTask({ id: 'session' } as Agent, workspace, buildBidStageTask('outline_generation'))
+
+    expect(task).toContain('research_topics 是 S3 通过本地资料和外部研究得到的结构设计输入')
+    expect(task).toContain('章节标题、层级、must_answer')
+    expect(task).toContain('不得机械地一个 Topic 对应一个章节')
+  })
+
+  it('publishes research-driven directory detail through the S4 Agent execution path', async () => {
+    const workspace = await fixture()
+    await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
+      schema_version: 3,
+      research_topics: [{
+        topic_id: 'RT-SECURITY', topic: '数据安全方案的技术维度', relevance: '细化安全章节。',
+        related_requirement_ids: ['REQ-ORG'], related_scoring_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }],
+        materials: [], external_materials: [], findings: ['需要覆盖分类分级、访问控制和安全审计。'],
+        writing_dimensions: ['数据分类分级', '访问控制', '安全审计'], missing_topics: [],
+      }], requirement_mappings: [], scoring_mappings: [],
+    }))
+    const followup = vi.fn()
+    let idleCalls = 0
+    const whenIdle = vi.fn(async () => {
+      idleCalls += 1
+      if (idleCalls === 2) await publishOutline(workspace, researchDrivenOutline)
+    })
+    const services = {
+      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
+    }
+    const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
+    const outline = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(outline.sections[0]).toMatchObject({
+      title: '数据安全保障体系',
+      must_answer: ['说明数据分类分级、访问控制和安全审计措施。'],
+    })
+  })
+
   it('revises a coarse first draft in a mandatory second Agent follow-up before validation', async () => {
     const workspace = await fixture()
     const followup = vi.fn()

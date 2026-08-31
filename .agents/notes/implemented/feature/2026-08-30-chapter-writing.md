@@ -14,7 +14,7 @@ S6 允许 `grep`、`read`、`write`、`web_search` 和 `web_fetch`。Agent 先�
 
 Chapter Metadata 与 Manifest 使用 Schema v2，分别保存 `evidence_used`、`additional_materials`、`external_evidence_used`、`additional_external_materials` 和 `unresolved_topics`。前两类区分 S3 已映射与 S6 新发现的本地 Evidence，后两类区分 S3 已映射与 S6 当前章节新发现的外部 Evidence；规范化 URL 不得跨外部数组重复，本地 Chunk 不得跨本地数组重复。
 
-S6 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，检查遍历路径、章节映射、must-answer 覆盖、本地 Evidence chunk 与行范围，并要求 `evidence_used` 和 `external_evidence_used` 分别属于当前章节相关的 S3 Requirement 或 Scoring Mapping。重试 S6 时先删除旧 `chapters/` 树。
+S6 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，检查遍历路径、章节映射、must-answer 覆盖、本地 Evidence chunk 与行范围，并要求 `evidence_used` 和 `external_evidence_used` 分别属于当前章节相关的 S3 Requirement、Scoring Mapping 或 research topic。重试 S6 时先删除旧 `chapters/` 树。
 
 ## Alternatives considered
 

@@ -135,13 +135,15 @@ describe('evidence-mapping Agent executor', () => {
     } as ToolExecution)).toBe('Bid evidence mapping may write only analysis/evidence-map.json')
   })
 
-  it('instructs the Agent to use external research only for public technical gaps', async () => {
+  it('lets the Agent independently decide whether external research will help', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-prompt-')), 'session')
     const task = buildBidStageTask('evidence_mapping')
 
     const prompt = renderEvidenceMappingTask({ id: 'session' } as Agent, workspace, task)
 
-    expect(prompt).toContain('本地 Evidence 已充分时不得为了丰富内容联网')
+    expect(prompt).toContain('本地资料已经存在，不代表项目背景')
+    expect(prompt).not.toContain('本地 Evidence 已充分时不得为了丰富内容联网')
+    expect(prompt).not.toContain('source_strategy')
     expect(prompt).toContain('web_search → 选择可信 URL → web_fetch 原始网页')
     expect(prompt).toContain('Search Snippet 和标题不能直接进入 external_materials')
     expect(prompt).toContain('企业事实只能来自 role=reference 的本地真实资料')

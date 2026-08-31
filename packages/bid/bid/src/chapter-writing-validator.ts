@@ -118,11 +118,13 @@ export async function validateChapterWriting(
       ...evidence.requirement_mappings.filter(mapping => requirementIds.has(mapping.requirement_id)),
       ...evidence.scoring_mappings.filter(mapping => scoringIds.has(mapping.scoring_id)),
     ]
-    const mappedLocal = new Set(mappings.flatMap(mapping => mapping.materials).map(localIdentity))
+    const researchTopics = evidence.research_topics.filter(topic => topic.related_requirement_ids.some(id => requirementIds.has(id))
+      || topic.related_scoring_points.some(point => scoringIds.has(point.scoring_id)))
+    const mappedLocal = new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.materials).map(localIdentity))
     for (const material of chapter.evidence_used) {
       if (!mappedLocal.has(localIdentity(material))) reject(issues, 'CHAPTER_WRITING_EVIDENCE_NOT_MAPPED', 'S3 local Evidence used by a chapter must belong to its related mappings.', MANIFEST)
     }
-    const mappedExternal = new Set(mappings.flatMap(mapping => mapping.external_materials).map(externalIdentity))
+    const mappedExternal = new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.external_materials).map(externalIdentity))
     for (const material of chapter.external_evidence_used) {
       if (!mappedExternal.has(externalIdentity(material))) reject(issues, 'CHAPTER_WRITING_EXTERNAL_EVIDENCE_NOT_MAPPED', 'S3 external Evidence used by a chapter must belong to its related mappings.', MANIFEST)
     }

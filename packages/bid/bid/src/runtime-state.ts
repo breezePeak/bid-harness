@@ -151,8 +151,8 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
   ],
   evidence_mapping: [
     '只处理技术标范围，不得搜索商务、资格或报价资料。',
-    '先 grep 定位候选，再 read 原始 chunk 判断材料用途。',
-    '先引用工作区中的本地技术资料；本地不足且属于公开技术知识时才可按 web_search、web_fetch 的顺序读取原始来源。',
+    '根据项目、要求、评分项、合规约束和已有资料自主决定是否 grep、read、web_search 或 web_fetch。',
+    'grep 只定位候选；读取原始 chunk 或网页正文后再判断其研究价值。',
     '企业事实只能使用本地资料证明；本地缺失时记录 missing_topics。',
     '只写入要求的 evidence-map Artifact。',
   ],
