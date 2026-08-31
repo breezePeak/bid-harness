@@ -31,6 +31,8 @@ export interface BidRuntimeState {
   status: StageRunStatus
   /** Host-recorded reason for the current failed stage. */
   readonly failureReason?: string | undefined
+  /** Browser-safe validation details for the current failed stage. */
+  readonly failureIssues?: readonly StageValidationIssue[] | undefined
 }
 
 /** The sole client-visible projection key for Bid runtime state. */
@@ -86,7 +88,8 @@ export interface StageArtifact {
 export interface StageValidationIssue {
   code: string
   message: string
-  artifact?: string
+  artifact?: string | undefined
+  path?: string | undefined
 }
 
 /** Artifact validation outcome used by the orchestrator to decide whether a stage may advance. */

@@ -294,6 +294,45 @@ describe('BidOrchestrator', () => {
     )
   })
 
+  it('persists structured tender-analysis issues and clears them when retry starts', async () => {
+    const session = createSession('bid-tender-validation-issues')
+    let tenderValidationAttempts = 0
+    const validator: BidStageValidatorPort = {
+      validate: async stage => stage === 'tender_analysis' && tenderValidationAttempts++ === 0
+        ? { ok: false, issues: [{
+          code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+          artifact: 'analysis/scoring.json',
+          path: 'scoring_items[2].response_points',
+          message: '至少需要一项技术响应重点。',
+        }] }
+        : { ok: true },
+    }
+    const orchestrator = new BidOrchestrator(session, new RecordingExecutor(), validator)
+
+    await orchestrator.runCurrentProgramStage()
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'tender_analysis',
+      status: 'failed',
+      failureReason: '招标分析结果未通过校验。',
+      failureIssues: [{
+        code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+        artifact: 'analysis/scoring.json',
+        path: 'scoring_items[2].response_points',
+        message: '至少需要一项技术响应重点。',
+      }],
+    })
+    expect(session.events.at(-1)).toMatchObject({
+      type: 'bid.stage.failed',
+      data: { issues: [{ artifact: 'analysis/scoring.json', path: 'scoring_items[2].response_points' }] },
+    })
+
+    const retry = orchestrator.retryCurrentAutomaticStage()
+    expect(reduceBidRuntimeState(orchestrator.state, {
+      type: 'bid.stage.started', seq: 99, time: 0, data: { stage: 'tender_analysis', status: 'running' },
+    })).not.toHaveProperty('failureIssues')
+    await expect(retry).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+  })
+
   it('keeps tender analysis failed when its single retry fails again', async () => {
     const session = createSession('bid-retry-single-stage-failed')
     const executor = new RecordingExecutor(async (task) => {
@@ -359,6 +398,7 @@ describe('BidOrchestrator', () => {
 
     await expect(orchestrator.runCurrentProgramStage()).resolves.toEqual({
       stage: 'file_intake', status: 'failed', failureReason: 'INVALID_STAGE_ARTIFACTS: file_intake artifacts failed validation',
+      failureIssues: [{ code: 'INVALID_STAGE_ARTIFACTS', message: 'file_intake artifacts failed validation' }],
     })
     expect(session.events.map(event => event.type)).toEqual(['bid.stage.started', 'bid.stage.failed'])
     expect(session.events.at(-1)?.data).toMatchObject({ reason: 'INVALID_STAGE_ARTIFACTS: file_intake artifacts failed validation' })
@@ -465,6 +505,7 @@ describe('BidOrchestrator', () => {
       stage: 'outline_confirmation',
       status: 'failed',
       failureReason: 'INVALID_STAGE_ARTIFACTS: outline_confirmation artifacts failed validation',
+      failureIssues: [{ code: 'INVALID_STAGE_ARTIFACTS', message: 'outline_confirmation artifacts failed validation' }],
     })
     await expect(orchestrator.retry()).resolves.toEqual({
       stage: 'outline_confirmation',

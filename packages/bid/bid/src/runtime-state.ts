@@ -211,7 +211,12 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
     case 'bid.stage.failed':
       return event.data.stage === state.stage
         && state.status === 'running'
-        ? { stage: state.stage, status: 'failed', failureReason: event.data.reason }
+        ? {
+          stage: state.stage,
+          status: 'failed',
+          failureReason: event.data.reason,
+          ...(event.data.issues === undefined ? {} : { failureIssues: event.data.issues.map(issue => ({ ...issue })) }),
+        }
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage

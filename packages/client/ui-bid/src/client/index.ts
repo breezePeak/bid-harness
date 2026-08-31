@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidDocumentRole, BidFileIntakeFileResult, BidUploadFile, OutlineArtifact, OutlineEditOperation, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocumentRole, BidFileIntakeFileResult, BidUploadFile, OutlineArtifact, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -55,7 +55,7 @@ export class BidActionError extends Error {
   constructor(
     public readonly code: string,
     message: string,
-    public readonly issues: readonly { readonly code: string; readonly message: string }[] = [],
+    public readonly issues: readonly StageValidationIssue[] = [],
     public readonly files: readonly BidFileIntakeFileResult[] = [],
   ) { super(message) }
 }
@@ -106,7 +106,7 @@ async function encodeFiles(
 function actionFailure(error: {
   readonly code: string
   readonly message: string
-  readonly issues?: readonly { readonly code: string; readonly message: string }[] | undefined
+  readonly issues?: readonly StageValidationIssue[] | undefined
   readonly files?: readonly BidFileIntakeFileResult[] | undefined
 }): Error {
   return new BidActionError(error.code, `${error.message} (${error.code})`, error.issues, error.files)

@@ -88,6 +88,12 @@ describe('bid control-plane public contract', () => {
       stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
       status: 'failed'
       reason: string
+      issues?: Array<{
+        code: string
+        message: string
+        artifact?: string | undefined
+        path?: string | undefined
+      }>
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<{
       stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'

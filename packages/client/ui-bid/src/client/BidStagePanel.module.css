@@ -83,6 +83,30 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+.validationIssues {
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.validationIssues p,
+.validationIssues ol {
+  margin: 0;
+}
+
+.validationIssues ol {
+  display: flex;
+  max-height: 180px;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding-left: 24px;
+}
+
+.validationIssues li,
+.validationIssues span {
+  display: block;
+}
+
 .fileList {
   display: flex;
   max-height: 144px;

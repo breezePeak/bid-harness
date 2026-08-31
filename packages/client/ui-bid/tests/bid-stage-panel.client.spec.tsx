@@ -154,6 +154,41 @@ describe('BidStagePanel', () => {
     expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
   })
 
+  it('shows every structured S2 validation issue and keeps retry available', () => {
+    const retryStage = vi.fn(async () => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: {
+        stage: 'tender_analysis',
+        status: 'failed',
+        failureReason: '招标分析结果未通过校验。',
+        failureIssues: [
+          {
+            code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+            artifact: 'analysis/scoring.json',
+            path: 'scoring_items[2].response_points',
+            message: '至少需要一项技术响应重点。',
+          },
+          {
+            code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
+            artifact: 'analysis/compliance.json',
+            path: 'compliance_items[0].severity',
+            message: '只能使用 fatal、mandatory 或 warning。',
+          },
+        ],
+      },
+      allowedActions: ['retry_stage'],
+      composer: { enabled: false, reason: 'bid.stage_failed' },
+    }), { retryStage })} />)
+
+    expect(screen.getByText('校验发现 2 个问题')).toBeTruthy()
+    expect(screen.getByText('文件：analysis/scoring.json')).toBeTruthy()
+    expect(screen.getByText('字段：scoring_items[2].response_points')).toBeTruthy()
+    expect(screen.getByText('原因：至少需要一项技术响应重点。')).toBeTruthy()
+    expect(screen.getByText('文件：analysis/compliance.json')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '确认技术标分析' })).toBeNull()
+  })
+
   it('mirrors only projection.composer into the session block', async () => {
     const setComposerBlock = vi.fn()
     const view = render(<BidStagePanel {...props(projection(), { setComposerBlock })} />)

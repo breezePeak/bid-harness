@@ -20,6 +20,12 @@ const runtimeSchema = z.object({
   stage: z.enum(BID_STAGES),
   status: z.enum(STAGE_RUN_STATUSES),
   failureReason: z.string().optional(),
+  failureIssues: z.array(z.object({
+    code: z.string(),
+    message: z.string(),
+    artifact: z.string().optional(),
+    path: z.string().optional(),
+  })).readonly().optional(),
 })
 
 const clientProjectionSchema = z.object({
@@ -33,6 +39,7 @@ const clientProjectionSchema = z.object({
         'bid.upload_required',
         'bid.stage_pending',
         'bid.stage_running',
+        'bid.tender_analysis_confirmation_required',
         'bid.outline_confirmation_required',
         'bid.stage_failed',
         'bid.completed',
@@ -67,6 +74,6 @@ export function registerBidRuntimeProjection(
       viewSchema: clientProjectionSchema,
       view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 4,
+    stateVersion: 5,
   })
 }
