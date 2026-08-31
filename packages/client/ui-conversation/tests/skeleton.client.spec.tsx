@@ -201,6 +201,8 @@ function mount(
           views={views}
           releaseSessionImages={vi.fn()}
           bindDraftMirror={write => wiring.bindMirror(write)}
+          bindViewActions={() => () => {}}
+          embeddedSurface={{ host: () => null, subscribe: () => () => {} }}
         />
       )
     }
@@ -266,6 +268,7 @@ function mount(
     inputActions,
     renderSlot,
     renderSlotChain,
+    embeddedSurface: { host: () => null, subscribe: () => () => {} },
     selectWorkspace: retargetWorkspace,
     t,
   }

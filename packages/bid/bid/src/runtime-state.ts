@@ -22,6 +22,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
     requiredArtifacts: ['manifest.json'],
     validator: 'file-intake-validator',
+    userGate: 'none',
     nextStage: 'tender_analysis',
   },
   tender_analysis: {
@@ -37,7 +38,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/compliance.json',
     ],
     validator: 'tender-analysis-validator',
-    requiresUserConfirmationAfterValidation: true,
+    userGate: 'after_validation',
     nextStage: 'evidence_mapping',
   },
   evidence_mapping: {
@@ -53,6 +54,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['bash'],
     requiredArtifacts: ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json'],
     validator: 'evidence-mapping-validator',
+    userGate: 'none',
     nextStage: 'outline_generation',
   },
   outline_generation: {
@@ -69,6 +71,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['grep', 'bash', 'web_search'],
     requiredArtifacts: ['outline/outline.json'],
     validator: 'outline-generation-validator',
+    userGate: 'none',
     nextStage: 'outline_confirmation',
   },
   outline_confirmation: {
@@ -79,6 +82,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
     requiredArtifacts: ['outline/confirmed-outline.json', 'outline/confirmation.json'],
     validator: 'outline-confirmation-validator',
+    userGate: 'before_execution',
     nextStage: 'chapter_writing',
   },
   chapter_writing: {
@@ -98,16 +102,18 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['bash', 'web_search'],
     requiredArtifacts: ['chapters/manifest.json'],
     validator: 'chapter-writing-validator',
+    userGate: 'none',
     nextStage: 'book_review',
   },
   book_review: {
     stage: 'book_review',
-    executor: 'agent',
-    requiredInputs: ['chapters/manifest.json'],
-    allowedTools: ['grep', 'read', 'write'],
-    forbiddenTools: ['bash', 'web_search'],
+    executor: 'program',
+    requiredInputs: ['outline/confirmed-outline.json', 'chapters/manifest.json'],
+    allowedTools: [],
+    forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
     requiredArtifacts: ['review/report.json'],
     validator: 'book-review-validator',
+    userGate: 'after_validation',
     nextStage: 'docx_export',
   },
   docx_export: {
@@ -118,6 +124,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'],
     requiredArtifacts: ['output/bid.docx'],
     validator: 'docx-export-validator',
+    userGate: 'none',
     nextStage: null,
   },
 }
@@ -220,8 +227,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage
-        && (getBidStagePolicy(state.stage).executor === 'user'
-          || getBidStagePolicy(state.stage).requiresUserConfirmationAfterValidation === true)
+        && getBidStagePolicy(state.stage).userGate !== 'none'
         && (state.status === 'pending' || state.status === 'running' || state.status === 'failed')
         ? { stage: state.stage, status: 'waiting_user' }
         : state
@@ -297,6 +303,14 @@ export function getBidClientProjection(
       runtime: { ...runtime },
       allowedActions: ['confirm_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
+      ...fileView,
+    }
+  }
+  if (runtime.stage === 'book_review' && runtime.status === 'waiting_user') {
+    return {
+      runtime: { ...runtime },
+      allowedActions: ['send_message', 'complete_review'],
+      composer: { enabled: true },
       ...fileView,
     }
   }

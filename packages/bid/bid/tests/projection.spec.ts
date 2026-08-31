@@ -35,6 +35,11 @@ describe('Bid client projection', () => {
       allowedActions: ['confirm_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
+    expect(getBidClientProjection({ stage: 'book_review', status: 'waiting_user' })).toEqual({
+      runtime: { stage: 'book_review', status: 'waiting_user' },
+      allowedActions: ['send_message', 'complete_review'],
+      composer: { enabled: true },
+    })
     expect(getBidClientProjection({
       stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
     })).toEqual({

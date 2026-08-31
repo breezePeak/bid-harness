@@ -2,12 +2,12 @@
 /** Conversation assembly acceptance independent of Tool presentation. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, waitFor, within } from '@testing-library/react'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import type { ISession, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotTestRuntime, usePinnedBrowserLanguages, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
-import { apply, inject, type EmptyWorkspaceOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { apply, inject, type ConvViewProps, type EmptyWorkspaceOwnerProps, type IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 
 usePinnedBrowserLanguages('zh-CN')
 
@@ -46,6 +46,14 @@ function WorkspaceProbe({ open }: EmptyWorkspaceOwnerProps) {
       {String(open)}:{count}
     </button>
   )
+}
+
+function EmbeddedConversationView({ setEmbeddedSurface }: ConvViewProps & {
+  setEmbeddedSurface: (kind: 'chat' | 'composer', element: HTMLElement | null) => void
+}) {
+  const chat = useCallback((element: HTMLDivElement | null) => { setEmbeddedSurface('chat', element) }, [setEmbeddedSurface])
+  const composer = useCallback((element: HTMLDivElement | null) => { setEmbeddedSurface('composer', element) }, [setEmbeddedSurface])
+  return <section><div ref={chat} data-embedded-chat="" /><div ref={composer} data-embedded-composer="" /></section>
 }
 
 async function bench(opts?: { blank?: boolean }) {
@@ -170,6 +178,36 @@ describe('resident composer', () => {
       draft.composerPhase = 'active'
     })
     expect(view.container.querySelector('textarea')).toBe(hero)
+    await runtime.dispose()
+  })
+})
+
+describe('embedded conversation surface', () => {
+  it('ports the one ChatView and Composer into a feature-owned S7 layout', async () => {
+    const runtime = await bench()
+    const scoped = runtime.sessions.scope(SID)
+    const conversation = scoped?.get('conversation') as IConversation | undefined
+    if (conversation === undefined) throw new Error('conversation service is unavailable')
+    runtime.slots.register({
+      name: 'conversation.view',
+      id: 'embedded',
+      inject: () => ({
+        setEmbeddedSurface: (kind: 'chat' | 'composer', element: HTMLElement | null) => {
+          conversation.setEmbeddedSurface(kind, element)
+        },
+      }),
+    }, EmbeddedConversationView)
+    const view = runtime.renderRoot()
+    conversation.blocks.set(SID, { reason: '', embedded: true })
+    conversation.selectView('embedded')
+
+    await waitFor(() => {
+      expect(view.container.querySelector('[data-embedded-chat] [data-chat-flow]')).not.toBeNull()
+      expect(view.container.querySelector('[data-embedded-composer] textarea')).not.toBeNull()
+    })
+    expect(view.container.querySelectorAll('textarea')).toHaveLength(1)
+    expect(view.container.querySelectorAll('[data-chat-flow]')).toHaveLength(1)
+    expect(view.container.querySelector('[data-composer-seat]')?.parentElement?.hasAttribute('data-embedded-composer')).toBe(true)
     await runtime.dispose()
   })
 })

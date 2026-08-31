@@ -2,7 +2,8 @@
 // chain, AND the composer bar (session-maybe slot) stay mounted across
 // no-session/session transitions — the bar renders inert via owner props.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { Portal } from '@deepseek-ai/dsh-client-ui-primitives'
 import clsx from 'clsx'
 import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
@@ -14,7 +15,7 @@ export type ConversationRootProps = ConversationSlotProps
 
 export function ConversationRoot({
   sessionId, useSession, useSessions, useWorkspaces, useInput, useComposerBlock,
-  renderSlot, renderSlotChain, selectWorkspace, t,
+  renderSlot, renderSlotChain, selectWorkspace, embeddedSurface, t,
 }: ConversationRootProps) {
   const openState = useSession(s => s.openState)
   const composerPhase = useSession(s => s.composerPhase)
@@ -27,6 +28,11 @@ export function ConversationRoot({
   // A plugin this package cannot import (ui-model-selection) says this session cannot
   // send; its reason is already localized by whoever raised it.
   const composerBlock = useComposerBlock(block => block)
+  const embeddedComposerHost = useSyncExternalStore(
+    embeddedSurface.subscribe,
+    () => embeddedSurface.host('composer'),
+    () => null,
+  )
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
@@ -177,11 +183,19 @@ export function ConversationRoot({
   // only `.composerStack`: overlay:true renders those as siblings, and sticky
   // on the fallback alone would leave Question/Approval panels at the content
   // end off-screen when the user is not pinned to the floor.
-  const composerSeat = (
-    <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">
-      {composer}
-    </div>
-  )
+  const composerSeat = composerBlock?.embedded === true
+    ? (
+      <Portal container={embeddedComposerHost}>
+        <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">
+          {composer}
+        </div>
+      </Portal>
+    )
+    : (
+      <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">
+        {composer}
+      </div>
+    )
 
   return (
     <div className={css.root} data-phase={phase}>

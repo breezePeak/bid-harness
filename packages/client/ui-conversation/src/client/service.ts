@@ -20,6 +20,7 @@ import type { QueueAction, QueueItemId } from './contract/queue.ts'
 import type { ComposerBlocks } from './input/blocks.ts'
 import type { DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
 import type { InputSubmitMode } from './contract/composer-submission.ts'
+import type { EmbeddedSurfaceKind } from './embedded-surface.ts'
 
 /**
  * The outward conversation face (`ctx.conversation`): the scope-addressed
@@ -57,6 +58,10 @@ export interface IConversation {
    * @returns completion of the page pull.
    */
   loadOlder(): Promise<void>
+  /** Select one registered view for the scoped Session. */
+  selectView(viewId: string): void
+  /** Mount one shared conversation surface in the calling feature view. */
+  setEmbeddedSurface(kind: EmbeddedSurfaceKind, element: HTMLElement | null): void
 }
 
 /** Create one browser-only draft descriptor; only its id enters input state. */
@@ -107,7 +112,12 @@ export class ConversationController extends Service implements IConversation {
    * constructed by the plugin apply (the same instances the slot inject
    * factories close over).
    */
-  constructor(ctx: Context, config: { input: SessionInputResolver; blocks: ComposerBlocks }) {
+  constructor(ctx: Context, private readonly config: {
+    input: SessionInputResolver
+    blocks: ComposerBlocks
+    selectView?: (sessionId: SessionId, viewId: string) => void
+    setEmbeddedSurface?: (sessionId: SessionId, kind: EmbeddedSurfaceKind, element: HTMLElement | null) => void
+  }) {
     super(ctx, 'conversation')
     this.input = config.input
     this.blocks = config.blocks
@@ -305,6 +315,16 @@ export class ConversationController extends Service implements IConversation {
   /** Pull one older history page for the scoped Session. */
   async loadOlder(): Promise<void> {
     await this.scopedSession('loadOlder').loadOlder()
+  }
+
+  /** Select a registered view for this scoped Session. */
+  selectView(viewId: string): void {
+    this.config.selectView?.(this.scopeId('selectView'), viewId)
+  }
+
+  /** Register a React portal destination owned by the current feature view. */
+  setEmbeddedSurface(kind: EmbeddedSurfaceKind, element: HTMLElement | null): void {
+    this.config.setEmbeddedSurface?.(this.scopeId('setEmbeddedSurface'), kind, element)
   }
 
   /** Resolve the caller scope's session face or throw on root contexts. */

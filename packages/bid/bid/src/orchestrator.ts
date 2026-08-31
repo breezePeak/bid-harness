@@ -50,6 +50,9 @@ export type BidStageConfirmationResult =
   | { readonly ok: true; readonly state: BidRuntimeState }
   | { readonly ok: false; readonly validation: StageValidationResult & { readonly ok: false } }
 
+/** Durable outcome of one executor and validator attempt. */
+export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'failed'
+
 /** Stable rejection codes for host-side Bid operation admission. */
 export type BidOrchestratorErrorCode =
   | 'BID_ACTION_NOT_ALLOWED'
@@ -119,15 +122,15 @@ export class BidOrchestrator {
       )
     }
     return this.begin(async () => {
-      if (getBidStagePolicy(state.stage).executor === 'user') {
+      if (getBidStagePolicy(state.stage).userGate === 'before_execution') {
         this.session.append('bid.user_confirmation.required', {
           stage: state.stage,
           status: 'waiting_user',
         })
         return this.state
       }
-      const completed = await this.executeStage(state.stage)
-      return completed ? this.driveLoop() : this.state
+      const settlement = await this.executeStage(state.stage)
+      return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
 
@@ -161,7 +164,7 @@ export class BidOrchestrator {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (state.status !== 'pending' || state.stage === 'file_intake' || policy.executor === 'user') {
+    if (state.status !== 'pending' || state.stage === 'file_intake' || policy.userGate === 'before_execution') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -177,7 +180,7 @@ export class BidOrchestrator {
   retryCurrentAutomaticStage(): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'failed' || state.stage === 'file_intake' || getBidStagePolicy(state.stage).executor === 'user') {
+    if (state.status !== 'failed' || state.stage === 'file_intake' || getBidStagePolicy(state.stage).userGate === 'before_execution') {
       throw new BidOrchestratorError(
         'BID_RETRY_NOT_ALLOWED',
         `cannot retry Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -238,7 +241,7 @@ export class BidOrchestrator {
     const state = this.state
     const policy = getBidStagePolicy(stage)
     if (state.stage !== stage || state.status !== 'waiting_user'
-      || policy.requiresUserConfirmationAfterValidation !== true) {
+      || policy.userGate !== 'after_validation') {
       throw new BidOrchestratorError(
         'BID_CONFIRM_NOT_ALLOWED',
         `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
@@ -322,7 +325,7 @@ export class BidOrchestrator {
       if (state.status !== 'pending') return state
       if (state.stage === 'file_intake') return state
       const policy = getBidStagePolicy(state.stage)
-      if (policy.executor === 'user') {
+      if (policy.userGate === 'before_execution') {
         this.session.append('bid.user_confirmation.required', {
           stage: state.stage,
           status: 'waiting_user',
@@ -330,32 +333,32 @@ export class BidOrchestrator {
         return this.state
       }
       if (!this.executor.canExecute(state.stage)) return state
-      if (!await this.executeStage(state.stage)) return this.state
+      if (await this.executeStage(state.stage) !== 'completed') return this.state
     }
   }
 
   /** Execute and validate one non-user stage, recording its complete outcome. */
-  private async executeStage(stage: BidStage): Promise<boolean> {
+  private async executeStage(stage: BidStage): Promise<StageExecutionSettlement> {
     this.session.append('bid.stage.started', { stage, status: 'running' })
     let artifacts: StageArtifact[]
     try {
       artifacts = await this.executor.execute(buildBidStageTask(stage))
     } catch (error: unknown) {
       this.fail(stage, `executor failed: ${String(error)}`)
-      return false
+      return 'failed'
     }
     const validation = await this.validate(stage, artifacts)
-    if (!validation.ok) return false
-    if (getBidStagePolicy(stage).requiresUserConfirmationAfterValidation === true) {
+    if (!validation.ok) return 'failed'
+    if (getBidStagePolicy(stage).userGate === 'after_validation') {
       this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
-      return false
+      return 'waiting_user'
     }
     this.session.append('bid.stage.completed', {
       stage,
       status: 'completed',
       artifacts,
     })
-    return true
+    return 'completed'
   }
 
   /** Validate artifacts, converting rejection and validator failures into the stage log. */

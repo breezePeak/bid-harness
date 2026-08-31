@@ -22,6 +22,8 @@ export interface ComposerBlock {
    * that raised the block.
    */
   readonly reason: string
+  /** The current view renders the shared composer; ConversationRoot keeps no duplicate. */
+  readonly embedded?: boolean
 }
 
 /** The registry face other plugins reach through `ctx.conversation.blocks`. */
@@ -57,7 +59,7 @@ export class ComposerBlockRegistry implements ComposerBlocks {
   set(sessionId: SessionId, block: ComposerBlock | undefined): void {
     const store = this.storeFor(sessionId)
     const current = store.getSnapshot()
-    if (current?.reason === block?.reason) return
+    if (current?.reason === block?.reason && current?.embedded === block?.embedded) return
     store.set(block)
   }
 

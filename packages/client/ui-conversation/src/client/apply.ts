@@ -39,6 +39,7 @@ import { en, NS, zh, type ConversationKey } from './locales.ts'
 import { registerConversationNodes } from './conversation-nodes/register.ts'
 import { registerChatNodeRenderers } from './chat/register-node-renderers.ts'
 import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
+import { EmbeddedSurfaceRegistry } from './embedded-surface.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -130,6 +131,8 @@ export function apply(ctx: Context): void {
 
   // Apply-time construction keeps store identity bound to this fiber.
   const chatStore = createChatStore()
+  const viewActions = new Map<SessionId, BoundActions<typeof chatStore>>()
+  const embeddedSurfaces = new EmbeddedSurfaceRegistry()
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
@@ -212,6 +215,10 @@ export function apply(ctx: Context): void {
     },
     inject: (sessionId: SessionId | undefined): ConversationInjected => ({
       hooks: { composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId) },
+      embeddedSurface: {
+        host: kind => sessionId === undefined ? null : embeddedSurfaces.host(sessionId, kind),
+        subscribe: listener => sessionId === undefined ? () => {} : embeddedSurfaces.subscribe(sessionId, listener),
+      },
       selectWorkspace: async (workspaceId) => {
         const nextId = await workspaces.connectWorkspace(workspaceId)
         if (sessionId !== undefined && nextId !== sessionId) {
@@ -249,6 +256,14 @@ export function apply(ctx: Context): void {
         views,
         releaseSessionImages: (id) => { conversation.releaseSessionImages(id) },
         bindDraftMirror: write => inputHub.shell(sessionId).bindMirror(write),
+        bindViewActions: (bound) => {
+          viewActions.set(sessionId, bound)
+          return () => { if (viewActions.get(sessionId) === bound) viewActions.delete(sessionId) }
+        },
+        embeddedSurface: {
+          host: kind => embeddedSurfaces.host(sessionId, kind),
+          subscribe: listener => embeddedSurfaces.subscribe(sessionId, listener),
+        },
       }
     },
   }, ConversationSession)
@@ -434,7 +449,12 @@ export function apply(ctx: Context): void {
   // registers itself as `conversation` and lives on its own child fiber.
   // Presentation registrants depend directly on their slot declarations;
   // this service remains only where conversation actions are required.
-  ctx.plugin(ConversationController, { input: inputHub, blocks: composerBlocks })
+  ctx.plugin(ConversationController, {
+    input: inputHub,
+    blocks: composerBlocks,
+    selectView: (sessionId, viewId) => { viewActions.get(sessionId)?.setView(viewId) },
+    setEmbeddedSurface: (sessionId, kind, element) => { embeddedSurfaces.setHost(sessionId, kind, element) },
+  })
 
   // The plan strip rides the input dock above the queue rows (same posture).
   ctx.plugin(todoDockEntry)

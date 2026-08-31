@@ -669,7 +669,7 @@ describe('Bid Host runtime composition', () => {
     await ctx.bid.confirmTenderAnalysis(agent.session, [])
     const draft = await ctx.bid.getOutlineForConfirmation(agent.session)
     const result = await ctx.bid.confirmOutline(agent.session, [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }])
-    expect(result).toEqual({ ok: true, value: { stage: 'book_review', status: 'pending' } })
+    expect(result).toEqual({ ok: true, value: { stage: 'book_review', status: 'waiting_user' } })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(draft)
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
@@ -684,6 +684,27 @@ describe('Bid Host runtime composition', () => {
         { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
       ] } })
     await expect(readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')).resolves.toContain('SEC-1')
+    await expect(ctx.bid.getReviewWorkbench(agent.session)).resolves.toMatchObject({
+      schema_version: 1,
+      outline: [expect.objectContaining({ section_id: 'SEC-1', has_content: true })],
+      review: { review_mode: 'framework_only', quality_gate: 'not_evaluated', issues: [] },
+    })
+    await expect(ctx.bid.getReviewChapter(agent.session, 'SEC-1')).resolves.toMatchObject({
+      section_id: 'SEC-1', writable: true, markdown: expect.stringContaining('交付计划'),
+    })
+    await expect(ctx.bid.getReviewChapter(agent.session, 'missing')).rejects.toThrow('BID_REVIEW_SECTION_UNKNOWN')
+    const chapterPath = join(workspace.sessionRoot, 'chapters/sections/0001.md')
+    const chapter = await readFile(chapterPath, 'utf8')
+    await writeFile(chapterPath, `${chapter}已修改。\n`, 'utf8')
+    await expect(ctx.bid.completeReview(agent.session)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BID_REVIEW_CONTENT_CHANGED' },
+    })
+    await writeFile(chapterPath, chapter, 'utf8')
+    await expect(ctx.bid.completeReview(agent.session)).resolves.toEqual({
+      ok: true,
+      value: { stage: 'docx_export', status: 'pending' },
+    })
   })
 
   it('keeps S5 waiting when deletion removes mandatory coverage', async () => {

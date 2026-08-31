@@ -2,7 +2,7 @@
 import type { ReactNode, RefObject } from 'react'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {
-  InjectFace, MaybeSnapshotSelectorHook, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
+  BoundActions, InjectFace, MaybeSnapshotSelectorHook, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
   SlotHookFactory, SnapshotSelectorHook,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -14,6 +14,7 @@ import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives
 import type { MessageId } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ComposerBlock } from '../input/blocks.ts'
+import type { EmbeddedSurfaceKind } from '../embedded-surface.ts'
 import type {
   ComposerKeyboard, DraftAttachmentId, EditSelection, InputActions, InputNotice, InputState,
 } from '../input/contract.ts'
@@ -243,6 +244,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * command face through its own inject.
      */
     'conversation.composer.bar': { kind: 'single'; scope: 'session-maybe'; owner: ComposerBarOwnerProps }
+    /** The same session composer mounted by a feature-owned view. */
+    'conversation.embedded.composer': { kind: 'single'; scope: 'session'; owner: {} }
+    /** The current Session transcript mounted by a feature-owned view. */
+    'conversation.embedded.chat': { kind: 'single'; scope: 'session'; owner: {} }
     /** Optional draft-image rail, drop target, and preview surface inside the composer. */
     'conversation.input.attachments': {
       kind: 'single'
@@ -476,6 +481,11 @@ export interface ConversationInjected {
    * When a blank session is already current, carry its draft to the target.
    */
   selectWorkspace: (workspaceId: WorkspaceId) => Promise<void>
+  /** Reactive lookup for feature-owned portal destinations in the current Session. */
+  embeddedSurface: {
+    host: (kind: EmbeddedSurfaceKind) => HTMLElement | null
+    subscribe: (listener: () => void) => () => void
+  }
   /**
    * Framework-bound sources. `composerBlock` is this session's block when a
    * plugin raised one; the reason is the blocker's own localized copy, which
@@ -496,6 +506,13 @@ export interface ConversationSessionInjected {
   releaseSessionImages: (sessionId: SessionId) => void
   /** Bind the input machine's draft persistence mirror to the session store. */
   bindDraftMirror: (write: (text: string) => void) => () => void
+  /** Register the live action set that owns this Session's selected view. */
+  bindViewActions: (actions: BoundActions<ChatStore>) => () => void
+  /** Reactive lookup for feature-owned portal destinations in this Session. */
+  embeddedSurface: {
+    host: (kind: EmbeddedSurfaceKind) => HTMLElement | null
+    subscribe: (listener: () => void) => () => void
+  }
 }
 
 /** Business callbacks injected into the strict session header seat. */
@@ -609,6 +626,15 @@ export type ComposerBarProps =
   >
   & InjectFace<ComposerBarInjected>
   & PropsLocale<'conversation'>
+
+/** Full props for a feature view that embeds the shared session composer. */
+export type EmbeddedComposerProps = PropsRuntime<'conversation.embedded.composer'>
+  & PropsRenderSlots<'conversation.composer.bar'>
+
+/** Full props for a feature view that embeds the existing ChatView. */
+export type EmbeddedChatProps = PropsRuntime<'conversation.embedded.chat'>
+  & PropsRenderSlots<'conversation.chat.node' | 'conversation.message.images'>
+  & PropsStore<ChatStore> & ChatViewInjected & PropsLocale<'conversation'>
 
 /**
  * Composer chain currency: what ConversationRoot dispatches at its
