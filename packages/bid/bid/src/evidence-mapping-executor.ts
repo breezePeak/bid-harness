@@ -1,12 +1,21 @@
-import { mkdir, rm } from 'node:fs/promises'
+import { lstat, mkdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
 import type { BidStageTask, StageArtifact } from './control-plane-contract.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import {
+  WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
+  normalizeWebEvidenceUrl,
+  parseWebEvidenceSourcesArtifact,
+  webEvidenceContentSha256,
+  webEvidenceSourceId,
+  type WebEvidenceSource,
+  type WebEvidenceSourcesArtifact,
+} from './web-evidence-source-artifacts.ts'
 
 function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -29,6 +38,181 @@ function evidenceMappingWriteReason(exec: Readonly<ToolExecution>, artifactPath:
 }
 
 const REQUIRED_WEB_TOOLS = ['web_search', 'web_fetch'] as const
+
+/** One current-attempt Web tool outcome paired with its durable call/result events. */
+export interface EvidenceMappingWebObservation {
+  readonly callId: string
+  readonly name: 'web_search' | 'web_fetch'
+  readonly arguments: unknown
+  readonly result: Readonly<ToolExecutionResult>
+  readonly callSeq: number
+  readonly resultSeq: number
+  readonly resultTime: number
+}
+
+/** One verified ledger record plus the exact bounded text returned to the Agent. */
+export interface EvidenceMappingWebSnapshot {
+  readonly source: WebEvidenceSource
+  readonly content: string
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || item.trim().length === 0)) return undefined
+  return value.map(item => (item as string).trim())
+}
+
+function searchSources(value: unknown): Array<{ url: string }> | undefined {
+  const output = record(value)
+  if (!Array.isArray(output?.sources)) return undefined
+  const sources: Array<{ url: string }> = []
+  for (const candidate of output.sources) {
+    const source = record(candidate)
+    if (typeof source?.url !== 'string' || normalizeWebEvidenceUrl(source.url) === undefined) continue
+    sources.push({ url: source.url })
+  }
+  return sources
+}
+
+function fetchValue(value: unknown): { url: string; statusCode: number; truncated: boolean; bodyContent: string } | undefined {
+  const output = record(value)
+  const body = record(output?.body)
+  if (typeof output?.url !== 'string' || normalizeWebEvidenceUrl(output.url) === undefined
+    || typeof output.statusCode !== 'number' || !Number.isInteger(output.statusCode)
+    || typeof output.truncated !== 'boolean' || typeof body?.content !== 'string') return undefined
+  return { url: output.url, statusCode: output.statusCode, truncated: output.truncated, bodyContent: body.content }
+}
+
+function modelVisibleFetchText(result: Readonly<ToolExecutionResult>): string | undefined {
+  if (result.isError || result.content.length !== 1) return undefined
+  const block = result.content[0]
+  return block?.type === 'text' && block.text.trim().length > 0 ? block.text : undefined
+}
+
+/**
+ * Reduce current-attempt canonical Tool outcomes into verified Web source snapshots.
+ * @param observations - current Agent and attempt outcomes paired with their durable event positions.
+ * @returns sources that contain a successful ordered search-to-fetch chain and bounded model-visible text.
+ */
+export function buildEvidenceMappingWebSnapshots(
+  observations: readonly EvidenceMappingWebObservation[],
+): EvidenceMappingWebSnapshot[] {
+  const searches = observations.flatMap((observation) => {
+    if (observation.name !== 'web_search' || observation.result.isError) return []
+    const args = record(observation.arguments)
+    const queries = stringArray(args?.queries)
+    const sources = searchSources(observation.result.value)
+    return queries === undefined || sources === undefined ? [] : [{ observation, queries, sources }]
+  })
+  const snapshots: EvidenceMappingWebSnapshot[] = []
+  for (const observation of observations) {
+    if (observation.name !== 'web_fetch' || observation.result.isError) continue
+    const args = record(observation.arguments)
+    const requestedUrl = typeof args?.url === 'string' ? args.url : undefined
+    const requestedNormalized = requestedUrl === undefined ? undefined : normalizeWebEvidenceUrl(requestedUrl)
+    const fetched = fetchValue(observation.result.value)
+    const content = modelVisibleFetchText(observation.result)
+    if (requestedUrl === undefined || requestedNormalized === undefined || fetched === undefined || content === undefined
+      || fetched.statusCode < 200 || fetched.statusCode >= 300 || fetched.bodyContent.trim().length === 0) continue
+    const search = searches.find(candidate => candidate.observation.resultSeq < observation.callSeq
+      && candidate.sources.some(source => normalizeWebEvidenceUrl(source.url) === requestedNormalized))
+    if (search === undefined) continue
+    const discovered = search.sources.find(source => normalizeWebEvidenceUrl(source.url) === requestedNormalized)
+    if (discovered === undefined) continue
+    const contentSha256 = webEvidenceContentSha256(content)
+    const sourceId = webEvidenceSourceId(observation.callId, fetched.url, contentSha256)
+    const meta = record(observation.result.meta)
+    const effectiveTruncated = typeof meta?.truncated === 'boolean' ? meta.truncated : fetched.truncated
+    snapshots.push({
+      content,
+      source: {
+        source_id: sourceId,
+        search_call_id: search.observation.callId,
+        fetch_call_id: observation.callId,
+        search_result_seq: search.observation.resultSeq,
+        fetch_call_seq: observation.callSeq,
+        fetch_result_seq: observation.resultSeq,
+        queries: search.queries,
+        discovered_url: discovered.url,
+        requested_url: requestedUrl,
+        final_url: fetched.url,
+        status_code: fetched.statusCode,
+        truncated: effectiveTruncated,
+        fetched_at: new Date(observation.resultTime).toISOString(),
+        content_sha256: contentSha256,
+        snapshot_path: `analysis/web-sources/${sourceId}.md`,
+      },
+    })
+  }
+  return snapshots
+}
+
+async function removeAttemptPath(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path)
+    if (stat.isSymbolicLink()) await unlink(path)
+    else await rm(path, { recursive: stat.isDirectory(), force: true })
+  } catch (error: unknown) {
+    if (record(error)?.code !== 'ENOENT') throw error
+  }
+}
+
+function collectAttemptObservations(
+  agent: Agent,
+  boundarySeq: number,
+  captured: ReadonlyMap<string, { exec: Readonly<ToolExecution>; result: Readonly<ToolExecutionResult> }>,
+): EvidenceMappingWebObservation[] {
+  const events = agent.session.events.filter(event => event.seq > boundarySeq)
+  const calls = new Map(events.flatMap(event => event.type === 'tool/call' && REQUIRED_WEB_TOOLS.includes(event.data.name as typeof REQUIRED_WEB_TOOLS[number])
+    ? [[String(event.data.callId), event] as const]
+    : []))
+  const results = new Map(events.flatMap(event => event.type === 'tool/result'
+    ? [[String(event.data.message.source.callId), event] as const]
+    : []))
+  const observations: EvidenceMappingWebObservation[] = []
+  for (const [callId, call] of calls) {
+    const resultEvent = results.get(callId)
+    if (resultEvent === undefined) throw new Error(`Bid evidence mapping cannot correlate Web tool result ${callId}`)
+    const capturedResult = captured.get(callId)
+    const durableBlock = resultEvent.data.message.content[0]
+    if (capturedResult === undefined) {
+      if (!durableBlock.isError) throw new Error(`Bid evidence mapping lost canonical Web tool result ${callId}`)
+      continue
+    }
+    if (capturedResult.exec.agent !== agent || capturedResult.exec.name !== call.data.name) {
+      throw new Error(`Bid evidence mapping Web tool identity mismatch ${callId}`)
+    }
+    observations.push({
+      callId,
+      name: call.data.name as 'web_search' | 'web_fetch',
+      arguments: capturedResult.exec.arguments,
+      result: capturedResult.result,
+      callSeq: call.seq,
+      resultSeq: resultEvent.seq,
+      resultTime: resultEvent.time,
+    })
+  }
+  for (const callId of captured.keys()) if (!calls.has(callId)) {
+    throw new Error(`Bid evidence mapping observed unlogged Web tool result ${callId}`)
+  }
+  return observations.sort((left, right) => left.callSeq - right.callSeq)
+}
+
+async function writeWebEvidenceArtifacts(
+  workspace: BidWorkspace,
+  snapshots: readonly EvidenceMappingWebSnapshot[],
+): Promise<void> {
+  for (const snapshot of snapshots) {
+    const absolute = join(workspace.sessionRoot, ...snapshot.source.snapshot_path.split('/'))
+    await assertNoLinkedPath(workspace.root, absolute)
+    await writeFile(absolute, snapshot.content, { encoding: 'utf8', mode: 0o600 })
+  }
+  const ledger: WebEvidenceSourcesArtifact = parseWebEvidenceSourcesArtifact({
+    schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
+    stage: 'evidence_mapping',
+    sources: snapshots.map(snapshot => snapshot.source),
+  })
+  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify(ledger, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+}
 
 /** Render the dynamic S3 assignment for the live Bid Agent. */
 export function renderEvidenceMappingTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
@@ -68,6 +252,8 @@ export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspa
   await agent.whenIdle()
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   const artifactPath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
+  const sourceLedgerPath = join(workspace.sessionRoot, 'analysis/web-evidence-sources.json')
+  const webSourcesRoot = join(workspace.sessionRoot, 'analysis/web-sources')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
   const fs = agent.ctx.get('fs')
@@ -78,9 +264,19 @@ export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspa
   if (missingWebTools.length > 0) {
     throw new Error(`Bid evidence mapping requires registered tools: ${missingWebTools.join(', ')}`)
   }
-  await rm(artifactPath, { force: true })
+  await removeAttemptPath(artifactPath)
+  await removeAttemptPath(sourceLedgerPath)
+  await removeAttemptPath(webSourcesRoot)
+  await mkdir(webSourcesRoot, { recursive: true, mode: 0o700 })
   const target = await fs.resolve(artifactPath)
   agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
+  const boundarySeq = agent.session.events.at(-1)?.seq ?? -1
+  const captured = new Map<string, { exec: Readonly<ToolExecution>; result: Readonly<ToolExecutionResult> }>()
+  const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
+    if (exec.agent === agent && REQUIRED_WEB_TOOLS.includes(exec.name as typeof REQUIRED_WEB_TOOLS[number])) {
+      captured.set(String(exec.callId), { exec, result })
+    }
+  })
   const allowed = new Set(task.allowedTools)
   const liftRestriction = tools.restrict({ allow: task.allowedTools })
   const liftGuard = tools.guard((exec) => {
@@ -91,8 +287,14 @@ export async function executeEvidenceMapping(agent: Agent, workspace: BidWorkspa
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderEvidenceMappingTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await agent.whenIdle()
   } finally {
+    liftObserver()
     liftGuard()
     liftRestriction()
   }
-  return [{ stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' }]
+  const snapshots = buildEvidenceMappingWebSnapshots(collectAttemptObservations(agent, boundarySeq, captured))
+  await writeWebEvidenceArtifacts(workspace, snapshots)
+  return [
+    { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
+    { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
+  ]
 }

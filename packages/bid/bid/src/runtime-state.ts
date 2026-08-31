@@ -51,7 +51,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     ],
     allowedTools: ['grep', 'read', 'write', 'web_search', 'web_fetch'],
     forbiddenTools: ['bash'],
-    requiredArtifacts: ['analysis/evidence-map.json'],
+    requiredArtifacts: ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json'],
     validator: 'evidence-mapping-validator',
     nextStage: 'outline_generation',
   },

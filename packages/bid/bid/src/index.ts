@@ -115,7 +115,14 @@ export { DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS, executeTenderAnalysis, renderT
 export type { TenderAnalysisExecutionOptions } from './tender-analysis-executor.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
-export { executeEvidenceMapping, renderEvidenceMappingTask } from './evidence-mapping-executor.ts'
+export * from './web-evidence-source-artifacts.ts'
+export {
+  buildEvidenceMappingWebSnapshots,
+  executeEvidenceMapping,
+  renderEvidenceMappingTask,
+  type EvidenceMappingWebObservation,
+  type EvidenceMappingWebSnapshot,
+} from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
 export * from './outline-confirmation-artifacts.ts'
