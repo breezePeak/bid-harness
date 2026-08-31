@@ -39,6 +39,10 @@ class TestTools extends Service {
   guard(): () => void {
     return () => {}
   }
+
+  schemas(): Array<{ name: string }> {
+    return ['grep', 'read', 'write', 'web_search', 'web_fetch'].map(name => ({ name }))
+  }
 }
 
 function request<P>(payload: P): RpcRequest<P> {
@@ -162,7 +166,7 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   }
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-    schema_version: 1,
+    schema_version: 2,
     requirement_mappings: requirements.requirements.map(item => ({
       requirement_id: item.id,
       materials,

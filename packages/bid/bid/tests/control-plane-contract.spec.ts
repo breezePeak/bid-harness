@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   BID_SESSION_EVENT_TYPES,
   BID_STAGES,
+  getBidStagePolicy,
   STAGE_RUN_STATUSES,
   type BidSessionEventMap,
   type BidStagePolicy,
@@ -54,6 +55,13 @@ describe('bid control-plane public contract', () => {
 
     expect(policy.nextStage).toBe('evidence_mapping')
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
+  })
+
+  it('limits evidence mapping to local evidence tools and the search-fetch pair', () => {
+    const policy = getBidStagePolicy('evidence_mapping')
+
+    expect(policy.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
+    expect(policy.forbiddenTools).toEqual(['bash'])
   })
 
   it('distinguishes successful and failed validation with multiple issues', () => {

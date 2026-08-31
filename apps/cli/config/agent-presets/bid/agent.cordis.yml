@@ -245,10 +245,10 @@
   config:
     allowParallelInProgress: true
 
-# The `web` service and its search provider stay in the host composition; only
-# the model-facing tool is per-session.
+# The `web` service and its search/fetch providers stay in the host composition;
+# only the model-facing tools are per-session.
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   config:
-    fetch: false
+    fetch: true
     searchTimeoutMs: 60000

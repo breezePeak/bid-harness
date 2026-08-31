@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 1 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 2 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -33,11 +33,12 @@ function isHttpUrl(value: string): boolean {
 const externalMaterialSchema = z.object({
   title: z.string().trim().min(1),
   url: z.url().refine(isHttpUrl, { message: 'external material URL must use http or https' }),
-  publisher: z.string().trim().min(1).nullable(),
-  published_at: z.string().trim().min(1).nullable(),
+  publisher: z.string().trim().min(1),
   retrieved_at: z.iso.datetime({ offset: true }),
+  retrieval_method: z.literal('web_search'),
   usage: z.enum(EXTERNAL_MATERIAL_USAGES),
   summary: z.string().trim().min(1),
+  supports: z.string().trim().min(1),
 }).strict()
 
 const mappingSchema = z.object({
@@ -59,7 +60,7 @@ const evidenceMapSchema = z.object({
 
 /** Parsed local material reference. */
 export type EvidenceMaterial = z.infer<typeof materialSchema>
-/** Parsed public technical reference. */
+/** Parsed public technical reference discovered by search and admitted only after a successful source fetch. */
 export type ExternalEvidenceMaterial = z.infer<typeof externalMaterialSchema>
 /** Parsed requirement-to-material mapping. */
 export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema>
