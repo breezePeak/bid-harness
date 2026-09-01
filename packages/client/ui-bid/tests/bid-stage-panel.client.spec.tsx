@@ -432,6 +432,11 @@ describe('BidStagePanel', () => {
 })
 
 describe('ui-bid browser plugin', () => {
+  it('declares every client service read by its slot injections', async () => {
+    const { inject } = await import('../src/client/index.ts')
+    expect(inject).toContain('sessions')
+  })
+
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()

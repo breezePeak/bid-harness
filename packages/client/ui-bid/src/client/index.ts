@@ -68,7 +68,7 @@ export class BidActionError extends Error {
 }
 
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
-export const inject = ['slots', 'locale', 'conversation', 'remote', 'remote.bid']
+export const inject = ['slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid']
 
 /** Encode arbitrary bytes without overflowing `String.fromCharCode` argument limits. */
 function bytesToBase64(bytes: Uint8Array): string {
