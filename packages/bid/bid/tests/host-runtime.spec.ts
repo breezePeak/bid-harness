@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
-import SessionStore from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SubagentRuntime, { type ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { ApiProxy, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
@@ -55,6 +56,49 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(SubagentRuntime)
+  let child = 0
+  ctx.subagents.registerProvider({
+    name: 'spawn',
+    capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
+    inheritsParentContext: false,
+    start: (request: ResolvedSubagentStartRequest) => {
+      const text = request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      const blueprintLine = text.split('\n').find(line => line.startsWith('Current Chapter Blueprint：'))
+      if (blueprintLine === undefined) throw new Error('missing chapter blueprint')
+      const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as {
+        id: string
+        must_answer: string[]
+        scoring_response_points: Array<{ scoring_id: string; response_point: string }>
+        source_mapping_ids: string[]
+      }
+      const id = SessionId(`chapter-child-${++child}`)
+      return Promise.resolve({
+        id,
+        localAgent: undefined,
+        result: Promise.resolve({
+          stopReason: 'completed' as const,
+          output: [],
+          structured: {
+            section_id: section.id,
+            markdown: '交付计划覆盖项目阶段和保障措施。',
+            metadata: {
+              section_id: section.id,
+              covered_must_answer: section.must_answer,
+              covered_scoring_response_points: section.scoring_response_points,
+              source_mapping_ids_used: section.source_mapping_ids,
+              evidence_used: [],
+              additional_materials: [],
+              external_evidence_used: [],
+              additional_external_materials: [],
+              unresolved_topics: [],
+            },
+          },
+        }),
+        dispose: () => Promise.resolve(),
+      })
+    },
+  })
   await ctx.plugin(TestFileSystem)
   await ctx.plugin(TestTools)
   await ctx.plugin(BidHostRuntime, config)
@@ -218,13 +262,21 @@ async function writeOutlineQualityReport(cwd: string, sessionId: string, section
   }, null, 2)}\n`, 'utf8')
 }
 
-async function writeChapterArtifact(cwd: string, sessionId: string): Promise<void> {
+async function writeChapterExecutionPlan(cwd: string, sessionId: string): Promise<void> {
   const workspace = new Bid.BidWorkspace(cwd, sessionId)
-  await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
-  await mkdir(join(workspace.sessionRoot, 'chapters/meta'), { recursive: true })
-  await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '交付计划覆盖项目阶段和保障措施。\n', 'utf8')
-  await writeFile(join(workspace.sessionRoot, 'chapters/meta/0001.json'), `${JSON.stringify({
-    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明交付计划和保障措施' }], source_mapping_ids_used: [], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
+  const outline = Bid.parseConfirmedOutlineArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
+  await mkdir(join(workspace.sessionRoot, 'chapters'), { recursive: true })
+  await writeFile(join(workspace.sessionRoot, 'chapters/execution-plan.json'), `${JSON.stringify({
+    schema_version: 1,
+    scope: 'technical_bid',
+    confirmed_outline_sha256: Bid.outlineArtifactSha256(outline),
+    global_consistency_notes: ['统一项目名称和交付周期。'],
+    sections: outline.sections.filter(section => section.writable).map(section => ({
+      section_id: section.id,
+      depends_on: [],
+      related_sections: [],
+      planning_notes: [],
+    })),
   }, null, 2)}\n`, 'utf8')
 }
 
@@ -238,13 +290,14 @@ function attach(
   agentPreset?: string,
   cwd = '/workspace',
   analysisWriter?: (cwd: string, sessionId: string, attempt: number, prompt: string) => Promise<void>,
+  origin?: 'subagent',
 ): {
   agent: Agent
   followup: ReturnType<typeof vi.fn>
   steer: ReturnType<typeof vi.fn>
 } {
   const session = ctx.sessions.create(undefined, {
-    meta: { cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
+    meta: { cwd, ...(agentPreset === undefined ? {} : { agentPreset }), ...(origin === undefined ? {} : { origin }) },
   })
   const followup = vi.fn()
   const steer = vi.fn()
@@ -270,7 +323,7 @@ function attach(
       } else if (analysisAttempt === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
       else if (analysisAttempt === 1) await writeEvidenceMappingArtifact(cwd, session.id)
       else if (analysisAttempt === 2) await writeOutlineArtifact(cwd, session.id)
-      else await writeChapterArtifact(cwd, session.id)
+      else await writeChapterExecutionPlan(cwd, session.id)
       analysisAttempt++
     } else {
       await analysisWriter(cwd, session.id, analysisAttempt++, prompt)
@@ -452,6 +505,18 @@ describe('Bid Host runtime composition', () => {
     expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
   })
 
+  it('does not start the parent Bid workflow for a subagent-origin session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-child-'))
+    const { ctx } = await harness()
+    const { agent, followup } = attach(ctx, 'bid', root, undefined, 'subagent')
+
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'startup' })
+
+    await Promise.resolve()
+    expect(followup).not.toHaveBeenCalled()
+    expect(agent.session.events).toHaveLength(0)
+  })
+
   it('repairs an invalid S2 Artifact once through the live Agent before waiting for confirmation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
@@ -586,6 +651,7 @@ describe('Bid Host runtime composition', () => {
       maxFileBytes: 4,
       maxTotalBytes: 4,
       modelStageRepairAttempts: Bid.DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+      chapterWritingMaxConcurrency: Bid.DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
     })
     const standard = attach(ctx, 'standard', root).agent.session
     const bid = attach(ctx, 'bid', root).agent.session
