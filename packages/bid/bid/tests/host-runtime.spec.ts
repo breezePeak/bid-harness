@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Readable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
@@ -671,6 +672,7 @@ describe('Bid Host runtime composition', () => {
       maxTotalBytes: 4,
       modelStageRepairAttempts: Bid.DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
       chapterWritingMaxConcurrency: Bid.DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+      trustedHosts: [],
     })
     const standard = attach(ctx, 'standard', root).agent.session
     const bid = attach(ctx, 'bid', root).agent.session
@@ -737,6 +739,68 @@ describe('Bid Host runtime composition', () => {
     ])
     await expect(readFile(join(workspace.sessionRoot, manifest.files[0]!.inputPath))).resolves.toEqual(tender)
     await expect(readFile(join(workspace.sessionRoot, manifest.files[1]!.inputPath))).resolves.toEqual(referenceBid)
+  })
+
+  it('accepts a raw binary tender and reference-bid batch without base64', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const tender = Buffer.from('招标文件', 'utf8')
+    const referenceBid = Buffer.from('旧参考标书', 'utf8')
+    const request = Object.assign(Readable.from([tender, referenceBid]), {
+      method: 'POST',
+      headers: {
+        host: '127.0.0.1',
+        'x-dsh-bid-session-id': agent.session.id,
+        'x-dsh-bid-files': encodeURIComponent(JSON.stringify([
+          { name: 'tender.txt', role: 'tender', size: tender.byteLength },
+          { name: 'reference-bid.txt', role: 'reference_bid', size: referenceBid.byteLength },
+        ])),
+      },
+    })
+    const response = { writeHead: vi.fn(), end: vi.fn() }
+
+    await (ctx.bid as unknown as {
+      handleBinaryUpload: (req: typeof request, res: typeof response) => Promise<void>
+    }).handleBinaryUpload(request, response)
+
+    expect(JSON.parse(String(response.end.mock.calls[0]?.[0]))).toMatchObject({ ok: true })
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    const manifest = await workspace.readManifest()
+    expect(manifest.files.map(file => ({ originalName: file.originalName, role: file.role }))).toEqual([
+      { originalName: 'tender.txt', role: 'tender' },
+      { originalName: 'reference-bid.txt', role: 'reference_bid' },
+    ])
+    await expect(readFile(join(workspace.sessionRoot, manifest.files[0]!.inputPath))).resolves.toEqual(tender)
+    await expect(readFile(join(workspace.sessionRoot, manifest.files[1]!.inputPath))).resolves.toEqual(referenceBid)
+  })
+
+  it('keeps S1 failed when a declared binary file is missing from the request body', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const tender = Buffer.from('招标文件', 'utf8')
+    const request = Object.assign(Readable.from([tender]), {
+      method: 'POST',
+      headers: {
+        host: '127.0.0.1',
+        'x-dsh-bid-session-id': agent.session.id,
+        'x-dsh-bid-files': encodeURIComponent(JSON.stringify([
+          { name: 'tender.txt', role: 'tender', size: tender.byteLength },
+          { name: 'reference-bid.txt', role: 'reference_bid', size: 1 },
+        ])),
+      },
+    })
+    const response = { writeHead: vi.fn(), end: vi.fn() }
+
+    await (ctx.bid as unknown as {
+      handleBinaryUpload: (req: typeof request, res: typeof response) => Promise<void>
+    }).handleBinaryUpload(request, response)
+
+    expect(JSON.parse(String(response.end.mock.calls[0]?.[0]))).toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED' } })
+    expect(agent.session.events.map(event => event.type)).toEqual(['bid.stage.started', 'bid.stage.failed'])
+    expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+      .toMatchObject({ stage: 'file_intake', status: 'failed' })
   })
 
   it('fails S1 when a selected file cannot be decoded', async () => {

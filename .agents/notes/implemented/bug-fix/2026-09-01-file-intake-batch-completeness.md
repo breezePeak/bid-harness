@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`BidHostRuntime.uploadFiles()` 在任一请求文件解码失败后使 S1 失败。`validateFileIntake()` 还将 Host 已解码的完整请求批次与 `BidWorkspace.import()` 返回记录逐项比对，并继续校验每条返回记录对应的原文件和 Manifest 记录。缺失的请求文件产生 `FILE_INTAKE_SELECTED_FILE_MISSING`，因此 S1 保持失败而不会推进到 S2。浏览器编码保留每个文件的 `role`，回归测试覆盖 `tender` 与 `reference_bid` 请求、`input` 原文件和 Manifest 角色。
+`BidHostRuntime.uploadFiles()` 在任一请求文件解码失败后使 S1 失败。`validateFileIntake()` 还将 Host 已解码的完整请求批次与 `BidWorkspace.import()` 返回记录逐项比对，并继续校验每条返回记录对应的原文件和 Manifest 记录。缺失的请求文件产生 `FILE_INTAKE_SELECTED_FILE_MISSING`，因此 S1 保持失败而不会推进到 S2。浏览器将原始 `File` 按选择顺序组合为 `Blob` 后发送到同源 S1 端点，并以小型请求头声明文件名、角色、类型和长度；该请求不使用受 HTTP 协议限制的流式 Fetch body，Host 在不经 base64 的情况下还原同一批次再执行既有入库和校验。回归测试使用原生 `Request` 校验请求参数，并覆盖 `tender` 与 `reference_bid` 的二进制请求、`input` 原文件和 Manifest 角色。
 
 ## Alternatives considered
 

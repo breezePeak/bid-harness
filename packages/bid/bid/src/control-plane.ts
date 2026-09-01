@@ -7,8 +7,11 @@
 /** Browser-safe Bid control-plane constants and types. */
 export {
   BID_CLIENT_ACTIONS,
+  BID_BINARY_UPLOAD_PATH,
   BID_RUNTIME_PROJECTION_KEY,
   BID_STAGES,
+  BID_UPLOAD_FILES_HEADER,
+  BID_UPLOAD_SESSION_HEADER,
   STAGE_RUN_STATUSES,
 } from './control-plane-contract.ts'
 export type {
@@ -42,6 +45,7 @@ export type {
   StageValidationIssue,
   StageValidationResult,
   BidUploadFile,
+  BidBinaryUploadFile,
 } from './control-plane-contract.ts'
 export { BID_DOCUMENT_ROLES, isBidDocumentRole } from './control-plane-contract.ts'
 export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-browser.ts'

@@ -85,6 +85,9 @@
     # Host authority for Bid projection and prompt admission.
     - id: bid-host-runtime
       name: '@deepseek-ai/dsh-bid'
+      inject: [webRuntime]
+      config:
+        trustedHosts: !!js ctx.webRuntime.trustedHosts
 
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'

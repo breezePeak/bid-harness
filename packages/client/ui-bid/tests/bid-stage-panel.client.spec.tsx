@@ -8,7 +8,10 @@ import { BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePa
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
   let value = zh[key]
@@ -542,11 +545,6 @@ describe('ui-bid browser plugin', () => {
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
-    const remoteUpload = vi.fn<(_sessionId: string, _files: readonly unknown[]) => Promise<unknown>>()
-      .mockResolvedValue({
-        ok: true as const,
-        value: { ok: true as const, value: { stage: 'tender_analysis' as const, status: 'pending' as const } },
-      })
     const remoteRetry = vi.fn<(_sessionId: string) => Promise<unknown>>()
       .mockResolvedValue({
         ok: true as const,
@@ -556,7 +554,7 @@ describe('ui-bid browser plugin', () => {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
-      remote: { bid: { uploadFiles: remoteUpload, retryStage: remoteRetry } },
+      remote: { bid: { retryStage: remoteRetry } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -582,39 +580,53 @@ describe('ui-bid browser plugin', () => {
     injected.setComposerBlock(undefined)
     expect(set).toHaveBeenLastCalledWith('session_bid', undefined)
 
-    const tender = new File([Uint8Array.of(1, 2, 3)], 'requirements.md', { type: 'text/markdown' })
-    Object.defineProperty(tender, 'arrayBuffer', {
-      value: async () => Uint8Array.of(1, 2, 3).buffer,
+    const uploadFetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      new Request(input, init)
+      return new Response(JSON.stringify({
+        ok: true,
+        value: { stage: 'tender_analysis', status: 'pending' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
     })
-    const referenceBid = new File([Uint8Array.of(4, 5)], 'reference-bid.md', { type: 'text/markdown' })
-    Object.defineProperty(referenceBid, 'arrayBuffer', {
-      value: async () => Uint8Array.of(4, 5).buffer,
-    })
+    vi.stubGlobal('fetch', uploadFetch)
+    const tenderBytes = Uint8Array.from({ length: 2049 }, (_, index) => index % 256)
+    const tender = new File([tenderBytes], 'requirements.md', { type: 'text/markdown' })
+    const referenceBidBytes = Uint8Array.of(4, 5)
+    const referenceBid = new File([referenceBidBytes], 'reference-bid.md', { type: 'text/markdown' })
     await injected.uploadFiles([{ file: tender, role: 'tender' }, { file: referenceBid, role: 'reference_bid' }])
-    expect(remoteUpload).toHaveBeenCalledWith('session_bid', [
-      {
-        name: 'requirements.md',
-        role: 'tender',
-        mediaType: 'text/markdown',
-        size: 3,
-        data: 'AQID',
-      },
-      {
-        name: 'reference-bid.md',
-        role: 'reference_bid',
-        mediaType: 'text/markdown',
-        size: 2,
-        data: 'BAU=',
-      },
-    ])
-
-    remoteUpload.mockResolvedValueOnce({
-      ok: true,
-      value: {
-        ok: false,
-        error: { code: 'BID_FILE_TYPE_UNSUPPORTED', message: '不支持该文件类型' },
-      },
+    expect(uploadFetch).toHaveBeenCalledTimes(1)
+    const init = uploadFetch.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(init).not.toHaveProperty('duplex')
+    expect(init.body).toBeInstanceOf(Blob)
+    expect(init.headers).toMatchObject({
+      'x-dsh-bid-session-id': 'session_bid',
+      'x-dsh-bid-files': encodeURIComponent(JSON.stringify([
+        {
+          name: 'requirements.md',
+          role: 'tender',
+          mediaType: 'text/markdown',
+          size: 2049,
+        },
+        {
+          name: 'reference-bid.md',
+          role: 'reference_bid',
+          mediaType: 'text/markdown',
+          size: 2,
+        },
+      ])),
     })
+    const uploadedBytes = await new Promise<Uint8Array>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.addEventListener('load', () => resolve(new Uint8Array(reader.result as ArrayBuffer)))
+      reader.addEventListener('error', () => reject(reader.error))
+      reader.readAsArrayBuffer(init.body as Blob)
+    })
+    expect(uploadedBytes).toEqual(Uint8Array.from([...tenderBytes, ...referenceBidBytes]))
+
+    uploadFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'BID_FILE_TYPE_UNSUPPORTED', message: '不支持该文件类型' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
     await expect(injected.uploadFiles([{ file: tender, role: 'tender' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
 
     await injected.retryStage()

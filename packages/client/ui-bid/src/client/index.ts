@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidFileIntakeFileResult, type BidUploadFile, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidFileIntakeFileResult, type BidFileIntakeResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -78,44 +78,12 @@ export class BidActionError extends Error {
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
 export const inject = ['slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid']
 
-/** Encode arbitrary bytes without overflowing `String.fromCharCode` argument limits. */
-function bytesToBase64(bytes: Uint8Array): string {
-  const parts: string[] = []
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    parts.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)))
-  }
-  return btoa(parts.join(''))
-}
-
-/** Encode one immutable browser File for the JSON-safe Bid Remote request. */
 /** Browser material paired with its selected business role. */
 export interface BidSelectedFile { readonly file: File; readonly role: BidDocumentRole }
 
-async function encodeFile({ file, role }: BidSelectedFile, onProgress?: (progress: number) => void): Promise<BidUploadFile> {
-  onProgress?.(10)
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  onProgress?.(30)
-  return {
-    name: file.name,
-    role,
-    ...(file.type === '' ? {} : { mediaType: file.type }),
-    size: file.size,
-    data: bytesToBase64(bytes),
-  }
-}
-
-/** Encode the selected batch serially so browser memory never holds every source ArrayBuffer at once. */
-async function encodeFiles(
-  files: readonly BidSelectedFile[],
-  onProgress?: (file: BidSelectedFile, progress: number) => void,
-): Promise<BidUploadFile[]> {
-  const encoded: BidUploadFile[] = []
-  for (const file of files) {
-    encoded.push(await encodeFile(file, progress => onProgress?.(file, progress)))
-    onProgress?.(file, 40)
-  }
-  return encoded
+/** Compose the selected original files without base64 expansion or a streaming Fetch body. */
+function binaryUploadBody(files: readonly BidSelectedFile[]): Blob {
+  return new Blob(files.map(selected => selected.file), { type: 'application/vnd.dsh.bid-upload' })
 }
 
 function actionFailure(error: {
@@ -198,17 +166,27 @@ export function apply(ctx: ClientContext): void {
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
       uploadFiles: async (files, onProgress) => {
-        const encoded = await encodeFiles(files, onProgress)
-        for (const file of files) onProgress?.(file, 50)
-        const result = await ctx.remote.bid.uploadFiles(
-          sessionId,
-          encoded,
-        )
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) {
-          throw actionFailure(result.value.error)
+        for (const selected of files) onProgress?.(selected, 5)
+        const uploadInit: RequestInit = {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/vnd.dsh.bid-upload',
+            [BID_UPLOAD_SESSION_HEADER]: sessionId,
+            [BID_UPLOAD_FILES_HEADER]: encodeURIComponent(JSON.stringify(files.map(({ file, role }) => ({
+              name: file.name,
+              role,
+              ...(file.type === '' ? {} : { mediaType: file.type }),
+              size: file.size,
+            })))),
+          },
+          body: binaryUploadBody(files),
         }
-        const fileResults = result.value.files ?? files.map(({ file, role }) => ({ name: file.name, role, status: 'completed' as const }))
+        const response = await fetch(new URL(BID_BINARY_UPLOAD_PATH, window.location.href), uploadInit)
+        for (const selected of files) onProgress?.(selected, 95)
+        if (!response.ok) throw new Error(`BID_FILE_UPLOAD_HTTP_${String(response.status)}`)
+        const result = await response.json() as BidFileIntakeResult
+        if (!result.ok) throw actionFailure(result.error)
+        const fileResults = result.files ?? files.map(({ file, role }) => ({ name: file.name, role, status: 'completed' as const }))
         for (const file of files) {
           onProgress?.(file, 100)
         }

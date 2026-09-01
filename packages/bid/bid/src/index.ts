@@ -8,6 +8,7 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
@@ -15,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
-import type { Session } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
@@ -58,6 +59,7 @@ import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { isBidDocumentRole } from './control-plane-contract.ts'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
@@ -72,6 +74,7 @@ import type {
   BidReviewChapterView,
   BidRuntimeState,
   BidDocumentRole,
+  BidBinaryUploadFile,
   BidUploadFile,
   StageArtifact,
   StageValidationIssue,
@@ -234,6 +237,8 @@ export interface Config {
   modelStageRepairAttempts: number
   /** Maximum Chapter Subagents running at the same time during S6. */
   chapterWritingMaxConcurrency: number
+  /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
+  trustedHosts: string[]
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -243,6 +248,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
   modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+  trustedHosts: [],
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -253,6 +259,7 @@ export const Config: z<Config> = z.object({
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
+  trustedHosts: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.trustedHosts),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -302,6 +309,46 @@ function retryRejected(code: BidRetryErrorCode, message: string): BidRetryResult
 /** Build one immutable retry success result from the Host's log-derived state. */
 function retrySuccess(value: BidRuntimeState): BidRetryResult {
   return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
+}
+
+/** Minimal webserver registration face used only when the web carrier is composed. */
+interface BidBinaryUploadWebServer {
+  register(route: {
+    kind: 'exact'
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  }): () => void
+}
+
+/** Validate an explicit non-loopback authority used by the binary S1 route. */
+function assertBidUploadTrustedAuthority(authority: string): void {
+  const parsed = new URL(`http://${authority}`)
+  if (parsed.host !== authority.toLocaleLowerCase('en-US')) {
+    throw new Error(`bid: trustedHosts entry ${JSON.stringify(authority)} is not a bare host[:port] authority`)
+  }
+}
+
+/** Apply the existing API route's Host, Origin, and Fetch-Metadata checks to binary S1 traffic. */
+function isTrustedBidUploadRequest(req: IncomingMessage, trustedHosts: readonly string[]): boolean {
+  const host = req.headers.host
+  if (host === undefined) return false
+  let hostUrl: URL
+  try {
+    hostUrl = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  const hostname = hostUrl.hostname.toLocaleLowerCase('en-US')
+  const loopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  if (!loopback && !trustedHosts.some((authority) => {
+    try { return new URL(`http://${authority}`).host === hostUrl.host }
+    catch { return false }
+  })) return false
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers.origin
+  if (origin === undefined) return true
+  try { return new URL(origin).host === hostUrl.host }
+  catch { return false }
 }
 
 interface DecodedUploadBatch {
@@ -389,6 +436,60 @@ function decodeUploadFiles(files: readonly BidUploadFile[], config: Config): Dec
   return { incoming, failures }
 }
 
+/** Parse the small JSON header that describes the ordered raw upload body. */
+function parseBinaryUploadFiles(value: string): BidBinaryUploadFile[] {
+  const parsed: unknown = JSON.parse(value)
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('bid-file-count-limit')
+  return parsed.map((file): BidBinaryUploadFile => {
+    if (typeof file !== 'object' || file === null) throw new Error('bid-invalid-file-data')
+    const record = file as Record<string, unknown>
+    if (typeof record.name !== 'string' || !isBidDocumentRole(record.role)
+      || typeof record.size !== 'number' || !Number.isSafeInteger(record.size) || record.size <= 0
+      || (record.mediaType !== undefined && typeof record.mediaType !== 'string')) {
+      throw new Error('bid-invalid-file-data')
+    }
+    return {
+      name: record.name as string,
+      role: record.role as BidDocumentRole,
+      ...(record.mediaType === undefined ? {} : { mediaType: record.mediaType as string }),
+      size: record.size as number,
+    }
+  })
+}
+
+/** Read one bounded binary S1 request and restore the files in its declared order. */
+async function readBinaryUpload(req: IncomingMessage, files: readonly BidBinaryUploadFile[], config: Config): Promise<IncomingFile[]> {
+  if (files.length > config.maxFiles) throw new Error('bid-file-count-limit')
+  const expected = files.reduce((total, file) => total + file.size, 0)
+  if (!Number.isSafeInteger(expected) || expected > config.maxTotalBytes) throw new Error('bid-total-size-limit')
+  for (const file of files) {
+    if (file.size > config.maxFileBytes) throw new Error('bid-file-size-limit')
+    const extension = extname(safeFileName(file.name)).toLocaleLowerCase('en-US')
+    if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
+  }
+  const chunks: Buffer[] = []
+  let received = 0
+  for await (const chunk of req) {
+    const bytes = Buffer.from(chunk as Uint8Array)
+    received += bytes.byteLength
+    if (received > expected) throw new Error('bid-invalid-file-data')
+    chunks.push(bytes)
+  }
+  if (received !== expected) throw new Error('bid-invalid-file-data')
+  const body = Buffer.concat(chunks, expected)
+  let offset = 0
+  return files.map((file): IncomingFile => {
+    const bytes = body.subarray(offset, offset + file.size)
+    offset += file.size
+    return {
+      name: file.name,
+      role: file.role,
+      ...(file.mediaType === undefined ? {} : { type: file.mediaType }),
+      bytes,
+    }
+  })
+}
+
 /** Translate an expected admission rejection into the public business vocabulary. */
 function intakeError(error: unknown): BidFileIntakeResult {
   const failure = intakeFailure(error)
@@ -415,6 +516,7 @@ export class BidHostRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
     this.config = config
+    for (const authority of config.trustedHosts) assertBidUploadTrustedAuthority(authority)
     ctx.effect(
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
       'bid: runtime projection',
@@ -435,6 +537,14 @@ export class BidHostRuntime extends TypertRemoteService {
       if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
       void this.driveStartedSession(agent, cwd)
     }, { global: true })
+    ctx.inject(['webServer'], (webCtx) => {
+      const webServer = webCtx.get('webServer') as unknown as BidBinaryUploadWebServer
+      webCtx.effect(() => webServer.register({
+        kind: 'exact',
+        path: BID_BINARY_UPLOAD_PATH,
+        handler: (req, res) => this.handleBinaryUpload(req, res),
+      }), 'bid: binary file intake route')
+    })
   }
 
   /** Continue implemented automatic stages after a Bid Session starts or resumes. */
@@ -493,6 +603,27 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('uploadFiles')
   async uploadFiles(session: Session, files: readonly BidUploadFile[]): Promise<BidFileIntakeResult> {
+    let decoded: DecodedUploadBatch
+    try {
+      decoded = decodeUploadFiles(files, this.config)
+    } catch (error) {
+      return intakeError(error)
+    }
+    return this.uploadIncomingFiles(session, decoded.incoming, decoded.failures)
+  }
+
+  /**
+   * Run the common S1 admission, persistence, manifest validation, and stage transition for raw bytes.
+   * @param session - live Session selected by the browser transport.
+   * @param incoming - every decoded selected file in request order.
+   * @param failures - file-level transport decode failures retained for an S1 failure.
+   * @returns the durable S1 outcome.
+   */
+  async uploadIncomingFiles(
+    session: Session,
+    incoming: readonly IncomingFile[],
+    failures: readonly BidFileIntakeFileResult[] = [],
+  ): Promise<BidFileIntakeResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       return intakeRejected('BID_SESSION_REQUIRED', 'File intake requires a Bid Session with a Host workspace.')
     }
@@ -506,16 +637,14 @@ export class BidHostRuntime extends TypertRemoteService {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
       }
 
-      const decoded = decodeUploadFiles(files, this.config)
-      if (decoded.incoming.length === 0) {
-        const failure = decoded.failures[0]?.error
+      if (incoming.length === 0) {
+        const failure = failures[0]?.error
         return intakeRejected(
           (failure?.code as BidFileIntakeErrorCode | undefined) ?? 'BID_FILE_INTAKE_FAILED',
           failure?.message ?? 'No selected file could be imported.',
-          decoded.failures,
+          failures,
         )
       }
-      const incoming = decoded.incoming
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
@@ -532,7 +661,7 @@ export class BidHostRuntime extends TypertRemoteService {
               } catch {
                 throw new Error('file intake could not persist the selected files')
               }
-              if (decoded.failures.length > 0) {
+              if (failures.length > 0) {
                 throw new Error('file intake could not decode every selected file')
               }
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
@@ -570,7 +699,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const next = await orchestrator.drive()
       await this.ctx.sessions.flush(session)
       const fileResults: BidFileIntakeFileResult[] = [
-        ...decoded.failures,
+        ...failures,
         ...imported.map((file): BidFileIntakeFileResult => file.parseStatus === 'success'
           ? { name: file.originalName, role: file.role, status: 'completed' }
           : {
@@ -603,6 +732,64 @@ export class BidHostRuntime extends TypertRemoteService {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', error.message)
       }
       return intakeError(error)
+    } finally {
+      this.inFlight.delete(session.id)
+    }
+  }
+
+  /** Serve the same-origin binary S1 endpoint without base64 expanding browser files. */
+  private async handleBinaryUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isTrustedBidUploadRequest(req, this.config.trustedHosts)) {
+      res.writeHead(403)
+      res.end('forbidden')
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    const sessionHeader = req.headers[BID_UPLOAD_SESSION_HEADER]
+    const filesHeader = req.headers[BID_UPLOAD_FILES_HEADER]
+    const sessionId = typeof sessionHeader === 'string' ? sessionHeader : undefined
+    const metadata = typeof filesHeader === 'string' ? filesHeader : undefined
+    const session = sessionId === undefined ? undefined : this.ctx.sessions.get(SessionId(sessionId))
+    let result: BidFileIntakeResult
+    try {
+      if (session === undefined || metadata === undefined) throw new Error('bid-invalid-file-data')
+      const files = parseBinaryUploadFiles(decodeURIComponent(metadata))
+      const incoming = await readBinaryUpload(req, files, this.config)
+      result = await this.uploadIncomingFiles(session, incoming)
+    } catch (error) {
+      result = session === undefined ? intakeError(error) : await this.recordBinaryUploadFailure(session, error)
+    }
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(JSON.stringify(result))
+  }
+
+  /** Record an S1 failure when a selected binary upload cannot be fully reconstructed. */
+  private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return intakeError(error)
+    if (this.inFlight.has(session.id)) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
+    this.inFlight.add(session.id)
+    try {
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
+        return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
+      }
+      const orchestrator = new BidOrchestrator(
+        session,
+        {
+          canExecute: () => false,
+          execute: async () => { throw new Error('file intake could not reconstruct every selected file') },
+        },
+        { validate: async () => ({ ok: true }) },
+      )
+      const failed = await orchestrator.runCurrentProgramStage()
+      await this.ctx.sessions.flush(session)
+      return intakeRejected('BID_FILE_INTAKE_FAILED', failed.failureReason ?? intakeFailure(error).message)
+    } catch (caught) {
+      return intakeError(caught)
     } finally {
       this.inFlight.delete(session.id)
     }

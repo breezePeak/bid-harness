@@ -140,6 +140,23 @@ export interface BidUploadFile {
   readonly data: string
 }
 
+/** Same-origin S1 binary upload endpoint; its body concatenates the declared files in order. */
+export const BID_BINARY_UPLOAD_PATH = '/api/bid-upload' as const
+
+/** Request header carrying the current Bid Session identity. */
+export const BID_UPLOAD_SESSION_HEADER = 'x-dsh-bid-session-id' as const
+
+/** Request header carrying JSON metadata for the ordered binary file body. */
+export const BID_UPLOAD_FILES_HEADER = 'x-dsh-bid-files' as const
+
+/** Browser file metadata paired with the raw bytes in the binary S1 upload body. */
+export interface BidBinaryUploadFile {
+  readonly name: string
+  readonly role: BidDocumentRole
+  readonly mediaType?: string
+  readonly size: number
+}
+
 /** Business purposes assigned to imported project materials. */
 export const BID_DOCUMENT_ROLES = [
   'tender',
