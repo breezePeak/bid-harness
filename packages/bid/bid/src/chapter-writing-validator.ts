@@ -2,6 +2,7 @@ import { lstat, readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
+import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist } from './chapter-writing-executor.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type EvidenceMaterial, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
@@ -11,6 +12,8 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 
 const MANIFEST = 'chapters/manifest.json'
+const PLAN = 'chapters/execution-plan.json'
+const LOG = 'chapters/execution-log.json'
 
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
@@ -70,27 +73,63 @@ export async function validateChapterWriting(
 ): Promise<StageValidationResult> {
   const issues: StageValidationIssue[] = []
   if (stage !== 'chapter_writing') reject(issues, 'CHAPTER_WRITING_STAGE_INVALID', 'The chapter-writing validator only accepts chapter_writing.')
-  const artifact = artifacts.length === 1 ? artifacts[0] : undefined
-  if (artifact === undefined || artifact.stage !== 'chapter_writing' || artifact.type !== 'chapter_manifest' || artifact.path !== MANIFEST) {
-    reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID', 'The executor must return chapters/manifest.json exactly once.', MANIFEST)
+  const expectedArtifacts = new Map([
+    [PLAN, 'chapter_execution_plan'],
+    [LOG, 'chapter_execution_log'],
+    [MANIFEST, 'chapter_manifest'],
+  ])
+  if (artifacts.length !== expectedArtifacts.size || artifacts.some(artifact =>
+    artifact.stage !== 'chapter_writing' || expectedArtifacts.get(artifact.path) !== artifact.type)
+    || new Set(artifacts.map(artifact => artifact.path)).size !== expectedArtifacts.size) {
+    reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID', 'The executor must return the execution plan, execution log, and chapter manifest exactly once.', MANIFEST)
   }
-  const [manifestRaw, outlineRaw, evidenceRaw] = await Promise.all([
-    readJson(workspace, MANIFEST, issues), readJson(workspace, 'outline/confirmed-outline.json', issues),
+  const [manifestRaw, planRaw, logRaw, outlineRaw, evidenceRaw] = await Promise.all([
+    readJson(workspace, MANIFEST, issues), readJson(workspace, PLAN, issues),
+    readJson(workspace, LOG, issues), readJson(workspace, 'outline/confirmed-outline.json', issues),
     readJson(workspace, 'analysis/evidence-map.json', issues),
   ])
-  if (manifestRaw === undefined || outlineRaw === undefined || evidenceRaw === undefined) return { ok: false, issues }
+  if (
+    manifestRaw === undefined || planRaw === undefined || logRaw === undefined
+    || outlineRaw === undefined || evidenceRaw === undefined
+  ) return { ok: false, issues }
   let chapters
+  let plan
+  let executionLog
   let outline
   let evidence
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
+    plan = parseChapterExecutionPlan(planRaw)
+    executionLog = parseChapterExecutionLog(logRaw)
     outline = parseConfirmedOutlineArtifact(outlineRaw)
     evidence = parseEvidenceMapArtifact(evidenceRaw)
   } catch {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or evidence map has invalid fields.', MANIFEST)
     return { ok: false, issues }
   }
-  if (chapters.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) reject(issues, 'CHAPTER_WRITING_OUTLINE_HASH_INVALID', 'The chapter manifest does not match the confirmed outline.', MANIFEST)
+  const outlineHash = outlineArtifactSha256(outline)
+  if (chapters.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_OUTLINE_HASH_INVALID', 'The chapter manifest does not match the confirmed outline.', MANIFEST)
+  issues.push(...validateChapterExecutionPlan(plan, outline, outlineHash))
+  if (executionLog.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_LOG_OUTLINE_HASH_INVALID', 'The execution log does not match the confirmed outline.', LOG)
+  const plannedDependencies = new Map(plan.sections.map(section => [section.section_id, section.depends_on.map(item => item.section_id)]))
+  const loggedSections = new Set<string>()
+  for (const section of executionLog.sections) {
+    if (loggedSections.has(section.section_id)) reject(issues, 'CHAPTER_WRITING_LOG_SECTION_DUPLICATE', 'The execution log contains a duplicate section.', LOG)
+    loggedSections.add(section.section_id)
+    if (section.status !== 'completed' || section.attempts.length === 0 || section.final_child_session_id === null) {
+      reject(issues, 'CHAPTER_WRITING_LOG_SECTION_INCOMPLETE', 'Every chapter must have a completed Child Session attempt.', LOG)
+    }
+    if (JSON.stringify(section.depends_on) !== JSON.stringify(plannedDependencies.get(section.section_id))) {
+      reject(issues, 'CHAPTER_WRITING_LOG_DEPENDENCY_INVALID', 'The execution log dependencies must match the validated plan.', LOG)
+    }
+    const accepted = section.attempts.filter(attempt => attempt.accepted)
+    if (accepted.length !== 1 || accepted[0]?.child_session_id !== section.final_child_session_id) {
+      reject(issues, 'CHAPTER_WRITING_LOG_FINAL_CHILD_INVALID', 'Each chapter must identify exactly one accepted final Child Session.', LOG)
+    }
+    if (accepted.some(attempt => attempt.issues.length > 0)) {
+      reject(issues, 'CHAPTER_WRITING_LOG_ACCEPTED_ISSUES_INVALID', 'An accepted Child Session attempt cannot retain validation issues.', LOG)
+    }
+  }
   const writable = new Map(outline.sections.filter(section => section.writable).map(section => [section.id, section]))
   const expectedPaths = new Map(buildChapterWorklist(outline).map((section, index) => {
     const serial = String(index + 1).padStart(4, '0')
@@ -161,6 +200,7 @@ export async function validateChapterWriting(
     } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the session, or empty.', chapter.content_path) }
   }
   for (const id of writable.keys()) if (!actual.has(id)) reject(issues, 'CHAPTER_WRITING_SECTION_MISSING', 'The manifest omits a writable confirmed section.', MANIFEST)
+  for (const id of writable.keys()) if (!loggedSections.has(id)) reject(issues, 'CHAPTER_WRITING_LOG_SECTION_MISSING', 'The execution log omits a writable confirmed section.', LOG)
   let bidManifest: BidManifest
   try { bidManifest = await workspace.readManifest() } catch { reject(issues, 'CHAPTER_WRITING_INPUT_INVALID', 'The Bid manifest cannot be read.', 'manifest.json'); return { ok: false, issues } }
   await Promise.all(chapters.chapters.flatMap(chapter =>

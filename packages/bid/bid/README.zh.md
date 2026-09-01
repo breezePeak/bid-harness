@@ -31,7 +31,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
-Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
+Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`chapterWritingMaxConcurrency` 限制 S6 同时运行的 Chapter Subagent 数量，默认为 3，可配置为 1–8。
 
 生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`modelStageRepairAttempts` 配置 S2、S3、S4 和 S6 每次执行内的 Validator 导向修复轮数，默认为 3，可配置为 1–20；每轮都把最新 Issues 交给同一 Agent，并在 Agent idle 后重新预校验。最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑；任何修复回复都不能直接推进阶段。
 
@@ -50,7 +50,7 @@ S3 先查找本地资料，只在公开技术知识缺口存在时执行 `web_se
 
 S4 初稿后以同一 Agent 强制执行 Blueprint Quality Review，并把已检查的 Requirement、Scoring 和最终章节写入内部 `outline/quality-report.json`。Host 预校验两个严格 Artifact，并把目录树、引用覆盖和质量报告问题交给同一 Agent 修复。完成条件要求该报告不存在未解决问题；目录还要求可写章节为叶子、同级标题不重复、`must_answer` 不重复且不机械复述标题。技术响应索引、偏离表或合规清单不能集中承担正文覆盖。S5 可确认当前目录，也可提交非空修改意见；修改意见先写入 Session 日志，再作为下一轮 S4 的必需输入重新生成目录并返回 S5。用户直接编辑后仍校验目录树和引用覆盖。
 
-S6 按已确认目录顺序逐章运行同一 live Agent。每章先消费相关 S2 记录以及 S3 本地 Evidence、外部 Evidence 和缺失主题，资料不足时先执行当前章节本地检索，仅对仍缺少的公开技术知识执行 `web_search → web_fetch`。Executor 将 `additional_external_materials` 与当前章节的规范 Tool 结果和 Session Tool Event 关联，只有本章搜索结果中出现并成功抓取非空原文的 URL 才能进入 Metadata。每章在写入 Host Manifest 前预校验正文、严格 Metadata、`section_id`、完整 `covered_must_answer`、S3 Evidence 子集和当前章节 Web 来源，并用最新 Issues 修复当前正文与 Metadata。Schema v2 Metadata 与 Manifest 分别保存 S3 本地 Evidence、S6 新增本地 Evidence、S3 外部 Evidence、S6 新增外部 Evidence 和未解决主题；最终 Validator 继续校验章节路径、Metadata 一致性、本地引用及 S3 Evidence 的当前章节 Mapping 子集关系。企业案例、资质、人员、实有产品参数和既有能力缺失时必须保留 `unresolved_topics`，不得用 Web 资料替代。
+S6 的主 Agent 只分析全部可写章节的强依赖、弱关联和全局一致性要求，并且只能写 `chapters/execution-plan.json`。Host 校验计划完整覆盖、引用合法且无环后，按确认目录的稳定顺序维护 ready queue，并通过 `ctx.subagents.start('spawn', …)` 在并发上限内启动独立 Child Session；强依赖章节只在前置候选通过后启动，并且只接收计划明确列出的前置章节正文、Metadata 和依赖原因。每个 Chapter Subagent 仅获得当前 Blueprint、相关 S2/S3 记录、缺失主题和一致性要求，工具限制为 `grep`、`read`、`web_search`、`web_fetch`，深度上限为 1，不能写工作区或创建后代 Agent。Child 通过 `outputSchema` 返回 Markdown 与 Metadata 候选，Host 在内存中校验 Evidence、Search-to-Fetch 记录和章节映射后原子写入正文与 sidecar；失败修复使用新的 spawn Child，不回退到主 Agent。Host 写入 `chapters/execution-log.json` 记录每次 Child Session、停止原因和最终接受者，再生成 `chapters/manifest.json`。重试 S6 会先删除旧 `chapters/` 树并重新规划。企业案例、资质、人员、实有产品参数和既有能力缺失时必须保留 `unresolved_topics`，不得用 Web 资料替代。
 
 
 ### Inventory 文本

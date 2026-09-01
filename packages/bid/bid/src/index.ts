@@ -16,6 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type { Session } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
 import { fromMarkdown } from 'mdast-util-from-markdown'
@@ -43,7 +44,7 @@ import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation
 import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
-import { executeChapterWriting } from './chapter-writing-executor.ts'
+import { DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY, executeChapterWriting } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { executeBookReview } from './book-review-executor.ts'
 import { validateBookReview } from './book-review-validator.ts'
@@ -151,7 +152,19 @@ export { executeOutlineGeneration, renderOutlineGenerationRepairTask, renderOutl
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
-export { buildChapterWorklist, executeChapterWriting, pickChapterContext, renderChapterWritingRepairTask, renderChapterWritingTask } from './chapter-writing-executor.ts'
+export * from './chapter-writing-plan-artifacts.ts'
+export {
+  DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+  buildChapterWorklist,
+  executeChapterWriting,
+  pickChapterContext,
+  renderChapterExecutionPlanRepairTask,
+  renderChapterExecutionPlanTask,
+  renderChapterSubagentRepairTask,
+  renderChapterSubagentTask,
+  validateChapterCandidate,
+} from './chapter-writing-executor.ts'
+export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export * from './book-review-artifacts.ts'
 export { executeBookReview } from './book-review-executor.ts'
@@ -197,7 +210,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
-/** Validated file limits and model-stage recovery budget for the Bid Host runtime. */
+/** Validated file limits, model-stage recovery budget, and S6 concurrency limit. */
 export interface Config {
   /** File extensions accepted by the Bid upload Remote. */
   allowedExtensions: string[]
@@ -209,6 +222,8 @@ export interface Config {
   maxTotalBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
+  /** Maximum Chapter Subagents running at the same time during S6. */
+  chapterWritingMaxConcurrency: number
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -217,6 +232,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
   modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+  chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -226,6 +242,7 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
+  chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -375,7 +392,7 @@ function intakeError(error: unknown): BidFileIntakeResult {
 
 /** Host service for Bid projection, prompt admission, and dedicated file intake. */
 export class BidHostRuntime extends TypertRemoteService {
-  static inject = ['agents', 'sessionProjections', 'sessions']
+  static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
   static Config = Config
 
   private readonly config: Config
@@ -383,7 +400,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /**
    * @param ctx - Host Context that owns Sessions and their Bid projection.
-   * @param config - validated file limits and S2 recovery budget.
+   * @param config - validated file limits, model-stage recovery budget, and S6 concurrency limit.
    */
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
@@ -405,7 +422,7 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     ctx.on('agent/session-start', ({ agent }) => {
       const cwd = agent.session.header.cwd
-      if (resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
+      if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
       return this.driveStartedSession(agent, cwd)
     }, { global: true })
   }
@@ -437,7 +454,10 @@ export class BidHostRuntime extends TypertRemoteService {
             : task.stage === 'outline_generation'
               ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
               : task.stage === 'chapter_writing'
-                ? executeChapterWriting(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
+                ? executeChapterWriting(agent, workspace, task, {
+                  maxRepairAttempts: this.config.modelStageRepairAttempts,
+                  maxConcurrency: this.config.chapterWritingMaxConcurrency,
+                })
                 : task.stage === 'book_review'
                   ? executeBookReview(workspace, task)
                   : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
@@ -509,7 +529,10 @@ export class BidHostRuntime extends TypertRemoteService {
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, repair)
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
-            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task, repair)
+            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task, {
+              ...repair,
+              maxConcurrency: this.config.chapterWritingMaxConcurrency,
+            })
             if (task.stage === 'book_review') return executeBookReview(workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },

@@ -9,6 +9,7 @@
     { "path": "../../core/session" },
     { "path": "../../fs/fs" },
     { "path": "../../session/session-projection" },
+    { "path": "../../subagent/subagent" },
     { "path": "../../preset/agent-presets" },
     { "path": "../../host/apiproxy" },
     { "path": "../../typert/protocol" },

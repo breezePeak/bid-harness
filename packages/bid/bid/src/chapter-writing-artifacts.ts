@@ -36,6 +36,13 @@ export const chapterMetadataSchema = z.object({
   if (duplicate(external)) context.addIssue({ code: 'custom', message: 'external evidence URLs must be unique across chapter evidence arrays' })
 })
 
+/** Structured Chapter Subagent result validated before Host persistence. */
+export const chapterCandidateSchema = z.object({
+  section_id: z.string().min(1),
+  markdown: z.string().trim().min(1),
+  metadata: chapterMetadataSchema,
+}).strict()
+
 /** One chapter entry that links a confirmed-outline section to its Markdown body. */
 export const chapterManifestEntrySchema = chapterMetadataSchema.extend({
   content_path: z.string().regex(/^chapters\/sections\/\d{4}\.md$/u),
@@ -58,6 +65,8 @@ export type ChapterMetadata = z.infer<typeof chapterMetadataSchema>
 export type ChapterManifestEntry = z.infer<typeof chapterManifestEntrySchema>
 /** Parsed S6 chapter manifest. */
 export type ChapterWritingManifest = z.infer<typeof chapterWritingManifestSchema>
+/** Parsed structured result from one Chapter Subagent. */
+export type ChapterCandidate = z.infer<typeof chapterCandidateSchema>
 
 /**
  * Parse a chapter sidecar file.
@@ -75,4 +84,13 @@ export function parseChapterMetadata(value: unknown): ChapterMetadata {
  */
 export function parseChapterWritingManifest(value: unknown): ChapterWritingManifest {
   return chapterWritingManifestSchema.parse(value)
+}
+
+/**
+ * Parse one structured Chapter Subagent result.
+ * @param value - decoded structured result.
+ * @returns strict chapter candidate.
+ */
+export function parseChapterCandidate(value: unknown): ChapterCandidate {
+  return chapterCandidateSchema.parse(value)
 }
