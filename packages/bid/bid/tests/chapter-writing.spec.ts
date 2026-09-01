@@ -14,6 +14,7 @@ import {
   executeChapterWriting,
   getBidStagePolicy,
   outlineArtifactSha256,
+  createScoringResponsePointCatalog,
   parseChapterExecutionLog,
   parseChapterWritingManifest,
 } from '@deepseek-ai/dsh-bid'
@@ -26,6 +27,8 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
   await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify({ schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null, project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['交付'], technical_scope: ['技术'], delivery_scope: ['实施'], implementation_constraints: ['周期'], key_technical_points: ['架构'], source_refs: source, analyzed_tender_files: ['tender'] })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify({ schema_version: 1, requirements: [1, 2, 3].map(index => ({ id: `REQ-${index}`, category: '技术', raw_text: `要求${index}`, normalized_requirement: `响应要求${index}`, mandatory: true, source_refs: source })) })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify({ schema_version: 1, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, response_points: [`回答评分${index}`], source_refs: source })) })}\n`)
+  const scoring = { schema_version: 1 as const, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, response_points: [`回答评分${index}`], source_refs: source })) }
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring))}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 5, source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], research_topics: [], requirement_mappings: [1, 2, 3].map(index => ({ requirement_id: `REQ-${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })), scoring_mappings: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, materials: [], external_materials: [], missing_topics: [] })), response_point_mappings: [1, 2, 3].map(index => ({ response_point_id: `RP-${String(index).padStart(6, '0')}`, scoring_id: `SCORE-${index}`, response_point: `回答评分${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] })) })}\n`)
   const outline = outlineFixture()
@@ -46,12 +49,27 @@ function promptText(request: SubagentStartRequest): string {
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
+function emptyHandoff(section_id: string) {
+  return {
+    section_id,
+    decisions: [],
+    terminology: [],
+    numbers_and_parameters: [],
+    interfaces: [],
+    deployment_constraints: [],
+    cross_reference_targets: [],
+    unresolved_topics: [],
+  }
+}
+
 function candidateFrom(request: SubagentStartRequest, valid = true) {
+  if (promptText(request).includes('Writer Candidate：')) return reviewFrom(request)
   const line = promptText(request).split('\n').find(value => value.startsWith('Current Chapter Blueprint：'))
   if (line === undefined) throw new Error('missing blueprint')
   const section = JSON.parse(line.slice('Current Chapter Blueprint：'.length)) as {
     id: string
     must_answer: string[]
+    scoring_response_point_ids: string[]
     scoring_response_points: Array<{ scoring_id: string; response_point: string }>
     source_mapping_ids: string[]
   }
@@ -61,10 +79,39 @@ function candidateFrom(request: SubagentStartRequest, valid = true) {
     metadata: {
       section_id: section.id,
       covered_must_answer: valid ? section.must_answer : [],
+      covered_scoring_response_point_ids: section.scoring_response_point_ids,
       covered_scoring_response_points: section.scoring_response_points,
-      source_mapping_ids_used: section.source_mapping_ids,
+      assigned_source_mapping_ids: section.source_mapping_ids,
+      source_mapping_usage: [],
+      source_mapping_ids_used: [],
       evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
+      handoff: emptyHandoff(section.id),
     },
+  }
+}
+
+function reviewFrom(request: SubagentStartRequest) {
+  const lines = promptText(request).split('\n')
+  const candidateLine = lines.find(line => line.startsWith('Writer Candidate：'))
+  const blueprintLine = lines.find(line => line.startsWith('Current Chapter Blueprint：'))
+  if (candidateLine === undefined || blueprintLine === undefined) throw new Error('missing reviewer context')
+  const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string; must_answer: string[]; requirement_ids: string[]; scoring_response_point_ids: string[]; compliance_ids: string[]; source_mapping_ids: string[] }
+  const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: ['正文'], issue: null })
+  return {
+    schema_version: 1 as const, section_id: section.id, verdict: 'pass' as const,
+    must_answer_coverage: section.must_answer.map(coverage),
+    requirement_coverage: section.requirement_ids.map(requirement_id => ({ requirement_id, ...coverage(requirement_id) })),
+    response_point_coverage: section.scoring_response_point_ids.map(response_point_id => (
+      { response_point_id, ...coverage(response_point_id) }
+    )),
+    compliance_coverage: section.compliance_ids.map(compliance_id => ({ compliance_id, ...coverage(compliance_id) })),
+    source_mapping_review: section.source_mapping_ids.map(mapping_id => ({ mapping_id, status: 'used' as const, evidence_quotes: ['正文'], issue: null })),
+    claim_checks: [],
+    quality_checks: {
+      content_mode_respected: true, project_specific: true, structure_complete: true,
+      legacy_project_pollution_free: true, placeholder_free: true, obvious_repetition_free: true,
+    },
+    blocking_issues: [],
   }
 }
 
@@ -96,6 +143,11 @@ function fixtureAgent(
   const subagents = {
     getProvider: vi.fn<(_name: string) => typeof spawnProvider | undefined>(() => spawnProvider),
     start: vi.fn(async (_name: string, request: SubagentStartRequest): Promise<SubagentRun> => {
+      if (request.toolFilter?.allow?.length === 0) {
+        const id = SessionId(`reviewer-${++attempt}`)
+        const localAgent = { id, session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] } } as unknown as Agent
+        return { id, localAgent, result: Promise.resolve({ stopReason: 'completed', output: [], structured: reviewFrom(request) }), dispose: async () => { disposed.push(String(id)) } }
+      }
       active++
       maxActive = Math.max(maxActive, active)
       const currentAttempt = ++attempt
@@ -149,7 +201,7 @@ function fixtureAgent(
       if (!planPending) return
       planPending = false
       await writeFile(join(workspace.sessionRoot, 'chapters/execution-plan.json'), `${JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         scope: 'technical_bid',
         confirmed_outline_sha256: outlineArtifactSha256(outline),
         global_consistency_notes: ['统一术语。'],
@@ -191,7 +243,7 @@ describe('chapter-writing executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
     const dependentPrompt = promptText(fixture.starts[2]!.request)
     expect(dependentPrompt).toContain('"section_id":"SEC-1"')
-    expect(dependentPrompt).toContain('# SEC-1')
+    expect(dependentPrompt).not.toContain('# SEC-1')
     expect(dependentPrompt).not.toContain('# SEC-2')
     fixture.starts[1]!.resolve()
     fixture.starts[2]!.resolve()
@@ -204,17 +256,19 @@ describe('chapter-writing executor', () => {
     const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')))
     expect(manifest.chapters.map(chapter => chapter.section_id)).toEqual(['SEC-1', 'SEC-2', 'SEC-3'])
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/execution-log.json'), 'utf8')))
-    expect(log.sections.every(section => section.status === 'completed' && section.final_child_session_id !== null)).toBe(true)
-    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
+    expect(log.sections.every(section => section.status === 'completed'
+      && section.final_writer_child_session_id !== null && section.final_reviewer_child_session_id !== null)).toBe(true)
+    expect(fixture.subagents.start).toHaveBeenCalledTimes(6)
     expect(fixture.subagents.start.mock.calls.every(call => call[0] === 'spawn')).toBe(true)
-    for (const [index, call] of fixture.subagents.start.mock.calls.entries()) {
+    const writerCalls = fixture.subagents.start.mock.calls.filter(call => call[1].toolFilter?.allow?.length !== 0)
+    for (const [index, call] of writerCalls.entries()) {
       expect(call[1]).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
       expect(call[1].parent).toBe(fixture.agent)
       expect(call[1].label).toContain(`000${index + 1}`)
       expect(fixture.starts[index]?.run.localAgent?.session.header).toMatchObject({ parentSession: 'parent', origin: 'subagent' })
     }
     expect(new Set(fixture.starts.map(item => item.run.id)).size).toBe(3)
-    expect(fixture.disposed).toHaveLength(3)
+    expect(fixture.disposed).toHaveLength(6)
   })
 
   it('fails before Main-Agent planning when the spawn provider is absent', async () => {
@@ -252,7 +306,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.starts[1]?.request.label).toContain('修复 1')
     expect(promptText(fixture.starts[1]!.request)).toContain('CHAPTER_WRITING_MUST_ANSWER_INVALID')
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/execution-log.json'), 'utf8')))
-    expect(log.sections[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true])
+    expect(log.sections[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true, true])
     expect(await readFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('# SEC-1')
   })
 
@@ -282,6 +336,7 @@ describe('chapter-writing executor', () => {
     ['missing structured result', (): SubagentResult => ({ stopReason: 'completed', output: [] }), 'CHAPTER_SUBAGENT_STRUCTURED_MISSING'],
     ['schema-invalid candidate', (request: SubagentStartRequest): SubagentResult => {
       const candidate = candidateFrom(request)
+      if (!('metadata' in candidate)) throw new Error('expected writer candidate')
       return { stopReason: 'completed', output: [], structured: { section_id: candidate.section_id, metadata: candidate.metadata } }
     }, 'CHAPTER_SUBAGENT_CANDIDATE_INVALID'],
   ])('repairs a %s in a new Child', async (_name, firstResult, issueCode) => {
@@ -297,7 +352,7 @@ describe('chapter-writing executor', () => {
 
     expect(fixture.starts[1]?.request.label).toContain('修复 1')
     expect(promptText(fixture.starts[1]!.request)).toContain(issueCode)
-    expect(fixture.disposed).toHaveLength(4)
+    expect(fixture.disposed).toHaveLength(7)
   })
 
   it('aborts and disposes sibling runs without publishing a manifest when one branch exhausts repair', async () => {
@@ -375,12 +430,14 @@ describe('chapter-writing executor', () => {
       },
       requirements: [],
       scoring: [],
+      responsePoints: [],
+      responsePointMappings: [],
       compliance: [],
       researchTopics: [],
       evidence: [],
       externalEvidence: [],
       missingTopics: [],
-      sourceMappingIds: [],
+      sourceMappings: [],
     }
     const external = {
       title: '来源 B', url: 'https://b.example/doc', publisher: 'B', retrieved_at: '2026-09-01T00:00:00.000Z',
@@ -392,13 +449,17 @@ describe('chapter-writing executor', () => {
       metadata: {
         section_id: section.id,
         covered_must_answer: section.must_answer,
+        covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
         covered_scoring_response_points: section.scoring_response_points,
-        source_mapping_ids_used: section.source_mapping_ids,
+        assigned_source_mapping_ids: section.source_mapping_ids,
+        source_mapping_usage: [],
+        source_mapping_ids_used: [],
         evidence_used: [],
         additional_materials: [],
         external_evidence_used: [],
         additional_external_materials: [external],
         unresolved_topics: [],
+        handoff: emptyHandoff(section.id),
       },
     }
     const childASnapshots: EvidenceMappingWebSnapshot[] = [{

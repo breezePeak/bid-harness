@@ -20,7 +20,7 @@ const outline: OutlineArtifact = {
 
 function validPlan(): ChapterExecutionPlan {
   return {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     scope: 'technical_bid' as const,
     confirmed_outline_sha256: hash,
     global_consistency_notes: ['统一术语。'],
@@ -55,7 +55,7 @@ describe('chapter execution plan', () => {
   })
 
   it('rejects schema versions and empty reasons at strict parsing', () => {
-    expect(() => parseChapterExecutionPlan({ ...validPlan(), schema_version: 2 })).toThrow()
+    expect(() => parseChapterExecutionPlan({ ...validPlan(), schema_version: 1 })).toThrow()
     const plan = validPlan()
     plan.sections[1]!.depends_on[0]!.reason = ' '
     expect(() => parseChapterExecutionPlan(plan)).toThrow()

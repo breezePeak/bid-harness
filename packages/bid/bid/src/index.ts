@@ -161,6 +161,7 @@ export { validateOutlineGenerationQuality } from './outline-generation-quality-v
 export { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
+export * from './chapter-writing-review-artifacts.ts'
 export * from './chapter-writing-plan-artifacts.ts'
 export {
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,

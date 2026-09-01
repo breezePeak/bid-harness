@@ -3,7 +3,7 @@ import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 
 /** Durable S6 relation-plan and execution-log format version. */
-export const CHAPTER_EXECUTION_SCHEMA_VERSION = 1 as const
+export const CHAPTER_EXECUTION_SCHEMA_VERSION = 2 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 
@@ -27,8 +27,12 @@ export const chapterExecutionPlanSchema = z.object({
 }).strict()
 
 const executionAttemptSchema = z.object({
+  role: z.enum(['writer', 'reviewer']),
+  attempt: z.number().int().positive(),
   child_session_id: z.string().min(1),
   label: z.string().min(1),
+  started_at: z.iso.datetime({ offset: true }),
+  ended_at: z.iso.datetime({ offset: true }),
   stop_reason: z.string().min(1),
   accepted: z.boolean(),
   issues: z.array(z.object({ code: z.string().min(1), message: z.string().min(1) }).strict()),
@@ -40,12 +44,15 @@ export const chapterExecutionLogSchema = z.object({
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   max_concurrency: z.number().int().min(1).max(8),
+  observed_max_concurrency: z.number().int().min(0).max(8),
   sections: z.array(z.object({
     section_id: z.string().min(1),
     depends_on: z.array(z.string().min(1)),
+    related_sections: z.array(z.string().min(1)),
     status: z.enum(['pending', 'running', 'completed', 'failed']),
     attempts: z.array(executionAttemptSchema),
-    final_child_session_id: z.string().min(1).nullable(),
+    final_writer_child_session_id: z.string().min(1).nullable(),
+    final_reviewer_child_session_id: z.string().min(1).nullable(),
   }).strict()),
 }).strict()
 

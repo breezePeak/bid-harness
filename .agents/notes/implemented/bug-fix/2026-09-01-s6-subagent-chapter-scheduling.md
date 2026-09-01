@@ -10,9 +10,9 @@ S6 原有执行器把章节任务逐个注入同一个 Bid Agent，并以整 Age
 
 `chapter_writing` 保持一个控制面 Stage，但内部明确分成两个所有者。主 Agent 只生成 `chapters/execution-plan.json`；工具限制和参数 Guard 使它只能读取输入并写该计划。计划必须恰好覆盖全部 writable section，声明带原因的强依赖、可并行的弱关联和全局一致性要求，并通过 Host 的哈希、引用与无环校验。
 
-Host 根据有效计划维护 pending、ready、running 和 completed 状态，按确认目录顺序选择 ready section，并以 `chapterWritingMaxConcurrency` 限制同时运行的任务。每个章节通过 `ctx.subagents.start('spawn', request)` 建立无父会话历史的 Child Session；Bid Host 的 session-start 驱动忽略 `origin === 'subagent'` 的会话，防止继承 Bid preset 的章节 Child 启动第二套八阶段流程。强依赖章节只接收已通过前置章节的最终 Markdown、metadata 和计划原因。候选修复同样创建新的 one-shot Child，不把正文任务交还主 Agent。
+Host 根据有效计划维护 pending、ready、running 和 completed 状态，按确认目录顺序选择 ready section，并以 `chapterWritingMaxConcurrency` 限制同时运行的任务。每个章节通过 `ctx.subagents.start('spawn', request)` 建立无父会话历史的 Writer Child Session；Bid Host 的 session-start 驱动忽略 `origin === 'subagent'` 的会话，防止继承 Bid preset 的章节 Child 启动第二套八阶段流程。强依赖章节只接收已通过前置章节的有界结构化 handoff 和计划原因。每个候选随后由独立 Reviewer Child 审查；候选或审查修复都创建新的 one-shot Writer Child，不把正文或审查任务交还主 Agent。
 
-Chapter Subagent 使用结构化输出返回一个章节候选，工具只包含本地检索与 Web 研究，绝对深度上限为 1。Host 在内存中校验候选后原子写入正文和 metadata。并发 Web Tool 结果以 Child Session ID 隔离，同一章节的多次尝试可以复用已验证观察，不同章节不能共享。`chapters/execution-log.json` 记录每次 Child Session、停止原因、校验问题和最终接受者；该记录与计划和 manifest 一起构成 S6 的必需 Artifact。
+Writer Child 使用结构化输出返回一个章节候选，工具只包含本地检索与 Web 研究，绝对深度上限为 1；参数 Guard 只允许读取 Chunk 索引和 Chunk Markdown。Reviewer 没有工作区或网络工具，只能通过结构化输出给出逐项正文引用和结论。Host 在内存中校验候选、Reviewer 结论和正文引用后原子写入正文、metadata 和审查报告。并发 Web Tool 结果以 Writer Child Session ID 隔离，同一章节的多次尝试可以复用已验证观察，不同章节不能共享。`chapters/execution-log.json` 记录 Writer、Reviewer、时间、停止原因、校验问题和最终接受者；该记录与计划、审查报告和 manifest 一起构成 S6 的必需 Artifact。
 
 ## Alternatives considered
 

@@ -38,9 +38,7 @@ export async function executeBookReview(workspace: BidWorkspace, task: BidStageT
   const responsePointCoverage = outline.sections.flatMap(section => (section.scoring_response_point_ids ?? []).map((id) => {
     const point = catalog.points.find(candidate => candidate.id === id)
     if (point === undefined) throw new Error(`unknown confirmed-outline response point ${id}`)
-    const declarations = manifest.chapters.filter(chapter => chapter.covered_scoring_response_points.some(
-      value => value.scoring_id === point.scoring_id && value.response_point === point.text,
-    ))
+    const declarations = manifest.chapters.filter(chapter => chapter.covered_scoring_response_point_ids.includes(point.id))
     const expected = manifest.chapters.find(chapter => chapter.section_id === section.id)
     const status = declarations.length === 0 ? 'missing' : declarations.length > 1 ? 'duplicate'
       : declarations[0]?.section_id !== expected?.section_id ? 'mismatch' : 'covered'

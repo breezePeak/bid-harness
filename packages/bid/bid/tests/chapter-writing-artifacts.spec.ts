@@ -16,15 +16,21 @@ function metadata(): Record<string, unknown> {
   return {
     section_id: 'SEC-1',
     covered_must_answer: ['回答架构设计'],
+    covered_scoring_response_point_ids: [],
+    covered_scoring_response_points: [],
+    assigned_source_mapping_ids: [],
+    source_mapping_usage: [],
+    source_mapping_ids_used: [],
     evidence_used: [],
     additional_materials: [],
     external_evidence_used: [external],
     additional_external_materials: [],
     unresolved_topics: [],
+    handoff: { section_id: 'SEC-1', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
   }
 }
 
-describe('chapter-writing schema v2', () => {
+describe('chapter-writing schema v4', () => {
   it('parses all four evidence arrays', () => {
     expect(parseChapterMetadata(metadata())).toMatchObject({ external_evidence_used: [external] })
   })

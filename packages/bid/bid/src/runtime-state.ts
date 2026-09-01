@@ -96,6 +96,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/project.json',
       'analysis/requirements.json',
       'analysis/scoring.json',
+      'analysis/scoring-response-points.json',
       'analysis/compliance.json',
       'analysis/evidence-map.json',
       'outline/confirmed-outline.json',

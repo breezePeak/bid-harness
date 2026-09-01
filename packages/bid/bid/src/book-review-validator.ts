@@ -93,14 +93,12 @@ export async function validateBookReview(
   const expectedCoverage = outline.sections.flatMap(section => (section.scoring_response_point_ids ?? []).map((id) => {
     const point = catalog.points.find(candidate => candidate.id === id)
     if (point === undefined) { reject(issues, 'BOOK_REVIEW_OUTLINE_RESPONSE_POINT_UNKNOWN', 'The confirmed outline references an unknown stable response-point id.'); return undefined }
-    const declarations = manifest.chapters.filter(chapter => chapter.covered_scoring_response_points.some(
-      value => value.scoring_id === point.scoring_id && value.response_point === point.text,
-    ))
+    const declarations = manifest.chapters.filter(chapter => chapter.covered_scoring_response_point_ids.includes(point.id))
     return { response_point_id: id, scoring_id: point.scoring_id, text: point.text, section_id: section.id,
       status: declarations.length === 0 ? 'missing' : declarations.length > 1 ? 'duplicate' : declarations[0]?.section_id === section.id ? 'covered' : 'mismatch' }
   }).filter((item): item is NonNullable<typeof item> => item !== undefined))
-  for (const chapter of manifest.chapters) for (const declaration of chapter.covered_scoring_response_points) {
-    if (!catalog.points.some(point => point.scoring_id === declaration.scoring_id && point.text === declaration.response_point)) reject(issues, 'BOOK_REVIEW_RESPONSE_POINT_MISMATCH', 'Chapter Metadata declares an unknown scoring response point.')
+  for (const chapter of manifest.chapters) for (const declaration of chapter.covered_scoring_response_point_ids) {
+    if (!catalog.points.some(point => point.id === declaration)) reject(issues, 'BOOK_REVIEW_RESPONSE_POINT_MISMATCH', 'Chapter Metadata declares an unknown scoring response point.')
   }
   if (JSON.stringify(report.response_point_coverage) !== JSON.stringify(expectedCoverage)) reject(issues, 'BOOK_REVIEW_RESPONSE_POINT_COVERAGE_INVALID', 'The response-point coverage report does not match the confirmed outline and chapter declarations.')
   if (report.summary.chapter_count !== report.chapters.length || report.summary.issue_count !== report.issues.length || report.summary.blocking_issue_count !== report.issues.filter(issue => issue.severity === 'blocking').length) reject(issues, 'BOOK_REVIEW_SUMMARY_INVALID', 'The review summary does not match its report entries.')

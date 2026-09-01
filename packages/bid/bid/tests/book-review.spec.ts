@@ -18,7 +18,7 @@ async function setup(): Promise<BidWorkspace> {
   await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '正文\n')
-  await writeFile(join(workspace.sessionRoot, 'chapters/manifest.json'), `${JSON.stringify({ schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: 'a'.repeat(64), chapters: [{ section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: [], scoring_ids: ['S-1'], compliance_ids: [], covered_must_answer: ['说明架构。'], covered_scoring_response_points: [{ scoring_id: 'S-1', response_point: '说明总体技术架构' }], source_mapping_ids_used: [], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [] }] })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'chapters/manifest.json'), `${JSON.stringify({ schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: 'a'.repeat(64), chapters: [{ section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: [], scoring_ids: ['S-1'], compliance_ids: [], covered_must_answer: ['说明架构。'], covered_scoring_response_point_ids: ['RP-000001'], covered_scoring_response_points: [{ scoring_id: 'S-1', response_point: '说明总体技术架构' }], assigned_source_mapping_ids: [], source_mapping_usage: [], source_mapping_ids_used: [], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [], handoff: { section_id: 'SEC-1', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] }, review_path: 'chapters/reviews/0001.json', review_sha256: 'a'.repeat(64) }] })}\n`)
   await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{ id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '总体技术架构', purpose: '说明架构。', writable: true, must_answer: ['说明架构。'], requirement_ids: [], scoring_ids: ['S-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids: ['RP-000001'], scoring_response_points: [{ scoring_id: 'S-1', response_point: '说明总体技术架构' }], suggested_tables: [], suggested_figures: [], writing_notes: [] }] })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', scoring_sha256: 'b'.repeat(64), next_sequence: 2, points: [{ id: 'RP-000001', scoring_id: 'S-1', order: 1, text: '说明总体技术架构' }] })}\n`)
   return workspace
@@ -80,14 +80,14 @@ describe('book-review executor and validator', () => {
     const workspace = await setup()
     const manifestPath = join(workspace.sessionRoot, 'chapters/manifest.json')
     const manifest = parseChapterWritingManifest(JSON.parse(await readFile(manifestPath, 'utf8')))
-    manifest.chapters[0]!.covered_scoring_response_points = []
+    manifest.chapters[0]!.covered_scoring_response_point_ids = []
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`)
     let artifacts = await executeBookReview(workspace, buildBidStageTask('book_review'))
     const report = parseBookReviewReport(JSON.parse(await readFile(join(workspace.sessionRoot, 'review/report.json'), 'utf8')))
     expect(report.response_point_coverage).toEqual([expect.objectContaining({ response_point_id: 'RP-000001', status: 'missing' })])
     expect(report.summary.blocking_issue_count).toBe(1)
     expect(report.limitations).toEqual(expect.arrayContaining(['DETAILED_REVIEW_NOT_IMPLEMENTED', 'STRUCTURED_RESPONSE_POINT_COVERAGE_ONLY']))
-    manifest.chapters[0]!.covered_scoring_response_points = [{ scoring_id: 'S-1', response_point: '未知响应点' }]
+    manifest.chapters[0]!.covered_scoring_response_point_ids = ['RP-999999']
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`)
     artifacts = await executeBookReview(workspace, buildBidStageTask('book_review'))
     const mismatch = await validateBookReview(workspace, 'book_review', artifacts)
