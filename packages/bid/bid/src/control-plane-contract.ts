@@ -193,12 +193,12 @@ export type BidFileIntakeResult =
 /** Stable result of an S5 outline-confirmation request. */
 export type BidOutlineConfirmationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
-  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
 
 /** Stable result of an S5 outline-regeneration request. */
 export type BidOutlineRegenerationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
-  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REGENERATE_NOT_ALLOWED' | 'BID_OUTLINE_FEEDBACK_REQUIRED' | 'BID_REGENERATE_FAILED'; readonly message: string } }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REGENERATE_NOT_ALLOWED' | 'BID_OUTLINE_FEEDBACK_REQUIRED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_REGENERATE_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
 
 /** Stable result of an S2 tender-analysis confirmation request. */
 export type BidTenderAnalysisConfirmationResult =

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 4 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 5 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -55,6 +55,7 @@ const requirementMappingSchema = mappingSchema.extend({
 }).strict()
 const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
 const relatedScoringPointSchema = z.object({
+  response_point_id: z.string().regex(/^RP-\d{6}$/u),
   scoring_id: z.string().min(1),
   response_point: z.string().min(1),
 }).strict()
@@ -82,6 +83,7 @@ const sourceStrategySchema = z.object({
 const sourceMappingSchema = z.object({
   mapping_id: z.string().min(1),
   file_id: z.string().min(1),
+  source_section_id: z.string().min(1),
   source_order: z.number().int().positive(),
   level: z.number().int().positive(),
   title: z.string().min(1),
@@ -106,6 +108,7 @@ const referenceBidMappingSchema = sourceMappingSchema.extend({
 }).strict()
 
 const responsePointMappingSchema = mappingSchema.extend({
+  response_point_id: z.string().regex(/^RP-\d{6}$/u),
   scoring_id: z.string().min(1),
   response_point: z.string().min(1),
   writing_dimensions: z.array(z.string().min(1)).min(1),

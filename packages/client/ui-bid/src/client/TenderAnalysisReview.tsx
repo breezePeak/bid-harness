@@ -35,7 +35,10 @@ function buildOperations(
   scoring: TenderScoringArtifact,
 ): TenderAnalysisEditOperation[] {
   const fields: Extract<TenderAnalysisEditOperation, { type: 'update_project' }>['fields'] = {}
-  for (const key of TEXT_FIELDS) if (project[key] !== source.project[key]) fields[key] = project[key]
+  for (const key of TEXT_FIELDS) {
+    const value = project[key]?.trim() || null
+    if (value !== source.project[key]) fields[key] = value
+  }
   for (const key of ARRAY_FIELDS) {
     if (JSON.stringify(project[key]) !== JSON.stringify(source.project[key])) fields[key] = [...project[key]]
   }
@@ -49,14 +52,26 @@ function buildOperations(
       type: 'update_scoring_item', scoring_id: item.id,
       ...(item.title === original.title ? {} : { title: item.title }),
       ...(item.criterion === original.criterion ? {} : { criterion: item.criterion }),
-      ...(JSON.stringify(item.response_points) === JSON.stringify(original.response_points)
-        ? {}
-        : { response_points: [...item.response_points] }),
     }
-    const changed = operation.title !== undefined
-      || operation.criterion !== undefined
-      || operation.response_points !== undefined
+    const changed = operation.title !== undefined || operation.criterion !== undefined
     if (changed) operations.push(operation)
+    const catalog = source.response_point_catalog.points.filter(point => point.scoring_id === item.id)
+      .sort((left, right) => left.order - right.order)
+    const common = Math.min(catalog.length, item.response_points.length)
+    for (let index = 0; index < common; index++) {
+      const point = catalog[index]
+      const next = item.response_points[index]
+      if (point !== undefined && next !== undefined && point.text !== next) operations.push({
+        type: 'update_response_point', scoring_id: item.id, response_point_id: point.id, text: next,
+      })
+    }
+    for (const point of catalog.slice(item.response_points.length)) operations.push({
+      type: 'delete_response_point', scoring_id: item.id, response_point_id: point.id,
+    })
+    for (let index = catalog.length; index < item.response_points.length; index++) {
+      const pointText = item.response_points[index]
+      if (pointText !== undefined) operations.push({ type: 'add_response_point', scoring_id: item.id, order: index + 1, text: pointText })
+    }
   }
   return operations
 }

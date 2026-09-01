@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import { applyOutlineEdits, buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineArtifact, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import { buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -37,8 +37,6 @@ type SelectedFile = BidSelectedFile & {
   status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
   error: string | undefined
 }
-
-const ABSENT_REVIEW_SURFACE = { host: () => null, subscribe: () => () => {} }
 
 function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
@@ -125,12 +123,13 @@ export function BidStagePanel({
   setComposerBlock,
   selectReviewView,
   setReviewViewAvailable,
-  reviewSurface = ABSENT_REVIEW_SURFACE,
+  reviewSurface,
   uploadFiles,
   retryStage,
   confirmOutline,
   regenerateOutline,
-  getOutlineForConfirmation,
+  getOutlineDraft,
+  applyOutlineDraftOperations,
   confirmTenderAnalysis,
   getTenderAnalysisForConfirmation,
   t,
@@ -140,10 +139,10 @@ export function BidStagePanel({
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
-  const [previewOutline, setPreviewOutline] = useState<OutlineArtifact | null>(null)
+  const [draft, setDraft] = useState<OutlineDraftView | null>(null)
   const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
-  const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const [outlineFeedback, setOutlineFeedback] = useState('')
+  const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const frameworkFileInput = useRef<HTMLInputElement>(null)
   const referenceBidFileInput = useRef<HTMLInputElement>(null)
@@ -153,7 +152,10 @@ export function BidStagePanel({
   const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
   const alive = useRef(true)
-  const temporarySectionId = useRef(0)
+  const draftRef = useRef<OutlineDraftView | null>(null)
+  const draftQueue = useRef<Promise<void>>(Promise.resolve())
+  const draftOperation = useRef(0)
+  const draftEpoch = useRef(0)
   const reviewReady = useRef<string | null>(null)
 
   useEffect(() => {
@@ -172,7 +174,7 @@ export function BidStagePanel({
   const embedConversation = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
   const reviewViewAvailable = projection?.runtime.status === 'waiting_user'
     && (canConfirm || canConfirmAnalysis || projection.runtime.stage === 'book_review')
-  const reviewStateKey = reviewViewAvailable ? `${projection?.runtime.stage}:${projection?.runtime.status}` : null
+  const reviewStateKey = reviewViewAvailable ? `${projection.runtime.stage}:${projection.runtime.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   useEffect(() => {
     if (!hasProjection) return
@@ -206,15 +208,15 @@ export function BidStagePanel({
   }, [sessionId, projection?.runtime.stage])
 
   useEffect(() => {
-    if (!canConfirm || getOutlineForConfirmation === undefined) return
-    void getOutlineForConfirmation().then((value) => { if (alive.current) {
-      temporarySectionId.current = 0
-      setOperations([])
-      setPreviewOutline(value)
+    if (!canConfirm || getOutlineDraft === undefined) return
+    void getOutlineDraft().then((value) => { if (alive.current) {
+      draftRef.current = value
+      setDraft(value)
+      setDraftSaveState('saved')
     } }, (reason: unknown) => {
       if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
-  }, [canConfirm, getOutlineForConfirmation, t])
+  }, [canConfirm, getOutlineDraft, t])
 
   useEffect(() => {
     if (!canConfirmAnalysis || getTenderAnalysisForConfirmation === undefined) return
@@ -271,11 +273,13 @@ export function BidStagePanel({
     try {
       const results = await uploadFiles(
         files.map(({ file, role }) => ({ file, role })),
-        (file, progress) => updateSelectedFiles(current => current.map(item => item.file === file.file && item.role === file.role
-          ? { ...item, progress, status: progress >= 50 ? 'uploading' : 'encoding' }
-          : item)),
+        (file, progress) => {
+          updateSelectedFiles(current => current.map(item => item.file === file.file && item.role === file.role
+            ? { ...item, progress, status: progress >= 50 ? 'uploading' : 'encoding' }
+            : item))
+        },
       )
-      applyFileResults(results ?? [])
+      applyFileResults(results)
     } catch (reason: unknown) {
       if (reason instanceof BidActionError && reason.files.length > 0) applyFileResults(reason.files)
       else updateSelectedFiles(current => current.map(file => ({ ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })))
@@ -312,28 +316,53 @@ export function BidStagePanel({
     : []
   const dotState = statusDot(projection.runtime.status)
 
-  const updateSection = (sectionId: string, patch: SectionEdit): void => {
-    if (previewOutline === null || sectionId.startsWith('tmp-')) return
-    const operation: OutlineEditOperation = { type: 'update_section', section_id: sectionId, ...patch }
-    setOperations(current => [...current, operation])
-    setPreviewOutline(current => current === null ? null : {
-      ...current,
-      sections: current.sections.map(section => section.id === sectionId
-        ? {
-          ...section,
-          ...(patch.title === undefined ? {} : { title: patch.title }),
-          ...(patch.purpose === undefined ? {} : { purpose: patch.purpose }),
-          ...(patch.must_answer === undefined ? {} : { must_answer: [...patch.must_answer] }),
-        }
-        : section),
+  const persistOperation = (operation: OutlineEditOperation): void => {
+    if (applyOutlineDraftOperations === undefined) return
+    const token = ++draftOperation.current
+    const epoch = draftEpoch.current
+    setDraftSaveState('saving')
+    draftQueue.current = draftQueue.current.then(async () => {
+      if (epoch !== draftEpoch.current) return
+      const current = draftRef.current
+      if (current === null) return
+      const next = await applyOutlineDraftOperations({
+        expected_revision: current.revision,
+        expected_draft_sha256: current.draft_outline_sha256,
+        operations: [operation],
+      })
+      draftRef.current = next
+      if (alive.current && token === draftOperation.current) { setDraft(next); setDraftSaveState('saved') }
+    }).catch(async (reason: unknown) => {
+      draftEpoch.current++
+      if (!alive.current) return
+      setDraftSaveState(reason instanceof BidActionError && reason.code === 'BID_OUTLINE_DRAFT_CONFLICT' ? 'conflict' : 'failed')
+      setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: reason instanceof BidActionError ? reason.issues : [] })
+      if (getOutlineDraft !== undefined) {
+        const current = await getOutlineDraft()
+        draftRef.current = current
+        setDraft(current)
+      }
     })
   }
 
+  const updateSection = (sectionId: string, patch: SectionEdit): void => {
+    if (draft === null) return
+    const operation: OutlineEditOperation = { type: 'update_section', section_id: sectionId, ...patch }
+    setDraft(current => current === null ? null : { ...current, outline: {
+      ...current.outline,
+      sections: current.outline.sections.map(section => section.id === sectionId
+        ? { ...section, ...patch, ...(patch.must_answer === undefined ? {} : { must_answer: [...patch.must_answer] }) }
+        : section),
+    } })
+    persistOperation(operation)
+  }
+
   const structureOperation = (operation: OutlineEditOperation): void => {
-    setOperations(current => [...current, operation])
-    setPreviewOutline(current => current === null ? null : applyOutlineEdits(current, [operation], () => `tmp-${String(++temporarySectionId.current)}`))
+    persistOperation(operation)
     setRequestError(null)
   }
+
+  const previewOutline = draft?.outline ?? null
 
   const indentSection = (sectionId: string): void => {
     const section = previewOutline?.sections.find(candidate => candidate.id === sectionId)
@@ -394,23 +423,42 @@ export function BidStagePanel({
             {canConfirm && previewOutline !== null && (
               <div className={css.outline} aria-label="技术标目录">
                 {buildOutlineView(previewOutline.sections).map(({ section, number, depth }) => {
-                  const isTemporary = section.id.startsWith('tmp-')
                   const siblings = previewOutline.sections.filter(candidate => candidate.parent_id === section.parent_id)
                     .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
                   const index = siblings.findIndex(candidate => candidate.id === section.id)
                   return <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((depth - 1) * 16)}px` }}>
                     <span aria-label={`${section.id} 章节编号`}>{number}</span>
-                    <input aria-label={`${section.id} 标题`} disabled={isTemporary} value={section.title} onChange={event => updateSection(section.id, { title: event.target.value })} />
-                    <textarea aria-label={`${section.id} 目的`} disabled={isTemporary} value={section.purpose} onChange={event => updateSection(section.id, { purpose: event.target.value })} />
-                    {section.writable && <textarea aria-label={`${section.id} 必答内容`} disabled={isTemporary} value={section.must_answer.join('\n')} onChange={event => updateSection(section.id, { must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} />}
+                    <input aria-label={`${section.id} 标题`} value={section.title} onChange={(event) => {
+                      updateSection(section.id, { title: event.target.value })
+                    }} />
+                    <textarea aria-label={`${section.id} 目的`} value={section.purpose} onChange={(event) => {
+                      updateSection(section.id, { purpose: event.target.value })
+                    }} />
+                    {section.writable && <textarea
+                      aria-label={`${section.id} 必答内容`}
+                      value={section.must_answer.join('\n')}
+                      onChange={(event) => {
+                        updateSection(section.id, {
+                          must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean),
+                        })
+                      }}
+                    />}
                     <div className={css.actions}>
-                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })}>新增同级</button>
-                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })}>新增子级</button>
-                      <button type="button" disabled={isTemporary} onClick={() => structureOperation({ type: 'delete_section', section_id: section.id })}>删除</button>
-                      <button type="button" disabled={isTemporary || index === 0} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })}>上移</button>
-                      <button type="button" disabled={isTemporary || index === siblings.length - 1} onClick={() => structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })}>下移</button>
-                      <button type="button" disabled={isTemporary || index === 0} onClick={() => indentSection(section.id)}>缩进</button>
-                      <button type="button" disabled={isTemporary || section.parent_id === null} onClick={() => outdentSection(section.id)}>取消缩进</button>
+                      <button type="button" onClick={() => {
+                        structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })
+                      }}>新增同级</button>
+                      <button type="button" onClick={() => {
+                        structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })
+                      }}>新增子级</button>
+                      <button type="button" onClick={() => { structureOperation({ type: 'delete_section', section_id: section.id }) }}>删除</button>
+                      <button type="button" disabled={index === 0} onClick={() => {
+                        structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })
+                      }}>上移</button>
+                      <button type="button" disabled={index === siblings.length - 1} onClick={() => {
+                        structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })
+                      }}>下移</button>
+                      <button type="button" disabled={index === 0} onClick={() => { indentSection(section.id) }}>缩进</button>
+                      <button type="button" disabled={section.parent_id === null} onClick={() => { outdentSection(section.id) }}>取消缩进</button>
                     </div>
                     <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
                   </article>
@@ -572,6 +620,7 @@ export function BidStagePanel({
                 <div className={css.decisionCopy}>
                   <span className={css.decisionLabel}>{t('outline.accept.label')}</span>
                   <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
+                  {draft !== null && <span className={css.decisionHint}>{t('outline.draft.status', { revision: draft.revision, status: t(`outline.draft.${draftSaveState}`) })}</span>}
                 </div>
                 <Button
                   size="sm"
@@ -579,7 +628,12 @@ export function BidStagePanel({
                   icon={<IconCheckOutline14 />}
                   disabled={requestPending !== null || confirmOutline === undefined}
                   title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-                  onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(operations)) }}
+                  onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : async () => {
+                    await draftQueue.current
+                    const current = draftRef.current
+                    if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
+                    await confirmOutline({ expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256 })
+                  }) }}
                 >
                   {requestPending === 'confirm' ? t('outline.accept.pending') : t('outline.accept.action')}
                 </Button>
@@ -606,7 +660,14 @@ export function BidStagePanel({
                   onClick={() => {
                     const feedback = outlineFeedback.trim()
                     invoke('revise', regenerateOutline === undefined ? undefined : async () => {
-                      await regenerateOutline(feedback)
+                      await draftQueue.current
+                      const current = draftRef.current
+                      if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
+                      await regenerateOutline({
+                        feedback,
+                        expected_revision: current.revision,
+                        expected_draft_sha256: current.draft_outline_sha256,
+                      })
                       if (alive.current) setOutlineFeedback('')
                     })
                   }}
@@ -615,18 +676,6 @@ export function BidStagePanel({
                 </Button>
               </div>
             </div>
-          )}
-          {canConfirmAnalysis && (
-            <Button
-              size="sm"
-              variant="primary"
-              icon={<IconCheckOutline14 />}
-              disabled={requestPending !== null || confirmTenderAnalysis === undefined}
-              title={confirmTenderAnalysis === undefined ? t('action.unavailable') : undefined}
-              onClick={() => { invoke('confirm_analysis', confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis([])) }}
-            >
-              {t('action.confirm')}
-            </Button>
           )}
         </div>
 

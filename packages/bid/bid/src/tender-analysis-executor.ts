@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -12,12 +12,35 @@ import {
 } from './model-stage-repair.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
+import { createScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/project.json': 'tender_project',
   'analysis/requirements.json': 'tender_requirements',
   'analysis/scoring.json': 'tender_scoring',
+  'analysis/scoring-response-points.json': 'scoring_response_points',
   'analysis/compliance.json': 'tender_compliance',
+}
+
+const HOST_ARTIFACT = 'analysis/scoring-response-points.json'
+
+function agentArtifactPaths(task: BidStageTask): string[] {
+  return task.requiredArtifacts.filter(path => path !== HOST_ARTIFACT)
+}
+
+async function writeResponsePointCatalog(workspace: BidWorkspace): Promise<void> {
+  const scoringPath = join(workspace.sessionRoot, 'analysis/scoring.json')
+  const catalogPath = join(workspace.sessionRoot, HOST_ARTIFACT)
+  let scoring: ReturnType<typeof parseTenderScoringArtifact>
+  try {
+    scoring = parseTenderScoringArtifact(JSON.parse(await readFile(scoringPath, 'utf8')))
+  } catch {
+    await rm(catalogPath, { force: true })
+    return
+  }
+  await writeFileAtomic(catalogPath, `${JSON.stringify(createScoringResponsePointCatalog(scoring), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
 /**
@@ -31,7 +54,7 @@ export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, 
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
   const manifestPath = `${workspacePath}/manifest.json`
-  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
+  const artifactPaths = agentArtifactPaths(task).map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage}`,
     `目标：${task.objective}`,
@@ -59,7 +82,7 @@ function renderTenderAnalysisCoverageAuditTask(agent: Agent, workspace: BidWorks
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
   const manifestPath = `${workspacePath}/manifest.json`
-  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
+  const artifactPaths = agentArtifactPaths(task).map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage} / Coverage Audit`,
     `Bid Session：${agent.id}`,
@@ -94,7 +117,7 @@ export function renderTenderAnalysisRepairTask(
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
-  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
+  const artifactPaths = agentArtifactPaths(task).map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage} / Artifact Repair`,
     `Bid Session：${agent.id}`,
@@ -138,10 +161,11 @@ export async function executeTenderAnalysis(
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
+  await rm(join(workspace.sessionRoot, HOST_ARTIFACT), { force: true })
   const fs = agent.ctx.get('fs')
   const tools = agent.ctx.get('tools')
   if (fs === undefined || tools === undefined) throw new Error('Bid tender analysis requires fs and tools services')
-  await Promise.all(task.requiredArtifacts.map(async (path) => {
+  await Promise.all(agentArtifactPaths(task).map(async (path) => {
     const artifactPath = join(workspace.sessionRoot, path)
     await rm(artifactPath, { force: true })
     const target = await fs.resolve(artifactPath)
@@ -163,6 +187,7 @@ export async function executeTenderAnalysis(
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
     await agent.whenIdle()
+    await writeResponsePointCatalog(workspace)
     const artifacts = task.requiredArtifacts.map(path => ({
       stage: 'tender_analysis' as const,
       type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
@@ -175,6 +200,7 @@ export async function executeTenderAnalysis(
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
       }))
       await agent.whenIdle()
+      await writeResponsePointCatalog(workspace)
       prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
     }
     return artifacts

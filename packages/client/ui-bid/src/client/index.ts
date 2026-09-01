@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { BidDocumentRole, BidFileIntakeFileResult, BidUploadFile, OutlineArtifact, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidFileIntakeFileResult, type BidUploadFile, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -27,6 +27,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Dictionary namespace owned by this plugin. */
 const NS = 'bid'
+
+/** Browser recovery action for every Host-owned S5 issue code. */
+export const OUTLINE_CONFIRMATION_REPAIR_ACTIONS = Object.fromEntries(
+  Object.entries(OUTLINE_CONFIRMATION_ISSUES).map(([code, definition]) => [code, definition.repair_action]),
+) as Readonly<Record<OutlineConfirmationIssueCode, OutlineConfirmationRepairAction>>
 
 /** Callbacks supplied to the Bid panel without exposing client services. */
 export interface BidStagePanelInjected {
@@ -50,10 +55,11 @@ export interface BidStagePanelInjected {
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
-  getOutlineForConfirmation?: () => Promise<OutlineArtifact>
-  confirmOutline?: (operations: readonly OutlineEditOperation[]) => Promise<void>
+  getOutlineDraft?: () => Promise<OutlineDraftView>
+  applyOutlineDraftOperations?: (request: OutlineDraftMutationRequest) => Promise<OutlineDraftView>
+  confirmOutline?: (request: { expected_revision: number; expected_draft_sha256: string }) => Promise<void>
   /** Host outline-regeneration action, installed when the Bid action API is composed. */
-  regenerateOutline?: (feedback: string) => Promise<void>
+  regenerateOutline?: (request: { feedback: string; expected_revision: number; expected_draft_sha256: string }) => Promise<void>
   /** Host tender-analysis review actions, installed when the Bid action API is composed. */
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
@@ -140,12 +146,12 @@ export function apply(ctx: ClientContext): void {
         )
       },
       selectReviewView: () => {
-        const scoped = ctx.sessions.scope(sessionId)
+        const scoped = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)
         const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
         conversation?.selectView?.('bid-review')
       },
       setReviewViewAvailable: (available) => {
-        const scoped = ctx.sessions.scope(sessionId)
+        const scoped = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)
         const conversation = scoped?.get('conversation') as { setViewAvailable?: (viewId: string, next: boolean) => void } | undefined
         conversation?.setViewAvailable?.('bid-review', available)
       },
@@ -160,18 +166,24 @@ export function apply(ctx: ClientContext): void {
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
-      getOutlineForConfirmation: async () => {
-        const result = await ctx.remote.bid.getOutlineForConfirmation(sessionId)
+      getOutlineDraft: async () => {
+        const result = await ctx.remote.bid.getOutlineDraft(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         return result.value
       },
-      confirmOutline: async (operations) => {
-        const result = await ctx.remote.bid.confirmOutline(sessionId, operations)
+      applyOutlineDraftOperations: async (request) => {
+        const result = await ctx.remote.bid.applyOutlineDraftOperations(sessionId, request)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+        return result.value.value
+      },
+      confirmOutline: async (request) => {
+        const result = await ctx.remote.bid.confirmOutline(sessionId, request)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
-      regenerateOutline: async (feedback) => {
-        const result = await ctx.remote.bid.regenerateOutline(sessionId, feedback)
+      regenerateOutline: async (request) => {
+        const result = await ctx.remote.bid.regenerateOutline(sessionId, request)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
@@ -217,7 +229,7 @@ export function apply(ctx: ClientContext): void {
         completeReview(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
-      const conversation = ctx.sessions.scope(sessionId)?.get('conversation') as {
+      const conversation = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)?.get('conversation') as {
         setEmbeddedSurface?: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
       } | undefined
       return {

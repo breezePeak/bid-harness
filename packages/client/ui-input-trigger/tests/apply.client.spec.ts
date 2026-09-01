@@ -37,7 +37,7 @@ async function bench() {
   // comes from FALLBACK_LOCALE (en): state the asserted locale explicitly.
   locale.setLocale('zh')
   ctx.provide('locale', locale)
-  return { ctx, slots, locale }
+  return { ctx, slots, locale, scope }
 }
 
 describe('apply', () => {
@@ -63,7 +63,7 @@ describe('apply', () => {
   })
 
   it('registers MenuView into the overlay and resolves the per-session controller by slot sessionId', async () => {
-    const { ctx, slots } = await bench()
+    const { ctx, slots, scope } = await bench()
     await ctx.plugin({ inject: [...inject], apply }).await()
     expect(slots.entries('conversation.input.overlay')).toHaveLength(1)
     const entries = slots.entries('conversation.input.overlay')
@@ -76,9 +76,7 @@ describe('apply', () => {
     // the erased registration widens it past a direct cast, so hop unknown.
     const injectEntry = entries[0]!.inject as unknown as (sessionId: SessionId) => MenuViewInjected
     const injected = injectEntry(sid('a'))
-    const controller = inputTriggers.sessionOf(
-      (ctx.get('sessions') as { scope(id: SessionId): Context }).scope(sid('a')),
-    )
+    const controller = inputTriggers.sessionOf(scope.ctx)
     expect(injected.menu).toBe(controller.menu)
     // The pick face routes into the controller pipeline (closed menu → no-op).
     injected.onPick('command', 0)

@@ -7,6 +7,8 @@ import { within } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type EvidenceMaterial, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { catalogMatchesScoring, parseScoringResponsePointCatalog, type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import type { DocumentSection } from './document-extract.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import {
   normalizeWebEvidenceUrl,
@@ -19,6 +21,7 @@ const ARTIFACT = 'analysis/evidence-map.json'
 const WEB_SOURCES_ARTIFACT = 'analysis/web-evidence-sources.json'
 const S2_REQUIREMENTS = 'analysis/requirements.json'
 const S2_SCORING = 'analysis/scoring.json'
+const RESPONSE_POINTS = 'analysis/scoring-response-points.json'
 
 function reject(
   issues: StageValidationIssue[], code: string, message: string, artifact?: string, path?: string,
@@ -67,7 +70,7 @@ function validateSourceStrategy(map: EvidenceMapArtifact, manifest: BidManifest,
   if (map.source_strategy.mode !== expectedMode) {
     reject(issues, 'EVIDENCE_MAPPING_SOURCE_STRATEGY_INVALID', 'Source strategy mode does not match successfully parsed special assets.', ARTIFACT, 'source_strategy.mode')
   }
-  const frameworkIds = new Set(frameworks.map(file => file.id))
+  const frameworkIds = new Set(frameworks.map(file => String(file.id)))
   if ((frameworks.length === 0 && map.source_strategy.framework_file_id !== null)
     || (frameworks.length > 0 && !frameworkIds.has(map.source_strategy.framework_file_id ?? ''))) {
     reject(issues, 'EVIDENCE_MAPPING_FRAMEWORK_FILE_INVALID', 'Source strategy must name one successfully parsed framework file, or null.', ARTIFACT, 'source_strategy.framework_file_id')
@@ -77,49 +80,118 @@ function validateSourceStrategy(map: EvidenceMapArtifact, manifest: BidManifest,
 
 function validateResponsePointMappings(
   map: EvidenceMapArtifact,
-  scoring: ReturnType<typeof parseTenderScoringArtifact>,
+  catalog: ScoringResponsePointCatalog,
   issues: StageValidationIssue[],
 ): void {
-  const expected = new Set(scoring.scoring_items.flatMap(item => item.response_points.map(point => `${item.id}\u0000${point}`)))
+  const expected = new Map(catalog.points.map(point => [point.id, point]))
   const actual = new Set<string>()
   for (const [index, mapping] of map.response_point_mappings.entries()) {
-    const key = `${mapping.scoring_id}\u0000${mapping.response_point}`
-    if (actual.has(key)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_DUPLICATE', 'Each scoring response point must occur once.', ARTIFACT, `response_point_mappings[${index}]`)
-    actual.add(key)
-    if (!expected.has(key)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_UNKNOWN', 'A response-point mapping does not exist in S2 scoring.', ARTIFACT, `response_point_mappings[${index}]`)
+    const point = expected.get(mapping.response_point_id)
+    if (actual.has(mapping.response_point_id)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_DUPLICATE', 'Each scoring response point must occur once.', ARTIFACT, `response_point_mappings[${index}]`)
+    actual.add(mapping.response_point_id)
+    if (point === undefined || point.scoring_id !== mapping.scoring_id || point.text !== mapping.response_point) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_UNKNOWN', 'A response-point mapping does not match the S2 response-point catalog.', ARTIFACT, `response_point_mappings[${index}]`)
   }
-  for (const key of expected) if (!actual.has(key)) {
+  for (const id of expected.keys()) if (!actual.has(id)) {
     reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_MISSING', 'A scoring response point has no S3 writing mapping.', ARTIFACT)
   }
 }
 
-function validateSourceMappings(
+async function readSourceSections(workspace: BidWorkspace, file: BidManifest['files'][number]): Promise<DocumentSection[]> {
+  if (file.structurePath !== null) {
+    const structurePath = within(workspace.sessionRoot, file.structurePath)
+    await assertNoLinkedPath(workspace.root, structurePath)
+    const raw = JSON.parse(await readFile(structurePath, 'utf8')) as { sections?: unknown }
+    if (!Array.isArray(raw.sections)) throw new Error('structure')
+    return raw.sections as DocumentSection[]
+  }
+  if (file.chunkIndexPath === null) return []
+  const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
+  await assertNoLinkedPath(workspace.root, indexPath)
+  const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+  const headings = new Map<string, DocumentSection>()
+  for (const chunk of index.chunks) {
+    for (let level = 1; level <= chunk.heading_path.length; level++) {
+      const headingPath = chunk.heading_path.slice(0, level)
+      const key = headingPath.join('\u0000')
+      if (!headings.has(key)) headings.set(key, {
+        id: `derived_${String(headings.size + 1).padStart(3, '0')}`,
+        parent_id: null, level, title: headingPath.at(-1) ?? '', page_start: null, page_end: null,
+        heading_path: headingPath, order: headings.size + 1,
+      })
+    }
+  }
+  return [...headings.values()]
+}
+
+async function validateSourceMappings(
   map: EvidenceMapArtifact,
+  workspace: BidWorkspace,
   manifest: BidManifest,
-  scoring: ReturnType<typeof parseTenderScoringArtifact>,
+  requirements: ReturnType<typeof parseTenderRequirementsArtifact>,
+  catalog: ScoringResponsePointCatalog,
   issues: StageValidationIssue[],
-): void {
-  const scoringPoints = new Set(scoring.scoring_items.flatMap(item => item.response_points.map(point => `${item.id}\u0000${point}`)))
-  const validate = (kind: 'framework' | 'reference_bid', role: 'outline_framework' | 'reference_bid', mappings: readonly { mapping_id: string; file_id: string; related_scoring_points: readonly { scoring_id: string; response_point: string }[]; content_materials: readonly EvidenceMaterial[] }[]): void => {
-    const ids = new Set<string>()
+): Promise<void> {
+  const requirementIds = new Set(requirements.requirements.map(item => item.id))
+  const points = new Map(catalog.points.map(point => [point.id, point]))
+  const ids = new Set<string>()
+  const validate = async (kind: 'framework' | 'reference_bid', role: 'outline_framework' | 'reference_bid', mappings: readonly EvidenceMapArtifact['framework_mappings'][number][] | readonly EvidenceMapArtifact['reference_bid_mappings'][number][]): Promise<void> => {
     for (const [index, mapping] of mappings.entries()) {
       const path = `${kind}_mappings[${index}]`
       if (ids.has(mapping.mapping_id)) reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_DUPLICATE', 'Each source mapping id must occur once.', ARTIFACT, `${path}.mapping_id`)
       ids.add(mapping.mapping_id)
-      const file = manifest.files.find(candidate => candidate.id === mapping.file_id)
+      const file = manifest.files.find(candidate => String(candidate.id) === mapping.file_id)
       if (file === undefined || file.role !== role || file.parseStatus !== 'success') {
         reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_FILE_INVALID', 'A source mapping must reference a successfully parsed file of its own role.', ARTIFACT, `${path}.file_id`)
       }
-      for (const point of mapping.related_scoring_points) if (!scoringPoints.has(`${point.scoring_id}\u0000${point.response_point}`)) {
-        reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_RESPONSE_POINT_INVALID', 'A source mapping names an unknown scoring response point.', ARTIFACT, `${path}.related_scoring_points`)
+      for (const requirementId of mapping.related_requirement_ids) if (!requirementIds.has(requirementId)) {
+        reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_REQUIREMENT_INVALID', 'A source mapping names an unknown requirement.', ARTIFACT, `${path}.related_requirement_ids`)
+      }
+      for (const point of mapping.related_scoring_points) {
+        const source = points.get(point.response_point_id)
+        if (source === undefined || source.scoring_id !== point.scoring_id || source.text !== point.response_point) {
+          reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_RESPONSE_POINT_INVALID', 'A source mapping names an unknown scoring response point.', ARTIFACT, `${path}.related_scoring_points`)
+        }
       }
       for (const material of mapping.content_materials) if (material.file_id !== mapping.file_id) {
         reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_MATERIAL_INVALID', 'Source mapping content must belong to its mapped source file.', ARTIFACT, `${path}.content_materials`)
       }
+      if (file !== undefined && file.role === role && file.parseStatus === 'success') {
+        try {
+          const sections = await readSourceSections(workspace, file)
+          const source = sections.find(section => section.id === mapping.source_section_id)
+          if (source === undefined || source.order !== mapping.source_order || source.level !== mapping.level
+            || source.title !== mapping.title || JSON.stringify(source.heading_path) !== JSON.stringify(mapping.heading_path)) {
+            reject(issues, 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', 'A source mapping must match a real source heading.', ARTIFACT, path)
+          }
+          for (const material of mapping.content_materials) {
+            const indexPath = file.chunkIndexPath === null ? null : within(workspace.sessionRoot, file.chunkIndexPath)
+            if (indexPath === null) continue
+            const indexValue = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+            const entry = indexValue.chunks.find(chunk => posix.join(file.chunksPath ?? '', chunk.path) === material.chunk)
+            if (entry !== undefined && !mapping.heading_path.every((title, offset) => entry.heading_path[offset] === title)) {
+              reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_HEADING_INVALID', 'Source content must come from the mapped heading or its descendants.', ARTIFACT, `${path}.content_materials`)
+            }
+          }
+        } catch {
+          reject(issues, 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', 'A source mapping cannot be verified against source structure.', ARTIFACT, path)
+        }
+      }
     }
   }
-  validate('framework', 'outline_framework', map.framework_mappings)
-  validate('reference_bid', 'reference_bid', map.reference_bid_mappings)
+  await validate('framework', 'outline_framework', map.framework_mappings)
+  await validate('reference_bid', 'reference_bid', map.reference_bid_mappings)
+  for (const file of manifest.files.filter(file => file.role === 'outline_framework' && file.parseStatus === 'success')) {
+    const sections = await readSourceSections(workspace, file)
+    for (const section of sections) {
+      const matches = map.framework_mappings.filter(
+        mapping => mapping.file_id === String(file.id) && mapping.source_section_id === section.id,
+      )
+      if (matches.length !== 1) reject(issues, matches.length === 0 ? 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_MISSING' : 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_DUPLICATE', 'Every framework heading must have exactly one mapping.', ARTIFACT)
+    }
+  }
+  for (const item of map.source_strategy.reference_bid_files.filter(item => item.applicability !== 'none')) {
+    if (!map.reference_bid_mappings.some(mapping => mapping.file_id === item.file_id)) reject(issues, 'EVIDENCE_MAPPING_REFERENCE_BID_MAPPING_MISSING', 'An applicable reference bid requires a real source mapping.', ARTIFACT)
+  }
 }
 
 async function validateMaterial(
@@ -127,8 +199,9 @@ async function validateMaterial(
 ): Promise<void> {
   const matchingFiles = manifest.files.filter(record => record.id === material.file_id)
   if (matchingFiles.length === 0) { reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN', 'A material references no manifest file.', material.chunk); return }
-  const file = matchingFiles.find(record => record.role !== 'tender')
-  if (file === undefined) {
+  const file = matchingFiles[0]
+  if (file === undefined) return
+  if (file.role === 'tender') {
     reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_NOT_REFERENCE', 'A material must reference a non-tender project material.', material.chunk)
     return
   }
@@ -204,11 +277,11 @@ function validateExternalMaterials(
 function validateResearchTopics(
   map: ReturnType<typeof parseEvidenceMapArtifact>,
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>,
-  scoring: ReturnType<typeof parseTenderScoringArtifact>,
+  catalog: ScoringResponsePointCatalog,
   issues: StageValidationIssue[],
 ): void {
   const requirementIds = new Set(requirements.requirements.map(item => item.id))
-  const scoringById = new Map(scoring.scoring_items.map(item => [item.id, item]))
+  const responsePointsById = new Map(catalog.points.map(point => [point.id, point]))
   const topicIds = new Set<string>()
   for (const [topicIndex, topic] of map.research_topics.entries()) {
     if (topicIds.has(topic.topic_id)) reject(issues, 'EVIDENCE_MAPPING_RESEARCH_TOPIC_DUPLICATE', 'Each research topic id must occur once.', ARTIFACT, `research_topics[${topicIndex}].topic_id`)
@@ -217,12 +290,12 @@ function validateResearchTopics(
       if (!requirementIds.has(requirementId)) reject(issues, 'EVIDENCE_MAPPING_RESEARCH_REQUIREMENT_UNKNOWN', `Research topic references unknown requirement id ${JSON.stringify(requirementId)}.`, ARTIFACT, `research_topics[${topicIndex}].related_requirement_ids[${idIndex}]`)
     }
     for (const [pointIndex, point] of topic.related_scoring_points.entries()) {
-      const scoringItem = scoringById.get(point.scoring_id)
+      const catalogPoint = responsePointsById.get(point.response_point_id)
       const path = `research_topics[${topicIndex}].related_scoring_points[${pointIndex}]`
-      if (scoringItem === undefined) {
-        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_SCORING_UNKNOWN', `Research topic references unknown scoring id ${JSON.stringify(point.scoring_id)}.`, ARTIFACT, `${path}.scoring_id`)
-      } else if (!scoringItem.response_points.includes(point.response_point)) {
-        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_RESPONSE_POINT_UNKNOWN', `The response point does not exist in scoring item ${point.scoring_id}.`, ARTIFACT, `${path}.response_point`)
+      if (catalogPoint === undefined) {
+        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_RESPONSE_POINT_UNKNOWN', `Research topic references unknown response-point id ${JSON.stringify(point.response_point_id)}.`, ARTIFACT, `${path}.response_point_id`)
+      } else if (catalogPoint.scoring_id !== point.scoring_id || catalogPoint.text !== point.response_point) {
+        reject(issues, 'EVIDENCE_MAPPING_RESEARCH_RESPONSE_POINT_MISMATCH', 'Research topic scoring id or text does not match the stable response point.', ARTIFACT, path)
       }
     }
   }
@@ -249,23 +322,26 @@ export async function validateEvidenceMapping(
     reject(issues, 'EVIDENCE_MAPPING_MANIFEST_INVALID', 'The current Bid manifest cannot be read.', 'manifest.json')
     return { ok: false, issues }
   }
-  const [rawMap, rawWebSources, rawRequirements, rawScoring] = await Promise.all([
+  const [rawMap, rawWebSources, rawRequirements, rawScoring, rawCatalog] = await Promise.all([
     parseJson(workspace, ARTIFACT, issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID'),
     parseJson(workspace, WEB_SOURCES_ARTIFACT, issues, 'EVIDENCE_MAPPING_WEB_SOURCE_ARTIFACT_INVALID'),
     parseJson(workspace, S2_REQUIREMENTS, issues, 'EVIDENCE_MAPPING_S2_INPUT_INVALID'),
     parseJson(workspace, S2_SCORING, issues, 'EVIDENCE_MAPPING_S2_INPUT_INVALID'),
+    parseJson(workspace, RESPONSE_POINTS, issues, 'EVIDENCE_MAPPING_S2_INPUT_INVALID'),
   ])
   if (rawMap === undefined || rawWebSources === undefined
-    || rawRequirements === undefined || rawScoring === undefined) return { ok: false, issues }
+    || rawRequirements === undefined || rawScoring === undefined || rawCatalog === undefined) return { ok: false, issues }
   let map
   let webSources
   let requirements
   let scoring
+  let catalog
   try {
     map = parseEvidenceMapArtifact(rawMap)
     webSources = parseWebEvidenceSourcesArtifact(rawWebSources)
     requirements = parseTenderRequirementsArtifact(rawRequirements)
     scoring = parseTenderScoringArtifact(rawScoring)
+    catalog = parseScoringResponsePointCatalog(rawCatalog)
   } catch {
     try { parseEvidenceMapArtifact(rawMap) } catch (error) {
       if (error instanceof ZodError) {
@@ -282,14 +358,17 @@ export async function validateEvidenceMapping(
   }
   validateCoverage(requirements.requirements, map.requirement_mappings.map(item => item.requirement_id), 'REQUIREMENT', issues)
   validateCoverage(scoring.scoring_items, map.scoring_mappings.map(item => item.scoring_id), 'SCORING', issues)
+  if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_CATALOG_MISMATCH', 'The stable response-point catalog does not match scoring.json.', RESPONSE_POINTS)
   validateSourceStrategy(map, manifest, issues)
-  validateResponsePointMappings(map, scoring, issues)
-  validateSourceMappings(map, manifest, scoring, issues)
-  validateResearchTopics(map, requirements, scoring, issues)
-  await Promise.all(
-    [...map.requirement_mappings, ...map.scoring_mappings, ...map.research_topics]
+  validateResponsePointMappings(map, catalog, issues)
+  await validateSourceMappings(map, workspace, manifest, requirements, catalog, issues)
+  validateResearchTopics(map, requirements, catalog, issues)
+  await Promise.all([
+    ...[...map.requirement_mappings, ...map.scoring_mappings, ...map.response_point_mappings, ...map.research_topics]
       .flatMap(mapping => mapping.materials.map(material => validateMaterial(workspace, manifest, material, issues))),
-  )
+    ...[...map.framework_mappings, ...map.reference_bid_mappings]
+      .flatMap(mapping => mapping.content_materials.map(material => validateMaterial(workspace, manifest, material, issues))),
+  ])
   const validity = await Promise.all(webSources.sources.map(async source => ({
     source,
     valid: await validateWebSource(workspace, source, issues),

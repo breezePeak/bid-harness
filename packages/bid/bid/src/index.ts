@@ -30,6 +30,7 @@ import { validateFileIntake } from './file-intake-validator.ts'
 import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { parseTenderProjectArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import {
   applyTenderAnalysisEdits,
   parseTenderAnalysisEditOperations,
@@ -41,9 +42,10 @@ import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
-import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
-import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
-import { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
+import type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
+import { validateOutlineConfirmation, validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
+import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import { DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY, executeChapterWriting } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { executeBookReview } from './book-review-executor.ts'
@@ -53,7 +55,7 @@ import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
-import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
+import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { isBidDocumentRole } from './control-plane-contract.ts'
 import type {
@@ -72,6 +74,7 @@ import type {
   BidDocumentRole,
   BidUploadFile,
   StageArtifact,
+  StageValidationIssue,
 } from './control-plane-contract.ts'
 
 export { extractDocument } from './document-extract.ts'
@@ -128,6 +131,7 @@ export type {
 export { validateFileIntake }
 export * from './tender-analysis-artifacts.ts'
 export * from './tender-analysis-confirmation.ts'
+export * from './scoring-response-point-artifacts.ts'
 export { executeTenderAnalysis, renderTenderAnalysisRepairTask, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
 export { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 export type { ModelStageExecutionOptions } from './model-stage-repair.ts'
@@ -148,8 +152,13 @@ export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
 export * from './outline-confirmation-artifacts.ts'
 export * from './outline-confirmation-edits.ts'
+export * from './outline-confirmation-issues.ts'
+export * from './outline-draft-store.ts'
+export * from './outline-regeneration-artifacts.ts'
 export { executeOutlineGeneration, renderOutlineGenerationRepairTask, renderOutlineGenerationTask } from './outline-generation-executor.ts'
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
+export { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
+export { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
 export * from './chapter-writing-plan-artifacts.ts'
@@ -414,7 +423,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
       if (projection.composer.enabled) return
-      const reason = projection.composer.enabled ? 'bid.stage_pending' : projection.composer.reason
+      const reason = projection.composer.reason
       return {
         reason,
         message: `Bid session prompt rejected by Host admission: ${reason}`,
@@ -423,7 +432,7 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('agent/session-start', ({ agent }) => {
       const cwd = agent.session.header.cwd
       if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
-      return this.driveStartedSession(agent, cwd)
+      void this.driveStartedSession(agent, cwd)
     }, { global: true })
   }
 
@@ -744,12 +753,15 @@ export class BidHostRuntime extends TypertRemoteService {
     const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
     const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
     const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
+    const catalogPath = within(workspace.sessionRoot, 'analysis/scoring-response-points.json')
     await assertNoLinkedPath(workspace.root, projectPath)
     await assertNoLinkedPath(workspace.root, scoringPath)
-    const [project, scoring] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8')])
+    await assertNoLinkedPath(workspace.root, catalogPath)
+    const [project, scoring, catalog] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(catalogPath, 'utf8')])
     return {
       project: parseTenderProjectArtifact(JSON.parse(project)),
       scoring: parseTenderScoringArtifact(JSON.parse(scoring)),
+      response_point_catalog: parseScoringResponsePointCatalog(JSON.parse(catalog)),
     }
   }
 
@@ -770,31 +782,49 @@ export class BidHostRuntime extends TypertRemoteService {
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
       const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
+      const catalogPath = within(workspace.sessionRoot, 'analysis/scoring-response-points.json')
       await assertNoLinkedPath(workspace.root, projectPath)
       await assertNoLinkedPath(workspace.root, scoringPath)
-      const [projectRaw, scoringRaw] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8')])
+      await assertNoLinkedPath(workspace.root, catalogPath)
+      const [projectRaw, scoringRaw, catalogRaw] = await Promise.all([readFile(projectPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(catalogPath, 'utf8')])
       let candidate: TenderAnalysisConfirmationView
       try {
         candidate = applyTenderAnalysisEdits(
           {
             project: parseTenderProjectArtifact(JSON.parse(projectRaw)),
             scoring: parseTenderScoringArtifact(JSON.parse(scoringRaw)),
+            response_point_catalog: parseScoringResponsePointCatalog(JSON.parse(catalogRaw)),
           },
           parseTenderAnalysisEditOperations(operations),
         )
       } catch (error: unknown) {
         return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The requested tender-analysis edits are invalid.', issues: [{ code: 'TENDER_ANALYSIS_EDIT_INVALID', message: error instanceof Error ? error.message : 'The requested tender-analysis edits are invalid.' }] } }
       }
-      await writeFileAtomic(projectPath, `${JSON.stringify(candidate.project, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-      await writeFileAtomic(scoringPath, `${JSON.stringify(candidate.scoring, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      const restore = async (): Promise<void> => {
+        await writeFileAtomic(projectPath, projectRaw, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(scoringPath, scoringRaw, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(catalogPath, catalogRaw, { mode: 0o600, dirMode: 0o700 })
+      }
+      try {
+        await writeFileAtomic(projectPath, `${JSON.stringify(candidate.project, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(scoringPath, `${JSON.stringify(candidate.scoring, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(catalogPath, `${JSON.stringify(candidate.response_point_catalog, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      } catch (error: unknown) {
+        await restore()
+        throw error
+      }
       const artifacts: StageArtifact[] = [
         { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
         { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
         { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
+        { stage: 'tender_analysis', type: 'scoring_response_points', path: 'analysis/scoring-response-points.json' },
         { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
       ]
       const confirmation = await this.automaticOrchestrator(agent, workspace).confirmValidatedStage('tender_analysis', artifacts)
-      if (!confirmation.ok) return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: confirmation.validation.issues } }
+      if (!confirmation.ok) {
+        await restore()
+        return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: confirmation.validation.issues } }
+      }
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
     } catch {
@@ -805,18 +835,35 @@ export class BidHostRuntime extends TypertRemoteService {
   /** Read the S4 draft only while its user-confirmation stage owns the session. */
   @Remote('getOutlineForConfirmation')
   async getOutlineForConfirmation(session: Session): Promise<OutlineArtifact> {
+    return (await this.getOutlineDraft(session)).outline
+  }
+
+  /** Read or initialize the Host-persisted S5 draft. */
+  @Remote('getOutlineDraft')
+  async getOutlineDraft(session: Session): Promise<OutlineDraftView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (runtime.stage !== 'outline_confirmation' || runtime.status !== 'waiting_user') throw new Error('Outline confirmation is not allowed in the current Bid stage state.')
     const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-    const path = within(workspace.sessionRoot, 'outline/outline.json')
-    await assertNoLinkedPath(workspace.root, path)
-    return parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+    return getOrCreateOutlineDraft(workspace)
+  }
+
+  /** Apply one CAS-protected edit batch to the Host-persisted S5 draft. */
+  @Remote('applyOutlineDraftOperations')
+  async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== 'outline_confirmation' || runtime.status !== 'waiting_user') throw new Error('Outline draft editing is not allowed in the current Bid stage state.')
+    if (this.inFlight.has(session.id)) throw new Error('BID_OPERATION_IN_PROGRESS')
+    this.inFlight.add(session.id)
+    try {
+      return await mutateOutlineDraft(new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config)), request)
+    } finally { this.inFlight.delete(session.id) }
   }
 
   /** Apply and validate user operations before atomically publishing S5 artifacts. */
   @Remote('confirmOutline')
-  async confirmOutline(session: Session, operations: readonly OutlineEditOperation[]): Promise<BidOutlineConfirmationResult> {
+  async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     this.inFlight.add(session.id)
@@ -826,27 +873,57 @@ export class BidHostRuntime extends TypertRemoteService {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-      const sourcePath = within(workspace.sessionRoot, 'outline/outline.json')
-      await assertNoLinkedPath(workspace.root, sourcePath)
-      const source = parseOutlineArtifact(JSON.parse(await readFile(sourcePath, 'utf8')))
-      let candidate: OutlineArtifact
-      try { candidate = applyOutlineEdits(source, parseOutlineEditOperations(operations)) } catch (error: unknown) {
-        return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The requested outline edits are invalid.', issues: [{ code: 'OUTLINE_EDIT_INVALID', message: error instanceof Error ? error.message : 'The requested outline edits are invalid.' }] } }
-      }
-      const analysis = await Promise.all(['analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json'].map(async (path) => {
-        const absolute = within(workspace.sessionRoot, path)
-        await assertNoLinkedPath(workspace.root, absolute)
-        return JSON.parse(await readFile(absolute, 'utf8'))
-      }))
-      const [requirements, scoring, compliance] = analysis
-      const validation = validateConfirmedOutline(candidate, requirements, scoring, compliance)
-      if (!validation.ok) return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The edited outline does not satisfy the required structure or coverage.', issues: validation.issues } }
+      const draft = await getOrCreateOutlineDraft(workspace)
+      if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
+      const candidate = draft.outline
+      const sharedInputs = await Promise.all([
+        'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json', 'analysis/evidence-map.json', 'analysis/scoring-response-points.json',
+      ].map(async (path): Promise<unknown> => JSON.parse(
+        await readFile(within(workspace.sessionRoot, path), 'utf8'),
+      ) as unknown))
+      const prevalidation = validateOutlineDraftForConfirmation(
+        candidate,
+        sharedInputs[0],
+        sharedInputs[1],
+        sharedInputs[2],
+        sharedInputs[3],
+        sharedInputs[4],
+      )
+      if (!prevalidation.ok) return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The current draft does not satisfy S5 validation.', issues: prevalidation.issues } }
       const confirmedPath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
       const confirmationPath = within(workspace.sessionRoot, 'outline/confirmation.json')
       await assertNoLinkedPath(workspace.root, confirmedPath)
       await assertNoLinkedPath(workspace.root, confirmationPath)
-      await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-      await writeFileAtomic(confirmationPath, `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineArtifactSha256(source), confirmed_outline_sha256: outlineArtifactSha256(candidate) }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      try {
+        await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        const confirmation = {
+          schema_version: 2,
+          scope: 'technical_bid',
+          decision: 'confirmed',
+          source_outline_sha256: draft.source_outline_sha256,
+          confirmed_outline_sha256: draft.draft_outline_sha256,
+          confirmed_draft_revision: draft.revision,
+          confirmed_draft_sha256: draft.draft_outline_sha256,
+        }
+        await writeFileAtomic(
+          confirmationPath,
+          `${JSON.stringify(confirmation, null, 2)}\n`,
+          { mode: 0o600, dirMode: 0o700 },
+        )
+      } catch (error) {
+        await Promise.all([rm(confirmedPath, { force: true }), rm(confirmationPath, { force: true })])
+        throw error
+      }
+      const artifactRefs: StageArtifact[] = [
+        { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
+        { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
+      ]
+      const validation = await validateOutlineConfirmation(workspace, 'outline_confirmation', artifactRefs)
+      if (!validation.ok) {
+        await rm(confirmedPath, { force: true })
+        await rm(confirmationPath, { force: true })
+        return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy S5 validation.', issues: validation.issues } }
+      }
       const next = await this.automaticOrchestrator(agent, workspace).confirm()
       await this.ctx.sessions.flush(session)
       return { ok: true, value: next }
@@ -855,12 +932,15 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { this.inFlight.delete(session.id) }
   }
 
-  /** Record user feedback and rerun S4 before returning to outline confirmation. */
+  /** Regenerate a temporary S4-quality candidate from the current persisted S5 draft. */
   @Remote('regenerateOutline')
-  async regenerateOutline(session: Session, feedback: string): Promise<BidOutlineRegenerationResult> {
+  async regenerateOutline(
+    session: Session,
+    request: OutlineDraftIdentityRequest & { readonly feedback: string },
+  ): Promise<BidOutlineRegenerationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline regeneration requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
-    const normalized = feedback.trim()
+    const normalized = request.feedback.trim()
     if (normalized.length === 0) return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
@@ -869,9 +949,47 @@ export class BidHostRuntime extends TypertRemoteService {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-      const next = await this.automaticOrchestrator(agent, workspace).reviseOutline(normalized)
-      await this.ctx.sessions.flush(session)
-      return { ok: true, value: next }
+      const draft = await getOrCreateOutlineDraft(workspace)
+      if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
+      const outlinePath = within(workspace.sessionRoot, 'outline/outline.json')
+      const qualityPath = within(workspace.sessionRoot, 'outline/quality-report.json')
+      const changeSetPath = within(workspace.sessionRoot, 'outline/regeneration/change-set.json')
+      await Promise.all([outlinePath, qualityPath, changeSetPath].map(path => assertNoLinkedPath(workspace.root, path)))
+      const [originalOutline, originalQuality] = await Promise.all([readFile(outlinePath, 'utf8'), readFile(qualityPath, 'utf8')])
+      let candidate: OutlineArtifact | undefined
+      let candidateRaw: string | undefined
+      let qualityRaw: string | undefined
+      let changeSetRaw: string | undefined
+      let validationIssues: readonly StageValidationIssue[] = []
+      try {
+        const artifacts = await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
+          maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+          regeneration: { feedback: normalized, revision: draft.revision, draftSha256: draft.draft_outline_sha256 },
+        })
+        const validation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
+        if (!validation.ok) { validationIssues = validation.issues; throw new Error('candidate-validation') }
+        ;[candidateRaw, qualityRaw, changeSetRaw] = await Promise.all([
+          readFile(outlinePath, 'utf8'), readFile(qualityPath, 'utf8'), readFile(changeSetPath, 'utf8'),
+        ])
+        candidate = parseOutlineArtifact(JSON.parse(candidateRaw))
+        const changeSet = parseOutlineRegenerationChangeSet(JSON.parse(changeSetRaw))
+        if (!regenerationChangeSetMatches(changeSet, draft.outline, candidate, draft.revision, draft.draft_outline_sha256)) throw new Error('change-set-mismatch')
+      } catch (error: unknown) {
+        await writeFileAtomic(outlinePath, originalOutline, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(qualityPath, originalQuality, { mode: 0o600, dirMode: 0o700 })
+        return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: error instanceof Error && error.message === 'change-set-mismatch' ? 'The regeneration change set does not match the candidate.' : `The regenerated outline candidate is invalid: ${error instanceof Error ? error.message : String(error)}`, issues: validationIssues, current: draft } }
+      }
+      await writeFileAtomic(outlinePath, originalOutline, { mode: 0o600, dirMode: 0o700 })
+      await writeFileAtomic(qualityPath, originalQuality, { mode: 0o600, dirMode: 0o700 })
+      const regenerationRoot = within(workspace.sessionRoot, 'outline/regeneration')
+      await assertNoLinkedPath(workspace.root, regenerationRoot)
+      await mkdir(regenerationRoot, { recursive: true, mode: 0o700 })
+      await writeFileAtomic(within(regenerationRoot, 'candidate-outline.json'), candidateRaw, { mode: 0o600, dirMode: 0o700 })
+      await writeFileAtomic(within(regenerationRoot, 'quality-report.json'), qualityRaw, { mode: 0o600, dirMode: 0o700 })
+      await writeFileAtomic(within(regenerationRoot, 'change-set.json'), changeSetRaw, { mode: 0o600, dirMode: 0o700 })
+      const replacement = await replaceOutlineDraft(workspace, request, candidate)
+      if (!replacement.ok) return { ok: false, error: { ...replacement.error, code: replacement.error.code === 'BID_OUTLINE_DRAFT_CONFLICT' ? 'BID_OUTLINE_DRAFT_CONFLICT' : 'BID_REGENERATE_FAILED' } }
+      return { ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } }
     } catch (error: unknown) {
       if (error instanceof BidOrchestratorError && error.code === 'BID_OUTLINE_FEEDBACK_REQUIRED') return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
       return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }

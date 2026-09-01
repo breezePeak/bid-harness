@@ -10,6 +10,10 @@ Status: implemented
 
 S4 和 S5 都不限制单个可写章节关联的 Requirement 或 Scoring 数量。两阶段继续校验目录树、映射 ID 的存在性和唯一性，以及 Requirement、Scoring 和 Compliance 的完整覆盖。
 
+## Superseded
+
+当前实现由 [Bid 持久化目录草稿与稳定评分响应点](2026-09-01-bid-persistent-outline-response-points.md) 取代：数量阈值属于 S4 生成质量，S5 只组合共享结构、共享覆盖与草稿一致性规则。本记录保留被取代方案及其取舍。
+
 ## Alternatives considered
 
 **保留 S4 的数量上限。** 不采用，因为映射数量不能证明章节是否适合写作，并会拒绝完整有效的目录。

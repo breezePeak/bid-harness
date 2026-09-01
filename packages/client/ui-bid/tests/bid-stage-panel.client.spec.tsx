@@ -2,10 +2,10 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { BidClientProjection } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
-import { apply, BidActionError } from '../src/client/index.ts'
+import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -46,6 +46,19 @@ function props(
     t,
     ...patch,
   } as unknown as BidStagePanelProps
+}
+
+function outlineDraft(outline: OutlineArtifact): OutlineDraftView {
+  return { schema_version: 1, scope: 'technical_bid', revision: 1, source_outline_sha256: 'a'.repeat(64), draft_outline_sha256: 'b'.repeat(64), outline }
+}
+
+function outlineStore(initial: OutlineDraftView) {
+  let current = initial
+  const apply = vi.fn(async (request: OutlineDraftMutationRequest) => {
+    current = { ...current, revision: current.revision + 1, draft_outline_sha256: String(current.revision + 1).padStart(64, '0'), outline: applyOutlineEdits(current.outline, request.operations) }
+    return current
+  })
+  return { apply, current: () => current }
 }
 
 describe('BidStagePanel', () => {
@@ -316,7 +329,8 @@ describe('BidStagePanel', () => {
 
   it('dispatches retry and confirmation without changing projected runtime', async () => {
     const retryStage = vi.fn(async () => {})
-    const confirmOutline = vi.fn(async (_operations: readonly unknown[]) => {})
+    const confirmOutline = vi.fn(async () => {})
+    const draft = outlineDraft({ schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     const retryProjection = projection({ allowedActions: ['retry_stage'] })
     const view = render(<BidStagePanel {...props(retryProjection, { retryStage, confirmOutline })} />)
 
@@ -328,9 +342,10 @@ describe('BidStagePanel', () => {
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     })
-    view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline })} />)
+    view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline, getOutlineDraft: async () => draft })} />)
+    await waitFor(() => { expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy() })
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
-    await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith([]) })
+    await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith({ expected_revision: 1, expected_draft_sha256: 'b'.repeat(64) }) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
   })
 
@@ -360,6 +375,13 @@ describe('BidStagePanel', () => {
             source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }],
           })),
         },
+        response_point_catalog: {
+          schema_version: 1, scope: 'technical_bid', scoring_sha256: 'a'.repeat(64), next_sequence: 3,
+          points: [
+            { id: 'RP-000001', scoring_id: 'SCORE-1', order: 1, text: '总体方案响应重点' },
+            { id: 'RP-000002', scoring_id: 'SCORE-2', order: 1, text: '实施方案响应重点' },
+          ],
+        },
       }),
     })} />)
 
@@ -378,8 +400,9 @@ describe('BidStagePanel', () => {
         { type: 'update_project', fields: { key_technical_points: ['安全架构', '兼容既有系统'] } },
         expect.objectContaining({
           type: 'update_scoring_item', scoring_id: 'SCORE-1', criterion: '总体方案完整、合理且可实施',
-          response_points: ['总体架构', '实施路径'],
         }),
+        { type: 'update_response_point', scoring_id: 'SCORE-1', response_point_id: 'RP-000001', text: '总体架构' },
+        { type: 'add_response_point', scoring_id: 'SCORE-1', order: 2, text: '实施路径' },
       ]))
     })
     confirmation.reject(new BidActionError('BID_INVALID_TENDER_ANALYSIS_EDIT', '修改无效', [{ code: 'EDIT_INVALID', message: '响应重点不能为空' }]))
@@ -388,18 +411,21 @@ describe('BidStagePanel', () => {
   })
 
   it('edits outline text and emits basic structural operations', async () => {
-    const confirmOutline = vi.fn(async (_operations: readonly unknown[]) => {})
+    const confirmOutline = vi.fn(async () => {})
+    const initial = outlineDraft({
+      schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
+        id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
+        must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      }],
+    })
+    const store = outlineStore(initial)
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline,
-      getOutlineForConfirmation: async () => ({
-        schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
-          id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
-          must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
-        }],
-      }),
+      getOutlineDraft: async () => initial,
+      applyOutlineDraftOperations: store.apply,
     })} />)
     const title = await screen.findByLabelText('SEC-1 标题')
     fireEvent.change(title, { target: { value: '更新标题' } })
@@ -407,22 +433,28 @@ describe('BidStagePanel', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]!)
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => {
-      expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
+      expect(store.apply.mock.calls.flatMap(call => call[0].operations)).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
         expect.objectContaining({ type: 'add_section' }),
         expect.objectContaining({ type: 'delete_section', section_id: 'SEC-1' }),
       ]))
+      expect(confirmOutline).toHaveBeenCalledWith({
+        expected_revision: store.current().revision,
+        expected_draft_sha256: store.current().draft_outline_sha256,
+      })
     })
   })
 
   it('shows separate outline acceptance and feedback-regeneration rows', async () => {
-    const regenerateOutline = vi.fn(async (_feedback: string) => {})
+    const regenerateOutline = vi.fn(async () => {})
+    const draft = outlineDraft({ schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),
       regenerateOutline,
+      getOutlineDraft: async () => draft,
     })} />)
 
     expect(screen.getByText('确认后将按当前目录开始章节编写')).toBeTruthy()
@@ -432,35 +464,49 @@ describe('BidStagePanel', () => {
     fireEvent.change(feedback, { target: { value: '  标书目录颗粒度太粗了  ' } })
     expect(regenerate).toHaveProperty('disabled', false)
     fireEvent.click(regenerate)
-    await waitFor(() => { expect(regenerateOutline).toHaveBeenCalledWith('标书目录颗粒度太粗了') })
+    await waitFor(() => { expect(regenerateOutline).toHaveBeenCalledWith({ feedback: '标书目录颗粒度太粗了', expected_revision: 1, expected_draft_sha256: 'b'.repeat(64) }) })
   })
 
   it('immediately previews hierarchy, order, and derived section numbers', async () => {
+    const initial = outlineDraft({
+      schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
+        id, parent_id: null, order: index + 1, level: 1, title: id, purpose: `${id} purpose`, writable: true,
+        must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      })),
+    })
+    const store = outlineStore(initial)
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),
-      getOutlineForConfirmation: async () => ({
-        schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
-          id, parent_id: null, order: index + 1, level: 1, title: id, purpose: `${id} purpose`, writable: true,
-          must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
-        })),
-      }),
+      getOutlineDraft: async () => initial,
+      applyOutlineDraftOperations: store.apply,
     })} />)
     await screen.findByLabelText('C 标题')
     expect(screen.getByLabelText('C 章节编号').textContent).toBe('3')
     fireEvent.click(screen.getAllByRole('button', { name: '上移' })[2]!)
-    expect(screen.getByLabelText('C 章节编号').textContent).toBe('2')
+    await waitFor(() => { expect(screen.getByLabelText('C 章节编号').textContent).toBe('2') })
     expect(screen.getByLabelText('B 章节编号').textContent).toBe('3')
     fireEvent.click(screen.getAllByRole('button', { name: '缩进' })[2]!)
-    expect(screen.getByLabelText('B 章节编号').textContent).toBe('2.1')
+    await waitFor(() => { expect(screen.getByLabelText('B 章节编号').textContent).toBe('2.1') })
     fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
-    expect(await screen.findByLabelText('tmp-1 章节编号')).toBeTruthy()
+    expect(await screen.findByLabelText('SEC-001 章节编号')).toBeTruthy()
   })
 })
 
 describe('ui-bid browser plugin', () => {
+  it('covers every Host S5 issue with the same browser repair action', () => {
+    expect(Object.keys(OUTLINE_CONFIRMATION_REPAIR_ACTIONS).sort()).toEqual(Object.keys(OUTLINE_CONFIRMATION_ISSUES).sort())
+    for (const [code, definition] of Object.entries(OUTLINE_CONFIRMATION_ISSUES)) {
+      expect(OUTLINE_CONFIRMATION_REPAIR_ACTIONS[code as keyof typeof OUTLINE_CONFIRMATION_REPAIR_ACTIONS]).toBe(definition.repair_action)
+      expect(definition.user_visible).toBe(true)
+      expect(typeof definition.user_editable).toBe('boolean')
+      expect(typeof definition.owner).toBe('string')
+      expect(typeof definition.repair_action).toBe('string')
+    }
+  })
+
   it('declares every client service read by its slot injections', async () => {
     const { inject } = await import('../src/client/index.ts')
     expect(inject).toContain('sessions')

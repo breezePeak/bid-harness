@@ -5,6 +5,7 @@ import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace, ManifestFile } from './index.ts'
 import { within } from './index.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import type {
   BidStage,
   StageArtifact,
@@ -380,7 +381,7 @@ export async function validateTenderAnalysis(
   if (stage !== 'tender_analysis') {
     reject(issues, 'TENDER_ANALYSIS_STAGE_INVALID', 'The tender-analysis validator only accepts tender_analysis.')
   }
-  const expectedPaths = Object.keys(TENDER_ANALYSIS_ARTIFACTS)
+  const expectedPaths = [...Object.keys(TENDER_ANALYSIS_ARTIFACTS), 'analysis/scoring-response-points.json']
   for (const path of expectedPaths) {
     const matches = artifacts.filter(artifact => artifact.stage === 'tender_analysis' && artifact.path === path)
     if (matches.length !== 1) {
@@ -422,6 +423,20 @@ export async function validateTenderAnalysis(
   validateCoverage(parsed.project, manifest, issues)
   validateCompleteness(parsed, await readTenderCorpusText(workspace, manifest), issues)
   validateTechnicalScoring(parsed.scoring, issues)
+  try {
+    const catalogPath = within(workspace.sessionRoot, 'analysis/scoring-response-points.json')
+    await assertNoLinkedPath(workspace.root, catalogPath)
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(catalogPath, 'utf8')))
+    if (!catalogMatchesScoring(catalog, parsed.scoring)) {
+      reject(issues, 'TENDER_ANALYSIS_RESPONSE_POINT_CATALOG_INVALID', 'The response-point catalog must exactly match scoring.json.', 'analysis/scoring-response-points.json')
+    }
+    for (const item of parsed.scoring.scoring_items) {
+      const texts = catalog.points.filter(point => point.scoring_id === item.id).map(point => point.text)
+      if (new Set(texts).size !== texts.length) reject(issues, 'TENDER_ANALYSIS_RESPONSE_POINT_TEXT_DUPLICATE', 'Response-point text must be unique within one scoring item.', 'analysis/scoring-response-points.json')
+    }
+  } catch {
+    reject(issues, 'TENDER_ANALYSIS_RESPONSE_POINT_CATALOG_INVALID', 'The response-point catalog is missing or invalid.', 'analysis/scoring-response-points.json')
+  }
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
     ['analysis/scoring.json', parsed.scoring.scoring_items],

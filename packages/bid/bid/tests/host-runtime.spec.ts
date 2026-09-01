@@ -210,7 +210,7 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   }
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-    schema_version: 4,
+    schema_version: 5,
     source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
     framework_mappings: [],
     reference_bid_mappings: [],
@@ -222,7 +222,7 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
       missing_topics,
       writing_dimensions: ['技术响应'],
     })),
-    response_point_mappings: scoring.scoring_items.flatMap(item => item.response_points.map(response_point => ({ scoring_id: item.id, response_point, materials, external_materials: [], missing_topics, writing_dimensions: ['技术响应'] }))),
+    response_point_mappings: scoring.scoring_items.flatMap((item, itemIndex) => item.response_points.map((response_point, pointIndex) => ({ response_point_id: `RP-${String(scoring.scoring_items.slice(0, itemIndex).reduce((count, previous) => count + previous.response_points.length, 0) + pointIndex + 1).padStart(6, '0')}`, scoring_id: item.id, response_point, materials, external_materials: [], missing_topics, writing_dimensions: ['技术响应'] }))),
     scoring_mappings: scoring.scoring_items.map(item => ({
       scoring_id: item.id,
       materials,
@@ -237,11 +237,12 @@ async function writeOutlineArtifact(cwd: string, sessionId: string): Promise<voi
   const scoring = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')) as { scoring_items: Array<{ id: string; response_points: string[] }> }
   const scoring_response_points = scoring.scoring_items.flatMap(item =>
     item.response_points.map(response_point => ({ scoring_id: item.id, response_point })))
+  const scoring_response_point_ids = scoring_response_points.map((_, index) => `RP-${String(index + 1).padStart(6, '0')}`)
   await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify({
     schema_version: 2, scope: 'technical_bid', document_title: '测试项目技术投标文件', global_compliance_ids: ['COMP-1'], sections: [{
       id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付要求。', writable: true,
-      must_answer: ['说明交付计划和保障措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points, suggested_tables: [], suggested_figures: [], writing_notes: [],
+      must_answer: ['说明交付计划和保障措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids, scoring_response_points, suggested_tables: [], suggested_figures: [], writing_notes: [],
     }],
   }, null, 2)}\n`, 'utf8')
 }
@@ -255,11 +256,24 @@ async function writeOutlineQualityReport(cwd: string, sessionId: string, section
     checked_requirement_ids: ['REQ-1'],
     checked_scoring_ids: ['SCORE-1'],
     checked_source_mapping_ids: [],
-    checked_scoring_response_points: scoring.scoring_items.flatMap(item =>
-      item.response_points.map(response_point => ({ scoring_id: item.id, response_point }))),
+    checked_scoring_response_point_ids: scoring.scoring_items.flatMap(item => item.response_points).map((_, index) => `RP-${String(index + 1).padStart(6, '0')}`),
     reviewed_section_ids: sectionIds,
     issues: [],
   }, null, 2)}\n`, 'utf8')
+  try { await readFile(join(workspace.sessionRoot, 'outline/draft.json'), 'utf8'); await writeOutlineRegenerationChangeSet(cwd, sessionId) } catch { /* A normal S4 run has no S5 draft. */ }
+}
+
+async function writeOutlineRegenerationChangeSet(cwd: string, sessionId: string): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const draft = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/draft.json'), 'utf8')) as { revision: number; draft_outline_sha256: string }
+  await mkdir(join(workspace.sessionRoot, 'outline/regeneration'), { recursive: true })
+  await writeFile(join(workspace.sessionRoot, 'outline/regeneration/change-set.json'), `${JSON.stringify({ schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256, changes: [] }, null, 2)}\n`)
+}
+
+async function writeOutlineFromDraft(cwd: string, sessionId: string): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const draft = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/draft.json'), 'utf8')) as { outline: unknown }
+  await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify(draft.outline, null, 2)}\n`)
 }
 
 async function writeChapterExecutionPlan(cwd: string, sessionId: string): Promise<void> {
@@ -393,6 +407,7 @@ describe('Bid Host runtime composition', () => {
     const { ctx } = await harness()
     const { agent, followup } = attach(ctx, 'bid', root)
     const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
+    const referenceBytes = Buffer.from('# 参考资料\n\n项目实施经验。', 'utf8')
 
     const result = await ctx.bid.uploadFiles(agent.session, [{
       name: '招标要求.md',
@@ -404,8 +419,8 @@ describe('Bid Host runtime composition', () => {
       name: '技术资料.md',
       role: 'reference',
       mediaType: 'text/markdown',
-      size: bytes.byteLength,
-      data: bytes.toString('base64'),
+      size: referenceBytes.byteLength,
+      data: referenceBytes.toString('base64'),
     }])
 
     expect(result).toEqual({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
@@ -420,9 +435,12 @@ describe('Bid Host runtime composition', () => {
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'tender_analysis')).toBe(false)
     const analysis = await ctx.bid.getTenderAnalysisForConfirmation(agent.session)
     const scoringId = analysis.scoring.scoring_items[0]!.id
+    const responsePointId = analysis.response_point_catalog.points[0]!.id
     await expect(ctx.bid.confirmTenderAnalysis(agent.session, [
       { type: 'update_project', fields: { key_technical_points: ['重点说明按期交付保障'] } },
-      { type: 'update_scoring_item', scoring_id: scoringId, criterion: '重点评价交付保障', response_points: ['交付计划', '进度保障'] },
+      { type: 'update_scoring_item', scoring_id: scoringId, criterion: '重点评价交付保障' },
+      { type: 'update_response_point', scoring_id: scoringId, response_point_id: responsePointId, text: '交付计划' },
+      { type: 'add_response_point', scoring_id: scoringId, order: 2, text: '进度保障' },
     ])).resolves.toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
     expect(followup.mock.calls.map(call => promptText(call[0])).find(prompt => prompt.includes('当前阶段：outline_generation')))
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
@@ -578,6 +596,7 @@ describe('Bid Host runtime composition', () => {
       ok: true,
       value: {
         stage: 'outline_generation', status: 'failed',
+        // oxlint-disable-next-line typescript/no-unsafe-assignment -- Vitest asymmetric matcher is intentionally untyped.
         failureReason: expect.stringContaining('OUTLINE_GENERATION_INPUT_INVALID'),
       },
     })
@@ -709,6 +728,7 @@ describe('Bid Host runtime composition', () => {
     ])
     expect(result).toMatchObject({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
     expect(result.ok && result.files).toEqual(expect.arrayContaining([
+      // oxlint-disable-next-line typescript/no-unsafe-assignment -- Vitest asymmetric matcher is intentionally untyped.
       expect.objectContaining({ name: '损坏.txt', status: 'failed', error: expect.objectContaining({ code: 'BID_FILE_PARSE_FAILED' }) }),
       expect.objectContaining({ name: '有效但同批.txt', status: 'completed' }),
     ]))
@@ -743,21 +763,47 @@ describe('Bid Host runtime composition', () => {
     const { ctx } = await harness()
     const { agent } = attach(ctx, 'bid', root)
     const bytes = Buffer.from('技术标资料', 'utf8')
+    const referenceBytes = Buffer.from('参考技术资料', 'utf8')
     await ctx.bid.uploadFiles(agent.session, [
       { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
-      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: referenceBytes.byteLength, data: referenceBytes.toString('base64') },
     ])
     await ctx.bid.confirmTenderAnalysis(agent.session, [])
-    const draft = await ctx.bid.getOutlineForConfirmation(agent.session)
-    const result = await ctx.bid.confirmOutline(agent.session, [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }])
+    const original = await ctx.bid.getOutlineDraft(agent.session)
+    expect(original.revision).toBe(1)
+    const unchanged = await ctx.bid.applyOutlineDraftOperations(agent.session, {
+      expected_revision: original.revision,
+      expected_draft_sha256: original.draft_outline_sha256,
+      operations: [],
+    })
+    expect(unchanged).toEqual({ ok: true, value: original })
+    const mutation = await ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: original.revision, expected_draft_sha256: original.draft_outline_sha256, operations: [{ type: 'update_section', section_id: 'SEC-1', title: '已确认交付方案' }] })
+    if (!mutation.ok) throw new Error(mutation.error.message)
+    expect(mutation.value.revision).toBe(2)
+    expect(mutation.value.draft_outline_sha256).not.toBe(original.draft_outline_sha256)
+    await expect(ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: original.revision, expected_draft_sha256: original.draft_outline_sha256, operations: [{ type: 'update_section', section_id: 'SEC-1', title: '陈旧覆盖' }] }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: { revision: 2 } } })
+    const addition = await ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: mutation.value.revision, expected_draft_sha256: mutation.value.draft_outline_sha256, operations: [{ type: 'add_section', parent_id: null, order: 2, writable: true, title: '补充说明', purpose: '补充说明。', must_answer: ['说明补充事项。'] }] })
+    if (!addition.ok) throw new Error(addition.error.message)
+    const added = addition.value.outline.sections.find(section => section.title === '补充说明')
+    expect(added?.id).toMatch(/^SEC-\d{3}$/u)
+    if (added === undefined) throw new Error('Host did not return the added section')
+    const continued = await ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: addition.value.revision, expected_draft_sha256: addition.value.draft_outline_sha256, operations: [{ type: 'update_section', section_id: added.id, title: '补充事项' }, { type: 'move_section', section_id: added.id, parent_id: null, order: 1 }, { type: 'delete_section', section_id: added.id }] })
+    if (!continued.ok) throw new Error(continued.error.message)
+    const draft = await ctx.bid.getOutlineDraft(agent.session)
+    expect(draft).toEqual(continued.value)
+    const result = await ctx.bid.confirmOutline(agent.session, {
+      expected_revision: draft.revision,
+      expected_draft_sha256: draft.draft_outline_sha256,
+    })
     expect(result).toEqual({ ok: true, value: { stage: 'book_review', status: 'waiting_user' } })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)
-    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(draft)
+    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).not.toEqual(draft.outline)
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
       .toMatchObject({ sections: [{ id: 'SEC-1', title: '已确认交付方案' }] })
     const confirmation = Bid.parseOutlineConfirmationArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmation.json'), 'utf8')))
     expect(confirmation).toMatchObject({ scope: 'technical_bid', decision: 'confirmed' })
-    expect(confirmation.source_outline_sha256).toBe(Bid.outlineArtifactSha256(draft))
+    expect(confirmation.source_outline_sha256).toBe(draft.source_outline_sha256)
     expect(confirmation.confirmed_outline_sha256).toBe(Bid.outlineArtifactSha256(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8'))))
     expect(agent.session.events.find(event => event.type === 'bid.stage.completed' && event.data.stage === 'outline_confirmation'))
       .toMatchObject({ data: { artifacts: [
@@ -771,6 +817,7 @@ describe('Bid Host runtime composition', () => {
       review: { review_mode: 'framework_only', quality_gate: 'not_evaluated', issues: [] },
     })
     await expect(ctx.bid.getReviewChapter(agent.session, 'SEC-1')).resolves.toMatchObject({
+      // oxlint-disable-next-line typescript/no-unsafe-assignment -- Vitest asymmetric matcher is intentionally untyped.
       section_id: 'SEC-1', writable: true, markdown: expect.stringContaining('交付计划'),
     })
     await expect(ctx.bid.getReviewChapter(agent.session, 'missing')).rejects.toThrow('BID_REVIEW_SECTION_UNKNOWN')
@@ -797,27 +844,36 @@ describe('Bid Host runtime composition', () => {
       if (prompt.includes('当前阶段：tender_analysis')) await writeTenderAnalysisArtifacts(cwd, sessionId)
       else if (prompt.includes('当前阶段：evidence_mapping')) await writeEvidenceMappingArtifact(cwd, sessionId)
       else if (prompt.includes('Blueprint Quality Review')) await writeOutlineQualityReport(cwd, sessionId)
-      else if (prompt.includes('当前阶段：outline_generation')) await writeOutlineArtifact(cwd, sessionId)
+      else if (prompt.includes('当前阶段：outline_generation')) {
+        if (prompt.includes('当前基线 revision=') || prompt.includes('这是基于 outline/draft.json revision=')) {
+          await writeOutlineFromDraft(cwd, sessionId)
+          await writeOutlineRegenerationChangeSet(cwd, sessionId)
+        } else await writeOutlineArtifact(cwd, sessionId)
+      }
     })
     const bytes = Buffer.from('技术标资料', 'utf8')
+    const referenceBytes = Buffer.from('参考技术资料', 'utf8')
     await ctx.bid.uploadFiles(agent.session, [
       { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
-      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: referenceBytes.byteLength, data: referenceBytes.toString('base64') },
     ])
     await ctx.bid.confirmTenderAnalysis(agent.session, [])
 
-    await expect(ctx.bid.regenerateOutline(agent.session, '   ')).resolves.toMatchObject({
+    const initial = await ctx.bid.getOutlineDraft(agent.session)
+    const manual = await ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: initial.revision, expected_draft_sha256: initial.draft_outline_sha256, operations: [{ type: 'update_section', section_id: 'SEC-1', title: '已手工确认的交付方案' }] })
+    if (!manual.ok) throw new Error(manual.error.message)
+    const draft = manual.value
+    await expect(ctx.bid.regenerateOutline(agent.session, { feedback: '   ', expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256 })).resolves.toMatchObject({
       ok: false,
       error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED' },
     })
-    await expect(ctx.bid.regenerateOutline(agent.session, '  拆细实施章节  ')).resolves.toEqual({
+    await expect(ctx.bid.regenerateOutline(agent.session, { feedback: '  拆细实施章节  ', expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256 })).resolves.toEqual({
       ok: true,
       value: { stage: 'outline_confirmation', status: 'waiting_user' },
     })
-    expect(agent.session.events.at(-4)).toMatchObject({
-      type: 'bid.user_confirmation.received',
-      data: { stage: 'outline_confirmation', confirmed: false, feedback: '拆细实施章节' },
-    })
+    expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.received' && event.data.stage === 'outline_confirmation' && !event.data.confirmed)).toBe(false)
+    expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE)).toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
+    expect((await ctx.bid.getOutlineDraft(agent.session)).outline.sections[0]?.title).toBe('已手工确认的交付方案')
     expect(prompts.filter(prompt => prompt.includes('<outline-revision-feedback>'))).toEqual([
       expect.stringContaining('拆细实施章节'),
     ])
@@ -828,12 +884,14 @@ describe('Bid Host runtime composition', () => {
     const { ctx } = await harness()
     const { agent } = attach(ctx, 'bid', root)
     const bytes = Buffer.from('技术标资料', 'utf8')
+    const referenceBytes = Buffer.from('参考技术资料', 'utf8')
     await ctx.bid.uploadFiles(agent.session, [
       { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
-      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: referenceBytes.byteLength, data: referenceBytes.toString('base64') },
     ])
     await ctx.bid.confirmTenderAnalysis(agent.session, [])
-    await expect(ctx.bid.confirmOutline(agent.session, [{ type: 'delete_section', section_id: 'SEC-1' }]))
+    const draft = await ctx.bid.getOutlineDraft(agent.session)
+    await expect(ctx.bid.applyOutlineDraftOperations(agent.session, { expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256, operations: [{ type: 'delete_section', section_id: 'SEC-1' }] }))
       .resolves.toMatchObject({ ok: false, error: { code: 'BID_INVALID_USER_OUTLINE' } })
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })

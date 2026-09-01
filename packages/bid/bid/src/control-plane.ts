@@ -22,6 +22,7 @@ export type {
   BidFileIntakeFailure,
   BidFileIntakeResult,
   BidOutlineConfirmationResult,
+  BidOutlineRegenerationResult,
   BidPromptAdmission,
   BidRetryErrorCode,
   BidRetryFailure,
@@ -46,6 +47,10 @@ export { BID_DOCUMENT_ROLES, isBidDocumentRole } from './control-plane-contract.
 export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-browser.ts'
 export type { OutlineEditOperation, OutlineViewSection } from './outline-confirmation-browser.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
+export type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+export type { OutlineDraftMutationRequest, OutlineDraftIdentityRequest, OutlineDraftMutationResult } from './outline-draft-store.ts'
+export { OUTLINE_CONFIRMATION_ISSUES } from './outline-confirmation-issues.ts'
+export type { OutlineConfirmationIssueCode, OutlineConfirmationRepairAction } from './outline-confirmation-issues.ts'
 export { applyTenderAnalysisEdits } from './tender-analysis-confirmation.ts'
 export type { TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from './tender-analysis-confirmation.ts'
 export type { TenderProjectArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
