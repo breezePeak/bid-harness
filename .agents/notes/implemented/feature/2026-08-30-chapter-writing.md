@@ -8,13 +8,13 @@ Status: implemented
 
 ## Decision
 
-`chapter_writing` 从 `outline/confirmed-outline.json` 按父节点和顺序确定工作清单，并对每个 `writable` 章节顺序调用现有 live DSH Agent。每章任务携带紧凑项目上下文、当前 Blueprint、关联 Requirement、Scoring、Compliance，以及按关联映射筛选并去重的 S3 本地 Evidence、外部 Evidence 和缺失主题。Agent 只可写当前 Markdown 正文和 Metadata sidecar；仅 Executor 写入 `chapters/manifest.json`。
+`chapter_writing` 从 `outline/confirmed-outline.json` 按父节点和顺序确定工作清单。主 Agent 只生成章节关系计划，Host 按强依赖 DAG 和并发上限启动每章独立 Writer Child；每章任务携带紧凑项目上下文、当前 Blueprint、关联 Requirement、Scoring、Compliance，以及按关联映射筛选并去重的 S3 本地 Evidence、外部 Evidence 和缺失主题。Writer 通过结构化输出返回候选，只有 Host 写入章节正文、Metadata sidecar 和 `chapters/manifest.json`。
 
-S6 允许 `grep`、`read`、`write`、`web_search` 和 `web_fetch`。Agent 先消费现有资料，再为当前章节执行本地补搜；只有仍缺少公开技术知识时才执行 Search-to-Fetch。Executor 在分发前确认 Web 工具已由 Bid Preset 注册，并将本章新增外部来源与当前章节 Session 事件和进程内规范 Tool 结果关联；搜索必须先返回该 URL，随后成功获取非空原文，Metadata 中的 `retrieved_at` 必须等于 Fetch 结果记录时间。搜索摘要、失败读取及其他章节调用不能进入本章新增外部 Evidence。企业案例、资质、人员、产品实有参数、既有能力和内部流程仍只能由本地 Evidence 证明，缺失项保留在 `unresolved_topics`。
+S6 Stage Policy 允许 `grep`、`read`、`write`、`web_search` 和 `web_fetch`，Executor 按角色收窄为主 Agent 的 `read`、`write`、Writer 的 `grep`、`read`、`web_search`、`web_fetch` 和 Reviewer 的空工具集。Writer 先消费现有资料，再按当前章节需要执行本地补搜；只有仍缺少公开技术知识时才执行 Search-to-Fetch。Executor 在分发前确认 Web 工具已由 Bid Preset 注册，并将本章新增外部来源与 Writer Child Session 事件和进程内规范 Tool 结果关联；搜索必须先返回该 URL，随后成功获取非空原文，Metadata 中的 `retrieved_at` 必须等于 Fetch 结果记录时间。Host 将验证后的来源追加到 S3 来源账本，并持久化实际交给 Writer 的正文快照；搜索摘要、失败读取及其他章节调用不能进入本章新增外部 Evidence。企业案例、资质、人员、产品实有参数、既有能力和内部流程仍只能由本地 Evidence 证明，缺失项保留在 `unresolved_topics`。
 
-Chapter Metadata 与 Manifest 使用 Schema v2，分别保存 `evidence_used`、`additional_materials`、`external_evidence_used`、`additional_external_materials` 和 `unresolved_topics`。前两类区分 S3 已映射与 S6 新发现的本地 Evidence，后两类区分 S3 已映射与 S6 当前章节新发现的外部 Evidence；规范化 URL 不得跨外部数组重复，本地 Chunk 不得跨本地数组重复。
+Chapter Metadata 与 Manifest 使用 Schema v4，分别保存 `evidence_used`、`additional_materials`、`external_evidence_used`、`additional_external_materials` 和 `unresolved_topics`。前两类区分 S3 已映射与 S6 新发现的本地 Evidence，后两类区分 S3 已映射与 S6 当前章节新发现的外部 Evidence；规范化 URL 不得跨外部数组重复，本地 Chunk 不得跨本地数组重复。
 
-S6 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，检查遍历路径、章节映射、must-answer 覆盖、本地 Evidence chunk 与行范围，并要求 `evidence_used` 和 `external_evidence_used` 分别属于当前章节相关的 S3 Requirement、Scoring Mapping 或 research topic。重试 S6 时先删除旧 `chapters/` 树。
+S6 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，检查遍历路径、章节映射、must-answer 覆盖、本地 Evidence chunk 与行范围，并要求 `evidence_used` 和 `external_evidence_used` 分别属于当前章节相关的 S3 Requirement、Scoring Mapping 或 research topic。每个 `additional_external_materials` 条目还必须匹配同章 Writer 尝试的持久 Search-to-Fetch 来源和正文哈希。重试 S6 时先删除旧 `chapters/` 树。
 
 ## Alternatives considered
 
@@ -28,4 +28,4 @@ S6 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可�
 
 ## Consequences
 
-S6 只有在完整 Manifest 通过校验后才进入 `book_review/pending`。Metadata 是可追溯执行记录而非技术标正文，后续审核和 DOCX 阶段可以区分四类证据并将每个已确认章节映射到唯一 Markdown 文件。顺序执行保证章节级工具调用归属、工作区写入和失败定位可复现，但放弃并行生成带来的吞吐量。
+S6 只有在完整 Manifest 通过校验后才进入 `book_review/pending`。Metadata 是可追溯执行记录而非技术标正文，后续审核和 DOCX 阶段可以区分四类证据并将每个已确认章节映射到唯一 Markdown 文件。无强依赖章节在 Host 并发上限内并行；强依赖章节只接收已接受前置章节的有界 handoff。

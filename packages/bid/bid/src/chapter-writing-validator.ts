@@ -12,7 +12,12 @@ import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scori
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
+import {
+  normalizeWebEvidenceUrl,
+  parseWebEvidenceSourcesArtifact,
+  webEvidenceContentSha256,
+  type WebEvidenceSource,
+} from './web-evidence-source-artifacts.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -62,6 +67,51 @@ function localIdentity(material: EvidenceMaterial): string {
 
 function externalIdentity(material: ExternalEvidenceMaterial): string {
   return JSON.stringify({ ...material, url: normalizeWebEvidenceUrl(material.url) })
+}
+
+async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEvidenceSource): Promise<boolean> {
+  try {
+    const path = within(workspace.sessionRoot, source.snapshot_path)
+    await assertNoLinkedPath(workspace.root, path)
+    if (!(await lstat(path)).isFile()) return false
+    return webEvidenceContentSha256(await readFile(path, 'utf8')) === source.content_sha256
+  } catch {
+    return false
+  }
+}
+
+async function validateAdditionalExternalMaterials(
+  workspace: BidWorkspace,
+  chapters: ReturnType<typeof parseChapterWritingManifest>,
+  executionLog: ReturnType<typeof parseChapterExecutionLog>,
+  issues: StageValidationIssue[],
+): Promise<void> {
+  if (chapters.chapters.every(chapter => chapter.additional_external_materials.length === 0)) return
+  const raw = await readJson(workspace, 'analysis/web-evidence-sources.json', issues)
+  if (raw === undefined) return
+  let sources: ReturnType<typeof parseWebEvidenceSourcesArtifact>['sources']
+  try {
+    sources = parseWebEvidenceSourcesArtifact(raw).sources
+  } catch {
+    reject(issues, 'CHAPTER_WRITING_WEB_SOURCE_LEDGER_INVALID', 'The Host Web source ledger has invalid fields.', 'analysis/web-evidence-sources.json')
+    return
+  }
+  for (const chapter of chapters.chapters) {
+    const writerAttempts = new Set((executionLog.sections.find(section => section.section_id === chapter.section_id)?.attempts ?? [])
+      .filter(attempt => attempt.role === 'writer')
+      .map(attempt => `${attempt.child_session_id}\u0000${attempt.attempt}`))
+    for (const material of chapter.additional_external_materials) {
+      const normalized = normalizeWebEvidenceUrl(material.url)
+      const source = sources.find(candidate => candidate.chapter_context?.section_id === chapter.section_id
+        && writerAttempts.has(`${candidate.chapter_context.child_session_id}\u0000${candidate.chapter_context.writer_attempt}`)
+        && candidate.fetched_at === material.retrieved_at
+        && (normalizeWebEvidenceUrl(candidate.requested_url) === normalized
+          || normalizeWebEvidenceUrl(candidate.final_url) === normalized))
+      if (source === undefined || !(await webSourceSnapshotValid(workspace, source))) {
+        reject(issues, 'CHAPTER_WRITING_WEB_SOURCE_UNVERIFIED', 'S6 additional external material must match a durable Chapter Writer search-to-fetch snapshot.', 'analysis/web-evidence-sources.json')
+      }
+    }
+  }
 }
 
 /**
@@ -241,5 +291,6 @@ export async function validateChapterWriting(
   await Promise.all(chapters.chapters.flatMap(chapter =>
     [...chapter.evidence_used, ...chapter.additional_materials]
       .map(material => validateMaterial(workspace, bidManifest, material, issues))))
+  await validateAdditionalExternalMaterials(workspace, chapters, executionLog, issues)
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

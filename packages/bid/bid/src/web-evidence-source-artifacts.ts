@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
-/** Version of the Host-owned S3 Web evidence source ledger. */
+/** Version of the Host-owned Bid Web evidence source ledger. */
 export const WEB_EVIDENCE_SOURCES_SCHEMA_VERSION = 1 as const
 
 const httpUrl = z.url().refine(value => normalizeWebEvidenceUrl(value) !== undefined, {
@@ -24,6 +24,11 @@ const sourceSchema = z.object({
   fetched_at: z.iso.datetime({ offset: true }),
   content_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   snapshot_path: z.string().regex(/^analysis\/web-sources\/WEB-[a-f0-9]{16}\.md$/u),
+  chapter_context: z.object({
+    section_id: z.string().min(1),
+    child_session_id: z.string().min(1),
+    writer_attempt: z.number().int().positive(),
+  }).strict().optional(),
 }).strict().superRefine((source, context) => {
   if (normalizeWebEvidenceUrl(source.discovered_url) !== normalizeWebEvidenceUrl(source.requested_url)) {
     context.addIssue({ code: 'custom', message: 'Fetched URL must be discovered by its search call' })
@@ -45,15 +50,16 @@ const ledgerSchema = z.object({
   const fetchCallIds = new Set<string>()
   for (const [index, source] of ledger.sources.entries()) {
     if (sourceIds.has(source.source_id)) context.addIssue({ code: 'custom', path: ['sources', index, 'source_id'], message: 'Source id must be unique' })
-    if (fetchCallIds.has(source.fetch_call_id)) context.addIssue({ code: 'custom', path: ['sources', index, 'fetch_call_id'], message: 'Fetch call id must be unique' })
+    const fetchIdentity = `${source.chapter_context?.child_session_id ?? 'evidence_mapping'}\u0000${source.fetch_call_id}`
+    if (fetchCallIds.has(fetchIdentity)) context.addIssue({ code: 'custom', path: ['sources', index, 'fetch_call_id'], message: 'Fetch call id must be unique within its Agent Session' })
     sourceIds.add(source.source_id)
-    fetchCallIds.add(source.fetch_call_id)
+    fetchCallIds.add(fetchIdentity)
   }
 })
 
-/** One verified search-to-fetch source recorded by the S3 Host. */
+/** One verified search-to-fetch source recorded by the Bid Host. */
 export type WebEvidenceSource = z.infer<typeof sourceSchema>
-/** Host-owned ledger of the current S3 attempt's verified Web sources. */
+/** S3-owned ledger that also retains verified S6 Chapter Writer sources. */
 export type WebEvidenceSourcesArtifact = z.infer<typeof ledgerSchema>
 
 /**

@@ -54,7 +54,11 @@ import type { OutlineArtifact, OutlineSection } from './outline-generation-artif
 import { catalogMatchesScoring, parseScoringResponsePointCatalog, type ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
+import {
+  normalizeWebEvidenceUrl,
+  parseWebEvidenceSourcesArtifact,
+  webEvidenceSourceId,
+} from './web-evidence-source-artifacts.ts'
 
 const PLAN_PATH = 'chapters/execution-plan.json'
 const LOG_PATH = 'chapters/execution-log.json'
@@ -506,6 +510,48 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
   return JSON.parse(await readFile(target, 'utf8'))
 }
 
+async function persistChapterWebSnapshots(
+  workspace: BidWorkspace,
+  sectionId: string,
+  childSessionId: string,
+  writerAttempt: number,
+  snapshots: readonly EvidenceMappingWebSnapshot[],
+): Promise<void> {
+  if (snapshots.length === 0) return
+  const ledgerPath = join(workspace.sessionRoot, 'analysis/web-evidence-sources.json')
+  const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  const sources = snapshots.map((snapshot) => {
+    const sourceId = webEvidenceSourceId(
+      `${childSessionId}\u0000${snapshot.source.fetch_call_id}`,
+      snapshot.source.final_url,
+      snapshot.source.content_sha256,
+    )
+    return {
+      ...snapshot.source,
+      source_id: sourceId,
+      snapshot_path: `analysis/web-sources/${sourceId}.md`,
+      chapter_context: {
+        section_id: sectionId,
+        child_session_id: childSessionId,
+        writer_attempt: writerAttempt,
+      },
+    }
+  })
+  const updated = parseWebEvidenceSourcesArtifact({
+    schema_version: ledger.schema_version,
+    stage: ledger.stage,
+    sources: [...ledger.sources, ...sources],
+  })
+  for (const [index, snapshot] of snapshots.entries()) {
+    const source = sources[index]
+    if (source === undefined) throw new Error('Bid chapter writing lost a Web source while persisting it')
+    const absolute = join(workspace.sessionRoot, ...source.snapshot_path.split('/'))
+    await assertNoLinkedPath(workspace.root, absolute)
+    await writeFileAtomic(absolute, snapshot.content, { mode: 0o600, dirMode: 0o700 })
+  }
+  await writeFileAtomic(ledgerPath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+}
+
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
@@ -867,6 +913,15 @@ export async function executeChapterWriting(
     return logWrites
   }
   await persistLog()
+  let webWrites = Promise.resolve()
+  const persistWebSnapshots = (
+    sectionId: string, childSessionId: string, writerAttempt: number, snapshots: readonly EvidenceMappingWebSnapshot[],
+  ): Promise<void> => {
+    webWrites = webWrites.then(() => persistChapterWebSnapshots(
+      workspace, sectionId, childSessionId, writerAttempt, snapshots,
+    ))
+    return webWrites
+  }
 
   const capturedByChild = new Map<string, Map<string, EvidenceMappingCapturedWebResult>>()
   const liftChildReadGuard = tools.guard(exec => chapterReadGuard(workspace, agent.id, exec))
@@ -935,7 +990,9 @@ export async function executeChapterWriting(
           latestStopReason = result.stopReason
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
           if (run.localAgent !== undefined) {
-            sectionSnapshots.push(...buildEvidenceMappingWebSnapshots(collectEvidenceMappingWebObservations(run.localAgent, -1, captured)))
+            const snapshots = buildEvidenceMappingWebSnapshots(collectEvidenceMappingWebObservations(run.localAgent, -1, captured))
+            sectionSnapshots.push(...snapshots)
+            await persistWebSnapshots(sectionId, String(run.id), attempt + 1, snapshots)
           }
           if (result.stopReason !== 'completed') {
             issues.push({ code: 'CHAPTER_SUBAGENT_STOP_REASON_INVALID', message: `Chapter Subagent 未正常完成：${result.stopReason}。` })
@@ -1079,7 +1136,7 @@ export async function executeChapterWriting(
   } finally {
     liftObserver()
     liftChildReadGuard()
-    await logWrites
+    await Promise.all([logWrites, webWrites])
   }
 
   const entries = worklist.map((section) => {

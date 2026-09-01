@@ -17,6 +17,7 @@ import {
   createScoringResponsePointCatalog,
   parseChapterExecutionLog,
   parseChapterWritingManifest,
+  parseWebEvidenceSourcesArtifact,
 } from '@deepseek-ai/dsh-bid'
 
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
@@ -62,7 +63,10 @@ function emptyHandoff(section_id: string) {
   }
 }
 
-function candidateFrom(request: SubagentStartRequest, valid = true) {
+const fetchedAt = '2026-09-01T00:00:00.000Z'
+const fetchedUrl = 'https://official.example/standard'
+
+function candidateFrom(request: SubagentStartRequest, valid = true, withWebEvidence = false) {
   if (promptText(request).includes('Writer Candidate：')) return reviewFrom(request)
   const line = promptText(request).split('\n').find(value => value.startsWith('Current Chapter Blueprint：'))
   if (line === undefined) throw new Error('missing blueprint')
@@ -84,7 +88,12 @@ function candidateFrom(request: SubagentStartRequest, valid = true) {
       assigned_source_mapping_ids: section.source_mapping_ids,
       source_mapping_usage: [],
       source_mapping_ids_used: [],
-      evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
+      evidence_used: [], additional_materials: [], external_evidence_used: [],
+      additional_external_materials: withWebEvidence ? [{
+        title: '官方标准', url: fetchedUrl, publisher: '官方机构', retrieved_at: fetchedAt,
+        retrieval_method: 'web_search', usage: 'reference', summary: '官方正文摘要', supports: '公开技术要求',
+      }] : [],
+      unresolved_topics: [],
       handoff: emptyHandoff(section.id),
     },
   }
@@ -128,6 +137,7 @@ function fixtureAgent(
   automatic = true,
   validCandidate: (attempt: number, request: SubagentStartRequest) => boolean = () => true,
   resultForAttempt?: (attempt: number, request: SubagentStartRequest) => SubagentResult,
+  webResearch = false,
 ) {
   let planPending = false
   const followup = vi.fn((_message: unknown) => { planPending = true })
@@ -152,6 +162,10 @@ function fixtureAgent(
       maxActive = Math.max(maxActive, active)
       const currentAttempt = ++attempt
       const id = SessionId(`child-${currentAttempt}`)
+      const localAgent = {
+        id,
+        session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] as unknown[] },
+      } as unknown as Agent
       let settle!: () => void
       let settled = false
       const result = new Promise<SubagentResult>((resolve) => {
@@ -159,8 +173,28 @@ function fixtureAgent(
           if (settled) return
           settled = true
           active--
+          if (webResearch && currentAttempt === 1) {
+            const searchResult = {
+              content: [{ type: 'text', text: 'Search result' }], isError: false,
+              value: { sources: [{ url: fetchedUrl }], truncated: false },
+            }
+            const fetchResult = {
+              content: [{ type: 'text', text: `Fetched ${fetchedUrl} (HTTP 200)\n\n官方正文` }], isError: false,
+              value: { url: fetchedUrl, statusCode: 200, body: { kind: 'text', content: '官方正文' }, truncated: false },
+              meta: { truncated: false },
+            }
+            ;(localAgent.session.events as unknown[]).push(
+              { seq: 1, time: Date.parse(fetchedAt) - 3, type: 'tool/call', data: { callId: 'search-1', name: 'web_search' } },
+              { seq: 2, time: Date.parse(fetchedAt) - 2, type: 'tool/result', data: { message: { source: { callId: 'search-1' }, content: [{ isError: false }] } } },
+              { seq: 3, time: Date.parse(fetchedAt) - 1, type: 'tool/call', data: { callId: 'fetch-1', name: 'web_fetch' } },
+              { seq: 4, time: Date.parse(fetchedAt), type: 'tool/result', data: { message: { source: { callId: 'fetch-1' }, content: [{ isError: false }] } } },
+            )
+            const listener = listeners.get('tools/result')
+            listener?.({ agent: localAgent, name: 'web_search', callId: 'search-1', arguments: { queries: ['官方标准'] } }, searchResult)
+            listener?.({ agent: localAgent, name: 'web_fetch', callId: 'fetch-1', arguments: { url: fetchedUrl } }, fetchResult)
+          }
           resolve(resultForAttempt?.(currentAttempt, request)
-            ?? { stopReason: 'completed', output: [], structured: candidateFrom(request, validCandidate(currentAttempt, request)) })
+            ?? { stopReason: 'completed', output: [], structured: candidateFrom(request, validCandidate(currentAttempt, request), webResearch && currentAttempt === 1) })
         }
         request.signal.addEventListener('abort', () => {
           if (settled) return
@@ -169,10 +203,6 @@ function fixtureAgent(
           resolve({ stopReason: 'aborted', output: [] })
         }, { once: true })
       })
-      const localAgent = {
-        id,
-        session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] },
-      } as unknown as Agent
       const deferred: DeferredRun = {
         request,
         run: { id, localAgent, result, dispose: async () => { disposed.push(String(id)) } },
@@ -188,13 +218,13 @@ function fixtureAgent(
     restrict: vi.fn(() => () => {}),
     guard: vi.fn(() => () => {}),
   }
-  const listeners = new Map<string, (...args: never[]) => void>()
+  const listeners = new Map<string, (...args: unknown[]) => void>()
   const agent = {
     id: 'parent',
     session: { header: { cwd: workspace.root }, events: [] },
     ctx: {
       get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents : undefined,
-      on: (name: string, listener: (...args: never[]) => void) => { listeners.set(name, listener); return () => listeners.delete(name) },
+      on: (name: string, listener: (...args: unknown[]) => void) => { listeners.set(name, listener); return () => listeners.delete(name) },
     },
     followup,
     whenIdle: vi.fn(async () => {
@@ -218,9 +248,11 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
-  it('limits the Main Agent to relation-plan read/write tools', () => {
+  it('allows the S6 capability union while keeping bash forbidden', () => {
     const policy = getBidStagePolicy('chapter_writing')
-    expect(policy.allowedTools).toEqual(['read', 'write'])
+    expect(policy.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
+    expect(policy.forbiddenTools).toEqual(['bash'])
+    expect(policy.requiredInputs).toContain('analysis/web-evidence-sources.json')
     expect(policy.requiredArtifacts).toEqual(['chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json'])
   })
 
@@ -234,6 +266,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.maxActive()).toBe(2)
     await expect(readFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
+    expect(fixture.tools.restrict).toHaveBeenCalledWith({ allow: ['read', 'write'] })
     expect(JSON.stringify(fixture.followup.mock.calls[0]?.[0])).toContain('Relation Planning')
     expect(fixture.starts.map(item => promptText(item.request))).toEqual([
       expect.stringContaining('"id":"SEC-1"'),
@@ -267,8 +300,41 @@ describe('chapter-writing executor', () => {
       expect(call[1].label).toContain(`000${index + 1}`)
       expect(fixture.starts[index]?.run.localAgent?.session.header).toMatchObject({ parentSession: 'parent', origin: 'subagent' })
     }
+    const reviewerCalls = fixture.subagents.start.mock.calls.filter(call => call[1].toolFilter?.allow?.length === 0)
+    expect(reviewerCalls).toHaveLength(3)
+    expect(reviewerCalls.every(call => call[1].maxDepth === 0)).toBe(true)
     expect(new Set(fixture.starts.map(item => item.run.id)).size).toBe(3)
     expect(fixture.disposed).toHaveLength(6)
+  })
+
+  it('persists a Writer search-to-fetch source without requiring Web for other chapters', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-ledger-')), 'session')
+    const outline = await writeInputs(workspace)
+    await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
+    await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+      schema_version: 1, stage: 'evidence_mapping', sources: [],
+    })}\n`)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, undefined, true)
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 1,
+    })
+
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(
+      await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8'),
+    ))
+    expect(ledger.sources).toHaveLength(1)
+    expect(ledger.sources[0]).toMatchObject({
+      search_call_id: 'search-1', fetch_call_id: 'fetch-1',
+      chapter_context: { section_id: 'SEC-1', child_session_id: 'child-1', writer_attempt: 1 },
+    })
+    expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方正文')
+    const manifest = parseChapterWritingManifest(JSON.parse(
+      await readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8'),
+    ))
+    expect(manifest.chapters[0]?.additional_external_materials).toHaveLength(1)
+    expect(manifest.chapters.slice(1).every(chapter => chapter.additional_external_materials.length === 0)).toBe(true)
   })
 
   it('fails before Main-Agent planning when the spawn provider is absent', async () => {
