@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -6,13 +6,18 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
 import { CHAPTER_WRITING_SCHEMA_VERSION, parseChapterMetadata, type ChapterManifestEntry } from './chapter-writing-artifacts.ts'
-import type { BidStageTask, StageArtifact } from './control-plane-contract.ts'
+import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 import {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
   type EvidenceMappingCapturedWebResult,
 } from './evidence-mapping-executor.ts'
 import { parseEvidenceMapArtifact, type EvidenceMaterial, type EvidenceResearchTopic, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import {
+  DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+  type ModelStageExecutionOptions,
+  renderStageRepairIssues,
+} from './model-stage-repair.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -195,10 +200,98 @@ export function renderChapterWritingTask(agent: Agent, workspace: BidWorkspace, 
   ].join('\n')
 }
 
+/**
+ * Render one Validator-guided repair assignment for the current chapter pair.
+ * @param agent - live Bid Agent receiving the repair assignment.
+ * @param workspace - Session-scoped Bid workspace.
+ * @param context - current section inputs and Host-owned output paths.
+ * @param issues - latest browser-safe chapter validation issues.
+ * @returns model-visible instructions for the original body and Metadata files.
+ */
+export function renderChapterWritingRepairTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  context: ChapterContext,
+  issues: readonly StageValidationIssue[],
+): string {
+  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  return [
+    '当前阶段：chapter_writing / Chapter Repair',
+    `Bid Session：${agent.id}`,
+    `当前章节 section_id：${context.section.id}`,
+    'Host 预校验未通过。只修改当前章节的原文件，不得创建替代文件：',
+    `- ${root}/${context.contentPath}`,
+    `- ${root}/${context.metadataPath}`,
+    ...renderStageRepairIssues(issues),
+    `元数据必须严格等于以下字段集合，不得增加 schema_version、id 或其他字段：${JSON.stringify({
+      section_id: context.section.id,
+      covered_must_answer: context.section.must_answer,
+      evidence_used: [],
+      additional_materials: [],
+      external_evidence_used: [],
+      additional_external_materials: [],
+      unresolved_topics: [],
+    })}`,
+    'covered_must_answer 必须完整列出当前章节已经回答的全部 must_answer；未能回答的内容仍需保留在 covered_must_answer，并同时写入 unresolved_topics 说明缺口。不得编造或改写 ID、Evidence 或来源。',
+    '修复正文和元数据后停止；Host 将重新校验当前章节。',
+  ].join('\n')
+}
+
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
   const target = join(workspace.sessionRoot, path)
   await assertNoLinkedPath(workspace.root, target)
   return JSON.parse(await readFile(target, 'utf8'))
+}
+
+function chapterDraftIssues(
+  context: ChapterContext,
+  metadata: ReturnType<typeof parseChapterMetadata>,
+): StageValidationIssue[] {
+  const issues: StageValidationIssue[] = []
+  if (metadata.section_id !== context.section.id) {
+    issues.push({ code: 'CHAPTER_WRITING_SECTION_INVALID', message: '元数据 section_id 必须等于当前章节 ID。', artifact: context.metadataPath, path: 'section_id' })
+  }
+  const expectedAnswers = new Set(context.section.must_answer)
+  const actualAnswers = new Set(metadata.covered_must_answer)
+  if (expectedAnswers.size !== actualAnswers.size
+    || [...expectedAnswers].some(answer => !actualAnswers.has(answer))) {
+    issues.push({ code: 'CHAPTER_WRITING_MUST_ANSWER_INVALID', message: 'covered_must_answer 必须完整且仅包含当前章节的 must_answer。', artifact: context.metadataPath, path: 'covered_must_answer' })
+  }
+  const local = new Set(context.evidence.map(material => JSON.stringify(material)))
+  if (metadata.evidence_used.some(material => !local.has(JSON.stringify(material)))) {
+    issues.push({ code: 'CHAPTER_WRITING_EVIDENCE_NOT_MAPPED', message: 'evidence_used 只能逐字引用当前章节的 Relevant Local Evidence。', artifact: context.metadataPath, path: 'evidence_used' })
+  }
+  const external = new Set(context.externalEvidence.map(material => normalizeWebEvidenceUrl(material.url)))
+  if (metadata.external_evidence_used.some(material => !external.has(normalizeWebEvidenceUrl(material.url)))) {
+    issues.push({ code: 'CHAPTER_WRITING_EXTERNAL_EVIDENCE_NOT_MAPPED', message: 'external_evidence_used 只能引用当前章节的 Relevant External Evidence。', artifact: context.metadataPath, path: 'external_evidence_used' })
+  }
+  return issues
+}
+
+async function inspectChapterDraft(
+  workspace: BidWorkspace,
+  context: ChapterContext,
+  observations: ReturnType<typeof collectEvidenceMappingWebObservations>,
+): Promise<{ metadata?: ReturnType<typeof parseChapterMetadata>; issues: StageValidationIssue[] }> {
+  const issues: StageValidationIssue[] = []
+  let metadata: ReturnType<typeof parseChapterMetadata> | undefined
+  try {
+    metadata = parseChapterMetadata(await readJson(workspace, context.metadataPath))
+    issues.push(...chapterDraftIssues(context, metadata))
+    try { verifyAdditionalExternalMaterials(metadata.additional_external_materials, observations) } catch (error: unknown) {
+      issues.push({ code: 'CHAPTER_WRITING_EXTERNAL_EVIDENCE_UNVERIFIED', message: String(error), artifact: context.metadataPath, path: 'additional_external_materials' })
+    }
+  } catch {
+    issues.push({ code: 'CHAPTER_WRITING_METADATA_INVALID', message: '当前章节元数据缺失、不是有效 JSON，或字段不符合严格定义。', artifact: context.metadataPath })
+  }
+  try {
+    const body = join(workspace.sessionRoot, context.contentPath)
+    await assertNoLinkedPath(workspace.root, body)
+    if (!(await lstat(body)).isFile() || (await readFile(body, 'utf8')).trim().length === 0) throw new Error('empty')
+  } catch {
+    issues.push({ code: 'CHAPTER_WRITING_CONTENT_INVALID', message: '当前章节正文文件缺失或为空。', artifact: context.contentPath })
+  }
+  return metadata === undefined ? { issues } : { metadata, issues }
 }
 
 /**
@@ -206,9 +299,15 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
  * @param agent - live Bid Agent used for every section.
  * @param workspace - Session-scoped Bid workspace.
  * @param task - Host-issued chapter-writing task and Tool policy.
+ * @param options - Host-owned per-chapter limit for Validator-guided repair turns.
  * @returns the Host-owned chapter manifest Artifact descriptor.
  */
-export async function executeChapterWriting(agent: Agent, workspace: BidWorkspace, task: BidStageTask): Promise<StageArtifact[]> {
+export async function executeChapterWriting(
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: BidStageTask,
+  options: ModelStageExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
+): Promise<StageArtifact[]> {
   if (task.stage !== 'chapter_writing') throw new Error('chapter-writing-executor-stage-invalid')
   await agent.whenIdle()
   const [outlineRaw, confirmationRaw, projectRaw, requirementsRaw, scoringRaw, complianceRaw, evidenceRaw] = await Promise.all([
@@ -264,28 +363,43 @@ export async function executeChapterWriting(agent: Agent, workspace: BidWorkspac
     try {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderChapterWritingTask(agent, workspace, context) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
       await agent.whenIdle()
+      let inspection = await inspectChapterDraft(
+        workspace,
+        context,
+        collectEvidenceMappingWebObservations(agent, boundarySeq, captured),
+      )
+      for (let attempt = 1; inspection.issues.length > 0 && attempt <= options.maxRepairAttempts; attempt++) {
+        agent.followup(createUserMessage({
+          content: [{ type: 'text', text: renderChapterWritingRepairTask(agent, workspace, context, inspection.issues) }],
+          source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+        }))
+        await agent.whenIdle()
+        inspection = await inspectChapterDraft(
+          workspace,
+          context,
+          collectEvidenceMappingWebObservations(agent, boundarySeq, captured),
+        )
+      }
+      if (inspection.metadata === undefined || inspection.issues.length > 0) {
+        throw new Error(`Bid chapter writing validation failed: ${inspection.issues.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
+      }
+      entries.push({
+        section_id: inspection.metadata.section_id,
+        content_path: context.contentPath,
+        requirement_ids: [...section.requirement_ids], scoring_ids: [...section.scoring_ids],
+        compliance_ids: [...section.compliance_ids, ...outline.global_compliance_ids],
+        covered_must_answer: inspection.metadata.covered_must_answer,
+        evidence_used: inspection.metadata.evidence_used,
+        additional_materials: inspection.metadata.additional_materials,
+        external_evidence_used: inspection.metadata.external_evidence_used,
+        additional_external_materials: inspection.metadata.additional_external_materials,
+        unresolved_topics: inspection.metadata.unresolved_topics,
+      })
     } finally {
       liftObserver()
       liftGuard()
       liftRestriction()
     }
-    const metadata = parseChapterMetadata(await readJson(workspace, context.metadataPath))
-    verifyAdditionalExternalMaterials(
-      metadata.additional_external_materials,
-      collectEvidenceMappingWebObservations(agent, boundarySeq, captured),
-    )
-    entries.push({
-      section_id: metadata.section_id,
-      content_path: context.contentPath,
-      requirement_ids: [...section.requirement_ids], scoring_ids: [...section.scoring_ids],
-      compliance_ids: [...section.compliance_ids, ...outline.global_compliance_ids],
-      covered_must_answer: metadata.covered_must_answer,
-      evidence_used: metadata.evidence_used,
-      additional_materials: metadata.additional_materials,
-      external_evidence_used: metadata.external_evidence_used,
-      additional_external_materials: metadata.additional_external_materials,
-      unresolved_topics: metadata.unresolved_topics,
-    })
   }
   await writeFile(join(chaptersRoot, 'manifest.json'), `${JSON.stringify({ schema_version: CHAPTER_WRITING_SCHEMA_VERSION, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), chapters: entries }, null, 2)}\n`, { mode: 0o600 })
   return [{ stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' }]

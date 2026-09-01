@@ -26,7 +26,7 @@ import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 import { validateFileIntake } from './file-intake-validator.ts'
-import { DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS, executeTenderAnalysis } from './tender-analysis-executor.ts'
+import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { parseTenderProjectArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import {
@@ -49,6 +49,7 @@ import { executeBookReview } from './book-review-executor.ts'
 import { validateBookReview } from './book-review-validator.ts'
 import { parseBookReviewReport } from './book-review-artifacts.ts'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
+import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -121,8 +122,9 @@ export type {
 export { validateFileIntake }
 export * from './tender-analysis-artifacts.ts'
 export * from './tender-analysis-confirmation.ts'
-export { DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS, executeTenderAnalysis, renderTenderAnalysisRepairTask, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
-export type { TenderAnalysisExecutionOptions } from './tender-analysis-executor.ts'
+export { executeTenderAnalysis, renderTenderAnalysisRepairTask, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
+export { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
+export type { ModelStageExecutionOptions } from './model-stage-repair.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
 export * from './web-evidence-source-artifacts.ts'
@@ -130,6 +132,7 @@ export {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
   executeEvidenceMapping,
+  renderEvidenceMappingRepairTask,
   renderEvidenceMappingTask,
   type EvidenceMappingCapturedWebResult,
   type EvidenceMappingWebObservation,
@@ -139,11 +142,11 @@ export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
 export * from './outline-confirmation-artifacts.ts'
 export * from './outline-confirmation-edits.ts'
-export { executeOutlineGeneration, renderOutlineGenerationTask } from './outline-generation-executor.ts'
+export { executeOutlineGeneration, renderOutlineGenerationRepairTask, renderOutlineGenerationTask } from './outline-generation-executor.ts'
 export { validateOutlineGeneration } from './outline-generation-validator.ts'
 export { validateConfirmedOutline, validateOutlineConfirmation } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
-export { buildChapterWorklist, executeChapterWriting, pickChapterContext, renderChapterWritingTask } from './chapter-writing-executor.ts'
+export { buildChapterWorklist, executeChapterWriting, pickChapterContext, renderChapterWritingRepairTask, renderChapterWritingTask } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export * from './book-review-artifacts.ts'
 export { executeBookReview } from './book-review-executor.ts'
@@ -189,13 +192,18 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
-/** Validated file limits and S2 recovery budget for the Bid Host runtime. */
+/** Validated file limits and model-stage recovery budget for the Bid Host runtime. */
 export interface Config {
+  /** File extensions accepted by the Bid upload Remote. */
   allowedExtensions: string[]
+  /** Maximum files admitted in one upload batch. */
   maxFiles: number
+  /** Maximum decoded bytes admitted for one uploaded file. */
   maxFileBytes: number
+  /** Maximum decoded bytes admitted across one upload batch. */
   maxTotalBytes: number
-  tenderAnalysisRepairAttempts: number
+  /** Validator-guided repair turns available to each model-authored stage execution. */
+  modelStageRepairAttempts: number
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -203,7 +211,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxFiles: DEFAULT_BID_CONFIG.maxFiles,
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
-  tenderAnalysisRepairAttempts: DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS,
+  modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -212,7 +220,7 @@ export const Config: z<Config> = z.object({
   maxFiles: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFiles),
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
-  tenderAnalysisRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.tenderAnalysisRepairAttempts),
+  modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -415,13 +423,13 @@ export class BidHostRuntime extends TypertRemoteService {
       {
         canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'book_review',
         execute: task => task.stage === 'tender_analysis'
-          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.tenderAnalysisRepairAttempts })
+          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
           : task.stage === 'evidence_mapping'
-            ? executeEvidenceMapping(agent, workspace, task)
+            ? executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
             : task.stage === 'outline_generation'
-              ? executeOutlineGeneration(agent, workspace, task)
+              ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
               : task.stage === 'chapter_writing'
-                ? executeChapterWriting(agent, workspace, task)
+                ? executeChapterWriting(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
                 : task.stage === 'book_review'
                   ? executeBookReview(workspace, task)
                   : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
@@ -489,10 +497,11 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
-            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.tenderAnalysisRepairAttempts })
-            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task)
-            if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task)
-            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task)
+            const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts }
+            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
+            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, repair)
+            if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
+            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task, repair)
             if (task.stage === 'book_review') return executeBookReview(workspace, task)
             throw new Error(`Bid Host has no executor for ${task.stage}`)
           },

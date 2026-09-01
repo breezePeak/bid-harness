@@ -33,7 +33,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。
 
-生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`tenderAnalysisRepairAttempts` 配置 S2 每次执行内的 Validator 导向修复轮数，默认为 3，可配置为 1–20；每轮都把最新 Issues 交给同一 Agent，并在 Agent idle 后重新预校验。最终仍未通过时，Orchestrator 记录 `tender_analysis/failed`，用户可通过 `bid/retryStage` 完整重跑 S2；任何修复回复都不能直接推进阶段。
+生成的 `bid/uploadFiles` Remote 解析实时 Session，且只使用 Host 解析的 Preset 与 `header.cwd`。它在 per-Session 锁内准入完整浏览器批次，检查声明限制后解码规范 base64，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`modelStageRepairAttempts` 配置 S2、S3、S4 和 S6 每次执行内的 Validator 导向修复轮数，默认为 3，可配置为 1–20；每轮都把最新 Issues 交给同一 Agent，并在 Agent idle 后重新预校验。最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑；任何修复回复都不能直接推进阶段。
 
 Tender Analysis 与 Evidence Mapping Executor 都通过 `Agent.followup()` 注入包含 Session 相对路径和当前 schema 的动态任务，并按 Stage Policy 限制本轮工具。S2 只将技术标范围的 Requirement、Scoring 和 Compliance 写入正式 Artifact，纯商务、资格和报价内容不会进入 S3。S3 读取 S2 Artifact 与 manifest，由 Agent 为技术 Requirement 和 Scoring 自行生成搜索词，先 `grep` 定位再 `read` 候选分块；本地公开技术资料不足时才依次调用 `web_search` 和 `web_fetch`。Host 从当前 Agent、当前 attempt 的 `tools/result` 规范值和 Session Tool Event 生成 `analysis/web-evidence-sources.json`，并把实际交给 Agent 的有界抓取文本保存到 `analysis/web-sources/<source_id>.md`，不发起第二次 HTTP 请求。Validator 检查 S2 覆盖、严格 schema、本地资料角色与引用位置、搜索到抓取的调用顺序、外部 URL 绑定、快照非链接普通文件及 SHA-256；只有全部通过才推进到 `outline_generation/pending`。
 
@@ -42,15 +42,15 @@ S2 的 `project.json` 额外记录项目背景、建设目标、实施约束和�
 `bid/getTenderAnalysisForConfirmation` 只返回 S2 的 Project 与 Scoring；`bid/confirmTenderAnalysis` 只接受 `update_project` 与 `update_scoring_item` 操作。项目结论以及评分标题、评分目标和 `response_points` 可编辑；评分原文、分值、ID、`source_refs` 与招标文件覆盖集合不在操作协议中。Host 应用操作后原子替换原路径下的 `analysis/project.json` 与 `analysis/scoring.json`，再次执行完整 S2 Validator；无效输入返回问题并保持 `waiting_user`，通过后才完成 S2 并启动 S3。
 
 ## Model Experience
-## S2–S4 质量控制
+## S2–S6 质量控制
 
 S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题；Schema 问题保留具体字段路径。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`，且只能覆盖四个正式 S2 Artifact。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
 
-S3 先查找本地资料，只在公开技术知识缺口存在时执行 `web_search → web_fetch`；`external_materials` 只保存当前 attempt 搜索结果中出现、随后成功抓取 2xx 正文且与 Host 来源账本匹配的公开技术来源，不能替代企业事实的本地证据。网页内容是不可信研究资料，Agent 仅允许写入 `analysis/evidence-map.json`；来源账本和快照由 Host 写入。没有联网时 Host 生成空来源账本，本地资料或 `missing_topics` 仍可正常通过。工具或 Provider 未注册会使阶段明确失败；搜索、抓取、超时、取消、非 2xx 或空正文都不会形成来源。通用重试会清除旧 evidence map、账本和快照。修复前含 external materials 但没有 Host 账本的开发 Session 必须重跑 S3；验证不证明摘要推导或网页本身真实，HTTP Fetch 的 SSRF 与私网访问限制仍未解决。
+S3 先查找本地资料，只在公开技术知识缺口存在时执行 `web_search → web_fetch`；`external_materials` 只保存当前 attempt 搜索结果中出现、随后成功抓取 2xx 正文且与 Host 来源账本匹配的公开技术来源，不能替代企业事实的本地证据。网页内容是不可信研究资料，Agent 仅允许写入 `analysis/evidence-map.json`；来源账本和快照由 Host 写入。Host 写入账本后预校验 schema、ID 覆盖、本地引用和外部 URL 绑定，并在修复任务中明确要求 `requirement_id` 与 `scoring_id`。没有联网时 Host 生成空来源账本，本地资料或 `missing_topics` 仍可正常通过。工具或 Provider 未注册会使阶段明确失败；搜索、抓取、超时、取消、非 2xx 或空正文都不会形成来源。通用重试会清除旧 evidence map、账本和快照。含 external materials 但没有 Host 账本的开发 Session 必须重跑 S3；验证不证明摘要推导或网页本身真实，HTTP Fetch 的 SSRF 与私网访问限制仍未解决。
 
-S4 初稿后以同一 Agent 强制执行 Blueprint Quality Review，并把已检查的 Requirement、Scoring 和最终章节写入内部 `outline/quality-report.json`。完成条件要求该报告不存在未解决问题；目录还要求可写章节为叶子、同级标题不重复、`must_answer` 不重复且不机械复述标题。S5 继续只确认 `outline.json`。
+S4 初稿后以同一 Agent 强制执行 Blueprint Quality Review，并把已检查的 Requirement、Scoring 和最终章节写入内部 `outline/quality-report.json`。Host 预校验两个严格 Artifact，并把目录树、引用覆盖和质量报告问题交给同一 Agent 修复。完成条件要求该报告不存在未解决问题；目录还要求可写章节为叶子、同级标题不重复、`must_answer` 不重复且不机械复述标题。S5 继续只确认 `outline.json`。
 
-S6 按已确认目录顺序逐章运行同一 live Agent。每章先消费相关 S2 记录以及 S3 本地 Evidence、外部 Evidence 和缺失主题，资料不足时先执行当前章节本地检索，仅对仍缺少的公开技术知识执行 `web_search → web_fetch`。Executor 将 `additional_external_materials` 与当前章节的规范 Tool 结果和 Session Tool Event 关联，只有本章搜索结果中出现并成功抓取非空原文的 URL 才能进入 Metadata。Schema v2 Metadata 与 Manifest 分别保存 S3 本地 Evidence、S6 新增本地 Evidence、S3 外部 Evidence、S6 新增外部 Evidence 和未解决主题；Validator 校验章节路径、Metadata 一致性、本地引用及 S3 Evidence 的当前章节 Mapping 子集关系。企业案例、资质、人员、实有产品参数和既有能力缺失时必须保留 `unresolved_topics`，不得用 Web 资料替代。
+S6 按已确认目录顺序逐章运行同一 live Agent。每章先消费相关 S2 记录以及 S3 本地 Evidence、外部 Evidence 和缺失主题，资料不足时先执行当前章节本地检索，仅对仍缺少的公开技术知识执行 `web_search → web_fetch`。Executor 将 `additional_external_materials` 与当前章节的规范 Tool 结果和 Session Tool Event 关联，只有本章搜索结果中出现并成功抓取非空原文的 URL 才能进入 Metadata。每章在写入 Host Manifest 前预校验正文、严格 Metadata、`section_id`、完整 `covered_must_answer`、S3 Evidence 子集和当前章节 Web 来源，并用最新 Issues 修复当前正文与 Metadata。Schema v2 Metadata 与 Manifest 分别保存 S3 本地 Evidence、S6 新增本地 Evidence、S3 外部 Evidence、S6 新增外部 Evidence 和未解决主题；最终 Validator 继续校验章节路径、Metadata 一致性、本地引用及 S3 Evidence 的当前章节 Mapping 子集关系。企业案例、资质、人员、实有产品参数和既有能力缺失时必须保留 `unresolved_topics`，不得用 Web 资料替代。
 
 
 ### Inventory 文本

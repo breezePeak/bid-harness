@@ -166,7 +166,8 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   }
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-    schema_version: 2,
+    schema_version: 3,
+    research_topics: [],
     requirement_mappings: requirements.requirements.map(item => ({
       requirement_id: item.id,
       materials,
@@ -571,7 +572,7 @@ describe('Bid Host runtime composition', () => {
       maxFiles: 1,
       maxFileBytes: 4,
       maxTotalBytes: 4,
-      tenderAnalysisRepairAttempts: Bid.DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS,
+      modelStageRepairAttempts: Bid.DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
     })
     const standard = attach(ctx, 'standard', root).agent.session
     const bid = attach(ctx, 'bid', root).agent.session

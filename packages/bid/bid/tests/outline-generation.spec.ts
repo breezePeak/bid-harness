@@ -214,6 +214,34 @@ describe('outline-generation Blueprint Quality Review', () => {
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
+  it('repairs an invalid reviewed Blueprint before the stage returns', async () => {
+    const workspace = await fixture()
+    const followup = vi.fn()
+    const whenIdle = vi.fn(async () => {
+      if (whenIdle.mock.calls.length === 2) {
+        await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+        await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), JSON.stringify({ ...reviewedOutline, schema_version: 0 }))
+      }
+      if (whenIdle.mock.calls.length === 3) {
+        await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
+          schema_version: 0, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [], reviewed_section_ids: [], issues: [],
+        }))
+      }
+      if (whenIdle.mock.calls.length === 4) await publishOutline(workspace, reviewedOutline)
+    })
+    const services = {
+      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
+    }
+    const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })
+
+    expect(followup).toHaveBeenCalledTimes(3)
+    expect(JSON.stringify(followup.mock.calls[2]?.[0])).toContain('Artifact Repair')
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
+  })
+
   it.each([
     ['writable parent', (outline: OutlineArtifact) => {
       outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['统筹项目实施专题。'] }

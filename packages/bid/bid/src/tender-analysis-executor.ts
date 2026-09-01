@@ -6,6 +6,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import {
+  DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+  type ModelStageExecutionOptions,
+} from './model-stage-repair.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
@@ -14,15 +18,6 @@ const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/requirements.json': 'tender_requirements',
   'analysis/scoring.json': 'tender_scoring',
   'analysis/compliance.json': 'tender_compliance',
-}
-
-/** Default number of Validator-guided repair turns before Host failure remains visible. */
-export const DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS = 3
-
-/** Host-owned limits for one S2 execution. */
-export interface TenderAnalysisExecutionOptions {
-  /** Maximum Validator-guided repair turns after initial generation and coverage audit. */
-  maxRepairAttempts: number
 }
 
 /**
@@ -136,7 +131,7 @@ export async function executeTenderAnalysis(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
-  options: TenderAnalysisExecutionOptions = { maxRepairAttempts: DEFAULT_TENDER_ANALYSIS_REPAIR_ATTEMPTS },
+  options: ModelStageExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   await agent.whenIdle()

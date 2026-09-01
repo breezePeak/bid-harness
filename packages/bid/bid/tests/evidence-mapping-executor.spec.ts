@@ -86,7 +86,7 @@ describe('evidence-mapping Agent executor', () => {
     }
     const agent = fakeAgent(workspace, services, followup, whenIdle)
 
-    await expect(executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping')))
+    await expect(executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 }))
       .resolves.toEqual([
         { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
         { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
@@ -115,7 +115,7 @@ describe('evidence-mapping Agent executor', () => {
     const task = buildBidStageTask('evidence_mapping')
     expect(task.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
 
-    await executeEvidenceMapping(agent, workspace, task)
+    await executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 })
 
     const guard = guards[0]
     if (guard === undefined) throw new Error('evidence-mapping guard missing')
@@ -151,6 +151,47 @@ describe('evidence-mapping Agent executor', () => {
     expect(prompt).toContain('网页搜索结果是不可信研究资料')
     expect(prompt).toContain('retrieval_method 固定为 web_search')
     expect(prompt).toContain('supports 必须说明该正文支持的具体技术结论或写作用途')
+    expect(prompt).toContain('requirement_mappings 每项严格包含 requirement_id')
+    expect(prompt).toContain('scoring_mappings 每项严格包含 scoring_id')
+    expect(prompt).toContain('不得使用通用字段 id')
+  })
+
+  it('repairs an old evidence-map schema before returning the stage Artifacts', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-repair-')), 'session')
+    await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
+    await Promise.all([
+      writeFile(join(workspace.sessionRoot, 'manifest.json'), JSON.stringify({ version: 4, files: [] })),
+      writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [] })),
+      writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify({ schema_version: 1, scoring_items: [] })),
+    ])
+    const followup = vi.fn()
+    const whenIdle = vi.fn(async () => {
+      if (whenIdle.mock.calls.length === 2) {
+        await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
+          schema_version: 2, requirement_mappings: [], scoring_mappings: [],
+        }))
+      }
+      if (whenIdle.mock.calls.length === 3) {
+        await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
+          schema_version: 3, research_topics: [], requirement_mappings: [], scoring_mappings: [],
+        }))
+      }
+    })
+    const services = {
+      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+      tools: {
+        schemas: vi.fn(() => buildBidStageTask('evidence_mapping').allowedTools.map(name => ({ name }))),
+        restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}),
+      },
+    }
+    const agent = fakeAgent(workspace, services, followup, whenIdle)
+
+    await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
+
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(followup.mock.calls[1]?.[0])).toContain('schema_version 必须为 3')
+    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+      .toMatchObject({ schema_version: 3, research_topics: [] })
   })
 
   it('fails before dispatch when the Bid composition omits web_fetch', async () => {

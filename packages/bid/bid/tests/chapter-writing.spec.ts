@@ -127,6 +127,47 @@ describe('chapter-writing executor and validator', () => {
     expect(followup).not.toHaveBeenCalled()
   })
 
+  it('repairs invalid chapter metadata before publishing the Host manifest', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-')), 'session')
+    await writeInputs(workspace)
+    const followup = vi.fn()
+    const whenIdle = vi.fn(async () => {
+      const call = whenIdle.mock.calls.length
+      if (call === 1) return
+      const chapter = call <= 3 ? 1 : call - 2
+      const serial = String(chapter).padStart(4, '0')
+      await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
+      await mkdir(join(workspace.sessionRoot, 'chapters/meta'), { recursive: true })
+      await writeFile(join(workspace.sessionRoot, `chapters/sections/${serial}.md`), `章节 ${chapter} 正文\n`)
+      const metadata = call === 2
+        ? { schema_version: 1, id: `SEC-${chapter}`, covered_must_answer: [`回答${chapter}`] }
+        : {
+          section_id: `SEC-${chapter}`, covered_must_answer: [`回答${chapter}`], evidence_used: [],
+          additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
+        }
+      await writeFile(join(workspace.sessionRoot, `chapters/meta/${serial}.json`), `${JSON.stringify(metadata)}\n`)
+    })
+    const services = {
+      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+      tools: {
+        schemas: vi.fn(() => ['grep', 'read', 'write', 'web_search', 'web_fetch'].map(name => ({ name }))),
+        restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}),
+      },
+    }
+    const agent = {
+      id: 'session', session: { header: { cwd: workspace.root }, events: [] },
+      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => () => {}) },
+      followup, whenIdle,
+    } as unknown as Agent
+
+    await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1 })
+
+    expect(followup).toHaveBeenCalledTimes(4)
+    expect(JSON.stringify(followup.mock.calls[1]?.[0])).toContain('Chapter Repair')
+    await expect(validateChapterWriting(workspace, 'chapter_writing', [{ stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' }]))
+      .resolves.toEqual({ ok: true })
+  })
+
   it('rejects an additional external source without a current search-to-fetch result', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-fetch-')), 'session')
     await writeInputs(workspace)
