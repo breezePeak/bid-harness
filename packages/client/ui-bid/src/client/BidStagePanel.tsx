@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -111,7 +111,7 @@ function fileRules(projection: BidClientProjection, t: TranslateBid): string | u
 
 /**
  * Render a Bid Session from the current Host projection. Local state is
- * limited to browser-selected files and request feedback; actions never
+ * limited to browser-selected files, request feedback, and polled S3 task counts; actions never
  * mutate the projected stage or status.
  * @param props - standard projection hook, Host-action callbacks, and locale.
  * @returns the Bid panel, or null for a non-Bid Session or unavailable projection.
@@ -132,6 +132,7 @@ export function BidStagePanel({
   applyOutlineDraftOperations,
   confirmTenderAnalysis,
   getTenderAnalysisForConfirmation,
+  getEvidenceMappingProgress,
   t,
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
@@ -141,6 +142,7 @@ export function BidStagePanel({
   const [requestError, setRequestError] = useState<RequestError | null>(null)
   const [draft, setDraft] = useState<OutlineDraftView | null>(null)
   const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
+  const [mappingProgress, setMappingProgress] = useState<BidEvidenceMappingProgress | null>(null)
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
   const tenderFileInput = useRef<HTMLInputElement>(null)
@@ -162,6 +164,27 @@ export function BidStagePanel({
     alive.current = true
     return () => { alive.current = false }
   }, [])
+
+  useEffect(() => {
+    if (projection?.runtime.stage !== 'evidence_mapping' || projection.runtime.status !== 'running' || getEvidenceMappingProgress === undefined) {
+      setMappingProgress(null)
+      return
+    }
+    let active = true
+    const refresh = (): void => {
+      void getEvidenceMappingProgress().then((progress) => {
+        if (active) setMappingProgress(progress)
+      }).catch(() => {
+        if (active) setMappingProgress(null)
+      })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 1000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [getEvidenceMappingProgress, projection?.runtime.stage, projection?.runtime.status])
 
   const blockedReason = useMemo(
     () => projection === undefined ? undefined : composerReason(projection, t),
@@ -406,6 +429,14 @@ export function BidStagePanel({
           <span className={css.message} role="status">
             {t(promptKey(projection.runtime.stage, projection.runtime.status))}
           </span>
+          {mappingProgress !== null && <span className={css.mappingProgress} role="status">
+            {t('mapping.progress', {
+              total: mappingProgress.total,
+              completed: mappingProgress.completed,
+              running: mappingProgress.running,
+              notStarted: mappingProgress.not_started,
+            })}
+          </span>}
           <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
         </div>
 

@@ -12,13 +12,15 @@ S3 需要同时理解整个项目、覆盖全部技术 Requirement、Scoring 与
 
 S3 保留现有 `evidence_mapping` 阶段、正式 Artifact 和 Orchestrator 推进方式。主 Agent 只读取 manifest 与 S2 Artifact，完成全局分析，并把工作按业务主题动态拆成内部 Mapping Task；Host 校验每个 Requirement、Scoring 和 Response Point 都至少分配给一个任务，任务之间允许共享研究主题，不按文件角色或固定技术分类拆分。
 
-Host 复用 `@deepseek-ai/dsh-subagent` 的 `spawn` Provider，在可配置并发上限内为每个任务启动 fresh-context Child Session。Child 只获得当前任务的 S2 切片、资料定位和全局来源策略提示，工具限制为 `grep`、`read`、`web_search`、`web_fetch`，深度上限为 1，并通过 `outputSchema` 返回局部 Evidence Mapping。Host 校验任务 ID 覆盖、本地引用和该 Child 的 search-to-fetch 结果；失败修复使用新的 Child，只重跑失败任务，已接受的兄弟结果保持不变。每次运行都显式 dispose。
+Host 复用 `@deepseek-ai/dsh-subagent` 的 `spawn` Provider，在可配置并发上限内为每个任务启动 fresh-context Child Session。Child 只获得移除招标来源引用后的当前任务 S2 切片、资料定位和全局来源策略提示，工具限制为 `grep`、`read`、`web_search`、`web_fetch`，深度上限为 1，并通过 `outputSchema` 返回局部 Evidence Mapping。Child 的 `grep` 与 `read` 只可访问成功入库的非招标文件分块；招标文件只在 S2 切片中解释当前需求，不能作为 Evidence。Host 校验任务 ID 覆盖、本地引用和该 Child 的 search-to-fetch 结果；失败修复使用新的 Child，只重跑失败任务，已接受的兄弟结果保持不变。每次运行都显式 dispose。
 
 Host 汇总所有 Child 的 Web Tool 结果，沿用来源账本与有界快照机制持久化公开资料。局部结果按稳定业务 ID 合并；本地资料按 `file_id + chunk id + 行号范围` 去重，公开资料按规范化 URL 去重，同一人工框架或旧标书标题按 `file_id + source_section_id` 去重并报告冲突。主 Agent 只接收计划、去重后的结构化结论和必要资料概况，负责冲突分析与正式 `analysis/evidence-map.json` 写入。
 
-本地证据身份由 `file_id + chunk id` 决定。Validator 根据 manifest 文件的 chunk index 解析规范路径并在该文件上校验行号，提交值中的绝对路径、相对路径和路径分隔符不参与身份判断；不存在的 chunk id 或属于另一文件的 chunk id 仍然失败。人工框架标题允许 0 或 1 个 mapping，同一 `file_id + source_section_id` 的重复 mapping 失败，不要求所有标题都出现。
+本地证据身份由 `file_id + chunk id` 决定。Validator 根据 manifest 文件的 chunk index 解析规范路径并在该文件上校验行号，提交值中的绝对路径、相对路径和路径分隔符不参与身份判断；不存在的 chunk id 或属于另一文件的 chunk id 仍然失败。招标文件的引用单独记录 `EVIDENCE_MAPPING_PARTIAL_TENDER_EVIDENCE_FORBIDDEN`，不伪装为分块或行号错误。人工框架标题允许 0 或 1 个 mapping，同一 `file_id + source_section_id` 的重复 mapping 失败，不要求所有标题都出现。
 
 `evidenceMappingMaxConcurrency` 默认 3，可配置为 1–8。内部计划和执行日志不属于正式阶段 Artifact；重试 S3 会清除旧计划、执行日志、Evidence Map、来源账本和快照。
+
+执行日志按 Mapping Task 持久化 `pending`、`running`、`completed` 和 `failed` 状态。S3 运行期间，`bid/getEvidenceMappingProgress` 只将总数、已完成、映射中、未开始和失败数返回给主 Agent 页面；页面以一秒间隔刷新，不读取计划、日志、文件路径或 Child 结果。
 
 ## Alternatives considered
 

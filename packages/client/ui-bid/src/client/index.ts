@@ -5,7 +5,7 @@
  * generated Bid Remote. It folds no Bid events and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidFileIntakeFileResult, type BidFileIntakeResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -60,7 +60,8 @@ export interface BidStagePanelInjected {
   confirmOutline?: (request: { expected_revision: number; expected_draft_sha256: string }) => Promise<void>
   /** Host outline-regeneration action, installed when the Bid action API is composed. */
   regenerateOutline?: (request: { feedback: string; expected_revision: number; expected_draft_sha256: string }) => Promise<void>
-  /** Host tender-analysis review actions, installed when the Bid action API is composed. */
+  /** Host S3 progress and tender-analysis review actions, installed when the Bid action API is composed. */
+  getEvidenceMappingProgress?: () => Promise<BidEvidenceMappingProgress | null>
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
 }
@@ -133,6 +134,11 @@ export function apply(ctx: ClientContext): void {
         const result = await ctx.remote.bid.retryStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      getEvidenceMappingProgress: async () => {
+        const result = await ctx.remote.bid.getEvidenceMappingProgress(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
       },
       getOutlineDraft: async () => {
         const result = await ctx.remote.bid.getOutlineDraft(sessionId)

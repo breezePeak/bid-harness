@@ -586,6 +586,37 @@ describe('Bid Host runtime composition', () => {
     expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
   })
 
+  it('returns only current S3 Mapping Task counts while evidence mapping runs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-progress-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    for (const stage of ['file_intake', 'tender_analysis'] as const) {
+      agent.session.append('bid.stage.started', { stage, status: 'running' })
+      agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    agent.session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
+      schema_version: 1,
+      max_concurrency: 3,
+      observed_max_concurrency: 2,
+      tasks: [
+        { task_id: 'MAP-01', status: 'completed', attempts: [], final_child_session_id: 'child-1' },
+        { task_id: 'MAP-02', status: 'running', attempts: [], final_child_session_id: null },
+        { task_id: 'MAP-03', status: 'pending', attempts: [], final_child_session_id: null },
+      ],
+    }))
+
+    await expect(ctx.bid.getEvidenceMappingProgress(agent.session)).resolves.toEqual({
+      total: 3,
+      completed: 1,
+      running: 1,
+      not_started: 1,
+      failed: 0,
+    })
+  })
+
   it('does not start the parent Bid workflow for a subagent-origin session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-child-'))
     const { ctx } = await harness()

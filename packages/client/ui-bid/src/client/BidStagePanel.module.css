@@ -70,8 +70,14 @@
 }
 
 .runtimeStatus,
+.mappingProgress,
 .rules {
   color: var(--dsw-alias-label-tertiary);
+}
+
+.mappingProgress {
+  flex: none;
+  white-space: nowrap;
 }
 
 .rules,

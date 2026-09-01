@@ -38,7 +38,7 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -61,6 +61,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
+  BidEvidenceMappingProgress,
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
   BidFileIntakeResult,
@@ -88,6 +89,7 @@ export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID
 export type {
   BidClientAction,
   BidDocumentRole,
+  BidEvidenceMappingProgress,
   BidClientProjection,
 
   BidComposerReason,
@@ -147,6 +149,7 @@ export {
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
   mergeEvidenceMappingPartialResults,
+  readEvidenceMappingProgress,
   renderEvidenceMappingRepairTask,
   renderEvidenceMappingSubagentTask,
   renderEvidenceMappingTask,
@@ -948,6 +951,19 @@ export class BidHostRuntime extends TypertRemoteService {
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (runtime.stage !== 'book_review' || runtime.status !== 'waiting_user') throw new Error('BID_REVIEW_NOT_ALLOWED')
     return new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+  }
+
+  /**
+   * Read the current S3 Mapping Task counts while evidence mapping runs.
+   * @param session - Bid Session that owns the S3 execution log.
+   * @returns task counts, or null when S3 is not running or has not produced its log.
+   */
+  @Remote('getEvidenceMappingProgress')
+  async getEvidenceMappingProgress(session: Session): Promise<BidEvidenceMappingProgress | null> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== 'evidence_mapping' || runtime.status !== 'running') return null
+    return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config)))
   }
 
   /** Read the editable S2 conclusions only while tender analysis waits for confirmation. */

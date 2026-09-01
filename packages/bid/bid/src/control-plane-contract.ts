@@ -25,6 +25,20 @@ export const STAGE_RUN_STATUSES = [
 /** Current execution state of one bid stage. */
 export type StageRunStatus = typeof STAGE_RUN_STATUSES[number]
 
+/** Current count of Host-owned S3 Mapping Tasks by execution state. */
+export interface BidEvidenceMappingProgress {
+  /** Number of Mapping Tasks in the approved execution plan. */
+  readonly total: number
+  /** Mapping Tasks whose Child result the Host accepted. */
+  readonly completed: number
+  /** Mapping Tasks currently assigned to a Child Session. */
+  readonly running: number
+  /** Mapping Tasks that have not started a Child Session. */
+  readonly not_started: number
+  /** Mapping Tasks that exhausted their repair attempts. */
+  readonly failed: number
+}
+
 /** Minimal replayable state of a bid workflow. */
 export interface BidRuntimeState {
   stage: BidStage

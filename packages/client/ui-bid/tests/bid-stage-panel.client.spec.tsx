@@ -87,6 +87,23 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
+  it('shows the current S3 Mapping Task counts while the Host runs evidence mapping', async () => {
+    const getEvidenceMappingProgress = vi.fn(async () => ({
+      total: 10,
+      completed: 3,
+      running: 2,
+      not_started: 5,
+      failed: 0,
+    }))
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'running' },
+      composer: { enabled: false, reason: 'bid.stage_running' },
+    }), { getEvidenceMappingProgress })} />)
+
+    expect(await screen.findByText('映射任务：共 10 个 · 已完成 3 · 映射中 2 · 未开始 5')).toBeTruthy()
+    expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
+  })
+
   it('stays absent for a non-Bid session even when a projection is available', () => {
     const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
       selector({ byId: { session_bid: { agentPreset: 'standard' } } })

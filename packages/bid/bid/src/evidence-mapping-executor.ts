@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
 import type { BidManifest, BidWorkspace } from './index.ts'
-import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageExecutionError, type BidEvidenceMappingProgress, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import { evidenceChunkId } from './document-chunk.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import {
@@ -398,6 +398,24 @@ interface EvidenceMappingExecutionLog {
   }>
 }
 
+const evidenceMappingExecutionLogSchema = z.object({
+  schema_version: z.literal(1),
+  max_concurrency: z.number().int().positive(),
+  observed_max_concurrency: z.number().int().nonnegative(),
+  tasks: z.array(z.object({
+    task_id: z.string().min(1),
+    status: z.enum(['pending', 'running', 'completed', 'failed']),
+    attempts: z.array(z.object({
+      child_session_id: z.string().nullable(),
+      attempt: z.number().int().positive(),
+      stop_reason: z.string(),
+      accepted: z.boolean(),
+      issues: z.array(z.object({ code: z.string(), message: z.string() }).strict()),
+    }).strict()),
+    final_child_session_id: z.string().nullable(),
+  }).strict()),
+}).strict()
+
 interface CompletedMappingTask {
   result: EvidenceMappingPartialResult
   snapshots: EvidenceMappingWebSnapshot[]
@@ -411,6 +429,45 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+}
+
+/**
+ * Read the current S3 Mapping Task counts from the Host-owned execution log.
+ * @param workspace - workspace that owns the S3 execution log.
+ * @returns current task counts, or null before the approved plan creates the log.
+ */
+export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
+  const logPath = join(workspace.sessionRoot, LOG_PATH)
+  await assertNoLinkedPath(workspace.root, logPath)
+  let raw: string
+  try {
+    raw = await readFile(logPath, 'utf8')
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  const log = evidenceMappingExecutionLogSchema.parse(JSON.parse(raw))
+  let completed = 0
+  let running = 0
+  let notStarted = 0
+  let failed = 0
+  for (const task of log.tasks) {
+    switch (task.status) {
+      case 'completed':
+        completed++
+        break
+      case 'running':
+        running++
+        break
+      case 'pending':
+        notStarted++
+        break
+      case 'failed':
+        failed++
+        break
+    }
+  }
+  return { total: log.tasks.length, completed, running, not_started: notStarted, failed }
 }
 
 function validatePlanMembers(
@@ -523,7 +580,12 @@ async function loadValidPlan(
   }
 }
 
-function childReadGuard(workspace: BidWorkspace, parentId: string, exec: Readonly<ToolExecution>): string | undefined {
+function childReadGuard(
+  workspace: BidWorkspace,
+  manifest: BidManifest,
+  parentId: string,
+  exec: Readonly<ToolExecution>,
+): string | undefined {
   const session = exec.agent?.session
   if (session?.header.origin !== 'subagent' || session.header.parentSession !== parentId) return undefined
   if (exec.name !== 'read' && exec.name !== 'grep') return undefined
@@ -536,6 +598,10 @@ function childReadGuard(workspace: BidWorkspace, parentId: string, exec: Readonl
   if (!target.startsWith('corpus/') || !/\/chunks\/(?:index\.json|[^/]+\.md)$/u.test(target)) {
     return 'S3 Mapping Child 只可读取 corpus/**/chunks/*.md 或 corpus/**/chunks/index.json。'
   }
+  const readable = manifest.files.some(file => file.role !== 'tender' && file.parseStatus === 'success'
+    && file.chunksPath !== null && file.chunkIndexPath !== null
+    && (target === file.chunkIndexPath || target.startsWith(`${file.chunksPath}/`)))
+  if (!readable) return 'S3 Mapping Child 不可读取招标文件或未入库资料的分块。'
   return undefined
 }
 
@@ -547,6 +613,15 @@ function corpusLocations(manifest: BidManifest): unknown[] {
       chunks_path: file.chunksPath, chunk_index_path: file.chunkIndexPath,
     }]
     : [])
+}
+
+function subagentTaskContext(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(subagentTaskContext)
+  const fields = record(value)
+  if (fields === undefined) return value
+  return Object.fromEntries(Object.entries(fields)
+    .filter(([key]) => key !== 'source_refs' && key !== 'analyzed_tender_files')
+    .map(([key, field]) => [key, subagentTaskContext(field)]))
 }
 
 /** Render one bounded independent Mapping Subagent assignment. */
@@ -563,13 +638,14 @@ export function renderEvidenceMappingSubagentTask(
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
     `Mapping Task：${JSON.stringify(task)}`,
-    `Project 摘要：${JSON.stringify(inputs.project)}`,
-    `相关 Requirements：${JSON.stringify(requirements)}`,
-    `相关 Scoring：${JSON.stringify(scoring)}`,
-    `相关 Response Points：${JSON.stringify(responsePoints)}`,
-    `相关 Compliance：${JSON.stringify(compliance)}`,
+    `Project 摘要：${JSON.stringify(subagentTaskContext(inputs.project))}`,
+    `相关 Requirements：${JSON.stringify(subagentTaskContext(requirements))}`,
+    `相关 Scoring：${JSON.stringify(subagentTaskContext(scoring))}`,
+    `相关 Response Points：${JSON.stringify(subagentTaskContext(responsePoints))}`,
+    `相关 Compliance：${JSON.stringify(subagentTaskContext(compliance))}`,
     `全局 Source Strategy Notes：${JSON.stringify(plan.source_strategy_notes)}`,
     `可用 Corpus 定位：${JSON.stringify(corpusLocations(manifest))}`,
+    '招标文件只用于当前 S2 摘要中的需求理解，不是可用 Corpus；不得读取其分块，也不得将其 file_id 写入任何 materials 或 content_materials。',
     `只允许调用：${MAPPING_AGENT_TOOLS.join(', ')}。只处理当前任务，不读取 S2 Artifact、其他 Child 结果或完整 document.md。`,
     '本地检索必须 grep 定位候选，再 read 候选 chunk 理解上下文；语义截断时读取同一 chunks/index.json 后按相邻 id 继续。grep 命中不能直接作为 Evidence。',
     '是否联网由你根据当前任务自主判断。本地已有资料不禁止研究公开背景、政策、标准、官方文档、技术原理和成熟路线；本地未命中也不强制联网。联网必须 web_search → 选择可信 URL → web_fetch → 阅读正文，Snippet、Provider Answer 和标题不能作为 External Evidence。',
@@ -609,9 +685,21 @@ async function materialIssues(
   issues: StageValidationIssue[],
 ): Promise<void> {
   await Promise.all(materials.map(async (material) => {
+    let resolved: Awaited<ReturnType<typeof resolveEvidenceChunk>>
     try {
-      const resolved = await resolveEvidenceChunk(workspace, manifest, material)
-      if (resolved.file.role === 'tender') throw new Error('tender')
+      resolved = await resolveEvidenceChunk(workspace, manifest, material)
+    } catch {
+      issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_LOCAL_EVIDENCE_INVALID', message: `本地 Evidence 不是 file_id 所属的有效 chunk 行范围：${material.file_id} / ${material.chunk}` })
+      return
+    }
+    if (resolved.file.role === 'tender') {
+      issues.push({
+        code: 'EVIDENCE_MAPPING_PARTIAL_TENDER_EVIDENCE_FORBIDDEN',
+        message: `招标文件不得作为本地 Evidence：${material.file_id} / ${material.chunk}`,
+      })
+      return
+    }
+    try {
       const lineCount = (await readFile(resolved.path, 'utf8')).split('\n').length
       if (material.line_end > lineCount) throw new Error('line')
     } catch {
@@ -889,7 +977,7 @@ export async function executeEvidenceMapping(
   }
   await persistLog()
   const capturedByChild = new Map<string, Map<string, EvidenceMappingCapturedWebResult>>()
-  const liftChildReadGuard = tools.guard(exec => childReadGuard(workspace, agent.id, exec))
+  const liftChildReadGuard = tools.guard(exec => childReadGuard(workspace, manifest, agent.id, exec))
   const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
     const childId = exec.agent?.session.id
     if (childId === undefined || exec.agent?.session.header.parentSession !== agent.id

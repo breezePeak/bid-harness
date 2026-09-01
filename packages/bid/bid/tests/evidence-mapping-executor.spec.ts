@@ -15,6 +15,7 @@ import {
   getBidStagePolicy,
   mergeEvidenceMappingPartialResults,
   parseWebEvidenceSourcesArtifact,
+  readEvidenceMappingProgress,
   renderEvidenceMappingTask,
   type EvidenceMappingWebObservation,
 } from '@deepseek-ai/dsh-bid'
@@ -47,9 +48,15 @@ async function writeInputs(workspace: BidWorkspace) {
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('可复用的统一技术资料。') },
   ])
-  if (tender === undefined || reference === undefined || reference.absoluteChunkIndexPath === null || reference.chunksPath === null) throw new Error('executor fixture missing')
+  if (tender === undefined || reference === undefined
+    || tender.absoluteChunkIndexPath === null || tender.chunksPath === null
+    || reference.absoluteChunkIndexPath === null || reference.chunksPath === null) {
+    throw new Error('executor fixture missing')
+  }
   const index = JSON.parse(await readFile(reference.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
+  const tenderIndex = JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
   const chunk = `${reference.chunksPath}/${index.chunks[0]!.path}`
+  const tenderChunk = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
   const source = [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }]
   const scoring = { schema_version: 1 as const, scoring_items: [1, 2].map(value => ({ id: `S-${value}`, parent: null, group: '技术', title: `评分${value}`, raw_text: `评分${value}`, criterion: `响应评分${value}`, score: 1, score_range: null, must_answer: true, response_points: [`响应点${value}`], source_refs: source })) }
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
@@ -60,7 +67,7 @@ async function writeInputs(workspace: BidWorkspace) {
     writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring))),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
   ])
-  return { chunk, fileId: reference.id }
+  return { chunk, fileId: reference.id, tender: { chunk: tenderChunk, fileId: tender.id } }
 }
 
 function mappingFixture(workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false) {
@@ -174,14 +181,36 @@ describe('evidence-mapping Agent executor', () => {
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toEqual({
+      total: 2,
+      completed: 0,
+      running: 2,
+      not_started: 0,
+      failed: 0,
+    })
     expect(promptText(fixture.starts[0]!.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request)).not.toContain('"id":"R-2"')
+    expect(promptText(fixture.starts[0]!.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
+    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.fileId)
+    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.chunk)
     for (const start of fixture.starts) {
       expect(start.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
       expect(start.request.outputSchema).toBeDefined()
     }
+    const childReadGuard = fixture.guards.at(-1)
+    expect(childReadGuard?.({
+      name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.tender.chunk) },
+      agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
+    } as unknown as ToolExecution)).toBe('S3 Mapping Child 不可读取招标文件或未入库资料的分块。')
     fixture.starts.forEach((start) => { start.resolve() })
     await expect(execution).resolves.toHaveLength(2)
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toEqual({
+      total: 2,
+      completed: 2,
+      running: 0,
+      not_started: 0,
+      failed: 0,
+    })
 
     const map = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')) as { requirement_mappings: Array<{ requirement_id: string; materials: unknown[] }> }
     expect(map.requirement_mappings.find(item => item.requirement_id === 'R-1')?.materials).toHaveLength(1)
@@ -204,6 +233,22 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.taskAttempts.get('TASK-2')).toBe(1)
     expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
     expect(promptText(fixture.subagents.start.mock.calls[2]![1])).toContain('EVIDENCE_MAPPING_PARTIAL_MISSING')
+  })
+
+  it('reports tender materials separately from invalid chunk references', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-tender-material-')), 'session')
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material.tender)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach(start => start.resolve())
+    await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_TENDER_EVIDENCE_FORBIDDEN')
+    await expect(readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8'))
+      .resolves.toContain('招标文件不得作为本地 Evidence')
   })
 
   it('limits the Main Agent policy to plan and merge tools', () => {
