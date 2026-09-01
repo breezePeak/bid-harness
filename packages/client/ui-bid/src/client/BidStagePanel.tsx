@@ -269,6 +269,9 @@ export function BidStagePanel({
 
   const uploadSelectedFiles = async (): Promise<void> => {
     const files = selectedFilesRef.current
+    if (!files.some(file => file.role === 'tender')) {
+      throw new BidActionError('BID_TENDER_REQUIRED', t('error.tender_required'))
+    }
     updateSelectedFiles(current => current.map(file => ({ ...file, progress: 5, status: 'encoding', error: undefined })))
     try {
       const results = await uploadFiles(
@@ -280,6 +283,15 @@ export function BidStagePanel({
         },
       )
       applyFileResults(results)
+      const failed = results.filter(file => file.status === 'failed')
+      if (failed.length > 0) {
+        setRequestError({
+          message: t('error.file_partial', {
+            files: failed.map(file => `${file.name}: ${file.error?.message ?? '文件解析失败'}`).join('；'),
+          }),
+          issues: [],
+        })
+      }
     } catch (reason: unknown) {
       if (reason instanceof BidActionError && reason.files.length > 0) applyFileResults(reason.files)
       else updateSelectedFiles(current => current.map(file => ({ ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })))
@@ -589,7 +601,7 @@ export function BidStagePanel({
                 variant="primary"
                 disabled={
                   requestPending !== null
-                  || !selectedFiles.some(item => item.role === 'tender')
+                  || selectedFiles.length === 0
                 }
                 onClick={() => { invoke('upload', uploadSelectedFiles) }}
               >

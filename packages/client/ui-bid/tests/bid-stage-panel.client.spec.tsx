@@ -91,7 +91,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByRole('region', { name: '技术标生成' })).toBeNull()
   })
 
-  it('shows file selection only when upload_files is admitted', () => {
+  it('shows file selection only when upload_files is admitted', async () => {
     const view = render(<BidStagePanel {...props(projection())} />)
     expect(screen.queryByRole('button', { name: '上传招标文件' })).toBeNull()
 
@@ -131,7 +131,9 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('项目资料.pdf')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' }))
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
-    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', false)
+    fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('请至少选择一个招标文件')
   })
 
   it('clears the browser upload queue when file intake advances to tender analysis', () => {
@@ -178,6 +180,31 @@ describe('BidStagePanel', () => {
 
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
     expect(screen.queryByText('项目资料.pdf')).toBeNull()
+  })
+
+  it('keeps partial file-intake failures visible after the stage advances', async () => {
+    const uploadFiles = vi.fn(async () => [{
+      name: '旧标书.pdf',
+      role: 'reference_bid' as const,
+      status: 'failed' as const,
+      error: { code: 'BID_FILE_TYPE_UNSUPPORTED' as const, message: '文件类型不受支持' },
+    }])
+    const view = render(<BidStagePanel {...props(projection({ allowedActions: ['upload_files'] }), { uploadFiles })} />)
+    const inputs = view.container.querySelectorAll('input[type="file"]')
+    fireEvent.change(inputs[0]!, { target: { files: [new File(['tender'], '招标文件.pdf', { type: 'application/pdf' })] } })
+    fireEvent.change(inputs[2]!, { target: { files: [new File(['reference'], '旧标书.pdf', { type: 'application/pdf' })] } })
+    fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('旧标书.pdf: 文件类型不受支持')
+    expect(uploadFiles).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ role: 'tender' }),
+        expect.objectContaining({ role: 'reference_bid' }),
+      ],
+      expect.any(Function),
+    )
+    view.rerender(<BidStagePanel {...props(projection({ runtime: { stage: 'tender_analysis', status: 'pending' } }), { uploadFiles })} />)
+    expect(screen.getByRole('alert').textContent).toContain('旧标书.pdf: 文件类型不受支持')
   })
 
   it('does not carry a browser upload queue into another file-intake Session', () => {
