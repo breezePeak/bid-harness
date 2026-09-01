@@ -5,12 +5,14 @@ import { mkdtemp } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import {
   BidWorkspace,
+  createScoringResponsePointCatalog,
   parseTenderComplianceArtifact,
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
   parseTenderScoringArtifact,
   validateTenderAnalysis,
   type StageArtifact,
+  type TenderScoringArtifact,
   type TenderSourceRef,
 } from '@deepseek-ai/dsh-bid'
 
@@ -19,6 +21,7 @@ const artifacts: StageArtifact[] = [
   { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
   { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
   { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
+  { stage: 'tender_analysis', type: 'scoring_response_points', path: 'analysis/scoring-response-points.json' },
 ]
 
 async function fixture(tenderText = '# 项目\n\n必须按期交付，技术方案得 10 分。'): Promise<{
@@ -103,6 +106,15 @@ async function publish(workspace: BidWorkspace, docs: Record<string, unknown>): 
   await Promise.all(Object.entries(docs).map(([name, value]) => (
     writeFile(join(root, name), `${JSON.stringify(value)}\n`)
   )))
+  const scoring = docs['scoring.json'] as { scoring_items?: Array<{ response_points?: unknown }> }
+  const catalog = Array.isArray(scoring.scoring_items)
+    && scoring.scoring_items.every(item => Array.isArray(item.response_points))
+    ? createScoringResponsePointCatalog(scoring as TenderScoringArtifact)
+    : {}
+  await writeFile(
+    join(root, 'scoring-response-points.json'),
+    `${JSON.stringify(catalog, null, 2)}\n`,
+  )
 }
 
 const codes = (result: Awaited<ReturnType<typeof validateTenderAnalysis>>): string[] => (
@@ -250,19 +262,31 @@ describe('tender-analysis validator', () => {
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
   })
 
-  it.each([
-    ['requirements.json', 'requirements'],
-    ['scoring.json', 'scoring_items'],
-    ['compliance.json', 'compliance_items'],
-  ])('rejects %s raw_text that is absent from its cited source range', async (artifactName, itemKey) => {
+  it('allows raw_text to extract and compress the meaning of cited tender text', async () => {
     const value = await fixture()
     const docs = documents(value.tenderId, value.source)
-    const artifact = docs[artifactName] as Record<string, unknown>
-    const items = artifact[itemKey] as Array<Record<string, unknown>>
-    items[0]!.raw_text = '必须建设三座数据中心。'
+    const requirements = docs['requirements.json'] as { requirements: Array<{ raw_text: string }> }
+    const scoring = docs['scoring.json'] as { scoring_items: Array<{ raw_text: string }> }
+    const compliance = docs['compliance.json'] as { compliance_items: Array<{ raw_text: string }> }
+    requirements.requirements[0]!.raw_text = '必须按期完成交付'
+    scoring.scoring_items[0]!.raw_text = '技术方案：10 分'
+    compliance.compliance_items[0]!.raw_text = '交付期限为强制要求'
     await publish(value.workspace, docs)
-    const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
-    expect(codes(result)).toContain('TENDER_ANALYSIS_SOURCE_TEXT_MISMATCH')
+
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('rejects raw_text references that name a nonexistent source file', async () => {
+    const value = await fixture()
+    const docs = documents(value.tenderId, value.source)
+    const requirements = docs['requirements.json'] as {
+      requirements: Array<{ source_refs: TenderSourceRef[] }>
+    }
+    requirements.requirements[0]!.source_refs = [{ ...value.source, file_id: 'missing-file' }]
+    await publish(value.workspace, docs)
+
+    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
+      .toContain('TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN')
   })
 
   it('distinguishes missing files from invalid JSON', async () => {

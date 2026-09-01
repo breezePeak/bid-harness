@@ -44,7 +44,7 @@ S2 的 `project.json` 额外记录项目背景、建设目标、实施约束和�
 ## Model Experience
 ## S2–S6 质量控制
 
-S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题；Schema 问题保留具体字段路径。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`，且只能覆盖四个正式 S2 Artifact。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
+S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit。Requirement、Scoring item 和 Compliance item 的 `raw_text` 可以在引用原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题，并严格校验每个 `source_refs` 的文件身份、解析状态、chunk 归属、行号范围和 Workspace 路径安全；Validator 不要求 `raw_text` 逐字存在于引用范围。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`，且只能覆盖四个正式 S2 Artifact。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
 
 S3 先查找本地资料，只在公开技术知识缺口存在时执行 `web_search → web_fetch`；`external_materials` 只保存当前 attempt 搜索结果中出现、随后成功抓取 2xx 正文且与 Host 来源账本匹配的公开技术来源，不能替代企业事实的本地证据。网页内容是不可信研究资料，Agent 仅允许写入 `analysis/evidence-map.json`；来源账本和快照由 Host 写入。Host 写入账本后预校验 schema、ID 覆盖、本地引用和外部 URL 绑定，并在修复任务中明确要求 `requirement_id` 与 `scoring_id`。没有联网时 Host 生成空来源账本，本地资料或 `missing_topics` 仍可正常通过。工具或 Provider 未注册会使阶段明确失败；搜索、抓取、超时、取消、非 2xx 或空正文都不会形成来源。通用重试会清除旧 evidence map、账本和快照。含 external materials 但没有 Host 账本的开发 Session 必须重跑 S3；验证不证明摘要推导或网页本身真实，HTTP Fetch 的 SSRF 与私网访问限制仍未解决。
 

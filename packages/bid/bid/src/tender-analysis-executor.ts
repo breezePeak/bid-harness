@@ -26,6 +26,13 @@ const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
 
 const HOST_ARTIFACT = 'analysis/scoring-response-points.json'
 
+const RAW_TEXT_SOURCE_RULES = [
+  'requirements.json、scoring.json、compliance.json 中每一项 raw_text 都必须以 source_refs 指向的招标原文为依据；允许提取、压缩、去冗余和原子化，不要求逐字复制。',
+  'raw_text 不得改变原文的关键数字、单位以及“应、须、必须、不得”等强制语义，不得新增原文没有的要求。归纳、解释或进一步拆解分别写入 normalized_requirement、normalized_rule、criterion 或 response_points。',
+  'source_refs 必须真实、合法且可追溯：写 Artifact 前重新 read 对应 chunk，逐项确认原文能够支持 raw_text，并核对 file_id、chunk 归属、文件解析状态以及 line_start、line_end。',
+  '内容跨 chunk 或被截断时，必须读取相邻 chunk 后再决定如何提取和原子化；不得凭上下文记忆补充要求。',
+] as const
+
 function agentArtifactPaths(task: BidStageTask): string[] {
   return task.requiredArtifacts.filter(path => path !== HOST_ARTIFACT)
 }
@@ -73,6 +80,7 @@ export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, 
     'requirements.json 严格包含 schema_version, requirements；每项严格包含 id, category, raw_text, normalized_requirement, mandatory, source_refs，并按可独立响应的语义原子化。',
     'scoring.json 严格包含 schema_version, scoring_items；只收录技术评分及其技术子项，排除资格、商务和价格评分。每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, response_points, source_refs。response_points 必须是非空数组，按当前评分项自身语义拆解后续技术标为充分响应而应重点覆盖的技术内容；不同评分项不得机械复用同一套内容，也不得创造原文没有的评分规则。score_range 为 null 或 {min,max}。',
     'compliance.json 严格包含 schema_version, compliance_items；每项严格包含 id, type, raw_text, normalized_rule, severity, source_refs；severity 只能是 fatal、mandatory、warning。',
+    ...RAW_TEXT_SOURCE_RULES,
     ...task.constraints.map(constraint => `约束：${constraint}`),
     '写完四个文件后停止。回复文字不会完成阶段；Host 会在 Agent idle 后独立校验文件与引用。',
   ].join('\n')
@@ -97,6 +105,8 @@ function renderTenderAnalysisCoverageAuditTask(agent: Agent, workspace: BidWorks
     '检查每一类内容是否已在 requirements.json、scoring.json 或 compliance.json 中以可追溯的原文和 source_refs 表达。发现遗漏时直接修正现有四个文件；不得创建其他 Artifact。',
     '继续只保留技术标内容。投标报价、价格评分、付款、财务、资格、保证金和纯商务材料不得写入分析 Artifact。',
     '逐项检查 scoring_items：必须只包含技术评分，每项 response_points 都应非空且与该项 raw_text 和 criterion 的具体语义对应，不得复制统一模板。',
+    ...RAW_TEXT_SOURCE_RULES,
+    '逐项遍历 requirements、scoring_items 和 compliance_items；根据每项 source_refs 重新 read 原文，确认引用真实合法、范围包含支持该项的原文，并检查提取后的 raw_text 未改变关键数字、单位、强制语义或新增要求。',
     '审计结束后停止。Host 会独立验证最终 Artifact、引用和异常空结果。',
   ].join('\n')
 }
@@ -138,6 +148,8 @@ export function renderTenderAnalysisRepairTask(
     'scoring.json 每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, response_points, source_refs；parent 和 group 必须存在且可为 null，score 为 number 或 null，score_range 为 {min,max} 或 null，response_points 必须是至少含一项非空字符串的数组。',
     'compliance.json 每项严格包含 id, type, raw_text, normalized_rule, severity, source_refs；severity 只能是 fatal、mandatory 或 warning。',
     'source_refs 必须是非空数组，元素严格包含 file_id, chunk, line_start, line_end。需要核对原文或行号时，可以重新 read 对应 chunk。',
+    ...RAW_TEXT_SOURCE_RULES,
+    '修复引用问题时必须重新 read 对应原始 chunk，根据真实来源修正 file_id、chunk、line_start 或 line_end；不得伪造引用。raw_text 可以在原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。',
     '必须实际写入修复结果；只回复“已修复”不会改变 Artifact。完成后停止，Host 将执行最终校验。',
   ].join('\n')
 }
