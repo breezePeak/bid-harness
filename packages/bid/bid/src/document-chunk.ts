@@ -115,6 +115,17 @@ export function parseDocumentChunkIndex(value: unknown): DocumentChunkIndex {
   return parsed.data
 }
 
+/**
+ * Extract the stable chunk id from an Agent-authored local Evidence reference.
+ * @param reference - chunk id or a Windows/POSIX path whose final component names the chunk.
+ * @returns the stable id without the Markdown extension, or `undefined` for an empty reference.
+ */
+export function evidenceChunkId(reference: string): string | undefined {
+  const name = reference.replaceAll('\\', '/').split('/').at(-1)?.trim()
+  if (name === undefined || name.length === 0) return undefined
+  return name.toLowerCase().endsWith('.md') ? name.slice(0, -3) : name
+}
+
 /** Paths and manifest returned after atomically replacing a chunk directory. */
 export interface ChunkDocumentResult {
   outputDir: string

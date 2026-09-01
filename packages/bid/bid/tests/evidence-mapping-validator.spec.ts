@@ -423,8 +423,7 @@ describe('evidence-mapping validator', () => {
       { name: 'level', code: 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', mutate: (map) => { map.framework_mappings[0]!.level = 2 } },
       { name: 'source_order', code: 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', mutate: (map) => { map.framework_mappings[0]!.source_order = 2 } },
       { name: 'source_section_id', code: 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', mutate: (map) => { map.framework_mappings[0]!.source_section_id = 'forged' } },
-      { name: 'missing framework heading', code: 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_MISSING', mutate: (map) => { map.framework_mappings = [] } },
-      { name: 'duplicate framework heading', code: 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_DUPLICATE', mutate: (map) => { map.framework_mappings.push({ ...map.framework_mappings[0]!, mapping_id: 'MAP-F-2' }) } },
+      { name: 'duplicate framework heading', code: 'EVIDENCE_MAPPING_SOURCE_SECTION_DUPLICATE', mutate: (map) => { map.framework_mappings.push({ ...map.framework_mappings[0]!, mapping_id: 'MAP-F-2' }) } },
       { name: 'high reference without mapping', code: 'EVIDENCE_MAPPING_REFERENCE_BID_MAPPING_MISSING', mutate: (map) => { map.reference_bid_mappings = [] } },
       { name: 'unknown requirement', code: 'EVIDENCE_MAPPING_SOURCE_MAPPING_REQUIREMENT_INVALID', mutate: (map) => { map.framework_mappings[0]!.related_requirement_ids = ['unknown'] } },
       { name: 'unknown response point', code: 'EVIDENCE_MAPPING_SOURCE_MAPPING_RESPONSE_POINT_INVALID', mutate: (map) => { map.framework_mappings[0]!.related_scoring_points[0]!.response_point_id = 'RP-999999' } },
@@ -442,6 +441,64 @@ describe('evidence-mapping validator', () => {
       expect(result.ok, testCase.name).toBe(false)
       if (result.ok) throw new Error(`Expected ${testCase.name} failure`)
       expect(result.issues.map(issue => issue.code), testCase.name).toContain(testCase.code)
+    }
+  })
+
+  it('allows unmapped framework headings and resolves local Evidence by file id plus chunk id', async () => {
+    const value = await fixture()
+    const [framework] = await value.workspace.import([{
+      name: 'partial-framework.md',
+      role: 'outline_framework',
+      bytes: new TextEncoder().encode('# 总体方案\n\n总体正文。\n\n## 子标题\n\n子标题正文。'),
+    }])
+    if (framework === undefined || framework.absoluteChunkIndexPath === null || framework.chunksPath === null) throw new Error('framework fixture missing')
+    const index = JSON.parse(await readFile(framework.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string; heading_path: string[] }> }
+    const entry = index.chunks[0]!
+    const material = {
+      file_id: framework.id,
+      chunk: `different\\workspace\\prefix\\${entry.id}.md`,
+      line_start: 1,
+      line_end: 3,
+      usage: 'adapt' as const,
+      summary: '总体方案正文。',
+    }
+    const mapping = {
+      mapping_id: 'MAP-PARTIAL', file_id: framework.id, source_section_id: 'derived_001', source_order: 1,
+      level: 1, title: entry.heading_path[0]!, heading_path: entry.heading_path.slice(0, 1), action: 'preserve' as const,
+      reason: '仅映射有业务价值的父标题。', related_requirement_ids: ['R-1'], related_scoring_points: [],
+      content_materials: [material], writing_dimensions: ['总体方案'], missing_topics: [],
+    }
+    await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(v4Map({
+      source_strategy: { mode: 'framework_only', framework_file_id: framework.id, reference_bid_files: [] },
+      framework_mappings: [mapping],
+      requirement_mappings: [{ requirement_id: 'R-1', materials: [material], external_materials: [], missing_topics: [], writing_dimensions: ['总体方案'] }],
+      scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: [] }],
+    })))
+
+    await expect(validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
+  })
+
+  it('rejects a missing chunk id and a chunk id owned only by another file', async () => {
+    const value = await fixture()
+    const [fileA, fileB] = await value.workspace.import([
+      { name: 'file-a.md', role: 'reference', bytes: new TextEncoder().encode('短资料。') },
+      { name: 'file-b.md', role: 'reference', bytes: new TextEncoder().encode(`# 第一节\n\n${'甲'.repeat(800)}\n\n# 第二节\n\n${'乙'.repeat(800)}`) },
+    ])
+    if (fileA === undefined || fileB === undefined || fileB.absoluteChunkIndexPath === null) throw new Error('cross-file fixture missing')
+    const indexB = JSON.parse(await readFile(fileB.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string }> }
+    const otherId = indexB.chunks.find(entry => entry.id !== 'chunk_0001')?.id
+    if (otherId === undefined) throw new Error('cross-file chunk missing')
+    const base = v4Map({
+      requirement_mappings: [{ requirement_id: 'R-1', materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['实施'] }],
+      scoring_mappings: [{ scoring_id: 'S-1', materials: [], external_materials: [], missing_topics: [] }],
+    })
+    for (const chunk of ['corpus/any/chunks/chunk_9999.md', `other\\prefix\\${otherId}.md`]) {
+      const candidate = structuredClone(base)
+      candidate.requirement_mappings[0]!.materials = [{ file_id: fileA.id, chunk, line_start: 1, line_end: 1, usage: 'reference', summary: '无效引用。' }]
+      await writeFile(join(value.workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(candidate))
+      const result = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_SOURCE_CHUNK_INVALID')
     }
   })
 })

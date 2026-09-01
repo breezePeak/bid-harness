@@ -1,6 +1,6 @@
 import { lstat, readFile } from 'node:fs/promises'
-import { posix } from 'node:path'
 import type { BidManifest, BidWorkspace } from './index.ts'
+import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
@@ -9,7 +9,6 @@ import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResu
 import { parseEvidenceMapArtifact, type EvidenceMaterial, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
-import { parseDocumentChunkIndex } from './document-chunk.ts'
 import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
@@ -37,20 +36,14 @@ async function readJson(workspace: BidWorkspace, path: string, issues: StageVali
 async function validateMaterial(
   workspace: BidWorkspace, manifest: BidManifest, material: EvidenceMaterial, issues: StageValidationIssue[],
 ): Promise<void> {
-  const file = manifest.files.find(item => item.id === material.file_id && item.role !== 'tender')
+  const file = manifest.files.find(item => String(item.id) === material.file_id && item.role !== 'tender')
   if (file === undefined || file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) {
     reject(issues, 'CHAPTER_WRITING_EVIDENCE_FILE_INVALID', 'A chapter Evidence reference must name a parsed reference file.', material.chunk)
     return
   }
   try {
-    const chunksPath = file.chunksPath
-    const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
-    await assertNoLinkedPath(workspace.root, indexPath)
-    const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
-    if (!index.chunks.some(chunk => posix.join(chunksPath, chunk.path) === material.chunk)) throw new Error('unknown-chunk')
-    const chunkPath = within(workspace.sessionRoot, material.chunk)
-    await assertNoLinkedPath(workspace.root, chunkPath)
-    if (material.line_end > (await readFile(chunkPath, 'utf8')).split('\n').length) throw new Error('line-range')
+    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
+    if (material.line_end > (await readFile(resolved.path, 'utf8')).split('\n').length) throw new Error('line-range')
   } catch {
     reject(issues, 'CHAPTER_WRITING_EVIDENCE_INVALID', 'A chapter Evidence reference does not name an indexed local line range.', material.chunk)
   }

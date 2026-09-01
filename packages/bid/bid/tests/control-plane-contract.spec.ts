@@ -58,11 +58,11 @@ describe('bid control-plane public contract', () => {
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
   })
 
-  it('limits evidence mapping to local evidence tools and the search-fetch pair', () => {
+  it('limits evidence mapping Main-Agent policy to planning tools', () => {
     const policy = getBidStagePolicy('evidence_mapping')
 
-    expect(policy.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])
-    expect(policy.forbiddenTools).toEqual(['bash'])
+    expect(policy.allowedTools).toEqual(['read', 'write'])
+    expect(policy.forbiddenTools).toEqual(['grep', 'bash', 'web_search', 'web_fetch'])
   })
 
   it('distinguishes successful and failed validation with multiple issues', () => {

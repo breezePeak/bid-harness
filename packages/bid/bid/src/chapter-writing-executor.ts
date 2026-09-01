@@ -1,5 +1,5 @@
 import { mkdir, readFile, rm } from 'node:fs/promises'
-import { join, posix, relative, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -28,7 +28,7 @@ import {
   type ChapterExecutionPlan,
 } from './chapter-writing-plan-artifacts.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
-import { parseDocumentChunkIndex } from './document-chunk.ts'
+import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
@@ -53,7 +53,7 @@ import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlin
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog, type ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
-import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { assertNoLinkedPath } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 
 const PLAN_PATH = 'chapters/execution-plan.json'
@@ -480,20 +480,13 @@ async function resolveChapterSourceMappings(workspace: BidWorkspace, context: Ch
     if (file === undefined || file.role !== expectedRole || file.parseStatus !== 'success' || file.chunkIndexPath === null || file.chunksPath === null) {
       throw new Error(`chapter-writing-source-mapping-invalid:${mapping.mappingId}`)
     }
-    const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
-    await assertNoLinkedPath(workspace.root, indexPath)
-    const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
     mapping.excerpts = await Promise.all(mapping.excerpts.map(async (material) => {
       if (material.file_id !== mapping.fileId) throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
-      const chunksPath = file.chunksPath
-      if (chunksPath === null) throw new Error(`chapter-writing-source-mapping-invalid:${mapping.mappingId}`)
-      const entry = index.chunks.find(chunk => posix.join(chunksPath, chunk.path) === material.chunk)
-      if (entry === undefined || !mapping.headingPath.every((heading, offset) => entry.heading_path[offset] === heading)) {
+      const resolved = await resolveEvidenceChunk(workspace, manifest, material)
+      if (!mapping.headingPath.every((heading, offset) => resolved.entry.heading_path[offset] === heading)) {
         throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
       }
-      const chunkPath = within(workspace.sessionRoot, material.chunk)
-      await assertNoLinkedPath(workspace.root, chunkPath)
-      const lines = (await readFile(chunkPath, 'utf8')).split('\n')
+      const lines = (await readFile(resolved.path, 'utf8')).split('\n')
       if (material.line_end > lines.length) throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
       return { ...material, text: lines.slice(material.line_start - 1, material.line_end).join('\n') }
     }))
@@ -533,16 +526,10 @@ function verifyAdditionalExternalMaterials(
 async function additionalMaterialValid(workspace: BidWorkspace, material: EvidenceMaterial): Promise<boolean> {
   try {
     const manifest = await workspace.readManifest()
-    const file = manifest.files.find(item => item.id === material.file_id && item.role !== 'tender')
+    const file = manifest.files.find(item => String(item.id) === material.file_id && item.role !== 'tender')
     if (file === undefined || file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) return false
-    const chunksPath = file.chunksPath
-    const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
-    await assertNoLinkedPath(workspace.root, indexPath)
-    const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
-    if (!index.chunks.some(chunk => posix.join(chunksPath, chunk.path) === material.chunk)) return false
-    const chunkPath = within(workspace.sessionRoot, material.chunk)
-    await assertNoLinkedPath(workspace.root, chunkPath)
-    return material.line_end <= (await readFile(chunkPath, 'utf8')).split('\n').length
+    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
+    return material.line_end <= (await readFile(resolved.path, 'utf8')).split('\n').length
   } catch {
     return false
   }

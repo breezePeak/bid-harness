@@ -65,6 +65,41 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
     inheritsParentContext: false,
     start: (request: ResolvedSubagentStartRequest) => {
       const text = request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      if (text.includes('当前阶段：evidence_mapping / Mapping Subagent')) {
+        const task = JSON.parse(text.split('\n').find(line => line.startsWith('Mapping Task：'))!.slice('Mapping Task：'.length)) as {
+          task_id: string
+          requirement_ids: string[]
+          scoring_ids: string[]
+          response_point_ids: string[]
+        }
+        const points = JSON.parse(text.split('\n').find(line => line.startsWith('相关 Response Points：'))!.slice('相关 Response Points：'.length)) as Array<{
+          id: string
+          scoring_id: string
+          text: string
+        }>
+        const missing_topics = ['测试未提供补充资料。']
+        const id = SessionId(`evidence-child-${++child}`)
+        return Promise.resolve({
+          id,
+          localAgent: undefined,
+          result: Promise.resolve({
+            stopReason: 'completed' as const,
+            output: [],
+            structured: {
+              task_id: task.task_id,
+              requirement_mappings: task.requirement_ids.map(requirement_id => ({ requirement_id, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
+              scoring_mappings: task.scoring_ids.map(scoring_id => ({ scoring_id, materials: [], external_materials: [], missing_topics })),
+              response_point_mappings: points.map(point => ({ response_point_id: point.id, scoring_id: point.scoring_id, response_point: point.text, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
+              research_topics: [],
+              framework_mappings: [],
+              reference_bid_mappings: [],
+              findings: [],
+              missing_topics,
+            },
+          }),
+          dispose: () => Promise.resolve(),
+        })
+      }
       const blueprintLine = text.split('\n').find(line => line.startsWith('Current Chapter Blueprint：'))
       if (blueprintLine === undefined) throw new Error('missing chapter blueprint')
       const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as {
@@ -233,6 +268,32 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   }, null, 2)}\n`, 'utf8')
 }
 
+async function writeEvidenceMappingPlan(cwd: string, sessionId: string): Promise<void> {
+  const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const [requirements, scoring, points, compliance] = await Promise.all([
+    readFile(join(workspace.sessionRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse) as Promise<{ requirements: Array<{ id: string }> }>,
+    readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse) as Promise<{ scoring_items: Array<{ id: string }> }>,
+    readFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), 'utf8').then(JSON.parse) as Promise<{ points: Array<{ id: string }> }>,
+    readFile(join(workspace.sessionRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse) as Promise<{ compliance_items: Array<{ id: string }> }>,
+  ])
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json'), `${JSON.stringify({
+    schema_version: 1,
+    global_analysis: ['按技术响应主题完成资料映射。'],
+    source_strategy_notes: [],
+    tasks: [{
+      task_id: 'TASK-1',
+      title: '技术响应',
+      objective: '覆盖全部技术要求与评分响应点。',
+      requirement_ids: requirements.requirements.map(item => item.id),
+      scoring_ids: scoring.scoring_items.map(item => item.id),
+      response_point_ids: points.points.map(item => item.id),
+      compliance_ids: compliance.compliance_items.map(item => item.id),
+      source_focus: [],
+      research_topics: [],
+    }],
+  }, null, 2)}\n`, 'utf8')
+}
+
 async function writeOutlineArtifact(cwd: string, sessionId: string): Promise<void> {
   const workspace = new Bid.BidWorkspace(cwd, sessionId)
   const scoring = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')) as { scoring_items: Array<{ id: string; response_points: string[] }> }
@@ -335,9 +396,10 @@ function attach(
       } else if (prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) {
         await writeOutlineQualityReport(cwd, session.id)
         return
-      } else if (analysisAttempt === 0) await writeTenderAnalysisArtifacts(cwd, session.id)
-      else if (analysisAttempt === 1) await writeEvidenceMappingArtifact(cwd, session.id)
-      else if (analysisAttempt === 2) await writeOutlineArtifact(cwd, session.id)
+      } else if (prompt.includes('当前阶段：tender_analysis')) await writeTenderAnalysisArtifacts(cwd, session.id)
+      else if (prompt.includes('evidence_mapping / Main-Agent Planning')) await writeEvidenceMappingPlan(cwd, session.id)
+      else if (prompt.includes('evidence_mapping / Main-Agent Merge')) await writeEvidenceMappingArtifact(cwd, session.id)
+      else if (prompt.includes('当前阶段：outline_generation')) await writeOutlineArtifact(cwd, session.id)
       else await writeChapterExecutionPlan(cwd, session.id)
       analysisAttempt++
     } else {
@@ -547,7 +609,11 @@ describe('Bid Host runtime composition', () => {
       const workspace = new Bid.BidWorkspace(cwd, sessionId)
       if (prompt.includes('当前阶段：tender_analysis / Coverage Audit') || prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) return
       if (prompt.includes('tender_analysis / Artifact Repair') && ++repairRuns === 1) return
-      if (prompt.includes('当前阶段：evidence_mapping')) {
+      if (prompt.includes('evidence_mapping / Main-Agent Planning')) {
+        await writeEvidenceMappingPlan(cwd, sessionId)
+        return
+      }
+      if (prompt.includes('evidence_mapping / Main-Agent Merge')) {
         await writeEvidenceMappingArtifact(cwd, sessionId)
         return
       }
@@ -671,6 +737,7 @@ describe('Bid Host runtime composition', () => {
       maxFileBytes: 4,
       maxTotalBytes: 4,
       modelStageRepairAttempts: Bid.DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+      evidenceMappingMaxConcurrency: Bid.DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
       chapterWritingMaxConcurrency: Bid.DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
       trustedHosts: [],
     })
@@ -944,7 +1011,8 @@ describe('Bid Host runtime composition', () => {
     const { agent } = attach(ctx, 'bid', root, async (cwd, sessionId, _attempt, prompt) => {
       prompts.push(prompt)
       if (prompt.includes('当前阶段：tender_analysis')) await writeTenderAnalysisArtifacts(cwd, sessionId)
-      else if (prompt.includes('当前阶段：evidence_mapping')) await writeEvidenceMappingArtifact(cwd, sessionId)
+      else if (prompt.includes('evidence_mapping / Main-Agent Planning')) await writeEvidenceMappingPlan(cwd, sessionId)
+      else if (prompt.includes('evidence_mapping / Main-Agent Merge')) await writeEvidenceMappingArtifact(cwd, sessionId)
       else if (prompt.includes('Blueprint Quality Review')) await writeOutlineQualityReport(cwd, sessionId)
       else if (prompt.includes('当前阶段：outline_generation')) {
         if (prompt.includes('当前基线 revision=') || prompt.includes('这是基于 outline/draft.json revision=')) {
