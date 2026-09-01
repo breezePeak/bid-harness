@@ -27,17 +27,18 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
   await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify({ schema_version: 1, requirements: [1, 2, 3].map(index => ({ id: `REQ-${index}`, category: '技术', raw_text: `要求${index}`, normalized_requirement: `响应要求${index}`, mandatory: true, source_refs: source })) })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify({ schema_version: 1, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, response_points: [`回答评分${index}`], source_refs: source })) })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 4, source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], research_topics: [], requirement_mappings: [1, 2, 3].map(index => ({ requirement_id: `REQ-${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })), scoring_mappings: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, materials: [], external_materials: [], missing_topics: [] })), response_point_mappings: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, response_point: `回答评分${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] })) })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 5, source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], research_topics: [], requirement_mappings: [1, 2, 3].map(index => ({ requirement_id: `REQ-${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })), scoring_mappings: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, materials: [], external_materials: [], missing_topics: [] })), response_point_mappings: [1, 2, 3].map(index => ({ response_point_id: `RP-${String(index).padStart(6, '0')}`, scoring_id: `SCORE-${index}`, response_point: `回答评分${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] })) })}\n`)
   const outline = outlineFixture()
   await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
-  await writeFile(join(workspace.sessionRoot, 'outline/confirmation.json'), `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineArtifactSha256(outline), confirmed_outline_sha256: outlineArtifactSha256(outline) })}\n`)
+  const outlineSha256 = outlineArtifactSha256(outline)
+  await writeFile(join(workspace.sessionRoot, 'outline/confirmation.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 })}\n`)
   return outline
 }
 
 function outlineFixture() {
   return { schema_version: 2 as const, scope: 'technical_bid' as const, document_title: '技术标', global_compliance_ids: [], sections: [
-    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '实施方案', purpose: '目录', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, content_mode: null, source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
-    ...[1, 2, 3].map(index => ({ id: `SEC-${index}`, parent_id: 'STRUCT', order: index, level: 2, title: `章节${index}`, purpose: `回答主题${index}`, writable: true, must_answer: [`回答${index}`], requirement_ids: [`REQ-${index}`], scoring_ids: [`SCORE-${index}`], compliance_ids: [], origin: 'generated' as const, content_mode: 'write_new' as const, source_mapping_ids: [], scoring_response_points: [{ scoring_id: `SCORE-${index}`, response_point: `回答评分${index}` }], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
+    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '实施方案', purpose: '目录', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, content_mode: null, source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
+    ...[1, 2, 3].map(index => ({ id: `SEC-${index}`, parent_id: 'STRUCT', order: index, level: 2, title: `章节${index}`, purpose: `回答主题${index}`, writable: true, must_answer: [`回答${index}`], requirement_ids: [`REQ-${index}`], scoring_ids: [`SCORE-${index}`], compliance_ids: [], origin: 'generated' as const, content_mode: 'write_new' as const, source_mapping_ids: [], scoring_response_point_ids: [`RP-${String(index).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `SCORE-${index}`, response_point: `回答评分${index}` }], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
   ] }
 }
 
@@ -113,7 +114,7 @@ function fixtureAgent(
           if (settled) return
           settled = true
           active--
-          resolve({ stopReason: 'cancelled', output: [] })
+          resolve({ stopReason: 'aborted', output: [] })
         }, { once: true })
       })
       const localAgent = {
