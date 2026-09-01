@@ -159,7 +159,10 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
     pendingMain = ''
   })
   const agent = { id: 'session', session: { header: { cwd: workspace.root }, events: [] }, ctx: { get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn(() => () => {}) }, followup, whenIdle } as unknown as Agent
-  return { agent, starts, subagents, followup, guards, disposed, maxActive: () => maxActive, taskAttempts }
+  return {
+    agent, starts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
+    guards, disposed, maxActive: () => maxActive, taskAttempts,
+  }
 }
 
 describe('evidence-mapping Agent executor', () => {
@@ -209,6 +212,96 @@ describe('evidence-mapping Agent executor', () => {
     const prompt = renderEvidenceMappingTask({ id: 'session' } as Agent, new BidWorkspace('C:/workspace', 'session'), buildBidStageTask('evidence_mapping'))
     expect(prompt).toContain('不要 grep、不要读取 corpus chunk、不要联网')
     expect(prompt).toContain('不得按文件角色拆任务')
+    expect(prompt).toContain('不得包含 Markdown code fence、解释文字或任何其他前后缀')
+    expect(prompt).toContain('每个 task 严格只允许 task_id、title、objective')
+  })
+
+  it.each([
+    {
+      name: 'reports a missing plan separately',
+      content: undefined,
+      code: 'EVIDENCE_MAPPING_PLAN_MISSING',
+      detail: 'evidence-mapping-plan.json 未生成。',
+    },
+    {
+      name: 'reports the JSON parse reason separately',
+      content: '{"schema_version":',
+      code: 'EVIDENCE_MAPPING_PLAN_JSON_INVALID',
+      detail: 'evidence-mapping-plan.json JSON 解析失败：',
+    },
+    {
+      name: 'reports strict plan schema paths separately',
+      content: JSON.stringify({
+        schema_version: 1,
+        global_analysis: ['按业务主题拆分。'],
+        source_strategy_notes: [],
+        tasks: [{
+          task_id: 'TASK-1',
+          title: '缺少目标',
+          requirement_ids: ['R-1'],
+          scoring_ids: [],
+          response_point_ids: [],
+          compliance_ids: [],
+          source_focus: [],
+          research_topics: [],
+        }],
+      }),
+      code: 'EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID',
+      detail: 'tasks[0].objective:',
+    },
+  ])('$name', async ({ content, code, detail }) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-plan-invalid-')), 'session')
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    fixture.whenIdle.mockImplementation(async () => {
+      if (!fixture.currentPrompt().includes('Main-Agent Planning') || content === undefined) return
+      await writeFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json'), content)
+    })
+
+    await expect(executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })).rejects.toMatchObject({
+      name: 'BidStageExecutionError',
+      message: expect.stringContaining(`${code} ${detail}`),
+      issues: expect.arrayContaining([expect.objectContaining({ code })]),
+    })
+  })
+
+  it('removes the rejected plan before asking the Main Agent to repair it', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-plan-repair-')), 'session')
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    let planAttempt = 0
+    let removedBeforeRepair = false
+    fixture.whenIdle.mockImplementation(async () => {
+      if (!fixture.currentPrompt().includes('Main-Agent Planning')) return
+      const planPath = join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json')
+      if (planAttempt++ === 0) {
+        await writeFile(planPath, '{"schema_version":')
+        return
+      }
+      await expect(readFile(planPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      removedBeforeRepair = true
+      await writeFile(planPath, JSON.stringify({
+        schema_version: 1,
+        global_analysis: ['按业务主题拆分。'],
+        source_strategy_notes: [],
+        tasks: [{
+          task_id: 'TASK-1', title: '主题一', objective: '处理第一组', requirement_ids: ['R-1'], scoring_ids: ['S-1'],
+          response_point_ids: ['RP-000001'], compliance_ids: [], source_focus: [], research_topics: [],
+        }, {
+          task_id: 'TASK-2', title: '主题二', objective: '处理第二组', requirement_ids: ['R-2'], scoring_ids: ['S-2'],
+          response_point_ids: ['RP-000002'], compliance_ids: [], source_focus: [], research_topics: [],
+        }],
+      }))
+    })
+
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1, maxConcurrency: 2 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach(start => start.resolve())
+    await expect(execution).resolves.toHaveLength(2)
+    expect(removedBeforeRepair).toBe(true)
   })
 
   it('fails before planning when spawn cannot enforce an independent structured Child', async () => {

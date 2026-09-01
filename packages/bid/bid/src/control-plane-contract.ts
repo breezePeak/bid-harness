@@ -97,6 +97,22 @@ export interface StageValidationIssue {
   path?: string | undefined
 }
 
+/** An executor failure whose browser-safe validation issues explain the rejected output. */
+export class BidStageExecutionError extends Error {
+  /**
+   * Create an executor failure from the issues that prevented the stage from continuing.
+   * @param issues - browser-safe issues that identify the rejected Artifact or field.
+   */
+  constructor(public readonly issues: readonly StageValidationIssue[]) {
+    super(issues.map(issue => [
+      issue.code,
+      issue.path === undefined ? undefined : `${issue.path}:`,
+      issue.message,
+    ].filter(value => value !== undefined).join(' ')).join('; '))
+    this.name = 'BidStageExecutionError'
+  }
+}
+
 /** Artifact validation outcome used by the orchestrator to decide whether a stage may advance. */
 export type StageValidationResult =
   | { ok: true }

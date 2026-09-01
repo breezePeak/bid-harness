@@ -6,9 +6,9 @@ import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { z } from 'zod'
+import { ZodError, z } from 'zod'
 import type { BidManifest, BidWorkspace } from './index.ts'
-import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import { evidenceChunkId } from './document-chunk.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import {
@@ -326,10 +326,20 @@ export function renderEvidenceMappingTask(agent: Agent, workspace: BidWorkspace,
     '理解整个项目、Requirements、Scoring、Response Points、Compliance、人工框架整体用法、旧标书整体适用性和资料概况，然后按业务主题、Requirement、Scoring、Response Point 或 Research Topic 拆分可独立执行的任务。不得按文件角色拆任务，也不得硬编码固定技术分类。',
     '每个 Requirement、Scoring 和 Response Point 至少分配给一个任务；需要共享研究时可以重叠。每个任务只列完成自身工作所需的 ID、资料侧重点和研究主题。Host 将按这些 ID 注入局部 S2 上下文，并在并发上限内调度独立 Child Session。',
     `唯一输出：${workspacePath}/${PLAN_PATH}。`,
-    `严格 JSON：schema_version=${EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION}、global_analysis、source_strategy_notes、tasks。每个 task 严格包含 task_id、title、objective、requirement_ids、scoring_ids、response_point_ids、compliance_ids、source_focus、research_topics。`,
+    ...evidenceMappingPlanFormat(),
     ...task.constraints.map(constraint => `约束：${constraint}`),
     '写完计划后停止；Host 将校验 ID 覆盖后启动 Mapping Subagents。',
   ].join('\n')
+}
+
+function evidenceMappingPlanFormat(): string[] {
+  return [
+    'write 的 content 必须是唯一完整的 UTF-8 JSON 对象，直接以 { 开始并以 } 结束；不得包含 Markdown code fence、解释文字或任何其他前后缀。',
+    `根对象严格只允许 schema_version、global_analysis、source_strategy_notes、tasks；schema_version 必须为数字 ${EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION}。`,
+    'global_analysis 必须是至少含一个非空字符串的数组；source_strategy_notes 必须是非空字符串数组，可以为空。',
+    'tasks 必须是至少含一个对象的数组。每个 task 严格只允许 task_id、title、objective、requirement_ids、scoring_ids、response_point_ids、compliance_ids、source_focus、research_topics；task_id、title、objective 均为非空字符串，其余字段均为非空字符串数组。',
+    '每个 task 的 requirement_ids、scoring_ids、response_point_ids、research_topics 至少有一个非空数组；没有枚举字段，不得添加 status、type 或其他字段。',
+  ]
 }
 
 /**
@@ -440,8 +450,41 @@ function renderPlanRepairTask(issues: readonly StageValidationIssue[]): string {
     '当前阶段：evidence_mapping / Main-Agent Planning Repair',
     `修复原文件 ${PLAN_PATH}，不得创建其他文件。`,
     ...renderStageRepairIssues(issues),
+    ...evidenceMappingPlanFormat(),
     '保留有效的动态业务拆分，补齐或修正 ID 后写回完整严格 JSON。',
   ].join('\n')
+}
+
+function zodPath(path: readonly PropertyKey[]): string {
+  return path.reduce<string>((result, segment) => typeof segment === 'number'
+    ? `${result}[${segment}]`
+    : result.length === 0 ? String(segment) : `${result}.${String(segment)}`, '')
+}
+
+function planValidationIssues(error: unknown): StageValidationIssue[] {
+  if (record(error)?.code === 'ENOENT') {
+    return [{
+      code: 'EVIDENCE_MAPPING_PLAN_MISSING',
+      message: 'evidence-mapping-plan.json 未生成。',
+      artifact: PLAN_PATH,
+    }]
+  }
+  if (error instanceof SyntaxError) {
+    return [{
+      code: 'EVIDENCE_MAPPING_PLAN_JSON_INVALID',
+      message: `evidence-mapping-plan.json JSON 解析失败：${error.message}`,
+      artifact: PLAN_PATH,
+    }]
+  }
+  if (error instanceof ZodError) {
+    return error.issues.map(issue => ({
+      code: 'EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID',
+      message: issue.message,
+      artifact: PLAN_PATH,
+      ...(issue.path.length === 0 ? {} : { path: zodPath(issue.path) }),
+    }))
+  }
+  throw error
 }
 
 async function loadValidPlan(
@@ -465,11 +508,12 @@ async function loadValidPlan(
       try {
         plan = parseEvidenceMappingPlan(await readJson(workspace, PLAN_PATH))
         issues = validateEvidenceMappingPlan(plan, inputs)
-      } catch {
-        issues = [{ code: 'EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID', message: 'evidence-mapping-plan.json 缺失、不是严格 JSON 或字段不符合 Schema。', artifact: PLAN_PATH }]
+      } catch (error: unknown) {
+        issues = planValidationIssues(error)
       }
       if (plan !== undefined && issues.length === 0) return plan
-      if (repair >= maxRepairAttempts) throw new Error(`Bid evidence mapping plan validation failed: ${issues.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
+      if (repair >= maxRepairAttempts) throw new BidStageExecutionError(issues)
+      await removeAttemptPath(planPath)
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderPlanRepairTask(issues) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
       await agent.whenIdle()
     }

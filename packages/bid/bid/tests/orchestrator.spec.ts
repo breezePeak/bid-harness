@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { BidStageExecutionError } from '../src/control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
   BID_STAGES,
@@ -439,6 +440,32 @@ describe('BidOrchestrator', () => {
     expect(session.events.at(-1)).toMatchObject({
       type: 'bid.stage.failed',
       data: { stage: 'file_intake', reason: 'executor failed: Error: offline' },
+    })
+  })
+
+  it('preserves executor validation issues for the failed-stage projection', async () => {
+    const session = createSession('bid-executor-validation-failure')
+    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    const issues = [{
+      code: 'EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID',
+      artifact: 'analysis/evidence-mapping-plan.json',
+      path: 'tasks[2].objective',
+      message: 'Invalid input: expected string, received undefined',
+    }]
+    const executor = new RecordingExecutor(async (task) => {
+      if (task.stage === 'evidence_mapping') throw new BidStageExecutionError(issues)
+      return artifactsFor(task)
+    })
+    const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
+
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({
+      stage: 'evidence_mapping',
+      status: 'failed',
+      failureReason: 'EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID tasks[2].objective: Invalid input: expected string, received undefined',
+      failureIssues: issues,
     })
   })
 

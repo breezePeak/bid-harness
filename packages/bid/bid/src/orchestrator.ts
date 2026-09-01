@@ -9,6 +9,7 @@ import type {
   StageValidationResult,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import { BidStageExecutionError } from './control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
   buildBidStageTask,
@@ -371,6 +372,10 @@ export class BidOrchestrator {
     try {
       artifacts = await this.executor.execute(buildBidStageTask(stage))
     } catch (error: unknown) {
+      if (error instanceof BidStageExecutionError) {
+        this.fail(stage, error.message, [...error.issues])
+        return 'failed'
+      }
       this.fail(stage, `executor failed: ${String(error)}`)
       return 'failed'
     }
