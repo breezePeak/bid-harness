@@ -326,7 +326,7 @@ describe('Bid Host runtime composition', () => {
   it('waits after S2, persists user edits, then runs through S4', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()
-    const { agent } = attach(ctx, 'bid', root)
+    const { agent, followup } = attach(ctx, 'bid', root)
     const bytes = Buffer.from('# 招标要求\n\n按期交付。', 'utf8')
 
     const result = await ctx.bid.uploadFiles(agent.session, [{
@@ -359,6 +359,8 @@ describe('Bid Host runtime composition', () => {
       { type: 'update_project', fields: { key_technical_points: ['重点说明按期交付保障'] } },
       { type: 'update_scoring_item', scoring_id: scoringId, criterion: '重点评价交付保障', response_points: ['交付计划', '进度保障'] },
     ])).resolves.toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
+    expect(followup.mock.calls.map(call => promptText(call[0])).find(prompt => prompt.includes('当前阶段：outline_generation')))
+      .toContain('requirement_ids 最多 4 个、scoring_ids 最多 3 个')
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)

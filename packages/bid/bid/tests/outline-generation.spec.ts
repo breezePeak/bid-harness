@@ -209,6 +209,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const reviewMessage = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
     expect(draftMessage.content[0]?.text).toContain('本轮初稿唯一输出')
     expect(reviewMessage.content[0]?.text).toContain('这是强制复核')
+    expect(reviewMessage.content[0]?.text).toContain('requirement_ids 不得超过 4 个、scoring_ids 不得超过 3 个')
     expect(reviewMessage.content[0]?.text).toContain('quality-report.json')
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
@@ -255,6 +256,12 @@ describe('outline-generation Blueprint Quality Review', () => {
     ['mechanical title restatement', (outline: OutlineArtifact) => {
       outline.sections[1] = { ...outline.sections[1]!, must_answer: ['说明项目组织与职责'] }
     }, 'OUTLINE_GENERATION_MUST_ANSWER_TITLE_RESTATEMENT'],
+    ['writable requirement sink', (outline: OutlineArtifact) => {
+      outline.sections[1] = { ...outline.sections[1]!, requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE', 'REQ-3', 'REQ-4', 'REQ-5'] }
+    }, 'OUTLINE_GENERATION_WRITABLE_REQUIREMENTS_TOO_BROAD'],
+    ['writable scoring sink', (outline: OutlineArtifact) => {
+      outline.sections[1] = { ...outline.sections[1]!, scoring_ids: ['SCORE-SCHEDULE', 'SCORE-2', 'SCORE-3', 'SCORE-4'] }
+    }, 'OUTLINE_GENERATION_WRITABLE_SCORING_TOO_BROAD'],
   ])('rejects a %s', async (_name, mutate, expectedCode) => {
     const workspace = await fixture()
     const outline = structuredClone(reviewedOutline)
@@ -295,5 +302,12 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('S5 candidate unexpectedly passed')
     expect(result.issues.map(issue => issue.code)).toContain('OUTLINE_GENERATION_WRITABLE_NOT_LEAF')
+  })
+
+  it('keeps the S4 granularity limits in the model-visible draft assignment', async () => {
+    const workspace = await fixture()
+    const task = renderOutlineGenerationTask({ id: 'session' } as Agent, workspace, buildBidStageTask('outline_generation'))
+    expect(task).toContain('requirement_ids 最多 4 个、scoring_ids 最多 3 个')
+    expect(task).toContain('索引重复引用不能替代正文拆分')
   })
 })

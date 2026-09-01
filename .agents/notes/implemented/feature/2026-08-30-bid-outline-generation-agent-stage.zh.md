@@ -14,7 +14,7 @@ Bid Host 将 `outline_generation` 注册为下一个自动 Agent 阶段。Agent 
 
 严格 Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、简洁 purpose、是否写作、映射和写作指引。结构节点必须有子节点；可写节点必须有具体 `must_answer`。Requirement、Scoring 和 Compliance 保持完整引用；S3 的 `research_topics.findings` 与 `writing_dimensions` 是目录结构输入，Agent 自主决定合并、拆分或仅形成写作指引，不能机械地一个 Topic 对应一个章节。
 
-Validator 校验树结构、引用存在性和覆盖率、数组内部重复，以及强制 Requirement 和重点 Scoring 是否落到可写节点。可写章节必须是叶子，同级标题不得重复，`must_answer` 不得重复或机械复述标题。质量报告必须覆盖全部当前 Requirement、Scoring 和最终 section ID，且没有未解决问题。成功后通过现有控制面进入 `outline_confirmation/waiting_user`。
+Validator 校验树结构、引用存在性和覆盖率、数组内部重复，以及强制 Requirement 和重点 Scoring 是否落到可写节点。可写章节必须是叶子，只承担一个工作流程、控制点或评分响应主题，最多关联 4 个 Requirement 和 3 个 Scoring；技术响应索引、偏离表或合规清单不能集中承担正文覆盖。同级标题不得重复，`must_answer` 不得重复或机械复述标题。质量报告必须覆盖全部当前 Requirement、Scoring 和最终 section ID，且没有未解决问题。成功后通过现有控制面进入 `outline_confirmation/waiting_user`。
 
 ## Alternatives considered
 
@@ -24,6 +24,8 @@ Validator 校验树结构、引用存在性和覆盖率、数组内部重复，�
 
 **每个评分项只生成一个标题。** 不采用，因为粗粒度评分项不足以指导章节写作。
 
+**只在 Prompt 中要求详细目录。** 不采用，因为模型可以通过把全部 ID 集中放入响应索引来满足覆盖检查，Host 必须在确认前拒绝过载的可写叶子。
+
 ## Consequences
 
-S4 在用户确认前增加初稿和强制复核两次 Agent 回合。质量报告是 S4 内部产物，不进入 Stage Artifact 或 S5/S6 输入；S5 继续对用户编辑后的目录使用同一组树结构规则。
+S4 在用户确认前增加初稿和强制复核两次 Agent 回合。质量报告是 S4 内部产物，不进入 Stage Artifact 或 S5/S6 输入；S5 继续对用户编辑后的目录使用同一组树结构和叶子粒度规则。一个技术主题确需引用更多要求时必须拆成多个可独立写作的叶子，因此后续章节写作任务更聚焦，但目录节点数量会增加。
