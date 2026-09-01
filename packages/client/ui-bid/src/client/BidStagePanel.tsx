@@ -129,6 +129,7 @@ export function BidStagePanel({
   uploadFiles,
   retryStage,
   confirmOutline,
+  regenerateOutline,
   getOutlineForConfirmation,
   confirmTenderAnalysis,
   getTenderAnalysisForConfirmation,
@@ -142,6 +143,7 @@ export function BidStagePanel({
   const [previewOutline, setPreviewOutline] = useState<OutlineArtifact | null>(null)
   const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
+  const [outlineFeedback, setOutlineFeedback] = useState('')
   const tenderFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly SelectedFile[]>([])
@@ -163,6 +165,7 @@ export function BidStagePanel({
   )
   const hasProjection = isBidSession && projection !== undefined
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
+  const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
   const embedConversation = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
   const reviewViewAvailable = projection?.runtime.status === 'waiting_user'
@@ -195,6 +198,10 @@ export function BidStagePanel({
     selectedFilesRef.current = []
     setSelectedFiles([])
   }, [projection?.runtime.stage, sessionId])
+
+  useEffect(() => {
+    setOutlineFeedback('')
+  }, [sessionId, projection?.runtime.stage])
 
   useEffect(() => {
     if (!canConfirm || getOutlineForConfirmation === undefined) return
@@ -518,19 +525,55 @@ export function BidStagePanel({
               {t('action.retry')}
             </Button>
           )}
-          {canConfirm && (
-            <>
-              <Button
-                size="sm"
-                variant="primary"
-                icon={<IconCheckOutline14 />}
-                disabled={requestPending !== null || confirmOutline === undefined}
-                title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-                onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(operations)) }}
-              >
-                {t('action.confirm')}
-              </Button>
-            </>
+          {(canConfirm || canRegenerate) && (
+            <div className={css.outlineDecision}>
+              <div className={css.decisionRow}>
+                <div className={css.decisionCopy}>
+                  <span className={css.decisionLabel}>{t('outline.accept.label')}</span>
+                  <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<IconCheckOutline14 />}
+                  disabled={requestPending !== null || confirmOutline === undefined}
+                  title={confirmOutline === undefined ? t('action.unavailable') : undefined}
+                  onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : () => confirmOutline(operations)) }}
+                >
+                  {requestPending === 'confirm' ? t('outline.accept.pending') : t('outline.accept.action')}
+                </Button>
+              </div>
+              <div className={css.decisionRow}>
+                <div className={css.revisionField}>
+                  <label className={css.decisionLabel} htmlFor={`bid-outline-feedback-${sessionId}`}>{t('outline.revise.label')}</label>
+                  <span className={css.decisionHint}>{t('outline.revise.hint')}</span>
+                  <textarea
+                    id={`bid-outline-feedback-${sessionId}`}
+                    className={css.revisionTextarea}
+                    value={outlineFeedback}
+                    placeholder={t('outline.revise.placeholder')}
+                    disabled={requestPending !== null}
+                    onChange={(event) => { setOutlineFeedback(event.target.value) }}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<IconRefreshOutline16 />}
+                  disabled={requestPending !== null || regenerateOutline === undefined || outlineFeedback.trim().length === 0}
+                  title={regenerateOutline === undefined ? t('action.unavailable') : undefined}
+                  onClick={() => {
+                    const feedback = outlineFeedback.trim()
+                    invoke('revise', regenerateOutline === undefined ? undefined : async () => {
+                      await regenerateOutline(feedback)
+                      if (alive.current) setOutlineFeedback('')
+                    })
+                  }}
+                >
+                  {requestPending === 'revise' ? t('outline.revise.pending') : t('outline.revise.action')}
+                </Button>
+              </div>
+            </div>
           )}
           {canConfirmAnalysis && (
             <Button

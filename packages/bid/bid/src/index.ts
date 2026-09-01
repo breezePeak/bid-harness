@@ -59,6 +59,7 @@ import type {
   BidFileIntakeFileResult,
   BidFileIntakeResult,
   BidOutlineConfirmationResult,
+  BidOutlineRegenerationResult,
   BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryResult,
@@ -85,6 +86,7 @@ export type {
   BidFileIntakeErrorCode,
   BidFileIntakeFailure,
   BidFileIntakeResult,
+  BidOutlineRegenerationResult,
   BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryFailure,
@@ -816,11 +818,34 @@ export class BidHostRuntime extends TypertRemoteService {
       await assertNoLinkedPath(workspace.root, confirmationPath)
       await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
       await writeFileAtomic(confirmationPath, `${JSON.stringify({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineArtifactSha256(source), confirmed_outline_sha256: outlineArtifactSha256(candidate) }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-      const next = await this.automaticOrchestrator(agent, workspace).confirm(true)
+      const next = await this.automaticOrchestrator(agent, workspace).confirm()
       await this.ctx.sessions.flush(session)
       return { ok: true, value: next }
     } catch {
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the outline.' } }
+    } finally { this.inFlight.delete(session.id) }
+  }
+
+  /** Record user feedback and rerun S4 before returning to outline confirmation. */
+  @Remote('regenerateOutline')
+  async regenerateOutline(session: Session, feedback: string): Promise<BidOutlineRegenerationResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline regeneration requires a Bid Session with a Host workspace.' } }
+    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    const normalized = feedback.trim()
+    if (normalized.length === 0) return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
+    this.inFlight.add(session.id)
+    try {
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const next = await this.automaticOrchestrator(agent, workspace).reviseOutline(normalized)
+      await this.ctx.sessions.flush(session)
+      return { ok: true, value: next }
+    } catch (error: unknown) {
+      if (error instanceof BidOrchestratorError && error.code === 'BID_OUTLINE_FEEDBACK_REQUIRED') return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
+      return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }
     } finally { this.inFlight.delete(session.id) }
   }
 }

@@ -189,8 +189,70 @@
 
 .actions {
   display: flex;
+  width: 100%;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.outlineDecision {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+}
+
+.decisionRow {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-l1);
+}
+
+.decisionCopy,
+.revisionField {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 4px;
+}
+
+.decisionLabel {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  font-weight: 500;
+}
+
+.decisionHint {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+}
+
+.revisionTextarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-l1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.revisionTextarea:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-tertiary);
+  outline-offset: 1px;
+}
+
+@media (max-width: 640px) {
+  .decisionRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 .fileInput {

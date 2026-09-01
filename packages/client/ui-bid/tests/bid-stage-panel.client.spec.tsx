@@ -317,10 +317,10 @@ describe('BidStagePanel', () => {
 
     const confirmationProjection = projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
     })
     view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline })} />)
-    fireEvent.click(screen.getByRole('button', { name: '确认' }))
+    fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith([]) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
   })
@@ -382,7 +382,7 @@ describe('BidStagePanel', () => {
     const confirmOutline = vi.fn(async (_operations: readonly unknown[]) => {})
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline,
       getOutlineForConfirmation: async () => ({
@@ -396,7 +396,7 @@ describe('BidStagePanel', () => {
     fireEvent.change(title, { target: { value: '更新标题' } })
     fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]!)
-    fireEvent.click(screen.getByRole('button', { name: '确认' }))
+    fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => {
       expect(confirmOutline).toHaveBeenCalledWith(expect.arrayContaining([
         expect.objectContaining({ type: 'update_section', section_id: 'SEC-1', title: '更新标题' }),
@@ -406,10 +406,30 @@ describe('BidStagePanel', () => {
     })
   })
 
+  it('shows separate outline acceptance and feedback-regeneration rows', async () => {
+    const regenerateOutline = vi.fn(async (_feedback: string) => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
+    }), {
+      confirmOutline: vi.fn(async () => {}),
+      regenerateOutline,
+    })} />)
+
+    expect(screen.getByText('确认后将按当前目录开始章节编写')).toBeTruthy()
+    const feedback = screen.getByLabelText('修改目录')
+    const regenerate = screen.getByRole('button', { name: '重新生成目录' })
+    expect(regenerate).toHaveProperty('disabled', true)
+    fireEvent.change(feedback, { target: { value: '  标书目录颗粒度太粗了  ' } })
+    expect(regenerate).toHaveProperty('disabled', false)
+    fireEvent.click(regenerate)
+    await waitFor(() => { expect(regenerateOutline).toHaveBeenCalledWith('标书目录颗粒度太粗了') })
+  })
+
   it('immediately previews hierarchy, order, and derived section numbers', async () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),
       getOutlineForConfirmation: async () => ({

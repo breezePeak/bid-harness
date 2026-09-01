@@ -30,8 +30,16 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
-    /** The explicit user decision received for a stage. */
-    'bid.user_confirmation.received': { stage: BidStage; confirmed: boolean }
+    /**
+     * The explicit user decision received for a stage.
+     * @mode broadcast
+     * @param stage Stage receiving the decision.
+     * @param confirmed Whether the user accepts the current artifact.
+     * @param feedback Required outline changes when the current outline is rejected.
+     */
+    'bid.user_confirmation.received':
+      | { stage: BidStage; confirmed: true }
+      | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
   }
 }
 

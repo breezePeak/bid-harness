@@ -245,11 +245,10 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : { stage: nextStage, status: 'pending' }
     }
     case 'bid.user_confirmation.received':
-      return event.data.stage === state.stage
-        && state.status === 'waiting_user'
-        && event.data.confirmed
+      if (event.data.stage !== state.stage || state.status !== 'waiting_user') return state
+      return event.data.confirmed
         ? { stage: state.stage, status: 'running' }
-        : state
+        : { stage: 'outline_generation', status: 'pending' }
     default:
       return state
   }
@@ -306,7 +305,7 @@ export function getBidClientProjection(
   if (runtime.stage === 'outline_confirmation' && runtime.status === 'waiting_user') {
     return {
       runtime: { ...runtime },
-      allowedActions: ['confirm_outline'],
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
       ...fileView,
     }

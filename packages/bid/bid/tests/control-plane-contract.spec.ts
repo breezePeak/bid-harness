@@ -96,9 +96,12 @@ describe('bid control-plane public contract', () => {
         path?: string | undefined
       }>
     }>()
-    expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<{
-      stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
-      confirmed: boolean
-    }>()
+    expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<
+      | {
+        stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+        confirmed: true
+      }
+      | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
+    >()
   })
 })

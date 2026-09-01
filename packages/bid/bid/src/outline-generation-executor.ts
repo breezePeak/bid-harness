@@ -21,10 +21,22 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 const OUTLINE_ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
 
+/** Return the latest durable user feedback that requested an outline regeneration. */
+function latestOutlineFeedback(agent: Agent): string | undefined {
+  for (let index = agent.session.events.length - 1; index >= 0; index--) {
+    const event = agent.session.events[index]
+    if (event?.type === 'bid.user_confirmation.received'
+      && event.data.stage === 'outline_confirmation'
+      && !event.data.confirmed) return event.data.feedback
+  }
+  return undefined
+}
+
 /** Render the dynamic S4 assignment for the live Bid Agent. */
 export function renderOutlineGenerationTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const feedback = latestOutlineFeedback(agent)
   return [
     `当前阶段：${task.stage}`,
     `目标：${task.objective}`,
@@ -41,6 +53,10 @@ export function renderOutlineGenerationTask(agent: Agent, workspace: BidWorkspac
     '技术响应索引、偏离表或合规清单只能作为索引或附录，不能集中承担正文覆盖。mandatory Requirement 和重点 Scoring 必须在对应的实质性可写叶子中映射；索引重复引用不能替代正文拆分。',
     '每个 Requirement、Scoring 和 Compliance ID 都必须至少覆盖一次；mandatory Requirement，以及 must_answer=true、带 score 或 score_range 的 Scoring，必须关联至少一个 writable 节点。一个 ID 可出现在多个章节，但同一数组不得重复。Compliance 可以放在 global_compliance_ids 或具体章节。',
     'Evidence Map 的 research_topics 是 S3 通过本地资料和外部研究得到的结构设计输入：findings 是已获得的研究结论，writing_dimensions 是可纳入后续技术标的维度。结合项目和 S2 记录自主决定如何将多个 Topic 合并、一个 Topic 拆成多个叶子章节、只用于项目理解，或转化为章节标题、层级、must_answer、建议表格、图示和 writing_notes；不得机械地一个 Topic 对应一个章节。reuse/adapt/reference/background 与 missing_topics 也可形成简短 writing_notes、建议表格或图示；不得复制 material 引用或撰写技术正文。',
+    ...(feedback === undefined ? [] : [
+      '本轮是用户要求的目录重新生成。以下内容是本轮必须落实的目录修改意见；在继续满足全部招标要求、评分项、合规项和粒度约束的前提下重构目录，不得只在 writing_notes 中转述：',
+      `<outline-revision-feedback>\n${feedback}\n</outline-revision-feedback>`,
+    ]),
     ...task.constraints.map(constraint => `约束：${constraint}`),
     '写完文件后停止；Host 将独立验证树结构、引用和覆盖。',
   ].join('\n')

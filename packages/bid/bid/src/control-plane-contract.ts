@@ -44,6 +44,7 @@ export const BID_CLIENT_ACTIONS = [
   'retry_stage',
   'confirm_tender_analysis',
   'confirm_outline',
+  'regenerate_outline',
   'complete_review',
   'send_message',
 ] as const
@@ -179,6 +180,11 @@ export type BidFileIntakeResult =
 export type BidOutlineConfirmationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+
+/** Stable result of an S5 outline-regeneration request. */
+export type BidOutlineRegenerationResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REGENERATE_NOT_ALLOWED' | 'BID_OUTLINE_FEEDBACK_REQUIRED' | 'BID_REGENERATE_FAILED'; readonly message: string } }
 
 /** Stable result of an S2 tender-analysis confirmation request. */
 export type BidTenderAnalysisConfirmationResult =

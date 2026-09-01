@@ -32,7 +32,7 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'outline_confirmation', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
     expect(getBidClientProjection({ stage: 'book_review', status: 'waiting_user' })).toEqual({

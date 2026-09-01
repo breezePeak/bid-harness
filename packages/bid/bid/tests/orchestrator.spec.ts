@@ -112,7 +112,7 @@ describe('Bid runtime state and policies', () => {
     expect(decision).toBe(state)
   })
 
-  it('requires an accepted waiting-user confirmation before outline completion can advance', () => {
+  it('regenerates after outline feedback and requires acceptance before completion can advance', () => {
     const outlinePending = { stage: 'outline_confirmation', status: 'pending' } as const
     const forgedStart = reduceBidRuntimeState(outlinePending, {
       type: 'bid.stage.started',
@@ -130,7 +130,7 @@ describe('Bid runtime state and policies', () => {
       type: 'bid.user_confirmation.received',
       seq: 2,
       time: 0,
-      data: { stage: 'outline_confirmation', confirmed: false },
+      data: { stage: 'outline_confirmation', confirmed: false, feedback: '拆细实施章节' },
     })
     const premature = reduceBidRuntimeState(rejected, {
       type: 'bid.stage.completed',
@@ -158,8 +158,8 @@ describe('Bid runtime state and policies', () => {
     })
 
     expect(forgedStart).toBe(outlinePending)
-    expect(rejected).toBe(waiting)
-    expect(premature).toBe(waiting)
+    expect(rejected).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(premature).toBe(rejected)
     expect(forgedFailure).toBe(waiting)
     expect(accepted).toEqual({ stage: 'outline_confirmation', status: 'running' })
     expect(advanced).toEqual({ stage: 'chapter_writing', status: 'pending' })
@@ -486,7 +486,7 @@ describe('BidOrchestrator', () => {
     ])
   })
 
-  it('keeps a rejected outline waiting and validates an accepted outline before continuing', async () => {
+  it('regenerates a rejected outline from durable feedback before accepting it', async () => {
     const session = createSession('bid-confirm')
     const executor = new RecordingExecutor()
     const orchestrator = new BidOrchestrator(session, executor, new StageValidator())
@@ -494,16 +494,17 @@ describe('BidOrchestrator', () => {
     await orchestrator.drive()
     await confirmTenderAnalysis(orchestrator)
 
-    await expect(orchestrator.confirm(false)).resolves.toEqual({
+    await expect(orchestrator.reviseOutline('  拆细实施章节  ')).resolves.toEqual({
       stage: 'outline_confirmation',
       status: 'waiting_user',
     })
-    expect(session.events.at(-1)).toMatchObject({
+    expect(session.events.find(event => event.type === 'bid.user_confirmation.received' && !event.data.confirmed)).toMatchObject({
       type: 'bid.user_confirmation.received',
-      data: { confirmed: false },
+      data: { confirmed: false, feedback: '拆细实施章节' },
     })
+    expect(executor.tasks.filter(task => task.stage === 'outline_generation')).toHaveLength(2)
 
-    await expect(orchestrator.confirm(true)).resolves.toEqual({ stage: 'book_review', status: 'waiting_user' })
+    await expect(orchestrator.confirm()).resolves.toEqual({ stage: 'book_review', status: 'waiting_user' })
     const confirmationCompletion = session.events.find(event =>
       event.type === 'bid.stage.completed' && event.data.stage === 'outline_confirmation')
     expect(confirmationCompletion).toMatchObject({
@@ -525,7 +526,7 @@ describe('BidOrchestrator', () => {
     await confirmTenderAnalysis(orchestrator)
     const taskCount = executor.tasks.length
 
-    await expect(orchestrator.confirm(true)).resolves.toEqual({
+    await expect(orchestrator.confirm()).resolves.toEqual({
       stage: 'outline_confirmation',
       status: 'failed',
       failureReason: 'INVALID_STAGE_ARTIFACTS: outline_confirmation artifacts failed validation',
@@ -628,7 +629,8 @@ describe('BidOrchestrator', () => {
     const session = createSession('bid-admission')
     const orchestrator = new BidOrchestrator(session, new RecordingExecutor(), new StageValidator())
 
-    expect(() => orchestrator.confirm(true)).toThrow(BidOrchestratorError)
+    expect(() => orchestrator.confirm()).toThrow(BidOrchestratorError)
+    expect(() => orchestrator.reviseOutline('')).toThrow(BidOrchestratorError)
     expect(orchestrator.admitPrompt('analyze this')).toEqual({ admitted: false, reason: 'bid.upload_required' })
     expect(() => { orchestrator.admitAction('retry_stage') }).toThrow(BidOrchestratorError)
 

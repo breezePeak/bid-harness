@@ -710,6 +710,41 @@ describe('Bid Host runtime composition', () => {
     })
   })
 
+  it('logs outline feedback and regenerates S4 before returning to S5', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const prompts: string[] = []
+    const { agent } = attach(ctx, 'bid', root, async (cwd, sessionId, _attempt, prompt) => {
+      prompts.push(prompt)
+      if (prompt.includes('当前阶段：tender_analysis')) await writeTenderAnalysisArtifacts(cwd, sessionId)
+      else if (prompt.includes('当前阶段：evidence_mapping')) await writeEvidenceMappingArtifact(cwd, sessionId)
+      else if (prompt.includes('Blueprint Quality Review')) await writeOutlineQualityReport(cwd, sessionId)
+      else if (prompt.includes('当前阶段：outline_generation')) await writeOutlineArtifact(cwd, sessionId)
+    })
+    const bytes = Buffer.from('技术标资料', 'utf8')
+    await ctx.bid.uploadFiles(agent.session, [
+      { name: '招标.txt', role: 'tender', size: bytes.byteLength, data: bytes.toString('base64') },
+      { name: '参考.txt', role: 'reference', size: bytes.byteLength, data: bytes.toString('base64') },
+    ])
+    await ctx.bid.confirmTenderAnalysis(agent.session, [])
+
+    await expect(ctx.bid.regenerateOutline(agent.session, '   ')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED' },
+    })
+    await expect(ctx.bid.regenerateOutline(agent.session, '  拆细实施章节  ')).resolves.toEqual({
+      ok: true,
+      value: { stage: 'outline_confirmation', status: 'waiting_user' },
+    })
+    expect(agent.session.events.at(-4)).toMatchObject({
+      type: 'bid.user_confirmation.received',
+      data: { stage: 'outline_confirmation', confirmed: false, feedback: '拆细实施章节' },
+    })
+    expect(prompts.filter(prompt => prompt.includes('<outline-revision-feedback>'))).toEqual([
+      expect.stringContaining('拆细实施章节'),
+    ])
+  })
+
   it('keeps S5 waiting when deletion removes mandatory coverage', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()

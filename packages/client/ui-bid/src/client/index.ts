@@ -52,6 +52,8 @@ export interface BidStagePanelInjected {
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
   getOutlineForConfirmation?: () => Promise<OutlineArtifact>
   confirmOutline?: (operations: readonly OutlineEditOperation[]) => Promise<void>
+  /** Host outline-regeneration action, installed when the Bid action API is composed. */
+  regenerateOutline?: (feedback: string) => Promise<void>
   /** Host tender-analysis review actions, installed when the Bid action API is composed. */
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
@@ -165,6 +167,11 @@ export function apply(ctx: ClientContext): void {
       },
       confirmOutline: async (operations) => {
         const result = await ctx.remote.bid.confirmOutline(sessionId, operations)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      regenerateOutline: async (feedback) => {
+        const result = await ctx.remote.bid.regenerateOutline(sessionId, feedback)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
