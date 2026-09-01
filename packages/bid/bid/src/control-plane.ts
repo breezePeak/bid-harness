@@ -20,6 +20,7 @@ export type {
   BidComposerCapability,
   BidComposerReason,
   BidDocumentRole,
+  BidEvidenceMappingProgress,
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
   BidFileIntakeFailure,

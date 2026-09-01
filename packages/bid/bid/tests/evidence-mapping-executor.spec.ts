@@ -191,6 +191,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request)).not.toContain('"id":"R-2"')
     expect(promptText(fixture.starts[0]!.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
+    expect(promptText(fixture.starts[0]!.request)).toContain('提交前在当前子任务中逐项检查')
     expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.fileId)
     expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.chunk)
     for (const start of fixture.starts) {
@@ -233,6 +234,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.taskAttempts.get('TASK-2')).toBe(1)
     expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
     expect(promptText(fixture.subagents.start.mock.calls[2]![1])).toContain('EVIDENCE_MAPPING_PARTIAL_MISSING')
+    expect(fixture.subagents.start.mock.calls[2]![1]).toMatchObject({ label: 'S3 · 主题一' })
   })
 
   it('reports tender materials separately from invalid chunk references', async () => {

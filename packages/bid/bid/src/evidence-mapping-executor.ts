@@ -653,6 +653,7 @@ export function renderEvidenceMappingSubagentTask(
     '人工框架与旧标书按业务主题映射；人工框架标题允许 0 或 1 个有意义的 mapping，不要为了覆盖全部标题而生成映射。',
     `通过 structured output 返回 task_id=${task.task_id}、requirement_mappings、scoring_mappings、response_point_mappings、research_topics、framework_mappings、reference_bid_mappings、findings、missing_topics。各 mapping 字段复用 evidence-map schema_version=${EVIDENCE_MAPPING_SCHEMA_VERSION} 的对应字段；不得写文件。`,
     '当前任务分配的 Requirement、Scoring 和 Response Point 必须各返回一次。没有资料时材料数组为 [] 并明确 missing_topics。',
+    '提交前在当前子任务中逐项检查：task_id 等于当前任务；每个已分配的 Requirement、Scoring 和 Response Point 恰好出现一次；本地 material 的 file_id、chunk 和行范围均来自已读取内容；external_material 均来自当前任务完成的 web_search → web_fetch。发现问题先在当前子任务修正完整结果，再提交 structured output。',
   ].join('\n')
 }
 
@@ -1004,7 +1005,7 @@ export async function executeEvidenceMapping(
     let latestIssues: StageValidationIssue[] = []
     try {
       for (let attempt = 0; attempt <= options.maxRepairAttempts; attempt++) {
-        const label = attempt === 0 ? `S3 · ${mappingTask.title}` : `S3 · 修复 ${attempt} · ${mappingTask.title}`
+        const label = `S3 · ${mappingTask.title}`
         const prompt = attempt === 0 ? basePrompt : renderEvidenceMappingSubagentRepairTask(basePrompt, rejectedCandidate, latestIssues)
         let run: Awaited<ReturnType<typeof subagents.start>> | undefined
         try {

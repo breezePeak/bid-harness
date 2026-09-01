@@ -10,6 +10,7 @@ import {
   type StageValidationResult,
 } from '@deepseek-ai/dsh-bid'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
+import type { BidEvidenceMappingProgress } from '@deepseek-ai/dsh-bid/control-plane'
 
 describe('bid control-plane public contract', () => {
   it('exports the fixed stage, status, and event names', () => {
@@ -56,6 +57,16 @@ describe('bid control-plane public contract', () => {
 
     expect(policy.nextStage).toBe('evidence_mapping')
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
+  })
+
+  it('exports S3 Mapping progress through the browser-safe entry', () => {
+    expectTypeOf<BidEvidenceMappingProgress>().toEqualTypeOf<{
+      readonly total: number
+      readonly completed: number
+      readonly running: number
+      readonly not_started: number
+      readonly failed: number
+    }>()
   })
 
   it('limits evidence mapping Main-Agent policy to planning tools', () => {
