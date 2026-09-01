@@ -88,6 +88,34 @@ describe('extractDocument', () => {
     ] })
   })
 
+  it('preserves DOCX comparison operators before scoring tables', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-document-extract-'))
+    const source = join(root, '评分文件.docx')
+    const row = (title: string, score: string) => new TableRow({ children: [
+      new TableCell({ children: [new Paragraph(title)] }),
+      new TableCell({ children: [new Paragraph(score)] }),
+    ] })
+    const document = new Document({ sections: [{ children: [
+      new Paragraph('异常低价：投标报价<全部通过符合性审查供应商报价平均值×50%。'),
+      new Table({ rows: [
+        row('评审内容、方法及标准', '100分'),
+        row('二、技术、服务部分（60分）', ''),
+        row('1.对项目的理解', '5分'),
+        row('2.设计方案（45分）', '45分'),
+      ] }),
+      new Paragraph('后续规则：报价>采购最高限价的投标无效。'),
+    ] }] })
+    await writeFile(source, await Packer.toBuffer(document))
+
+    const result = await extractDocument({ sourcePath: source, outputDir: join(root, 'corpus') })
+
+    expect(result).toMatchObject({ parseStatus: 'success', fileType: 'docx' })
+    const markdown = await readFile(result.documentPath!, 'utf8')
+    expect(markdown).toContain('投标报价<全部通过符合性审查供应商报价平均值×50%')
+    expect(markdown).toContain('二、技术、服务部分（60分）')
+    expect(markdown).toContain('2.设计方案（45分）')
+  })
+
   it('extracts a real Chinese Word 97-2003 DOC without system executables', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-document-extract-'))
     const result = await extractDocument({ sourcePath: fixture('bid-document.doc'), outputDir: join(root, 'corpus') })

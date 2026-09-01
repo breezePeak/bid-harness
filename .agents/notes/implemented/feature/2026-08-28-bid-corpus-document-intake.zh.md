@@ -12,11 +12,11 @@ Status: implemented
 
 `BidWorkspace.import()` 先保存原始字节，再把 PDF、DOCX 和 DOC 交给 `extractDocument()`。每份文档拥有 `corpus/<stored-name>/`；manifest 版本 3 记录语料目录、正文、结构、元数据和分块路径。TXT、Markdown、XLS 和 XLSX 保留确定性转换，但也在相同语料布局下发布 `document.md`。`messageInventory()` 投影工作区相对的正文和结构路径，使现有 `grep` 与 `read` 工具直接处理已存储语料。
 
-PDF 提取在写入物理页标记前，按基线和水平位置组合文本项。章节处于打开状态时，每个页标记都会推进其页码范围。DOCX 转换在规范化前保留 Mammoth 生成的标题、列表和表格 HTML。DOC 转换使用纯 JavaScript 的 `word-extractor`，不需要系统可执行文件；它会规范化自然段和制表符分隔的单元格文本，不伪造标题层级或页码。三个语料文件都通过 `dsh-atomic-write` 发布，包括替换已有输出。
+PDF 提取在写入物理页标记前，按基线和水平位置组合文本项。章节处于打开状态时，每个页标记都会推进其页码范围。DOCX 转换在规范化前保留 Mammoth 生成的标题、列表和表格 HTML；HTML 清理只移除合法标签，因此正文中的 `<`、`>` 等比较符号会保留。DOC 转换使用纯 JavaScript 的 `word-extractor`，不需要系统可执行文件；它会规范化自然段和制表符分隔的单元格文本，不伪造标题层级或页码。三个语料文件都通过 `dsh-atomic-write` 发布，包括替换已有输出。
 
 ## Verification
 
-包内 fixture 包括两页中文文字 PDF、无文字 PDF、包含列表和表格单元格的生成式中文 Word 97-2003 DOC，以及包含三级标题、有序与无序列表和表格的生成式 DOCX。测试覆盖损坏输入、重复发布输出、工作区 DOC/DOCX 入库、manifest 路径、相对 inventory 文本，以及通过内置 `grep` 二进制与文件系统 `read` 工具完成的真实工具注册表往返。
+包内 fixture 包括两页中文文字 PDF、无文字 PDF、包含列表和表格单元格的生成式中文 Word 97-2003 DOC，以及包含三级标题、有序与无序列表、表格和比较符号的生成式 DOCX。测试覆盖损坏输入、重复发布输出、工作区 DOC/DOCX 入库、manifest 路径、相对 inventory 文本，以及通过内置 `grep` 二进制与文件系统 `read` 工具完成的真实工具注册表往返。
 
 ## Alternatives considered
 

@@ -232,7 +232,8 @@ function tableToMarkdown(table: string): string {
 }
 
 function stripHtml(value: string): string {
-  return value.replace(/<br\s*\/?\s*>/giu, '\n').replace(/<[^>]+>/gu, '').replace(/&nbsp;/giu, ' ').replace(/&amp;/giu, '&').replace(/&lt;/giu, '<').replace(/&gt;/giu, '>').trim()
+  // Mammoth emits literal comparison operators in text nodes, so only remove syntactically valid tags.
+  return value.replace(/<br\s*\/?\s*>/giu, '\n').replace(/<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s[^>]*)?\/?\s*>/gu, '').replace(/&nbsp;/giu, ' ').replace(/&amp;/giu, '&').replace(/&lt;/giu, '<').replace(/&gt;/giu, '>').trim()
 }
 
 function plainTextToMarkdown(value: string): string {
