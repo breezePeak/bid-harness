@@ -80,28 +80,42 @@ describe('BidStagePanel', () => {
 
   it('shows file selection only when upload_files is admitted', () => {
     const view = render(<BidStagePanel {...props(projection())} />)
-    expect(screen.queryByRole('button', { name: '上传标书' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '上传招标文件' })).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
     }), { uploadFiles: vi.fn(async () => []) })} />)
-    expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '相关资料' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传人工框架 / 半成品标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传参考旧标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传其他技术资料' })).toBeTruthy()
     const inputs = view.container.querySelectorAll('input[type="file"]')
-    expect(inputs).toHaveLength(2)
+    expect(inputs).toHaveLength(4)
     fireEvent.change(inputs[0]!, {
       target: { files: [new File(['bid'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
-    expect(screen.getAllByText('招标资料')).toHaveLength(1)
+    expect(screen.getAllByText('招标文件')).toHaveLength(1)
     expect(screen.getByRole('button', { name: '上传并解析' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', false)
     fireEvent.change(inputs[1]!, {
+      target: { files: [new File(['framework'], '人工框架.pdf', { type: 'application/pdf' })] },
+    })
+    fireEvent.change(inputs[1]!, {
+      target: { files: [new File(['replacement'], '替换框架.pdf', { type: 'application/pdf' })] },
+    })
+    fireEvent.change(inputs[2]!, {
+      target: { files: [new File(['reference-bid'], '旧标书.pdf', { type: 'application/pdf' })] },
+    })
+    fireEvent.change(inputs[3]!, {
       target: { files: [new File(['reference'], '项目资料.pdf', { type: 'application/pdf' })] },
     })
-    expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', false)
+    expect(screen.queryByText('人工框架.pdf')).toBeNull()
+    expect(screen.getByText('替换框架.pdf')).toBeTruthy()
+    expect(screen.getByText('旧标书.pdf')).toBeTruthy()
+    expect(screen.getByText('项目资料.pdf')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' }))
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
     expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', true)
@@ -115,13 +129,13 @@ describe('BidStagePanel', () => {
     fireEvent.change(inputs[0]!, {
       target: { files: [new File(['tender'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
-    fireEvent.change(inputs[1]!, {
+    fireEvent.change(inputs[3]!, {
       target: { files: [new File(['reference'], '项目资料.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
     expect(screen.getByText('项目资料.pdf')).toBeTruthy()
-    expect(screen.getByText('招标资料')).toBeTruthy()
-    expect(screen.getByText('相关资料')).toBeTruthy()
+    expect(screen.getByText('招标文件')).toBeTruthy()
+    expect(screen.getByText('其他技术资料')).toBeTruthy()
     expect(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '移除文件: 项目资料.pdf' })).toBeTruthy()
 
@@ -140,8 +154,8 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('正在分析招标文件')).toBeTruthy()
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
     expect(screen.queryByText('项目资料.pdf')).toBeNull()
-    expect(screen.queryByText('招标资料')).toBeNull()
-    expect(screen.queryByText('相关资料')).toBeNull()
+    expect(screen.queryByText('招标文件')).toBeNull()
+    expect(screen.queryByText('其他技术资料')).toBeNull()
     expect(screen.queryByRole('button', { name: '移除文件: 招标文件.pdf' })).toBeNull()
     expect(screen.queryByRole('button', { name: '移除文件: 项目资料.pdf' })).toBeNull()
 
@@ -184,25 +198,20 @@ describe('BidStagePanel', () => {
     const view = render(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.md'],
-      maxFiles: 2,
+      maxFiles: 1,
     }), { uploadFiles })} />)
     const file = new File(['# 招标要求'], 'requirements.md', { type: 'text/markdown' })
     const inputs = view.container.querySelectorAll('input[type="file"]')
     fireEvent.change(inputs[0]!, {
       target: { files: [file] },
     })
-    fireEvent.change(inputs[1]!, {
-      target: { files: [new File(['project'], 'project.md', { type: 'text/markdown' })] },
-    })
-
     fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
     expect(uploadFiles).toHaveBeenCalledOnce()
     expect(uploadFiles).toHaveBeenCalledWith([
       { file, role: 'tender' },
-      expect.objectContaining({ file: expect.any(File), role: 'reference' }),
     ], expect.any(Function))
     expect(screen.getByRole('button', { name: '正在上传…' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '上传标书' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '上传招标文件' })).toHaveProperty('disabled', true)
     expect(screen.getByText('请添加本项目资料')).toBeTruthy()
 
     act(() => { first.reject(new Error('BID_FILE_INTAKE_NOT_ALLOWED')) })
@@ -223,7 +232,7 @@ describe('BidStagePanel', () => {
 
     expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
-    expect(screen.getByRole('button', { name: '上传标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
   })
 
   it('shows every structured S2 validation issue and keeps retry available', () => {
@@ -386,9 +395,9 @@ describe('BidStagePanel', () => {
     }), {
       confirmOutline,
       getOutlineForConfirmation: async () => ({
-        schema_version: 1, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
+        schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
           id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
-          must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+          must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
         }],
       }),
     })} />)
@@ -433,9 +442,9 @@ describe('BidStagePanel', () => {
     }), {
       confirmOutline: vi.fn(async () => {}),
       getOutlineForConfirmation: async () => ({
-        schema_version: 1, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
+        schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
           id, parent_id: null, order: index + 1, level: 1, title: id, purpose: `${id} purpose`, writable: true,
-          must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+          must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
         })),
       }),
     })} />)
@@ -490,7 +499,7 @@ describe('ui-bid browser plugin', () => {
     const options = registration[0] as {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
-        uploadFiles: (files: readonly { file: File; role: 'tender' | 'reference' }[]) => Promise<void>
+        uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
         retryStage: () => Promise<void>
       }
     }

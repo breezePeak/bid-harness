@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 3 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 4 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -49,7 +49,10 @@ const mappingSchema = z.object({
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
-const requirementMappingSchema = mappingSchema.extend({ requirement_id: z.string().min(1) }).strict()
+const requirementMappingSchema = mappingSchema.extend({
+  requirement_id: z.string().min(1),
+  writing_dimensions: z.array(z.string().min(1)).min(1),
+}).strict()
 const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
 const relatedScoringPointSchema = z.object({
   scoring_id: z.string().min(1),
@@ -65,11 +68,58 @@ const researchTopicSchema = mappingSchema.extend({
   writing_dimensions: z.array(z.string().min(1)).min(1),
 }).strict()
 
+const sourceStrategySchema = z.object({
+  mode: z.enum(['framework_and_reference_bid', 'framework_only', 'reference_bid_only', 'generated_from_scratch']),
+  framework_file_id: z.string().min(1).nullable(),
+  reference_bid_files: z.array(z.object({
+    file_id: z.string().min(1),
+    applicability: z.enum(['high', 'partial', 'none']),
+    summary: z.string().min(1),
+    global_adaptation_notes: z.array(z.string().min(1)),
+  }).strict()),
+}).strict()
+
+const sourceMappingSchema = z.object({
+  mapping_id: z.string().min(1),
+  file_id: z.string().min(1),
+  source_order: z.number().int().positive(),
+  level: z.number().int().positive(),
+  title: z.string().min(1),
+  heading_path: z.array(z.string().min(1)).min(1),
+  related_requirement_ids: z.array(z.string().min(1)),
+  related_scoring_points: z.array(relatedScoringPointSchema),
+  content_materials: z.array(evidenceMaterialSchema),
+  writing_dimensions: z.array(z.string().min(1)).min(1),
+  missing_topics: z.array(z.string().min(1)),
+}).strict()
+
+const frameworkMappingSchema = sourceMappingSchema.extend({
+  action: z.enum(['preserve', 'expand', 'adjust', 'exclude']),
+  reason: z.string().min(1),
+}).strict()
+
+const referenceBidMappingSchema = sourceMappingSchema.extend({
+  action: z.enum(['reuse', 'adapt', 'reference', 'background']),
+  summary: z.string().min(1),
+  adaptation_notes: z.array(z.string().min(1)),
+  risk_notes: z.array(z.string().min(1)),
+}).strict()
+
+const responsePointMappingSchema = mappingSchema.extend({
+  scoring_id: z.string().min(1),
+  response_point: z.string().min(1),
+  writing_dimensions: z.array(z.string().min(1)).min(1),
+}).strict()
+
 const evidenceMapSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_SCHEMA_VERSION),
+  source_strategy: sourceStrategySchema,
+  framework_mappings: z.array(frameworkMappingSchema),
+  reference_bid_mappings: z.array(referenceBidMappingSchema),
   research_topics: z.array(researchTopicSchema),
   requirement_mappings: z.array(requirementMappingSchema),
   scoring_mappings: z.array(scoringMappingSchema),
+  response_point_mappings: z.array(responsePointMappingSchema),
 }).strict()
 
 /** Parsed local material reference. */
@@ -82,6 +132,14 @@ export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema
 export type ScoringMaterialMapping = z.infer<typeof scoringMappingSchema>
 /** Parsed Agent-authored research that may inform multiple later sections. */
 export type EvidenceResearchTopic = z.infer<typeof researchTopicSchema>
+/** Parsed source strategy selected from successfully parsed special writing assets. */
+export type EvidenceSourceStrategy = z.infer<typeof sourceStrategySchema>
+/** Parsed mapping from an artificial framework heading to this bid. */
+export type FrameworkMapping = z.infer<typeof frameworkMappingSchema>
+/** Parsed mapping from a reference-bid heading to this bid. */
+export type ReferenceBidMapping = z.infer<typeof referenceBidMappingSchema>
+/** Parsed mapping from one scoring response point to writing materials and dimensions. */
+export type ScoringResponsePointMapping = z.infer<typeof responsePointMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
 

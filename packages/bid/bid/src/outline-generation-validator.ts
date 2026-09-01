@@ -4,6 +4,7 @@ import { within } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseOutlineArtifact, parseOutlineQualityReport, type OutlineArtifact, type OutlineQualityReport, type OutlineSection } from './outline-generation-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseEvidenceMapArtifact, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
 const ARTIFACT = 'outline/outline.json'
@@ -115,6 +116,7 @@ function validateQualityReview(
   outline: OutlineArtifact,
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>,
   scoring: ReturnType<typeof parseTenderScoringArtifact>,
+  evidence: EvidenceMapArtifact,
   issues: StageValidationIssue[],
 ): void {
   if (report.issues.length !== 0) {
@@ -123,6 +125,46 @@ function validateQualityReview(
   validateQualityReviewIds('REQUIREMENT', requirements.requirements.map(item => item.id), report.checked_requirement_ids, issues)
   validateQualityReviewIds('SCORING', scoring.scoring_items.map(item => item.id), report.checked_scoring_ids, issues)
   validateQualityReviewIds('SECTION', outline.sections.map(item => item.id), report.reviewed_section_ids, issues)
+  const mappingIds = [...evidence.framework_mappings, ...evidence.reference_bid_mappings].map(item => item.mapping_id)
+  validateQualityReviewIds('SOURCE_MAPPING', mappingIds, report.checked_source_mapping_ids, issues)
+  const responsePoints = evidence.response_point_mappings.map(item => `${item.scoring_id}\u0000${item.response_point}`)
+  const reviewedPoints = report.checked_scoring_response_points.map(item => `${item.scoring_id}\u0000${item.response_point}`)
+  validateQualityReviewIds('SCORING_RESPONSE_POINT', responsePoints, reviewedPoints, issues)
+}
+
+/** Validate that S4 retains the S3 source decisions and scoring response points. */
+export function validateOutlineEvidenceReferences(
+  sections: readonly OutlineSection[],
+  evidence: EvidenceMapArtifact,
+  issues: StageValidationIssue[],
+): void {
+  const mappings = [...evidence.framework_mappings, ...evidence.reference_bid_mappings]
+  const mappingById = new Map(mappings.map(item => [item.mapping_id, item]))
+  const usedMappingIds = sections.flatMap(section => section.source_mapping_ids)
+  for (const id of usedMappingIds) if (!mappingById.has(id)) {
+    reject(issues, 'OUTLINE_GENERATION_SOURCE_MAPPING_UNKNOWN', `Outline references unknown source mapping ${JSON.stringify(id)}.`)
+  }
+  for (const mapping of mappings) if (mapping.action !== 'exclude' && !usedMappingIds.includes(mapping.mapping_id)) {
+    reject(issues, 'OUTLINE_GENERATION_SOURCE_MAPPING_MISSING', `Outline omits active source mapping ${JSON.stringify(mapping.mapping_id)}.`)
+  }
+  for (const section of sections) {
+    if (!section.writable
+      && (section.source_mapping_ids.length > 0 || section.scoring_response_points.length > 0 || section.content_mode !== null)) {
+      reject(issues, 'OUTLINE_GENERATION_CONTAINER_EVIDENCE_INVALID', 'Only writable sections can own source mappings, response points, or a content mode.')
+    }
+    if (section.writable && section.content_mode === null) reject(issues, 'OUTLINE_GENERATION_WRITABLE_CONTENT_MODE_MISSING', 'A writable section requires a content mode.')
+    const sourceMappings = section.source_mapping_ids
+      .map(id => mappingById.get(id))
+      .filter((item): item is NonNullable<typeof item> => item !== undefined)
+    if (section.origin === 'generated' && sourceMappings.length !== 0) reject(issues, 'OUTLINE_GENERATION_ORIGIN_SOURCE_MISMATCH', 'Generated sections cannot retain source mappings.')
+    if (section.origin === 'framework' && sourceMappings.some(item => !evidence.framework_mappings.includes(item))) reject(issues, 'OUTLINE_GENERATION_ORIGIN_SOURCE_MISMATCH', 'Framework sections can only use framework mappings.')
+    if (section.origin === 'reference_bid' && sourceMappings.some(item => !evidence.reference_bid_mappings.includes(item))) reject(issues, 'OUTLINE_GENERATION_ORIGIN_SOURCE_MISMATCH', 'Reference-bid sections can only use reference-bid mappings.')
+  }
+  const expectedPoints = evidence.response_point_mappings.map(item => `${item.scoring_id}\u0000${item.response_point}`)
+  const actualPoints = sections.flatMap(section => section.scoring_response_points.map(point => `${point.scoring_id}\u0000${point.response_point}`))
+  if (!unique(actualPoints)) reject(issues, 'OUTLINE_GENERATION_RESPONSE_POINT_DUPLICATE', 'A scoring response point can only appear once in the outline.')
+  for (const point of actualPoints) if (!expectedPoints.includes(point)) reject(issues, 'OUTLINE_GENERATION_RESPONSE_POINT_UNKNOWN', `Outline references unknown scoring response point ${JSON.stringify(point)}.`)
+  for (const point of expectedPoints) if (!actualPoints.includes(point)) reject(issues, 'OUTLINE_GENERATION_RESPONSE_POINT_MISSING', `Outline omits scoring response point ${JSON.stringify(point)}.`)
 }
 
 /** Validate S2 identifier coverage for generated and confirmed outlines. */
@@ -176,15 +218,16 @@ export async function validateOutlineGeneration(
       'The executor must return outline/outline.json exactly once.',
     )
   }
-  const [outlineRaw, qualityReportRaw, requirementsRaw, scoringRaw, complianceRaw] = await Promise.all([
+  const [outlineRaw, qualityReportRaw, requirementsRaw, scoringRaw, complianceRaw, evidenceRaw] = await Promise.all([
     parseJson(workspace, ARTIFACT, issues),
     parseJson(workspace, QUALITY_REPORT, issues),
     parseJson(workspace, 'analysis/requirements.json', issues),
     parseJson(workspace, 'analysis/scoring.json', issues),
     parseJson(workspace, 'analysis/compliance.json', issues),
+    parseJson(workspace, 'analysis/evidence-map.json', issues),
   ])
   if (
-    [outlineRaw, qualityReportRaw, requirementsRaw, scoringRaw, complianceRaw]
+    [outlineRaw, qualityReportRaw, requirementsRaw, scoringRaw, complianceRaw, evidenceRaw]
       .some(value => value === undefined)
   ) return { ok: false, issues }
   try {
@@ -193,9 +236,11 @@ export async function validateOutlineGeneration(
     const requirements = parseTenderRequirementsArtifact(requirementsRaw)
     const scoring = parseTenderScoringArtifact(scoringRaw)
     const compliance = parseTenderComplianceArtifact(complianceRaw)
+    const evidence = parseEvidenceMapArtifact(evidenceRaw)
     validateOutlineTree(outline.sections, issues)
     validateOutlineReferences(outline.sections, outline.global_compliance_ids, requirements, scoring, compliance, issues)
-    validateQualityReview(qualityReport, outline, requirements, scoring, issues)
+    validateOutlineEvidenceReferences(outline.sections, evidence, issues)
+    validateQualityReview(qualityReport, outline, requirements, scoring, evidence, issues)
   } catch { reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', 'The outline Artifact has invalid fields.') }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

@@ -9,13 +9,13 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 const outline: OutlineArtifact = {
-  schema_version: 1,
+  schema_version: 2,
   scope: 'technical_bid',
   document_title: '技术标',
   global_compliance_ids: [],
   sections: [{
     id: 'SEC-001', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付要求', writable: true,
-    must_answer: ['交付计划'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+    must_answer: ['交付计划'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
   }],
 }
 

@@ -31,7 +31,7 @@ async function readJson(workspace: BidWorkspace, path: string, issues: StageVali
 async function validateMaterial(
   workspace: BidWorkspace, manifest: BidManifest, material: EvidenceMaterial, issues: StageValidationIssue[],
 ): Promise<void> {
-  const file = manifest.files.find(item => item.id === material.file_id && item.role === 'reference')
+  const file = manifest.files.find(item => item.id === material.file_id && item.role !== 'tender')
   if (file === undefined || file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) {
     reject(issues, 'CHAPTER_WRITING_EVIDENCE_FILE_INVALID', 'A chapter Evidence reference must name a parsed reference file.', material.chunk)
     return
@@ -110,6 +110,10 @@ export async function validateChapterWriting(
       || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)) {
       reject(issues, 'CHAPTER_WRITING_SECTION_MAPPING_INVALID', 'A chapter mapping must match its confirmed section.', MANIFEST)
     }
+    if (JSON.stringify(chapter.covered_scoring_response_points) !== JSON.stringify(section.scoring_response_points)
+      || JSON.stringify(chapter.source_mapping_ids_used) !== JSON.stringify(section.source_mapping_ids)) {
+      reject(issues, 'CHAPTER_WRITING_INHERITED_MAPPING_INVALID', 'A chapter must retain its confirmed source mappings and scoring response points.', MANIFEST)
+    }
     for (const answer of chapter.covered_must_answer) if (!section.must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_UNKNOWN', 'A chapter records a must-answer outside its confirmed section.', MANIFEST)
     for (const answer of section.must_answer) if (!chapter.covered_must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_MISSING', 'A chapter omits a required must-answer from its metadata.', MANIFEST)
     const requirementIds = new Set(section.requirement_ids)
@@ -136,6 +140,8 @@ export async function validateChapterWriting(
           const fromManifest = {
             section_id: chapter.section_id,
             covered_must_answer: chapter.covered_must_answer,
+            covered_scoring_response_points: chapter.covered_scoring_response_points,
+            source_mapping_ids_used: chapter.source_mapping_ids_used,
             evidence_used: chapter.evidence_used,
             additional_materials: chapter.additional_materials,
             external_evidence_used: chapter.external_evidence_used,

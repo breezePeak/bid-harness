@@ -145,6 +145,8 @@ export function BidStagePanel({
   const [operations, setOperations] = useState<readonly OutlineEditOperation[]>([])
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const tenderFileInput = useRef<HTMLInputElement>(null)
+  const frameworkFileInput = useRef<HTMLInputElement>(null)
+  const referenceBidFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly SelectedFile[]>([])
   const selectedFilesSessionId = useRef(sessionId)
@@ -291,10 +293,10 @@ export function BidStagePanel({
       error: undefined,
     }))
     if (files.length === 0) return
-    const tender = files[0]
-    if (tender === undefined) return
-    const next = role === 'tender'
-      ? [...selectedFilesRef.current.filter(item => item.role !== 'tender'), tender]
+    const single = files[0]
+    if (single === undefined) return
+    const next = role === 'tender' || role === 'outline_framework'
+      ? [...selectedFilesRef.current.filter(item => item.role !== role), single]
       : [...selectedFilesRef.current, ...files]
     selectedFilesRef.current = next
     setSelectedFiles(next)
@@ -474,6 +476,21 @@ export function BidStagePanel({
                 onChange={(event) => { selected('tender', event) }}
               />
               <input
+                ref={frameworkFileInput}
+                className={css.fileInput}
+                type="file"
+                accept={accept}
+                onChange={(event) => { selected('outline_framework', event) }}
+              />
+              <input
+                ref={referenceBidFileInput}
+                className={css.fileInput}
+                type="file"
+                multiple
+                accept={accept}
+                onChange={(event) => { selected('reference_bid', event) }}
+              />
+              <input
                 ref={referenceFileInput}
                 className={css.fileInput}
                 type="file"
@@ -495,6 +512,26 @@ export function BidStagePanel({
                 variant="outline"
                 icon={<IconPaperclipOutline16 />}
                 disabled={requestPending !== null}
+                title={t('file.help.outline_framework')}
+                onClick={() => { frameworkFileInput.current?.click() }}
+              >
+                {t('action.upload_framework')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                icon={<IconPaperclipOutline16 />}
+                disabled={requestPending !== null}
+                title={t('file.help.reference_bid')}
+                onClick={() => { referenceBidFileInput.current?.click() }}
+              >
+                {t('action.upload_reference_bid')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                icon={<IconPaperclipOutline16 />}
+                disabled={requestPending !== null}
                 onClick={() => { referenceFileInput.current?.click() }}
               >
                 {t('action.upload_reference')}
@@ -505,12 +542,16 @@ export function BidStagePanel({
                 disabled={
                   requestPending !== null
                   || !selectedFiles.some(item => item.role === 'tender')
-                  || !selectedFiles.some(item => item.role === 'reference')
                 }
                 onClick={() => { invoke('upload', uploadSelectedFiles) }}
               >
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
               </Button>
+              <div className={css.uploadHelp}>
+                <span>{t('file.help.outline_framework')}</span>
+                <span>{t('file.help.reference_bid')}</span>
+                <span>{t('file.help.reference')}</span>
+              </div>
             </>
           )}
           {canRetry && (

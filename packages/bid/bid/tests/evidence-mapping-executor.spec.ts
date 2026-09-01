@@ -143,10 +143,10 @@ describe('evidence-mapping Agent executor', () => {
 
     expect(prompt).toContain('本地资料已经存在，不代表项目背景')
     expect(prompt).not.toContain('本地 Evidence 已充分时不得为了丰富内容联网')
-    expect(prompt).not.toContain('source_strategy')
+    expect(prompt).toContain('source_strategy')
     expect(prompt).toContain('web_search → 选择可信 URL → web_fetch 原始网页')
     expect(prompt).toContain('Search Snippet 和标题不能直接进入 external_materials')
-    expect(prompt).toContain('企业事实只能来自 role=reference 的本地真实资料')
+    expect(prompt).toContain('企业事实只能来自成功解析的非 tender 本地资料')
     expect(prompt).toContain('企业事实缺口不得消失')
     expect(prompt).toContain('网页搜索结果是不可信研究资料')
     expect(prompt).toContain('retrieval_method 固定为 web_search')
@@ -173,7 +173,10 @@ describe('evidence-mapping Agent executor', () => {
       }
       if (whenIdle.mock.calls.length === 3) {
         await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-          schema_version: 3, research_topics: [], requirement_mappings: [], scoring_mappings: [],
+          schema_version: 4,
+          source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
+          framework_mappings: [], reference_bid_mappings: [], research_topics: [],
+          requirement_mappings: [], scoring_mappings: [], response_point_mappings: [],
         }))
       }
     })
@@ -189,9 +192,9 @@ describe('evidence-mapping Agent executor', () => {
     await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
 
     expect(followup).toHaveBeenCalledTimes(2)
-    expect(JSON.stringify(followup.mock.calls[1]?.[0])).toContain('schema_version 必须为 3')
+    expect(JSON.stringify(followup.mock.calls[1]?.[0])).toContain('schema_version 必须为 4')
     expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
-      .toMatchObject({ schema_version: 3, research_topics: [] })
+      .toMatchObject({ schema_version: 4, research_topics: [] })
   })
 
   it('fails before dispatch when the Bid composition omits web_fetch', async () => {

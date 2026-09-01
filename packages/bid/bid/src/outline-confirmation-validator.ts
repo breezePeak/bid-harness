@@ -2,7 +2,8 @@ import { lstat, readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
-import { validateOutlineReferences, validateOutlineTree } from './outline-generation-validator.ts'
+import { validateOutlineEvidenceReferences, validateOutlineReferences, validateOutlineTree } from './outline-generation-validator.ts'
+import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -32,6 +33,7 @@ export function validateConfirmedOutline(
   requirementsRaw: unknown,
   scoringRaw: unknown,
   complianceRaw: unknown,
+  evidenceRaw?: unknown,
 ): StageValidationResult {
   const issues: StageValidationIssue[] = []
   try {
@@ -45,6 +47,7 @@ export function validateConfirmedOutline(
       parseTenderComplianceArtifact(complianceRaw),
       issues,
     )
+    if (evidenceRaw !== undefined) validateOutlineEvidenceReferences(outline.sections, parseEvidenceMapArtifact(evidenceRaw), issues)
   } catch {
     issues.push({ code: 'OUTLINE_CONFIRMATION_ARTIFACT_INVALID', message: 'The confirmed outline or its required analysis artifacts are invalid.', artifact: 'outline/confirmed-outline.json' })
   }
@@ -67,14 +70,15 @@ export async function validateOutlineConfirmation(
       'The executor must return confirmed-outline.json and confirmation.json exactly once.',
     )
   }
-  const [sourceRaw, confirmedRaw, confirmationRaw, requirementsRaw, scoringRaw, complianceRaw] = await Promise.all([
+  const [sourceRaw, confirmedRaw, confirmationRaw, requirementsRaw, scoringRaw, complianceRaw, evidenceRaw] = await Promise.all([
     parseJson(workspace, SOURCE_OUTLINE, issues),
     parseJson(workspace, CONFIRMED_OUTLINE, issues),
     parseJson(workspace, CONFIRMATION, issues),
     parseJson(workspace, 'analysis/requirements.json', issues), parseJson(workspace, 'analysis/scoring.json', issues),
     parseJson(workspace, 'analysis/compliance.json', issues),
+    parseJson(workspace, 'analysis/evidence-map.json', issues),
   ])
-  const inputs = [sourceRaw, confirmedRaw, confirmationRaw, requirementsRaw, scoringRaw, complianceRaw]
+  const inputs = [sourceRaw, confirmedRaw, confirmationRaw, requirementsRaw, scoringRaw, complianceRaw, evidenceRaw]
   if (inputs.some(value => value === undefined)) return { ok: false, issues }
   try {
     const source = parseConfirmedOutlineArtifact(sourceRaw)
@@ -91,6 +95,7 @@ export async function validateOutlineConfirmation(
       parseTenderComplianceArtifact(complianceRaw),
       issues,
     )
+    validateOutlineEvidenceReferences(confirmed.sections, parseEvidenceMapArtifact(evidenceRaw), issues)
   } catch {
     reject(issues, 'OUTLINE_CONFIRMATION_ARTIFACT_INVALID', 'The outline-confirmation Artifacts have invalid fields.')
   }

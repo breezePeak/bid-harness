@@ -6,7 +6,7 @@ import {
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 
 /** Version of the durable S6 chapter manifest and chapter metadata records. */
-export const CHAPTER_WRITING_SCHEMA_VERSION = 2 as const
+export const CHAPTER_WRITING_SCHEMA_VERSION = 3 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 function localIdentity(material: z.infer<typeof evidenceMaterialSchema>): string {
@@ -21,6 +21,8 @@ function duplicate(values: readonly string[]): boolean {
 export const chapterMetadataSchema = z.object({
   section_id: z.string().min(1),
   covered_must_answer: z.array(z.string().min(1)),
+  covered_scoring_response_points: z.array(z.object({ scoring_id: z.string().min(1), response_point: z.string().min(1) }).strict()),
+  source_mapping_ids_used: z.array(z.string().min(1)),
   evidence_used: z.array(evidenceMaterialSchema),
   additional_materials: z.array(evidenceMaterialSchema),
   external_evidence_used: z.array(externalEvidenceMaterialSchema),

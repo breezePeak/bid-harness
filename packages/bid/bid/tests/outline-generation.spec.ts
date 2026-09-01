@@ -42,7 +42,7 @@ const compliance = {
 }
 
 const reviewedOutline: OutlineArtifact = {
-  schema_version: 1,
+  schema_version: 2,
   scope: 'technical_bid',
   document_title: '技术投标文件',
   global_compliance_ids: ['COMP-DELIVERY'],
@@ -59,40 +59,41 @@ const reviewedOutline: OutlineArtifact = {
       requirement_ids: [],
       scoring_ids: [],
       compliance_ids: [],
+      origin: 'generated', content_mode: null, source_mapping_ids: [], scoring_response_points: [],
       suggested_tables: [],
       suggested_figures: [],
       writing_notes: [],
     },
     {
       id: 'SEC-ORGANIZATION', parent_id: 'SEC-IMPLEMENTATION', order: 1, level: 2, title: '项目组织与职责', purpose: '说明组织安排。', writable: true,
-      must_answer: ['明确项目组织、岗位职责和协同机制。'], requirement_ids: ['REQ-ORG'], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      must_answer: ['明确项目组织、岗位职责和协同机制。'], requirement_ids: ['REQ-ORG'], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
     },
     {
       id: 'SEC-SCHEDULE', parent_id: 'SEC-IMPLEMENTATION', order: 2, level: 2, title: '实施阶段与进度控制', purpose: '说明阶段安排。', writable: true,
-      must_answer: ['列明实施阶段、里程碑和进度保障措施。'], requirement_ids: ['REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      must_answer: ['列明实施阶段、里程碑和进度保障措施。'], requirement_ids: ['REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }], suggested_tables: [], suggested_figures: [], writing_notes: [],
     },
   ],
 }
 
 const coarseOutline: OutlineArtifact = {
-  schema_version: 1,
+  schema_version: 2,
   scope: 'technical_bid',
   document_title: '技术投标文件',
   global_compliance_ids: ['COMP-DELIVERY'],
   sections: [{
     id: 'SEC-IMPLEMENTATION', parent_id: null, order: 1, level: 1, title: '项目实施方案', purpose: '响应项目实施要求。', writable: true,
-    must_answer: ['完整响应项目技术要求。'], requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+    must_answer: ['完整响应项目技术要求。'], requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }], suggested_tables: [], suggested_figures: [], writing_notes: [],
   }],
 }
 
 const researchDrivenOutline: OutlineArtifact = {
-  schema_version: 1,
+  schema_version: 2,
   scope: 'technical_bid',
   document_title: '技术投标文件',
   global_compliance_ids: ['COMP-DELIVERY'],
   sections: [{
     id: 'SEC-SECURITY', parent_id: null, order: 1, level: 1, title: '数据安全保障体系', purpose: '响应安全技术要求。', writable: true,
-    must_answer: ['说明数据分类分级、访问控制和安全审计措施。'], requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+    must_answer: ['说明数据分类分级、访问控制和安全审计措施。'], requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }], suggested_tables: [], suggested_figures: [], writing_notes: [],
   }],
 }
 
@@ -103,7 +104,7 @@ async function fixture(): Promise<BidWorkspace> {
     writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
     writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
-    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 3, research_topics: [], requirement_mappings: [], scoring_mappings: [] })),
+    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 4, source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], research_topics: [], requirement_mappings: [], scoring_mappings: [], response_point_mappings: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障', materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['进度控制'] }] })),
   ])
   return workspace
 }
@@ -113,10 +114,12 @@ async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact,
   await Promise.all([
     writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`),
     writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), `${JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       scope: 'technical_bid',
       checked_requirement_ids: requirements.requirements.map(item => item.id),
       checked_scoring_ids: scoring.scoring_items.map(item => item.id),
+      checked_source_mapping_ids: [],
+      checked_scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }],
       reviewed_section_ids: outline.sections.map(item => item.id),
       issues: qualityIssues,
     })}\n`),
@@ -131,7 +134,8 @@ describe('outline-generation Blueprint Quality Review', () => {
   it('gives S3 research findings and writing dimensions to the S4 Agent as structural inputs', async () => {
     const workspace = await fixture()
     await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 3,
+      schema_version: 4,
+      source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], response_point_mappings: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障', materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['进度控制'] }],
       research_topics: [{
         topic_id: 'RT-SECURITY', topic: '数据安全方案的技术维度', relevance: '细化安全章节。',
         related_requirement_ids: [], related_scoring_points: [], materials: [], external_materials: [],
@@ -140,7 +144,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       }],
       requirement_mappings: [], scoring_mappings: [],
     }))
-    const task = renderOutlineGenerationTask({ id: 'session' } as Agent, workspace, buildBidStageTask('outline_generation'))
+    const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as Agent, workspace, buildBidStageTask('outline_generation'))
 
     expect(task).toContain('research_topics 是 S3 通过本地资料和外部研究得到的结构设计输入')
     expect(task).toContain('章节标题、层级、must_answer')
@@ -150,7 +154,8 @@ describe('outline-generation Blueprint Quality Review', () => {
   it('publishes research-driven directory detail through the S4 Agent execution path', async () => {
     const workspace = await fixture()
     await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-      schema_version: 3,
+      schema_version: 4,
+      source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] }, framework_mappings: [], reference_bid_mappings: [], response_point_mappings: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障', materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['进度控制'] }],
       research_topics: [{
         topic_id: 'RT-SECURITY', topic: '数据安全方案的技术维度', relevance: '细化安全章节。',
         related_requirement_ids: ['REQ-ORG'], related_scoring_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }],
@@ -168,7 +173,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
       tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
     }
-    const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+    const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
 
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
     const outline = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
@@ -196,6 +201,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     }
     const agent = {
       id: 'session',
+      session: { events: [] },
       ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
       followup,
       whenIdle,
@@ -234,7 +240,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
       tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
     }
-    const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+    const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
 
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })
 
@@ -276,10 +282,12 @@ describe('outline-generation Blueprint Quality Review', () => {
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
     await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       scope: 'technical_bid',
       checked_requirement_ids: ['REQ-ORG'],
       checked_scoring_ids: ['SCORE-SCHEDULE'],
+      checked_source_mapping_ids: [],
+      checked_scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }],
       reviewed_section_ids: reviewedOutline.sections.map(item => item.id),
       issues: [],
     }))
@@ -306,7 +314,7 @@ describe('outline-generation Blueprint Quality Review', () => {
 
   it('keeps the S4 granularity limits in the model-visible draft assignment', async () => {
     const workspace = await fixture()
-    const task = renderOutlineGenerationTask({ id: 'session' } as Agent, workspace, buildBidStageTask('outline_generation'))
+    const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as Agent, workspace, buildBidStageTask('outline_generation'))
     expect(task).toContain('requirement_ids 最多 4 个、scoring_ids 最多 3 个')
     expect(task).toContain('索引重复引用不能替代正文拆分')
   })
