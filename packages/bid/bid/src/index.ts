@@ -38,7 +38,7 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -144,13 +144,18 @@ export * from './web-evidence-source-artifacts.ts'
 export {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
+  DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
+  mergeEvidenceMappingPartialResults,
   renderEvidenceMappingRepairTask,
+  renderEvidenceMappingSubagentTask,
   renderEvidenceMappingTask,
   type EvidenceMappingCapturedWebResult,
+  type MergedEvidenceMappingResults,
   type EvidenceMappingWebObservation,
   type EvidenceMappingWebSnapshot,
 } from './evidence-mapping-executor.ts'
+export type { EvidenceMappingExecutionOptions } from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 export * from './outline-generation-artifacts.ts'
 export * from './outline-confirmation-artifacts.ts'
@@ -223,7 +228,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
-/** Validated file limits, model-stage recovery budget, and S6 concurrency limit. */
+/** Validated file limits, model-stage recovery budget, and Subagent concurrency limits. */
 export interface Config {
   /** File extensions accepted by the Bid upload Remote. */
   allowedExtensions: string[]
@@ -235,6 +240,8 @@ export interface Config {
   maxTotalBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
+  /** Maximum Mapping Subagents running at the same time during S3. */
+  evidenceMappingMaxConcurrency: number
   /** Maximum Chapter Subagents running at the same time during S6. */
   chapterWritingMaxConcurrency: number
   /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
@@ -247,6 +254,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
   modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+  evidenceMappingMaxConcurrency: DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   trustedHosts: [],
 }
@@ -258,6 +266,7 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
+  evidenceMappingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.evidenceMappingMaxConcurrency),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
   trustedHosts: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.trustedHosts),
 })
@@ -570,7 +579,10 @@ export class BidHostRuntime extends TypertRemoteService {
         execute: task => task.stage === 'tender_analysis'
           ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
           : task.stage === 'evidence_mapping'
-            ? executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
+            ? executeEvidenceMapping(agent, workspace, task, {
+              maxRepairAttempts: this.config.modelStageRepairAttempts,
+              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+            })
             : task.stage === 'outline_generation'
               ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
               : task.stage === 'chapter_writing'
@@ -669,7 +681,10 @@ export class BidHostRuntime extends TypertRemoteService {
             }
             const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
-            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, repair)
+            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
+              ...repair,
+              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+            })
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
             if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task, {
               ...repair,

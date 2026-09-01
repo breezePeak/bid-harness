@@ -49,17 +49,17 @@ const mappingSchema = z.object({
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
-const requirementMappingSchema = mappingSchema.extend({
+export const requirementMappingSchema = mappingSchema.extend({
   requirement_id: z.string().min(1),
   writing_dimensions: z.array(z.string().min(1)).min(1),
 }).strict()
-const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
-const relatedScoringPointSchema = z.object({
+export const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
+export const relatedScoringPointSchema = z.object({
   response_point_id: z.string().regex(/^RP-\d{6}$/u),
   scoring_id: z.string().min(1),
   response_point: z.string().min(1),
 }).strict()
-const researchTopicSchema = mappingSchema.extend({
+export const researchTopicSchema = mappingSchema.extend({
   topic_id: z.string().min(1),
   topic: z.string().min(1),
   relevance: z.string().min(1),
@@ -69,7 +69,7 @@ const researchTopicSchema = mappingSchema.extend({
   writing_dimensions: z.array(z.string().min(1)).min(1),
 }).strict()
 
-const sourceStrategySchema = z.object({
+export const sourceStrategySchema = z.object({
   mode: z.enum(['framework_and_reference_bid', 'framework_only', 'reference_bid_only', 'generated_from_scratch']),
   framework_file_id: z.string().min(1).nullable(),
   reference_bid_files: z.array(z.object({
@@ -95,19 +95,19 @@ const sourceMappingSchema = z.object({
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
-const frameworkMappingSchema = sourceMappingSchema.extend({
+export const frameworkMappingSchema = sourceMappingSchema.extend({
   action: z.enum(['preserve', 'expand', 'adjust', 'exclude']),
   reason: z.string().min(1),
 }).strict()
 
-const referenceBidMappingSchema = sourceMappingSchema.extend({
+export const referenceBidMappingSchema = sourceMappingSchema.extend({
   action: z.enum(['reuse', 'adapt', 'reference', 'background']),
   summary: z.string().min(1),
   adaptation_notes: z.array(z.string().min(1)),
   risk_notes: z.array(z.string().min(1)),
 }).strict()
 
-const responsePointMappingSchema = mappingSchema.extend({
+export const responsePointMappingSchema = mappingSchema.extend({
   response_point_id: z.string().regex(/^RP-\d{6}$/u),
   scoring_id: z.string().min(1),
   response_point: z.string().min(1),
@@ -123,6 +123,43 @@ const evidenceMapSchema = z.object({
   requirement_mappings: z.array(requirementMappingSchema),
   scoring_mappings: z.array(scoringMappingSchema),
   response_point_mappings: z.array(responsePointMappingSchema),
+}).strict()
+
+/** Version of the Host-private S3 task plan. */
+export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 1 as const
+
+const evidenceMappingTaskSchema = z.object({
+  task_id: z.string().min(1),
+  title: z.string().min(1),
+  objective: z.string().min(1),
+  requirement_ids: z.array(z.string().min(1)),
+  scoring_ids: z.array(z.string().min(1)),
+  response_point_ids: z.array(z.string().min(1)),
+  compliance_ids: z.array(z.string().min(1)),
+  source_focus: z.array(z.string().min(1)),
+  research_topics: z.array(z.string().min(1)),
+}).strict().refine(task => task.requirement_ids.length + task.scoring_ids.length
+  + task.response_point_ids.length + task.research_topics.length > 0, {
+  message: 'mapping task must own at least one business item or research topic',
+})
+
+const evidenceMappingPlanSchema = z.object({
+  schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),
+  global_analysis: z.array(z.string().min(1)).min(1),
+  source_strategy_notes: z.array(z.string().min(1)),
+  tasks: z.array(evidenceMappingTaskSchema).min(1),
+}).strict()
+
+export const evidenceMappingPartialResultSchema = z.object({
+  task_id: z.string().min(1),
+  requirement_mappings: z.array(requirementMappingSchema),
+  scoring_mappings: z.array(scoringMappingSchema),
+  response_point_mappings: z.array(responsePointMappingSchema),
+  research_topics: z.array(researchTopicSchema),
+  framework_mappings: z.array(frameworkMappingSchema),
+  reference_bid_mappings: z.array(referenceBidMappingSchema),
+  findings: z.array(z.string().min(1)),
+  missing_topics: z.array(z.string().min(1)),
 }).strict()
 
 /** Parsed local material reference. */
@@ -145,6 +182,12 @@ export type ReferenceBidMapping = z.infer<typeof referenceBidMappingSchema>
 export type ScoringResponsePointMapping = z.infer<typeof responsePointMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
+/** One Main-Agent-authored S3 work item executed in an independent Child Session. */
+export type EvidenceMappingTask = z.infer<typeof evidenceMappingTaskSchema>
+/** Host-private Main-Agent task plan for S3. */
+export type EvidenceMappingPlan = z.infer<typeof evidenceMappingPlanSchema>
+/** Strict partial Evidence Map returned by one Mapping Subagent. */
+export type EvidenceMappingPartialResult = z.infer<typeof evidenceMappingPartialResultSchema>
 
 /**
  * Parse an evidence map through the current schema.
@@ -153,4 +196,14 @@ export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
  */
 export function parseEvidenceMapArtifact(value: unknown): EvidenceMapArtifact {
   return evidenceMapSchema.parse(value)
+}
+
+/** Parse a Host-private S3 task plan. */
+export function parseEvidenceMappingPlan(value: unknown): EvidenceMappingPlan {
+  return evidenceMappingPlanSchema.parse(value)
+}
+
+/** Parse one Mapping Subagent result through the existing Evidence schemas. */
+export function parseEvidenceMappingPartialResult(value: unknown): EvidenceMappingPartialResult {
+  return evidenceMappingPartialResultSchema.parse(value)
 }

@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises'
-import { posix } from 'node:path'
 import { ZodError } from 'zod'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
+import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
@@ -134,11 +134,15 @@ async function validateSourceMappings(
   const requirementIds = new Set(requirements.requirements.map(item => item.id))
   const points = new Map(catalog.points.map(point => [point.id, point]))
   const ids = new Set<string>()
+  const sourceSections = new Set<string>()
   const validate = async (kind: 'framework' | 'reference_bid', role: 'outline_framework' | 'reference_bid', mappings: readonly EvidenceMapArtifact['framework_mappings'][number][] | readonly EvidenceMapArtifact['reference_bid_mappings'][number][]): Promise<void> => {
     for (const [index, mapping] of mappings.entries()) {
       const path = `${kind}_mappings[${index}]`
       if (ids.has(mapping.mapping_id)) reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_DUPLICATE', 'Each source mapping id must occur once.', ARTIFACT, `${path}.mapping_id`)
       ids.add(mapping.mapping_id)
+      const sourceKey = `${mapping.file_id}\u0000${mapping.source_section_id}`
+      if (sourceSections.has(sourceKey)) reject(issues, 'EVIDENCE_MAPPING_SOURCE_SECTION_DUPLICATE', 'A source heading may have at most one mapping.', ARTIFACT, path)
+      sourceSections.add(sourceKey)
       const file = manifest.files.find(candidate => String(candidate.id) === mapping.file_id)
       if (file === undefined || file.role !== role || file.parseStatus !== 'success') {
         reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_FILE_INVALID', 'A source mapping must reference a successfully parsed file of its own role.', ARTIFACT, `${path}.file_id`)
@@ -164,11 +168,8 @@ async function validateSourceMappings(
             reject(issues, 'EVIDENCE_MAPPING_SOURCE_SECTION_INVALID', 'A source mapping must match a real source heading.', ARTIFACT, path)
           }
           for (const material of mapping.content_materials) {
-            const indexPath = file.chunkIndexPath === null ? null : within(workspace.sessionRoot, file.chunkIndexPath)
-            if (indexPath === null) continue
-            const indexValue = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
-            const entry = indexValue.chunks.find(chunk => posix.join(file.chunksPath ?? '', chunk.path) === material.chunk)
-            if (entry !== undefined && !mapping.heading_path.every((title, offset) => entry.heading_path[offset] === title)) {
+            const entry = (await resolveEvidenceChunk(workspace, manifest, material)).entry
+            if (!mapping.heading_path.every((title, offset) => entry.heading_path[offset] === title)) {
               reject(issues, 'EVIDENCE_MAPPING_SOURCE_MAPPING_HEADING_INVALID', 'Source content must come from the mapped heading or its descendants.', ARTIFACT, `${path}.content_materials`)
             }
           }
@@ -180,15 +181,6 @@ async function validateSourceMappings(
   }
   await validate('framework', 'outline_framework', map.framework_mappings)
   await validate('reference_bid', 'reference_bid', map.reference_bid_mappings)
-  for (const file of manifest.files.filter(file => file.role === 'outline_framework' && file.parseStatus === 'success')) {
-    const sections = await readSourceSections(workspace, file)
-    for (const section of sections) {
-      const matches = map.framework_mappings.filter(
-        mapping => mapping.file_id === String(file.id) && mapping.source_section_id === section.id,
-      )
-      if (matches.length !== 1) reject(issues, matches.length === 0 ? 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_MISSING' : 'EVIDENCE_MAPPING_FRAMEWORK_SECTION_DUPLICATE', 'Every framework heading must have exactly one mapping.', ARTIFACT)
-    }
-  }
   for (const item of map.source_strategy.reference_bid_files.filter(item => item.applicability !== 'none')) {
     if (!map.reference_bid_mappings.some(mapping => mapping.file_id === item.file_id)) reject(issues, 'EVIDENCE_MAPPING_REFERENCE_BID_MAPPING_MISSING', 'An applicable reference bid requires a real source mapping.', ARTIFACT)
   }
@@ -197,7 +189,7 @@ async function validateSourceMappings(
 async function validateMaterial(
   workspace: BidWorkspace, manifest: BidManifest, material: EvidenceMaterial, issues: StageValidationIssue[],
 ): Promise<void> {
-  const matchingFiles = manifest.files.filter(record => record.id === material.file_id)
+  const matchingFiles = manifest.files.filter(record => String(record.id) === material.file_id)
   if (matchingFiles.length === 0) { reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_UNKNOWN', 'A material references no manifest file.', material.chunk); return }
   const file = matchingFiles[0]
   if (file === undefined) return
@@ -209,15 +201,9 @@ async function validateMaterial(
     reject(issues, 'EVIDENCE_MAPPING_SOURCE_FILE_INVALID', 'A material references an unparsed file.', material.chunk)
     return
   }
-  const chunksPath = file.chunksPath
   try {
-    const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
-    await assertNoLinkedPath(workspace.root, indexPath)
-    const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
-    if (!index.chunks.some(chunk => posix.join(chunksPath, chunk.path) === material.chunk)) throw new Error('chunk')
-    const chunkPath = within(workspace.sessionRoot, material.chunk)
-    await assertNoLinkedPath(workspace.root, chunkPath)
-    const lineCount = (await readFile(chunkPath, 'utf8')).split('\n').length
+    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
+    const lineCount = (await readFile(resolved.path, 'utf8')).split('\n').length
     if (material.line_end > lineCount) reject(issues, 'EVIDENCE_MAPPING_SOURCE_LINE_INVALID', 'A material line range leaves its chunk.', material.chunk)
   } catch {
     reject(issues, 'EVIDENCE_MAPPING_SOURCE_CHUNK_INVALID', 'A material does not name a real chunk owned by its file.', material.chunk)

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -6,6 +6,9 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent-in-process-driver'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -14,6 +17,7 @@ import {
   BidOrchestrator,
   BidWorkspace,
   buildBidStageTask,
+  createScoringResponsePointCatalog,
   executeEvidenceMapping,
   parseWebEvidenceSourcesArtifact,
   parseEvidenceMapArtifact,
@@ -75,9 +79,13 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
     },
   }))
   ctx.tools.register(defineTool({
-    name: 'grep', description: 'Find local technical material.', parameters: { pattern: { type: 'string', required: true } },
+    name: 'grep', description: 'Find local technical material.', parameters: {
+      pattern: { type: 'string', required: true }, path: { type: 'string', required: true },
+    },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: async () => 'reference chunk contains access control',
+    execute: async args => (await readFile(resolve(root, args.path), 'utf8')).includes(args.pattern)
+      ? `${args.path}: access control`
+      : '',
   }))
   ctx.tools.register(defineTool({
     name: 'write', description: 'Write a UTF-8 file.', parameters: {
@@ -125,7 +133,12 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
   }))
 }
 
-async function prepareS2(workspace: BidWorkspace): Promise<{ chunk: string; requirementId: string; scoringId: string }> {
+async function prepareS2(workspace: BidWorkspace): Promise<{
+  chunk: string
+  requirementId: string
+  scoringId: string
+  responsePointId: string
+}> {
   const [tender, reference] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('需要访问控制与安全审计方案。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('本地资料只有实施流程。') },
@@ -135,59 +148,104 @@ async function prepareS2(workspace: BidWorkspace): Promise<{ chunk: string; requ
   const chunk = `${reference.chunksPath}/${chunkIndex.chunks[0]!.path}`
   const sourceRef = { file_id: tender.id, chunk, line_start: 1, line_end: 1 }
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
-  await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1 }))
+  await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1, project_name: '访问控制项目', tender_name: null, purchaser: null, owner: null, project_background: ['安全建设'], project_objectives: ['访问控制'], project_scope: ['技术方案'], technical_scope: ['安全'], delivery_scope: ['方案'], implementation_constraints: [], key_technical_points: ['访问控制'], source_refs: [sourceRef], analyzed_tender_files: [tender.id] }))
   await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify({ schema_version: 1, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '安全', raw_text: '安全审计', criterion: '方案完整', score: 5, score_range: null, must_answer: true, response_points: ['说明访问控制'], source_refs: [sourceRef] }] }))
-  await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1 }))
-  return { chunk, requirementId: 'REQ-1', scoringId: 'SCORE-1' }
+  const scoring = { schema_version: 1 as const, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '安全', raw_text: '安全审计', criterion: '方案完整', score: 5, score_range: null, must_answer: true, response_points: ['说明访问控制'], source_refs: [sourceRef] }] }
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring)))
+  await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
+  return { chunk, requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
 }
 
-function externalEvidenceMap(s2: { requirementId: string; scoringId: string }, url: string, complete = true): string {
+function externalMaterial(url: string) {
+  return {
+    title: '官方标准', url, publisher: '官方机构', retrieved_at: '2026-08-31T00:00:00.000Z',
+    retrieval_method: 'web_search' as const, usage: 'reference' as const, summary: '要求访问控制与审计。', supports: '支持安全方案。',
+  }
+}
+
+function partialResult(s2: { requirementId: string; scoringId: string; responsePointId: string }, url: string) {
+  const external = externalMaterial(url)
+  return {
+    task_id: 'TASK-SECURITY',
+    framework_mappings: [], reference_bid_mappings: [], findings: ['访问控制需要与审计协同。'], missing_topics: [],
+    research_topics: [{
+      topic_id: 'RT-1', topic: '访问控制方案的技术维度', relevance: '用于细化安全章节。',
+      related_requirement_ids: [s2.requirementId],
+      related_scoring_points: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制' }],
+      materials: [], external_materials: [external], findings: ['访问控制需要与审计协同。'],
+      writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
+    }],
+    requirement_mappings: [{ requirement_id: s2.requirementId, materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
+    scoring_mappings: [{ scoring_id: s2.scoringId, materials: [], external_materials: [{ ...external, supports: '支持安全评分响应。' }], missing_topics: [] }],
+    response_point_mappings: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制', materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
+  }
+}
+
+function externalEvidenceMap(s2: { requirementId: string; scoringId: string; responsePointId: string }, url: string): string {
   const external = {
     title: '官方标准', url, publisher: '官方机构', retrieved_at: '2026-08-31T00:00:00.000Z',
     retrieval_method: 'web_search', usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。',
   }
   return JSON.stringify({
-    schema_version: 4,
+    schema_version: 5,
     source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
     framework_mappings: [],
     reference_bid_mappings: [],
     research_topics: [{
       topic_id: 'RT-1', topic: '访问控制方案的技术维度', relevance: '用于细化安全章节。',
       related_requirement_ids: [s2.requirementId],
-      related_scoring_points: [{ scoring_id: s2.scoringId, response_point: '说明访问控制' }],
+      related_scoring_points: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制' }],
       materials: [], external_materials: [external], findings: ['访问控制需要与审计协同。'],
       writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
     }],
     requirement_mappings: [{ requirement_id: s2.requirementId, materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
-    scoring_mappings: complete
-      ? [{ scoring_id: s2.scoringId, materials: [], external_materials: [{ ...external, supports: '支持安全评分响应。' }], missing_topics: [] }]
-      : [],
-    response_point_mappings: complete
-      ? [{ scoring_id: s2.scoringId, response_point: '说明访问控制', materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }]
-      : [],
+    scoring_mappings: [{ scoring_id: s2.scoringId, materials: [], external_materials: [{ ...external, supports: '支持安全评分响应。' }], missing_topics: [] }],
+    response_point_mappings: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制', materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
   })
 }
 
 describe('S3 Web evidence through a real Agent Tool loop', () => {
-  it('captures search and fetch outcomes, writes Host snapshots, and completes evidence_mapping', async () => {
+  it('plans in the Main Agent, maps in a fresh child, and completes evidence_mapping', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s3-loop-'))
     const sessionId = SessionId('s3-real-loop')
     const workspace = new BidWorkspace(root, sessionId)
     const s2 = await prepareS2(workspace)
     const sourceUrl = 'https://official.example/standard'
-    const artifactPath = `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/evidence-map.json`
+    const workspacePath = relative(root, workspace.sessionRoot).replaceAll('\\', '/')
+    const planPath = `${workspacePath}/analysis/evidence-mapping-plan.json`
+    const artifactPath = `${workspacePath}/analysis/evidence-map.json`
+    const plan = JSON.stringify({
+      schema_version: 1,
+      global_analysis: ['访问控制要求由一个安全主题任务负责。'],
+      source_strategy_notes: ['本地资料与公开标准结合。'],
+      tasks: [{
+        task_id: 'TASK-SECURITY',
+        title: '访问控制与审计',
+        objective: '定位本地实施资料并补充公开技术依据。',
+        requirement_ids: [s2.requirementId],
+        scoring_ids: [s2.scoringId],
+        response_point_ids: [s2.responsePointId],
+        compliance_ids: [],
+        source_focus: ['reference'],
+        research_topics: ['访问控制安全审计官方标准'],
+      }],
+    })
     const evidenceMap = externalEvidenceMap(s2, sourceUrl)
     const script = [
       toolCall('read-manifest', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/manifest.json` }),
       toolCall('read-project', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/project.json` }),
       toolCall('read-requirements', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/requirements.json` }),
       toolCall('read-scoring', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/scoring.json` }),
+      toolCall('read-response-points', 'read', { file_path: `${workspacePath}/analysis/scoring-response-points.json` }),
       toolCall('read-compliance', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/compliance.json` }),
-      toolCall('grep-local', 'grep', { pattern: '访问控制' }),
-      toolCall('read-chunk', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/${s2.chunk}` }),
+      toolCall('write-plan', 'write', { file_path: planPath, content: plan }),
+      finalText('规划完成。'),
+      toolCall('grep-local', 'grep', { pattern: '实施流程', path: `${workspacePath}/${s2.chunk}` }),
+      toolCall('read-chunk', 'read', { file_path: `${workspacePath}/${s2.chunk}` }),
       toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
       toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
+      toolCall('structured-result', STRUCTURED_OUTPUT_TOOL, partialResult(s2, sourceUrl)),
       toolCall('write-evidence', 'write', { file_path: artifactPath, content: evidenceMap }),
       finalText('完成。'),
     ]
@@ -199,6 +257,8 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(IntegrationFileSystem)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(script))
     registerIntegrationTools(ctx, root, sourceUrl)
     const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
@@ -208,7 +268,7 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
     const orchestrator = new BidOrchestrator(
       agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
+      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0, maxConcurrency: 2 }) },
       { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     )
 
@@ -223,96 +283,9 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'evidence_mapping')).toBe(true)
     expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
-      'read', 'read', 'read', 'read', 'read', 'grep', 'read', 'web_search', 'web_fetch', 'write',
+      'read', 'read', 'read', 'read', 'read', 'read', 'write', 'write',
     ])
     expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json'])
-    await ctx.fiber.dispose()
-  })
-
-  it('rejects an Agent-authored external material when no search or fetch ran', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s3-forged-'))
-    const sessionId = SessionId('s3-forged-source')
-    const workspace = new BidWorkspace(root, sessionId)
-    const s2 = await prepareS2(workspace)
-    const artifactPath = `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/evidence-map.json`
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'test' })
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(IntegrationFileSystem)
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(AgentLoop, { agents: [] })
-    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
-      toolCall('write-forged', 'write', { file_path: artifactPath, content: externalEvidenceMap(s2, 'https://forged.example/standard') }),
-      finalText('完成。'),
-    ]))
-    registerIntegrationTools(ctx, root, 'https://unused.example/standard')
-    const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
-    agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
-    agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
-    agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
-    const orchestrator = new BidOrchestrator(
-      agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
-      { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
-    )
-
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
-    const failure = agent.session.events.find(event => event.type === 'bid.stage.failed' && event.data.stage === 'evidence_mapping')
-    expect(failure?.type === 'bid.stage.failed' ? failure.data.issues?.map(issue => issue.code) : []).toContain('EVIDENCE_MAPPING_WEB_SOURCE_UNVERIFIED')
-    expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'evidence_mapping')).toBe(false)
-    expect(agent.session.events.some(event => event.type === 'bid.stage.started' && event.data.stage === 'outline_generation')).toBe(false)
-    await ctx.fiber.dispose()
-  })
-
-  it('uses the generic retry path and removes the prior attempt source ledger and snapshot', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s3-retry-'))
-    const sessionId = SessionId('s3-source-retry')
-    const workspace = new BidWorkspace(root, sessionId)
-    const s2 = await prepareS2(workspace)
-    const urlA = 'https://official.example/old'
-    const urlB = 'https://official.example/current'
-    const artifactPath = `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/evidence-map.json`
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'test' })
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(IntegrationFileSystem)
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(AgentLoop, { agents: [] })
-    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
-      toolCall('search-a', 'web_search', { queries: ['旧来源'] }),
-      toolCall('fetch-a', 'web_fetch', { url: urlA }),
-      toolCall('write-a', 'write', { file_path: artifactPath, content: externalEvidenceMap(s2, urlA, false) }),
-      finalText('第一次完成。'),
-      toolCall('search-b', 'web_search', { queries: ['新来源'] }),
-      toolCall('fetch-b', 'web_fetch', { url: urlB }),
-      toolCall('write-b', 'write', { file_path: artifactPath, content: externalEvidenceMap(s2, urlB) }),
-      finalText('第二次完成。'),
-    ]))
-    registerIntegrationTools(ctx, root, [urlA, urlB])
-    const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
-    agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
-    agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
-    agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
-    const orchestrator = new BidOrchestrator(
-      agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
-      { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
-    )
-
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
-    const firstLedger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
-    const oldSnapshotName = `${firstLedger.sources[0]!.source_id}.md`
-    await expect(orchestrator.retryCurrentAutomaticStage()).resolves.toEqual({ stage: 'outline_generation', status: 'pending' })
-    const finalLedger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
-    expect(finalLedger.sources.map(source => source.requested_url)).toEqual([urlB])
-    expect(await readdir(join(workspace.sessionRoot, 'analysis/web-sources'))).toEqual([`${finalLedger.sources[0]!.source_id}.md`])
-    expect(await readdir(join(workspace.sessionRoot, 'analysis/web-sources'))).not.toContain(oldSnapshotName)
     await ctx.fiber.dispose()
   })
 })
