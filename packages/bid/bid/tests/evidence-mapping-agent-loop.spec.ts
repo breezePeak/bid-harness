@@ -188,8 +188,8 @@ function externalEvidenceMap(s2: { requirementId: string; scoringId: string; res
     retrieval_method: 'web_search', usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。',
   }
   return JSON.stringify({
-    schema_version: 5,
-    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
+    schema_version: 6,
+    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_file_ids: [] },
     framework_mappings: [],
     reference_bid_mappings: [],
     research_topics: [{
@@ -283,7 +283,7 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'evidence_mapping')).toBe(true)
     expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
-      'read', 'read', 'read', 'read', 'read', 'read', 'write', 'write',
+      'read', 'read', 'read', 'read', 'read', 'read', 'write',
     ])
     expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json'])
     await ctx.fiber.dispose()

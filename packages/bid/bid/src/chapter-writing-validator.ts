@@ -47,10 +47,9 @@ async function validateMaterial(
     return
   }
   try {
-    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
-    if (material.line_end > (await readFile(resolved.path, 'utf8')).split('\n').length) throw new Error('line-range')
+    await resolveEvidenceChunk(workspace, manifest, material)
   } catch {
-    reject(issues, 'CHAPTER_WRITING_EVIDENCE_INVALID', 'A chapter Evidence reference does not name an indexed local line range.', material.chunk)
+    reject(issues, 'CHAPTER_WRITING_EVIDENCE_INVALID', 'A chapter Evidence reference does not name an indexed local chunk.', material.chunk)
   }
 }
 

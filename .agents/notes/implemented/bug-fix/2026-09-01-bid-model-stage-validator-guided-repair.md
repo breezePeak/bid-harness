@@ -10,7 +10,7 @@ Bid 模型阶段可能在回复中声称工作完成，但正式 Artifact 仍使
 
 `modelStageRepairAttempts` 为所有模型生成阶段配置每次执行内的修复轮数，默认为 3，允许 1–20。每轮把最新的浏览器安全 `StageValidationIssue` 交给同一 live Agent，等待 idle 后重新检查正式路径；修复只能覆盖当前阶段原文件，不能创建 `final`、`fixed`、`new` 或版本后缀副本。
 
-S2 在 Coverage Audit 后运行完整 `validateTenderAnalysis()`。S3 主 Agent 的内部 `evidence-mapping-plan.json` 在启动 Child 前独立校验：文件未生成记录 `EVIDENCE_MAPPING_PLAN_MISSING`，JSON 语法错误记录包含原始解析原因的 `EVIDENCE_MAPPING_PLAN_JSON_INVALID`，严格 Schema 错误记录 `EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID` 及字段路径；每轮计划修复前删除旧文件。S3 Mapping Child 在当前任务内核对任务 ID、三类分配 ID 的唯一完整覆盖、已读取的本地引用和当前任务 Search-to-Fetch 的外部引用后才提交候选。S3 在 Host 写入当前尝试的 Web 来源账本与快照后运行 `validateEvidenceMapping()`，因此 schema、ID 覆盖、本地引用和外部 URL 绑定都能参与修复；任务和 Repair 明确区分 `requirement_id`、`scoring_id`，并拒绝通用 `id` 字段。S4 在强制 Blueprint Quality Review 后运行 `validateOutlineGeneration()`，同时修复目录与质量报告。
+S2 在 Coverage Audit 后运行完整 `validateTenderAnalysis()`。S3 主 Agent 的内部 `evidence-mapping-plan.json` 在启动 Child 前独立校验：文件未生成记录 `EVIDENCE_MAPPING_PLAN_MISSING`，JSON 语法错误记录包含原始解析原因的 `EVIDENCE_MAPPING_PLAN_JSON_INVALID`，严格 Schema 错误记录 `EVIDENCE_MAPPING_PLAN_SCHEMA_INVALID` 及字段路径；每轮计划修复前删除旧文件。S3 Mapping Child 在当前任务内核对任务 ID、三类分配 ID 的唯一完整覆盖、已读取的本地引用和当前任务 Search-to-Fetch 的外部引用后才提交候选。失败候选只重跑所属 Mapping Task；Host 确定性合并已接受结果、写入 Web 来源账本与正式 Evidence Map，并运行 `validateEvidenceMapping()`，不执行全阶段模型 Repair。S4 在强制 Blueprint Quality Review 后运行 `validateOutlineGeneration()`，同时修复目录与质量报告。S3 的例外由 [S3 Host 确定性合并](../simplification/2026-09-01-s3-host-evidence-canonicalization.md)记录。
 
 S6 逐章检查正文和严格 Metadata，覆盖 `section_id`、完整 `covered_must_answer`、S3 Evidence 子集和当前章节 Web 来源；通过后才由 Host 生成 Manifest。程序生成的文件接入、书审和 DOCX 导出不接受模型定义的 JSON，因此不进入该修复机制。
 

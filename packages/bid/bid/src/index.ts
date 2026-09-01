@@ -150,7 +150,6 @@ export {
   executeEvidenceMapping,
   mergeEvidenceMappingPartialResults,
   readEvidenceMappingProgress,
-  renderEvidenceMappingRepairTask,
   renderEvidenceMappingSubagentTask,
   renderEvidenceMappingTask,
   type EvidenceMappingCapturedWebResult,

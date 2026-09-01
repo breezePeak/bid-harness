@@ -13,7 +13,6 @@ import {
   createScoringResponsePointCatalog,
   executeEvidenceMapping,
   getBidStagePolicy,
-  mergeEvidenceMappingPartialResults,
   parseWebEvidenceSourcesArtifact,
   readEvidenceMappingProgress,
   renderEvidenceMappingTask,
@@ -55,8 +54,9 @@ async function writeInputs(workspace: BidWorkspace) {
   }
   const index = JSON.parse(await readFile(reference.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
   const tenderIndex = JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
-  const chunk = `${reference.chunksPath}/${index.chunks[0]!.path}`
-  const tenderChunk = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
+  const chunk = index.chunks[0]!.id
+  const tenderChunk = tenderIndex.chunks[0]!.id
+  const tenderPath = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
   const source = [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }]
   const scoring = { schema_version: 1 as const, scoring_items: [1, 2].map(value => ({ id: `S-${value}`, parent: null, group: '技术', title: `评分${value}`, raw_text: `评分${value}`, criterion: `响应评分${value}`, score: 1, score_range: null, must_answer: true, response_points: [`响应点${value}`], source_refs: source })) }
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
@@ -67,7 +67,7 @@ async function writeInputs(workspace: BidWorkspace) {
     writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring))),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
   ])
-  return { chunk, fileId: reference.id, tender: { chunk: tenderChunk, fileId: tender.id } }
+  return { chunk, fileId: reference.id, tender: { chunk: tenderChunk, path: tenderPath, fileId: tender.id } }
 }
 
 function mappingFixture(workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false) {
@@ -91,7 +91,7 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
     const task = JSON.parse(line.slice('Mapping Task：'.length)) as typeof plan.tasks[number]
     const attempt = (taskAttempts.get(task.task_id) ?? 0) + 1
     taskAttempts.set(task.task_id, attempt)
-    const local = { file_id: material.fileId, chunk: task.task_id === 'TASK-1' ? material.chunk : `alternate\\prefix\\${material.chunk.split('/').at(-1)}`, line_start: 1, line_end: 1, usage: 'reference' as const, summary: '统一资料。' }
+    const local = { file_id: material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
     return {
       task_id: task.task_id,
       requirement_mappings: task.requirement_ids.flatMap((requirement_id, index) =>
@@ -144,24 +144,6 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
   const whenIdle = vi.fn(async () => {
     if (pendingMain.includes('Main-Agent Planning')) {
       await writeFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json'), JSON.stringify(plan))
-    } else if (pendingMain.includes('Main-Agent Merge')) {
-      const text = JSON.parse(pendingMain) as { content: Array<{ text?: string }> }
-      const prompt = text.content[0]?.text ?? pendingMain
-      const line = prompt.split('\n').find(value => value.startsWith('Host 按稳定 ID 去重后的 Child 结论：'))
-      if (line === undefined) throw new Error('merged result missing')
-      const merged = JSON.parse(line.slice('Host 按稳定 ID 去重后的 Child 结论：'.length)) as ReturnType<
-        typeof mergeEvidenceMappingPartialResults
-      >
-      await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({
-        schema_version: 5,
-        source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
-        framework_mappings: merged.framework_mappings,
-        reference_bid_mappings: merged.reference_bid_mappings,
-        research_topics: merged.research_topics,
-        requirement_mappings: merged.requirement_mappings,
-        scoring_mappings: merged.scoring_mappings,
-        response_point_mappings: merged.response_point_mappings,
-      }))
     }
     pendingMain = ''
   })
@@ -193,14 +175,14 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
     expect(promptText(fixture.starts[0]!.request)).toContain('提交前在当前子任务中逐项检查')
     expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.fileId)
-    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.chunk)
+    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.path)
     for (const start of fixture.starts) {
       expect(start.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
       expect(start.request.outputSchema).toBeDefined()
     }
     const childReadGuard = fixture.guards.at(-1)
     expect(childReadGuard?.({
-      name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.tender.chunk) },
+      name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.tender.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
     } as unknown as ToolExecution)).toBe('S3 Mapping Child 不可读取招标文件或未入库资料的分块。')
     fixture.starts.forEach((start) => { start.resolve() })
@@ -219,7 +201,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.observed_max_concurrency).toBe(2)
     expect(log.tasks.every(item => item.final_child_session_id !== null)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
-    expect(fixture.followup).toHaveBeenCalledTimes(2)
+    expect(fixture.followup).toHaveBeenCalledTimes(1)
     expect(fixture.disposed).toHaveLength(2)
   })
 

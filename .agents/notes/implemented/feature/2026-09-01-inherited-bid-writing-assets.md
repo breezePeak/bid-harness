@@ -32,4 +32,4 @@ Evidence Map、Outline、Outline Quality Report 与 Chapter Metadata 使用严�
 
 只有成功解析的 `tender` 即可完成 S1 并推进到 S2；四类角色在 Remote、Manifest、模型可见库存和文件列表中保持一致。S3 对四种来源策略生成并校验映射，S4 消费每个有效 Mapping 与评分 response point，S6 消费指定框架或旧标书内容并记录可追溯 Metadata。
 
-Artifact 字段跨 S3 至 S6 传播，版本和引用验证遗漏会阻止阶段推进。每一层均使用真实 file、chunk、行号、角色和章节归属验证，并在重试前清理阶段拥有的旧 Artifact。聚焦 Host、Evidence Mapping、Outline、Chapter Writing 与 UI 测试共同覆盖该链路。
+Artifact 字段跨 S3 至 S6 传播，版本和引用验证遗漏会阻止阶段推进。S3 与 S6 使用真实 file、chunk、角色和章节归属验证；S3 不持久化行号或复制源章节标题、层级、顺序和路径，S6 从原始结构 Artifact 解析这些元数据。聚焦 Host、Evidence Mapping、Outline、Chapter Writing 与 UI 测试共同覆盖该链路。详见 [S3 Host 确定性合并](../simplification/2026-09-01-s3-host-evidence-canonicalization.md)。

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { evidenceChunkId, parseDocumentChunkIndex, type DocumentChunkEntry } from './document-chunk.ts'
+import type { DocumentSection } from './document-extract.ts'
 import type { EvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import type { BidManifest, BidWorkspace, ManifestFile } from './index.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
@@ -12,8 +13,67 @@ export interface ResolvedEvidenceChunk {
   path: string
 }
 
+/** Host-resolved source heading from a parsed framework or reference bid. */
+export interface ResolvedEvidenceSourceSection {
+  file: ManifestFile
+  section: DocumentSection
+}
+
+async function readSourceSections(workspace: BidWorkspace, file: ManifestFile): Promise<DocumentSection[]> {
+  if (file.structurePath !== null) {
+    const structurePath = within(workspace.sessionRoot, file.structurePath)
+    await assertNoLinkedPath(workspace.root, structurePath)
+    const raw = JSON.parse(await readFile(structurePath, 'utf8')) as { sections?: unknown }
+    if (!Array.isArray(raw.sections)) throw new Error('evidence-source-structure-invalid')
+    return raw.sections as DocumentSection[]
+  }
+  if (file.chunkIndexPath === null) return []
+  const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
+  await assertNoLinkedPath(workspace.root, indexPath)
+  const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+  const headings = new Map<string, DocumentSection>()
+  for (const chunk of index.chunks) {
+    for (let level = 1; level <= chunk.heading_path.length; level++) {
+      const headingPath = chunk.heading_path.slice(0, level)
+      const key = headingPath.join('\u0000')
+      if (!headings.has(key)) headings.set(key, {
+        id: `derived_${String(headings.size + 1).padStart(3, '0')}`,
+        parent_id: null,
+        level,
+        title: headingPath.at(-1) ?? '',
+        page_start: null,
+        page_end: null,
+        heading_path: headingPath,
+        order: headings.size + 1,
+      })
+    }
+  }
+  return [...headings.values()]
+}
+
 /**
- * Resolve local Evidence by `file_id + chunk id`; Agent-authored path prefixes are ignored.
+ * Resolve source metadata that the Evidence Map identifies only by file and section id.
+ * @param workspace - Session-scoped Bid workspace.
+ * @param manifest - current validated manifest.
+ * @param source - source file and section identity.
+ * @param role - required special-asset role.
+ * @returns the owning file and Host-authoritative section metadata.
+ */
+export async function resolveEvidenceSourceSection(
+  workspace: BidWorkspace,
+  manifest: BidManifest,
+  source: { file_id: string; source_section_id: string },
+  role: 'outline_framework' | 'reference_bid',
+): Promise<ResolvedEvidenceSourceSection> {
+  const file = manifest.files.find(candidate => String(candidate.id) === source.file_id)
+  if (file === undefined || file.role !== role || file.parseStatus !== 'success') throw new Error('evidence-source-file-invalid')
+  const section = (await readSourceSections(workspace, file)).find(candidate => candidate.id === source.source_section_id)
+  if (section === undefined) throw new Error('evidence-source-section-invalid')
+  return { file, section }
+}
+
+/**
+ * Resolve local Evidence by exact `file_id + chunk id`.
  * @param workspace - Session-scoped Bid workspace.
  * @param manifest - current validated manifest.
  * @param material - local Evidence reference.

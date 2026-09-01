@@ -28,7 +28,7 @@ import {
   type ChapterExecutionPlan,
 } from './chapter-writing-plan-artifacts.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
-import { resolveEvidenceChunk } from './evidence-chunk.ts'
+import { resolveEvidenceChunk, resolveEvidenceSourceSection } from './evidence-chunk.ts'
 import {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
@@ -93,8 +93,8 @@ const CHAPTER_CANDIDATE_OUTPUT_SCHEMA: ObjectJsonSchema = {
           status: { type: 'string', enum: ['used', 'not_used'] }, usage: { type: 'string', enum: ['preserve', 'adapt', 'reference', 'background'] }, notes: { type: 'string' },
         }, required: ['mapping_id', 'source_kind', 'status', 'usage', 'notes'], additionalProperties: false } },
         source_mapping_ids_used: { type: 'array', items: { type: 'string' } },
-        evidence_used: { type: 'array', items: { type: 'object', properties: { file_id: { type: 'string' }, chunk: { type: 'string' }, line_start: { type: 'integer' }, line_end: { type: 'integer' }, usage: { type: 'string', enum: ['reuse', 'adapt', 'reference', 'background'] }, summary: { type: 'string' } }, required: ['file_id', 'chunk', 'line_start', 'line_end', 'usage', 'summary'], additionalProperties: false } },
-        additional_materials: { type: 'array', items: { type: 'object', properties: { file_id: { type: 'string' }, chunk: { type: 'string' }, line_start: { type: 'integer' }, line_end: { type: 'integer' }, usage: { type: 'string', enum: ['reuse', 'adapt', 'reference', 'background'] }, summary: { type: 'string' } }, required: ['file_id', 'chunk', 'line_start', 'line_end', 'usage', 'summary'], additionalProperties: false } },
+        evidence_used: { type: 'array', items: { type: 'object', properties: { file_id: { type: 'string' }, chunk: { type: 'string' }, usage: { type: 'string', enum: ['reuse', 'adapt', 'reference', 'background'] }, summary: { type: 'string' } }, required: ['file_id', 'chunk', 'usage', 'summary'], additionalProperties: false } },
+        additional_materials: { type: 'array', items: { type: 'object', properties: { file_id: { type: 'string' }, chunk: { type: 'string' }, usage: { type: 'string', enum: ['reuse', 'adapt', 'reference', 'background'] }, summary: { type: 'string' } }, required: ['file_id', 'chunk', 'usage', 'summary'], additionalProperties: false } },
         external_evidence_used: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, url: { type: 'string' }, publisher: { type: 'string' }, retrieved_at: { type: 'string' }, retrieval_method: { type: 'string', enum: ['web_search'] }, usage: { type: 'string', enum: ['reference', 'background'] }, summary: { type: 'string' }, supports: { type: 'string' } }, required: ['title', 'url', 'publisher', 'retrieved_at', 'retrieval_method', 'usage', 'summary', 'supports'], additionalProperties: false } },
         additional_external_materials: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, url: { type: 'string' }, publisher: { type: 'string' }, retrieved_at: { type: 'string' }, retrieval_method: { type: 'string', enum: ['web_search'] }, usage: { type: 'string', enum: ['reference', 'background'] }, summary: { type: 'string' }, supports: { type: 'string' } }, required: ['title', 'url', 'publisher', 'retrieved_at', 'retrieval_method', 'usage', 'summary', 'supports'], additionalProperties: false } },
         unresolved_topics: { type: 'array', items: { type: 'string' } },
@@ -225,7 +225,7 @@ function uniqueBy<T>(values: readonly T[], identity: (value: T) => string): T[] 
 }
 
 function localIdentity(material: EvidenceMaterial): string {
-  return `${material.file_id}\u0000${material.chunk}\u0000${material.line_start}\u0000${material.line_end}`
+  return `${material.file_id}\u0000${material.chunk}`
 }
 
 function externalIdentity(material: ExternalEvidenceMaterial): string {
@@ -288,7 +288,7 @@ function sourceMappingWithoutExcerpts(mapping: FrameworkMapping | ReferenceBidMa
     sourceKind: 'reason' in mapping ? 'outline_framework' : 'reference_bid',
     fileId: mapping.file_id,
     sourceSectionId: mapping.source_section_id,
-    headingPath: [...mapping.heading_path],
+    headingPath: [],
     action: mapping.action,
     ...('reason' in mapping ? { reason: mapping.reason } : { summary: mapping.summary }),
     adaptationNotes: 'adaptation_notes' in mapping ? [...mapping.adaptation_notes] : [],
@@ -484,15 +484,18 @@ async function resolveChapterSourceMappings(workspace: BidWorkspace, context: Ch
     if (file === undefined || file.role !== expectedRole || file.parseStatus !== 'success' || file.chunkIndexPath === null || file.chunksPath === null) {
       throw new Error(`chapter-writing-source-mapping-invalid:${mapping.mappingId}`)
     }
+    const { section } = await resolveEvidenceSourceSection(workspace, manifest, {
+      file_id: mapping.fileId,
+      source_section_id: mapping.sourceSectionId,
+    }, expectedRole)
+    mapping.headingPath = [...section.heading_path]
     mapping.excerpts = await Promise.all(mapping.excerpts.map(async (material) => {
       if (material.file_id !== mapping.fileId) throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
       const resolved = await resolveEvidenceChunk(workspace, manifest, material)
       if (!mapping.headingPath.every((heading, offset) => resolved.entry.heading_path[offset] === heading)) {
         throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
       }
-      const lines = (await readFile(resolved.path, 'utf8')).split('\n')
-      if (material.line_end > lines.length) throw new Error(`chapter-writing-source-material-invalid:${mapping.mappingId}`)
-      return { ...material, text: lines.slice(material.line_start - 1, material.line_end).join('\n') }
+      return { ...material, text: await readFile(resolved.path, 'utf8') }
     }))
   }
 }
@@ -574,8 +577,8 @@ async function additionalMaterialValid(workspace: BidWorkspace, material: Eviden
     const manifest = await workspace.readManifest()
     const file = manifest.files.find(item => String(item.id) === material.file_id && item.role !== 'tender')
     if (file === undefined || file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) return false
-    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
-    return material.line_end <= (await readFile(resolved.path, 'utf8')).split('\n').length
+    await resolveEvidenceChunk(workspace, manifest, material)
+    return true
   } catch {
     return false
   }

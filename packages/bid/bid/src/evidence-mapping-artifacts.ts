@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 5 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 6 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -12,14 +12,10 @@ export const EXTERNAL_MATERIAL_USAGES = ['reference', 'background'] as const
 /** Strict schema shared by S3 and later evidence-consuming stages. */
 export const evidenceMaterialSchema = z.object({
   file_id: z.string().min(1),
-  chunk: z.string().min(1),
-  line_start: z.number().int().positive(),
-  line_end: z.number().int().positive(),
+  chunk: z.string().regex(/^chunk_\d{4}$/u),
   usage: z.enum(MATERIAL_USAGES),
   summary: z.string().min(1),
-}).strict().refine(material => material.line_end >= material.line_start, {
-  message: 'material line range must be ordered',
-})
+}).strict()
 
 /** Whether an external source uses the only supported network protocols. */
 function isHttpUrl(value: string): boolean {
@@ -72,40 +68,33 @@ export const researchTopicSchema = mappingSchema.extend({
 export const sourceStrategySchema = z.object({
   mode: z.enum(['framework_and_reference_bid', 'framework_only', 'reference_bid_only', 'generated_from_scratch']),
   framework_file_id: z.string().min(1).nullable(),
-  reference_bid_files: z.array(z.object({
-    file_id: z.string().min(1),
-    applicability: z.enum(['high', 'partial', 'none']),
-    summary: z.string().min(1),
-    global_adaptation_notes: z.array(z.string().min(1)),
-  }).strict()),
+  reference_bid_file_ids: z.array(z.string().min(1)),
 }).strict()
 
 const sourceMappingSchema = z.object({
-  mapping_id: z.string().min(1),
   file_id: z.string().min(1),
   source_section_id: z.string().min(1),
-  source_order: z.number().int().positive(),
-  level: z.number().int().positive(),
-  title: z.string().min(1),
-  heading_path: z.array(z.string().min(1)).min(1),
   related_requirement_ids: z.array(z.string().min(1)),
-  related_scoring_points: z.array(relatedScoringPointSchema),
+  related_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
   content_materials: z.array(evidenceMaterialSchema),
   writing_dimensions: z.array(z.string().min(1)).min(1),
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
-export const frameworkMappingSchema = sourceMappingSchema.extend({
+const frameworkMappingResultSchema = sourceMappingSchema.extend({
   action: z.enum(['preserve', 'expand', 'adjust', 'exclude']),
   reason: z.string().min(1),
 }).strict()
 
-export const referenceBidMappingSchema = sourceMappingSchema.extend({
+const referenceBidMappingResultSchema = sourceMappingSchema.extend({
   action: z.enum(['reuse', 'adapt', 'reference', 'background']),
   summary: z.string().min(1),
   adaptation_notes: z.array(z.string().min(1)),
   risk_notes: z.array(z.string().min(1)),
 }).strict()
+
+export const frameworkMappingSchema = frameworkMappingResultSchema.extend({ mapping_id: z.string().min(1) }).strict()
+export const referenceBidMappingSchema = referenceBidMappingResultSchema.extend({ mapping_id: z.string().min(1) }).strict()
 
 export const responsePointMappingSchema = mappingSchema.extend({
   response_point_id: z.string().regex(/^RP-\d{6}$/u),
@@ -156,8 +145,8 @@ export const evidenceMappingPartialResultSchema = z.object({
   scoring_mappings: z.array(scoringMappingSchema),
   response_point_mappings: z.array(responsePointMappingSchema),
   research_topics: z.array(researchTopicSchema),
-  framework_mappings: z.array(frameworkMappingSchema),
-  reference_bid_mappings: z.array(referenceBidMappingSchema),
+  framework_mappings: z.array(frameworkMappingResultSchema),
+  reference_bid_mappings: z.array(referenceBidMappingResultSchema),
   findings: z.array(z.string().min(1)),
   missing_topics: z.array(z.string().min(1)),
 }).strict()
@@ -172,7 +161,7 @@ export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema
 export type ScoringMaterialMapping = z.infer<typeof scoringMappingSchema>
 /** Parsed Agent-authored research that may inform multiple later sections. */
 export type EvidenceResearchTopic = z.infer<typeof researchTopicSchema>
-/** Parsed source strategy selected from successfully parsed special writing assets. */
+/** Host-derived source strategy for successfully parsed special writing assets. */
 export type EvidenceSourceStrategy = z.infer<typeof sourceStrategySchema>
 /** Parsed mapping from an artificial framework heading to this bid. */
 export type FrameworkMapping = z.infer<typeof frameworkMappingSchema>

@@ -239,15 +239,13 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   const reference = manifest.files.find(file => file.role === 'reference' && file.parseStatus === 'success')
   let materials: unknown[] = []
   if (reference !== undefined && reference.chunksPath !== null && reference.chunkIndexPath !== null) {
-    const index = JSON.parse(await readFile(join(workspace.sessionRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
-    const chunk = `${reference.chunksPath}/${index.chunks[0]!.path}`
-    const lines = (await readFile(join(workspace.sessionRoot, chunk), 'utf8')).split('\n').length
-    materials = [{ file_id: reference.id, chunk, line_start: 1, line_end: lines, usage: 'adapt', summary: '可复用技术资料。' }]
+    const index = JSON.parse(await readFile(join(workspace.sessionRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ id: string }> }
+    materials = [{ file_id: reference.id, chunk: index.chunks[0]!.id, usage: 'adapt', summary: '可复用技术资料。' }]
   }
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-    schema_version: 5,
-    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
+    schema_version: 6,
+    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_file_ids: [] },
     framework_mappings: [],
     reference_bid_mappings: [],
     research_topics: [],
