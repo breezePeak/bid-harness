@@ -716,6 +716,44 @@ describe('Bid Host runtime composition', () => {
     await expect(firstRequest).resolves.toMatchObject({ ok: true })
   })
 
+  it('persists the complete tender and reference-bid batch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const tender = Buffer.from('招标文件', 'utf8')
+    const referenceBid = Buffer.from('旧参考标书', 'utf8')
+
+    await expect(ctx.bid.uploadFiles(agent.session, [
+      { name: 'tender.txt', role: 'tender', size: tender.byteLength, data: tender.toString('base64') },
+      { name: 'reference-bid.txt', role: 'reference_bid', size: referenceBid.byteLength, data: referenceBid.toString('base64') },
+    ])).resolves.toMatchObject({ ok: true })
+
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    const manifest = JSON.parse(await readFile(workspace.manifestPath, 'utf8')) as Bid.BidManifest
+    expect(manifest.files).toHaveLength(2)
+    expect(manifest.files.map(file => ({ originalName: file.originalName, role: file.role }))).toEqual([
+      { originalName: 'tender.txt', role: 'tender' },
+      { originalName: 'reference-bid.txt', role: 'reference_bid' },
+    ])
+    await expect(readFile(join(workspace.sessionRoot, manifest.files[0]!.inputPath))).resolves.toEqual(tender)
+    await expect(readFile(join(workspace.sessionRoot, manifest.files[1]!.inputPath))).resolves.toEqual(referenceBid)
+  })
+
+  it('fails S1 when a selected file cannot be decoded', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    const tender = Buffer.from('招标文件', 'utf8')
+
+    await expect(ctx.bid.uploadFiles(agent.session, [
+      { name: 'tender.txt', role: 'tender', size: tender.byteLength, data: tender.toString('base64') },
+      { name: 'reference-bid.txt', role: 'reference_bid', size: 1, data: '!!!!' },
+    ])).resolves.toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED' } })
+    expect(agent.session.events.map(event => event.type)).toEqual(['bid.stage.started', 'bid.stage.failed'])
+    expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+      .toMatchObject({ stage: 'file_intake', status: 'failed', failureReason: 'executor failed: Error: file intake could not decode every selected file' })
+  })
+
   it('records a failed parse without blocking a valid file in the same batch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
     const { ctx } = await harness()

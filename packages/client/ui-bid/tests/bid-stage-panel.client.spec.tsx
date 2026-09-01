@@ -582,18 +582,31 @@ describe('ui-bid browser plugin', () => {
     injected.setComposerBlock(undefined)
     expect(set).toHaveBeenLastCalledWith('session_bid', undefined)
 
-    const file = new File([Uint8Array.of(1, 2, 3)], 'requirements.md', { type: 'text/markdown' })
-    Object.defineProperty(file, 'arrayBuffer', {
+    const tender = new File([Uint8Array.of(1, 2, 3)], 'requirements.md', { type: 'text/markdown' })
+    Object.defineProperty(tender, 'arrayBuffer', {
       value: async () => Uint8Array.of(1, 2, 3).buffer,
     })
-    await injected.uploadFiles([{ file, role: 'reference' }])
-    expect(remoteUpload).toHaveBeenCalledWith('session_bid', [{
-      name: 'requirements.md',
-      role: 'reference',
-      mediaType: 'text/markdown',
-      size: 3,
-      data: 'AQID',
-    }])
+    const referenceBid = new File([Uint8Array.of(4, 5)], 'reference-bid.md', { type: 'text/markdown' })
+    Object.defineProperty(referenceBid, 'arrayBuffer', {
+      value: async () => Uint8Array.of(4, 5).buffer,
+    })
+    await injected.uploadFiles([{ file: tender, role: 'tender' }, { file: referenceBid, role: 'reference_bid' }])
+    expect(remoteUpload).toHaveBeenCalledWith('session_bid', [
+      {
+        name: 'requirements.md',
+        role: 'tender',
+        mediaType: 'text/markdown',
+        size: 3,
+        data: 'AQID',
+      },
+      {
+        name: 'reference-bid.md',
+        role: 'reference_bid',
+        mediaType: 'text/markdown',
+        size: 2,
+        data: 'BAU=',
+      },
+    ])
 
     remoteUpload.mockResolvedValueOnce({
       ok: true,
@@ -602,7 +615,7 @@ describe('ui-bid browser plugin', () => {
         error: { code: 'BID_FILE_TYPE_UNSUPPORTED', message: '不支持该文件类型' },
       },
     })
-    await expect(injected.uploadFiles([{ file, role: 'reference' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
+    await expect(injected.uploadFiles([{ file: tender, role: 'tender' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
 
     await injected.retryStage()
     expect(remoteRetry).toHaveBeenCalledWith('session_bid')

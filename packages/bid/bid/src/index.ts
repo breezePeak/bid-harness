@@ -532,6 +532,9 @@ export class BidHostRuntime extends TypertRemoteService {
               } catch {
                 throw new Error('file intake could not persist the selected files')
               }
+              if (decoded.failures.length > 0) {
+                throw new Error('file intake could not decode every selected file')
+              }
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
@@ -549,7 +552,7 @@ export class BidHostRuntime extends TypertRemoteService {
         },
         {
           validate: (stage, artifacts) => stage === 'file_intake'
-            ? validateFileIntake(workspace, imported, stage, artifacts)
+            ? validateFileIntake(workspace, imported, stage, artifacts, incoming)
             : stage === 'tender_analysis'
               ? validateTenderAnalysis(workspace, stage, artifacts)
               : stage === 'evidence_mapping'

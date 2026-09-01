@@ -3,7 +3,7 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
-import type { BidManifest, BidWorkspace, ImportedFile, ManifestFile } from './index.ts'
+import type { BidManifest, BidWorkspace, ImportedFile, IncomingFile, ManifestFile } from './index.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import type {
   BidStage,
@@ -218,6 +218,7 @@ export async function validateFileIntake(
   batch: readonly ImportedFile[],
   stage: BidStage,
   artifacts: readonly StageArtifact[],
+  expectedBatch?: readonly IncomingFile[],
 ): Promise<StageValidationResult> {
   const issues: StageValidationIssue[] = []
   if (stage !== 'file_intake') {
@@ -245,6 +246,24 @@ export async function validateFileIntake(
     reject(issues, 'FILE_INTAKE_BATCH_EMPTY', 'The current file-intake batch is empty.')
   } else if (!batch.some(file => file.parseStatus === 'success' && file.role === 'tender')) {
     reject(issues, 'FILE_INTAKE_NO_SUCCESSFUL_TENDER', 'No tender file was parsed successfully.')
+  }
+
+  if (expectedBatch !== undefined) {
+    const unmatched = [...batch]
+    for (const expected of expectedBatch) {
+      const originalName = expected.name.normalize('NFC').trim()
+      const role = expected.role ?? 'tender'
+      const index = unmatched.findIndex(imported => (
+        imported.originalName === originalName
+        && imported.role === role
+        && imported.size === expected.bytes.byteLength
+      ))
+      if (index < 0) {
+        reject(issues, 'FILE_INTAKE_SELECTED_FILE_MISSING', 'A selected file was not persisted by the current file-intake batch.', originalName)
+        continue
+      }
+      unmatched.splice(index, 1)
+    }
   }
 
   const manifest = await readRequiredManifest(workspace, issues)

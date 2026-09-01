@@ -7,6 +7,7 @@ import {
   BidWorkspace,
   validateFileIntake,
   type BidManifest,
+  type IncomingFile,
   type ImportedFile,
   type StageValidationResult,
 } from '@deepseek-ai/dsh-bid'
@@ -39,6 +40,17 @@ describe('file-intake validator', () => {
       await expect(validateFileIntake(workspace, imported, 'file_intake', [...artifact]))
         .resolves.toEqual({ ok: true })
     }
+  })
+
+  it('rejects a selected reference bid that the importer did not return', async () => {
+    const { workspace, imported } = await textBatch('tender.txt')
+    const expected: IncomingFile[] = [
+      { name: 'tender.txt', role: 'tender', bytes: new TextEncoder().encode('# tender.txt\n\n有效内容。') },
+      { name: 'reference-bid.txt', role: 'reference_bid', bytes: new TextEncoder().encode('参考旧标书') },
+    ]
+
+    expect(issueCodes(await validateFileIntake(workspace, imported, 'file_intake', [...artifact], expected)))
+      .toContain('FILE_INTAKE_SELECTED_FILE_MISSING')
   })
 
   it('rejects missing, malformed, stale, and batch-incomplete manifests', async () => {
