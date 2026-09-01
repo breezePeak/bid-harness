@@ -148,7 +148,10 @@ function externalEvidenceMap(s2: { requirementId: string; scoringId: string }, u
     retrieval_method: 'web_search', usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。',
   }
   return JSON.stringify({
-    schema_version: 3,
+    schema_version: 4,
+    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
+    framework_mappings: [],
+    reference_bid_mappings: [],
     research_topics: [{
       topic_id: 'RT-1', topic: '访问控制方案的技术维度', relevance: '用于细化安全章节。',
       related_requirement_ids: [s2.requirementId],
@@ -156,9 +159,12 @@ function externalEvidenceMap(s2: { requirementId: string; scoringId: string }, u
       materials: [], external_materials: [external], findings: ['访问控制需要与审计协同。'],
       writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
     }],
-    requirement_mappings: [{ requirement_id: s2.requirementId, materials: [], external_materials: [external], missing_topics: [] }],
+    requirement_mappings: [{ requirement_id: s2.requirementId, materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
     scoring_mappings: complete
       ? [{ scoring_id: s2.scoringId, materials: [], external_materials: [{ ...external, supports: '支持安全评分响应。' }], missing_topics: [] }]
+      : [],
+    response_point_mappings: complete
+      ? [{ scoring_id: s2.scoringId, response_point: '说明访问控制', materials: [], external_materials: [external], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }]
       : [],
   })
 }
@@ -202,7 +208,7 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
     const orchestrator = new BidOrchestrator(
       agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task) },
+      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
       { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     )
 
@@ -249,7 +255,7 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
     const orchestrator = new BidOrchestrator(
       agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task) },
+      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
       { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     )
 
@@ -295,7 +301,7 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
     const orchestrator = new BidOrchestrator(
       agent.session,
-      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task) },
+      { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: 0 }) },
       { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     )
 

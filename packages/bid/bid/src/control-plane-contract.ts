@@ -140,8 +140,21 @@ export interface BidUploadFile {
   readonly data: string
 }
 
+/** Business purposes assigned to imported project materials. */
+export const BID_DOCUMENT_ROLES = [
+  'tender',
+  'outline_framework',
+  'reference_bid',
+  'reference',
+] as const
+
 /** Business purpose assigned to one imported project material. */
-export type BidDocumentRole = 'tender' | 'reference'
+export type BidDocumentRole = typeof BID_DOCUMENT_ROLES[number]
+
+/** Whether an untrusted value names a supported Bid document purpose. */
+export function isBidDocumentRole(value: unknown): value is BidDocumentRole {
+  return typeof value === 'string' && (BID_DOCUMENT_ROLES as readonly string[]).includes(value)
+}
 
 /** Stable business rejection codes returned by Bid file intake. */
 export type BidFileIntakeErrorCode =
@@ -152,6 +165,7 @@ export type BidFileIntakeErrorCode =
   | 'BID_FILE_SIZE_LIMIT'
   | 'BID_TOTAL_SIZE_LIMIT'
   | 'BID_FILE_TYPE_UNSUPPORTED'
+  | 'BID_FILE_ROLE_INVALID'
   | 'BID_FILE_NAME_INVALID'
   | 'BID_FILE_INTAKE_FAILED'
 

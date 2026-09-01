@@ -42,6 +42,7 @@ export type {
   StageValidationResult,
   BidUploadFile,
 } from './control-plane-contract.ts'
+export { BID_DOCUMENT_ROLES, isBidDocumentRole } from './control-plane-contract.ts'
 export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-browser.ts'
 export type { OutlineEditOperation, OutlineViewSection } from './outline-confirmation-browser.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'

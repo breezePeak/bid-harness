@@ -54,6 +54,7 @@ import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { isBidDocumentRole } from './control-plane-contract.ts'
 import type {
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
@@ -67,6 +68,7 @@ import type {
   BidReviewWorkbenchView,
   BidReviewChapterView,
   BidRuntimeState,
+  BidDocumentRole,
   BidUploadFile,
   StageArtifact,
 } from './control-plane-contract.ts'
@@ -75,9 +77,10 @@ export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
-export { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES } from './control-plane-contract.ts'
+export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole } from './control-plane-contract.ts'
 export type {
   BidClientAction,
+  BidDocumentRole,
   BidClientProjection,
 
   BidComposerReason,
@@ -281,6 +284,7 @@ interface DecodedUploadBatch {
 
 /** Convert one canonical browser base64 file into importer bytes after size admission. */
 function decodeUploadFile(file: BidUploadFile): IncomingFile {
+  if (!isBidDocumentRole(file.role)) throw new Error('bid-invalid-file-role')
   const expectedLength = Math.ceil(file.size / 3) * 4
   if (file.data.length !== expectedLength
     || file.data.length % 4 !== 0
@@ -323,6 +327,8 @@ function intakeFailure(error: unknown): { code: BidFileIntakeErrorCode; message:
       return { code: 'BID_TOTAL_SIZE_LIMIT', message: 'The selected files exceed the Bid Host total-size limit.' }
     case 'bid-unsupported-file-type':
       return { code: 'BID_FILE_TYPE_UNSUPPORTED', message: 'A selected file type is not accepted by the Bid Host.' }
+    case 'bid-invalid-file-role':
+      return { code: 'BID_FILE_ROLE_INVALID', message: 'A selected file has an unsupported Bid document role.' }
     case 'bid-invalid-file-name':
     case 'bid-reserved-file-name':
       return { code: 'BID_FILE_NAME_INVALID', message: 'A selected file name is not valid for the Bid workspace.' }
@@ -869,7 +875,7 @@ function reviewHeadingPath(outline: OutlineArtifact, sectionId: string): { title
 /** Durable manifest entry for one imported file. */
 export interface ManifestFile {
   id: BidFileId
-  /** `tender` supplies S2 requirements; S3 may use both roles. */
+  /** `tender` supplies S2 requirements; later stages use every persisted role. */
   role: import('./control-plane-contract.ts').BidDocumentRole
   originalName: string
   inputPath: string
@@ -905,7 +911,7 @@ export interface ImportedFile extends ManifestFile {
 const nullablePathSchema = zod.string().min(1).nullable()
 const manifestFileSchema = zod.object({
   id: zod.string().min(1),
-  role: zod.enum(['tender', 'reference']),
+  role: zod.enum(['tender', 'outline_framework', 'reference_bid', 'reference']),
   originalName: zod.string().min(1),
   inputPath: zod.string().min(1),
   corpusPath: nullablePathSchema,
@@ -946,6 +952,14 @@ const MEDIA_TYPES: Record<string, string> = {
   '.txt': 'text/plain', '.md': 'text/markdown',
 }
 
+/** Chinese model-visible names for all persisted document roles. */
+const BID_DOCUMENT_ROLE_NAMES: Record<BidDocumentRole, string> = {
+  tender: '招标文件',
+  outline_framework: '人工框架或半成品标书',
+  reference_bid: '参考旧标书',
+  reference: '其他技术资料',
+}
+
 /**
  * Reject file names that are invalid on supported workspace filesystems.
  * @param name - User-supplied base file name.
@@ -970,6 +984,7 @@ export function validateBidFileBatch(files: readonly IncomingFile[], config: Bid
   const total = files.reduce((sum, file) => sum + file.bytes.byteLength, 0)
   if (!Number.isSafeInteger(total) || total > config.maxTotalBytes) throw new Error('bid-total-size-limit')
   for (const file of files) {
+    if (file.role !== undefined && !isBidDocumentRole(file.role)) throw new Error('bid-invalid-file-role')
     const originalName = safeFileName(file.name)
     const extension = extname(originalName).toLocaleLowerCase('en-US')
     if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
@@ -1193,7 +1208,7 @@ export class BidWorkspace {
       const chunks = file.chunksPath === null ? '无' : this.relative(file.chunksPath)
       const structure = file.structurePath === null ? '无' : this.relative(file.structurePath)
       const status = file.parseStatus === 'success' ? '成功' : file.parseStatus === 'needs_ocr' ? '需要 OCR' : `失败：${file.parseError ?? '未知错误'}`
-      return `${index + 1}. ${file.originalName}\n   资料类型：${file.role === 'tender' ? '招标资料' : '参考资料'}\n   原始文件：${this.relative(file.inputPath)}\n   完整正文：${document}\n   搜索语料：${chunks}\n   文档结构：${structure}\n   解析状态：${status}`
+      return `${index + 1}. ${file.originalName}\n   资料类型：${BID_DOCUMENT_ROLE_NAMES[file.role]}\n   原始文件：${this.relative(file.inputPath)}\n   完整正文：${document}\n   搜索语料：${chunks}\n   文档结构：${structure}\n   解析状态：${status}`
     }).join('\n\n')
     return `用户已上传以下项目文件：\n\n${files}\n\n用户要求：\n${request}`
   }

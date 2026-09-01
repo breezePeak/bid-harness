@@ -75,7 +75,12 @@ export function applyOutlineEdits(
   operations: readonly OutlineEditOperation[],
   allocateSectionId?: () => string,
 ): OutlineArtifact {
-  const sections = source.sections.map(section => ({ ...section, must_answer: [...section.must_answer] }))
+  const sections = source.sections.map(section => ({
+    ...section,
+    must_answer: [...section.must_answer],
+    source_mapping_ids: [...section.source_mapping_ids],
+    scoring_response_points: [...section.scoring_response_points],
+  }))
   const byId = new Map(sections.map(section => [section.id, section]))
   let nextId = sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
   for (const operation of operations) {
@@ -95,6 +100,7 @@ export function applyOutlineEdits(
         title: operation.title, purpose: operation.purpose, writable: operation.writable,
         must_answer: operation.writable ? [...(operation.must_answer ?? [])] : [],
         requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+        origin: 'generated', content_mode: operation.writable ? 'write_new' : null, source_mapping_ids: [], scoring_response_points: [],
       }
       sections.push(section)
       byId.set(id, section)

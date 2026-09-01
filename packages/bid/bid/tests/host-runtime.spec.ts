@@ -154,7 +154,7 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   const manifest = await workspace.readManifest()
   const [requirements, scoring] = await Promise.all([
     readFile(join(workspace.sessionRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse) as Promise<{ requirements: Array<{ id: string }> }>,
-    readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse) as Promise<{ scoring_items: Array<{ id: string }> }>,
+    readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse) as Promise<{ scoring_items: Array<{ id: string; response_points: string[] }> }>,
   ])
   const reference = manifest.files.find(file => file.role === 'reference' && file.parseStatus === 'success')
   let materials: unknown[] = []
@@ -166,14 +166,19 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
   }
   const missing_topics = materials.length === 0 ? ['缺少可复用的本地技术资料。'] : []
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-    schema_version: 3,
+    schema_version: 4,
+    source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_files: [] },
+    framework_mappings: [],
+    reference_bid_mappings: [],
     research_topics: [],
     requirement_mappings: requirements.requirements.map(item => ({
       requirement_id: item.id,
       materials,
       external_materials: [],
       missing_topics,
+      writing_dimensions: ['技术响应'],
     })),
+    response_point_mappings: scoring.scoring_items.flatMap(item => item.response_points.map(response_point => ({ scoring_id: item.id, response_point, materials, external_materials: [], missing_topics, writing_dimensions: ['技术响应'] }))),
     scoring_mappings: scoring.scoring_items.map(item => ({
       scoring_id: item.id,
       materials,
@@ -185,22 +190,29 @@ async function writeEvidenceMappingArtifact(cwd: string, sessionId: string): Pro
 
 async function writeOutlineArtifact(cwd: string, sessionId: string): Promise<void> {
   const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const scoring = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')) as { scoring_items: Array<{ id: string; response_points: string[] }> }
+  const scoring_response_points = scoring.scoring_items.flatMap(item =>
+    item.response_points.map(response_point => ({ scoring_id: item.id, response_point })))
   await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify({
-    schema_version: 1, scope: 'technical_bid', document_title: '测试项目技术投标文件', global_compliance_ids: ['COMP-1'], sections: [{
+    schema_version: 2, scope: 'technical_bid', document_title: '测试项目技术投标文件', global_compliance_ids: ['COMP-1'], sections: [{
       id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付要求。', writable: true,
-      must_answer: ['说明交付计划和保障措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      must_answer: ['说明交付计划和保障措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points, suggested_tables: [], suggested_figures: [], writing_notes: [],
     }],
   }, null, 2)}\n`, 'utf8')
 }
 
 async function writeOutlineQualityReport(cwd: string, sessionId: string, sectionIds: readonly string[] = ['SEC-1']): Promise<void> {
   const workspace = new Bid.BidWorkspace(cwd, sessionId)
+  const scoring = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')) as { scoring_items: Array<{ id: string; response_points: string[] }> }
   await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), `${JSON.stringify({
-    schema_version: 1,
+    schema_version: 2,
     scope: 'technical_bid',
     checked_requirement_ids: ['REQ-1'],
     checked_scoring_ids: ['SCORE-1'],
+    checked_source_mapping_ids: [],
+    checked_scoring_response_points: scoring.scoring_items.flatMap(item =>
+      item.response_points.map(response_point => ({ scoring_id: item.id, response_point }))),
     reviewed_section_ids: sectionIds,
     issues: [],
   }, null, 2)}\n`, 'utf8')
@@ -212,7 +224,7 @@ async function writeChapterArtifact(cwd: string, sessionId: string): Promise<voi
   await mkdir(join(workspace.sessionRoot, 'chapters/meta'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), '交付计划覆盖项目阶段和保障措施。\n', 'utf8')
   await writeFile(join(workspace.sessionRoot, 'chapters/meta/0001.json'), `${JSON.stringify({
-    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
+    section_id: 'SEC-1', covered_must_answer: ['说明交付计划和保障措施。'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明交付计划和保障措施' }], source_mapping_ids_used: [], evidence_used: [], additional_materials: [], external_evidence_used: [], additional_external_materials: [], unresolved_topics: [],
   }, null, 2)}\n`, 'utf8')
 }
 
@@ -587,6 +599,7 @@ describe('Bid Host runtime composition', () => {
       [{ name: 'x.exe', role: 'tender', size: 1, data: one.toString('base64') }, 'BID_FILE_TYPE_UNSUPPORTED'],
       [{ name: 'x.txt', role: 'tender', size: 5, data: one.toString('base64') }, 'BID_FILE_SIZE_LIMIT'],
       [{ name: 'x.txt', role: 'tender', size: 1, data: 'not-base64' }, 'BID_FILE_INTAKE_FAILED'],
+      [{ name: 'x.txt', role: 'unknown' as never, size: 1, data: one.toString('base64') }, 'BID_FILE_ROLE_INVALID'],
     ] as const) {
       await expect(ctx.bid.uploadFiles(bid, [file])).resolves.toMatchObject({ ok: false, error: { code } })
       expect(bid.events).toHaveLength(0)

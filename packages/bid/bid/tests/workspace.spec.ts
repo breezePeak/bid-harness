@@ -37,6 +37,33 @@ describe('BidWorkspace', () => {
     expect(inventory).not.toContain(root)
   })
 
+  it('persists every document role and renders its model-visible inventory name', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root, 'roles')
+    const bytes = new TextEncoder().encode('项目资料')
+    await bid.import([
+      { name: '招标.txt', role: 'tender', bytes },
+      { name: '框架.txt', role: 'outline_framework', bytes },
+      { name: '旧标书.txt', role: 'reference_bid', bytes },
+      { name: '资料.txt', role: 'reference', bytes },
+    ])
+
+    await expect(bid.readManifest()).resolves.toMatchObject({
+      version: 4,
+      files: [
+        { role: 'tender' },
+        { role: 'outline_framework' },
+        { role: 'reference_bid' },
+        { role: 'reference' },
+      ],
+    })
+    const inventory = await bid.messageInventory('编写技术标')
+    expect(inventory).toContain('资料类型：招标文件')
+    expect(inventory).toContain('资料类型：人工框架或半成品标书')
+    expect(inventory).toContain('资料类型：参考旧标书')
+    expect(inventory).toContain('资料类型：其他技术资料')
+  })
+
   it('rejects linked workspace ancestors before writing outside the workspace', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
     const outside = await mkdtemp(join(tmpdir(), 'dsh-bid-outside-'))

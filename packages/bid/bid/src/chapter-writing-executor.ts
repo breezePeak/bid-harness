@@ -39,6 +39,7 @@ export interface ChapterContext {
   evidence: EvidenceMaterial[]
   externalEvidence: ExternalEvidenceMaterial[]
   missingTopics: string[]
+  sourceMappingIds: string[]
 }
 
 /**
@@ -119,6 +120,7 @@ export function pickChapterContext(raw: {
     evidence: uniqueBy([...mappings, ...researchTopics].flatMap(mapping => mapping.materials), localIdentity),
     externalEvidence: uniqueBy([...mappings, ...researchTopics].flatMap(mapping => mapping.external_materials), externalIdentity),
     missingTopics: [...new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.missing_topics))],
+    sourceMappingIds: [...raw.section.source_mapping_ids],
   }
 }
 
@@ -188,6 +190,7 @@ export function renderChapterWritingTask(agent: Agent, workspace: BidWorkspace, 
     '正文只保存本章节内容，不要重复正式章节标题树。建议表格适合时可使用 Markdown 表格；suggested_figures 仅作写作提示。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Current Blueprint：${JSON.stringify(context.section)}`,
+    `Inherited Source Mapping IDs：${JSON.stringify(context.sourceMappingIds)}`,
     `Relevant Requirements：${JSON.stringify(context.requirements)}`,
     `Relevant Scoring：${JSON.stringify(context.scoring)}`,
     `Relevant Compliance：${JSON.stringify(context.compliance)}`,
@@ -195,7 +198,7 @@ export function renderChapterWritingTask(agent: Agent, workspace: BidWorkspace, 
     `Relevant Local Evidence：${JSON.stringify(context.evidence)}`,
     `Relevant External Evidence：${JSON.stringify(context.externalEvidence)}`,
     `Missing Topics：${JSON.stringify(context.missingTopics)}`,
-    '元数据必须是严格 JSON Schema v2：{"section_id":"...","covered_must_answer":[...],"evidence_used":[],"additional_materials":[],"external_evidence_used":[],"additional_external_materials":[],"unresolved_topics":[]}。四类数组只记录实际用于正文或 must_answer 判断的来源；S3 来源分别进入 evidence_used 或 external_evidence_used，本章新发现来源分别进入 additional_materials 或 additional_external_materials，同一本地范围或规范化 URL 不得跨数组重复。covered_must_answer 只列实际回答的当前 must_answer。',
+    '元数据必须是严格 JSON Schema v3：{"section_id":"...","covered_must_answer":[...],"covered_scoring_response_points":[],"source_mapping_ids_used":[],"evidence_used":[],"additional_materials":[],"external_evidence_used":[],"additional_external_materials":[],"unresolved_topics":[]}。四类数组只记录实际用于正文或 must_answer 判断的来源；S3 来源分别进入 evidence_used 或 external_evidence_used，本章新发现来源分别进入 additional_materials 或 additional_external_materials，同一本地范围或规范化 URL 不得跨数组重复。covered_must_answer、covered_scoring_response_points 和 source_mapping_ids_used 只列当前 Blueprint 中实际覆盖或使用的内容。',
     '写完这两个文件后停止；Host 会独立校验路径、目录覆盖、Evidence 和元数据。',
   ].join('\n')
 }
@@ -226,6 +229,8 @@ export function renderChapterWritingRepairTask(
     `元数据必须严格等于以下字段集合，不得增加 schema_version、id 或其他字段：${JSON.stringify({
       section_id: context.section.id,
       covered_must_answer: context.section.must_answer,
+      covered_scoring_response_points: context.section.scoring_response_points,
+      source_mapping_ids_used: context.sourceMappingIds,
       evidence_used: [],
       additional_materials: [],
       external_evidence_used: [],
@@ -389,6 +394,8 @@ export async function executeChapterWriting(
         requirement_ids: [...section.requirement_ids], scoring_ids: [...section.scoring_ids],
         compliance_ids: [...section.compliance_ids, ...outline.global_compliance_ids],
         covered_must_answer: inspection.metadata.covered_must_answer,
+        covered_scoring_response_points: inspection.metadata.covered_scoring_response_points,
+        source_mapping_ids_used: inspection.metadata.source_mapping_ids_used,
         evidence_used: inspection.metadata.evidence_used,
         additional_materials: inspection.metadata.additional_materials,
         external_evidence_used: inspection.metadata.external_evidence_used,

@@ -194,6 +194,14 @@
   gap: 8px;
 }
 
+.uploadHelp {
+  display: grid;
+  width: 100%;
+  gap: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+}
+
 .outlineDecision {
   display: grid;
   width: 100%;
