@@ -9,8 +9,6 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 
 const ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT = 'outline/quality-report.json'
-const MAX_WRITABLE_REQUIREMENTS = 4
-const MAX_WRITABLE_SCORING_ITEMS = 3
 
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact = ARTIFACT): void {
   issues.push({ code, message, artifact })
@@ -39,8 +37,15 @@ function repeatsTitleMechanically(mustAnswer: string, title: string): boolean {
   return normalizedTitle.length > 0 && normalizedAnswer === normalizedTitle
 }
 
-/** Validate the shared flat outline-tree invariants for generated and confirmed outlines. */
-export function validateOutlineTree(sections: readonly OutlineSection[], issues: StageValidationIssue[]): void {
+/**
+ * Validate flat outline-tree invariants.
+ * @param sections Sections to validate.
+ * @param issues Destination for detected violations.
+ */
+export function validateOutlineTree(
+  sections: readonly OutlineSection[],
+  issues: StageValidationIssue[],
+): void {
   const byId = new Map<string, OutlineSection>()
   const parentsWithChildren = new Set(sections.flatMap(section => section.parent_id === null ? [] : [section.parent_id]))
   for (const section of sections) {
@@ -66,12 +71,6 @@ export function validateOutlineTree(sections: readonly OutlineSection[], issues:
     }
     if (section.writable && section.must_answer.some(item => repeatsTitleMechanically(item, section.title))) {
       reject(issues, 'OUTLINE_GENERATION_MUST_ANSWER_TITLE_RESTATEMENT', 'A writable section needs must-answer guidance beyond a mechanical title restatement.')
-    }
-    if (section.writable && section.requirement_ids.length > MAX_WRITABLE_REQUIREMENTS) {
-      reject(issues, 'OUTLINE_GENERATION_WRITABLE_REQUIREMENTS_TOO_BROAD', `A writable section can reference at most ${String(MAX_WRITABLE_REQUIREMENTS)} requirements; split independent workflows or control points into separate leaves.`)
-    }
-    if (section.writable && section.scoring_ids.length > MAX_WRITABLE_SCORING_ITEMS) {
-      reject(issues, 'OUTLINE_GENERATION_WRITABLE_SCORING_TOO_BROAD', `A writable section can reference at most ${String(MAX_WRITABLE_SCORING_ITEMS)} scoring items; split independent scoring responses into separate leaves.`)
     }
     for (const ids of [section.requirement_ids, section.scoring_ids, section.compliance_ids]) if (!unique(ids)) {
       reject(issues, 'OUTLINE_GENERATION_SECTION_REFERENCE_DUPLICATE', 'A section cannot repeat a referenced id.')

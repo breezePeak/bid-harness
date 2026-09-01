@@ -372,7 +372,6 @@ describe('Bid Host runtime composition', () => {
       { type: 'update_scoring_item', scoring_id: scoringId, criterion: '重点评价交付保障', response_points: ['交付计划', '进度保障'] },
     ])).resolves.toEqual({ ok: true, value: { stage: 'outline_confirmation', status: 'waiting_user' } })
     expect(followup.mock.calls.map(call => promptText(call[0])).find(prompt => prompt.includes('当前阶段：outline_generation')))
-      .toContain('requirement_ids 最多 4 个、scoring_ids 最多 3 个')
     expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
       .toEqual({ stage: 'outline_confirmation', status: 'waiting_user' })
     const workspace = new Bid.BidWorkspace(root, agent.session.id)

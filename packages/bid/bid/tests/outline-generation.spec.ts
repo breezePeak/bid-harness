@@ -262,12 +262,6 @@ describe('outline-generation Blueprint Quality Review', () => {
     ['mechanical title restatement', (outline: OutlineArtifact) => {
       outline.sections[1] = { ...outline.sections[1]!, must_answer: ['说明项目组织与职责'] }
     }, 'OUTLINE_GENERATION_MUST_ANSWER_TITLE_RESTATEMENT'],
-    ['writable requirement sink', (outline: OutlineArtifact) => {
-      outline.sections[1] = { ...outline.sections[1]!, requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE', 'REQ-3', 'REQ-4', 'REQ-5'] }
-    }, 'OUTLINE_GENERATION_WRITABLE_REQUIREMENTS_TOO_BROAD'],
-    ['writable scoring sink', (outline: OutlineArtifact) => {
-      outline.sections[1] = { ...outline.sections[1]!, scoring_ids: ['SCORE-SCHEDULE', 'SCORE-2', 'SCORE-3', 'SCORE-4'] }
-    }, 'OUTLINE_GENERATION_WRITABLE_SCORING_TOO_BROAD'],
   ])('rejects a %s', async (_name, mutate, expectedCode) => {
     const workspace = await fixture()
     const outline = structuredClone(reviewedOutline)
@@ -303,7 +297,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       .toContain('OUTLINE_GENERATION_INPUT_INVALID')
   })
 
-  it('applies the writable-leaf rule to S5 user-edited candidates without changing their schema', () => {
+  it('applies the writable-leaf rule to S5 candidates', () => {
     const outline = structuredClone(reviewedOutline)
     outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['统筹项目实施专题。'] }
     const result = validateConfirmedOutline(outline, requirements, scoring, compliance)
@@ -312,10 +306,9 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(result.issues.map(issue => issue.code)).toContain('OUTLINE_GENERATION_WRITABLE_NOT_LEAF')
   })
 
-  it('keeps the S4 granularity limits in the model-visible draft assignment', async () => {
+  it('keeps structural rules in the model-visible draft assignment', async () => {
     const workspace = await fixture()
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as Agent, workspace, buildBidStageTask('outline_generation'))
-    expect(task).toContain('requirement_ids 最多 4 个、scoring_ids 最多 3 个')
     expect(task).toContain('索引重复引用不能替代正文拆分')
   })
 })

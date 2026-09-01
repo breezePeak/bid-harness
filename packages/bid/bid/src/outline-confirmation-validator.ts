@@ -27,7 +27,7 @@ async function parseJson(workspace: BidWorkspace, path: string, issues: StageVal
   }
 }
 
-/** Validate a user-edited candidate with the same mechanical S4 rules. */
+/** Validate a user-edited candidate's structure and identifier coverage. */
 export function validateConfirmedOutline(
   outlineRaw: unknown,
   requirementsRaw: unknown,
