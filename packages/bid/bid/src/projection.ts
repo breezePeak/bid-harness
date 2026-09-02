@@ -76,6 +76,6 @@ export function registerBidRuntimeProjection(
       viewSchema: clientProjectionSchema,
       view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 5,
+    stateVersion: 6,
   })
 }

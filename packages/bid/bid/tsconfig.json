@@ -7,6 +7,7 @@
     { "path": "../../../vendor/cordis" },
     { "path": "../../util/atomic-write" },
     { "path": "../../core/session" },
+    { "path": "../../interaction/commands" },
     { "path": "../../fs/fs" },
     { "path": "../../session/session-projection" },
     { "path": "../../subagent/subagent" },

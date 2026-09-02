@@ -217,6 +217,14 @@ describe('Bid runtime state and policies', () => {
       data: { stage: 'tender_analysis', status: 'running' },
     })
     expect(tenderRunning).toEqual({ stage: 'tender_analysis', status: 'running' })
+
+    const reset = reduceBidRuntimeState(tenderRunning, {
+      type: 'bid.stage.reset',
+      seq: 7,
+      time: 0,
+      data: { stage: 'tender_analysis', status: 'pending' },
+    })
+    expect(reset).toEqual({ stage: 'tender_analysis', status: 'pending' })
   })
 })
 
@@ -612,6 +620,27 @@ describe('BidOrchestrator', () => {
 
     await expect(restored.drive()).resolves.toEqual({ stage: 'outline_generation', status: 'pending' })
     expect(executor.tasks.map(task => task.stage)).toEqual(['evidence_mapping'])
+  })
+
+  it('makes an interrupted restored stage retryable instead of leaving it running', async () => {
+    const source = createSession('bid-interrupted-stage-source')
+    source.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    source.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
+    source.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
+    const replayed = Session.create(SessionId('bid-interrupted-stage'), source.events)
+    const executor = new RecordingExecutor(undefined, ['tender_analysis'])
+    const restored = new BidOrchestrator(replayed, executor, new StageValidator())
+
+    await expect(restored.drive()).resolves.toEqual({
+      stage: 'tender_analysis',
+      status: 'failed',
+      failureReason: '阶段执行因后端停止而中断，请重试当前阶段。',
+    })
+    expect(executor.tasks).toHaveLength(0)
+    await expect(restored.retryCurrentAutomaticStage()).resolves.toEqual({
+      stage: 'tender_analysis', status: 'waiting_user',
+    })
+    expect(executor.tasks.map(task => task.stage)).toEqual(['tender_analysis'])
   })
 
   it('coalesces concurrent drive calls before the executor can run twice', async () => {

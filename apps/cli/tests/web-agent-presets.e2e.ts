@@ -19,6 +19,7 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-compaction-basic'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-commands'
 // Type-only: resolves `ctx.get('sessionProjections')` and `ctx.get('tokenMeter')`.
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -237,6 +238,10 @@ describe('the shipped Web composition', () => {
     try {
       expect(resolveSessionPreset(handle.agent.session)).toBe('bid')
       expect(toolNames(ctx, handle.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+      expect(ctx.commands.list(handle.agent).map(command => command.name)).toEqual(expect.arrayContaining([
+        'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
+        'bid-reset-s5', 'bid-reset-s6', 'bid-reset-s7',
+      ]))
       expect(projections.snapshot(handle.agent.session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
         runtime: { stage: 'file_intake', status: 'pending' },
         allowedActions: ['upload_files'],

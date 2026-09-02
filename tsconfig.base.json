@@ -58,6 +58,7 @@
       "@deepseek-ai/dsh-session/surface": ["./packages/core/session/src/surface.ts"],
       "@deepseek-ai/dsh-session-projection/types": ["./packages/session/session-projection/src/types.ts"],
       "@deepseek-ai/dsh-bid/control-plane": ["./packages/bid/bid/src/control-plane.ts"],
+      "@deepseek-ai/dsh-bid/stage-reset-commands": ["./packages/bid/bid/src/stage-reset-commands.ts"],
       "@deepseek-ai/dsh-tool-todo/types": ["./packages/todo/tool-todo/src/types.ts"],
       "@deepseek-ai/dsh-tool-todo/client": ["./packages/todo/tool-todo/src/client.ts"],
       "@deepseek-ai/dsh-session-title/types": ["./packages/session/session-title/src/types.ts"],

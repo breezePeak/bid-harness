@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import {
   BidWorkspace,
@@ -38,7 +38,7 @@ function observation(
   }
 }
 
-function promptText(request: SubagentStartRequest): string {
+function promptText(request: { prompt: readonly { type: string; text?: string }[] }): string {
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
@@ -70,12 +70,14 @@ async function writeInputs(workspace: BidWorkspace) {
   return { chunk, fileId: reference.id, tender: { chunk: tenderChunk, path: tenderPath, fileId: tender.id } }
 }
 
-function mappingFixture(workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false) {
+function mappingFixture(
+  workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false, truncatedFileId = false,
+) {
   let pendingMain = ''
   let active = 0
   let maxActive = 0
   let sequence = 0
-  const starts: Array<{ request: SubagentStartRequest; resolve(): void }> = []
+  const starts: Array<{ request: ContinuableStartSpec; resolve(): void }> = []
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
   const plan = {
@@ -85,13 +87,13 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
       { task_id: 'TASK-2', title: '主题二', objective: '处理第二组', requirement_ids: ['R-1', 'R-2'], scoring_ids: ['S-2'], response_point_ids: ['RP-000002'], compliance_ids: [], source_focus: ['统一资料'], research_topics: [] },
     ],
   }
-  const partial = (request: SubagentStartRequest) => {
+  const partial = (request: { prompt: readonly { type: string; text?: string }[] }) => {
     const line = promptText(request).split('\n').find(value => value.startsWith('Mapping Task：'))
     if (line === undefined) throw new Error('mapping task missing')
     const task = JSON.parse(line.slice('Mapping Task：'.length)) as typeof plan.tasks[number]
     const attempt = (taskAttempts.get(task.task_id) ?? 0) + 1
     taskAttempts.set(task.task_id, attempt)
-    const local = { file_id: material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
+    const local = { file_id: truncatedFileId ? material.fileId.slice(0, 24) : material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
     return {
       task_id: task.task_id,
       requirement_mappings: task.requirement_ids.flatMap((requirement_id, index) =>
@@ -111,28 +113,59 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
       research_topics: [], framework_mappings: [], reference_bid_mappings: [], findings: [`${task.task_id} 结论`], missing_topics: [],
     }
   }
-  const spawnProvider = {
+  const spawnProvider: Pick<SubagentProvider, 'capabilities' | 'inheritsParentContext' | 'prepareContinuable'> = {
     capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
     inheritsParentContext: false,
+    prepareContinuable: async () => ({}),
   }
+  const children = new Map<string, Agent>()
+  const childRequests = new Map<string, ContinuableStartSpec>()
   const subagents = {
     getProvider: vi.fn(() => spawnProvider),
-    start: vi.fn(async (_provider: string, request: SubagentStartRequest): Promise<SubagentRun> => {
+    startContinuable: vi.fn(async (request: ContinuableStartSpec) => {
       active++
       maxActive = Math.max(maxActive, active)
       const id = SessionId(`child-${++sequence}`)
-      let settle!: () => void
-      const result = new Promise<Awaited<SubagentRun['result']>>((resolve) => {
-        settle = () => { active--; resolve({ stopReason: 'completed', output: [], structured: partial(request) }) }
-      })
-      const localAgent = { id, session: { id, header: { cwd: workspace.root, parentSession: 'session', origin: 'subagent' }, events: [
+      let settleIdle!: () => void
+      const idle = new Promise<void>((resolve) => { settleIdle = resolve })
+      const localAgent = { id, status: 'running', session: { id, header: { cwd: workspace.root, parentSession: 'session', origin: 'subagent' }, events: [
         { type: 'tool/call', data: { name: 'grep' } }, { type: 'tool/call', data: { name: 'read' } },
-      ] } } as unknown as Agent
-      const run = { id, localAgent, result, dispose: async () => { disposed.push(String(id)) } }
+      ] }, whenIdle: () => idle } as unknown as Agent
+      const settle = () => {
+        ;(localAgent.session.events as unknown[]).push({
+          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request)) }] }, seq: localAgent.session.events.length },
+          seq: localAgent.session.events.length,
+        })
+        active--
+        settleIdle()
+      }
+      const original = localAgent.whenIdle
+      localAgent.whenIdle = () => original()
+      children.set(String(id), localAgent)
+      childRequests.set(String(id), request)
       starts.push({ request, resolve: settle })
-      if (repairFirst) queueMicrotask(settle)
-      return run
+      if (repairFirst || truncatedFileId) queueMicrotask(settle)
+      return { childId: id, messageId: `message-${id}` as never }
     }),
+    followup: vi.fn(async (_parent: Agent, childId: SessionId, _content: Array<{ type: string; text: string }>) => {
+      const child = children.get(String(childId))!
+      active++
+      let settleIdle!: () => void
+      const idle = new Promise<void>((resolve) => { settleIdle = resolve })
+      child.whenIdle = () => idle
+      queueMicrotask(() => {
+        const request = childRequests.get(String(childId))
+        if (request === undefined) throw new Error('missing continuable fixture request')
+        ;(child.session.events as unknown[]).push({
+          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request)) }] }, seq: child.session.events.length },
+          seq: child.session.events.length,
+        })
+        active--
+        settleIdle()
+      })
+      return `message-${childId}` as never
+    }),
+    drainContinuableChildren: vi.fn(async (_parent: Agent, childIds: readonly SessionId[]) => { disposed.push(...childIds.map(String)) }),
   }
   const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
   const tools = {
@@ -147,7 +180,8 @@ function mappingFixture(workspace: BidWorkspace, material: { chunk: string; file
     }
     pendingMain = ''
   })
-  const agent = { id: 'session', session: { header: { cwd: workspace.root }, events: [] }, ctx: { get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn(() => () => {}) }, followup, whenIdle } as unknown as Agent
+  const agents = { get: (id: SessionId) => children.get(String(id)) }
+  const agent = { id: 'session', session: { header: { cwd: workspace.root }, events: [] }, ctx: { agents, get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn(() => () => {}) }, followup, whenIdle } as unknown as Agent
   return {
     agent, starts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
     guards, disposed, maxActive: () => maxActive, taskAttempts,
@@ -170,15 +204,14 @@ describe('evidence-mapping Agent executor', () => {
       not_started: 0,
       failed: 0,
     })
-    expect(promptText(fixture.starts[0]!.request)).toContain('相关 Requirements：[{"id":"R-1"')
-    expect(promptText(fixture.starts[0]!.request)).not.toContain('"id":"R-2"')
-    expect(promptText(fixture.starts[0]!.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
-    expect(promptText(fixture.starts[0]!.request)).toContain('提交前在当前子任务中逐项检查')
-    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.fileId)
-    expect(promptText(fixture.starts[0]!.request)).not.toContain(material.tender.path)
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('相关 Requirements：[{"id":"R-1"')
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain('"id":"R-2"')
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('提交前在当前子任务中逐项检查')
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.fileId)
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.path)
     for (const start of fixture.starts) {
-      expect(start.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
-      expect(start.request.outputSchema).toBeDefined()
+      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
     }
     const childReadGuard = fixture.guards.at(-1)
     expect(childReadGuard?.({
@@ -214,9 +247,27 @@ describe('evidence-mapping Agent executor', () => {
 
     expect(fixture.taskAttempts.get('TASK-1')).toBe(2)
     expect(fixture.taskAttempts.get('TASK-2')).toBe(1)
-    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
-    expect(promptText(fixture.subagents.start.mock.calls[2]![1])).toContain('EVIDENCE_MAPPING_PARTIAL_MISSING')
-    expect(fixture.subagents.start.mock.calls[2]![1]).toMatchObject({ label: 'S3 · 主题一' })
+    expect(fixture.subagents.startContinuable).toHaveBeenCalledTimes(2)
+    expect(fixture.subagents.followup).toHaveBeenCalledTimes(1)
+    const repairPrompt = fixture.subagents.followup.mock.calls[0]?.[2]?.[0]
+    if (repairPrompt === undefined) throw new Error('missing continuable repair prompt')
+    expect(repairPrompt.text).toContain('EVIDENCE_MAPPING_PARTIAL_MISSING')
+    const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; attempts: Array<{ child_session_id: string }> }>
+    }
+    expect(new Set(log.tasks.find(item => item.task_id === 'TASK-1')!.attempts.map(item => item.child_session_id))).toEqual(new Set(['child-1']))
+  })
+
+  it('canonicalizes an unambiguous copied corpus id before validating its chunk', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-file-id-')), 'session')
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material, false, true)
+
+    await expect(executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })).resolves.toHaveLength(2)
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
   })
 
   it('reports tender materials separately from invalid chunk references', async () => {

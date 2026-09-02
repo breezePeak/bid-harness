@@ -74,6 +74,7 @@ import type {
   BidReviewWorkbenchView,
   BidReviewChapterView,
   BidRuntimeState,
+  BidStage,
   BidDocumentRole,
   BidBinaryUploadFile,
   BidUploadFile,
@@ -607,6 +608,47 @@ export class BidHostRuntime extends TypertRemoteService {
                   : validateOutlineGeneration(workspace, stage, artifacts),
       },
     )
+  }
+
+  /**
+   * Reset the exact current Bid stage and immediately re-enter its normal Host driver.
+   * The command is rejected while another Host operation owns the Session. S5 also
+   * discards its editable and partially published files before returning to confirmation.
+   * @param agent - live Bid Agent receiving the scoped command.
+   * @param stage - stage named by that command; it must equal the current stage.
+   * @returns the state reached after automatic execution, user gating, or failure.
+   */
+  async resetStage(agent: Agent, stage: BidStage): Promise<BidRuntimeState> {
+    const { session } = agent
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
+    }
+    if (this.inFlight.has(session.id)) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
+    }
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.stage !== stage) {
+      throw new BidOrchestratorError(
+        'BID_STAGE_RESET_NOT_ALLOWED',
+        `Cannot reset Bid stage ${JSON.stringify(stage)} while the current stage is ${JSON.stringify(runtime.stage)}.`,
+      )
+    }
+    this.inFlight.add(session.id)
+    try {
+      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      if (stage === 'outline_confirmation') {
+        const paths = ['outline/draft.json', 'outline/confirmed-outline.json', 'outline/confirmation.json']
+          .map(path => within(workspace.sessionRoot, path))
+        for (const path of paths) await assertNoLinkedPath(workspace.root, path)
+        await Promise.all(paths.map(path => rm(path, { force: true })))
+      }
+      session.append('bid.stage.reset', { stage, status: 'pending' })
+      const next = await this.automaticOrchestrator(agent, workspace).drive()
+      await this.ctx.sessions.flush(session)
+      return next
+    } finally {
+      this.inFlight.delete(session.id)
+    }
   }
 
   /**

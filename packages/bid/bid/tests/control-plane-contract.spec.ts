@@ -29,6 +29,7 @@ describe('bid control-plane public contract', () => {
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.failed',
+      'bid.stage.reset',
       'bid.user_confirmation.required',
       'bid.user_confirmation.received',
     ])
@@ -106,6 +107,10 @@ describe('bid control-plane public contract', () => {
         artifact?: string | undefined
         path?: string | undefined
       }>
+    }>()
+    expectTypeOf<SessionEventMap['bid.stage.reset']>().toEqualTypeOf<{
+      stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+      status: 'pending'
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<
       | {

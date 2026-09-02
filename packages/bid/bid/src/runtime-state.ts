@@ -240,6 +240,10 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
           ...(event.data.issues === undefined ? {} : { failureIssues: event.data.issues.map(issue => ({ ...issue })) }),
         }
         : state
+    case 'bid.stage.reset':
+      return event.data.stage === state.stage
+        ? { stage: state.stage, status: 'pending' }
+        : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage
         && getBidStagePolicy(state.stage).userGate !== 'none'

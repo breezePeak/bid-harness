@@ -52,6 +52,16 @@ async function readSourceSections(workspace: BidWorkspace, file: ManifestFile): 
 }
 
 /**
+ * List the Host-authoritative headings selectable by an S3 source mapping.
+ * @param workspace - Session-scoped Bid workspace.
+ * @param file - Successfully parsed framework or reference-bid file.
+ * @returns Canonical section identifiers and heading metadata for the file.
+ */
+export async function listEvidenceSourceSections(workspace: BidWorkspace, file: ManifestFile): Promise<readonly DocumentSection[]> {
+  return readSourceSections(workspace, file)
+}
+
+/**
  * Resolve source metadata that the Evidence Map identifies only by file and section id.
  * @param workspace - Session-scoped Bid workspace.
  * @param manifest - current validated manifest.

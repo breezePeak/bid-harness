@@ -250,7 +250,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:21`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:22`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -259,11 +259,34 @@ Source: [`packages/bid/bid/src/bid-events.ts:21`](../packages/bid/bid/src/bid-ev
 #### `bid.stage.failed` — log-only
 
 ```ts persistence-catalog
-/** A stage failed before validation could authorize a transition. */
-'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string }
+/**
+ * A stage failed before validation could authorize a transition.
+ * @param stage Failed stage.
+ * @param status Stable failed status.
+ * @param reason Short user-visible summary.
+ * @param issues Browser-safe validation details when validation rejected Artifacts.
+ */
+'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:23`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:30`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.stage.reset/*`
+
+<a id="bidstagereset--log-only"></a>
+
+#### `bid.stage.reset` — log-only
+
+```ts persistence-catalog
+/**
+ * A user command returned the current stage to its pending entry state.
+ * @param stage Current stage selected by the scoped reset command.
+ * @param status Stable pending entry status.
+ */
+'bid.stage.reset': { stage: BidStage; status: 'pending' }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:36`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -276,7 +299,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:23`](../packages/bid/bid/src/bid-ev
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:19`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:20`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -285,11 +308,18 @@ Source: [`packages/bid/bid/src/bid-events.ts:19`](../packages/bid/bid/src/bid-ev
 #### `bid.user_confirmation.received` — log-only
 
 ```ts persistence-catalog
-/** The explicit user decision received for a stage. */
-'bid.user_confirmation.received': { stage: BidStage; confirmed: boolean }
+/**
+ * The explicit user decision received for a stage.
+ * @param stage Stage receiving the decision.
+ * @param confirmed Whether the user accepts the current artifact.
+ * @param feedback Required outline changes when the current outline is rejected.
+ */
+'bid.user_confirmation.received':
+  | { stage: BidStage; confirmed: true }
+  | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -302,7 +332,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-ev
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:25`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:38`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 

@@ -31,6 +31,10 @@
       "types": "./lib/typert.remote-client.d.ts",
       "default": "./lib/typert.remote-client.js"
     },
+    "./stage-reset-commands": {
+      "types": "./lib/types/stage-reset-commands.d.ts",
+      "default": "./lib/types/stage-reset-commands.js"
+    },
     "./invariant": {
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
@@ -42,11 +46,11 @@
     "lib/index.js",
     "lib/invariant.js",
     "lib/types/**/*.js",
+    "lib/types/**/*.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",
-    "lib/typert.remote-client.d.ts",
-    "lib/types/**/*.d.ts"
+    "lib/typert.remote-client.d.ts"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "workspace:^",
@@ -64,6 +68,7 @@
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-atomic-write": "workspace:^",
+    "@deepseek-ai/dsh-commands": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-agent-presets": "workspace:^",
     "@deepseek-ai/dsh-fs": "workspace:^",
@@ -80,6 +85,7 @@
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-agent-loop": "workspace:^",
     "@deepseek-ai/dsh-atomic-write": "workspace:^",
+    "@deepseek-ai/dsh-commands": "workspace:^",
     "@deepseek-ai/dsh-fs-local": "workspace:^",
     "@deepseek-ai/dsh-fs": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",

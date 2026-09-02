@@ -34,6 +34,11 @@
   config:
     maxBytes: 65536
 
+# Human-only recovery controls are scoped to Bid sessions and never enter a
+# model request. Each command can reset only the exact current stage.
+- id: stage-reset-commands
+  name: '@deepseek-ai/dsh-bid/stage-reset-commands'
+
 # ── shell ───────────────────────────────────────────────────────────────────
 
 # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to

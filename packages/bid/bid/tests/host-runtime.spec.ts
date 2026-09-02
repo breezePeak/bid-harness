@@ -9,7 +9,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import SubagentRuntime, { type ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { type ContinuableStartSpec, type ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { ApiProxy, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
@@ -59,6 +59,46 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SubagentRuntime)
   let child = 0
+  let continuableChild = 0
+  type ContinuableFixture = {
+    child: Agent
+    request: ContinuableStartSpec
+    idle: Promise<void>
+    resolveIdle: () => void
+  }
+  const continuableChildren = new Map<string, ContinuableFixture>()
+  const mappingResult = (text: string): Record<string, unknown> => {
+    const task = JSON.parse(text.split('\n').find(line => line.startsWith('Mapping Task：'))!.slice('Mapping Task：'.length)) as {
+      task_id: string
+      requirement_ids: string[]
+      scoring_ids: string[]
+    }
+    const points = JSON.parse(text.split('\n').find(line => line.startsWith('相关 Response Points：'))!.slice('相关 Response Points：'.length)) as Array<{
+      id: string
+      scoring_id: string
+      text: string
+    }>
+    const missing_topics = ['测试未提供补充资料。']
+    return {
+      task_id: task.task_id,
+      requirement_mappings: task.requirement_ids.map(requirement_id => ({ requirement_id, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
+      scoring_mappings: task.scoring_ids.map(scoring_id => ({ scoring_id, materials: [], external_materials: [], missing_topics })),
+      response_point_mappings: points.map(point => ({ response_point_id: point.id, scoring_id: point.scoring_id, response_point: point.text, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
+      research_topics: [],
+      framework_mappings: [],
+      reference_bid_mappings: [],
+      findings: [],
+      missing_topics,
+    }
+  }
+  const settleContinuable = (fixture: ContinuableFixture): void => {
+    const text = fixture.request.request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    ;(fixture.child.session.events as unknown[]).push({
+      type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(mappingResult(text)) }] } },
+      seq: fixture.child.session.events.length,
+    })
+    fixture.resolveIdle()
+  }
   ctx.subagents.registerProvider({
     name: 'spawn',
     capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
@@ -66,18 +106,6 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
     start: (request: ResolvedSubagentStartRequest) => {
       const text = request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
       if (text.includes('当前阶段：evidence_mapping / Mapping Subagent')) {
-        const task = JSON.parse(text.split('\n').find(line => line.startsWith('Mapping Task：'))!.slice('Mapping Task：'.length)) as {
-          task_id: string
-          requirement_ids: string[]
-          scoring_ids: string[]
-          response_point_ids: string[]
-        }
-        const points = JSON.parse(text.split('\n').find(line => line.startsWith('相关 Response Points：'))!.slice('相关 Response Points：'.length)) as Array<{
-          id: string
-          scoring_id: string
-          text: string
-        }>
-        const missing_topics = ['测试未提供补充资料。']
         const id = SessionId(`evidence-child-${++child}`)
         return Promise.resolve({
           id,
@@ -85,16 +113,49 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
           result: Promise.resolve({
             stopReason: 'completed' as const,
             output: [],
+            structured: mappingResult(text),
+          }),
+          dispose: () => Promise.resolve(),
+        })
+      }
+      if (text.includes('你是独立 S6 Chapter Reviewer')) {
+        const section = JSON.parse(text.split('\n').find(line => line.startsWith('Current Chapter Blueprint：'))!.slice('Current Chapter Blueprint：'.length)) as {
+          id: string
+          must_answer: string[]
+          scoring_response_point_ids: string[]
+          scoring_response_points: Array<{ scoring_id: string; response_point: string }>
+        }
+        const requirements = JSON.parse(text.split('\n').find(line => line.startsWith('Relevant Requirements：'))!.slice('Relevant Requirements：'.length)) as Array<{ id: string }>
+        const compliance = JSON.parse(text.split('\n').find(line => line.startsWith('Relevant Compliance：'))!.slice('Relevant Compliance：'.length)) as Array<{ id: string }>
+        const evidenceQuote = '本方案交付计划覆盖项目阶段和保障措施，确保按期完成技术交付。'
+        const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: [evidenceQuote], issue: null })
+        return Promise.resolve({
+          id: SessionId(`chapter-reviewer-${++child}`),
+          localAgent: undefined,
+          result: Promise.resolve({
+            stopReason: 'completed' as const,
+            output: [],
             structured: {
-              task_id: task.task_id,
-              requirement_mappings: task.requirement_ids.map(requirement_id => ({ requirement_id, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
-              scoring_mappings: task.scoring_ids.map(scoring_id => ({ scoring_id, materials: [], external_materials: [], missing_topics })),
-              response_point_mappings: points.map(point => ({ response_point_id: point.id, scoring_id: point.scoring_id, response_point: point.text, materials: [], external_materials: [], missing_topics, writing_dimensions: ['技术响应'] })),
-              research_topics: [],
-              framework_mappings: [],
-              reference_bid_mappings: [],
-              findings: [],
-              missing_topics,
+              schema_version: 1,
+              section_id: section.id,
+              verdict: 'pass',
+              must_answer_coverage: section.must_answer.map(coverage),
+              requirement_coverage: requirements.map(item => ({ ...coverage(item.id), requirement_id: item.id })),
+              response_point_coverage: section.scoring_response_points.map((item, index) => ({
+                ...coverage(item.response_point), response_point_id: section.scoring_response_point_ids[index],
+              })),
+              compliance_coverage: compliance.map(item => ({ ...coverage(item.id), compliance_id: item.id })),
+              source_mapping_review: [],
+              claim_checks: [],
+              quality_checks: {
+                content_mode_respected: true,
+                project_specific: true,
+                structure_complete: true,
+                legacy_project_pollution_free: true,
+                placeholder_free: true,
+                obvious_repetition_free: true,
+              },
+              blocking_issues: [],
             },
           }),
           dispose: () => Promise.resolve(),
@@ -105,6 +166,7 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
       const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as {
         id: string
         must_answer: string[]
+        scoring_response_point_ids: string[]
         scoring_response_points: Array<{ scoring_id: string; response_point: string }>
         source_mapping_ids: string[]
       }
@@ -117,23 +179,67 @@ async function harness(config?: Bid.Config): Promise<{ ctx: Context; api: ApiPro
           output: [],
           structured: {
             section_id: section.id,
-            markdown: '交付计划覆盖项目阶段和保障措施。',
+            markdown: '本方案交付计划覆盖项目阶段和保障措施，确保按期完成技术交付。',
             metadata: {
               section_id: section.id,
               covered_must_answer: section.must_answer,
+              covered_scoring_response_point_ids: section.scoring_response_point_ids,
               covered_scoring_response_points: section.scoring_response_points,
-              source_mapping_ids_used: section.source_mapping_ids,
+              assigned_source_mapping_ids: section.source_mapping_ids,
+              source_mapping_usage: [],
+              source_mapping_ids_used: [],
               evidence_used: [],
               additional_materials: [],
               external_evidence_used: [],
               additional_external_materials: [],
               unresolved_topics: [],
+              handoff: {
+                section_id: section.id,
+                decisions: [],
+                terminology: [],
+                numbers_and_parameters: [],
+                interfaces: [],
+                deployment_constraints: [],
+                cross_reference_targets: [],
+                unresolved_topics: [],
+              },
             },
           },
         }),
         dispose: () => Promise.resolve(),
       })
     },
+    prepareContinuable: async () => ({}),
+  })
+  vi.spyOn(ctx.subagents, 'startContinuable').mockImplementation(async (request) => {
+    const id = SessionId(`evidence-child-${++continuableChild}`)
+    let resolveIdle!: () => void
+    const fixture = {
+      request,
+      idle: new Promise<void>((resolve) => { resolveIdle = resolve }),
+      resolveIdle,
+      child: undefined as unknown as Agent,
+    }
+    fixture.child = {
+      id,
+      status: 'running',
+      session: { id, header: { cwd: request.request.parent.session.header.cwd, parentSession: request.request.parent.id, origin: 'subagent' }, events: [] },
+      whenIdle: () => fixture.idle,
+    } as unknown as Agent
+    continuableChildren.set(String(id), fixture)
+    ctx.agents.register(fixture.child)
+    queueMicrotask(() => settleContinuable(fixture))
+    return { childId: id, messageId: `message-${id}` as never }
+  })
+  vi.spyOn(ctx.subagents, 'followup').mockImplementation(async (_parent, childId) => {
+    const fixture = continuableChildren.get(String(childId))
+    if (fixture === undefined) throw new Error(`missing continuable fixture ${childId}`)
+    fixture.idle = new Promise<void>((resolve) => { fixture.resolveIdle = resolve })
+    queueMicrotask(() => settleContinuable(fixture))
+    return `message-${childId}` as never
+  })
+  vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (_parent, childIds) => {
+    for (const childId of childIds) continuableChildren.delete(String(childId))
   })
   await ctx.plugin(TestFileSystem)
   await ctx.plugin(TestTools)
@@ -341,7 +447,7 @@ async function writeChapterExecutionPlan(cwd: string, sessionId: string): Promis
   const outline = Bid.parseConfirmedOutlineArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')))
   await mkdir(join(workspace.sessionRoot, 'chapters'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'chapters/execution-plan.json'), `${JSON.stringify({
-    schema_version: 1,
+    schema_version: 2,
     scope: 'technical_bid',
     confirmed_outline_sha256: Bid.outlineArtifactSha256(outline),
     global_consistency_notes: ['统一项目名称和交付周期。'],
@@ -582,6 +688,91 @@ describe('Bid Host runtime composition', () => {
     })
     expect(execute).toHaveBeenCalledOnce()
     expect(execute.mock.calls[0]?.[0].stage).toBe('evidence_mapping')
+  })
+
+  it('fails an interrupted running stage through the session-start entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    for (const stage of ['file_intake', 'tender_analysis'] as const) {
+      agent.session.append('bid.stage.started', { stage, status: 'running' })
+      agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    agent.session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
+
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'resume' })
+
+    await vi.waitFor(() => {
+      expect(agent.session.events.reduce(Bid.reduceBidRuntimeState, Bid.BID_INITIAL_RUNTIME_STATE))
+        .toEqual({
+          stage: 'evidence_mapping',
+          status: 'failed',
+          failureReason: '阶段执行因后端停止而中断，请重试当前阶段。',
+        })
+    })
+    expect(agent.session.events.at(-1)).toMatchObject({
+      type: 'bid.stage.failed',
+      data: { stage: 'evidence_mapping', status: 'failed' },
+    })
+  })
+
+  it('resets only the exact current stage and re-enters its executor', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    for (const stage of ['file_intake', 'tender_analysis'] as const) {
+      agent.session.append('bid.stage.started', { stage, status: 'running' })
+      agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    agent.session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
+    agent.session.append('bid.stage.failed', { stage: 'evidence_mapping', status: 'failed', reason: 'interrupted' })
+    const runtime = ctx.bid as unknown as {
+      automaticOrchestrator(agent: Agent, workspace: Bid.BidWorkspace): Bid.BidOrchestrator
+    }
+    const execute = vi.fn(async (task: Bid.BidStageTask): Promise<Bid.StageArtifact[]> =>
+      task.requiredArtifacts.map(path => ({ stage: task.stage, type: path, path })))
+    vi.spyOn(runtime, 'automaticOrchestrator').mockImplementation(currentAgent => new Bid.BidOrchestrator(
+      currentAgent.session,
+      { canExecute: stage => stage === 'evidence_mapping', execute },
+      { validate: async () => ({ ok: true }) },
+    ))
+
+    await expect(ctx.bid.resetStage(agent, 'outline_generation')).rejects.toMatchObject({
+      code: 'BID_STAGE_RESET_NOT_ALLOWED',
+    })
+    await expect(ctx.bid.resetStage(agent, 'evidence_mapping')).resolves.toEqual({
+      stage: 'outline_generation', status: 'pending',
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(agent.session.events.slice(-3).map(event => event.type)).toEqual([
+      'bid.stage.reset', 'bid.stage.started', 'bid.stage.completed',
+    ])
+  })
+
+  it('discards the S5 draft and partial confirmation before returning to confirmation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-'))
+    const { ctx } = await harness()
+    const { agent } = attach(ctx, 'bid', root)
+    for (const stage of ['file_intake', 'tender_analysis', 'evidence_mapping', 'outline_generation'] as const) {
+      agent.session.append('bid.stage.started', { stage, status: 'running' })
+      agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+    }
+    agent.session.append('bid.user_confirmation.required', {
+      stage: 'outline_confirmation', status: 'waiting_user',
+    })
+    const workspace = new Bid.BidWorkspace(root, agent.session.id)
+    await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+    const paths = ['draft.json', 'confirmed-outline.json', 'confirmation.json']
+      .map(name => join(workspace.sessionRoot, 'outline', name))
+    await Promise.all(paths.map(path => writeFile(path, '{}')))
+
+    await expect(ctx.bid.resetStage(agent, 'outline_confirmation')).resolves.toEqual({
+      stage: 'outline_confirmation', status: 'waiting_user',
+    })
+    for (const path of paths) await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(agent.session.events.slice(-2).map(event => event.type)).toEqual([
+      'bid.stage.reset', 'bid.user_confirmation.required',
+    ])
   })
 
   it('returns only current S3 Mapping Task counts while evidence mapping runs', async () => {

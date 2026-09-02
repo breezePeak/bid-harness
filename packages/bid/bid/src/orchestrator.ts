@@ -63,6 +63,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RETRY_NOT_ALLOWED'
+  | 'BID_STAGE_RESET_NOT_ALLOWED'
 
 /** Host-side rejection for an operation that is invalid in current session state. */
 export class BidOrchestratorError extends Error {
@@ -100,12 +101,20 @@ export class BidOrchestrator {
 
   /**
    * Drive pending stages after file intake until user input, failure, or final completion. Concurrent callers share the same drive.
-   * A fresh file-intake stage waits for {@link runCurrentProgramStage} because its executor requires user files.
+   * A fresh file-intake stage waits for {@link runCurrentProgramStage} because its executor requires user files. A running state
+   * without this instance's operation is a replayed interruption; the driver records failure so the Host can offer a full retry.
    * @returns the state at the stopping point.
    */
   drive(): Promise<BidRuntimeState> {
     if (this.operation !== undefined) return this.operation
-    return this.begin(() => this.driveLoop())
+    return this.begin(() => {
+      const state = this.state
+      if (state.status === 'running') {
+        this.fail(state.stage, '阶段执行因后端停止而中断，请重试当前阶段。')
+        return Promise.resolve(this.state)
+      }
+      return this.driveLoop()
+    })
   }
 
   /**

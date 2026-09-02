@@ -6,6 +6,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.stage.started',
   'bid.stage.completed',
   'bid.stage.failed',
+  'bid.stage.reset',
   'bid.user_confirmation.required',
   'bid.user_confirmation.received',
 ] as const
@@ -21,18 +22,22 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
     /**
      * A stage failed before validation could authorize a transition.
-     * @mode broadcast
      * @param stage Failed stage.
      * @param status Stable failed status.
      * @param reason Short user-visible summary.
      * @param issues Browser-safe validation details when validation rejected Artifacts.
      */
     'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
+    /**
+     * A user command returned the current stage to its pending entry state.
+     * @param stage Current stage selected by the scoped reset command.
+     * @param status Stable pending entry status.
+     */
+    'bid.stage.reset': { stage: BidStage; status: 'pending' }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
     /**
      * The explicit user decision received for a stage.
-     * @mode broadcast
      * @param stage Stage receiving the decision.
      * @param confirmed Whether the user accepts the current artifact.
      * @param feedback Required outline changes when the current outline is rejected.
