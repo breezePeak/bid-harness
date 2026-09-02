@@ -240,7 +240,7 @@ describe('the shipped Web composition', () => {
       expect(toolNames(ctx, handle.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
       expect(ctx.commands.list(handle.agent).map(command => command.name)).toEqual(expect.arrayContaining([
         'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
-        'bid-reset-s5', 'bid-reset-s6', 'bid-reset-s7',
+        'bid-reset-s5',
       ]))
       expect(projections.snapshot(handle.agent.session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
         runtime: { stage: 'file_intake', status: 'pending' },

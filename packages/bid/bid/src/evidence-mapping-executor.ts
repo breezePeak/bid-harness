@@ -30,6 +30,7 @@ import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
   renderStageRepairIssues,
+  waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
@@ -486,6 +487,7 @@ async function loadValidPlan(
   task: BidStageTask,
   inputs: EvidenceMappingInputs,
   maxRepairAttempts: number,
+  signal?: AbortSignal,
 ): Promise<EvidenceMappingPlan> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid evidence mapping planning requires tools service')
@@ -493,8 +495,9 @@ async function loadValidPlan(
   const liftRestriction = tools.restrict({ allow: [...MAIN_AGENT_TOOLS] })
   const liftGuard = tools.guard(exec => evidenceMappingWriteReason(exec, planPath)?.replace('analysis/evidence-map.json', PLAN_PATH))
   try {
+    signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderEvidenceMappingTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, signal)
     for (let repair = 0; ; repair++) {
       let plan: EvidenceMappingPlan | undefined
       let issues: StageValidationIssue[] = []
@@ -507,8 +510,9 @@ async function loadValidPlan(
       if (plan !== undefined && issues.length === 0) return plan
       if (repair >= maxRepairAttempts) throw new BidStageExecutionError(issues)
       await removeAttemptPath(planPath)
+      signal?.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderPlanRepairTask(issues) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, signal)
     }
   } finally {
     liftGuard()
@@ -653,6 +657,7 @@ function readMappingChildResult(agent: Agent, eventStart: number): unknown {
 async function waitForMappingChildReply(agent: Agent, eventStart: number, signal: AbortSignal): Promise<void> {
   const deadline = Date.now() + 5 * 60_000
   while (true) {
+    signal.throwIfAborted()
     await agent.whenIdle()
     if (agent.session.events.slice(eventStart).some(event => event.type === 'assistant/message')) return
     signal.throwIfAborted()
@@ -884,6 +889,7 @@ async function refineOutline(
   workspace: BidWorkspace,
   initial: OutlineArtifact,
   suggestions: readonly string[],
+  signal?: AbortSignal,
 ): Promise<OutlineArtifact> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid outline refinement requires tools service')
@@ -909,15 +915,17 @@ async function refineOutline(
   const waitForArtifact = async (path: string): Promise<void> => {
     const deadline = Date.now() + 5 * 60_000
     while (true) {
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, signal)
       try { if ((await lstat(path)).isFile()) return } catch { /* Follow-up may not have started yet. */ }
       if (Date.now() >= deadline) throw new Error(`Bid outline refinement did not produce ${path}`)
       await new Promise<void>(resolve => setTimeout(resolve, 25))
     }
   }
   try {
+    signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: assignment }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(candidatePath)
+    signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: review }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(qualityPath)
   } finally {
@@ -956,7 +964,7 @@ export async function executeEvidenceMapping(
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) {
     throw new Error('evidence-mapping-max-concurrency-invalid')
   }
-  await agent.whenIdle()
+  await waitForModelStageIdle(agent, options.signal)
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   const artifactPath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
   const planPath = join(workspace.sessionRoot, PLAN_PATH)
@@ -1011,7 +1019,7 @@ export async function executeEvidenceMapping(
   }
   if (!catalogMatchesScoring(inputs.responsePoints, inputs.scoring)) throw new Error('evidence-mapping-response-point-catalog-mismatch')
   const manifest = await workspace.readManifest()
-  const plan = await loadValidPlan(agent, workspace, task, inputs, options.maxRepairAttempts)
+  const plan = await loadValidPlan(agent, workspace, task, inputs, options.maxRepairAttempts, options.signal)
 
   const executionLog: EvidenceMappingExecutionLog = {
     schema_version: 1,
@@ -1036,6 +1044,9 @@ export async function executeEvidenceMapping(
     capturedByChild.set(String(childId), captured)
   }, { global: true })
   const controller = new AbortController()
+  const signal = options.signal === undefined
+    ? controller.signal
+    : AbortSignal.any([options.signal, controller.signal])
   let activeTasks = 0
 
   const runTask = async (
@@ -1043,6 +1054,7 @@ export async function executeEvidenceMapping(
     runPlan: EvidenceMappingPlan,
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
+    signal.throwIfAborted()
     const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
     if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
     log.status = 'running'
@@ -1063,7 +1075,7 @@ export async function executeEvidenceMapping(
           maxDepth: 1,
           persona: '你是技术标资料映射 Subagent。只处理 Host 指定的局部 Mapping Task，并以原始 JSON 返回完整结论。',
         },
-        signal: controller.signal,
+        signal,
       })
       let child = agent.ctx.agents.get(started.childId)
       if (child === undefined) throw new Error(`Bid evidence mapping Child ${started.childId} was not published`)
@@ -1072,8 +1084,9 @@ export async function executeEvidenceMapping(
       try {
         for (let attempt = 0; attempt <= options.maxRepairAttempts; attempt++) {
           try {
-            if (attempt === 0) await child.whenIdle()
-            else await waitForMappingChildReply(child, outputEventStart, controller.signal)
+            signal.throwIfAborted()
+            if (attempt === 0) await waitForModelStageIdle(child, signal)
+            else await waitForMappingChildReply(child, outputEventStart, signal)
             const captured = capturedByChild.get(String(started.childId)) ?? new Map()
             const attemptCaptured = new Map([...captured].filter(([, value]) => value.exec.agent === child))
             snapshots.push(...buildEvidenceMappingWebSnapshots(
@@ -1103,6 +1116,7 @@ export async function executeEvidenceMapping(
             }
             latestIssues = issues
           } catch (error: unknown) {
+            if (signal.aborted) throw error
             const detail = error instanceof Error ? error.message : String(error)
             latestIssues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: `Mapping Subagent 结果通道发生基础设施错误：${detail}` }]
             log.attempts.push({ child_session_id: String(started.childId), attempt: attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues })
@@ -1113,7 +1127,7 @@ export async function executeEvidenceMapping(
             boundarySeq = child.session.events.at(-1)?.seq ?? -1
             await subagents.followup(agent, started.childId, [{
               type: 'text', text: renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues),
-            }], { source: { kind: 'user' }, signal: controller.signal })
+            }], { source: { kind: 'user' }, signal })
             const resumed = agent.ctx.agents.get(started.childId)
             if (resumed !== undefined) child = resumed
           }
@@ -1138,6 +1152,7 @@ export async function executeEvidenceMapping(
     let nextTask = 0
     const workers = Array.from({ length: Math.min(maxConcurrency, tasks.length) }, async () => {
       while (true) {
+        signal.throwIfAborted()
         const mappingTask = tasks[nextTask++]
         if (mappingTask === undefined) return
         completed.set(mappingTask.task_id, await runTask(mappingTask, runPlan, runInputs))
@@ -1165,7 +1180,8 @@ export async function executeEvidenceMapping(
     const initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
     const preliminary = buildEvidenceMap(initialMerged, initialSnapshots, inputs.outline)
     await writeJson(join(workspace.sessionRoot, 'analysis/evidence-map.json'), preliminary.map)
-    const refined = await refineOutline(agent, workspace, inputs.outline, initialMerged.refinement_suggestions)
+    signal.throwIfAborted()
+    const refined = await refineOutline(agent, workspace, inputs.outline, initialMerged.refinement_suggestions, signal)
     const changed = changedWritableSectionIds(inputs.outline, refined)
     const supplementalTasks: EvidenceMappingTask[] = changed.map((sectionId, index) => ({
       task_id: `MAP-SUP-${String(index + 1).padStart(3, '0')}`,

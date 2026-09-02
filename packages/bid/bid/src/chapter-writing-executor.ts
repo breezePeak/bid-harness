@@ -47,6 +47,7 @@ import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
   renderStageRepairIssues,
+  waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
@@ -800,6 +801,7 @@ async function loadValidPlan(
     compliance: ReturnType<typeof parseTenderComplianceArtifact>
   },
   maxRepairAttempts: number,
+  signal?: AbortSignal,
 ): Promise<ChapterExecutionPlan> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid chapter planning requires tools service')
@@ -807,8 +809,9 @@ async function loadValidPlan(
   const liftRestriction = tools.restrict({ allow: [...MAIN_AGENT_TOOLS] })
   const liftGuard = tools.guard(exec => planWriteReason(exec, absolutePlanPath))
   try {
+    signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderChapterExecutionPlanTask(agent, workspace, outline, outlineHash, inputs) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, signal)
     for (let repair = 0; ; repair++) {
       let plan: ChapterExecutionPlan | undefined
       let issues: StageValidationIssue[] = []
@@ -822,8 +825,9 @@ async function loadValidPlan(
       if (repair >= maxRepairAttempts) {
         throw new Error(`Bid chapter execution plan validation failed: ${issues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
       }
+      signal?.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderChapterExecutionPlanRepairTask(outlineHash, issues) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, signal)
     }
   } finally {
     liftGuard()
@@ -853,7 +857,7 @@ export async function executeChapterWriting(
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
     throw new Error('chapter-writing-max-concurrency-invalid')
   }
-  await agent.whenIdle()
+  await waitForModelStageIdle(agent, options.signal)
   const inputs = await Promise.all([
     readJson(workspace, 'outline/confirmed-outline.json'), readJson(workspace, 'outline/confirmation.json'),
     readJson(workspace, 'analysis/project.json'), readJson(workspace, 'analysis/requirements.json'),
@@ -904,6 +908,7 @@ export async function executeChapterWriting(
 
   const plan = await loadValidPlan(
     agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance }, options.maxRepairAttempts,
+    options.signal,
   )
   const worklist = buildChapterWorklist(outline)
   const contexts = new Map(worklist.map((section, index) => [section.id, pickChapterContext({
@@ -973,11 +978,15 @@ export async function executeChapterWriting(
     capturedByChild.set(childId, captured)
   }, { global: true })
   const controller = new AbortController()
+  const signal = options.signal === undefined
+    ? controller.signal
+    : AbortSignal.any([options.signal, controller.signal])
   const completed = new Map<string, CompletedChapter>()
   const pending = new Set(worklist.map(section => section.id))
   const running = new Map<string, Promise<{ sectionId: string; chapter: CompletedChapter }>>()
 
   const writeSection = async (sectionId: string): Promise<CompletedChapter> => {
+    signal.throwIfAborted()
     const context = contexts.get(sectionId)
     const planned = planSections.get(sectionId)
     const log = executionLog.sections.find(section => section.section_id === sectionId)
@@ -1008,6 +1017,7 @@ export async function executeChapterWriting(
       let latestStopReason = 'not-started'
       const maxWriterAttempts = Math.min(2, options.maxRepairAttempts + 1)
       for (let attempt = 0; attempt < maxWriterAttempts; attempt++) {
+        signal.throwIfAborted()
         const serial = context.contentPath.slice(-7, -3)
         const label = attempt === 0 ? `S5 · ${serial} · ${context.section.title}` : `S5 · ${serial} · 修复 ${attempt} · ${context.section.title}`
         const prompt = attempt === 0 ? basePrompt : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues)
@@ -1016,7 +1026,7 @@ export async function executeChapterWriting(
           label,
           parent: agent,
           prompt: [{ type: 'text', text: prompt }],
-          signal: controller.signal,
+          signal,
           outputSchema: CHAPTER_CANDIDATE_OUTPUT_SCHEMA,
           toolFilter: { allow: [...CHAPTER_AGENT_TOOLS] },
           maxDepth: 1,
@@ -1074,7 +1084,7 @@ export async function executeChapterWriting(
               label: reviewLabel,
               parent: agent,
               prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies) }],
-              signal: controller.signal,
+              signal,
               outputSchema: CHAPTER_REVIEW_OUTPUT_SCHEMA,
               toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
               maxDepth: 0,
@@ -1124,7 +1134,8 @@ export async function executeChapterWriting(
             }
           }
           latestIssues = issues
-        } catch {
+        } catch (error: unknown) {
+          if (signal.aborted) throw error
           latestStopReason = 'infrastructure-error'
           issues.push({
             code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR',
@@ -1149,6 +1160,7 @@ export async function executeChapterWriting(
       }
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
+      if (signal.aborted) throw error
       log.status = 'failed'
       await persistLog()
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
@@ -1158,6 +1170,7 @@ export async function executeChapterWriting(
 
   try {
     while (pending.size > 0 || running.size > 0) {
+      signal.throwIfAborted()
       for (const section of worklist) {
         if (running.size >= options.maxConcurrency) break
         if (!pending.has(section.id)) continue

@@ -9,6 +9,7 @@ import type { BidStageTask, StageArtifact, StageValidationIssue } from './contro
 import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
+  waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
@@ -146,7 +147,7 @@ export async function executeTenderAnalysis(
   options: ModelStageExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
-  await agent.whenIdle()
+  await waitForModelStageIdle(agent, options.signal)
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
@@ -165,16 +166,18 @@ export async function executeTenderAnalysis(
     ? undefined
     : `Bid stage ${task.stage} allows only ${task.allowedTools.join(', ')}`)
   try {
+    options.signal?.throwIfAborted()
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: renderTenderAnalysisTask(agent, workspace, task) }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, options.signal)
+    options.signal?.throwIfAborted()
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: renderTenderAnalysisCoverageAuditTask(agent, workspace, task) }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, options.signal)
     const artifacts = task.requiredArtifacts.map(path => ({
       stage: 'tender_analysis' as const,
       type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
@@ -182,11 +185,12 @@ export async function executeTenderAnalysis(
     }))
     let prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
     for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
+      options.signal?.throwIfAborted()
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, prevalidation.issues) }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
       }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, options.signal)
       prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
     }
     return artifacts

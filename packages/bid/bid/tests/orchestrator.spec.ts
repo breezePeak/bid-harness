@@ -52,4 +52,29 @@ describe('BidOrchestrator', () => {
       stage: 'tender_analysis', status: 'failed', failureIssues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }],
     })
   })
+
+  it('leaves a cancelled stage for reset without recording a failure', async () => {
+    const current = await session()
+    const controller = new AbortController()
+    const orchestrator = new BidOrchestrator(
+      current,
+      {
+        canExecute: stage => stage === 'tender_analysis',
+        execute: async () => {
+          controller.abort()
+          controller.signal.throwIfAborted()
+          return []
+        },
+      },
+      { validate: async () => ({ ok: true }) },
+      controller.signal,
+    )
+    current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
+
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({
+      stage: 'tender_analysis', status: 'running',
+    })
+    expect(current.events.some(event => event.type === 'bid.stage.failed')).toBe(false)
+  })
 })

@@ -35,7 +35,8 @@
     maxBytes: 65536
 
 # Human-only recovery controls are scoped to Bid sessions and never enter a
-# model request. Each command can reset only the exact current stage.
+# model request. Each command can reset the current or an earlier S2-S5 stage;
+# the Host cancels and drains active automatic work before replacing artifacts.
 - id: stage-reset-commands
   name: '@deepseek-ai/dsh-bid/stage-reset-commands'
 

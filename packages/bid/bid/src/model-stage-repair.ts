@@ -1,3 +1,4 @@
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 
 /** Default number of Validator-guided repair turns for one model-produced Bid stage. */
@@ -7,6 +8,20 @@ export const DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS = 3
 export interface ModelStageExecutionOptions {
   /** Maximum Validator-guided repair turns after the initial model output. */
   maxRepairAttempts: number
+  /** Host operation cancellation for reset-to-stage recovery. */
+  signal?: AbortSignal | undefined
+}
+
+/**
+ * Wait for the live Agent to stop, rejecting before further stage work after cancellation.
+ * @param agent - live Agent whose active turn must settle.
+ * @param signal - optional Host operation cancellation.
+ * @returns when the Agent is idle and the operation remains active.
+ */
+export async function waitForModelStageIdle(agent: Agent, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
+  await agent.whenIdle()
+  signal?.throwIfAborted()
 }
 
 /**

@@ -236,9 +236,9 @@ export interface Config {
   maxTotalBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
-  /** Maximum Mapping Subagents running at the same time during S3. */
+  /** Maximum Mapping Subagents running at the same time during S4. */
   evidenceMappingMaxConcurrency: number
-  /** Maximum Chapter Subagents running at the same time during S6. */
+  /** Maximum Chapter Subagents running at the same time during S5. */
   chapterWritingMaxConcurrency: number
   /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
   trustedHosts: string[]
@@ -507,16 +507,46 @@ function intakeError(error: unknown): BidFileIntakeResult {
 }
 
 /** Host service for Bid projection, prompt admission, and dedicated file intake. */
+interface ActiveBidOperation {
+  controller: AbortController
+  readonly done: Promise<void>
+  readonly settle: () => void
+  reservedForReset: boolean
+}
+
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
   static Config = Config
 
   private readonly config: Config
-  private readonly inFlight = new Set<string>()
+  private readonly inFlight = new Map<string, ActiveBidOperation>()
+
+  /** Reserve one Session mutation until its async work reaches quiescence. */
+  private beginOperation(sessionId: string): ActiveBidOperation {
+    if (this.inFlight.has(sessionId)) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
+    }
+    const settled = Promise.withResolvers<void>()
+    const operation: ActiveBidOperation = {
+      controller: new AbortController(),
+      done: settled.promise,
+      settle: settled.resolve,
+      reservedForReset: false,
+    }
+    this.inFlight.set(sessionId, operation)
+    return operation
+  }
+
+  /** Release an operation, preserving its slot when a reset is taking ownership. */
+  private finishOperation(sessionId: string, operation: ActiveBidOperation): void {
+    if (this.inFlight.get(sessionId) !== operation) return
+    if (!operation.reservedForReset) this.inFlight.delete(sessionId)
+    operation.settle()
+  }
 
   /**
    * @param ctx - Host Context that owns Sessions and their Bid projection.
-   * @param config - validated file limits, model-stage recovery budget, and S6 concurrency limit.
+   * @param config - validated file limits, model-stage recovery budget, and Subagent concurrency limits.
    */
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
@@ -556,35 +586,37 @@ export class BidHostRuntime extends TypertRemoteService {
   private async driveStartedSession(agent: Agent, cwd: string): Promise<void> {
     const { session } = agent
     if (this.inFlight.has(session.id)) return
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const workspace = new BidWorkspace(cwd, session.id, workspaceConfig(this.config))
-      await this.automaticOrchestrator(agent, workspace).drive()
+      await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
       await this.ctx.sessions.flush(session)
     } finally {
-      this.inFlight.delete(session.id)
+      this.finishOperation(session.id, operation)
     }
   }
 
   /** Build the production executor and Validator for implemented automatic stages. */
-  private automaticOrchestrator(agent: Agent, workspace: BidWorkspace): BidOrchestrator {
+  private automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator {
     return new BidOrchestrator(
       agent.session,
       {
         canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: task => task.stage === 'tender_analysis'
-          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
+          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
           : task.stage === 'evidence_mapping'
             ? executeEvidenceMapping(agent, workspace, task, {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+              signal,
             })
             : task.stage === 'outline_generation'
-              ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts })
+              ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
               : task.stage === 'chapter_writing'
                 ? executeChapterWriting(agent, workspace, task, {
                   maxRepairAttempts: this.config.modelStageRepairAttempts,
                   maxConcurrency: this.config.chapterWritingMaxConcurrency,
+                  signal,
                 })
                 : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
       },
@@ -596,13 +628,14 @@ export class BidHostRuntime extends TypertRemoteService {
             : stage === 'chapter_writing' ? validateChapterWriting(workspace, stage, artifacts)
               : validateOutlineGeneration(workspace, stage, artifacts),
       },
+      signal,
     )
   }
 
   /**
    * Rewind to the current or an earlier Bid stage and immediately re-enter its normal Host driver.
-   * The command is rejected while another Host operation owns the Session and removes
-   * artifacts owned by the selected stage and every later stage before rerunning it.
+   * Active automatic work is cancelled and drained before artifacts owned by the
+   * selected stage and every later stage are removed and rerun.
    * @param agent - live Bid Agent receiving the scoped command.
    * @param stage - current or earlier stage named by that command.
    * @returns the state reached after automatic execution, user gating, or failure.
@@ -612,9 +645,6 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
     }
-    if (this.inFlight.has(session.id)) {
-      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
-    }
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) {
       throw new BidOrchestratorError(
@@ -622,7 +652,19 @@ export class BidHostRuntime extends TypertRemoteService {
         `Cannot reset future Bid stage ${JSON.stringify(stage)} while the current stage is ${JSON.stringify(runtime.stage)}.`,
       )
     }
-    this.inFlight.add(session.id)
+    let operation = this.inFlight.get(session.id)
+    if (operation !== undefined) {
+      if (operation.reservedForReset) {
+        throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid stage reset is already running for this Session.')
+      }
+      operation.reservedForReset = true
+      operation.controller.abort()
+      if (runtime.status === 'running') agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+      await Promise.all([operation.done, agent.whenIdle()])
+      operation.controller = new AbortController()
+    } else {
+      operation = this.beginOperation(session.id)
+    }
     try {
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const resetPaths: Readonly<Record<BidStage, readonly string[]>> = {
@@ -661,11 +703,12 @@ export class BidHostRuntime extends TypertRemoteService {
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       await Promise.all(paths.map(path => rm(path, { recursive: true, force: true })))
       session.append('bid.stage.reset', { stage, status: 'pending' })
-      const next = await this.automaticOrchestrator(agent, workspace).drive()
+      const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
       await this.ctx.sessions.flush(session)
       return next
     } finally {
-      this.inFlight.delete(session.id)
+      operation.reservedForReset = false
+      this.finishOperation(session.id, operation)
     }
   }
 
@@ -704,7 +747,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (this.inFlight.has(session.id)) {
       return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
     }
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
@@ -741,7 +784,7 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
-            const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts }
+            const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts, signal: operation.controller.signal }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
               ...repair,
@@ -768,6 +811,7 @@ export class BidHostRuntime extends TypertRemoteService {
                     ? validateChapterWriting(workspace, stage, artifacts)
                     : validateOutlineGeneration(workspace, stage, artifacts),
         },
+        operation.controller.signal,
       )
       await orchestrator.runCurrentProgramStage()
       const next = await orchestrator.drive()
@@ -807,7 +851,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return intakeError(error)
     } finally {
-      this.inFlight.delete(session.id)
+      this.finishOperation(session.id, operation)
     }
   }
 
@@ -845,7 +889,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return intakeError(error)
     if (this.inFlight.has(session.id)) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
@@ -865,7 +909,7 @@ export class BidHostRuntime extends TypertRemoteService {
     } catch (caught) {
       return intakeError(caught)
     } finally {
-      this.inFlight.delete(session.id)
+      this.finishOperation(session.id, operation)
     }
   }
 
@@ -882,7 +926,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (this.inFlight.has(session.id)) {
       return retryRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
     }
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       if (!getBidClientProjection(runtime).allowedActions.includes('retry_stage')) {
@@ -891,7 +935,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-      const orchestrator = this.automaticOrchestrator(agent, workspace)
+      const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
       const next = await orchestrator.retry()
       await this.ctx.sessions.flush(session)
       return retrySuccess(next)
@@ -904,7 +948,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return retryRejected('BID_RETRY_FAILED', 'The Bid Host could not retry the current stage.')
     } finally {
-      this.inFlight.delete(session.id)
+      this.finishOperation(session.id, operation)
     }
   }
 
@@ -1050,7 +1094,7 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<BidTenderAnalysisConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Tender-analysis confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_tender_analysis')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Tender-analysis confirmation is not allowed in the current Bid stage state.' } }
@@ -1100,7 +1144,7 @@ export class BidHostRuntime extends TypertRemoteService {
         { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
         { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
       ]
-      const confirmation = await this.automaticOrchestrator(agent, workspace).confirmValidatedStage('tender_analysis', artifacts)
+      const confirmation = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).confirmValidatedStage('tender_analysis', artifacts)
       if (!confirmation.ok) {
         await restore()
         return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: confirmation.validation.issues } }
@@ -1109,7 +1153,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return { ok: true, value: confirmation.state }
     } catch {
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the tender analysis.' } }
-    } finally { this.inFlight.delete(session.id) }
+    } finally { this.finishOperation(session.id, operation) }
   }
 
   /** Read the S4 draft only while its user-confirmation stage owns the session. */
@@ -1135,10 +1179,10 @@ export class BidHostRuntime extends TypertRemoteService {
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline draft editing is not allowed in the current Bid stage state.')
     if (this.inFlight.has(session.id)) throw new Error('BID_OPERATION_IN_PROGRESS')
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       return await mutateOutlineDraft(new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config)), request)
-    } finally { this.inFlight.delete(session.id) }
+    } finally { this.finishOperation(session.id, operation) }
   }
 
   /** Apply and validate user operations before atomically publishing S5 artifacts. */
@@ -1146,7 +1190,7 @@ export class BidHostRuntime extends TypertRemoteService {
   async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
@@ -1209,7 +1253,9 @@ export class BidHostRuntime extends TypertRemoteService {
         { stage: 'evidence_mapping', type: 'outline', path: 'outline/outline.json' },
         { stage: 'evidence_mapping', type: 'outline_quality_report', path: 'outline/quality-report.json' },
       ]
-      const confirmation = await this.automaticOrchestrator(agent, workspace).confirmValidatedStage(runtime.stage, artifactRefs)
+      const confirmation = await this
+        .automaticOrchestrator(agent, workspace, operation.controller.signal)
+        .confirmValidatedStage(runtime.stage, artifactRefs)
       if (!confirmation.ok) {
         await rm(confirmedPath, { force: true })
         return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy outline validation.', issues: confirmation.validation.issues } }
@@ -1219,7 +1265,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return { ok: true, value: confirmation.state }
     } catch {
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the outline.' } }
-    } finally { this.inFlight.delete(session.id) }
+    } finally { this.finishOperation(session.id, operation) }
   }
 
   /** Regenerate a temporary S4-quality candidate from the current persisted S5 draft. */
@@ -1234,7 +1280,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (normalized.length === 0) return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
-    this.inFlight.add(session.id)
+    const operation = this.beginOperation(session.id)
     try {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
@@ -1254,6 +1300,7 @@ export class BidHostRuntime extends TypertRemoteService {
       try {
         const artifacts = await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
           maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
+          signal: operation.controller.signal,
           regeneration: { feedback: normalized, revision: draft.revision, draftSha256: draft.draft_outline_sha256 },
         })
         const validation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
@@ -1283,7 +1330,7 @@ export class BidHostRuntime extends TypertRemoteService {
     } catch (error: unknown) {
       if (error instanceof BidOrchestratorError && error.code === 'BID_OUTLINE_FEEDBACK_REQUIRED') return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
       return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }
-    } finally { this.inFlight.delete(session.id) }
+    } finally { this.finishOperation(session.id, operation) }
   }
 }
 

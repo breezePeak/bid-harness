@@ -52,7 +52,7 @@ export type BidStageConfirmationResult =
   | { readonly ok: false; readonly validation: StageValidationResult & { readonly ok: false } }
 
 /** Durable outcome of one executor and validator attempt. */
-export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'failed'
+export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'failed' | 'aborted'
 
 /** Stable rejection codes for host-side Bid operation admission. */
 export type BidOrchestratorErrorCode =
@@ -92,11 +92,17 @@ export class BidOrchestrator {
     private readonly session: Session,
     private readonly executor: BidStageExecutorPort,
     private readonly validator: BidStageValidatorPort,
+    private readonly signal?: AbortSignal,
   ) {}
 
   /** Current state replayed from the session log. */
   get state(): BidRuntimeState {
     return this.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+  }
+
+  /** Read cancellation without retaining a stale narrowing across an await. */
+  private isAborted(): boolean {
+    return this.signal?.aborted === true
   }
 
   /**
@@ -295,6 +301,7 @@ export class BidOrchestrator {
   /** Continue the automatic control loop from the current log-derived state. */
   private async driveLoop(): Promise<BidRuntimeState> {
     while (true) {
+      if (this.isAborted()) return this.state
       const state = this.state
       if (state.status !== 'pending') return state
       if (state.stage === 'file_intake') return state
@@ -313,11 +320,13 @@ export class BidOrchestrator {
 
   /** Execute and validate one non-user stage, recording its complete outcome. */
   private async executeStage(stage: BidStage): Promise<StageExecutionSettlement> {
+    if (this.isAborted()) return 'aborted'
     this.session.append('bid.stage.started', { stage, status: 'running' })
     let artifacts: StageArtifact[]
     try {
       artifacts = await this.executor.execute(buildBidStageTask(stage))
     } catch (error: unknown) {
+      if (this.isAborted()) return 'aborted'
       if (error instanceof BidStageExecutionError) {
         this.fail(stage, error.message, [...error.issues])
         return 'failed'
@@ -325,7 +334,9 @@ export class BidOrchestrator {
       this.fail(stage, `executor failed: ${String(error)}`)
       return 'failed'
     }
+    if (this.isAborted()) return 'aborted'
     const validation = await this.validate(stage, artifacts)
+    if (this.isAborted()) return 'aborted'
     if (!validation.ok) return 'failed'
     if (getBidStagePolicy(stage).userGate === 'after_validation') {
       this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })

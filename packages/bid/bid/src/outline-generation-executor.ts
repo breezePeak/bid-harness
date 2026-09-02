@@ -11,6 +11,7 @@ import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
   renderStageRepairIssues,
+  waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import {
   OUTLINE_GENERATION_SCHEMA_VERSION,
@@ -195,7 +196,7 @@ export async function executeOutlineGeneration(
   options: OutlineGenerationExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  await agent.whenIdle()
+  await waitForModelStageIdle(agent, options.signal)
   const frameworks = await loadOutlineFrameworkStructures(workspace)
   const outlineRoot = join(workspace.sessionRoot, 'outline')
   const artifactPaths = [OUTLINE_ARTIFACT, QUALITY_REPORT_ARTIFACT, RESPONSE_POINT_CANDIDATE]
@@ -221,25 +222,30 @@ export async function executeOutlineGeneration(
   ]
   try {
     if (options.regeneration === undefined) {
+      options.signal?.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointAnalysisTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, options.signal)
+      options.signal?.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointSemanticReviewTask(agent, workspace) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, options.signal)
       const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')))
       const candidate = parseScoringResponsePointCandidate(JSON.parse(await readFile(join(workspace.sessionRoot, RESPONSE_POINT_CANDIDATE), 'utf8')))
       await writeFileAtomic(join(workspace.sessionRoot, RESPONSE_POINT_CATALOG), `${JSON.stringify(createScoringResponsePointCatalog(scoring, candidate), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     }
+    options.signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, options.signal)
+    options.signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderBlueprintQualityReviewTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await agent.whenIdle()
+    await waitForModelStageIdle(agent, options.signal)
     let prevalidation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
     for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
+      options.signal?.throwIfAborted()
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: renderOutlineGenerationRepairTask(agent, workspace, task, prevalidation.issues, options.regeneration) }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
       }))
-      await agent.whenIdle()
+      await waitForModelStageIdle(agent, options.signal)
       prevalidation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
     }
   } finally {

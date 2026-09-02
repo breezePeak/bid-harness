@@ -12,6 +12,25 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 describe('tender-analysis Agent executor', () => {
+  it('stops before issuing stage work when the Host operation is cancelled', async () => {
+    const controller = new AbortController()
+    const followup = vi.fn()
+    const agent = {
+      id: 'session',
+      whenIdle: vi.fn(async () => { controller.abort() }),
+      followup,
+    } as unknown as Agent
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-cancel-')), 'session')
+
+    await expect(executeTenderAnalysis(
+      agent,
+      workspace,
+      buildBidStageTask('tender_analysis'),
+      { maxRepairAttempts: 1, signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' })
+    expect(followup).not.toHaveBeenCalled()
+  })
+
   it('delivers the StageTask through followup, waits for idle, and restricts tools', async () => {
     const liftRestriction = vi.fn()
     const liftGuard = vi.fn()

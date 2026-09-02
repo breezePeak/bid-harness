@@ -73,6 +73,7 @@ interface BenchOptions {
   subagent?: Exclude<ConversationSnapshot['subagent'], null>
   disabled?: boolean
   inert?: boolean
+  blocked?: { readonly reason: string }
   workspacePickerOpen?: boolean
   onRequestWorkspace?: () => void
   promptError?: ConversationSnapshot['promptError']
@@ -191,6 +192,7 @@ function bench(over?: BenchOptions) {
     t: over?.t ?? makeTranslate(zh, commonZh),
     renderSlot,
     variant: over?.variant ?? 'composer',
+    ...(over?.blocked !== undefined ? { blocked: over.blocked } : {}),
     ...(over?.inert === true ? { disabled: true } : {}),
     ...(over?.workspacePickerOpen !== undefined ? { workspacePickerOpen: over.workspacePickerOpen } : {}),
     ...(over?.onRequestWorkspace !== undefined ? { onRequestWorkspace: over.onRequestWorkspace } : {}),
@@ -1492,6 +1494,22 @@ describe('command launcher chrome and control seats', () => {
     expect(toggleCommandMenu).toHaveBeenCalledExactlyOnceWith({ start: 2, end: 7 })
     act(() => { menuLauncher.set('command') })
     expect(launcher.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('keeps human commands available while a composer block rejects messages', () => {
+    const toggleCommandMenu = vi.fn()
+    const permissions = { options: [{ value: 'workspace-write', name: 'workspace-write' }], currentValue: 'workspace-write' }
+    const { view, textarea, button } = bench({
+      blocked: { reason: '当前阶段处理失败' }, permissions, toggleCommandMenu,
+    })
+    const launcher = view.getByLabelText('命令') as HTMLButtonElement
+
+    expect(textarea.disabled).toBe(true)
+    expect(button.disabled).toBe(true)
+    expect((view.getByLabelText(/^访问模式/) as HTMLButtonElement).disabled).toBe(true)
+    expect(launcher.disabled).toBe(false)
+    fireEvent.click(launcher)
+    expect(toggleCommandMenu).toHaveBeenCalledOnce()
   })
 
   it('the Access chip renders the projection value and submits a non-Full-access pick directly', async () => {

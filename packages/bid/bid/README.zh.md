@@ -33,7 +33,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8。
 
-`bid` Agent Preset 只为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数命令。每个命令可以重置当前阶段或回退到更早阶段，先删除所选阶段及其后续阶段拥有的 Artifact，再追加 `bid.stage.reset` 并从阶段入口完整重跑；正在被 Host 操作拥有的 Session 会拒绝重置，未来阶段也不能提前执行。命令结果不进入模型历史。
+`bid` Agent Preset 只为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数命令。每个命令可以重置当前阶段或回退到更早阶段；自动阶段正在运行时，Host 原子占用 Session，取消主 Agent、Subagent 和并发 Worker，等待全部工作静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset` 并从阶段入口完整重跑。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，在 per-Session 锁内准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑。
 

@@ -167,6 +167,9 @@ export function InputBar({
   // adjudicating and submitting render read-only so the draft stays visible.
   const disabled = removed || inert || !live || blocked !== undefined || parentOffline
   const locked = disabled
+  // A composer block rejects messages, not human commands. Bare command picks
+  // execute without the textarea, so recovery commands must remain reachable.
+  const commandLauncherLocked = removed || inert || !live || parentOffline
   // The model seat is the ONE control a block leaves live: every block this
   // contract has is cleared by choosing a model, so locking it too would leave
   // the composer asking for the only thing it prevents. The other reasons to
@@ -776,7 +779,7 @@ export function InputBar({
                 aria-label={t('input.commands')}
                 aria-haspopup="listbox"
                 aria-expanded={commandMenuOpen}
-                disabled={locked || toggleCommandMenu === undefined}
+                disabled={commandLauncherLocked || toggleCommandMenu === undefined}
                 onMouseDown={keepFocus}
                 onClick={onToggleCommandMenu}
               >
