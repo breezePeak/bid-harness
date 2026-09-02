@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import type { BidWorkspace } from './index.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
@@ -8,6 +7,12 @@ import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+
+/** Host workspace paths needed by the draft store without importing the Host entrypoint. */
+interface OutlineDraftWorkspace {
+  readonly root: string
+  readonly sessionRoot: string
+}
 
 /** CAS identity and operations required for one S5 mutation. */
 export interface OutlineDraftMutationRequest {
@@ -27,14 +32,14 @@ export type OutlineDraftMutationResult =
   | { readonly ok: true; readonly value: OutlineDraftView }
   | { readonly ok: false; readonly error: { readonly code: 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_OUTLINE_DRAFT_PERSIST_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current: OutlineDraftView } }
 
-async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
+async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.sessionRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
 /** @param workspace Session Bid workspace. @returns Existing or initialized Host-owned S5 draft. */
-export async function getOrCreateOutlineDraft(workspace: BidWorkspace): Promise<OutlineDraftView> {
+export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace): Promise<OutlineDraftView> {
   const source = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
   const sourceHash = outlineArtifactSha256(source)
   const path = within(workspace.sessionRoot, 'outline/draft.json')
@@ -65,7 +70,7 @@ export async function getOrCreateOutlineDraft(workspace: BidWorkspace): Promise<
  * @returns Persisted draft or a recoverable rejection.
  */
 export async function mutateOutlineDraft(
-  workspace: BidWorkspace,
+  workspace: OutlineDraftWorkspace,
   request: OutlineDraftMutationRequest,
 ): Promise<OutlineDraftMutationResult> {
   const current = await getOrCreateOutlineDraft(workspace)
@@ -114,7 +119,7 @@ export async function mutateOutlineDraft(
  * @returns Persisted replacement or a recoverable rejection.
  */
 export async function replaceOutlineDraft(
-  workspace: BidWorkspace,
+  workspace: OutlineDraftWorkspace,
   request: OutlineDraftIdentityRequest,
   candidate: ReturnType<typeof parseOutlineArtifact>,
 ): Promise<OutlineDraftMutationResult> {
