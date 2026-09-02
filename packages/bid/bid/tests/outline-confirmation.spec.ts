@@ -9,30 +9,30 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 const outline: OutlineArtifact = {
-  schema_version: 2,
+  schema_version: 3,
   scope: 'technical_bid',
   document_title: '技术标',
   global_compliance_ids: [],
   sections: [{
     id: 'SEC-001', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付要求', writable: true,
-    must_answer: ['交付计划'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+    must_answer: ['交付计划'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
   }],
 }
 
 describe('outline confirmation artifacts', () => {
   it('parses only the complete durable confirmation record', () => {
     const hash = outlineArtifactSha256(outline)
-    expect(parseOutlineConfirmationArtifact({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash }))
+    expect(parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
       .toMatchObject({ decision: 'confirmed' })
-    expect(() => parseOutlineConfirmationArtifact({ schema_version: 1, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash }))
+    expect(() => parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash }))
       .toThrow()
-    expect(() => parseOutlineConfirmationArtifact({ schema_version: 1, scope: 'commercial_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash }))
+    expect(() => parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'commercial_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
       .toThrow()
-    expect(() => parseOutlineConfirmationArtifact({ schema_version: 1, scope: 'technical_bid', decision: 'rejected', source_outline_sha256: hash, confirmed_outline_sha256: hash }))
+    expect(() => parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'technical_bid', decision: 'rejected', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
       .toThrow()
   })
 
-  it('updates user-editable fields without changing mapped identifiers', () => {
+  it('updates user-editable fields without changing coverage identifiers', () => {
     const edited = applyOutlineEdits(outline, [{ type: 'update_section', section_id: 'SEC-001', title: '已确认交付方案', purpose: '更新说明', must_answer: ['交付计划', '保障措施'] }])
     expect(edited.sections[0]).toMatchObject({ title: '已确认交付方案', purpose: '更新说明', must_answer: ['交付计划', '保障措施'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'] })
     expect(outline.sections[0]?.title).toBe('交付方案')

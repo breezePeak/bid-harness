@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 1 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 2 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -23,13 +23,6 @@ const complianceCoverageSchema = coverageSchema.extend({
   compliance_id: z.string().min(1),
 }).strict()
 
-const sourceMappingReviewSchema = z.object({
-  mapping_id: z.string().min(1),
-  status: z.enum(['used', 'not_used']),
-  evidence_quotes: z.array(z.string().trim().min(1)),
-  issue: z.string().min(1).nullable(),
-}).strict()
-
 const claimCheckSchema = z.object({
   claim_quote: z.string().trim().min(1),
   kind: z.enum(['project_fact', 'technical_fact', 'commitment']),
@@ -47,10 +40,8 @@ export const chapterReviewSchema = z.object({
   requirement_coverage: z.array(identifiedCoverageSchema),
   response_point_coverage: z.array(responsePointCoverageSchema),
   compliance_coverage: z.array(complianceCoverageSchema),
-  source_mapping_review: z.array(sourceMappingReviewSchema),
   claim_checks: z.array(claimCheckSchema),
   quality_checks: z.object({
-    content_mode_respected: z.boolean(),
     project_specific: z.boolean(),
     structure_complete: z.boolean(),
     legacy_project_pollution_free: z.boolean(),

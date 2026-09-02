@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
-import { validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { pickChapterContext, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
 import type { EvidenceMappingWebSnapshot } from '../src/evidence-mapping-executor.ts'
 import {
@@ -16,8 +17,14 @@ import {
   outlineArtifactSha256,
   createScoringResponsePointCatalog,
   parseChapterExecutionLog,
+  parseEvidenceMapArtifact,
   parseChapterWritingManifest,
+  parseTenderComplianceArtifact,
+  parseTenderProjectArtifact,
+  parseTenderRequirementsArtifact,
+  parseTenderScoringArtifact,
   parseWebEvidenceSourcesArtifact,
+  webEvidenceContentSha256,
 } from '@deepseek-ai/dsh-bid'
 
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
@@ -27,11 +34,12 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
   await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify({ schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null, project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['交付'], technical_scope: ['技术'], delivery_scope: ['实施'], implementation_constraints: ['周期'], key_technical_points: ['架构'], source_refs: source, analyzed_tender_files: ['tender'] })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify({ schema_version: 1, requirements: [1, 2, 3].map(index => ({ id: `REQ-${index}`, category: '技术', raw_text: `要求${index}`, normalized_requirement: `响应要求${index}`, mandatory: true, source_refs: source })) })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify({ schema_version: 1, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, response_points: [`回答评分${index}`], source_refs: source })) })}\n`)
-  const scoring = { schema_version: 1 as const, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, response_points: [`回答评分${index}`], source_refs: source })) }
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring))}\n`)
+  const scoring = { schema_version: 1 as const, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, source_refs: source })) }
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 6, source_strategy: { mode: 'generated_from_scratch', framework_file_id: null, reference_bid_file_ids: [] }, framework_mappings: [], reference_bid_mappings: [], research_topics: [], requirement_mappings: [1, 2, 3].map(index => ({ requirement_id: `REQ-${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })), scoring_mappings: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, materials: [], external_materials: [], missing_topics: [] })), response_point_mappings: [1, 2, 3].map(index => ({ response_point_id: `RP-${String(index).padStart(6, '0')}`, scoring_id: `SCORE-${index}`, response_point: `回答评分${index}`, materials: [], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] })) })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 8, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 1, stage: 'evidence_mapping', sources: [] })}\n`)
   const outline = outlineFixture()
   await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
   const outlineSha256 = outlineArtifactSha256(outline)
@@ -40,9 +48,9 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
 }
 
 function outlineFixture() {
-  return { schema_version: 2 as const, scope: 'technical_bid' as const, document_title: '技术标', global_compliance_ids: [], sections: [
-    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '实施方案', purpose: '目录', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, content_mode: null, source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
-    ...[1, 2, 3].map(index => ({ id: `SEC-${index}`, parent_id: 'STRUCT', order: index, level: 2, title: `章节${index}`, purpose: `回答主题${index}`, writable: true, must_answer: [`回答${index}`], requirement_ids: [`REQ-${index}`], scoring_ids: [`SCORE-${index}`], compliance_ids: [], origin: 'generated' as const, content_mode: 'write_new' as const, source_mapping_ids: [], scoring_response_point_ids: [`RP-${String(index).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `SCORE-${index}`, response_point: `回答评分${index}` }], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
+  return { schema_version: 3 as const, scope: 'technical_bid' as const, document_title: '技术标', global_compliance_ids: [], sections: [
+    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '实施方案', purpose: '目录', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
+    ...[1, 2, 3].map(index => ({ id: `SEC-${index}`, parent_id: 'STRUCT', order: index, level: 2, title: `章节${index}`, purpose: `回答主题${index}`, writable: true, must_answer: [`回答${index}`], requirement_ids: [`REQ-${index}`], scoring_ids: [`SCORE-${index}`], compliance_ids: [], origin: 'generated' as const, scoring_response_point_ids: [`RP-${String(index).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `SCORE-${index}`, response_point: `回答评分${index}` }], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
   ] }
 }
 
@@ -63,8 +71,96 @@ function emptyHandoff(section_id: string) {
   }
 }
 
+function emptyChapterContext(section: ReturnType<typeof outlineFixture>['sections'][number]): ChapterContext {
+  return {
+    section,
+    contentPath: 'chapters/sections/0001.md',
+    metadataPath: 'chapters/meta/0001.json',
+    project: parseTenderProjectArtifact({
+      schema_version: 1,
+      project_name: '测试项目',
+      tender_name: null,
+      purchaser: null,
+      owner: null,
+      project_background: [],
+      project_objectives: [],
+      project_scope: [],
+      technical_scope: [],
+      delivery_scope: [],
+      implementation_constraints: [],
+      key_technical_points: [],
+      source_refs: source,
+      analyzed_tender_files: ['tender'],
+    }),
+    requirements: [],
+    scoring: [],
+    responsePoints: [],
+    responsePointMappings: [],
+    compliance: [],
+    researchTopics: [],
+    relatedMaterials: [],
+    referenceBidMaterials: [],
+    webMaterials: [],
+    writingDimensions: [],
+    missingTopics: [],
+    localReadLocations: [],
+    webReadLocations: [],
+  }
+}
+
 const fetchedAt = '2026-09-01T00:00:00.000Z'
 const fetchedUrl = 'https://official.example/standard'
+
+const chunkIndex = {
+  schema_version: 1,
+  source_document: 'document.md',
+  chunk_count: 1,
+  chunk_config: { minChars: 1, targetChars: 2, maxChars: 3 },
+  chunks: [{
+    id: 'chunk_0001', path: 'chunk_0001.md', order: 1, heading_path: ['章节'],
+    page_start: null, page_end: null, source_line_start: 1, source_line_end: 1,
+    char_count: 2, prev_chunk: null, next_chunk: null, oversized: false,
+  }],
+}
+
+function manifestFile(id: string, role: 'tender' | 'outline_framework' | 'reference' | 'reference_bid') {
+  const root = `corpus/${role}`
+  return {
+    id, role, originalName: `${role}.md`, inputPath: `input/${role}.md`, corpusPath: root,
+    documentPath: `${root}/document.md`, structurePath: `${root}/structure.json`, metadataPath: `${root}/metadata.json`,
+    chunksPath: `${root}/chunks`, chunkIndexPath: `${root}/chunks/index.json`, mediaType: 'text/markdown',
+    size: 1, sha256: id, parseStatus: 'success', parseError: null,
+  }
+}
+
+async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
+  await mkdir(workspace.sessionRoot, { recursive: true })
+  const files = [
+    manifestFile('TENDER', 'tender'), manifestFile('FRAMEWORK', 'outline_framework'),
+    manifestFile('REFERENCE', 'reference'), manifestFile('REFERENCE-BID', 'reference_bid'),
+  ]
+  await writeFile(workspace.manifestPath, `${JSON.stringify({ version: 4, files })}\n`)
+  for (const file of files) {
+    await mkdir(join(workspace.sessionRoot, file.chunksPath), { recursive: true })
+    await writeFile(join(workspace.sessionRoot, file.chunkIndexPath), `${JSON.stringify(chunkIndex)}\n`)
+    await writeFile(join(workspace.sessionRoot, file.chunksPath, 'chunk_0001.md'), `${file.role} 正文\n`)
+  }
+  const snapshot = '公开技术资料\n'
+  const sourceId = 'WEB-aaaaaaaaaaaaaaaa'
+  await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
+  await writeFile(join(workspace.sessionRoot, `analysis/web-sources/${sourceId}.md`), snapshot)
+  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+    schema_version: 1,
+    stage: 'evidence_mapping',
+    sources: [{
+      source_id: sourceId, search_call_id: 'search-ledger', fetch_call_id: 'fetch-ledger',
+      search_result_seq: 1, fetch_call_seq: 2, fetch_result_seq: 3, queries: ['公开技术'],
+      discovered_url: 'https://example.com/standard', requested_url: 'https://example.com/standard',
+      final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: fetchedAt,
+      content_sha256: webEvidenceContentSha256(snapshot), snapshot_path: `analysis/web-sources/${sourceId}.md`,
+    }],
+  })}\n`)
+}
 
 function candidateFrom(request: SubagentStartRequest, valid = true, withWebEvidence = false) {
   if (promptText(request).includes('Writer Candidate：')) return reviewFrom(request)
@@ -75,7 +171,6 @@ function candidateFrom(request: SubagentStartRequest, valid = true, withWebEvide
     must_answer: string[]
     scoring_response_point_ids: string[]
     scoring_response_points: Array<{ scoring_id: string; response_point: string }>
-    source_mapping_ids: string[]
   }
   return {
     section_id: section.id,
@@ -85,13 +180,9 @@ function candidateFrom(request: SubagentStartRequest, valid = true, withWebEvide
       covered_must_answer: valid ? section.must_answer : [],
       covered_scoring_response_point_ids: section.scoring_response_point_ids,
       covered_scoring_response_points: section.scoring_response_points,
-      assigned_source_mapping_ids: section.source_mapping_ids,
-      source_mapping_usage: [],
-      source_mapping_ids_used: [],
-      evidence_used: [], additional_materials: [], external_evidence_used: [],
-      additional_external_materials: withWebEvidence ? [{
-        title: '官方标准', url: fetchedUrl, publisher: '官方机构', retrieved_at: fetchedAt,
-        retrieval_method: 'web_search', usage: 'reference', summary: '官方正文摘要', supports: '公开技术要求',
+      local_materials_used: [], web_materials_used: [],
+      additional_web_materials: withWebEvidence ? [{
+        url: fetchedUrl, usage: 'reference', summary: '官方正文摘要', supports: '公开技术要求',
       }] : [],
       unresolved_topics: [],
       handoff: emptyHandoff(section.id),
@@ -104,20 +195,19 @@ function reviewFrom(request: SubagentStartRequest) {
   const candidateLine = lines.find(line => line.startsWith('Writer Candidate：'))
   const blueprintLine = lines.find(line => line.startsWith('Current Chapter Blueprint：'))
   if (candidateLine === undefined || blueprintLine === undefined) throw new Error('missing reviewer context')
-  const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string; must_answer: string[]; requirement_ids: string[]; scoring_response_point_ids: string[]; compliance_ids: string[]; source_mapping_ids: string[] }
+  const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string; must_answer: string[]; requirement_ids: string[]; scoring_response_point_ids: string[]; compliance_ids: string[] }
   const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: ['正文'], issue: null })
   return {
-    schema_version: 1 as const, section_id: section.id, verdict: 'pass' as const,
+    schema_version: 2 as const, section_id: section.id, verdict: 'pass' as const,
     must_answer_coverage: section.must_answer.map(coverage),
     requirement_coverage: section.requirement_ids.map(requirement_id => ({ requirement_id, ...coverage(requirement_id) })),
     response_point_coverage: section.scoring_response_point_ids.map(response_point_id => (
       { response_point_id, ...coverage(response_point_id) }
     )),
     compliance_coverage: section.compliance_ids.map(compliance_id => ({ compliance_id, ...coverage(compliance_id) })),
-    source_mapping_review: section.source_mapping_ids.map(mapping_id => ({ mapping_id, status: 'used' as const, evidence_quotes: ['正文'], issue: null })),
     claim_checks: [],
     quality_checks: {
-      content_mode_respected: true, project_specific: true, structure_complete: true,
+      project_specific: true, structure_complete: true,
       legacy_project_pollution_free: true, placeholder_free: true, obvious_repetition_free: true,
     },
     blocking_issues: [],
@@ -146,6 +236,7 @@ function fixtureAgent(
   let maxActive = 0
   let attempt = 0
   const disposed: string[] = []
+  const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
   const spawnProvider = {
     capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
     inheritsParentContext: false,
@@ -216,7 +307,10 @@ function fixtureAgent(
   const tools = {
     schemas: vi.fn(() => ['grep', 'read', 'write', 'web_search', 'web_fetch'].map(name => ({ name }))),
     restrict: vi.fn(() => () => {}),
-    guard: vi.fn(() => () => {}),
+    guard: vi.fn((guard: (execution: Readonly<ToolExecution>) => string | undefined) => {
+      guards.push(guard)
+      return () => {}
+    }),
   }
   const listeners = new Map<string, (...args: unknown[]) => void>()
   const agent = {
@@ -244,7 +338,7 @@ function fixtureAgent(
       })}\n`)
     }),
   } as unknown as Agent
-  return { agent, followup, starts, subagents, tools, disposed, maxActive: () => maxActive }
+  return { agent, followup, starts, subagents, tools, guards, disposed, maxActive: () => maxActive }
 }
 
 describe('chapter-writing executor', () => {
@@ -254,6 +348,130 @@ describe('chapter-writing executor', () => {
     expect(policy.forbiddenTools).toEqual(['bash'])
     expect(policy.requiredInputs).toContain('analysis/web-evidence-sources.json')
     expect(policy.requiredArtifacts).toEqual(['chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json'])
+  })
+
+  it('classifies reference, reference-bid, and Web materials without source-section abstractions', () => {
+    const scoring = parseTenderScoringArtifact({
+      schema_version: 1,
+      scoring_items: [{
+        id: 'SCORE-1', parent: null, group: null, title: '评分', raw_text: '评分', criterion: '评分', score: 1,
+        score_range: null, must_answer: true, source_refs: source,
+      }],
+    })
+    const context = pickChapterContext({
+      section: outlineFixture().sections[1]!,
+      sequence: 1,
+      project: parseTenderProjectArtifact({
+        schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+        project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
+        implementation_constraints: [], key_technical_points: [], source_refs: source, analyzed_tender_files: ['tender'],
+      }),
+      requirements: parseTenderRequirementsArtifact({
+        schema_version: 1,
+        requirements: [{ id: 'REQ-1', category: '技术', raw_text: '要求', normalized_requirement: '要求', mandatory: true, source_refs: source }],
+      }),
+      scoring,
+      compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
+      evidence: parseEvidenceMapArtifact({
+        schema_version: 8,
+        section_mappings: [{
+          section_id: 'SEC-1',
+          local_materials: [
+            { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
+            { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
+          ],
+          web_materials: [{ source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md', usage: 'reference', summary: '公开资料', supports: '评分响应' }],
+          missing_topics: [], writing_dimensions: ['需求维度', '评分维度'],
+        }],
+      }),
+      responsePointCatalog: createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '回答评分1' }] }).points,
+      globalComplianceIds: [],
+    })
+
+    expect(context.relatedMaterials.map(material => material.file_id)).toEqual(['REFERENCE'])
+    expect(context.referenceBidMaterials.map(material => material.file_id)).toEqual(['REFERENCE-BID'])
+    expect(context.webMaterials.map(material => material.source_id)).toEqual(['WEB-aaaaaaaaaaaaaaaa'])
+    expect(context.writingDimensions).toEqual(['需求维度', '评分维度'])
+  })
+
+  it('allows only reference chunks, their indexes, and ledger Web snapshots', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-read-guard-')), 'session')
+    const outline = await writeInputs(workspace)
+    await seedReadableMaterials(workspace)
+    const evidencePath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8')) as {
+      section_mappings: Array<{ local_materials: unknown[]; web_materials: unknown[] }>
+    }
+    evidence.section_mappings[0]!.local_materials = [
+      { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
+      { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
+    ]
+    evidence.section_mappings[0]!.web_materials = [{
+      source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+      usage: 'reference', summary: '公开资料', supports: '章节方法',
+    }]
+    await writeFile(evidencePath, `${JSON.stringify(evidence)}\n`)
+    const fixture = fixtureAgent(workspace, outline)
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 1,
+    })
+
+    const firstWriter = fixture.subagents.start.mock.calls.find(call => call[1].toolFilter?.allow?.length !== 0
+      && promptText(call[1]).includes('"id":"SEC-1"'))
+    expect(firstWriter).toBeDefined()
+    const prompt = promptText(firstWriter![1])
+    expect(prompt).toContain('corpus/reference/chunks/chunk_0001.md')
+    expect(prompt).toContain('corpus/reference/chunks/index.json')
+    expect(prompt).toContain('corpus/reference_bid/chunks/chunk_0001.md')
+    expect(prompt).toContain('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md')
+
+    const guard = fixture.guards.at(-1)
+    expect(guard).toBeDefined()
+    const guarded = (name: 'read' | 'grep', argument: 'file_path' | 'path', path: string): string | undefined => guard!({
+      name,
+      arguments: { [argument]: path },
+      agent: { session: { id: SessionId('guard-child'), header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
+    } as unknown as ToolExecution)
+    const sessionPath = (path: string): string => join(workspace.sessionRoot, ...path.split('/'))
+    expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks/index.json'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('corpus/reference_bid/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath('corpus/reference_bid/chunks/index.json'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('corpus/tender/chunks/chunk_0001.md'))).toContain('不可读取')
+    expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toContain('不可读取')
+    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('账本')
+  })
+
+  it('accepts any Web material whose ledger snapshot and hash are real', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-ledger-material-')), 'session')
+    await seedReadableMaterials(workspace)
+    const section = outlineFixture().sections[1]!
+    const candidate: ChapterCandidate = {
+      section_id: section.id,
+      markdown: '# 章节\n\n正文内容',
+      metadata: {
+        section_id: section.id,
+        covered_must_answer: section.must_answer,
+        covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+        covered_scoring_response_points: section.scoring_response_points,
+        local_materials_used: [],
+        web_materials_used: [{
+          source_id: 'WEB-aaaaaaaaaaaaaaaa',
+          snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+          usage: 'reference',
+          summary: '公开资料',
+          supports: '章节方法',
+        }],
+        additional_web_materials: [],
+        unresolved_topics: [],
+        handoff: emptyHandoff(section.id),
+      },
+    }
+
+    await expect(validateChapterCandidate(workspace, emptyChapterContext(section), candidate, [])).resolves.toEqual([])
   })
 
   it('overlaps independent spawn children and unlocks a strong dependency only after acceptance', async () => {
@@ -267,11 +485,24 @@ describe('chapter-writing executor', () => {
     await expect(readFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
     expect(fixture.tools.restrict).toHaveBeenCalledWith({ allow: ['read', 'write'] })
-    expect(JSON.stringify(fixture.followup.mock.calls[0]?.[0])).toContain('Relation Planning')
+    const planningPrompt = JSON.stringify(fixture.followup.mock.calls[0]?.[0])
+    expect(planningPrompt).toContain('Relation Planning')
+    expect(planningPrompt).not.toContain('source_refs')
+    expect(planningPrompt).not.toContain('analyzed_tender_files')
+    expect(planningPrompt).not.toContain('corpus/tender')
     expect(fixture.starts.map(item => promptText(item.request))).toEqual([
       expect.stringContaining('"id":"SEC-1"'),
       expect.stringContaining('"id":"SEC-2"'),
     ])
+    for (const prompt of fixture.starts.map(item => promptText(item.request))) {
+      expect(prompt).not.toContain('source_refs')
+      expect(prompt).not.toContain('analyzed_tender_files')
+      expect(prompt).not.toContain('corpus/tender')
+      expect(prompt).toContain('Related Materials：')
+      expect(prompt).toContain('Reference Bid Materials：')
+      expect(prompt).toContain('Web Materials：')
+      expect(prompt).toContain('Writing Dimensions：')
+    }
     fixture.starts[0]!.resolve()
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
     const dependentPrompt = promptText(fixture.starts[2]!.request)
@@ -333,8 +564,15 @@ describe('chapter-writing executor', () => {
     const manifest = parseChapterWritingManifest(JSON.parse(
       await readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8'),
     ))
-    expect(manifest.chapters[0]?.additional_external_materials).toHaveLength(1)
-    expect(manifest.chapters.slice(1).every(chapter => chapter.additional_external_materials.length === 0)).toBe(true)
+    expect(manifest.chapters[0]?.web_materials_used).toEqual([{
+      source_id: ledger.sources[0]?.source_id,
+      snapshot_path: ledger.sources[0]?.snapshot_path,
+      usage: 'reference',
+      summary: '官方正文摘要',
+      supports: '公开技术要求',
+    }])
+    expect(JSON.stringify(manifest.chapters[0])).not.toContain(fetchedUrl)
+    expect(manifest.chapters.slice(1).every(chapter => chapter.web_materials_used.length === 0)).toBe(true)
   })
 
   it('fails before Main-Agent planning when the spawn provider is absent', async () => {
@@ -473,41 +711,14 @@ describe('chapter-writing executor', () => {
 
   it('rejects additional Web evidence that belongs to another Child', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-')), 'session')
+    await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+      schema_version: 1, stage: 'evidence_mapping', sources: [],
+    })}\n`)
     const section = outlineFixture().sections[1]!
-    const context: ChapterContext = {
-      section,
-      contentPath: 'chapters/sections/0001.md',
-      metadataPath: 'chapters/meta/0001.json',
-      project: {
-        schema_version: 1,
-        project_name: '测试项目',
-        tender_name: null,
-        purchaser: null,
-        owner: null,
-        project_background: [],
-        project_objectives: [],
-        project_scope: [],
-        technical_scope: [],
-        delivery_scope: [],
-        implementation_constraints: [],
-        key_technical_points: [],
-        source_refs: source,
-        analyzed_tender_files: ['tender'],
-      },
-      requirements: [],
-      scoring: [],
-      responsePoints: [],
-      responsePointMappings: [],
-      compliance: [],
-      researchTopics: [],
-      evidence: [],
-      externalEvidence: [],
-      missingTopics: [],
-      sourceMappings: [],
-    }
+    const context = emptyChapterContext(section)
     const external = {
-      title: '来源 B', url: 'https://b.example/doc', publisher: 'B', retrieved_at: '2026-09-01T00:00:00.000Z',
-      retrieval_method: 'web_search' as const, usage: 'reference' as const, summary: '摘要', supports: '技术说明',
+      url: 'https://b.example/doc', usage: 'reference' as const, summary: '摘要', supports: '技术说明',
     }
     const candidate: ChapterCandidate = {
       section_id: section.id,
@@ -517,13 +728,9 @@ describe('chapter-writing executor', () => {
         covered_must_answer: section.must_answer,
         covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
         covered_scoring_response_points: section.scoring_response_points,
-        assigned_source_mapping_ids: section.source_mapping_ids,
-        source_mapping_usage: [],
-        source_mapping_ids_used: [],
-        evidence_used: [],
-        additional_materials: [],
-        external_evidence_used: [],
-        additional_external_materials: [external],
+        local_materials_used: [],
+        web_materials_used: [],
+        additional_web_materials: [external],
         unresolved_topics: [],
         handoff: emptyHandoff(section.id),
       },
@@ -533,12 +740,12 @@ describe('chapter-writing executor', () => {
         source_id: 'WEB-aaaaaaaaaaaaaaaa', search_call_id: 'search-a', fetch_call_id: 'fetch-a', search_result_seq: 1,
         fetch_call_seq: 2, fetch_result_seq: 3, queries: ['A'], discovered_url: 'https://a.example/doc',
         requested_url: 'https://a.example/doc', final_url: 'https://a.example/doc', status_code: 200, truncated: false,
-        fetched_at: external.retrieved_at, content_sha256: 'a'.repeat(64), snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+        fetched_at: fetchedAt, content_sha256: 'a'.repeat(64), snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
       },
       content: 'A',
     }]
 
     expect((await validateChapterCandidate(workspace, context, candidate, childASnapshots)).map(issue => issue.code))
-      .toContain('CHAPTER_WRITING_EXTERNAL_EVIDENCE_UNVERIFIED')
+      .toContain('CHAPTER_WRITING_WEB_MATERIAL_UNVERIFIED')
   })
 })

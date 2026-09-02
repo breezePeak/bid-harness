@@ -44,7 +44,7 @@ declare module '@deepseek-ai/dsh-session/types' {
      */
     'bid.user_confirmation.received':
       | { stage: BidStage; confirmed: true }
-      | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
+      | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
   }
 }
 

@@ -342,29 +342,16 @@ describe('BidStagePanel', () => {
     await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, false) })
   })
 
-  it('moves the composer into the shared S7 workbench only while review waits for the user', async () => {
+  it('exposes the shared workbench throughout S5 without moving the composer', async () => {
     const setComposerBlock = vi.fn()
     const selectReviewView = vi.fn()
     const setReviewViewAvailable = vi.fn()
     const view = render(<BidStagePanel {...props(projection({
-      runtime: { stage: 'book_review', status: 'running' },
+      runtime: { stage: 'chapter_writing', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
     await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith('当前阶段正在处理，请稍候', false) })
-    expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
-    expect(selectReviewView).not.toHaveBeenCalled()
-
-    view.rerender(<BidStagePanel {...props(projection({
-      runtime: { stage: 'book_review', status: 'waiting_user' },
-      composer: { enabled: true },
-    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
-    await waitFor(() => { expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, true) })
-    expect(selectReviewView).toHaveBeenCalledOnce()
-
-    view.rerender(<BidStagePanel {...props(projection({
-      runtime: { stage: 'book_review', status: 'waiting_user' },
-      composer: { enabled: true },
-    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
+    expect(setReviewViewAvailable).toHaveBeenLastCalledWith(true)
     expect(selectReviewView).toHaveBeenCalledOnce()
 
     view.rerender(<BidStagePanel {...props(projection({
@@ -377,7 +364,7 @@ describe('BidStagePanel', () => {
   it('dispatches retry and confirmation without changing projected runtime', async () => {
     const retryStage = vi.fn(async () => {})
     const confirmOutline = vi.fn(async () => {})
-    const draft = outlineDraft({ schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
+    const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     const retryProjection = projection({ allowedActions: ['retry_stage'] })
     const view = render(<BidStagePanel {...props(retryProjection, { retryStage, confirmOutline })} />)
 
@@ -386,7 +373,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('请添加本项目资料')).toBeTruthy()
 
     const confirmationProjection = projection({
-      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     })
     view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline, getOutlineDraft: async () => draft })} />)
@@ -418,56 +405,45 @@ describe('BidStagePanel', () => {
           scoring_items: ['总体方案', '实施方案'].map((title, index) => ({
             id: `SCORE-${String(index + 1)}`, parent: null, group: '技术评分', title,
             raw_text: `${title}完整合理得 ${String(10 - index)} 分`, criterion: `${title}完整合理`,
-            score: 10 - index, score_range: null, must_answer: true, response_points: [`${title}响应重点`],
+            score: 10 - index, score_range: null, must_answer: true,
             source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }],
           })),
         },
-        response_point_catalog: {
-          schema_version: 1, scope: 'technical_bid', scoring_sha256: 'a'.repeat(64), next_sequence: 3,
-          points: [
-            { id: 'RP-000001', scoring_id: 'SCORE-1', order: 1, text: '总体方案响应重点' },
-            { id: 'RP-000002', scoring_id: 'SCORE-2', order: 1, text: '实施方案响应重点' },
-          ],
-        },
+        requirements: { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '满足安全要求', normalized_requirement: '满足安全要求', mandatory: true, source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }] }] },
+        compliance: { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: '合规', raw_text: '不得偏离', normalized_rule: '不得偏离', severity: 'mandatory', source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }] }] },
       }),
     })} />)
 
     expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
-    expect(screen.getByText('总体方案')).toBeTruthy()
-    expect(screen.getByText('实施方案')).toBeTruthy()
+    expect(screen.getByDisplayValue('总体方案')).toBeTruthy()
+    expect(screen.getByDisplayValue('实施方案')).toBeTruthy()
     fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
-    fireEvent.click(screen.getByText('总体方案'))
     expect(screen.getByText('总体方案完整合理得 10 分')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('SCORE-1 评分目标理解'), { target: { value: '总体方案完整、合理且可实施' } })
-    fireEvent.change(screen.getByLabelText('SCORE-1 技术标需要重点响应'), { target: { value: '总体架构\n实施路径' } })
+    fireEvent.change(screen.getAllByLabelText('评分目标理解')[0]!, { target: { value: '总体方案完整、合理且可实施' } })
     fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
     expect(screen.getByRole('button', { name: '正在确认…' })).toHaveProperty('disabled', true)
     await waitFor(() => {
       expect(confirmTenderAnalysis).toHaveBeenCalledWith(expect.arrayContaining([
         { type: 'update_project', fields: { key_technical_points: ['安全架构', '兼容既有系统'] } },
-        expect.objectContaining({
-          type: 'update_scoring_item', scoring_id: 'SCORE-1', criterion: '总体方案完整、合理且可实施',
-        }),
-        { type: 'update_response_point', scoring_id: 'SCORE-1', response_point_id: 'RP-000001', text: '总体架构' },
-        { type: 'add_response_point', scoring_id: 'SCORE-1', order: 2, text: '实施路径' },
+        { type: 'update_scoring_item', scoring_id: 'SCORE-1', fields: { criterion: '总体方案完整、合理且可实施' } },
       ]))
     })
-    confirmation.reject(new BidActionError('BID_INVALID_TENDER_ANALYSIS_EDIT', '修改无效', [{ code: 'EDIT_INVALID', message: '响应重点不能为空' }]))
-    expect(await screen.findByText('EDIT_INVALID: 响应重点不能为空')).toBeTruthy()
+    confirmation.reject(new BidActionError('BID_INVALID_TENDER_ANALYSIS_EDIT', '修改无效', [{ code: 'EDIT_INVALID', message: '规范化字段不能为空' }]))
+    expect(await screen.findByText('EDIT_INVALID: 规范化字段不能为空')).toBeTruthy()
     expect(screen.getByLabelText('技术标分析结果')).toBeTruthy()
   })
 
   it('edits outline text and emits basic structural operations', async () => {
     const confirmOutline = vi.fn(async () => {})
     const initial = outlineDraft({
-      schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
+      schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
         id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
-        must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+        must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
       }],
     })
     const store = outlineStore(initial)
     render(<BidStagePanel {...props(projection({
-      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline,
@@ -494,9 +470,9 @@ describe('BidStagePanel', () => {
 
   it('shows separate outline acceptance and feedback-regeneration rows', async () => {
     const regenerateOutline = vi.fn(async () => {})
-    const draft = outlineDraft({ schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
+    const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     render(<BidStagePanel {...props(projection({
-      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),
@@ -516,14 +492,14 @@ describe('BidStagePanel', () => {
 
   it('immediately previews hierarchy, order, and derived section numbers', async () => {
     const initial = outlineDraft({
-      schema_version: 2, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
+      schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: ['A', 'B', 'C'].map((id, index) => ({
         id, parent_id: null, order: index + 1, level: 1, title: id, purpose: `${id} purpose`, writable: true,
-        must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: 'write_new', source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+        must_answer: [`${id} answer`], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
       })),
     })
     const store = outlineStore(initial)
     render(<BidStagePanel {...props(projection({
-      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),

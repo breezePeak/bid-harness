@@ -2,11 +2,9 @@
 export const BID_STAGES = [
   'file_intake',
   'tender_analysis',
-  'evidence_mapping',
   'outline_generation',
-  'outline_confirmation',
+  'evidence_mapping',
   'chapter_writing',
-  'book_review',
   'docx_export',
 ] as const
 
@@ -25,7 +23,7 @@ export const STAGE_RUN_STATUSES = [
 /** Current execution state of one bid stage. */
 export type StageRunStatus = typeof STAGE_RUN_STATUSES[number]
 
-/** Current count of Host-owned S3 Mapping Tasks by execution state. */
+/** Current count of Host-owned S4 Mapping Tasks by execution state. */
 export interface BidEvidenceMappingProgress {
   /** Number of Mapping Tasks in the approved execution plan. */
   readonly total: number
@@ -59,7 +57,6 @@ export const BID_CLIENT_ACTIONS = [
   'confirm_tender_analysis',
   'confirm_outline',
   'regenerate_outline',
-  'complete_review',
   'send_message',
 ] as const
 
@@ -139,7 +136,6 @@ export type BidComposerReason =
   | 'bid.stage_running'
   | 'bid.tender_analysis_confirmation_required'
   | 'bid.outline_confirmation_required'
-  | 'bid.book_review_completion_required'
   | 'bid.stage_failed'
   | 'bid.completed'
 
@@ -237,12 +233,12 @@ export type BidFileIntakeResult =
   | { readonly ok: true; readonly value: BidRuntimeState; readonly files?: readonly BidFileIntakeFileResult[] | undefined }
   | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
-/** Stable result of an S5 outline-confirmation request. */
+/** Stable result of an S3 or S4 outline-confirmation request. */
 export type BidOutlineConfirmationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
 
-/** Stable result of an S5 outline-regeneration request. */
+/** Stable result of an S3 or S4 outline-regeneration request. */
 export type BidOutlineRegenerationResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REGENERATE_NOT_ALLOWED' | 'BID_OUTLINE_FEEDBACK_REQUIRED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_REGENERATE_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
@@ -270,16 +266,31 @@ export type BidRetryResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidRetryFailure }
 
-/** Result of the explicit S7 transition into DOCX export. */
-export type BidReviewCompletionResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
-  | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REVIEW_NOT_ALLOWED' | 'BID_REVIEW_REPORT_INVALID' | 'BID_REVIEW_CONTENT_CHANGED' | 'BID_REVIEW_COMPLETE_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
+/** Per-section writing state exposed by the S5 workbench. */
+export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready' | 'completed' | 'failed'
 
-/** Browser-safe outline and report summary used by the S7 workbench. */
+/** Per-section review state exposed by the S5 workbench. */
+export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_attention' | 'failed'
+
+/** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
   readonly schema_version: 1
-  readonly outline: readonly { readonly section_id: string; readonly parent_id: string | null; readonly order: number; readonly title: string; readonly writable: boolean; readonly has_content: boolean; readonly review_status: 'not_evaluated' }[]
-  readonly review: { readonly review_mode: 'framework_only'; readonly quality_gate: 'not_evaluated'; readonly summary: { readonly chapter_count: number; readonly evaluated_chapter_count: 0; readonly issue_count: number; readonly blocking_issue_count: number }; readonly limitations: readonly string[]; readonly issues: readonly BidReviewIssueView[] }
+  readonly outline: readonly {
+    readonly section_id: string
+    readonly parent_id: string | null
+    readonly order: number
+    readonly title: string
+    readonly writable: boolean
+    readonly writing_status: BidChapterWritingStatus
+    readonly review_status: BidChapterReviewStatus
+    readonly content_available: boolean
+  }[]
+  readonly summary: {
+    readonly chapter_count: number
+    readonly content_count: number
+    readonly reviewed_count: number
+    readonly needs_attention_count: number
+  }
 }
 
 /** Browser-safe generic review finding reserved for later detailed-review rules. */
@@ -294,7 +305,7 @@ export interface BidReviewIssueView {
   readonly suggestion: string
 }
 
-/** Browser-safe body for a selected S7 outline section. */
+/** Browser-safe body for a selected S5 outline section. */
 export interface BidReviewChapterView {
   readonly section_id: string
   readonly title: string
@@ -302,7 +313,10 @@ export interface BidReviewChapterView {
   readonly heading_path: readonly string[]
   readonly writable: boolean
   readonly markdown: string | null
-  readonly review: { readonly status: 'not_evaluated'; readonly issues: readonly BidReviewIssueView[] }
+  readonly requirement_ids: readonly string[]
+  readonly scoring_response_point_ids: readonly string[]
+  readonly evidence_status: 'available' | 'missing' | 'not_applicable'
+  readonly review: { readonly status: BidChapterReviewStatus; readonly issues: readonly BidReviewIssueView[] }
 }
 
 /** Result of host admission for an ordinary Bid composer message. */

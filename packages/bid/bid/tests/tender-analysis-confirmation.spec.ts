@@ -21,42 +21,43 @@ const analysis: TenderAnalysisConfirmationView = {
     scoring_items: [{
       id: 'SCORE-1', parent: null, group: '技术评分', title: '总体方案', raw_text: '总体方案完整得 10 分',
       criterion: '方案完整可行', score: 10, score_range: null, must_answer: true,
-      response_points: ['总体架构'], source_refs: [source],
+      source_refs: [source],
     }],
   },
-  response_point_catalog: {
-    schema_version: 1, scope: 'technical_bid', scoring_sha256: '0'.repeat(64), next_sequence: 2,
-    points: [{ id: 'RP-000001', scoring_id: 'SCORE-1', order: 1, text: '总体架构' }],
+  requirements: {
+    schema_version: 1,
+    requirements: [{ id: 'REQ-1', category: '技术', raw_text: '应具备总体架构。', normalized_requirement: '具备总体架构。', mandatory: true, source_refs: [source] }],
+  },
+  compliance: {
+    schema_version: 1,
+    compliance_items: [{ id: 'COMP-1', type: '技术', raw_text: '应符合安全规范。', normalized_rule: '符合安全规范。', severity: 'mandatory', source_refs: [source] }],
   },
 }
 
 describe('tender-analysis confirmation edits', () => {
-  it('updates only editable project and scoring conclusions', () => {
+  it('updates only editable normalized conclusions', () => {
     const edited = applyTenderAnalysisEdits(analysis, parseTenderAnalysisEditOperations([
       { type: 'update_project', fields: { key_technical_points: ['安全架构', '兼容既有系统'] } },
-      { type: 'update_scoring_item', scoring_id: 'SCORE-1', criterion: '方案完整、可行且可落地' },
-      { type: 'add_response_point', scoring_id: 'SCORE-1', order: 2, text: '实施路径' },
+      { type: 'update_requirement', requirement_id: 'REQ-1', fields: { normalized_requirement: '具备可审查的总体架构。' } },
+      { type: 'update_scoring_item', scoring_id: 'SCORE-1', fields: { criterion: '方案完整、可行且可落地' } },
+      { type: 'update_compliance', compliance_id: 'COMP-1', fields: { severity: 'warning' } },
     ]))
 
     expect(edited.project.key_technical_points).toEqual(['安全架构', '兼容既有系统'])
-    expect(edited.scoring.scoring_items[0]).toMatchObject({
-      criterion: '方案完整、可行且可落地', response_points: ['总体架构', '实施路径'],
-      raw_text: '总体方案完整得 10 分', source_refs: [source], score: 10,
-    })
+    expect(edited.requirements.requirements[0]).toMatchObject({ normalized_requirement: '具备可审查的总体架构。', raw_text: '应具备总体架构。', source_refs: [source] })
+    expect(edited.scoring.scoring_items[0]).toMatchObject({ criterion: '方案完整、可行且可落地', raw_text: '总体方案完整得 10 分', source_refs: [source], score: 10 })
+    expect(edited.compliance.compliance_items[0]).toMatchObject({ severity: 'warning', raw_text: '应符合安全规范。', source_refs: [source] })
   })
 
-  it('rejects source-truth fields, unknown scoring ids, and empty response points', () => {
+  it('rejects source-truth fields and unknown item ids', () => {
     expect(() => parseTenderAnalysisEditOperations([{
-      type: 'update_scoring_item', scoring_id: 'SCORE-1', raw_text: '伪造原文',
+      type: 'update_scoring_item', scoring_id: 'SCORE-1', fields: { raw_text: '伪造原文' },
     }])).toThrow()
     expect(() => parseTenderAnalysisEditOperations([{
       type: 'update_project', fields: { source_refs: [] },
     }])).toThrow()
-    expect(() => parseTenderAnalysisEditOperations([{
-      type: 'update_scoring_item', scoring_id: 'SCORE-1', response_points: [],
-    }])).toThrow()
     expect(() => applyTenderAnalysisEdits(analysis, [{
-      type: 'update_scoring_item', scoring_id: 'SCORE-X', criterion: '无效',
+      type: 'update_scoring_item', scoring_id: 'SCORE-X', fields: { criterion: '无效' },
     }])).toThrow('unknown tender scoring item')
   })
 
@@ -67,18 +68,9 @@ describe('tender-analysis confirmation edits', () => {
     expect(edited.project).toMatchObject({ project_name: null, purchaser: null, project_background: [] })
   })
 
-  it('keeps response-point ids across text and order edits and never reuses a deleted id', () => {
-    const added = applyTenderAnalysisEdits(analysis, parseTenderAnalysisEditOperations([
-      { type: 'add_response_point', scoring_id: 'SCORE-1', order: 1, text: '实施路径' },
-      { type: 'update_response_point', scoring_id: 'SCORE-1', response_point_id: 'RP-000001', text: '总体架构设计' },
-      { type: 'move_response_point', scoring_id: 'SCORE-1', response_point_id: 'RP-000001', order: 2 },
-    ]))
-    expect(added.response_point_catalog.points.map(point => point.id).sort()).toEqual(['RP-000001', 'RP-000002'])
-    const replacement = applyTenderAnalysisEdits(added, parseTenderAnalysisEditOperations([
-      { type: 'delete_response_point', scoring_id: 'SCORE-1', response_point_id: 'RP-000002' },
-      { type: 'add_response_point', scoring_id: 'SCORE-1', order: 1, text: '交付保障' },
-    ]))
-    expect(replacement.response_point_catalog.points.map(point => point.id).sort()).toEqual(['RP-000001', 'RP-000003'])
-    expect(replacement.response_point_catalog.next_sequence).toBe(4)
+  it('rejects empty edit objects', () => {
+    expect(() => parseTenderAnalysisEditOperations([{
+      type: 'update_compliance', compliance_id: 'COMP-1', fields: {},
+    }])).toThrow()
   })
 })

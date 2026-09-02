@@ -78,7 +78,6 @@ export function applyOutlineEdits(
   const sections: OutlineSection[] = source.sections.map(section => ({
     ...section,
     must_answer: [...section.must_answer],
-    source_mapping_ids: [...section.source_mapping_ids],
     scoring_response_point_ids: [...(section.scoring_response_point_ids ?? [])],
     scoring_response_points: [...section.scoring_response_points],
   }))
@@ -101,7 +100,7 @@ export function applyOutlineEdits(
         title: operation.title, purpose: operation.purpose, writable: operation.writable,
         must_answer: operation.writable ? [...(operation.must_answer ?? [])] : [],
         requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
-        origin: 'generated', content_mode: operation.writable ? 'write_new' : null, source_mapping_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
+        origin: 'generated', scoring_response_point_ids: [], scoring_response_points: [],
       }
       sections.push(section)
       byId.set(id, section)

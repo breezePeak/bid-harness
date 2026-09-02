@@ -59,9 +59,9 @@ describe('BidWorkspace', () => {
     })
     const inventory = await bid.messageInventory('编写技术标')
     expect(inventory).toContain('资料类型：招标文件')
-    expect(inventory).toContain('资料类型：人工框架或半成品标书')
+    expect(inventory).toContain('资料类型：人工目录框架')
     expect(inventory).toContain('资料类型：参考旧标书')
-    expect(inventory).toContain('资料类型：其他技术资料')
+    expect(inventory).toContain('资料类型：项目相关资料')
   })
 
   it('rejects linked workspace ancestors before writing outside the workspace', async () => {

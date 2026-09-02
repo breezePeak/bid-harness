@@ -6,13 +6,12 @@ import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-wr
 import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist } from './chapter-writing-executor.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
-import { parseEvidenceMapArtifact, type EvidenceMaterial, type ExternalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import {
-  normalizeWebEvidenceUrl,
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
   type WebEvidenceSource,
@@ -39,26 +38,14 @@ async function readJson(workspace: BidWorkspace, path: string, issues: StageVali
 }
 
 async function validateMaterial(
-  workspace: BidWorkspace, manifest: BidManifest, material: EvidenceMaterial, issues: StageValidationIssue[],
+  workspace: BidWorkspace, manifest: BidManifest, material: LocalEvidenceMaterial, issues: StageValidationIssue[],
 ): Promise<void> {
-  const file = manifest.files.find(item => String(item.id) === material.file_id && item.role !== 'tender')
-  if (file === undefined || file.parseStatus !== 'success' || file.chunksPath === null || file.chunkIndexPath === null) {
-    reject(issues, 'CHAPTER_WRITING_EVIDENCE_FILE_INVALID', 'A chapter Evidence reference must name a parsed reference file.', material.chunk)
-    return
-  }
   try {
-    await resolveEvidenceChunk(workspace, manifest, material)
+    const resolved = await resolveEvidenceChunk(workspace, manifest, material)
+    if (!(await lstat(resolved.path)).isFile()) throw new Error('not-file')
   } catch {
-    reject(issues, 'CHAPTER_WRITING_EVIDENCE_INVALID', 'A chapter Evidence reference does not name an indexed local chunk.', material.chunk)
+    reject(issues, 'CHAPTER_WRITING_LOCAL_MATERIAL_INVALID', 'A chapter local material must name an indexed reference/reference_bid chunk.', material.chunk)
   }
-}
-
-function localIdentity(material: EvidenceMaterial): string {
-  return JSON.stringify(material)
-}
-
-function externalIdentity(material: ExternalEvidenceMaterial): string {
-  return JSON.stringify({ ...material, url: normalizeWebEvidenceUrl(material.url) })
 }
 
 async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEvidenceSource): Promise<boolean> {
@@ -72,13 +59,12 @@ async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEviden
   }
 }
 
-async function validateAdditionalExternalMaterials(
+async function validateWebMaterials(
   workspace: BidWorkspace,
   chapters: ReturnType<typeof parseChapterWritingManifest>,
-  executionLog: ReturnType<typeof parseChapterExecutionLog>,
   issues: StageValidationIssue[],
 ): Promise<void> {
-  if (chapters.chapters.every(chapter => chapter.additional_external_materials.length === 0)) return
+  if (chapters.chapters.every(chapter => chapter.web_materials_used.length === 0)) return
   const raw = await readJson(workspace, 'analysis/web-evidence-sources.json', issues)
   if (raw === undefined) return
   let sources: ReturnType<typeof parseWebEvidenceSourcesArtifact>['sources']
@@ -89,25 +75,18 @@ async function validateAdditionalExternalMaterials(
     return
   }
   for (const chapter of chapters.chapters) {
-    const writerAttempts = new Set((executionLog.sections.find(section => section.section_id === chapter.section_id)?.attempts ?? [])
-      .filter(attempt => attempt.role === 'writer')
-      .map(attempt => `${attempt.child_session_id}\u0000${attempt.attempt}`))
-    for (const material of chapter.additional_external_materials) {
-      const normalized = normalizeWebEvidenceUrl(material.url)
-      const source = sources.find(candidate => candidate.chapter_context?.section_id === chapter.section_id
-        && writerAttempts.has(`${candidate.chapter_context.child_session_id}\u0000${candidate.chapter_context.writer_attempt}`)
-        && candidate.fetched_at === material.retrieved_at
-        && (normalizeWebEvidenceUrl(candidate.requested_url) === normalized
-          || normalizeWebEvidenceUrl(candidate.final_url) === normalized))
-      if (source === undefined || !(await webSourceSnapshotValid(workspace, source))) {
-        reject(issues, 'CHAPTER_WRITING_WEB_SOURCE_UNVERIFIED', 'S6 additional external material must match a durable Chapter Writer search-to-fetch snapshot.', 'analysis/web-evidence-sources.json')
+    for (const material of chapter.web_materials_used) {
+      const source = sources.find(candidate => candidate.source_id === material.source_id)
+      if (source === undefined || source.snapshot_path !== material.snapshot_path
+        || !(await webSourceSnapshotValid(workspace, source))) {
+        reject(issues, 'CHAPTER_WRITING_WEB_SOURCE_UNVERIFIED', 'A chapter Web material must match a durable ledger Snapshot and its content hash.', 'analysis/web-evidence-sources.json')
       }
     }
   }
 }
 
 /**
- * Validate complete S6 output against the confirmed outline, S3 mappings, and local corpus.
+ * Validate complete S6 output against the confirmed outline and durable material sources.
  * @param workspace - Session-scoped Bid workspace.
  * @param stage - stage that produced the declared Artifact.
  * @param artifacts - Executor-declared Artifact set.
@@ -128,22 +107,20 @@ export async function validateChapterWriting(
     || new Set(artifacts.map(artifact => artifact.path)).size !== expectedArtifacts.size) {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID', 'The executor must return the execution plan, execution log, and chapter manifest exactly once.', MANIFEST)
   }
-  const [manifestRaw, planRaw, logRaw, outlineRaw, evidenceRaw, scoringRaw, catalogRaw] = await Promise.all([
+  const [manifestRaw, planRaw, logRaw, outlineRaw, scoringRaw, catalogRaw] = await Promise.all([
     readJson(workspace, MANIFEST, issues), readJson(workspace, PLAN, issues),
     readJson(workspace, LOG, issues), readJson(workspace, 'outline/confirmed-outline.json', issues),
-    readJson(workspace, 'analysis/evidence-map.json', issues),
     readJson(workspace, 'analysis/scoring.json', issues),
     readJson(workspace, 'analysis/scoring-response-points.json', issues),
   ])
   if (
     manifestRaw === undefined || planRaw === undefined || logRaw === undefined
-    || outlineRaw === undefined || evidenceRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
+    || outlineRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
   ) return { ok: false, issues }
   let chapters
   let plan
   let executionLog
   let outline
-  let evidence
   let scoring
   let catalog
   try {
@@ -151,11 +128,10 @@ export async function validateChapterWriting(
     plan = parseChapterExecutionPlan(planRaw)
     executionLog = parseChapterExecutionLog(logRaw)
     outline = parseConfirmedOutlineArtifact(outlineRaw)
-    evidence = parseEvidenceMapArtifact(evidenceRaw)
     scoring = parseTenderScoringArtifact(scoringRaw)
     catalog = parseScoringResponsePointCatalog(catalogRaw)
   } catch {
-    reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or evidence map has invalid fields.', MANIFEST)
+    reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or scoring inputs have invalid fields.', MANIFEST)
     return { ok: false, issues }
   }
   const outlineHash = outlineArtifactSha256(outline)
@@ -176,12 +152,9 @@ export async function validateChapterWriting(
     }
     const acceptedWriters = section.attempts.filter(attempt => attempt.role === 'writer' && attempt.accepted)
     const acceptedReviewers = section.attempts.filter(attempt => attempt.role === 'reviewer' && attempt.accepted)
-    if (acceptedWriters.length !== 1 || acceptedWriters[0]?.child_session_id !== section.final_writer_child_session_id
-      || acceptedReviewers.length !== 1 || acceptedReviewers[0]?.child_session_id !== section.final_reviewer_child_session_id) {
-      reject(issues, 'CHAPTER_WRITING_LOG_FINAL_CHILD_INVALID', 'Each chapter must identify one accepted Writer and Reviewer Child Session.', LOG)
-    }
-    if ([...acceptedWriters, ...acceptedReviewers].some(attempt => attempt.issues.length > 0)) {
-      reject(issues, 'CHAPTER_WRITING_LOG_ACCEPTED_ISSUES_INVALID', 'An accepted Child Session attempt cannot retain validation issues.', LOG)
+    if (acceptedWriters.at(-1)?.child_session_id !== section.final_writer_child_session_id
+      || acceptedReviewers.at(-1)?.child_session_id !== section.final_reviewer_child_session_id) {
+      reject(issues, 'CHAPTER_WRITING_LOG_FINAL_CHILD_INVALID', 'Each chapter must identify its final Writer and Reviewer Child Session.', LOG)
     }
   }
   const writable = new Map(outline.sections.filter(section => section.writable).map(section => [section.id, section]))
@@ -200,34 +173,16 @@ export async function validateChapterWriting(
       reject(issues, 'CHAPTER_WRITING_CONTENT_PATH_INVALID', 'A chapter body path must match its confirmed traversal position.', chapter.content_path)
     }
     if (JSON.stringify(chapter.requirement_ids) !== JSON.stringify(section.requirement_ids)
-      || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)) {
+      || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)
+      || JSON.stringify(chapter.compliance_ids) !== JSON.stringify([...section.compliance_ids, ...outline.global_compliance_ids])) {
       reject(issues, 'CHAPTER_WRITING_SECTION_MAPPING_INVALID', 'A chapter mapping must match its confirmed section.', MANIFEST)
     }
     if (JSON.stringify(chapter.covered_scoring_response_points) !== JSON.stringify(section.scoring_response_points)
-      || JSON.stringify(chapter.covered_scoring_response_point_ids) !== JSON.stringify(section.scoring_response_point_ids ?? [])
-      || JSON.stringify(chapter.assigned_source_mapping_ids) !== JSON.stringify(section.source_mapping_ids)
-      || JSON.stringify(chapter.source_mapping_ids_used) !== JSON.stringify(chapter.source_mapping_usage.filter(item => item.status === 'used').map(item => item.mapping_id))) {
-      reject(issues, 'CHAPTER_WRITING_INHERITED_MAPPING_INVALID', 'A chapter must retain confirmed response-point identities and source-mapping usage.', MANIFEST)
+      || JSON.stringify(chapter.covered_scoring_response_point_ids) !== JSON.stringify(section.scoring_response_point_ids ?? [])) {
+      reject(issues, 'CHAPTER_WRITING_INHERITED_RESPONSE_POINT_INVALID', 'A chapter must retain confirmed response-point identities.', MANIFEST)
     }
     for (const answer of chapter.covered_must_answer) if (!section.must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_UNKNOWN', 'A chapter records a must-answer outside its confirmed section.', MANIFEST)
     for (const answer of section.must_answer) if (!chapter.covered_must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_MISSING', 'A chapter omits a required must-answer from its metadata.', MANIFEST)
-    const requirementIds = new Set(section.requirement_ids)
-    const responsePointIds = new Set(section.scoring_response_point_ids ?? [])
-    const mappings = [
-      ...evidence.requirement_mappings.filter(mapping => requirementIds.has(mapping.requirement_id)),
-      ...evidence.scoring_mappings.filter(mapping => section.scoring_ids.includes(mapping.scoring_id)),
-      ...evidence.response_point_mappings.filter(mapping => responsePointIds.has(mapping.response_point_id)),
-    ]
-    const researchTopics = evidence.research_topics.filter(topic => topic.related_requirement_ids.some(id => requirementIds.has(id))
-      || topic.related_scoring_points.some(point => responsePointIds.has(point.response_point_id)))
-    const mappedLocal = new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.materials).map(localIdentity))
-    for (const material of chapter.evidence_used) {
-      if (!mappedLocal.has(localIdentity(material))) reject(issues, 'CHAPTER_WRITING_EVIDENCE_NOT_MAPPED', 'S3 local Evidence used by a chapter must belong to its related mappings.', MANIFEST)
-    }
-    const mappedExternal = new Set([...mappings, ...researchTopics].flatMap(mapping => mapping.external_materials).map(externalIdentity))
-    for (const material of chapter.external_evidence_used) {
-      if (!mappedExternal.has(externalIdentity(material))) reject(issues, 'CHAPTER_WRITING_EXTERNAL_EVIDENCE_NOT_MAPPED', 'S3 external Evidence used by a chapter must belong to its related mappings.', MANIFEST)
-    }
     if (expectedPath !== undefined) {
       const metadataRaw = await readJson(workspace, expectedPath.metadata, issues)
       if (metadataRaw !== undefined) {
@@ -238,13 +193,8 @@ export async function validateChapterWriting(
             covered_must_answer: chapter.covered_must_answer,
             covered_scoring_response_point_ids: chapter.covered_scoring_response_point_ids,
             covered_scoring_response_points: chapter.covered_scoring_response_points,
-            assigned_source_mapping_ids: chapter.assigned_source_mapping_ids,
-            source_mapping_usage: chapter.source_mapping_usage,
-            source_mapping_ids_used: chapter.source_mapping_ids_used,
-            evidence_used: chapter.evidence_used,
-            additional_materials: chapter.additional_materials,
-            external_evidence_used: chapter.external_evidence_used,
-            additional_external_materials: chapter.additional_external_materials,
+            local_materials_used: chapter.local_materials_used,
+            web_materials_used: chapter.web_materials_used,
             unresolved_topics: chapter.unresolved_topics,
             handoff: chapter.handoff,
           }
@@ -262,14 +212,13 @@ export async function validateChapterWriting(
       const reviewRaw = await readJson(workspace, chapter.review_path, issues)
       if (reviewRaw === undefined) throw new Error('review-missing')
       const review = parseChapterReviewArtifact(reviewRaw)
-      if (review.section_id !== chapter.section_id || review.verdict !== 'pass' || review.candidate_sha256 !== chapter.review_sha256
+      if (review.section_id !== chapter.section_id || review.candidate_sha256 !== chapter.review_sha256
         || review.candidate_sha256 !== chapterCandidateSha256(markdown)) throw new Error('review-invalid')
       const coverage = [
         ...review.must_answer_coverage,
         ...review.requirement_coverage,
         ...review.response_point_coverage,
         ...review.compliance_coverage,
-        ...review.source_mapping_review,
       ]
       for (const item of coverage) {
         if (item.evidence_quotes.some(quote => !markdown.includes(quote))) throw new Error('review-quote-invalid')
@@ -280,9 +229,8 @@ export async function validateChapterWriting(
   for (const id of writable.keys()) if (!loggedSections.has(id)) reject(issues, 'CHAPTER_WRITING_LOG_SECTION_MISSING', 'The execution log omits a writable confirmed section.', LOG)
   let bidManifest: BidManifest
   try { bidManifest = await workspace.readManifest() } catch { reject(issues, 'CHAPTER_WRITING_INPUT_INVALID', 'The Bid manifest cannot be read.', 'manifest.json'); return { ok: false, issues } }
-  await Promise.all(chapters.chapters.flatMap(chapter =>
-    [...chapter.evidence_used, ...chapter.additional_materials]
-      .map(material => validateMaterial(workspace, bidManifest, material, issues))))
-  await validateAdditionalExternalMaterials(workspace, chapters, executionLog, issues)
+  await Promise.all(chapters.chapters.flatMap(chapter => chapter.local_materials_used
+    .map(material => validateMaterial(workspace, bidManifest, material, issues))))
+  await validateWebMaterials(workspace, chapters, issues)
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

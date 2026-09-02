@@ -71,7 +71,6 @@ const scoringItemSchema = z.object({
   score: z.number().nullable(),
   score_range: scoreRangeSchema.nullable(),
   must_answer: z.boolean(),
-  response_points: z.array(z.string().min(1)).min(1),
   source_refs: sourceRefsSchema,
 }).strict()
 

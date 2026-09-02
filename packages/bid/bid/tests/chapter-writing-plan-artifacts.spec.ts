@@ -8,13 +8,13 @@ import {
 
 const hash = 'a'.repeat(64)
 const outline: OutlineArtifact = {
-  schema_version: 2,
+  schema_version: 3,
   scope: 'technical_bid',
   document_title: '技术标',
   global_compliance_ids: [],
   sections: [
-    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '结构', purpose: '结构', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', content_mode: null, source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
-    ...['A', 'B', 'C'].map((id, index) => ({ id, parent_id: 'STRUCT', order: index + 1, level: 2, title: id, purpose: id, writable: true, must_answer: [id], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, content_mode: 'write_new' as const, source_mapping_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
+    { id: 'STRUCT', parent_id: null, order: 1, level: 1, title: '结构', purpose: '结构', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
+    ...['A', 'B', 'C'].map((id, index) => ({ id, parent_id: 'STRUCT', order: index + 1, level: 2, title: id, purpose: id, writable: true, must_answer: [id], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated' as const, scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] })),
   ],
 }
 

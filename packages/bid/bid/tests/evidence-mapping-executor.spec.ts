@@ -43,35 +43,59 @@ function promptText(request: { prompt: readonly { type: string; text?: string }[
 }
 
 async function writeInputs(workspace: BidWorkspace) {
-  const [tender, reference] = await workspace.import([
+  const [tender, reference, framework, referenceBid] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('可复用的统一技术资料。') },
+    { name: 'framework.md', role: 'outline_framework', bytes: new TextEncoder().encode('# 人工目录\n\n框架正文。') },
+    { name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 旧标书\n\n成熟方案。') },
   ])
-  if (tender === undefined || reference === undefined
+  if (tender === undefined || reference === undefined || framework === undefined || referenceBid === undefined
     || tender.absoluteChunkIndexPath === null || tender.chunksPath === null
-    || reference.absoluteChunkIndexPath === null || reference.chunksPath === null) {
+    || reference.absoluteChunkIndexPath === null || reference.chunksPath === null
+    || framework.absoluteChunkIndexPath === null || framework.chunksPath === null
+    || referenceBid.absoluteChunkIndexPath === null || referenceBid.chunksPath === null) {
     throw new Error('executor fixture missing')
   }
   const index = JSON.parse(await readFile(reference.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
   const tenderIndex = JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ id: string; path: string }> }
+  const frameworkIndex = JSON.parse(await readFile(framework.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
+  const referenceBidIndex = JSON.parse(await readFile(referenceBid.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = index.chunks[0]!.id
   const tenderChunk = tenderIndex.chunks[0]!.id
   const tenderPath = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
   const source = [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }]
-  const scoring = { schema_version: 1 as const, scoring_items: [1, 2].map(value => ({ id: `S-${value}`, parent: null, group: '技术', title: `评分${value}`, raw_text: `评分${value}`, criterion: `响应评分${value}`, score: 1, score_range: null, must_answer: true, response_points: [`响应点${value}`], source_refs: source })) }
+  const scoring = { schema_version: 1 as const, scoring_items: [1, 2].map(value => ({ id: `S-${value}`, parent: null, group: '技术', title: `评分${value}`, raw_text: `评分${value}`, criterion: `响应评分${value}`, score: 1, score_range: null, must_answer: true, source_refs: source })) }
   await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
   await Promise.all([
     writeFile(join(workspace.sessionRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null, project_background: ['背景'], project_objectives: ['目标'], project_scope: ['范围'], technical_scope: ['技术'], delivery_scope: ['交付'], implementation_constraints: [], key_technical_points: ['架构'], source_refs: source, analyzed_tender_files: [tender.id] })),
     writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [1, 2].map(value => ({ id: `R-${value}`, category: '技术', raw_text: `要求${value}`, normalized_requirement: `响应要求${value}`, mandatory: true, source_refs: source })) })),
     writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
-    writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring))),
+    writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2].map(value => ({ scoring_id: `S-${value}`, order: 1, text: `响应点${value}` })) }))),
     writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
   ])
-  return { chunk, fileId: reference.id, tender: { chunk: tenderChunk, path: tenderPath, fileId: tender.id } }
+  const outline = {
+    schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [1, 2].map(value => ({
+      id: `SEC-${value}`, parent_id: null, order: value, level: 1, title: `章节${value}`, purpose: `响应主题${value}`, writable: true,
+      must_answer: [`响应主题${value}`], requirement_ids: [`R-${value}`], scoring_ids: [`S-${value}`], compliance_ids: [], origin: 'generated',
+      scoring_response_point_ids: [`RP-${String(value).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `S-${value}`, response_point: `响应点${value}` }], suggested_tables: [], suggested_figures: [], writing_notes: [],
+    })),
+  }
+  await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+  await Promise.all([
+    writeFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline)),
+    writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })),
+  ])
+  return {
+    chunk,
+    fileId: reference.id,
+    tender: { chunk: tenderChunk, path: tenderPath, fileId: tender.id },
+    framework: { path: `${framework.chunksPath}/${frameworkIndex.chunks[0]!.path}`, fileId: framework.id },
+    referenceBid: { path: `${referenceBid.chunksPath}/${referenceBidIndex.chunks[0]!.path}`, fileId: referenceBid.id },
+  }
 }
 
 function mappingFixture(
-  workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false, truncatedFileId = false,
+  workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false,
 ) {
   let pendingMain = ''
   let active = 0
@@ -81,7 +105,7 @@ function mappingFixture(
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
   const plan = {
-    schema_version: 1, global_analysis: ['按业务响应拆分。'], source_strategy_notes: ['普通资料供各任务交叉检索。'],
+    schema_version: 2, global_analysis: ['按业务响应拆分。'], research_notes: ['普通资料供各任务交叉检索。'],
     tasks: [
       { task_id: 'TASK-1', title: '主题一', objective: '处理第一组', requirement_ids: ['R-1'], scoring_ids: ['S-1'], response_point_ids: ['RP-000001'], compliance_ids: [], source_focus: ['统一资料'], research_topics: [] },
       { task_id: 'TASK-2', title: '主题二', objective: '处理第二组', requirement_ids: ['R-1', 'R-2'], scoring_ids: ['S-2'], response_point_ids: ['RP-000002'], compliance_ids: [], source_focus: ['统一资料'], research_topics: [] },
@@ -93,24 +117,24 @@ function mappingFixture(
     const task = JSON.parse(line.slice('Mapping Task：'.length)) as typeof plan.tasks[number]
     const attempt = (taskAttempts.get(task.task_id) ?? 0) + 1
     taskAttempts.set(task.task_id, attempt)
-    const local = { file_id: truncatedFileId ? material.fileId.slice(0, 24) : material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
+    const local = { source_kind: 'reference' as const, file_id: material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
     return {
       task_id: task.task_id,
       requirement_mappings: task.requirement_ids.flatMap((requirement_id, index) =>
         repairFirst && task.task_id === 'TASK-1' && attempt === 1 && index === 0
           ? []
-          : [{ requirement_id, materials: [local], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] }]),
+          : [{ requirement_id, local_materials: [local], web_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] }]),
       scoring_mappings: task.scoring_ids.map(scoring_id => ({
-        scoring_id, materials: [local], external_materials: [], missing_topics: [],
+        scoring_id, local_materials: [local], web_materials: [], missing_topics: [],
       })),
       response_point_mappings: task.response_point_ids.map((response_point_id) => {
         const value = Number(response_point_id.slice(-1))
         return {
           response_point_id, scoring_id: `S-${value}`, response_point: `响应点${value}`,
-          materials: [local], external_materials: [], missing_topics: [], writing_dimensions: ['技术响应'],
+          local_materials: [local], web_materials: [], missing_topics: [], writing_dimensions: ['技术响应'],
         }
       }),
-      research_topics: [], framework_mappings: [], reference_bid_mappings: [], findings: [`${task.task_id} 结论`], missing_topics: [],
+      research_topics: [],
     }
   }
   const spawnProvider: Pick<SubagentProvider, 'capabilities' | 'inheritsParentContext' | 'prepareContinuable'> = {
@@ -144,7 +168,7 @@ function mappingFixture(
       children.set(String(id), localAgent)
       childRequests.set(String(id), request)
       starts.push({ request, resolve: settle })
-      if (repairFirst || truncatedFileId) queueMicrotask(settle)
+      if (repairFirst) queueMicrotask(settle)
       return { childId: id, messageId: `message-${id}` as never }
     }),
     followup: vi.fn(async (_parent: Agent, childId: SessionId, _content: Array<{ type: string; text: string }>) => {
@@ -210,6 +234,9 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request.request)).toContain('提交前在当前子任务中逐项检查')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.fileId)
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.path)
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.fileId)
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.path)
+    expect(promptText(fixture.starts[0]!.request.request)).toContain(material.referenceBid.fileId)
     for (const start of fixture.starts) {
       expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] } })
     }
@@ -217,9 +244,17 @@ describe('evidence-mapping Agent executor', () => {
     expect(childReadGuard?.({
       name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.tender.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
-    } as unknown as ToolExecution)).toBe('S3 Mapping Child 不可读取招标文件或未入库资料的分块。')
+    } as unknown as ToolExecution)).toBe('S3 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
+    expect(childReadGuard?.({
+      name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.framework.path) },
+      agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
+    } as unknown as ToolExecution)).toBe('S3 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
+    expect(childReadGuard?.({
+      name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.referenceBid.path) },
+      agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
+    } as unknown as ToolExecution)).toBeUndefined()
     fixture.starts.forEach((start) => { start.resolve() })
-    await expect(execution).resolves.toHaveLength(2)
+    await expect(execution).resolves.toHaveLength(4)
     await expect(readEvidenceMappingProgress(workspace)).resolves.toEqual({
       total: 2,
       completed: 2,
@@ -228,8 +263,8 @@ describe('evidence-mapping Agent executor', () => {
       failed: 0,
     })
 
-    const map = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')) as { requirement_mappings: Array<{ requirement_id: string; materials: unknown[] }> }
-    expect(map.requirement_mappings.find(item => item.requirement_id === 'R-1')?.materials).toHaveLength(1)
+    const map = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')) as { section_mappings: Array<{ section_id: string; local_materials: unknown[] }> }
+    expect(map.section_mappings.find(item => item.section_id === 'SEC-1')?.local_materials).toHaveLength(1)
     const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as { observed_max_concurrency: number; tasks: Array<{ final_child_session_id: string | null }> }
     expect(log.observed_max_concurrency).toBe(2)
     expect(log.tasks.every(item => item.final_child_session_id !== null)).toBe(true)
@@ -258,19 +293,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(new Set(log.tasks.find(item => item.task_id === 'TASK-1')!.attempts.map(item => item.child_session_id))).toEqual(new Set(['child-1']))
   })
 
-  it('canonicalizes an unambiguous copied corpus id before validating its chunk', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-file-id-')), 'session')
-    const material = await writeInputs(workspace)
-    const fixture = mappingFixture(workspace, material, false, true)
-
-    await expect(executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxRepairAttempts: 0,
-      maxConcurrency: 2,
-    })).resolves.toHaveLength(2)
-    expect(fixture.subagents.followup).not.toHaveBeenCalled()
-  })
-
-  it('reports tender materials separately from invalid chunk references', async () => {
+  it('rejects a local material whose declared source kind does not match the manifest role', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-tender-material-')), 'session')
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material.tender)
@@ -281,15 +304,17 @@ describe('evidence-mapping Agent executor', () => {
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach(start => start.resolve())
-    await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_TENDER_EVIDENCE_FORBIDDEN')
+    await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_LOCAL_EVIDENCE_INVALID')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8'))
-      .resolves.toContain('招标文件不得作为本地 Evidence')
+      .resolves.toContain('source_kind、file_id 或 chunk 无效')
   })
 
   it('limits the Main Agent policy to plan and merge tools', () => {
     const policy = getBidStagePolicy('evidence_mapping')
     expect(policy.allowedTools).toEqual(['read', 'write'])
+    expect(policy.requiredInputs).toContain('manifest.json')
     const prompt = renderEvidenceMappingTask({ id: 'session' } as Agent, new BidWorkspace('C:/workspace', 'session'), buildBidStageTask('evidence_mapping'))
+    expect(prompt.match(/session\/manifest\.json/gu)).toHaveLength(1)
     expect(prompt).toContain('不要 grep、不要读取 corpus chunk、不要联网')
     expect(prompt).toContain('不得按文件角色拆任务')
     expect(prompt).toContain('不得包含 Markdown code fence、解释文字或任何其他前后缀')
@@ -312,9 +337,9 @@ describe('evidence-mapping Agent executor', () => {
     {
       name: 'reports strict plan schema paths separately',
       content: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         global_analysis: ['按业务主题拆分。'],
-        source_strategy_notes: [],
+        research_notes: [],
         tasks: [{
           task_id: 'TASK-1',
           title: '缺少目标',
@@ -364,9 +389,9 @@ describe('evidence-mapping Agent executor', () => {
       await expect(readFile(planPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       removedBeforeRepair = true
       await writeFile(planPath, JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         global_analysis: ['按业务主题拆分。'],
-        source_strategy_notes: [],
+        research_notes: [],
         tasks: [{
           task_id: 'TASK-1', title: '主题一', objective: '处理第一组', requirement_ids: ['R-1'], scoring_ids: ['S-1'],
           response_point_ids: ['RP-000001'], compliance_ids: [], source_focus: [], research_topics: [],
@@ -380,7 +405,7 @@ describe('evidence-mapping Agent executor', () => {
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1, maxConcurrency: 2 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach(start => start.resolve())
-    await expect(execution).resolves.toHaveLength(2)
+    await expect(execution).resolves.toHaveLength(4)
     expect(removedBeforeRepair).toBe(true)
   })
 

@@ -83,12 +83,11 @@ export async function mutateOutlineDraft(
   }
   const hash = outlineArtifactSha256(candidate)
   if (hash === current.draft_outline_sha256) return { ok: true, value: current }
-  const [requirements, scoring, compliance, evidence, catalog] = await Promise.all([
+  const [requirements, scoring, compliance, catalog] = await Promise.all([
     readJson(workspace, 'analysis/requirements.json'), readJson(workspace, 'analysis/scoring.json'),
-    readJson(workspace, 'analysis/compliance.json'), readJson(workspace, 'analysis/evidence-map.json'),
-    readJson(workspace, 'analysis/scoring-response-points.json'),
+    readJson(workspace, 'analysis/compliance.json'), readJson(workspace, 'analysis/scoring-response-points.json'),
   ])
-  const validation = validateOutlineDraftForConfirmation(candidate, requirements, scoring, compliance, evidence, catalog)
+  const validation = validateOutlineDraftForConfirmation(candidate, requirements, scoring, compliance, catalog)
   if (!validation.ok) {
     const candidateIds = new Set(candidate.sections.flatMap(section => section.scoring_response_point_ids ?? []))
     const missingPoint = parseScoringResponsePointCatalog(catalog).points.find(point => !candidateIds.has(point.id))

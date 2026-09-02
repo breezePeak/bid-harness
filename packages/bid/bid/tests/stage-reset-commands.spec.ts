@@ -14,7 +14,7 @@ class FakeBidRuntime extends Service {
 }
 
 describe('Bid stage reset commands', () => {
-  it('registers S2-S7 commands and dispatches the selected stage without model input', async () => {
+  it('registers S2-S5 commands and dispatches the selected stage without model input', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(CommandRuntime)
@@ -25,7 +25,7 @@ describe('Bid stage reset commands', () => {
 
     expect(ctx.commands.list(agent).map(command => command.name)).toEqual([
       'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
-      'bid-reset-s5', 'bid-reset-s6', 'bid-reset-s7',
+      'bid-reset-s5',
     ])
     const handler = ctx.commands.find(agent, 'bid-reset-s3')?.handler
     expect(handler).toBeDefined()
@@ -37,8 +37,8 @@ describe('Bid stage reset commands', () => {
       signal: new AbortController().signal,
     })).resolves.toEqual({
       kind: 'success',
-      text: '证据映射阶段已重置：evidence_mapping / waiting_user。',
+      text: '初步目录阶段已重置：outline_generation / waiting_user。',
     })
-    expect((ctx.bid as unknown as FakeBidRuntime).resetStage).toHaveBeenCalledWith(agent, 'evidence_mapping')
+    expect((ctx.bid as unknown as FakeBidRuntime).resetStage).toHaveBeenCalledWith(agent, 'outline_generation')
   })
 })
