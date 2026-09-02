@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
 
@@ -22,7 +23,7 @@ const chapter = {
 
 function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbenchProps {
   return {
-    sessionId: 'bid',
+    sessionId: 'bid' as SessionId,
     useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'running' } }),
     renderSlot: (name: string) => <div data-slot={name} />,
