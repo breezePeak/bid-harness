@@ -17,11 +17,9 @@ describe('bid control-plane public contract', () => {
     expect(BID_STAGES).toEqual([
       'file_intake',
       'tender_analysis',
-      'evidence_mapping',
       'outline_generation',
-      'outline_confirmation',
+      'evidence_mapping',
       'chapter_writing',
-      'book_review',
       'docx_export',
     ])
     expect(STAGE_RUN_STATUSES).toEqual(['pending', 'running', 'waiting_user', 'failed', 'completed'])
@@ -45,7 +43,7 @@ describe('bid control-plane public contract', () => {
       requiredArtifacts: ['analysis/requirements.json'],
       validator: 'tender-analysis-validator',
       userGate: 'none',
-      nextStage: 'evidence_mapping',
+      nextStage: 'outline_generation',
     }
     const task: BidStageTask = {
       stage: 'tender_analysis',
@@ -56,7 +54,7 @@ describe('bid control-plane public contract', () => {
       constraints: ['Write only the required analysis artifacts.'],
     }
 
-    expect(policy.nextStage).toBe('evidence_mapping')
+    expect(policy.nextStage).toBe('outline_generation')
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
   })
 
@@ -74,7 +72,7 @@ describe('bid control-plane public contract', () => {
     const policy = getBidStagePolicy('evidence_mapping')
 
     expect(policy.allowedTools).toEqual(['read', 'write'])
-    expect(policy.forbiddenTools).toEqual(['grep', 'bash', 'web_search', 'web_fetch'])
+    expect(policy.forbiddenTools).toEqual(['bash'])
   })
 
   it('distinguishes successful and failed validation with multiple issues', () => {
@@ -94,11 +92,11 @@ describe('bid control-plane public contract', () => {
   it('merges bid payloads into the shared session event map', () => {
     expectTypeOf<BidSessionEventMap>().toEqualTypeOf<Pick<SessionEventMap, typeof BID_SESSION_EVENT_TYPES[number]>>()
     expectTypeOf<SessionEventMap['bid.stage.started']>().toEqualTypeOf<{
-      stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+      stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
       status: 'running'
     }>()
     expectTypeOf<SessionEventMap['bid.stage.failed']>().toEqualTypeOf<{
-      stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+      stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
       status: 'failed'
       reason: string
       issues?: Array<{
@@ -109,15 +107,15 @@ describe('bid control-plane public contract', () => {
       }>
     }>()
     expectTypeOf<SessionEventMap['bid.stage.reset']>().toEqualTypeOf<{
-      stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+      stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
       status: 'pending'
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<
       | {
-        stage: 'file_intake' | 'tender_analysis' | 'evidence_mapping' | 'outline_generation' | 'outline_confirmation' | 'chapter_writing' | 'book_review' | 'docx_export'
+        stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
         confirmed: true
       }
-      | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
+      | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
     >()
   })
 })

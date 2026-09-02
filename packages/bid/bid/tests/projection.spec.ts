@@ -30,15 +30,15 @@ describe('Bid client projection', () => {
       allowedActions: ['confirm_tender_analysis'],
       composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
     })
-    expect(getBidClientProjection({ stage: 'outline_confirmation', status: 'waiting_user' })).toEqual({
-      runtime: { stage: 'outline_confirmation', status: 'waiting_user' },
+    expect(getBidClientProjection({ stage: 'outline_generation', status: 'waiting_user' })).toEqual({
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
       composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
-    expect(getBidClientProjection({ stage: 'book_review', status: 'waiting_user' })).toEqual({
-      runtime: { stage: 'book_review', status: 'waiting_user' },
-      allowedActions: ['send_message', 'complete_review'],
-      composer: { enabled: true },
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toEqual({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
+      composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
     })
     expect(getBidClientProjection({
       stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
@@ -54,8 +54,8 @@ describe('Bid client projection', () => {
       allowedActions: ['retry_stage'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
-    expect(getBidClientProjection({ stage: 'book_review', status: 'failed' })).toEqual({
-      runtime: { stage: 'book_review', status: 'failed' },
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toEqual({
+      runtime: { stage: 'chapter_writing', status: 'failed' },
       allowedActions: ['retry_stage'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })

@@ -75,11 +75,9 @@ function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
     case 'tender_analysis':
       if (status === 'pending') return 'prompt.tender_analysis_pending'
       return status === 'waiting_user' ? 'prompt.tender_analysis_confirmation' : 'prompt.tender_analysis'
-    case 'evidence_mapping': return 'prompt.evidence_mapping'
-    case 'outline_generation': return 'prompt.outline_generation'
-    case 'outline_confirmation': return 'prompt.outline_confirmation'
+    case 'evidence_mapping': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.evidence_mapping'
+    case 'outline_generation': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.outline_generation'
     case 'chapter_writing':
-    case 'book_review':
     case 'docx_export':
       return 'prompt.later_stage'
   }
@@ -194,10 +192,9 @@ export function BidStagePanel({
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
   const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
-  const embedConversation = projection?.runtime.stage === 'book_review' && projection.runtime.status === 'waiting_user'
-  const reviewViewAvailable = projection?.runtime.status === 'waiting_user'
-    && (canConfirm || canConfirmAnalysis || projection.runtime.stage === 'book_review')
-  const reviewStateKey = reviewViewAvailable ? `${projection.runtime.stage}:${projection.runtime.status}` : null
+  const embedConversation = false
+  const reviewViewAvailable = canConfirm || canConfirmAnalysis || projection?.runtime.stage === 'chapter_writing'
+  const reviewStateKey = reviewViewAvailable && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   useEffect(() => {
     if (!hasProjection) return

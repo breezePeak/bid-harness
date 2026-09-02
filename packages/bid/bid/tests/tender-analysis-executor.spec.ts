@@ -62,7 +62,7 @@ describe('tender-analysis Agent executor', () => {
     expect(message.content[0]?.text).toContain('当前只分析技术标')
     expect(message.content[0]?.text).toContain('投标报价、价格评分')
     expect(message.content[0]?.text).toContain('project_background')
-    expect(message.content[0]?.text).toContain('response_points')
+    expect(message.content[0]?.text).toContain('评分响应点留给 S3 分析')
     expect(message.content[0]?.text).toContain('允许提取、压缩、去冗余和原子化')
     expect(message.content[0]?.text).toContain('不得改变原文的关键数字、单位')
     expect(coverageAudit.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
@@ -95,7 +95,7 @@ describe('tender-analysis Agent executor', () => {
     const firstPass = { schema_version: 1, scoring_items: [] }
     const repaired = {
       schema_version: 1,
-      scoring_items: [{ id: 'SCORE-1', title: '技术评分', raw_text: '技术评分标准', criterion: '技术方案完整', score: 10, response_points: ['说明技术方案完整性'] }],
+      scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '技术评分', raw_text: '技术评分标准', criterion: '技术方案完整', score: 10, score_range: null, must_answer: true, source_refs: [{ file_id: 'technical-scoring', chunk: 'corpus/technical-scoring/chunks/chunk_0001.md', line_start: 1, line_end: 1 }] }],
     }
     let idleCount = 0
     let observedFirstPass: unknown
@@ -139,11 +139,11 @@ describe('tender-analysis Agent executor', () => {
       [{
         code: 'TENDER_ANALYSIS_SCHEMA_INVALID',
         artifact: 'analysis/scoring.json',
-        path: 'scoring_items[2].response_points',
+        path: 'scoring_items[2].criterion',
         message: '至少需要一项技术响应重点。',
       }],
     )
-    expect(text).toContain('scoring_items[2].response_points')
+    expect(text).toContain('scoring_items[2].criterion')
     expect(text).toContain('不得创建 final、fixed、new 或 v2 文件')
   })
 

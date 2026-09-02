@@ -1,4 +1,4 @@
-/** Bid-preset human commands that rerun the exact current workflow stage. */
+/** Bid-preset human commands that rewind to and rerun one workflow stage. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -14,12 +14,10 @@ const COMMANDS: ReadonlyArray<{
   readonly stage: BidStage
   readonly label: string
 }> = [
-  { name: 'bid-reset-s2', description: '重置当前招标分析阶段（S2）', stage: 'tender_analysis', label: '招标分析' },
-  { name: 'bid-reset-s3', description: '重置当前证据映射阶段（S3）', stage: 'evidence_mapping', label: '证据映射' },
-  { name: 'bid-reset-s4', description: '重置当前目录生成阶段（S4）', stage: 'outline_generation', label: '目录生成' },
-  { name: 'bid-reset-s5', description: '重置当前目录确认阶段（S5）', stage: 'outline_confirmation', label: '目录确认' },
-  { name: 'bid-reset-s6', description: '重置当前章节编写阶段（S6）', stage: 'chapter_writing', label: '章节编写' },
-  { name: 'bid-reset-s7', description: '重置当前全书审核阶段（S7）', stage: 'book_review', label: '全书审核' },
+  { name: 'bid-reset-s2', description: '回退并重跑招标分析阶段（S2）', stage: 'tender_analysis', label: '招标分析' },
+  { name: 'bid-reset-s3', description: '回退并重跑初步目录阶段（S3）', stage: 'outline_generation', label: '初步目录' },
+  { name: 'bid-reset-s4', description: '回退并重跑资料映射阶段（S4）', stage: 'evidence_mapping', label: '资料映射' },
+  { name: 'bid-reset-s5', description: '回退并重跑章节编写阶段（S5）', stage: 'chapter_writing', label: '章节编写' },
 ]
 
 /** Execute one argument-free, stage-specific reset command. */
@@ -44,7 +42,7 @@ async function resetStage(
         kind: 'error',
         text: error.code === 'BID_OPERATION_IN_PROGRESS'
           ? '当前阶段仍有 Host 操作在运行，请等待其结束或后端恢复中断状态后重试。'
-          : `只能重置当前所处的${label}阶段。`,
+          : `只能回退到当前或更早的${label}阶段。`,
       }
     }
     throw error
@@ -52,7 +50,7 @@ async function resetStage(
 }
 
 /**
- * Register S2–S7 reset commands only inside the Bid agent preset.
+ * Register S2–S5 reset commands only inside the Bid agent preset.
  * @param ctx - agent-scoped Context carrying the Host Bid runtime and command registry.
  */
 export function apply(ctx: Context): void {

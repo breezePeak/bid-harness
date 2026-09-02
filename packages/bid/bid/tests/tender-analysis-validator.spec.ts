@@ -5,14 +5,12 @@ import { mkdtemp } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import {
   BidWorkspace,
-  createScoringResponsePointCatalog,
   parseTenderComplianceArtifact,
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
   parseTenderScoringArtifact,
   validateTenderAnalysis,
   type StageArtifact,
-  type TenderScoringArtifact,
   type TenderSourceRef,
 } from '@deepseek-ai/dsh-bid'
 
@@ -21,7 +19,6 @@ const artifacts: StageArtifact[] = [
   { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
   { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
   { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
-  { stage: 'tender_analysis', type: 'scoring_response_points', path: 'analysis/scoring-response-points.json' },
 ]
 
 async function fixture(tenderText = '# 项目\n\n必须按期交付，技术方案得 10 分。'): Promise<{
@@ -87,7 +84,7 @@ function documents(tenderId: string, source: TenderSourceRef): Record<string, un
       scoring_items: [{
         id: 'SCORE-1', parent: null, group: '技术', title: '技术方案', raw_text: '技术方案得 10 分',
         criterion: '提供技术方案', score: 10, score_range: null, must_answer: true,
-        response_points: ['说明技术方案总体设计'], source_refs: [source],
+        source_refs: [source],
       }],
     },
     'compliance.json': {
@@ -106,15 +103,6 @@ async function publish(workspace: BidWorkspace, docs: Record<string, unknown>): 
   await Promise.all(Object.entries(docs).map(([name, value]) => (
     writeFile(join(root, name), `${JSON.stringify(value)}\n`)
   )))
-  const scoring = docs['scoring.json'] as { scoring_items?: Array<{ response_points?: unknown }> }
-  const catalog = Array.isArray(scoring.scoring_items)
-    && scoring.scoring_items.every(item => Array.isArray(item.response_points))
-    ? createScoringResponsePointCatalog(scoring as TenderScoringArtifact)
-    : {}
-  await writeFile(
-    join(root, 'scoring-response-points.json'),
-    `${JSON.stringify(catalog, null, 2)}\n`,
-  )
 }
 
 const codes = (result: Awaited<ReturnType<typeof validateTenderAnalysis>>): string[] => (
@@ -154,16 +142,16 @@ describe('tender-analysis validator', () => {
     compliance.compliance_items = []
     const scoring = docs['scoring.json'] as { scoring_items: Array<Record<string, unknown>> }
     scoring.scoring_items = [
-      { ...scoring.scoring_items[0], id: 'TECH-1', title: '系统总体技术方案', raw_text: citedText, criterion: '总体方案完整合理', score: 10, response_points: ['总体架构', '技术路线'] },
-      { ...scoring.scoring_items[0], id: 'TECH-2', title: '项目实施方案', raw_text: citedText, criterion: '实施方案可行', score: 8, response_points: ['实施阶段', '进度保障'] },
-      { ...scoring.scoring_items[0], id: 'TECH-3', title: '数据安全方案', raw_text: citedText, criterion: '安全措施完整', score: 7, response_points: ['数据保护', '安全审计'] },
+      { ...scoring.scoring_items[0], id: 'TECH-1', title: '系统总体技术方案', raw_text: citedText, criterion: '总体方案完整合理', score: 10 },
+      { ...scoring.scoring_items[0], id: 'TECH-2', title: '项目实施方案', raw_text: citedText, criterion: '实施方案可行', score: 8 },
+      { ...scoring.scoring_items[0], id: 'TECH-3', title: '数据安全方案', raw_text: citedText, criterion: '安全措施完整', score: 7 },
     ]
     await publish(value.workspace, docs)
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
 
     scoring.scoring_items.push({
       ...scoring.scoring_items[0], id: 'COMMERCIAL-1', group: '商务评分', title: '类似项目业绩',
-      raw_text: citedText, criterion: '业绩数量', response_points: ['提供业绩'],
+      raw_text: citedText, criterion: '业绩数量',
     })
     await publish(value.workspace, docs)
     expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
@@ -314,8 +302,7 @@ describe('tender-analysis validator', () => {
     ['project.json 缺少字段', 'project.json', (doc: Record<string, unknown>) => { delete doc.project_name }, 'project_name', '缺少必需字段。'],
     ['project.json 多出字段', 'project.json', (doc: Record<string, unknown>) => { doc.unknown_field = true }, 'unknown_field', '存在 Schema 未定义的字段。'],
     ['project.json 单值使用空字符串', 'project.json', (doc: Record<string, unknown>) => { doc.owner = '' }, 'owner', '未知值应使用 null，不能使用空字符串。'],
-    ['scoring.json 缺少 response_points', 'scoring.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points }, 'scoring_items[0].response_points', '缺少必需字段。'],
-    ['scoring.json response_points 为空数组', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points = [] }, 'scoring_items[0].response_points', '至少需要一项技术响应重点。'],
+    ['scoring.json 禁止 response_points', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points = [] }, 'scoring_items[0].response_points', '存在 Schema 未定义的字段。'],
     ['scoring.json score 为字符串', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.score = '10' }, 'scoring_items[0].score', '必须为数字或 null。'],
     ['scoring.json 缺少 parent', 'scoring.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.parent }, 'scoring_items[0].parent', '缺少必需字段。'],
     ['compliance.json severity 非法', 'compliance.json', (doc: Record<string, unknown>) => { (doc.compliance_items as Array<Record<string, unknown>>)[0]!.severity = 'critical' }, 'compliance_items[0].severity', '只能使用 fatal、mandatory 或 warning。'],

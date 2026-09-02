@@ -210,7 +210,6 @@ export function apply(ctx: ClientContext): void {
       const remote = ctx.remote.bid as unknown as {
         getReviewWorkbench(id: SessionId): Promise<{ ok: boolean; value: unknown }>
         getReviewChapter(id: SessionId, sectionId: string): Promise<{ ok: boolean; value: unknown }>
-        completeReview(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
       const conversation = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)?.get('conversation') as {
@@ -226,11 +225,6 @@ export function apply(ctx: ClientContext): void {
           const result = await remote.getReviewChapter(sessionId, sectionId)
           if (!result.ok) throw new Error('BID_REVIEW_NOT_ALLOWED')
           return result.value as BidReviewChapterView
-        },
-        completeReview: async () => {
-          const result = await remote.completeReview(sessionId)
-          if (!result.ok) throw new Error('BID_REVIEW_COMPLETE_FAILED')
-          if (!result.value.ok) throw new Error(result.value.error?.message ?? 'BID_REVIEW_COMPLETE_FAILED')
         },
         retryStage: async () => {
           const result = await remote.retryStage(sessionId)

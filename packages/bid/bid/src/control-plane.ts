@@ -16,6 +16,8 @@ export {
 } from './control-plane-contract.ts'
 export type {
   BidClientAction,
+  BidChapterReviewStatus,
+  BidChapterWritingStatus,
   BidClientProjection,
   BidComposerCapability,
   BidComposerReason,
@@ -32,7 +34,6 @@ export type {
   BidRetryFailure,
   BidRetryResult,
   BidReviewChapterView,
-  BidReviewCompletionResult,
   BidReviewIssueView,
   BidReviewWorkbenchView,
   BidTenderAnalysisConfirmationResult,

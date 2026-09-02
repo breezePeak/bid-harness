@@ -204,69 +204,6 @@ export class BidOrchestrator {
   }
 
   /**
-   * Record and validate acceptance of the current outline.
-   * @returns the state after recording the decision and any automatic continuation.
-   * @throws {@link BidOrchestratorError} unless outline confirmation is waiting and the driver is idle.
-   */
-  confirm(): Promise<BidRuntimeState> {
-    this.assertIdle()
-    const state = this.state
-    if (state.stage !== 'outline_confirmation' || state.status !== 'waiting_user') {
-      throw new BidOrchestratorError(
-        'BID_CONFIRM_NOT_ALLOWED',
-        `cannot confirm Bid outline while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
-      )
-    }
-    return this.begin(async () => {
-      this.session.append('bid.user_confirmation.received', {
-        stage: 'outline_confirmation',
-        confirmed: true,
-      })
-      const artifacts: StageArtifact[] = [
-        { stage: 'outline_confirmation', type: 'confirmed_outline', path: 'outline/confirmed-outline.json' },
-        { stage: 'outline_confirmation', type: 'outline_confirmation', path: 'outline/confirmation.json' },
-      ]
-      const validation = await this.validate('outline_confirmation', artifacts)
-      if (!validation.ok) return this.state
-      this.session.append('bid.stage.completed', {
-        stage: 'outline_confirmation',
-        status: 'completed',
-        artifacts,
-      })
-      return this.driveLoop()
-    })
-  }
-
-  /**
-   * Record requested outline changes and rerun outline generation.
-   * @param feedback - concrete changes supplied by the user.
-   * @returns the state after regeneration stops for confirmation or fails.
-   * @throws {@link BidOrchestratorError} unless outline confirmation is waiting, feedback is non-empty, and the driver is idle.
-   */
-  reviseOutline(feedback: string): Promise<BidRuntimeState> {
-    this.assertIdle()
-    const state = this.state
-    if (state.stage !== 'outline_confirmation' || state.status !== 'waiting_user') {
-      throw new BidOrchestratorError(
-        'BID_CONFIRM_NOT_ALLOWED',
-        `cannot revise Bid outline while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
-      )
-    }
-    const normalized = feedback.trim()
-    if (normalized.length === 0) {
-      throw new BidOrchestratorError('BID_OUTLINE_FEEDBACK_REQUIRED', 'outline revision feedback is required')
-    }
-    return this.begin(async () => {
-      this.session.append('bid.user_confirmation.received', {
-        stage: 'outline_confirmation',
-        confirmed: false,
-        feedback: normalized,
-      })
-      return this.driveLoop()
-    })
-  }
-
-  /**
    * Revalidate canonical artifacts and complete a stage that is waiting after successful automatic validation.
    * Validation rejection leaves the replayed stage in `waiting_user` so the caller can return issues for another edit.
    * @param stage - waiting stage whose policy requires post-validation confirmation.

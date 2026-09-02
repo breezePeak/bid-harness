@@ -1,6 +1,5 @@
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import type { OutlineConfirmationIssueCode } from './outline-confirmation-issues.ts'
-import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { catalogMatchesScoring, type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import type { TenderComplianceArtifact, TenderRequirementsArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -38,7 +37,7 @@ export function validateOutlineSharedStructure(sections: readonly OutlineSection
     if (section.writable && section.must_answer.length === 0) reject(issues, 'OUTLINE_SHARED_MUST_ANSWER_MISSING', 'A writable section requires must-answer guidance.')
     if (!section.writable && section.must_answer.length !== 0) reject(issues, 'OUTLINE_SHARED_CONTAINER_MUST_ANSWER_INVALID', 'A structural section cannot have must-answer guidance.')
     for (const values of [section.must_answer.map(normalized), section.requirement_ids, section.scoring_ids,
-      section.compliance_ids, section.source_mapping_ids, section.scoring_response_point_ids ?? []]) {
+      section.compliance_ids, section.scoring_response_point_ids ?? []]) {
       if (!unique(values)) reject(issues, 'OUTLINE_SHARED_SECTION_REFERENCE_DUPLICATE', 'Section reference arrays cannot contain duplicates.')
     }
   }
@@ -54,7 +53,7 @@ export function validateOutlineSharedStructure(sections: readonly OutlineSection
 }
 
 function validateCompleteIds(
-  kind: 'REQUIREMENT' | 'SCORING' | 'COMPLIANCE' | 'SOURCE_MAPPING' | 'RESPONSE_POINT',
+  kind: 'REQUIREMENT' | 'SCORING' | 'COMPLIANCE' | 'RESPONSE_POINT',
   expected: readonly string[],
   actual: readonly string[],
   issues: StageValidationIssue[],
@@ -69,7 +68,6 @@ function validateCompleteIds(
  * @param requirements S2 requirements.
  * @param scoring S2 scoring.
  * @param compliance S2 compliance.
- * @param evidence S3 map.
  * @param catalog Stable response points.
  * @param issues Mutable issue sink.
  * @returns Nothing.
@@ -79,7 +77,6 @@ export function validateOutlineSharedCoverage(
   requirements: TenderRequirementsArtifact,
   scoring: TenderScoringArtifact,
   compliance: TenderComplianceArtifact,
-  evidence: EvidenceMapArtifact,
   catalog: ScoringResponsePointCatalog,
   issues: StageValidationIssue[],
 ): void {
@@ -94,16 +91,13 @@ export function validateOutlineSharedCoverage(
   if (!unique(outline.global_compliance_ids)) reject(issues, 'OUTLINE_SHARED_COMPLIANCE_DUPLICATE', 'Global compliance ids cannot repeat.')
   validateCompleteIds('COMPLIANCE', compliance.compliance_items.map(item => item.id), [...outline.global_compliance_ids, ...sections.flatMap(section => section.compliance_ids)], issues)
 
-  const mappings = [...evidence.framework_mappings, ...evidence.reference_bid_mappings]
-  const activeMappingIds = mappings.filter(mapping => mapping.action !== 'exclude').map(mapping => mapping.mapping_id)
-  validateCompleteIds('SOURCE_MAPPING', activeMappingIds, sections.flatMap(section => section.source_mapping_ids), issues)
   const pointById = new Map(catalog.points.map(point => [point.id, point]))
   const pointIds = sections.flatMap(section => section.scoring_response_point_ids ?? [])
   if (!unique(pointIds)) reject(issues, 'OUTLINE_SHARED_RESPONSE_POINT_DUPLICATE', 'Each response-point id must occur in exactly one section.')
   validateCompleteIds('RESPONSE_POINT', catalog.points.map(point => point.id), pointIds, issues)
   for (const section of sections) {
-    if (!section.writable && (section.source_mapping_ids.length > 0 || (section.scoring_response_point_ids?.length ?? 0) > 0
-      || section.scoring_response_points.length > 0 || section.content_mode !== null)) reject(issues, 'OUTLINE_SHARED_CONTAINER_EVIDENCE_INVALID', 'Only writable sections can own writing evidence.')
+    if (!section.writable && ((section.scoring_response_point_ids?.length ?? 0) > 0
+      || section.scoring_response_points.length > 0)) reject(issues, 'OUTLINE_SHARED_CONTAINER_RESPONSE_POINT_INVALID', 'Only writable sections can own scoring response points.')
     const responsePointIds = section.scoring_response_point_ids ?? []
     if (responsePointIds.length !== section.scoring_response_points.length) reject(issues, 'OUTLINE_SHARED_RESPONSE_POINT_TEXT_MISMATCH', 'Response-point ids and text snapshots must have equal length.')
     responsePointIds.forEach((id, index) => {
