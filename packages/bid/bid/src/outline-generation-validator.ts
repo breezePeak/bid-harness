@@ -16,13 +16,34 @@ function reject(issues: StageValidationIssue[], code: string, message: string, a
   issues.push({ code, message, artifact })
 }
 
+function reportArtifactParseFailure(error: unknown, issues: StageValidationIssue[]): void {
+  if (!(error instanceof Error) || !('issues' in error) || !Array.isArray(error.issues)) {
+    reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', 'The outline-generation Artifacts have invalid fields.')
+    return
+  }
+  for (const issue of error.issues.slice(0, 12)) {
+    if (typeof issue !== 'object' || issue === null) continue
+    const value = issue as { path?: unknown; message?: unknown }
+    const path = Array.isArray(value.path) ? value.path.join('.') : 'unknown'
+    const message = typeof value.message === 'string' ? value.message : 'invalid field'
+    reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', `Invalid outline-generation field ${path}: ${message}`)
+  }
+  if (issues.length === 0) reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', 'The outline-generation Artifacts have invalid fields.')
+}
+
 async function parseJson(workspace: BidWorkspace, path: string, issues: StageValidationIssue[]): Promise<unknown> {
   try {
     const absolute = within(workspace.sessionRoot, path)
     await assertNoLinkedPath(workspace.root, absolute)
     if (!(await lstat(absolute)).isFile()) throw new Error('not-file')
-    return JSON.parse(await readFile(absolute, 'utf8'))
   } catch { reject(issues, 'OUTLINE_GENERATION_INPUT_INVALID', 'A required outline-generation input is missing or invalid.', path) }
+  try {
+    const absolute = within(workspace.sessionRoot, path)
+    return JSON.parse(await readFile(absolute, 'utf8'))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'invalid JSON'
+    reject(issues, 'OUTLINE_GENERATION_INPUT_INVALID', `Invalid JSON: ${message}`, path)
+  }
 }
 
 /** Validate S4 with shared structure and coverage plus generation-only quality rules. */
@@ -56,6 +77,6 @@ export async function validateOutlineGeneration(
     validateOutlineSharedStructure(outline.sections, issues)
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, evidence, catalog, issues)
     validateOutlineGenerationQuality(outline, report, requirements, scoring, evidence, catalog, issues)
-  } catch { reject(issues, 'OUTLINE_GENERATION_ARTIFACT_INVALID', 'The outline-generation Artifacts have invalid fields.') }
+  } catch (error) { reportArtifactParseFailure(error, issues) }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }
