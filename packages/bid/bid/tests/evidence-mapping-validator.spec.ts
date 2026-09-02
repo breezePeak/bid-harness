@@ -126,7 +126,7 @@ describe('evidence-map v8 schema', () => {
   })
 
   it('keeps Child URL results separate from durable Host references', () => {
-    expect(() => parseEvidenceMappingPartialResult({ task_id: 'TASK-1', requirement_mappings: [{ requirement_id: 'R-1', local_materials: [], web_materials: [{ url: 'https://example.com/standard', usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'] }], scoring_mappings: [], response_point_mappings: [], research_topics: [] })).not.toThrow()
+    expect(() => parseEvidenceMappingPartialResult({ task_id: 'TASK-1', section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [{ url: 'https://example.com/standard', usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'] }], refinement_suggestions: [] })).not.toThrow()
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, web_materials: [{ source_id: 'WEB-0123456789abcdef', snapshot_path: 'analysis/web-sources/WEB-fedcba9876543210.md', usage: 'reference', summary: '标准。', supports: '支持方案。' }] }] })).toThrow()
   })
 })

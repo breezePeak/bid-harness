@@ -80,6 +80,7 @@ export function applyOutlineEdits(
     must_answer: [...section.must_answer],
     scoring_response_point_ids: [...(section.scoring_response_point_ids ?? [])],
     scoring_response_points: [...section.scoring_response_points],
+    framework_refs: (section.framework_refs ?? []).map(reference => ({ ...reference, heading_path: [...reference.heading_path] })),
   }))
   const byId = new Map(sections.map(section => [section.id, section]))
   let nextId = sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
@@ -101,6 +102,7 @@ export function applyOutlineEdits(
         must_answer: operation.writable ? [...(operation.must_answer ?? [])] : [],
         requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
         origin: 'generated', scoring_response_point_ids: [], scoring_response_points: [],
+        framework_refs: [],
       }
       sections.push(section)
       byId.set(id, section)

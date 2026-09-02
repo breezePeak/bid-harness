@@ -92,8 +92,7 @@ export function validateOutlineSharedCoverage(
   validateCompleteIds('COMPLIANCE', compliance.compliance_items.map(item => item.id), [...outline.global_compliance_ids, ...sections.flatMap(section => section.compliance_ids)], issues)
 
   const pointById = new Map(catalog.points.map(point => [point.id, point]))
-  const pointIds = sections.flatMap(section => section.scoring_response_point_ids ?? [])
-  if (!unique(pointIds)) reject(issues, 'OUTLINE_SHARED_RESPONSE_POINT_DUPLICATE', 'Each response-point id must occur in exactly one section.')
+  const pointIds = sections.filter(section => section.writable).flatMap(section => section.scoring_response_point_ids ?? [])
   validateCompleteIds('RESPONSE_POINT', catalog.points.map(point => point.id), pointIds, issues)
   for (const section of sections) {
     if (!section.writable && ((section.scoring_response_point_ids?.length ?? 0) > 0

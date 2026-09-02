@@ -11,6 +11,7 @@ import {
   parseTenderRequirementsArtifact,
   parseScoringResponsePointCatalog,
   renderOutlineGenerationTask,
+  renderResponsePointSemanticReviewTask,
   scoringArtifactSha256,
   validateConfirmedOutline,
   validateOutlineGenerationQuality,
@@ -155,8 +156,11 @@ describe('outline-generation Blueprint Quality Review', () => {
   it('injects successful outline-framework headings without S3 source mappings', async () => {
     const workspace = await fixture()
     await workspace.import([{
-      name: 'framework.md', role: 'outline_framework',
+      name: 'primary-framework.md', role: 'outline_framework',
       bytes: new TextEncoder().encode('# 总体方案\n\n## 实施计划\n'),
+    }, {
+      name: 'supplementary-framework.md', role: 'outline_framework',
+      bytes: new TextEncoder().encode('# 质量保障\n'),
     }])
     const followup = vi.fn()
     let idleCalls = 0
@@ -173,11 +177,36 @@ describe('outline-generation Blueprint Quality Review', () => {
 
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
 
-    const draftMessage = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
+    const draftMessage = followup.mock.calls[2]?.[0] as { content: Array<{ text: string }> }
     expect(draftMessage.content[0]?.text).toContain('目录模式：存在人工框架')
     expect(draftMessage.content[0]?.text).toContain('总体方案')
     expect(draftMessage.content[0]?.text).toContain('实施计划')
+    expect(draftMessage.content[0]?.text).toContain('质量保障')
+    expect(draftMessage.content[0]?.text).toContain('第一个是 primary framework')
+    expect(draftMessage.content[0]?.text).toContain('精确覆盖时直接复用')
+    expect(draftMessage.content[0]?.text).toContain('过粗时保留父标题并增加子章节')
+    expect(draftMessage.content[0]?.text).toContain('无直接评分点但合理的技术章节可以保留')
+    expect(draftMessage.content[0]?.text).toContain('Framework 高于 reference_bid')
+    expect(draftMessage.content[0]?.text).toContain('framework_refs')
     expect(draftMessage.content[0]?.text).not.toContain('mapping_id')
+  })
+
+  it('accepts exact framework heading references and rejects unknown headings', async () => {
+    const workspace = await fixture()
+    const [framework] = await workspace.import([{
+      name: 'framework.md', role: 'outline_framework',
+      bytes: new TextEncoder().encode('# 总体方案\n\n框架正文。\n'),
+    }])
+    if (framework === undefined) throw new Error('framework import missing')
+    const referenced: OutlineArtifact = structuredClone(reviewedOutline)
+    referenced.sections[1]!.framework_refs = [{ file_id: String(framework.id), heading_path: ['总体方案'] }]
+    await publishOutline(workspace, referenced)
+
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toMatchObject({ ok: true })
+
+    referenced.sections[1]!.framework_refs = [{ file_id: String(framework.id), heading_path: ['不存在'] }]
+    await publishOutline(workspace, referenced)
+    expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts))).toContain('OUTLINE_FRAMEWORK_REF_INVALID')
   })
 
   it('publishes the Blueprint written after response-point analysis', async () => {
@@ -210,11 +239,11 @@ describe('outline-generation Blueprint Quality Review', () => {
     const whenIdle = vi.fn(async () => {
       idleCalls += 1
       if (idleCalls === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (idleCalls === 3) {
+      if (idleCalls === 4) {
         await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
         await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify(coarseOutline)}\n`)
       }
-      if (idleCalls === 4) await publishOutline(workspace, reviewedOutline)
+      if (idleCalls === 5) await publishOutline(workspace, reviewedOutline)
     })
     const services = {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
@@ -230,10 +259,10 @@ describe('outline-generation Blueprint Quality Review', () => {
 
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
       .resolves.toEqual(artifacts)
-    expect(whenIdle).toHaveBeenCalledTimes(4)
-    expect(followup).toHaveBeenCalledTimes(3)
-    const draftMessage = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
-    const reviewMessage = followup.mock.calls[2]?.[0] as { content: Array<{ text: string }> }
+    expect(whenIdle).toHaveBeenCalledTimes(5)
+    expect(followup).toHaveBeenCalledTimes(4)
+    const draftMessage = followup.mock.calls[2]?.[0] as { content: Array<{ text: string }> }
+    const reviewMessage = followup.mock.calls[3]?.[0] as { content: Array<{ text: string }> }
     expect(draftMessage.content[0]?.text).toContain('本轮初稿唯一输出')
     expect(reviewMessage.content[0]?.text).toContain('这是强制复核')
     expect(reviewMessage.content[0]?.text).toContain('根据评分语义判断章节')
@@ -249,16 +278,16 @@ describe('outline-generation Blueprint Quality Review', () => {
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {
       if (whenIdle.mock.calls.length === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (whenIdle.mock.calls.length === 3) {
+      if (whenIdle.mock.calls.length === 4) {
         await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
         await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), JSON.stringify({ ...reviewedOutline, schema_version: 0 }))
       }
-      if (whenIdle.mock.calls.length === 4) {
+      if (whenIdle.mock.calls.length === 5) {
         await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
           schema_version: 0, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [], reviewed_section_ids: [], issues: [],
         }))
       }
-      if (whenIdle.mock.calls.length === 5) await publishOutline(workspace, reviewedOutline)
+      if (whenIdle.mock.calls.length === 6) await publishOutline(workspace, reviewedOutline)
     })
     const services = {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
@@ -268,8 +297,8 @@ describe('outline-generation Blueprint Quality Review', () => {
 
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })
 
-    expect(followup).toHaveBeenCalledTimes(4)
-    expect(JSON.stringify(followup.mock.calls[3]?.[0])).toContain('Artifact Repair')
+    expect(followup).toHaveBeenCalledTimes(5)
+    expect(JSON.stringify(followup.mock.calls[4]?.[0])).toContain('Artifact Repair')
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
@@ -291,7 +320,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts))).toContain(expectedCode)
   })
 
-  it('requires a complete clean internal quality report without inventing ids', async () => {
+  it('requires complete quality-review identity sets but permits advisory issues', async () => {
     const workspace = await fixture()
     await publishOutline(workspace, reviewedOutline)
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
@@ -309,8 +338,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       .toContain('OUTLINE_GENERATION_QUALITY_REQUIREMENT_MISSING')
 
     await publishOutline(workspace, reviewedOutline, ['实施章节仍然过粗。'])
-    expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts)))
-      .toContain('OUTLINE_GENERATION_QUALITY_ISSUES_UNRESOLVED')
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
     await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), '')
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts)))
@@ -348,5 +376,31 @@ describe('outline-generation Blueprint Quality Review', () => {
     const workspace = await fixture()
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as unknown as Agent, workspace, buildBidStageTask('outline_generation'))
     expect(task).toContain('索引重复引用不能替代正文拆分')
+  })
+
+  it('reviews real itemized scoring semantics without splitting quality words or score counts', async () => {
+    const workspace = await fixture()
+    const prompt = renderResponsePointSemanticReviewTask({ id: 'session' } as Agent, workspace)
+    expect(prompt).toContain('项目目标、预期成果')
+    expect(prompt).toContain('软件技术路线、总体设计应分别保留')
+    expect(prompt).toContain('完整、合理可行、现状分析准确清晰')
+    expect(prompt).toContain('总体方案完整、合理、可行，得5分')
+    expect(prompt).toContain('不得另写 review report')
+  })
+
+  it('allows one response point to be covered by multiple writable sections', () => {
+    const catalog = parseScoringResponsePointCatalog({ schema_version: 1, scope: 'technical_bid', scoring_sha256: scoringArtifactSha256(scoringArtifact), next_sequence: 2, points: [{ id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })
+    const outline: OutlineArtifact = {
+      schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: ['COMP-DELIVERY'],
+      sections: ['实施进度计划', '进度保障机制'].map((title, index) => ({
+        id: `SEC-${String(index + 1)}`, parent_id: null, order: index + 1, level: 1, title,
+        purpose: '共同响应进度评分点。', writable: true, must_answer: [title],
+        requirement_ids: requirements.requirements.map(item => item.id), scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: [],
+        origin: 'generated', framework_refs: [], scoring_response_point_ids: ['RP-000001'],
+        scoring_response_points: [{ scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障' }],
+        suggested_tables: [], suggested_figures: [], writing_notes: [],
+      })),
+    }
+    expect(validateConfirmedOutline(outline, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
   })
 })

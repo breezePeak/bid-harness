@@ -2,6 +2,7 @@ import { lstat, readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseOutlineArtifact, parseOutlineQualityReport } from './outline-generation-artifacts.ts'
+import { validateOutlineFrameworkRefs } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
@@ -81,6 +82,7 @@ export async function validateOutlineGeneration(
     }
     validateOutlineSharedStructure(outline.sections, issues)
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
+    await validateOutlineFrameworkRefs(workspace, outline, issues)
     validateOutlineGenerationQuality(outline, report, requirements, scoring, catalog, issues)
   } catch (error) { reportArtifactParseFailure(error, issues) }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }

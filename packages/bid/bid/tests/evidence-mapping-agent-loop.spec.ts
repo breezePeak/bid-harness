@@ -53,7 +53,7 @@ class ScriptedAdapter extends LlmAdapter {
 
   async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
     const response = this.script.shift()
-    if (response === undefined) throw new Error('S3 scripted adapter exhausted')
+    if (response === undefined) throw new Error('S4 scripted adapter exhausted')
     yield* response
   }
 }
@@ -143,7 +143,7 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('需要访问控制与安全审计方案。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('本地资料只有实施流程。') },
   ])
-  if (tender === undefined || reference === undefined || reference.chunkIndexPath === null || reference.chunksPath === null) throw new Error('S3 integration corpus missing')
+  if (tender === undefined || reference === undefined || reference.chunkIndexPath === null || reference.chunksPath === null) throw new Error('S4 integration corpus missing')
   const chunkIndex = JSON.parse(await readFile(join(workspace.sessionRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = `${reference.chunksPath}/${chunkIndex.chunks[0]!.path}`
   const sourceRef = { file_id: tender.id, chunk, line_start: 1, line_end: 1 }
@@ -168,24 +168,16 @@ function transientWebMaterial(url: string) {
   }
 }
 
-function partialResult(s2: { requirementId: string; scoringId: string; responsePointId: string }, url: string) {
+function partialResult(url: string) {
   const web = transientWebMaterial(url)
   return {
     task_id: 'TASK-SECURITY',
-    research_topics: [{
-      topic_id: 'RT-1', topic: '访问控制方案的技术维度', relevance: '用于细化安全章节。',
-      related_requirement_ids: [s2.requirementId],
-      related_scoring_points: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制' }],
-      local_materials: [], web_materials: [web], findings: ['访问控制需要与审计协同。'],
-      writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
-    }],
-    requirement_mappings: [{ requirement_id: s2.requirementId, local_materials: [], web_materials: [web], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
-    scoring_mappings: [{ scoring_id: s2.scoringId, local_materials: [], web_materials: [{ ...web, supports: '支持安全评分响应。' }], missing_topics: [] }],
-    response_point_mappings: [{ response_point_id: s2.responsePointId, scoring_id: s2.scoringId, response_point: '说明访问控制', local_materials: [], web_materials: [web], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
+    section_mappings: [{ section_id: 'SEC-SECURITY', local_materials: [], web_materials: [web], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
+    refinement_suggestions: [],
   }
 }
 
-describe('S3 Web evidence through a real Agent Tool loop', () => {
+describe('S4 Web evidence through a real Agent Tool loop', () => {
   it('plans in the Main Agent, maps in a fresh child, and completes evidence_mapping', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s3-loop-'))
     const sessionId = SessionId('s3-real-loop')
@@ -196,21 +188,19 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     const workspacePath = relative(root, workspace.sessionRoot).replaceAll('\\', '/')
     const planPath = `${workspacePath}/analysis/evidence-mapping-plan.json`
     const plan = JSON.stringify({
-      schema_version: 2,
-      global_analysis: ['访问控制要求由一个安全主题任务负责。'],
+      schema_version: 3,
+      global_analysis: ['访问控制章节由一个任务负责。'],
       research_notes: ['本地资料与公开标准结合。'],
       tasks: [{
         task_id: 'TASK-SECURITY',
         title: '访问控制与审计',
         objective: '定位本地实施资料并补充公开技术依据。',
-        requirement_ids: [s2.requirementId],
-        scoring_ids: [s2.scoringId],
-        response_point_ids: [s2.responsePointId],
-        compliance_ids: [],
-        source_focus: ['reference'],
+        section_ids: ['SEC-SECURITY'],
         research_topics: ['访问控制安全审计官方标准'],
       }],
     })
+    const initialOutline = await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
+    const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })
     const script = [
       toolCall('read-manifest', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/manifest.json` }),
       toolCall('read-project', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/project.json` }),
@@ -226,7 +216,16 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
       toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
-      finalText(JSON.stringify(partialResult(s2, sourceUrl))),
+      finalText(JSON.stringify(partialResult(sourceUrl))),
+      finalText('等待 Host 下发目录深化任务。'),
+      toolCall('read-initial-outline', 'read', { file_path: `${workspacePath}/outline/initial-confirmed-outline.json` }),
+      toolCall('read-section-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
+      toolCall('write-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: initialOutline }),
+      finalText('目录无需深化。'),
+      toolCall('read-refined-outline', 'read', { file_path: `${workspacePath}/outline/refined-outline.candidate.json` }),
+      toolCall('read-refined-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
+      toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
+      finalText('复核完成。'),
     ]
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -270,9 +269,9 @@ describe('S3 Web evidence through a real Agent Tool loop', () => {
     expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
     expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping')).toBe(true)
     expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
-      'read', 'read', 'read', 'read', 'read', 'read', 'write',
+      'read', 'read', 'read', 'read', 'read', 'read', 'write', 'read', 'read', 'write', 'read', 'read', 'write',
     ])
     expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json'])
     await ctx.fiber.dispose()
-  })
+  }, 15_000)
 })

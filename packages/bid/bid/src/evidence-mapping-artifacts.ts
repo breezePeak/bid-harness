@@ -9,7 +9,7 @@ export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as 
 /** Allowed ways a later technical proposal may use public Web material. */
 export const WEB_MATERIAL_USAGES = ['reference', 'background'] as const
 
-/** Strict local-material reference shared by S3 and later evidence consumers. */
+/** Strict local-material reference shared by S4 and later evidence consumers. */
 export const localEvidenceMaterialSchema = z.object({
   source_kind: z.enum(['reference', 'reference_bid']),
   file_id: z.string().min(1),
@@ -65,38 +65,6 @@ const partialMappingSchema = z.object({
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
-/** Strict Requirement-to-material mapping stored in the final Evidence Map. */
-export const requirementMappingSchema = mappingSchema.extend({
-  requirement_id: z.string().min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
-}).strict()
-/** Strict Scoring-to-material mapping stored in the final Evidence Map. */
-export const scoringMappingSchema = mappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
-/** Stable Response Point identity embedded in a research topic. */
-export const relatedScoringPointSchema = z.object({
-  response_point_id: z.string().regex(/^RP-\d{6}$/u),
-  scoring_id: z.string().min(1),
-  response_point: z.string().min(1),
-}).strict()
-/** Cross-item technical research stored in the final Evidence Map. */
-export const researchTopicSchema = mappingSchema.extend({
-  topic_id: z.string().min(1),
-  topic: z.string().min(1),
-  relevance: z.string().min(1),
-  related_requirement_ids: z.array(z.string().min(1)),
-  related_scoring_points: z.array(relatedScoringPointSchema),
-  findings: z.array(z.string().min(1)).min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
-}).strict()
-
-/** Strict Response Point-to-material mapping stored in the final Evidence Map. */
-export const responsePointMappingSchema = mappingSchema.extend({
-  response_point_id: z.string().regex(/^RP-\d{6}$/u),
-  scoring_id: z.string().min(1),
-  response_point: z.string().min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
-}).strict()
-
 /** Evidence available to one final writable outline section. */
 export const sectionEvidenceMappingSchema = mappingSchema.extend({
   section_id: z.string().min(1),
@@ -108,23 +76,16 @@ const evidenceMapSchema = z.object({
   section_mappings: z.array(sectionEvidenceMappingSchema),
 }).strict()
 
-/** Version of the Host-private S3 task plan. */
-export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 2 as const
+/** Version of the Host-private S4 task plan. */
+export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 3 as const
 
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
   objective: z.string().min(1),
-  requirement_ids: z.array(z.string().min(1)),
-  scoring_ids: z.array(z.string().min(1)),
-  response_point_ids: z.array(z.string().min(1)),
-  compliance_ids: z.array(z.string().min(1)),
-  source_focus: z.array(z.string().min(1)),
+  section_ids: z.array(z.string().min(1)).min(1),
   research_topics: z.array(z.string().min(1)),
-}).strict().refine(task => task.requirement_ids.length + task.scoring_ids.length
-  + task.response_point_ids.length + task.research_topics.length > 0, {
-  message: 'mapping task must own at least one business item or research topic',
-})
+}).strict()
 
 const evidenceMappingPlanSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),
@@ -133,34 +94,16 @@ const evidenceMappingPlanSchema = z.object({
   tasks: z.array(evidenceMappingTaskSchema).min(1),
 }).strict()
 
-const partialRequirementMappingSchema = partialMappingSchema.extend({
-  requirement_id: z.string().min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
-}).strict()
-const partialScoringMappingSchema = partialMappingSchema.extend({ scoring_id: z.string().min(1) }).strict()
-const partialResponsePointMappingSchema = partialMappingSchema.extend({
-  response_point_id: z.string().regex(/^RP-\d{6}$/u),
-  scoring_id: z.string().min(1),
-  response_point: z.string().min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
-}).strict()
-const partialResearchTopicSchema = partialMappingSchema.extend({
-  topic_id: z.string().min(1),
-  topic: z.string().min(1),
-  relevance: z.string().min(1),
-  related_requirement_ids: z.array(z.string().min(1)),
-  related_scoring_points: z.array(relatedScoringPointSchema),
-  findings: z.array(z.string().min(1)).min(1),
-  writing_dimensions: z.array(z.string().min(1)).min(1),
+const partialSectionMappingSchema = partialMappingSchema.extend({
+  section_id: z.string().min(1),
+  writing_dimensions: z.array(z.string().min(1)),
 }).strict()
 
 /** Strict URL-bearing result returned by one Mapping Subagent before Host binding. */
 export const evidenceMappingPartialResultSchema = z.object({
   task_id: z.string().min(1),
-  requirement_mappings: z.array(partialRequirementMappingSchema),
-  scoring_mappings: z.array(partialScoringMappingSchema),
-  response_point_mappings: z.array(partialResponsePointMappingSchema),
-  research_topics: z.array(partialResearchTopicSchema),
+  section_mappings: z.array(partialSectionMappingSchema),
+  refinement_suggestions: z.array(z.string().min(1)),
 }).strict()
 
 /** Parsed local material reference. */
@@ -171,19 +114,11 @@ export type TransientWebEvidenceMaterial = z.infer<typeof transientWebEvidenceMa
 export type WebEvidenceMaterial = z.infer<typeof webEvidenceMaterialSchema>
 /** Parsed section-to-evidence mapping. */
 export type SectionEvidenceMapping = z.infer<typeof sectionEvidenceMappingSchema>
-/** Parsed requirement-to-material mapping. */
-export type RequirementMaterialMapping = z.infer<typeof requirementMappingSchema>
-/** Parsed scoring-to-material mapping. */
-export type ScoringMaterialMapping = z.infer<typeof scoringMappingSchema>
-/** Parsed Agent-authored research that may inform multiple later sections. */
-export type EvidenceResearchTopic = z.infer<typeof researchTopicSchema>
-/** Parsed mapping from one scoring response point to writing materials and dimensions. */
-export type ScoringResponsePointMapping = z.infer<typeof responsePointMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
-/** One Main-Agent-authored S3 work item executed in an independent Child Session. */
+/** One Main-Agent-authored S4 work item executed in an independent Child Session. */
 export type EvidenceMappingTask = z.infer<typeof evidenceMappingTaskSchema>
-/** Host-private Main-Agent task plan for S3. */
+/** Host-private Main-Agent task plan for S4. */
 export type EvidenceMappingPlan = z.infer<typeof evidenceMappingPlanSchema>
 /** Strict partial Evidence Map returned by one Mapping Subagent. */
 export type EvidenceMappingPartialResult = z.infer<typeof evidenceMappingPartialResultSchema>
@@ -198,9 +133,9 @@ export function parseEvidenceMapArtifact(value: unknown): EvidenceMapArtifact {
 }
 
 /**
- * Parse a Host-private S3 task plan.
+ * Parse a Host-private S4 task plan.
  * @param value - decoded JSON value.
- * @returns strict current-version S3 plan.
+ * @returns strict current-version S4 plan.
  */
 export function parseEvidenceMappingPlan(value: unknown): EvidenceMappingPlan {
   return evidenceMappingPlanSchema.parse(value)

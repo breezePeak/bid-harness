@@ -6,6 +6,12 @@ export const OUTLINE_GENERATION_SCHEMA_VERSION = 3 as const
 /** Version of the internal Blueprint Quality Review record. */
 export const OUTLINE_QUALITY_REPORT_SCHEMA_VERSION = 3 as const
 
+/** Stable reference from one generated Section to an imported framework heading. */
+export const outlineFrameworkRefSchema = z.object({
+  file_id: z.string().min(1),
+  heading_path: z.array(z.string().min(1)).min(1),
+}).strict()
+
 /** Strict schema shared by generated and user-confirmed technical-bid sections. */
 export const outlineSectionSchema = z.object({
   id: z.string().min(1),
@@ -20,6 +26,7 @@ export const outlineSectionSchema = z.object({
   scoring_ids: z.array(z.string().min(1)),
   compliance_ids: z.array(z.string().min(1)),
   origin: z.enum(['framework', 'generated', 'mixed']),
+  framework_refs: z.array(outlineFrameworkRefSchema).optional(),
   scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)).optional(),
   scoring_response_points: z.array(z.object({ scoring_id: z.string().min(1), response_point: z.string().min(1) }).strict()),
   suggested_tables: z.array(z.string().min(1)),
@@ -56,6 +63,8 @@ export const outlineQualityReportSchema = z.object({
 
 /** One independently writable or structural node in a technical bid outline. */
 export type OutlineSection = z.infer<typeof outlineSectionSchema>
+/** Stable reference to one source heading in an imported outline framework. */
+export type OutlineFrameworkRef = z.infer<typeof outlineFrameworkRefSchema>
 /** Parsed technical-writing blueprint. */
 export type OutlineArtifact = z.infer<typeof outlineArtifactSchema>
 /** Parsed internal Blueprint Quality Review record. */

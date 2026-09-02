@@ -14,9 +14,9 @@ S4 与 S5 只共享目录树和结构化引用覆盖规则。S4 额外要求 Age
 
 重新生成以当前持久化草稿为基线。Agent 在 S4 质量复核下产生候选目录、质量报告和声明变更的 change set；Host 对草稿与候选做确定性 diff，只在候选、质量报告和 change set 全部一致时原子替换草稿。失败保留旧草稿、revision 和哈希，Session 继续处于 `outline_confirmation/waiting_user`。确认先校验当前草稿并持久化、复读验证确认 Artifact，最后才记录用户确认和阶段完成事件。
 
-`analysis/scoring-response-points.json` 为每个 S2 评分响应点保存 Host 分配的 `RP-*`、所属评分项、顺序、文本快照、下一分配序号和 `scoring.json` 哈希。修改文本或移动顺序不改变 ID，删除后分配序号不回退。S3 Mapping、S4/S5 Outline 和 S7 覆盖报告使用 ID 判断唯一覆盖，同时保留现有文本对供 S6 使用。
+`analysis/scoring-response-points.json` 为每个 S2 评分响应点保存 Host 分配的 `RP-*`、所属评分项、顺序、文本快照、下一分配序号和 `scoring.json` 哈希。修改文本或移动顺序不改变 ID，删除后分配序号不回退。S3 Outline、S4 Section Mapping 和 S5 章节 Metadata 使用 ID 判断覆盖，同时保留文本快照；同一响应点可以覆盖多个可写 Section。
 
-S4 直接从 manifest 读取人工框架的 `structure.json`，或从 Chunk 标题路径派生目录骨架；框架不进入 S3 Evidence。S3 的普通资料、旧标书和 Web Snapshot 只影响目录深度与写作指引。
+S3 直接从 manifest 读取人工框架的 `structure.json`，或从 Chunk 标题路径派生目录骨架，并把精确标题路径保存为 Section 的 `framework_refs`。框架不进入 S4 Evidence Map；S5 只把引用命中的框架正文作为写作输入。
 
 ## S6 边界
 
@@ -30,7 +30,7 @@ S6 使用 Outline 和 Chapter Metadata 中的稳定 Response Point ID 与文本�
 
 **用响应点文本哈希作为 ID。** 文本编辑会改变身份，重复文本也无法表达独立评分语义，因此由 Host 使用不复用的递增序号分配 ID。
 
-**只保存 Response Point 文本。** 不采用，因为文本编辑和重复文本不能稳定表达跨 S3–S7 的唯一归属；Metadata 同时保存稳定 ID 与文本快照。
+**只保存 Response Point 文本。** 不采用，因为文本编辑和重复文本不能稳定表达跨 S3–S5 的覆盖关系；Metadata 同时保存稳定 ID 与文本快照。
 
 ## Consequences
 

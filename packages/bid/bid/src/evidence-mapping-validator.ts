@@ -5,6 +5,7 @@ import type { BidManifest, BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseOutlineArtifact, parseOutlineQualityReport } from './outline-generation-artifacts.ts'
+import { validateOutlineFrameworkRefs } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -125,6 +126,7 @@ export async function validateEvidenceMapping(
     if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_CATALOG_MISMATCH', 'The response-point catalog does not match scoring.json.', 'analysis/scoring-response-points.json')
     validateOutlineSharedStructure(outline.sections, issues)
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
+    await validateOutlineFrameworkRefs(workspace, outline, issues)
     validateOutlineGenerationQuality(outline, quality, requirements, scoring, catalog, issues)
     const expectedSections = new Set(outline.sections.filter(section => section.writable).map(section => section.id))
     const actualSections = new Set<string>()

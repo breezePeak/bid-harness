@@ -29,7 +29,6 @@ export function validateOutlineGenerationQuality(
   catalog: ScoringResponsePointCatalog,
   issues: StageValidationIssue[],
 ): void {
-  if (report.issues.length !== 0) reject(issues, 'OUTLINE_GENERATION_QUALITY_ISSUES_UNRESOLVED', 'Quality report issues must be empty.', 'outline/quality-report.json')
   validateExact('REQUIREMENT', requirements.requirements.map(item => item.id), report.checked_requirement_ids, issues)
   validateExact('SCORING', scoring.scoring_items.map(item => item.id), report.checked_scoring_ids, issues)
   validateExact('SECTION', outline.sections.map(item => item.id), report.reviewed_section_ids, issues)

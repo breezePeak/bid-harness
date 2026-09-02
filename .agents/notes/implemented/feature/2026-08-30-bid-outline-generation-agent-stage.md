@@ -8,11 +8,11 @@ Status: implemented
 
 ## Decision
 
-Bid Host 将 `outline_generation` 注册为自动 Agent 阶段。Host 读取 manifest；存在成功解析的 `outline_framework` 时，把原始结构或从 chunk 标题恢复的层级直接注入任务，Agent 以人工层级、顺序和标题意图为优先骨架，再用 S2 要求、评分响应点和 S3 资料扩充。没有框架时，Agent 以评分响应点和评分项为主要拆分依据自主生成完整目录，再用 Requirements、Compliance 和 S3 主题补充。[文件角色分离的数据流](../architecture/2026-09-02-bid-role-separated-evidence-flow.md)说明框架为何不进入 Evidence Map。
+Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先产生候选评分响应点，再以独立语义复核检查完整评分场景；Host 随后分配稳定 `RP-*`。存在成功解析的 `outline_framework` 时，Host 把 manifest 顺序下的标题树注入任务，Agent 明确选择主框架、补充框架和无关框架，并按保留、扩展、调整或排除适配；没有框架时按评分响应点、评分项、Requirements 和 Compliance 自主生成完整目录。
 
-严格 Outline Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、purpose、是否写作、Requirement/Scoring/Compliance/Response Point 引用、结构来源和写作指引。`origin` 只取 `framework`、`generated` 或 `mixed`，不承载 Evidence ID；结构节点必须有子节点，可写节点必须是叶子并具有具体 `must_answer`。
+严格 Outline Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、purpose、是否写作、Requirement/Scoring/Compliance/Response Point 引用、结构来源、精确 `framework_refs` 和写作指引。`origin` 只取 `framework`、`generated` 或 `mixed`；结构节点必须有子节点，可写节点必须是叶子并具有具体 `must_answer`。
 
-同一 Agent 在初稿后执行强制 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，并写入质量报告。Host 只确定性校验树结构、引用存在性与覆盖、数组重复、Response Point 唯一归属、强制 Requirement 和重点 Scoring 的可写覆盖，以及质量报告集合和空问题列表；不以每章固定 ID 数量或标题关键词代替语义判断。成功后进入 `outline_confirmation/waiting_user`。
+同一 Agent 在初稿后执行 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，并写入质量报告。Host 只确定性校验树结构、引用存在性与覆盖、数组重复、精确框架标题引用、强制 Requirement 和重点 Scoring 的可写覆盖及质量报告集合；同一 Response Point 可以出现在多个可写 Section，`issues` 可保存非阻断建议。成功后由 S3 等待首次用户确认。
 
 ## Alternatives considered
 
@@ -26,4 +26,4 @@ Bid Host 将 `outline_generation` 注册为自动 Agent 阶段。Host 读取 man
 
 ## Consequences
 
-S4 在人工确认前增加初稿和强制复核两个 Agent 回合。语义质量由 Prompt、质量复核和场景测试约束；Validator 限于结构、引用、覆盖和报告一致性。人工框架缺失不阻断 S4，框架完成目录生成后也不进入 S5/S6。
+S3 在人工确认前执行响应点生成、独立语义复核、目录生成和质量复核。语义质量由 Prompt、复核和场景测试约束；Validator 限于结构、引用、覆盖和报告一致性。人工框架缺失不阻断 S3；命中的框架正文通过 `framework_refs` 进入 S5 写作上下文，但不作为事实 Evidence。

@@ -95,7 +95,10 @@ async function writeInputs(workspace: BidWorkspace) {
 }
 
 function mappingFixture(
-  workspace: BidWorkspace, material: { chunk: string; fileId: string }, repairFirst = false,
+  workspace: BidWorkspace,
+  material: { chunk: string; fileId: string },
+  repairFirst = false,
+  refinedOutline?: unknown,
 ) {
   let pendingMain = ''
   let active = 0
@@ -105,10 +108,10 @@ function mappingFixture(
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
   const plan = {
-    schema_version: 2, global_analysis: ['按业务响应拆分。'], research_notes: ['普通资料供各任务交叉检索。'],
+    schema_version: 3, global_analysis: ['按章节拆分。'], research_notes: ['普通资料供各章节交叉检索。'],
     tasks: [
-      { task_id: 'TASK-1', title: '主题一', objective: '处理第一组', requirement_ids: ['R-1'], scoring_ids: ['S-1'], response_point_ids: ['RP-000001'], compliance_ids: [], source_focus: ['统一资料'], research_topics: [] },
-      { task_id: 'TASK-2', title: '主题二', objective: '处理第二组', requirement_ids: ['R-1', 'R-2'], scoring_ids: ['S-2'], response_point_ids: ['RP-000002'], compliance_ids: [], source_focus: ['统一资料'], research_topics: [] },
+      { task_id: 'TASK-1', title: '章节一', objective: '处理第一章', section_ids: ['SEC-1'], research_topics: [] },
+      { task_id: 'TASK-2', title: '章节二', objective: '处理第二章', section_ids: ['SEC-2'], research_topics: [] },
     ],
   }
   const partial = (request: { prompt: readonly { type: string; text?: string }[] }) => {
@@ -120,21 +123,12 @@ function mappingFixture(
     const local = { source_kind: 'reference' as const, file_id: material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
     return {
       task_id: task.task_id,
-      requirement_mappings: task.requirement_ids.flatMap((requirement_id, index) =>
-        repairFirst && task.task_id === 'TASK-1' && attempt === 1 && index === 0
-          ? []
-          : [{ requirement_id, local_materials: [local], web_materials: [], missing_topics: [], writing_dimensions: ['技术响应'] }]),
-      scoring_mappings: task.scoring_ids.map(scoring_id => ({
-        scoring_id, local_materials: [local], web_materials: [], missing_topics: [],
-      })),
-      response_point_mappings: task.response_point_ids.map((response_point_id) => {
-        const value = Number(response_point_id.slice(-1))
-        return {
-          response_point_id, scoring_id: `S-${value}`, response_point: `响应点${value}`,
-          local_materials: [local], web_materials: [], missing_topics: [], writing_dimensions: ['技术响应'],
-        }
-      }),
-      research_topics: [],
+      section_mappings: repairFirst && task.task_id === 'TASK-1' && attempt === 1
+        ? []
+        : task.section_ids.map(section_id => ({
+          section_id, local_materials: [local], web_materials: [], missing_topics: [], writing_dimensions: ['技术响应'],
+        })),
+      refinement_suggestions: [],
     }
   }
   const spawnProvider: Pick<SubagentProvider, 'capabilities' | 'inheritsParentContext' | 'prepareContinuable'> = {
@@ -202,6 +196,15 @@ function mappingFixture(
     if (pendingMain.includes('Main-Agent Planning')) {
       await writeFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json'), JSON.stringify(plan))
     }
+    if (pendingMain.includes('refined-outline.candidate.json')) {
+      const candidate = refinedOutline === undefined
+        ? await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
+        : JSON.stringify(refinedOutline)
+      await writeFile(join(workspace.sessionRoot, 'outline/refined-outline.candidate.json'), candidate)
+    }
+    if (pendingMain.includes('Outline Refinement Review')) {
+      await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] }))
+    }
     pendingMain = ''
   })
   const agents = { get: (id: SessionId) => children.get(String(id)) }
@@ -228,10 +231,11 @@ describe('evidence-mapping Agent executor', () => {
       not_started: 0,
       failed: 0,
     })
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('当前 Section Blueprints：[{"id":"SEC-1"')
     expect(promptText(fixture.starts[0]!.request.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain('"id":"R-2"')
-    expect(promptText(fixture.starts[0]!.request.request)).toContain('招标文件只用于当前 S2 摘要中的需求理解')
-    expect(promptText(fixture.starts[0]!.request.request)).toContain('提交前在当前子任务中逐项检查')
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('不得脱离当前 Section 做全局资料搜集')
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('提交前逐项检查')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.fileId)
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.path)
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.fileId)
@@ -244,11 +248,11 @@ describe('evidence-mapping Agent executor', () => {
     expect(childReadGuard?.({
       name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.tender.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
-    } as unknown as ToolExecution)).toBe('S3 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
+    } as unknown as ToolExecution)).toBe('S4 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
     expect(childReadGuard?.({
       name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.framework.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
-    } as unknown as ToolExecution)).toBe('S3 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
+    } as unknown as ToolExecution)).toBe('S4 Mapping Child 只可读取成功入库的 reference 或 reference_bid 分块。')
     expect(childReadGuard?.({
       name: 'read', arguments: { file_path: join(workspace.sessionRoot, material.referenceBid.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
@@ -269,7 +273,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.observed_max_concurrency).toBe(2)
     expect(log.tasks.every(item => item.final_child_session_id !== null)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
-    expect(fixture.followup).toHaveBeenCalledTimes(1)
+    expect(fixture.followup).toHaveBeenCalledTimes(3)
     expect(fixture.disposed).toHaveLength(2)
   })
 
@@ -291,6 +295,73 @@ describe('evidence-mapping Agent executor', () => {
       tasks: Array<{ task_id: string; attempts: Array<{ child_session_id: string }> }>
     }
     expect(new Set(log.tasks.find(item => item.task_id === 'TASK-1')!.attempts.map(item => item.child_session_id))).toEqual(new Set(['child-1']))
+  })
+
+  it('keeps existing ids, assigns stable ids to split sections, and maps only the changed sections again', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-refinement-')), 'session')
+    const material = await writeInputs(workspace)
+    const initial = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')) as {
+      sections: Array<Record<string, unknown>>
+    }
+    const first = initial.sections[0]!
+    const refined = {
+      ...initial,
+      sections: [
+        {
+          ...first,
+          writable: false,
+          must_answer: [],
+          requirement_ids: [],
+          scoring_ids: [],
+          scoring_response_point_ids: [],
+          scoring_response_points: [],
+        },
+        {
+          ...first,
+          id: 'NEW-CLASSIFICATION',
+          parent_id: 'SEC-1',
+          title: '数据分类分级',
+          order: 1,
+          level: 2,
+        },
+        {
+          ...first,
+          id: 'NEW-AUDIT',
+          parent_id: 'SEC-1',
+          title: '访问控制与安全审计',
+          order: 2,
+          level: 2,
+        },
+        initial.sections[1]!,
+      ],
+    }
+    const fixture = mappingFixture(workspace, material, false, refined)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 1,
+      maxConcurrency: 2,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.slice(0, 2).forEach(start => start.resolve())
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) })
+    fixture.starts.slice(2).forEach(start => start.resolve())
+    await execution
+
+    const finalOutline = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')) as {
+      sections: Array<{ id: string; parent_id: string | null; writable: boolean; title: string }>
+    }
+    expect(finalOutline).not.toEqual(initial)
+    expect(finalOutline.sections.map(section => section.id)).toEqual(['SEC-1', 'SEC-003', 'SEC-004', 'SEC-2'])
+    expect(finalOutline.sections.filter(section => section.parent_id === 'SEC-1').map(section => section.title))
+      .toEqual(['数据分类分级', '访问控制与安全审计'])
+    expect(finalOutline.sections.find(section => section.id === 'SEC-1')?.writable).toBe(false)
+    const map = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')) as {
+      section_mappings: Array<{ section_id: string }>
+    }
+    expect(map.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-003', 'SEC-004', 'SEC-2'])
+    expect(fixture.starts.slice(2).map(start => JSON.parse(
+      promptText(start.request.request).split('\n').find(value => value.startsWith('Mapping Task：'))!.slice('Mapping Task：'.length),
+    ).section_ids)).toEqual([['SEC-003'], ['SEC-004']])
   })
 
   it('rejects a local material whose declared source kind does not match the manifest role', async () => {
@@ -337,17 +408,13 @@ describe('evidence-mapping Agent executor', () => {
     {
       name: 'reports strict plan schema paths separately',
       content: JSON.stringify({
-        schema_version: 2,
+        schema_version: 3,
         global_analysis: ['按业务主题拆分。'],
         research_notes: [],
         tasks: [{
           task_id: 'TASK-1',
           title: '缺少目标',
-          requirement_ids: ['R-1'],
-          scoring_ids: [],
-          response_point_ids: [],
-          compliance_ids: [],
-          source_focus: [],
+          section_ids: ['SEC-1'],
           research_topics: [],
         }],
       }),
@@ -380,6 +447,12 @@ describe('evidence-mapping Agent executor', () => {
     let planAttempt = 0
     let removedBeforeRepair = false
     fixture.whenIdle.mockImplementation(async () => {
+      if (fixture.currentPrompt().includes('refined-outline.candidate.json')) {
+        await writeFile(join(workspace.sessionRoot, 'outline/refined-outline.candidate.json'), await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8'))
+      }
+      if (fixture.currentPrompt().includes('Outline Refinement Review')) {
+        await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] }))
+      }
       if (!fixture.currentPrompt().includes('Main-Agent Planning')) return
       const planPath = join(workspace.sessionRoot, 'analysis/evidence-mapping-plan.json')
       if (planAttempt++ === 0) {
@@ -389,15 +462,13 @@ describe('evidence-mapping Agent executor', () => {
       await expect(readFile(planPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       removedBeforeRepair = true
       await writeFile(planPath, JSON.stringify({
-        schema_version: 2,
-        global_analysis: ['按业务主题拆分。'],
+        schema_version: 3,
+        global_analysis: ['按章节拆分。'],
         research_notes: [],
         tasks: [{
-          task_id: 'TASK-1', title: '主题一', objective: '处理第一组', requirement_ids: ['R-1'], scoring_ids: ['S-1'],
-          response_point_ids: ['RP-000001'], compliance_ids: [], source_focus: [], research_topics: [],
+          task_id: 'TASK-1', title: '章节一', objective: '处理第一章', section_ids: ['SEC-1'], research_topics: [],
         }, {
-          task_id: 'TASK-2', title: '主题二', objective: '处理第二组', requirement_ids: ['R-2'], scoring_ids: ['S-2'],
-          response_point_ids: ['RP-000002'], compliance_ids: [], source_focus: [], research_topics: [],
+          task_id: 'TASK-2', title: '章节二', objective: '处理第二章', section_ids: ['SEC-2'], research_topics: [],
         }],
       }))
     })

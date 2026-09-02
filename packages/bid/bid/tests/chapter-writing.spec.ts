@@ -9,6 +9,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { pickChapterContext, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
 import type { EvidenceMappingWebSnapshot } from '../src/evidence-mapping-executor.ts'
+import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
   buildBidStageTask,
@@ -95,15 +96,15 @@ function emptyChapterContext(section: ReturnType<typeof outlineFixture>['section
     requirements: [],
     scoring: [],
     responsePoints: [],
-    responsePointMappings: [],
     compliance: [],
-    researchTopics: [],
     relatedMaterials: [],
     referenceBidMaterials: [],
+    frameworkDraftMaterials: [],
     webMaterials: [],
     writingDimensions: [],
     missingTopics: [],
     localReadLocations: [],
+    frameworkReadLocations: [],
     webReadLocations: [],
   }
 }
@@ -394,7 +395,7 @@ describe('chapter-writing executor', () => {
     expect(context.writingDimensions).toEqual(['需求维度', '评分维度'])
   })
 
-  it('allows only reference chunks, their indexes, and ledger Web snapshots', async () => {
+  it('allows reference and framework draft chunks plus ledger Web snapshots', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-read-guard-')), 'session')
     const outline = await writeInputs(workspace)
     await seedReadableMaterials(workspace)
@@ -441,8 +442,22 @@ describe('chapter-writing executor', () => {
     expect(guarded('grep', 'path', sessionPath('corpus/reference_bid/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/tender/chunks/chunk_0001.md'))).toContain('不可读取')
-    expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toContain('不可读取')
+    expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('账本')
+  })
+
+  it('resolves the exact referenced framework body for the chapter writer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-framework-draft-')), 'session')
+    await seedReadableMaterials(workspace)
+
+    const materials = await resolveFrameworkDraftMaterials(workspace, [{
+      file_id: 'FRAMEWORK',
+      heading_path: ['章节'],
+    }])
+
+    expect(materials).toHaveLength(1)
+    expect(materials[0]).toMatchObject({ file_id: 'FRAMEWORK', chunk: 'chunk_0001', heading_path: ['章节'] })
+    await expect(readFile(materials[0]!.chunk_path, 'utf8')).resolves.toContain('outline_framework 正文')
   })
 
   it('accepts any Web material whose ledger snapshot and hash are real', async () => {

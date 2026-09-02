@@ -5,9 +5,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { BidWorkspace, ManifestFile } from './index.ts'
+import type { BidWorkspace } from './index.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
-import { parseDocumentChunkIndex } from './document-chunk.ts'
 import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
@@ -17,89 +16,20 @@ import {
   OUTLINE_GENERATION_SCHEMA_VERSION,
   OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
 } from './outline-generation-artifacts.ts'
+import { loadOutlineFrameworkStructures, type OutlineFrameworkStructure } from './outline-framework.ts'
 import {
   createScoringResponsePointCatalog,
   parseScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
 import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
-import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { assertNoLinkedPath } from './workspace-path.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
 const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.json'
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
-
-interface OutlineFrameworkHeading {
-  readonly title: string
-  readonly level: number
-  readonly heading_path: readonly string[]
-  readonly order: number
-}
-
-interface OutlineFrameworkStructure {
-  readonly file_id: string
-  readonly name: string
-  readonly headings: readonly OutlineFrameworkHeading[]
-}
-
-function parseFrameworkStructure(value: unknown): OutlineFrameworkHeading[] {
-  if (typeof value !== 'object' || value === null || !('sections' in value) || !Array.isArray(value.sections)) {
-    throw new Error('outline-framework-structure-invalid')
-  }
-  return value.sections.map((section) => {
-    if (typeof section !== 'object' || section === null) throw new Error('outline-framework-structure-invalid')
-    const record = section as Record<string, unknown>
-    if (typeof record.title !== 'string' || record.title.trim().length === 0
-      || typeof record.level !== 'number' || !Number.isSafeInteger(record.level) || record.level < 1
-      || typeof record.order !== 'number' || !Number.isSafeInteger(record.order) || record.order < 1
-      || !Array.isArray(record.heading_path)
-      || record.heading_path.some(heading => typeof heading !== 'string' || heading.trim().length === 0)) {
-      throw new Error('outline-framework-structure-invalid')
-    }
-    return {
-      title: record.title,
-      level: record.level,
-      heading_path: record.heading_path as string[],
-      order: record.order,
-    }
-  })
-}
-
-async function readFrameworkHeadings(workspace: BidWorkspace, file: ManifestFile): Promise<OutlineFrameworkHeading[]> {
-  if (file.structurePath !== null) {
-    const path = within(workspace.sessionRoot, file.structurePath)
-    await assertNoLinkedPath(workspace.root, path)
-    return parseFrameworkStructure(JSON.parse(await readFile(path, 'utf8')))
-  }
-  if (file.chunkIndexPath === null) throw new Error('outline-framework-chunk-index-missing')
-  const path = within(workspace.sessionRoot, file.chunkIndexPath)
-  await assertNoLinkedPath(workspace.root, path)
-  const index = parseDocumentChunkIndex(JSON.parse(await readFile(path, 'utf8')))
-  const headings = new Map<string, OutlineFrameworkHeading>()
-  for (const chunk of index.chunks) {
-    for (let level = 1; level <= chunk.heading_path.length; level++) {
-      const headingPath = chunk.heading_path.slice(0, level)
-      const key = headingPath.join('\u0000')
-      if (!headings.has(key)) headings.set(key, {
-        title: headingPath.at(-1) ?? '', level, heading_path: headingPath, order: headings.size + 1,
-      })
-    }
-  }
-  return [...headings.values()]
-}
-
-async function loadOutlineFrameworkStructures(workspace: BidWorkspace): Promise<OutlineFrameworkStructure[]> {
-  const manifest = await workspace.readManifest()
-  return Promise.all(manifest.files
-    .filter(file => file.role === 'outline_framework' && file.parseStatus === 'success')
-    .map(async file => ({
-      file_id: String(file.id),
-      name: file.originalName,
-      headings: await readFrameworkHeadings(workspace, file),
-    })))
-}
 
 /** Optional user-feedback regeneration identity layered onto normal S3 execution. */
 export interface OutlineGenerationExecutionOptions extends ModelStageExecutionOptions {
@@ -124,9 +54,28 @@ function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, 
     `当前阶段：${task.stage} / 评分响应点分析`,
     `Bid Session：${agent.id}`,
     `读取 ${root}/analysis/scoring.json。`,
-    '逐项理解评分语义，将每个评分项拆成一个或多个可独立回答、可独立审查的响应点。不要按标点、连接词或固定正则机械切分；一个完整单义要求保留为一个响应点。',
+    '逐项理解评分语义，将每个评分项拆成一个或多个可独立回答、可独立审查，或在实际评分逻辑中明显独立评价的最小合理业务单元。重点识别原文明列事项、包括或包括但不限于的独立内容、编号或分号列项、逐项得分或扣分，以及虽在同一句但可独立编写审查的技术内容。',
+    '不要按顿号、逗号、和、及或分值数量机械切分。完整、合理、可行、准确、符合要求等质量判断词不是独立写作主题，除非原文明确定义为分别响应的评价维度；不得凭常识新增原文没有依据的评分内容。',
     `唯一输出：${root}/${RESPONSE_POINT_CANDIDATE}。严格写入 {"schema_version":1,"points":[{"scoring_id":"SCORE-...","order":1,"text":"具体响应点"}]}。`,
     '每个 scoring_id 至少一个响应点，同一评分项的 order 从 1 连续递增。写完停止，稳定 RP ID 由 Host 分配。',
+  ].join('\n')
+}
+
+/**
+ * Render the independent S3 semantic review that repairs the candidate in place.
+ * @param agent - live Bid Agent receiving the review assignment.
+ * @param workspace - Session-scoped Bid workspace.
+ * @returns model-visible semantic review instructions.
+ */
+export function renderResponsePointSemanticReviewTask(agent: Agent, workspace: BidWorkspace): string {
+  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  return [
+    '当前阶段：outline_generation / Response Point Semantic Review',
+    `Bid Session：${agent.id}`,
+    `重新读取 ${root}/analysis/scoring.json 和 ${root}/${RESPONSE_POINT_CANDIDATE}。`,
+    '逐个评分项复核：原文明列事项是否遗漏，多个独立内容是否错误合并，完整单义要求是否过度拆碎，质量评价词是否误作写作主题，是否新增无原文依据的内容，scoring_id 与顺序是否正确，每个响应点是否具体到可直接用于目录设计。',
+    '典型逐项计分原文中的项目目标、预期成果、总体设计对相关政策与现有条件的符合性、软件技术路线、总体设计应分别保留；完整、合理可行、现状分析准确清晰、符合项目要求、满足采购需求仍是质量标准。整体表述“总体方案完整、合理、可行，得5分”应保留为一个合理响应点，不得按分值拆成五项。',
+    `发现过粗、遗漏或误拆时直接重写 ${root}/${RESPONSE_POINT_CANDIDATE}；没有问题则保持文件内容。不得另写 review report。完成后停止，Host 只校验 JSON、scoring_id、每项至少一点、连续 order 和非空文本。`,
   ].join('\n')
 }
 
@@ -150,15 +99,17 @@ export function renderOutlineGenerationTask(
     ...task.inputs.map(path => `- ${root}/${path}`),
     `本阶段只允许调用：${task.allowedTools.join(', ')}。不得 Web Search、bash 或重新进行全库资料映射。`,
     ...(frameworks.length === 0 ? [
-      '目录模式：无人工框架。以评分响应点和评分项为主要拆分依据，自主生成完整技术标目录，再用 mandatory Requirements、其他 Requirements 和 Compliance 补充。语义相近的评分响应点可以合并到同一技术主题，但每个稳定 Response Point ID 必须恰好落入一个合适的可写叶子。',
+      '目录模式：无人工框架。以评分响应点和评分项为主要拆分依据，自主生成完整技术标目录，再用 mandatory Requirements、其他 Requirements 和 Compliance 补充。语义相近的评分响应点可以合并到同一技术主题；每个稳定 Response Point ID 必须至少落入一个合适的可写叶子，同一 Response Point 可以由多个章节共同支撑。',
     ] : [
-      '目录模式：存在人工框架。以下结构由 Host 从 manifest 中成功解析的 outline_framework 直接提取，是目录的优先骨架；保持其层级、顺序和标题意图，再用当前 tender 的评分响应点、评分项、Requirements 和 Compliance 扩充。当前 tender 高于框架，框架缺失的评分或强制要求必须补入目录。',
+      '目录模式：存在人工框架。以下结构由 Host 从 manifest 中成功解析的 outline_framework 直接提取。第一个是 primary framework，决定主要层级和顺序；其余仅补充 primary 缺失的合理技术章节，不得打乱主要骨架。当前 Tender、稳定 Response Points、人工框架、reference_bid 结构、自主补充依次决定必须响应内容、语义颗粒度、整体组织、缺口参考和剩余补充。',
+      '先按 primary framework 初始化骨架：精确覆盖时直接复用，过粗时保留父标题并增加子章节，缺失 Tender 必须内容时在合适位置新增，旧项目污染或非技术标标题才排除。无直接评分点但合理的技术章节可以保留；不得要求每个框架标题都绑定评分点。Framework 高于 reference_bid，但绝不覆盖当前 Tender。',
       `<outline-framework-structures>\n${JSON.stringify(frameworks)}\n</outline-framework-structures>`,
     ]),
     '根据 Project、Requirements、Scoring、Compliance 和稳定评分响应点目录设计技术标详细写作 Blueprint。此阶段不读取或推断证据映射。',
     `本轮初稿唯一输出：${root}/${OUTLINE_ARTIFACT}。Host 随后会强制发送一次 Blueprint Quality Review。`,
     `文件严格包含 schema_version=${OUTLINE_GENERATION_SCHEMA_VERSION}、scope="technical_bid"、document_title、global_compliance_ids、sections。不得写 content、body、markdown 或任何正文。`,
-    'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、scoring_response_point_ids、scoring_response_points、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。每个稳定 Response Point ID 与文本快照必须按相同顺序恰好落在一个可写叶子：scoring_response_point_ids 写 ["RP-000001"]，对应 scoring_response_points 写 [{"scoring_id":"SCORE-...","response_point":"该评分响应点原文"}]，绝不能写 {"id":"RP-...","text":"..."}。',
+    'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、scoring_response_points、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
+    '每个稳定 Response Point ID 与文本快照必须在同一 Section 中按相同顺序配对：scoring_response_point_ids 写 ["RP-000001"]，对应 scoring_response_points 写 [{"scoring_id":"SCORE-...","response_point":"该评分响应点原文"}]，绝不能写 {"id":"RP-...","text":"..."}。每个 RP 至少由一个可写叶子覆盖，也可由多个可写叶子共同支撑。',
     'writable 节点必须有至少一个具体 must_answer。父评分、子评分和通用质量评分可以同时关联。结构节点 writable=false、must_answer=[] 且必须有子节点。章节标题应按技术语义表达组织、阶段、质量、风险、安全、验收等内容，但不要套固定模板。',
     '技术响应索引、偏离表或合规清单只能作为索引或附录，不能集中承担正文覆盖。mandatory Requirement 和重点 Scoring 必须在对应的实质性可写叶子中映射；索引重复引用不能替代正文拆分。',
     '每个 Requirement、Scoring 和 Compliance ID 都必须至少覆盖一次；mandatory Requirement，以及 must_answer=true、带 score 或 score_range 的 Scoring，必须关联至少一个 writable 节点。一个 ID 可出现在多个章节，但同一数组不得重复。Compliance 可以放在 global_compliance_ids 或具体章节。',
@@ -188,10 +139,10 @@ function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace,
     ...task.inputs.map(path => `- ${root}/${path}`),
     `- ${root}/${OUTLINE_ARTIFACT}`,
     `本阶段只允许调用：${task.allowedTools.join(', ')}。不得 Web Search、bash 或重新进行全库资料映射。`,
-    '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适的可写叶子章节；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。',
+    '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适的可写叶子章节；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。存在 Framework 时还要检查主要骨架、顺序和关键技术章节是否合理继承，框架过粗处是否按 RP 扩展，是否产生重复主题，framework_refs 与 origin 是否符合实际来源，旧项目污染是否清理。',
     '发现章节过粗、多个明显技术主题混在一节、评分项未真实拆解、must_answer 过泛、结构与可写职责混淆或其他问题时，先修改 outline/outline.json；保留原有严格 JSON 字段和全部引用覆盖。',
     `修正后写入 ${root}/${QUALITY_REPORT_ARTIFACT}。文件严格包含 schema_version=${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}、scope="technical_bid"、checked_requirement_ids、checked_scoring_ids、checked_scoring_response_point_ids、reviewed_section_ids、issues。前三个 checked 数组分别列出全部现有 Requirement ID、Scoring ID 和稳定 Response Point ID。`,
-    '完成复核和质量报告后停止；Host 会独立校验报告、树结构和引用覆盖。',
+    'issues 可以记录仍需用户判断的非阻断语义建议；Host 不要求它为空。完成复核和质量报告后停止；Host 会独立校验报告集合、树结构和引用覆盖。',
   ].join('\n')
 }
 
@@ -224,7 +175,7 @@ export function renderOutlineGenerationRepairTask(
       `这是基于 outline/draft.json revision=${String(regeneration.revision)}、draft hash=${regeneration.draftSha256} 的重新生成修复；保留未被反馈涉及的草稿内容。`,
       `修复候选后同步更新 ${root}/${REGENERATION_CHANGE_SET}，使其逐项准确声明相对该基线的全部实际变更。`,
     ]),
-    '修正目录树、ID 覆盖、评分响应点和质量报告后，将 reviewed_section_ids 更新为最终全部 section ID。索引或附录不能替代实质性正文叶子的映射。仅在所有问题已解决时写 issues=[]。',
+    '修正目录树、ID 覆盖、评分响应点和质量报告后，将 reviewed_section_ids 更新为最终全部 section ID。索引或附录不能替代实质性正文叶子的映射；主观建议可以保留在 issues。',
     `修复时只允许调用：${task.allowedTools.join(', ')}。写完原文件后停止；Host 将重新校验。`,
   ].join('\n')
 }
@@ -271,6 +222,8 @@ export async function executeOutlineGeneration(
   try {
     if (options.regeneration === undefined) {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointAnalysisTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
+      await agent.whenIdle()
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointSemanticReviewTask(agent, workspace) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
       await agent.whenIdle()
       const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')))
       const candidate = parseScoringResponsePointCandidate(JSON.parse(await readFile(join(workspace.sessionRoot, RESPONSE_POINT_CANDIDATE), 'utf8')))

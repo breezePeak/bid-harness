@@ -37,7 +37,7 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，在 per-Session 锁内准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑。
 
-六阶段固定为 S1 文件接入、S2 招标分析、S3 目录生成、S4 证据映射、S5 章节写作、S6 DOCX 导出。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 由 Agent 按语义拆解评分响应点，Host 分配稳定 `RP-*` ID，再生成初始目录并在本阶段等待用户确认。S4 以已确认初始目录为单位形成 `section_mappings`，绑定本地材料和 Web Snapshot，提供最终目录并再次等待确认。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断整本输出。
+六阶段固定为 S1 文件接入、S2 招标分析、S3 目录生成、S4 证据映射、S5 章节写作、S6 DOCX 导出。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断整本输出。
 
 S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目技术重点；`scoring.json` 只保存评分原文、分值与简单规范化字段，不含评分响应点。纯商务、资格和报价评分不得进入 `scoring.json`。Validator 检查覆盖、严格 schema、来源文件、分块和引用行后，S2 停在 `tender_analysis/waiting_user`。
 
@@ -48,11 +48,11 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit。Requirement、Scoring item 和 Compliance item 的 `raw_text` 可以在引用原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题，并严格校验每个 `source_refs` 的文件身份、解析状态、chunk 归属、行号范围和 Workspace 路径安全；Validator 不要求 `raw_text` 逐字存在于引用范围。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`，且只能覆盖四个正式 S2 Artifact。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
 
-S3 先按评分语义产生候选响应点，Host 用评分 Artifact 哈希和单调序列建立稳定目录；Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录。目录质量复核负责语义粒度，Host 只校验确定性的 Schema、树、ID、覆盖和唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
+S3 先按评分语义产生候选响应点，再由独立语义复核回看评分场景是否完整；Host 用评分 Artifact 哈希和单调序列建立稳定目录。Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录，按主框架、补充框架和无关框架明确适配，并在 Section 上保存精确 `framework_refs`。目录质量复核负责语义粒度；Host 只校验确定性的 Schema、树、ID、覆盖和框架引用，不要求响应点全局唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
 
-S4 的 Evidence Map schema v8 只保存每个可写 Section 的 `local_materials`、`web_materials`、`missing_topics` 和 `writing_dimensions`。普通 `reference` 只能用于 `reference` 或 `background`，`reference_bid` 才可用于 `reuse` 或 `adapt`。Host 将已完成 `web_search → web_fetch` 且被最终映射使用的正文保存为带哈希的 Snapshot。Validator 只确定性检查 Section 覆盖、manifest 角色、chunk 归属、Workspace 路径、账本绑定、Snapshot 哈希和最终目录；缺少资料可由 `missing_topics` 明示。
+S4 的 Main Agent 按可写 Section 生成任务，Child 直接返回 `section_mappings` 和目录深化建议，不再先构造 Requirement、Scoring 或 Response Point 中间映射。首轮映射后 Main Agent 只深化一次目录；Host 保留现有 Section ID，为新增节点分配稳定 `SEC-*`，并只对新增或语义变化的可写 Section 运行一批补充映射。Evidence Map schema v8 只保存最终可写 Section 的 `local_materials`、`web_materials`、`missing_topics` 和 `writing_dimensions`。普通 `reference` 只能用于 `reference` 或 `background`，`reference_bid` 才可用于 `reuse` 或 `adapt`。Host 将已完成 `web_search → web_fetch` 且被最终映射使用的正文保存为带哈希的 Snapshot；Validator 确定性检查 Section 覆盖、manifest 角色、chunk 归属、Workspace 路径、账本绑定、Snapshot 哈希和最终目录。
 
-S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。主 Agent 只写章节关系计划；Host 按强依赖 DAG 调度 Writer，每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取。Reviewer 没有工作区或网络工具；通过则标记 `pass`，要求修复时最多再启动一次 Writer，第二次审查仍有问题则持久化为 `needs_attention`。企业事实缺少本地依据时保留 `unresolved_topics`，不得由 Web 资料替代。
+S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。主 Agent 只写章节关系计划；Host 按强依赖 DAG 调度 Writer，并按每个 Section 的 `framework_refs` 注入精确框架正文分块。框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。企业事实缺少本地依据时保留 `unresolved_topics`，不得由框架或 Web 资料替代。
 
 
 ### Inventory 文本
