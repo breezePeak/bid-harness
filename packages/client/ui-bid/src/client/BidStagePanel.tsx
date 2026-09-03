@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import { buildOutlineView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -15,9 +14,9 @@ import {
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from './index.ts'
 import type { BidKey } from './locales.ts'
+import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import css from './BidStagePanel.module.css'
 
@@ -157,6 +156,7 @@ export function BidStagePanel({
   const draftOperation = useRef(0)
   const draftEpoch = useRef(0)
   const reviewReady = useRef<string | null>(null)
+  const [updatedForConfirmation, setUpdatedForConfirmation] = useState(false)
 
   useEffect(() => {
     alive.current = true
@@ -164,7 +164,7 @@ export function BidStagePanel({
   }, [])
 
   useEffect(() => {
-    if (projection?.runtime.stage !== 'evidence_mapping' || projection.runtime.status !== 'running' || getEvidenceMappingProgress === undefined) {
+    if (projection?.runtime.stage !== 'evidence_mapping' || (projection.runtime.status !== 'running' && projection.runtime.status !== 'waiting_user') || getEvidenceMappingProgress === undefined) {
       setMappingProgress(null)
       return
     }
@@ -177,12 +177,12 @@ export function BidStagePanel({
       })
     }
     refresh()
-    const timer = window.setInterval(refresh, 1000)
+    const timer = projection.runtime.status === 'running' ? window.setInterval(refresh, 1000) : undefined
     return () => {
       active = false
       window.clearInterval(timer)
     }
-  }, [getEvidenceMappingProgress, projection?.runtime.stage, projection?.runtime.status])
+  }, [getEvidenceMappingProgress, projection])
 
   const blockedReason = useMemo(
     () => projection === undefined ? undefined : composerReason(projection, t),
@@ -225,18 +225,23 @@ export function BidStagePanel({
 
   useEffect(() => {
     setOutlineFeedback('')
+    setUpdatedForConfirmation(false)
+    draftRef.current = null
   }, [sessionId, projection?.runtime.stage])
 
   useEffect(() => {
     if (!canConfirm || getOutlineDraft === undefined) return
-    void getOutlineDraft().then((value) => { if (alive.current) {
+    let active = true
+    void getOutlineDraft().then((value) => { if (alive.current && active) {
+      if (draftRef.current !== null && value.revision > draftRef.current.revision) setUpdatedForConfirmation(true)
       draftRef.current = value
       setDraft(value)
       setDraftSaveState('saved')
     } }, (reason: unknown) => {
-      if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
+      if (alive.current && active) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
-  }, [canConfirm, getOutlineDraft, t])
+    return () => { active = false }
+  }, [canConfirm, getOutlineDraft, projection, t])
 
   useEffect(() => {
     if (!canConfirmAnalysis || getTenderAnalysisForConfirmation === undefined) return
@@ -439,6 +444,8 @@ export function BidStagePanel({
           <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
         </div>
 
+        {canConfirm && updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}
+
         {hostFailureReason !== undefined && (
           <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
         )}
@@ -461,51 +468,19 @@ export function BidStagePanel({
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
         {reviewHost !== null && (canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
-          <div>
+          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             {canConfirm && previewOutline !== null && (
-              <div className={css.outline} aria-label="技术标目录">
-                {buildOutlineView(previewOutline.sections).map(({ section, number, depth }) => {
-                  const siblings = previewOutline.sections.filter(candidate => candidate.parent_id === section.parent_id)
-                    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
-                  const index = siblings.findIndex(candidate => candidate.id === section.id)
-                  return <article key={section.id} className={css.outlineSection} style={{ marginLeft: `${String((depth - 1) * 16)}px` }}>
-                    <span aria-label={`${section.id} 章节编号`}>{number}</span>
-                    <input aria-label={`${section.id} 标题`} value={section.title} onChange={(event) => {
-                      updateSection(section.id, { title: event.target.value })
-                    }} />
-                    <textarea aria-label={`${section.id} 目的`} value={section.purpose} onChange={(event) => {
-                      updateSection(section.id, { purpose: event.target.value })
-                    }} />
-                    {section.writable && <textarea
-                      aria-label={`${section.id} 必答内容`}
-                      value={section.must_answer.join('\n')}
-                      onChange={(event) => {
-                        updateSection(section.id, {
-                          must_answer: event.target.value.split('\n').map(value => value.trim()).filter(Boolean),
-                        })
-                      }}
-                    />}
-                    <div className={css.actions}>
-                      <button type="button" onClick={() => {
-                        structureOperation({ type: 'add_section', parent_id: section.parent_id, order: section.order + 1, writable: true, title: '新增章节', purpose: '补充响应', must_answer: ['待补充'] })
-                      }}>新增同级</button>
-                      <button type="button" onClick={() => {
-                        structureOperation({ type: 'add_section', parent_id: section.id, order: 1, writable: true, title: '新增子级', purpose: '补充响应', must_answer: ['待补充'] })
-                      }}>新增子级</button>
-                      <button type="button" onClick={() => { structureOperation({ type: 'delete_section', section_id: section.id }) }}>删除</button>
-                      <button type="button" disabled={index === 0} onClick={() => {
-                        structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index })
-                      }}>上移</button>
-                      <button type="button" disabled={index === siblings.length - 1} onClick={() => {
-                        structureOperation({ type: 'move_section', section_id: section.id, parent_id: section.parent_id, order: index + 2 })
-                      }}>下移</button>
-                      <button type="button" disabled={index === 0} onClick={() => { indentSection(section.id) }}>缩进</button>
-                      <button type="button" disabled={section.parent_id === null} onClick={() => { outdentSection(section.id) }}>取消缩进</button>
-                    </div>
-                    <span className={css.mapping}>{`Requirement ${String(section.requirement_ids.length)} · Scoring ${String(section.scoring_ids.length)}`}</span>
-                  </article>
-                })}
-              </div>
+              <OutlineConfirmationReview
+                outline={previewOutline}
+                stage={projection.runtime.stage}
+                draftSaveState={draftSaveState}
+                revision={draft?.revision}
+                onUpdateSection={updateSection}
+                onStructureOperation={structureOperation}
+                onIndentSection={indentSection}
+                onOutdentSection={outdentSection}
+                t={t}
+              />
             )}
 
             {canConfirmAnalysis && tenderAnalysis !== null && (

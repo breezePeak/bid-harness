@@ -10,6 +10,8 @@ The Bid browser projection used two keys, exported Host runtime functions throug
 
 ## Decision
 
+[阶段交互](../feature/2026-09-03-bid-waiting-user-stage-interaction.md)部分替代本文禁用全部普通消息的决定：S2/S3/S4 的等待态允许对话，运行态仍由 Host 拒绝；Host 准入与单一投影的依据保持有效。
+
 `@deepseek-ai/dsh-bid/control-plane` exports only browser-safe constants and types, and `bid.runtime` is the sole Bid projection key. The Bid Host plugin registers that projection with its configured file limits and rejects generic prompt admission for sessions whose resolved preset is `bid` before `createUserMessage`, follow-up, or steering can run. ApiProxy dispatches prompt admission from the root Context so sibling Host composition plugins participate in the same Host-wide decision. The projection advertises only actions with Host routes: file upload is available while `file_intake` is pending or failed, and the composer remains disabled with a canonical reason. The reducer accepts stage completion only from the current running stage; outline confirmation enters that state only after a required confirmation receives `confirmed: true`. Projection state version 3 includes the durable failure reason and invalidates cache entries derived under the earlier transition rules.
 
 ## Alternatives considered

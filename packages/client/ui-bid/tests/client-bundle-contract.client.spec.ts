@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { INLINE_SAFE } from '../../tsdown.client.ts'
@@ -23,12 +25,23 @@ describe('ui-bid client bundle contract', () => {
       default: './lib/types/control-plane.js',
     })
 
-    const entry = await readFile(`${BID_PACKAGE}src/control-plane.ts`, 'utf8')
-    const contract = await readFile(`${BID_PACKAGE}src/control-plane-contract.ts`, 'utf8')
-    expect(entry.match(/from ['"]([^'"]+)['"]/g)).toEqual([
-      "from './control-plane-contract.ts'",
-      "from './control-plane-contract.ts'",
-    ])
-    expect(contract).not.toMatch(/from ['"]|node:|\b(?:docx|xlsx|mammoth|pdfjs-dist)\b/)
+    const pending = [`${BID_PACKAGE}src/control-plane.ts`]
+    const visited = new Set<string>()
+    while (pending.length > 0) {
+      const path = pending.pop()!
+      if (visited.has(path)) continue
+      visited.add(path)
+      const source = ts.createSourceFile(path, await readFile(path, 'utf8'), ts.ScriptTarget.Latest)
+      for (const statement of source.statements) {
+        if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue
+        if (ts.isImportDeclaration(statement) && statement.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword) continue
+        if (ts.isExportDeclaration(statement) && statement.isTypeOnly) continue
+        const module = statement.moduleSpecifier
+        if (module === undefined || !ts.isStringLiteral(module)) continue
+        expect(module.text).not.toMatch(/^node:|^(?:docx|xlsx|mammoth|pdfjs-dist)$/u)
+        if (module.text.startsWith('.')) pending.push(resolve(dirname(path), module.text))
+        else expect(module.text).toBe('zod')
+      }
+    }
   })
 })

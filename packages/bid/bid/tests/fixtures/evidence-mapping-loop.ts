@@ -31,6 +31,7 @@ function finalText(text: string): StreamChunk[] {
 }
 
 class ScriptedAdapter extends LlmAdapter {
+  interactive = false
   constructor(
     private readonly parentId: SessionId,
     private readonly parentScript: StreamChunk[][],
@@ -44,7 +45,7 @@ class ScriptedAdapter extends LlmAdapter {
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (options.messages.at(-1)?.source.kind === 'subagent-settled') {
+    if (!this.interactive && options.messages.at(-1)?.source.kind === 'subagent-settled') {
       yield* finalText('等待 Host 下发目录深化任务。')
       return
     }
@@ -186,7 +187,7 @@ function partialResult(url: string) {
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @returns 阶段结果、Host 及其工作区。
  */
-export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean) {
+export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root, sessionId)
   const s2 = await prepareS2(workspace)
@@ -227,9 +228,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
     finalText('复核完成。'),
   ]
-  ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, refinementScript, childScript)))
+  const adapter = new ScriptedAdapter(sessionId, refinementScript, childScript)
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
-  const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
+  const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root, ...(interactive ? { agentPreset: 'bid' } : {}) })
   agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
   agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
   agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
@@ -243,5 +245,6 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   )
 
   const outcome = await orchestrator.runCurrentAutomaticStage()
-  return { agent, workspace, sourceUrl, outcome }
+  adapter.interactive = interactive
+  return { agent, workspace, sourceUrl, outcome, parentScript: refinementScript, childScript }
 }

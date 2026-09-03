@@ -14,8 +14,54 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { buildBidStageTask, parseWebEvidenceSourcesArtifact, parseEvidenceMapArtifact, webEvidenceContentSha256 } from '@deepseek-ai/dsh-bid'
 import IntegrationFileSystem, { runEvidenceMappingLoop } from './fixtures/evidence-mapping-loop.ts'
+import { runFullOutlineRegenerationLoop, runStageInteractionLoop } from './fixtures/stage-interaction-loop.ts'
 
 describe('S4 Web evidence through a real Agent Tool loop', () => {
+  it('整本重生成期间开放原有执行工具，完成后恢复等待确认', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-full-regeneration-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    try {
+      expect(await runFullOutlineRegenerationLoop(ctx, root)).toMatchObject({
+        result: { ok: true }, draft: { revision: 2, outline: { sections: [{ title: '访问控制与安全审计方案' }] } },
+        canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' },
+        transitions: ['bid.stage.started', 'bid.user_confirmation.required'],
+      })
+    } finally { await ctx.fiber.dispose() }
+  }, 30_000)
+  it('Main Agent 在等待态咨询、拆分、局部重生成和 remap，且不能裸写或隐式确认', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-interaction-loop-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    try {
+      expect(await runStageInteractionLoop(ctx, root, true)).toMatchObject({
+        state: { stage: 'evidence_mapping', status: 'waiting_user' },
+        confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 4, disposed: true,
+        titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
+        target: { local_materials: [], web_materials: [], writing_dimensions: ['资源核查'] },
+        visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'],
+        concurrent: Array(5).fill('BID_OPERATION_IN_PROGRESS'), failures: 3,
+      })
+    } finally { await ctx.fiber.dispose() }
+  }, 30_000)
   it.each([false, true])('completes evidence mapping through one Child (repair: %s)', async (repair) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-loop-'))
     const ctx = new Context()

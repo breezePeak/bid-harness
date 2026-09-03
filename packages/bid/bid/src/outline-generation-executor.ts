@@ -5,6 +5,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
+import { z } from 'zod'
+import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { outlineSectionScope } from './section-evidence-context.ts'
+import { outlineRegenerationChanges } from './outline-regeneration-artifacts.ts'
 import type { BidWorkspace } from './index.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 import {
@@ -31,6 +36,53 @@ const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
 const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.json'
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
+
+function renderOutlineRevisionFeedback(feedback: string): string {
+  return `以当前持久化 Draft 为基线，保留未涉及章节、全部招标要求和评分覆盖。按以下用户反馈重构目录，不得只在 writing_notes 中转述：\n<outline-revision-feedback>\n${feedback}\n</outline-revision-feedback>`
+}
+
+/**
+ * 使用独立、无文件写权限的 Child 生成局部编辑操作，与整本重生成共用反馈规则和目录 Validator。
+ * @param agent 当前 Main Agent，不等待其工具调用结束。
+ * @param draft 最近一次读取的 CAS 基线。
+ * @param sectionIds 选中章节或分支。
+ * @param feedback 用户反馈。
+ * @param signal 当前 Host 操作取消信号。
+ * @returns 只修改选中子树的编辑操作；调用方经 mutateOutlineDraft 校验后提交。
+ */
+export async function generateScopedOutlineOperations(
+  agent: Agent, draft: OutlineDraftView, sectionIds: readonly string[], feedback: string, signal: AbortSignal,
+): Promise<OutlineEditOperation[]> {
+  const selected = outlineSectionScope(draft.outline, sectionIds)
+  const subagents = agent.ctx.get('subagents')
+  if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) throw new Error('局部目录重生成需要独立上下文的 spawn provider。')
+  const run = await subagents.start('spawn', {
+    parent: agent, signal, label: '局部目录重生成', maxDepth: 1, toolFilter: { allow: [] },
+    prompt: [{ type: 'text', text: [
+      renderOutlineRevisionFeedback(feedback),
+      `当前 Draft：${JSON.stringify(draft)}`,
+      `只允许修改以下章节及其子树：${JSON.stringify(sectionIds)}。保留选中根的 ID、父节点和位置；不得修改范围外节点。拆分叶子使用 split_section，合并同级叶子使用 merge_sections。`,
+      '不得写文件。最终只返回原始 JSON 编辑操作数组，新增 ID 由 Host 分配。操作必须符合：',
+      JSON.stringify(z.toJSONSchema(z.array(outlineEditOperationSchema))),
+    ].join('\n') }],
+  })
+  try {
+    const result = await run.result
+    signal.throwIfAborted()
+    if (result.stopReason !== 'completed') throw new Error(`BID_REGENERATE_FAILED: ${result.stopReason}`)
+    const operations = parseOutlineEditOperations(JSON.parse(result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join('')))
+    const candidate = applyOutlineEdits(draft.outline, operations)
+    const candidateScope = outlineSectionScope(candidate, sectionIds)
+    if (sectionIds.some((id) => {
+      const before = draft.outline.sections.find(section => section.id === id)
+      const after = candidate.sections.find(section => section.id === id)
+      return before === undefined || after === undefined || before.parent_id !== after.parent_id || before.order !== after.order
+    })) throw new Error('BID_OUTLINE_SCOPE_VIOLATION')
+    const changes = outlineRegenerationChanges(draft.outline, candidate)
+    if (changes.some(change => change.type === 'add' ? !candidateScope.has(change.section_id) : !selected.has(change.section_id))) throw new Error('BID_OUTLINE_SCOPE_VIOLATION')
+    return operations
+  } finally { await run.dispose() }
+}
 
 /** Optional user-feedback regeneration identity layered onto normal S3 execution. */
 export interface OutlineGenerationExecutionOptions extends ModelStageExecutionOptions {
@@ -120,8 +172,7 @@ export function renderOutlineGenerationTask(
         `当前基线 revision=${String(regeneration.revision)}，draft hash=${regeneration.draftSha256}。`,
         `同时写入 ${root}/${REGENERATION_CHANGE_SET}，严格包含 schema_version=1、base_revision、base_draft_sha256、changes；每个实际 update/add/delete/move 都必须逐项登记 section_id、type、reason，不得登记不存在的变更。`,
       ]),
-      '本轮是用户要求的目录重新生成。以下内容是本轮必须落实的目录修改意见；在继续满足全部招标要求、评分项、合规项和粒度约束的前提下重构目录，不得只在 writing_notes 中转述：',
-      `<outline-revision-feedback>\n${feedback}\n</outline-revision-feedback>`,
+      renderOutlineRevisionFeedback(feedback),
     ]),
     ...task.constraints.map(constraint => `约束：${constraint}`),
     '写完文件后停止；Host 将独立验证树结构、引用和覆盖。',

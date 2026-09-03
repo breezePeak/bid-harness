@@ -27,18 +27,18 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'waiting_user' },
-      allowedActions: ['confirm_tender_analysis'],
-      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
+      allowedActions: ['confirm_tender_analysis', 'send_message'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({ stage: 'outline_generation', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'outline_generation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline', 'regenerate_outline'],
-      composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
+      allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
-      allowedActions: ['confirm_outline', 'regenerate_outline'],
-      composer: { enabled: false, reason: 'bid.outline_confirmation_required' },
+      allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({
       stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',

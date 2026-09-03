@@ -205,7 +205,7 @@ export function apply(ctx: ClientContext): void {
     id: 'bid-review',
     order: 10,
     label: () => '审核项',
-    embeddedChat: true,
+    embeddedChat: false,
     inject: (sessionId: SessionId) => {
       const remote = ctx.remote.bid as unknown as {
         getReviewWorkbench(id: SessionId): Promise<{ ok: boolean; value: unknown }>

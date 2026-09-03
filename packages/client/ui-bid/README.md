@@ -10,6 +10,8 @@ The panel mirrors `projection.composer.enabled` and its stable reason code into 
 
 ## Model Experience
 
+S2/S3/S4 等待确认时，Composer 跟随 Host projection 开放；正式确认和重新生成按钮独立保留。阶段交互执行时临时阻止发送，完成后按新的 projection 自动读取 Draft revision 和映射进度，显示“已更新，请重新确认”。客户端不从聊天文本推导确认，也不自行推进阶段。
+
 None directly. This package adds no prompt content and sends no ordinary Session prompt; the Host owns file persistence, workflow events, and every model-visible Bid input.
 
 #### KV Cache effect

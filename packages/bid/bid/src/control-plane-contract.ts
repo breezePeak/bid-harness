@@ -309,6 +309,15 @@ export interface BidReviewIssueView {
   readonly suggestion: string
 }
 
+/** Browser-safe reference material mapped to one S5 outline section. */
+export interface BidReviewMaterialView {
+  readonly source_kind: 'reference' | 'reference_bid' | 'web'
+  readonly source_label: string
+  readonly file_id: string
+  readonly usage: string
+  readonly summary: string
+}
+
 /** Browser-safe body for a selected S5 outline section. */
 export interface BidReviewChapterView {
   readonly section_id: string
@@ -320,6 +329,7 @@ export interface BidReviewChapterView {
   readonly requirement_ids: readonly string[]
   readonly scoring_response_point_ids: readonly string[]
   readonly evidence_status: 'available' | 'missing' | 'not_applicable'
+  readonly materials?: readonly BidReviewMaterialView[]
   readonly review: { readonly status: BidChapterReviewStatus; readonly issues: readonly BidReviewIssueView[] }
 }
 

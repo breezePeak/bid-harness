@@ -12,7 +12,7 @@ import { BidStageExecutionError, type BidEvidenceMappingProgress, type BidStageT
 import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 import { evidenceChunkId } from './document-chunk.ts'
 import { mappingCorpusToolGuard, resolveMappingCorpusLocations, type MappingCorpusLocation } from './evidence-mapping-corpus.ts'
-import { buildWritableSectionWorklist, sectionEvidenceContext, reconcileSectionEvidence } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, sectionEvidenceContext, reconcileSectionEvidence, outlineSectionScope } from './section-evidence-context.ts'
 import {
   EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
   EVIDENCE_MAPPING_SCHEMA_VERSION,
@@ -111,6 +111,8 @@ export const DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY = 3
 export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOptions {
   /** Maximum Mapping Subagents that may run simultaneously. */
   maxConcurrency?: number
+  /** 交互映射只调度选中范围，不等待调用中的 Main Agent，也不深化整本目录。 */
+  remap?: { section_ids: readonly string[]; mode: 'replace' | 'supplement'; reason?: string }
 }
 
 async function removeAttemptPath(path: string): Promise<void> {
@@ -126,6 +128,7 @@ async function removeAttemptPath(path: string): Promise<void> {
 async function writeWebEvidenceArtifacts(
   workspace: BidWorkspace,
   snapshots: readonly WebEvidenceSnapshot[],
+  retained: WebEvidenceSourcesArtifact['sources'] = [],
 ): Promise<void> {
   for (const snapshot of snapshots) {
     const absolute = join(workspace.sessionRoot, ...snapshot.source.snapshot_path.split('/'))
@@ -135,7 +138,7 @@ async function writeWebEvidenceArtifacts(
   const ledger: WebEvidenceSourcesArtifact = parseWebEvidenceSourcesArtifact({
     schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
     stage: 'evidence_mapping',
-    sources: snapshots.map(snapshot => snapshot.source),
+    sources: [...new Map([...retained, ...snapshots.map(snapshot => snapshot.source)].map(source => [source.source_id, source])).values()],
   })
   await writeWebEvidenceLedger(workspace, ledger)
 }
@@ -213,11 +216,11 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 /**
- * Read the current S4 Mapping Task counts from the Host-owned execution log.
+ * Read the latest S4 task execution records from the Host-owned log.
  * @param workspace - workspace that owns the S4 execution log.
- * @returns current task counts, or null before Host scheduling creates the log.
+ * @returns Validated task records, or null before Host scheduling creates the log.
  */
-export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
+export async function readEvidenceMappingLog(workspace: BidWorkspace): Promise<EvidenceMappingExecutionLog | null> {
   const logPath = join(workspace.sessionRoot, LOG_PATH)
   await assertNoLinkedPath(workspace.root, logPath)
   let raw: string
@@ -227,7 +230,13 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
-  const log = evidenceMappingExecutionLogSchema.parse(JSON.parse(raw))
+  return evidenceMappingExecutionLogSchema.parse(JSON.parse(raw))
+}
+
+/** @param workspace 会话工作区。 @returns 当前映射执行的状态计数，尚未执行时返回 null。 */
+export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
+  const log = await readEvidenceMappingLog(workspace)
+  if (log === null) return null
   let completed = 0
   let running = 0
   let notStarted = 0
@@ -442,7 +451,7 @@ function salvageMappingResult(raw: unknown, task: EvidenceMappingTask): Evidence
       const parsed = parseEvidenceMappingPartialResult({
         task_id: task.task_id, refinement_suggestions: [], section_mappings: [{
           ...mapping, local_materials: parsedLocal, web_materials: parsedWeb,
-          missing_topics: [...(Array.isArray(mapping.missing_topics) ? mapping.missing_topics : []), ...empty.missing_topics],
+          missing_topics: [...(Array.isArray(mapping.missing_topics) ? mapping.missing_topics as unknown[] : []), ...empty.missing_topics],
         }],
       }).section_mappings[0]
       return parsed === undefined ? empty : parsed
@@ -575,9 +584,10 @@ function buildEvidenceMap(
     sourcesBySection.set(mapping.section_id, sources)
   }
   const used = new Map<string, WebEvidenceSnapshot>()
+  const selected = new Set(tasks.flatMap(item => item.task.section_ids))
   const map = parseEvidenceMapArtifact({
     schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
-    section_mappings: buildWritableSectionWorklist(outline).map((section) => {
+    section_mappings: buildWritableSectionWorklist(outline).filter(section => selected.has(section.id)).map((section) => {
       const mapping = merged.section_mappings.find(item => item.section_id === section.id)
       if (mapping === undefined) throw new Error('evidence-mapping-current-section-missing:' + section.id)
       const transient = uniqueWebMaterials(mapping.web_materials)
@@ -679,7 +689,7 @@ async function refineOutline(
   }
   const validateAndRepair = async (reviewed: boolean) => {
     while (true) {
-      signal?.throwIfAborted()
+      signal.throwIfAborted()
       const issues: StageValidationIssue[] = []
       const candidate = await parseArtifact(REFINED_OUTLINE_CANDIDATE_PATH, parseOutlineArtifact, issues)
       const quality = reviewed ? await parseArtifact(QUALITY_PATH, parseOutlineQualityReport, issues) : undefined
@@ -710,12 +720,12 @@ async function refineOutline(
     }
   }
   try {
-    signal?.throwIfAborted()
+    signal.throwIfAborted()
     const assignmentStart = agent.session.events.length
     agent.followup(createUserMessage({ content: [{ type: 'text', text: assignment }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(candidatePath, assignmentStart)
     await validateAndRepair(false)
-    signal?.throwIfAborted()
+    signal.throwIfAborted()
     const reviewStart = agent.session.events.length
     agent.followup(createUserMessage({ content: [{ type: 'text', text: review }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(qualityPath, reviewStart)
@@ -756,7 +766,8 @@ async function executeEvidenceMappingRun(
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) {
     throw new Error('evidence-mapping-max-concurrency-invalid')
   }
-  await waitForModelStageIdle(agent, options.signal)
+  if (options.remap === undefined) await waitForModelStageIdle(agent, options.signal)
+  options.signal?.throwIfAborted()
   const analysisRoot = join(workspace.sessionRoot, 'analysis')
   const artifactPath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
   const planPath = join(workspace.sessionRoot, PLAN_PATH)
@@ -777,18 +788,22 @@ async function executeEvidenceMappingRun(
     || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
     throw new Error('Bid evidence mapping requires a continuable spawn provider with depth-limit, tool-filter, and persona capabilities')
   }
-  const registered = new Set(tools.schemas(agent).map(schema => schema.name))
-  const requiredTools = [...new Set([...MAIN_AGENT_TOOLS, ...MAPPING_AGENT_TOOLS])]
+  const registered = new Set(tools.schemas(options.remap === undefined ? agent : undefined).map(schema => schema.name))
+  const requiredTools = [...new Set([...(options.remap === undefined ? MAIN_AGENT_TOOLS : []), ...MAPPING_AGENT_TOOLS])]
   const missingTools = requiredTools.filter(name => !registered.has(name))
   if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
-  await removeAttemptPath(artifactPath)
+  const previous = options.remap === undefined ? undefined : parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
+  const previousWeb = options.remap === undefined ? undefined : parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  if (options.remap === undefined) await removeAttemptPath(artifactPath)
   await removeAttemptPath(planPath)
   await removeAttemptPath(logPath)
-  await removeAttemptPath(sourceLedgerPath)
-  await removeAttemptPath(webSourcesRoot)
+  if (options.remap === undefined) {
+    await removeAttemptPath(sourceLedgerPath)
+    await removeAttemptPath(webSourcesRoot)
+  }
   await mkdir(webSourcesRoot, { recursive: true, mode: 0o700 })
   const target = await fs.resolve(artifactPath)
-  agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
+  if (options.remap === undefined) agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
   const artifacts: StageArtifact[] = [
     { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
     { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
@@ -798,7 +813,7 @@ async function executeEvidenceMappingRun(
   const rawInputs = await Promise.all([
     readJson(workspace, 'analysis/project.json'), readJson(workspace, 'analysis/requirements.json'),
     readJson(workspace, 'analysis/scoring.json'), readJson(workspace, 'analysis/scoring-response-points.json'),
-    readJson(workspace, 'analysis/compliance.json'), readJson(workspace, 'outline/initial-confirmed-outline.json'),
+    readJson(workspace, 'analysis/compliance.json'), readJson(workspace, options.remap === undefined ? 'outline/initial-confirmed-outline.json' : OUTLINE_PATH),
   ])
   const [projectRaw, requirementsRaw, scoringRaw, responsePointsRaw, complianceRaw, outlineRaw] = rawInputs
   const inputs: EvidenceMappingInputs = {
@@ -812,6 +827,12 @@ async function executeEvidenceMappingRun(
   if (!catalogMatchesScoring(inputs.responsePoints, inputs.scoring)) throw new Error('evidence-mapping-response-point-catalog-mismatch')
   const manifest = await workspace.readManifest()
   const plan = buildEvidenceMappingPlan(inputs.outline)
+  if (options.remap !== undefined) {
+    const selected = outlineSectionScope(inputs.outline, options.remap.section_ids)
+    plan.tasks = plan.tasks.map(item => ({ ...item, task_id: item.task_id.replace('MAP-INIT-', 'MAP-REMAP-'), section_ids: item.section_ids.filter(id => selected.has(id)) }))
+      .filter(item => item.section_ids.length > 0)
+    if (plan.tasks.length === 0) throw new Error('BID_SECTION_SCOPE_INVALID')
+  }
   await writeJson(planPath, plan)
 
   const executionLog: EvidenceMappingExecutionLog = {
@@ -862,7 +883,11 @@ async function executeEvidenceMappingRun(
     activeTasks++
     executionLog.observed_max_concurrency = Math.max(executionLog.observed_max_concurrency, activeTasks)
     await persistLog()
-    const basePrompt = renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations)
+    const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations), ...(options.remap === undefined ? [] : [
+      `当前任务是局部 ${options.remap.mode} 资料映射，仅处理 Mapping Task.section_ids。`,
+      `用户要求：${options.remap.reason ?? '重新研究选中章节的资料。'}`,
+      ...(options.remap.mode === 'supplement' ? [`已有资料：${JSON.stringify(previous?.section_mappings.filter(item => mappingTask.section_ids.includes(item.section_id)))}`] : []),
+    ])].join('\n')
     let latestIssues: StageValidationIssue[] = []
     try {
       const started = await subagents.startContinuable({
@@ -984,13 +1009,31 @@ async function executeEvidenceMappingRun(
     const initialResults = await runBatch(plan.tasks, inputs)
     const initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
     const preliminary = buildEvidenceMap(initialMerged, initialResults, inputs.outline)
-    await writeWebEvidenceArtifacts(workspace, preliminary.snapshots)
-    await writeJson(artifactPath, preliminary.map)
     signal.throwIfAborted()
-    const refined = await refineOutline(agent, workspace, inputs, initialMerged.refinement_suggestions, options.maxRepairAttempts, signal)
-    const reconciled = reconcileSectionEvidence(refined, preliminary.map)
-    await writeJson(artifactPath, reconciled)
-    await pruneWebEvidenceArtifacts(workspace, reconciled)
+    await writeWebEvidenceArtifacts(workspace, preliminary.snapshots, previousWeb?.sources)
+    if (previous !== undefined && options.remap !== undefined) {
+      const selected = new Set(plan.tasks.flatMap(item => item.section_ids))
+      const replacements = new Map(preliminary.map.section_mappings.map(item => [item.section_id, item]))
+      const merged: EvidenceMapArtifact = { ...previous, section_mappings: previous.section_mappings.map((old) => {
+        const fresh = replacements.get(old.section_id)
+        if (!selected.has(old.section_id) || fresh === undefined) return old
+        if (options.remap?.mode === 'replace') return fresh
+        return { ...fresh,
+          local_materials: [...new Map([...old.local_materials, ...fresh.local_materials].map(item => [`${item.file_id}:${item.chunk}`, item])).values()],
+          web_materials: [...new Map([...old.web_materials, ...fresh.web_materials].map(item => [item.source_id, item])).values()],
+          writing_dimensions: [...new Set([...old.writing_dimensions, ...fresh.writing_dimensions])],
+          missing_topics: [...new Set([...old.missing_topics, ...fresh.missing_topics])],
+        }
+      }) }
+      await writeJson(artifactPath, merged)
+    } else {
+      await writeJson(artifactPath, preliminary.map)
+      signal.throwIfAborted()
+      const refined = await refineOutline(agent, workspace, inputs, initialMerged.refinement_suggestions, options.maxRepairAttempts, signal)
+      const reconciled = reconcileSectionEvidence(refined, preliminary.map)
+      await writeJson(artifactPath, reconciled)
+      await pruneWebEvidenceArtifacts(workspace, reconciled)
+    }
   } finally {
     liftObserver()
     liftChildReadGuard()

@@ -275,6 +275,44 @@ function webResearch(taskId: string) {
 }
 
 describe('evidence-mapping Agent executor', () => {
+  it.each(['replace', 'supplement'] as const)('局部 %s 只运行选中 Section，并保留其他章节及 Web 快照', async (mode) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-targeted-remap-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.onReply.mockImplementation((child, result) => {
+      const { search, fetch } = webResearch(result.task_id)
+      fixture.emitWeb(child, [search, fetch])
+      result.section_mappings[0]!.web_materials = [webMaterial()]
+    })
+    const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await initial
+    const before = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    const snapshot = before.section_mappings[0]!.web_materials[0]!.snapshot_path
+    const snapshotContent = await readFile(join(workspace.sessionRoot, snapshot), 'utf8')
+    fixture.starts.length = 0
+    fixture.followup.mockClear()
+    fixture.whenIdle.mockImplementation(async () => { throw new Error('工具执行期间不得等待 Main Agent 空闲') })
+    fixture.onReply.mockImplementation((_child, result) => {
+      result.section_mappings[0]!.local_materials = []
+      result.section_mappings[0]!.missing_topics = ['新增资料仍缺失']
+    })
+    const remap = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0, remap: { section_ids: ['SEC-2'], mode, reason: '只处理第二章' } })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const prompt = promptText(fixture.starts[0]!.request.request)
+    expect(prompt).toContain('"section_ids":["SEC-2"]')
+    expect(prompt).toContain('只处理第二章')
+    fixture.starts[0]!.resolve()
+    await remap
+    const after = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(after.section_mappings[0]).toEqual(before.section_mappings[0])
+    expect(after.section_mappings[1]!.local_materials).toEqual(mode === 'replace' ? [] : before.section_mappings[1]!.local_materials)
+    expect(after.section_mappings[1]!.web_materials).toEqual(mode === 'replace' ? [] : before.section_mappings[1]!.web_materials)
+    expect(after.section_mappings[1]!.missing_topics).toContain('新增资料仍缺失')
+    expect(await readFile(join(workspace.sessionRoot, snapshot), 'utf8')).toBe(snapshotContent)
+    expect(fixture.followup).not.toHaveBeenCalled()
+  })
+
   it.each([
     { replaceAgent: false, completedBeforeRepair: false },
     { replaceAgent: true, completedBeforeRepair: false },

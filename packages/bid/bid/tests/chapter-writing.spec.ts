@@ -6,12 +6,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { pickChapterContext, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
+import { pickChapterContext, renderChapterExecutionPlanTask, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
+  CHAPTER_EXECUTION_SCHEMA_VERSION,
   buildBidStageTask,
   executeChapterWriting,
   getBidStagePolicy,
@@ -337,6 +338,28 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
+  it('uses the current execution-plan schema version in the planning prompt', async () => {
+    const outline = outlineFixture()
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-plan-prompt-')), 'session')
+    const prompt = renderChapterExecutionPlanTask(
+      { id: 'parent' } as unknown as Agent,
+      workspace,
+      outline,
+      outlineArtifactSha256(outline),
+      {
+        project: parseTenderProjectArtifact({
+          schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+          project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
+          implementation_constraints: [], key_technical_points: [], source_refs: source, analyzed_tender_files: ['tender'],
+        }),
+        requirements: parseTenderRequirementsArtifact({ schema_version: 1, requirements: [] }),
+        scoring: parseTenderScoringArtifact({ schema_version: 1, scoring_items: [] }),
+        compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
+      },
+    )
+    expect(prompt).toContain(`\"schema_version\":${String(CHAPTER_EXECUTION_SCHEMA_VERSION)}`)
+  })
+
   it('allows the S6 capability union while keeping bash forbidden', () => {
     const policy = getBidStagePolicy('chapter_writing')
     expect(policy.allowedTools).toEqual(['grep', 'read', 'write', 'web_search', 'web_fetch'])

@@ -38,8 +38,12 @@ async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
-/** @param workspace Session Bid workspace. @returns Existing or initialized Host-owned S5 draft. */
-export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace): Promise<OutlineDraftView> {
+/**
+ * @param workspace Session Bid workspace.
+ * @param persist 是否持久化初始化或源目录刷新；只读 inspect 使用 false。
+ * @returns Existing or initialized Host-owned draft.
+ */
+export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, persist = true): Promise<OutlineDraftView> {
   const source = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
   const sourceHash = outlineArtifactSha256(source)
   const path = within(workspace.sessionRoot, 'outline/draft.json')
@@ -51,7 +55,7 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace):
       schema_version: 1, scope: 'technical_bid', revision: existing.revision + 1,
       source_outline_sha256: sourceHash, draft_outline_sha256: sourceHash, outline: source,
     }
-    await writeFileAtomic(path, `${JSON.stringify(replacement, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    if (persist) await writeFileAtomic(path, `${JSON.stringify(replacement, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     return replacement
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -59,7 +63,7 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace):
       schema_version: 1, scope: 'technical_bid', revision: 1,
       source_outline_sha256: sourceHash, draft_outline_sha256: sourceHash, outline: source,
     }
-    await writeFileAtomic(path, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    if (persist) await writeFileAtomic(path, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     return initial
   }
 }
@@ -78,7 +82,9 @@ export async function mutateOutlineDraft(
     return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current } }
   }
   let candidate
-  try { candidate = applyOutlineEdits(current.outline, parseOutlineEditOperations(request.operations)) } catch (error) {
+  try {
+    candidate = parseOutlineArtifact(applyOutlineEdits(current.outline, parseOutlineEditOperations(request.operations)))
+  } catch (error) {
     return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: error instanceof Error ? error.message : 'The requested outline edit is invalid.', current } }
   }
   const hash = outlineArtifactSha256(candidate)

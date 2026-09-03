@@ -39,6 +39,16 @@ In S5, the Host schedules independent Writers from the confirmed outline and mak
 
 ## Model Experience
 
+### 等待确认时的阶段交互
+
+S2、S3、S4 的 `waiting_user` 开放普通消息，`running` 禁止发送。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
+
+所有修改使用 Host 的 Session 锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 提交；范围外节点及选中根位置不得改变。拆分保留父 ID，子章节继承引用和候选资料；新增章节保留资料缺口。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
+
+S4 交互重映射与初始映射共用执行器、Corpus Guard、Child 调度、有限修复、Web Snapshot 和 Validator。指定可写叶子只运行该叶子，指定结构节点展开其可写后代，不运行无关章节，也不再次深化整本目录。`replace` 替换目标章节的旧 Evidence；`supplement` 保留并去重合并材料、写作维度和缺口。计划和任务日志展示最近一轮映射，未选中章节及其 Web 快照保留；最终正式确认按引用清理快照。
+
+修改成功更新 canonical Outline、Evidence 与 Draft revision，发布 `running → waiting_user`，客户端自动刷新并提示“已更新，请重新确认”。可恢复失败还原本次修改前的产物；还原失败进入 `failed`。交互动作不写 `bid.user_confirmation.received` 或 `bid.stage.completed`；“可以”“没问题”等聊天文字不代表确认，只有现有正式确认动作可以推进阶段。决定依据见[阶段交互记录](../../../.agents/notes/implemented/feature/2026-09-03-bid-waiting-user-stage-interaction.md)。
+
 ## S2–S5 quality control
 
 After initial extraction, S2 requires the same live Agent to perform a Coverage Audit. The Validator separately reports missing Artifacts, JSON syntax failures, and strict Schema failures, retaining exact field paths for Schema issues. The Executor uses the latest Issues for a configurable number of Repair rounds, allows only `grep`, `read`, and `write`, and permits overwriting only the four formal S2 Artifacts. The Orchestrator advances to `tender_analysis/waiting_user` only after the final Validator passes.

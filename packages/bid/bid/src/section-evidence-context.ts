@@ -116,3 +116,25 @@ export function reconcileSectionEvidence(outline: OutlineArtifact, evidence: Evi
     }),
   }
 }
+
+/**
+ * 展开明确选中的章节与其后代；展示编号必须先由当前目录解析成实际 ID。
+ * @param outline 当前目录。
+ * @param ids 实际章节 ID，不接受空范围或不存在的 ID。
+ * @returns 包含结构节点的完整选中范围。
+ */
+export function outlineSectionScope(outline: OutlineArtifact, ids: readonly string[]): Set<string> {
+  const known = new Set(outline.sections.map(section => section.id))
+  if (ids.length === 0 || ids.some(id => !known.has(id))) throw new Error('BID_SECTION_SCOPE_INVALID')
+  const selected = new Set(ids)
+  for (let changed = true; changed;) {
+    changed = false
+    for (const section of outline.sections) {
+      if (section.parent_id !== null && selected.has(section.parent_id) && !selected.has(section.id)) {
+        selected.add(section.id)
+        changed = true
+      }
+    }
+  }
+  return selected
+}

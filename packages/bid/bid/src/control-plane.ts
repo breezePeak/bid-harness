@@ -35,6 +35,7 @@ export type {
   BidRetryResult,
   BidReviewChapterView,
   BidReviewIssueView,
+  BidReviewMaterialView,
   BidReviewWorkbenchView,
   BidTenderAnalysisConfirmationResult,
   BidRuntimeState,

@@ -65,6 +65,32 @@ function outlineStore(initial: OutlineDraftView) {
 }
 
 describe('BidStagePanel', () => {
+  it('等待态开放 Composer，阶段修改完成自动读取新 revision 并重新提示确认', async () => {
+    const setComposerBlock = vi.fn()
+    let draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
+    const getOutlineDraft = vi.fn(async () => draft)
+    const getEvidenceMappingProgress = vi.fn(async () => ({
+      total: 1, initial: 1, supplemental: 0, completed: 1, running: 0, not_started: 0, failed: 0,
+    }))
+    const confirmOutline = vi.fn(async () => {})
+    const shared = {
+      setComposerBlock, getOutlineDraft, getEvidenceMappingProgress, confirmOutline, regenerateOutline: vi.fn(async () => {}),
+    }
+    const waiting = projection({ runtime: { stage: 'evidence_mapping', status: 'waiting_user' }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true } })
+    const view = render(<BidStagePanel {...props(waiting, shared)} />)
+    await waitFor(() => { expect(getOutlineDraft).toHaveBeenCalledOnce() })
+    expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, false)
+    expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy()
+    view.rerender(<BidStagePanel {...props(projection({ runtime: { stage: 'evidence_mapping', status: 'running' }, composer: { enabled: false, reason: 'bid.stage_running' } }), shared)} />)
+    expect(setComposerBlock).toHaveBeenLastCalledWith('当前阶段正在处理，请稍候', false)
+    draft = { ...draft, revision: 2, draft_outline_sha256: 'c'.repeat(64) }
+    view.rerender(<BidStagePanel {...props({ ...waiting }, shared)} />)
+    expect(await screen.findByText('已更新，请重新确认。')).toBeTruthy()
+    expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, false)
+    fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
+    await waitFor(() => { expect(confirmOutline).toHaveBeenCalledWith({ expected_revision: 2, expected_draft_sha256: 'c'.repeat(64) }) })
+    expect(getEvidenceMappingProgress.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
   it('stays absent without the Host projection and follows runtime updates', () => {
     const setComposerBlock = vi.fn()
     const view = render(<BidStagePanel {...props(undefined, { setComposerBlock })} />)

@@ -20,6 +20,19 @@ const outline: OutlineArtifact = {
 }
 
 describe('outline confirmation artifacts', () => {
+  it('拆分和合并保留稳定父 ID、引用覆盖和可写叶子规则', () => {
+    const split = applyOutlineEdits(outline, parseOutlineEditOperations([{ type: 'split_section', section_id: 'SEC-001', children: [
+      { title: '交付准备', purpose: '准备', must_answer: ['交付准备计划'] },
+      { title: '交付实施', purpose: '实施', must_answer: ['交付实施计划'] },
+    ] }]))
+    expect(split.sections[0]).toMatchObject({ id: 'SEC-001', writable: false, must_answer: [] })
+    expect(split.sections.slice(1).map(item => item.requirement_ids)).toEqual([['REQ-1'], ['REQ-1']])
+    const merged = applyOutlineEdits(split, parseOutlineEditOperations([{ type: 'merge_sections', section_ids: ['SEC-002', 'SEC-003'], title: '交付细则', purpose: '准备与实施' }]))
+    expect(merged.sections).toHaveLength(2)
+    expect(merged.sections[1]).toMatchObject({ id: 'SEC-002', parent_id: 'SEC-001', requirement_ids: ['REQ-1'], must_answer: ['交付准备计划', '交付实施计划'] })
+    expect(outline.sections[0]!.writable).toBe(true)
+    expect(() => applyOutlineEdits(split, [{ type: 'merge_sections', section_ids: ['SEC-001', 'SEC-002'], title: '无效', purpose: '无效' }])).toThrow()
+  })
   it('parses only the complete durable confirmation record', () => {
     const hash = outlineArtifactSha256(outline)
     expect(parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))

@@ -19,6 +19,8 @@ export type OutlineEditOperation =
     readonly must_answer?: readonly string[]
   }
   | { readonly type: 'delete_section'; readonly section_id: string }
+  | { readonly type: 'split_section'; readonly section_id: string; readonly children: readonly { readonly title: string; readonly purpose: string; readonly must_answer: readonly string[] }[] }
+  | { readonly type: 'merge_sections'; readonly section_ids: readonly string[]; readonly title: string; readonly purpose: string }
   | { readonly type: 'move_section'; readonly section_id: string; readonly parent_id: string | null; readonly order: number }
 
 /** A section paired with its derived position in the displayed outline tree. */
@@ -78,9 +80,11 @@ export function applyOutlineEdits(
   const sections: OutlineSection[] = source.sections.map(section => ({
     ...section,
     must_answer: [...section.must_answer],
-    scoring_response_point_ids: [...(section.scoring_response_point_ids ?? [])],
+    ...(section.scoring_response_point_ids === undefined ? {} : { scoring_response_point_ids: [...section.scoring_response_point_ids] }),
     scoring_response_points: [...section.scoring_response_points],
-    framework_refs: (section.framework_refs ?? []).map(reference => ({ ...reference, heading_path: [...reference.heading_path] })),
+    ...(section.framework_refs === undefined ? {} : {
+      framework_refs: section.framework_refs.map(reference => ({ ...reference, heading_path: [...reference.heading_path] })),
+    }),
   }))
   const byId = new Map(sections.map(section => [section.id, section]))
   let nextId = sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
@@ -110,6 +114,44 @@ export function applyOutlineEdits(
         .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
       siblings.splice(Math.min(operation.order - 1, siblings.length), 0, section)
       siblings.forEach((candidate, index) => { candidate.order = index + 1 })
+    } else if (operation.type === 'split_section') {
+      const section = byId.get(operation.section_id)
+      if (section === undefined || !section.writable || sections.some(item => item.parent_id === section.id)) throw new Error('split requires a writable leaf')
+      if (operation.children.length < 2) throw new Error('split requires at least two children')
+      for (const [index, input] of operation.children.entries()) {
+        const id = allocateSectionId?.() ?? `SEC-${String(++nextId).padStart(3, '0')}`
+        if (byId.has(id)) throw new Error(`duplicate outline section ${id}`)
+        const child: OutlineSection = {
+          ...section, ...input, must_answer: [...input.must_answer], id, parent_id: section.id, order: index + 1, level: section.level + 1,
+        }
+        sections.push(child)
+        byId.set(id, child)
+      }
+      section.writable = false
+      section.must_answer = []
+      section.scoring_response_point_ids = []
+      section.scoring_response_points = []
+    } else if (operation.type === 'merge_sections') {
+      const selected = operation.section_ids.map((id) => {
+        const section = byId.get(id)
+        if (section === undefined || !section.writable || sections.some(item => item.parent_id === id)) throw new Error('merge requires writable leaves')
+        return section
+      })
+      const target = selected[0]
+      if (target === undefined || selected.length < 2 || new Set(operation.section_ids).size !== selected.length || selected.some(item => item.parent_id !== target.parent_id)) throw new Error('merge requires distinct sibling leaves')
+      target.title = operation.title
+      target.purpose = operation.purpose
+      for (const key of ['must_answer', 'requirement_ids', 'scoring_ids', 'compliance_ids', 'scoring_response_point_ids', 'suggested_tables', 'suggested_figures', 'writing_notes'] as const) {
+        target[key] = [...new Set(selected.flatMap(item => item[key] ?? []))]
+      }
+      target.scoring_response_points = [...new Map(selected.flatMap(item => item.scoring_response_points)
+        .map(point => [JSON.stringify(point), point])).values()]
+      target.framework_refs = [...new Map(selected.flatMap(item => item.framework_refs ?? [])
+        .map(ref => [JSON.stringify(ref), ref])).values()]
+      for (const item of selected.slice(1)) {
+        sections.splice(sections.indexOf(item), 1)
+        byId.delete(item.id)
+      }
     } else if (operation.type === 'delete_section') {
       if (!byId.has(operation.section_id)) throw new Error(`unknown outline section ${operation.section_id}`)
       const remove = new Set<string>([operation.section_id])

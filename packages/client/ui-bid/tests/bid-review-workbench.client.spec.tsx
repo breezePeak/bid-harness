@@ -18,6 +18,7 @@ const workbench = {
 const chapter = {
   section_id: 'SEC-1', title: '实施方案', number: '1.1', heading_path: ['技术方案', '实施方案'], writable: true,
   markdown: '章节正文', requirement_ids: ['REQ-1'], scoring_response_point_ids: ['RP-000001'], evidence_status: 'available' as const,
+  materials: [{ source_kind: 'reference_bid' as const, source_label: '参考旧标', file_id: 'ref-01.docx', usage: 'adapt', summary: '历史同类实施方案' }],
   review: { status: 'reviewing' as const, issues: [] },
 }
 
@@ -39,7 +40,8 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props()} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     expect(screen.getByText('正文 1/1')).toBeTruthy()
-    expect(screen.getByText('状态：reviewing')).toBeTruthy()
+    expect(screen.getByText('参考资料')).toBeTruthy()
+    expect(screen.getByText('历史同类实施方案')).toBeTruthy()
     expect(screen.getByText('Evidence：available')).toBeTruthy()
   })
 

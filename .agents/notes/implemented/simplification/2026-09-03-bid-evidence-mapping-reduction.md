@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+[阶段交互](../feature/2026-09-03-bid-waiting-user-stage-interaction.md)允许用户明确要求局部 replace/supplement；本记录的“不启动 Mapping Child”仅指自动 reconcile 和正式确认，不限制用户主动研究。
+
 S1 → S2 → S3 → S4 → S5 → S6 的阶段和 S1–S3 业务逻辑保持不变。S4 Task 是执行批次，Section 是业务实体。Host 按目录顶层业务分支分组；唯一根目录下的结构分支各成一批，直属叶子合为一批。plan v5 保存 section_ids，Evidence Map v10 只按 section_id 保存材料、缺口和写作维度。
 
 S4 执行一轮映射、一次目录深化及 Evidence reconcile，再等待用户确认。reconcile 保留同 ID Evidence，新增章节建立空材料和 missing_topics，删除章节移除映射。可写章节拆成子章节时，继承最近祖先的原资料并提示 S5 重新筛选和补充；没有保留祖先 ID 的新节点按新增章节处理。最终用户编辑执行同一确定性操作，不启动 Mapping Child。最终集合检查只要求可写章节全部存在且无未知或重复 ID。

@@ -110,7 +110,7 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
     case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed' || (state.stage === 'evidence_mapping' && state.status === 'waiting_user'))
+      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed' || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
         ? { stage: state.stage, status: 'running' } : state
     case 'bid.stage.failed':
       return event.data.stage === state.stage && state.status === 'running'
@@ -148,7 +148,7 @@ export function getBidClientProjection(
   if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
   if (runtime.status === 'completed') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.completed' }, ...fileView }
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
-  if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis'], composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' }, ...fileView }
-  if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline'], composer: { enabled: false, reason: 'bid.outline_confirmation_required' }, ...fileView }
+  if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
+  if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
   return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
 }

@@ -330,7 +330,7 @@ export function renderChapterExecutionPlanTask(
   const firstId = writable[0]?.id ?? 'SECTION-ID'
   const secondId = writable[1]?.id
   const schemaExample = {
-    schema_version: 1,
+    schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION,
     scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash,
     global_consistency_notes: ['全书统一要求'],
@@ -353,6 +353,7 @@ export function renderChapterExecutionPlanTask(
     `Requirements：${JSON.stringify(modelContext(inputs.requirements))}`,
     `Scoring：${JSON.stringify(modelContext(inputs.scoring))}`,
     `Compliance：${JSON.stringify(modelContext(inputs.compliance))}`,
+    `execution-plan.json 的 schema_version 必须严格等于 ${String(CHAPTER_EXECUTION_SCHEMA_VERSION)}，不得使用其他版本。`,
     `严格 JSON Schema 示例：${JSON.stringify(schemaExample)}`,
     'sections 必须恰好覆盖全部 writable section。写完 execution-plan.json 后停止；Host 将校验覆盖、引用和 DAG。',
   ].join('\n')
@@ -369,6 +370,7 @@ export function renderChapterExecutionPlanRepairTask(outlineHash: string, issues
     '当前阶段：chapter_writing / Relation Plan Repair',
     `确认目录 SHA-256：${outlineHash}`,
     '只修复 chapters/execution-plan.json；不得写章节正文、metadata、execution-log 或 manifest。',
+    `execution-plan.json 的 schema_version 必须严格等于 ${String(CHAPTER_EXECUTION_SCHEMA_VERSION)}。`,
     ...renderStageRepairIssues(issues),
     '修复后停止；Host 将重新进行严格 Schema、全量覆盖、引用和无环校验。',
   ].join('\n')
