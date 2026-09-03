@@ -26,7 +26,10 @@ import {
   type TransientWebEvidenceMaterial,
   type WebEvidenceMaterial,
 } from './evidence-mapping-artifacts.ts'
-import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { parseOutlineArtifact, parseOutlineQualityReport, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { validateOutlineFrameworkRefs } from './outline-framework.ts'
+import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
+import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
@@ -301,7 +304,31 @@ async function writeWebEvidenceArtifacts(
     stage: 'evidence_mapping',
     sources: snapshots.map(snapshot => snapshot.source),
   })
-  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify(ledger, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await writeWebEvidenceLedger(workspace, ledger)
+}
+
+async function writeWebEvidenceLedger(workspace: BidWorkspace, ledger: WebEvidenceSourcesArtifact): Promise<void> {
+  let previous: WebEvidenceSourcesArtifact | undefined
+  try { previous = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json')) } catch (error) {
+    if (record(error)?.code !== 'ENOENT') throw error
+  }
+  const retained = new Set(ledger.sources.map(source => source.snapshot_path))
+  const obsolete = previous?.sources.filter(source => !retained.has(source.snapshot_path)) ?? []
+  for (const source of obsolete) await assertNoLinkedPath(workspace.root, join(workspace.sessionRoot, source.snapshot_path))
+  await writeJson(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), ledger)
+  for (const source of obsolete) await rm(join(workspace.sessionRoot, source.snapshot_path), { force: true })
+}
+
+/**
+ * 按最终 Evidence Map 的实际引用裁剪 Web ledger，并删除失去引用的快照。
+ * @param workspace - Session 工作区。
+ * @param evidence - 最终章节证据。
+ * @returns ledger 和快照清理完成；文件系统异常向调用方传播。
+ */
+export async function pruneWebEvidenceArtifacts(workspace: BidWorkspace, evidence: EvidenceMapArtifact): Promise<void> {
+  const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  const referenced = new Set(evidence.section_mappings.flatMap(mapping => mapping.web_materials.map(material => material.source_id)))
+  await writeWebEvidenceLedger(workspace, { ...ledger, sources: ledger.sources.filter(source => referenced.has(source.source_id)) })
 }
 
 interface EvidenceMappingInputs {
@@ -723,9 +750,10 @@ function refinementWriteReason(exec: Readonly<ToolExecution>, workspace: BidWork
 async function refineOutline(
   agent: Agent,
   workspace: BidWorkspace,
-  initial: OutlineArtifact,
+  inputs: EvidenceMappingInputs,
   suggestions: readonly string[],
-  signal?: AbortSignal,
+  maxRepairAttempts: number,
+  signal: AbortSignal,
 ): Promise<OutlineArtifact> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid outline refinement requires tools service')
@@ -760,27 +788,73 @@ async function refineOutline(
       await new Promise<void>(resolve => setTimeout(resolve, 25))
     }
   }
+  let repairAttempts = 0
+  const parseArtifact = async <T>(path: string, parse: (value: unknown) => T, issues: StageValidationIssue[]): Promise<T | undefined> => {
+    await assertNoLinkedPath(workspace.root, join(workspace.sessionRoot, path))
+    const content = await readFile(join(workspace.sessionRoot, path), 'utf8')
+    try { return parse(JSON.parse(content)) } catch (error) {
+      if (error instanceof SyntaxError) issues.push({ code: 'OUTLINE_REFINEMENT_JSON_INVALID', message: error.message, artifact: path })
+      else if (error instanceof ZodError) issues.push(...error.issues.map(issue => ({
+        code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: issue.message, artifact: path, path: issue.path.join('.'),
+      })))
+      else throw error
+    }
+  }
+  const validateAndRepair = async (reviewed: boolean) => {
+    while (true) {
+      signal?.throwIfAborted()
+      const issues: StageValidationIssue[] = []
+      const candidate = await parseArtifact(REFINED_OUTLINE_CANDIDATE_PATH, parseOutlineArtifact, issues)
+      const quality = reviewed ? await parseArtifact(QUALITY_PATH, parseOutlineQualityReport, issues) : undefined
+      if (candidate !== undefined) {
+        validateOutlineSharedStructure(candidate.sections, issues)
+        validateOutlineSharedCoverage(candidate, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
+        await validateOutlineFrameworkRefs(workspace, candidate, issues)
+        if (quality !== undefined) {
+          quality.reviewed_section_ids = candidate.sections.map(section => section.id)
+          validateOutlineGenerationQuality(candidate, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues)
+        }
+      }
+      if (issues.length === 0 && candidate !== undefined) return { candidate, quality }
+      const repairIssues = issues.map(issue => ({
+        ...issue,
+        artifact: issue.artifact === OUTLINE_PATH ? REFINED_OUTLINE_CANDIDATE_PATH : issue.artifact,
+      }))
+      if (repairAttempts >= maxRepairAttempts) throw new BidStageExecutionError(repairIssues)
+      repairAttempts++
+      const eventStart = agent.session.events.length
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: [
+        '当前阶段：evidence_mapping / Outline Refinement Repair',
+        `根据 Validator 问题修复 ${root}/${REFINED_OUTLINE_CANDIDATE_PATH}${reviewed ? ` 和 ${root}/${QUALITY_PATH}` : ''}。仅修正产物错误，保留已完成的资料映射。`,
+        ...renderStageRepairIssues(repairIssues),
+      ].join('\n') }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
+      await waitForMappingChildReply(agent, eventStart, signal)
+      await waitForArtifact(reviewed ? qualityPath : candidatePath, eventStart)
+    }
+  }
   try {
     signal?.throwIfAborted()
     const assignmentStart = agent.session.events.length
     agent.followup(createUserMessage({ content: [{ type: 'text', text: assignment }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(candidatePath, assignmentStart)
+    await validateAndRepair(false)
     signal?.throwIfAborted()
     const reviewStart = agent.session.events.length
     agent.followup(createUserMessage({ content: [{ type: 'text', text: review }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForArtifact(qualityPath, reviewStart)
+    const { candidate, quality } = await validateAndRepair(true)
+    if (quality === undefined) throw new Error('evidence-mapping-refinement-quality-missing')
+    const refined = normalizeRefinedOutline(inputs.outline, candidate)
+    quality.reviewed_section_ids = refined.sections.map(section => section.id)
+    await Promise.all([
+      writeJson(join(workspace.sessionRoot, OUTLINE_PATH), refined),
+      writeJson(qualityPath, quality),
+    ])
+    return refined
   } finally {
     liftGuard()
     liftRestriction()
   }
-  const refined = normalizeRefinedOutline(initial, parseOutlineArtifact(JSON.parse(await readFile(candidatePath, 'utf8'))))
-  const quality = JSON.parse(await readFile(qualityPath, 'utf8')) as Record<string, unknown>
-  quality.reviewed_section_ids = refined.sections.map(section => section.id)
-  await Promise.all([
-    writeJson(join(workspace.sessionRoot, OUTLINE_PATH), refined),
-    writeJson(qualityPath, quality),
-  ])
-  return refined
 }
 
 /**
@@ -903,7 +977,8 @@ async function executeEvidenceMappingRun(
   const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
     const childId = exec.agent?.session.id
     if (childId === undefined || exec.agent?.session.header.parentSession !== agent.id) return
-    if ((exec.name === 'read' || exec.name === 'grep') && result.isError
+    if (result.isError && (exec.name === 'read'
+      || (exec.name === 'grep' && result.error.info?.code === 'SEARCH_FAILED'))
       && mappingCorpusToolGuard(locations, String(agent.session.id), exec) === undefined) {
       controller.abort(new Error('EVIDENCE_MAPPING_FILESYSTEM_ERROR: ' + exec.name))
       return
@@ -1050,7 +1125,7 @@ async function executeEvidenceMappingRun(
     await writeJson(artifactPath, preliminary.map)
     signal.throwIfAborted()
     if (retained === undefined) {
-      const refined = await refineOutline(agent, workspace, inputs.outline, initialMerged.refinement_suggestions, signal)
+      const refined = await refineOutline(agent, workspace, inputs, initialMerged.refinement_suggestions, options.maxRepairAttempts, signal)
       const supplementalPlan = buildEvidenceMappingPlan(refined, 'supplemental', preliminary.map)
       await writeJson(planPath, { ...supplementalPlan, tasks: [...plan.tasks, ...supplementalPlan.tasks] })
       executionLog.tasks.push(...supplementalPlan.tasks.map(item => ({

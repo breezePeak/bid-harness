@@ -123,6 +123,8 @@ function mappingFixture(
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
   const serializeReply = vi.fn((value: EvidenceMappingPartialResult) => JSON.stringify(value))
+  const serializeOutline = vi.fn((content: string) => content)
+  const serializeQuality = vi.fn((content: string) => content)
   const onReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
   let webObserver: ((exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void) | undefined
   const emitWeb = (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]) => {
@@ -227,18 +229,21 @@ function mappingFixture(
       const candidate = refinedOutline === undefined
         ? await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
         : JSON.stringify(refinedOutline)
-      await writeFile(join(workspace.sessionRoot, 'outline/refined-outline.candidate.json'), candidate)
+      await writeFile(join(workspace.sessionRoot, 'outline/refined-outline.candidate.json'), serializeOutline(candidate))
     }
-    if (pendingMain.includes('Outline Refinement Review')) {
-      await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] }))
+    if (pendingMain.includes('quality-report.json')) {
+      await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), serializeQuality(JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })))
     }
+    if (pendingMain) (agent.session.events as unknown[]).push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '目录产物已写入。' }] } } })
     pendingMain = ''
   })
   const agents = { get: (id: SessionId) => children.get(String(id)) }
   const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn((_event: string, observer: typeof webObserver) => { webObserver = observer; return () => { webObserver = undefined } }) }, followup, whenIdle } as unknown as Agent
   return {
     agent, starts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
-    guards, disposed, maxActive: () => maxActive, taskAttempts, onReply, serializeReply, emitWeb, children,
+    guards, disposed, maxActive: () => maxActive, taskAttempts, onReply, serializeReply,
+    serializeOutline, serializeQuality, emitWeb, children,
+    emitToolResult: (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => webObserver?.(exec, result),
   }
 }
 
@@ -665,7 +670,89 @@ describe('S4 Host 准入与最终确认', () => {
     expect(fixture.starts).toHaveLength(2)
   })
 
-  it.each(['web-channel', 'filesystem', 'provider', 'agent-error', 'agent-aborted', 'agent-blocked', 'agent-interrupted'] as const)('%s 基础设施故障不消耗模型 repair', async (scenario) => {
+  it.each(['SEARCH_INVALID_PATTERN', 'SEARCH_RAW_OUTPUT_OVERFLOW', 'SEARCH_ABORTED', undefined])('grep %s 允许当前 Child 调整搜索，不中止 Sibling', async (code) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-grep-repair-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const [location] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const child = fixture.children.get('child-1')!
+    const exec = { agent: child, callId: 'grep-invalid', name: 'grep', arguments: { path: location!.chunks_path, pattern: '[' } } as unknown as ToolExecution
+    fixture.emitToolResult(exec, { isError: true, error: { message: '请调整搜索条件', ...(code === undefined ? {} : { info: { name: 'SearchError', code } }) }, content: [{ type: 'text', text: '请调整搜索条件' }] })
+    expect(fixture.starts.every(start => !start.request.signal?.aborted)).toBe(true)
+    fixture.emitToolResult({ ...exec, callId: 'grep-corrected' as ToolExecution['callId'], arguments: { path: location!.chunks_path, pattern: '技术' } }, { isError: false, value: { matches: [] }, content: [{ type: 'text', text: 'No matches found' }] })
+    fixture.starts.forEach(start => start.resolve())
+    await execution
+    expect([...fixture.taskAttempts.values()]).toEqual([1, 1])
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['json', 'OUTLINE_REFINEMENT_JSON_INVALID'],
+    ['schema', 'OUTLINE_REFINEMENT_SCHEMA_INVALID'],
+    ['structure', 'OUTLINE_SHARED_SECTION_PARENT_UNKNOWN'],
+    ['quality', 'OUTLINE_REFINEMENT_SCHEMA_INVALID'],
+  ])('目录深化 %s 由 Validator 引导修复，成功 Mapping Child 不重跑', async (kind, code) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-refinement-repair-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    if (kind === 'quality') fixture.serializeQuality.mockReturnValueOnce('{}')
+    else fixture.serializeOutline.mockImplementationOnce((content) => {
+      if (kind === 'json') return '{'
+      if (kind === 'schema') return '{}'
+      const outline = parseOutlineArtifact(JSON.parse(content))
+      outline.sections[0]!.parent_id = 'missing-parent'
+      return JSON.stringify(outline)
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach(start => start.resolve())
+    await execution
+    const repairs = fixture.followup.mock.calls.filter(call => JSON.stringify(call).includes('Outline Refinement Repair'))
+    expect(repairs).toHaveLength(1)
+    expect(JSON.stringify(repairs)).toContain(code)
+    expect(fixture.starts).toHaveLength(2)
+    expect([...fixture.taskAttempts.values()]).toEqual([1, 1])
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it('目录深化 repair 耗尽保留模型产物错误及已完成 Mapping Task', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-refinement-exhausted-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.serializeOutline.mockReturnValue('{')
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 2 })
+    const rejection = expect(execution).rejects.toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_JSON_INVALID', artifact: 'outline/refined-outline.candidate.json' }] })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach(start => start.resolve())
+    await rejection
+    expect(fixture.followup.mock.calls.filter(call => JSON.stringify(call).includes('Outline Refinement Repair'))).toHaveLength(2)
+    expect([...fixture.taskAttempts.values()]).toEqual([1, 1])
+    const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as { failure: Array<{ code: string }>; tasks: Array<{ status: string }> }
+    expect(log.failure.map(issue => issue.code)).toEqual(['OUTLINE_REFINEMENT_JSON_INVALID'])
+    expect(log.tasks.map(task => task.status)).toEqual(['completed', 'completed'])
+  })
+
+  it.each(['provider', 'filesystem', 'host-invariant'] as const)('目录深化 %s 立即失败，不进入模型 repair', async (scenario) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-refinement-infra-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.serializeOutline.mockImplementation(() => { throw new Error('provider unavailable') })
+    if (scenario !== 'provider') fixture.serializeOutline.mockImplementation(content => content)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 2 })
+    const rejection = expect(execution).rejects.toThrow('EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR')
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    if (scenario !== 'provider') {
+      const manifest = await workspace.readManifest()
+      const framework = manifest.files.find(file => file.role === 'outline_framework')!
+      const path = join(workspace.sessionRoot, framework.chunkIndexPath!)
+      if (scenario === 'filesystem') await rm(path)
+      else await writeFile(path, '{')
+    }
+    fixture.starts.forEach(start => start.resolve())
+    await rejection
+    expect(fixture.followup.mock.calls.filter(call => JSON.stringify(call).includes('Outline Refinement Repair'))).toHaveLength(0)
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it.each(['web-channel', 'filesystem', 'grep', 'provider', 'agent-error', 'agent-aborted', 'agent-blocked', 'agent-interrupted'] as const)('%s 基础设施故障不消耗模型 repair', async (scenario) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-infra-')), 'session')
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     fixture.onReply.mockImplementation((child) => {
@@ -680,6 +767,13 @@ describe('S4 Host 准入与最终确认', () => {
       if (scenario === 'filesystem') {
         const [location] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
         await rm(location!.chunks[0]!.path)
+      }
+      if (scenario === 'grep') {
+        const [location] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
+        fixture.emitToolResult({ agent: fixture.children.get('child-1')!, name: 'grep', arguments: { path: location!.chunks_path, pattern: '技术' } } as unknown as ToolExecution, {
+          isError: true, error: { message: 'ripgrep launch failed', info: { name: 'SearchError', code: 'SEARCH_FAILED' } }, content: [{ type: 'text', text: 'ripgrep launch failed' }],
+        })
+        expect(fixture.starts.every(start => start.request.signal?.aborted)).toBe(true)
       }
       fixture.starts.forEach((start) => { start.resolve() })
     }
@@ -710,15 +804,31 @@ describe('S4 Host 准入与最终确认', () => {
     await rejection
   })
 
-  it.each(['add', 'purpose', 'must_answer', 'scoring', 'order', 'delete', 'failure'] as const)('最终确认 %s：先补映射再发布确认文件', async (edit) => {
+  it.each(['add', 'purpose', 'must_answer', 'scoring', 'order', 'delete', 'delete-unused', 'failure'] as const)('最终确认 %s：先补映射再发布确认文件', async (edit) => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-confirm-')), 'session')
-    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const material = await writeInputs(workspace)
+    if (edit === 'delete-unused') {
+      const path = join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json')
+      const outline = parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+      outline.sections[0]!.requirement_ids.push(...outline.sections[1]!.requirement_ids)
+      outline.sections[0]!.scoring_ids.push(...outline.sections[1]!.scoring_ids)
+      outline.sections[0]!.scoring_response_point_ids!.push(...outline.sections[1]!.scoring_response_point_ids!)
+      outline.sections[0]!.scoring_response_points.push(...outline.sections[1]!.scoring_response_points)
+      await writeFile(path, JSON.stringify(outline))
+    }
+    const fixture = mappingFixture(workspace, material)
+    fixture.onReply.mockImplementation((child, result) => {
+      const { search, fetch } = webResearch(result.task_id)
+      fixture.emitWeb(child, [search, fetch])
+      result.section_mappings[0]!.web_materials = [webMaterial()]
+    })
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach((start) => { start.resolve() })
     await initial
+    const initialLedger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
     const session = ctx.sessions.create(SessionId('session'), { meta: { cwd: workspace.root, agentPreset: 'bid' } })
     for (const stage of ['file_intake', 'tender_analysis', 'outline_generation'] as const) {
       session.append('bid.stage.started', { stage, status: 'running' })
@@ -745,6 +855,7 @@ describe('S4 Host 准入与最终确认', () => {
       candidate.sections[0]!.scoring_response_points.push(...candidate.sections[1]!.scoring_response_points)
       candidate.sections.pop()
     }
+    if (edit === 'delete-unused') candidate.sections.pop()
     const changed = await replaceOutlineDraft(workspace, {
       expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256,
     }, candidate)
@@ -762,7 +873,7 @@ describe('S4 Host 准入与最终确认', () => {
     const confirming = host.confirmOutline(session, {
       expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256,
     })
-    if (edit !== 'order') {
+    if (edit !== 'order' && edit !== 'delete-unused') {
       await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
       await expect(readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(readFile(join(workspace.sessionRoot, 'outline/confirmation.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
@@ -778,6 +889,14 @@ describe('S4 Host 准入与最终确认', () => {
       expect(parseOutlineConfirmationArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/confirmation.json'), 'utf8'))).decision).toBe('confirmed')
       if (edit === 'delete') expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1'])
       if (edit === 'order') expect(fixture.starts).toHaveLength(2)
+      if (edit === 'delete-unused') {
+        expect(fixture.starts).toHaveLength(2)
+        expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1'])
+        const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+        expect(ledger.sources).toEqual([initialLedger.sources[0]])
+        await expect(readFile(join(workspace.sessionRoot, initialLedger.sources[1]!.snapshot_path), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await readFile(join(workspace.sessionRoot, initialLedger.sources[0]!.snapshot_path), 'utf8')).toContain('MAP-INIT-SEC-1 正文')
+      }
     } else {
       await expect(readFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       expect(session.events.at(-1)!.type).toBe('bid.stage.failed')

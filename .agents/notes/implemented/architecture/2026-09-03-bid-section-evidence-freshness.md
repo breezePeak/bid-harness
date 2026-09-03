@@ -16,7 +16,9 @@ Evidence Map v9 保存 Host 计算的 section_fingerprint。指纹使用固定�
 
 Corpus 预检仅处理成功解析的 reference/reference_bid，验证 Session 内归属、符号链接、索引 Schema 和登记分块是否存在。绝对路径同时用于 Prompt、Guard 和材料校验。grep 授权分块根目录或登记分块，read 授权索引或登记分块；本地引用还必须对应当前 Child 成功 read 的日志。损坏 Corpus 在任何 Child 启动前以 EVIDENCE_MAPPING_CORPUS_INVALID 失败并写入具体文件诊断。
 
-材料为空可以正常完成；模型 JSON、Schema、Section 归属、未读分块和 Web 来源不完整允许同 Child 有限修复。Host、文件系统、工具或 Provider 不可用、Guard 异常和 Web 结果无法关联立即使任务及阶段失败。Web search→fetch、同会话跨轮来源、Snapshot 与哈希校验保持完整。最终确认等待补映射和验证后发布 confirmed-outline.json 与 S5 的 confirmation.json。
+材料为空可以正常完成；模型 JSON、Schema、Section 归属、未读分块和 Web 来源不完整允许同 Child 有限修复。grep 使用 `result.error.info.code` 区分搜索条件错误与基础设施故障：无效表达式、原始输出溢出和协作取消允许当前 Child 调整查询，`SEARCH_FAILED` 中止 batch；合法路径本身不能证明失败来自文件系统。预检资料在 read 期间不可用、Host、Provider、Guard 和 Web 结果关联异常立即使任务及阶段失败。
+
+Outline Refinement 的候选生成与复核产物共用 `maxRepairAttempts`，JSON、Schema、目录结构、覆盖和质量问题由 Validator 引导 Main Agent 修复；已完成的 Mapping Child 不重跑。文件读取与 Host 输入校验异常不进入模型产物解析的 catch，避免把基础设施故障误交给模型。修复耗尽保留具体产物错误码。Web search→fetch、同会话跨轮来源、Snapshot 与哈希校验保持完整；每次 ledger 替换清理旧快照，最终确认即使无补充任务也按实际引用裁剪来源，避免被删章节的资料遗留在最终产物中。确认文件仍在补映射和验证完成后发布。
 
 ## Alternatives considered
 

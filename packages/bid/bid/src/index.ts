@@ -38,7 +38,7 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, buildEvidenceMappingPlan, executeEvidenceMapping, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, buildEvidenceMappingPlan, executeEvidenceMapping, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -1281,6 +1281,7 @@ export class BidHostRuntime extends TypertRemoteService {
             const writable = new Set(candidate.sections.filter(section => section.writable).map(section => section.id))
             evidence.section_mappings = evidence.section_mappings.filter(mapping => writable.has(mapping.section_id))
             await writeFileAtomic(evidencePath, JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
+            await pruneWebEvidenceArtifacts(workspace, evidence)
           }
           const validation = await validateEvidenceMapping(workspace, 'evidence_mapping', [
             { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },

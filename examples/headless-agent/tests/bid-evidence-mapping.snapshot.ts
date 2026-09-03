@@ -33,6 +33,8 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
         .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
       expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 2]])
       expect(childLog).toContain('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+      expect(childLog).toContain('SEARCH_INVALID_PATTERN')
+      expect(childLog).toContain('SEARCH_RAW_OUTPUT_OVERFLOW')
       expect(childLog).toContain('本地资料只有实施流程。')
       expect(childLog).not.toContain('EISDIR')
 
@@ -48,7 +50,11 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
         map, ledger: { ...ledger, sources: ledger.sources.map(source => ({ ...source, fetched_at: '<TIME>' })) }, snapshots,
       }, null, 2) + '\n'
       const transcript = normalizeSessionSnapshot(childLog, { sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
-      const expected = { 'child.expected.jsonl': transcript, 'artifacts.expected.json': artifacts }
+      const parentLog = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === header.parentSession)
+      if (parentLog === undefined) throw new Error('缺少持久化父 Agent 日志')
+      expect(parentLog).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
+      const refinement = normalizeSessionSnapshot(parentLog, { sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
+      const expected = { 'child.expected.jsonl': transcript, 'refinement.expected.jsonl': refinement, 'artifacts.expected.json': artifacts }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })
         for (const [name, content] of Object.entries(expected)) await writeFile(join(fixtureDir, name), content)

@@ -5,6 +5,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
 import type {} from '@deepseek-ai/dsh-fs'
 import {
   BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
@@ -80,6 +81,8 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     execute: async (args) => {
+      if (args.pattern === '[') throw new SearchError('请修正无效的搜索表达式。', 'SEARCH_INVALID_PATTERN')
+      if (args.pattern === '.*') throw new SearchError('请缩小搜索范围。', 'SEARCH_RAW_OUTPUT_OVERFLOW')
       const path = resolve(root, args.path)
       const files = (await lstat(path)).isDirectory() ? (await readdir(path)).filter(file => file.endsWith('.md')).map(file => join(path, file)) : [path]
       const matches = await Promise.all(files.map(async file => (await readFile(file, 'utf8')).includes(args.pattern) ? file : ''))
@@ -180,7 +183,7 @@ function partialResult(url: string) {
  * 在已组装的服务上执行 S4，模型与 Web 返回使用固定数据。
  * @param ctx - 真实 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
- * @param repair - 首轮只搜索，下一轮仅抓取该 URL。
+ * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @returns 阶段结果、Host 及其工作区。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean) {
@@ -195,6 +198,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const [corpus] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
   if (corpus === undefined) throw new Error('missing reference corpus')
   const childScript = [
+    ...(repair ? [
+      toolCall('grep-invalid', 'grep', { pattern: '[', path: corpus.chunks_path }),
+      toolCall('grep-overflow', 'grep', { pattern: '.*', path: corpus.chunks_path }),
+    ] : []),
     toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
@@ -209,8 +216,12 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const refinementScript = [
     toolCall('read-initial-outline', 'read', { file_path: `${workspacePath}/outline/initial-confirmed-outline.json` }),
     toolCall('read-section-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
-    toolCall('write-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: initialOutline }),
+    toolCall('write-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: repair ? '{}' : initialOutline }),
     finalText('目录无需深化。'),
+    ...(repair ? [
+      toolCall('repair-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: initialOutline }),
+      finalText('目录产物已修复。'),
+    ] : []),
     toolCall('read-refined-outline', 'read', { file_path: `${workspacePath}/outline/refined-outline.candidate.json` }),
     toolCall('read-refined-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
     toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),

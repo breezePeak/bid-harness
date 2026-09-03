@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of the Host-owned Bid Web evidence source ledger. */
-export const WEB_EVIDENCE_SOURCES_SCHEMA_VERSION = 1 as const
+export const WEB_EVIDENCE_SOURCES_SCHEMA_VERSION = 2 as const
 
 const httpUrl = z.url().refine(value => normalizeWebEvidenceUrl(value) !== undefined, {
   message: 'Web evidence URL must use http or https',
@@ -10,13 +10,6 @@ const httpUrl = z.url().refine(value => normalizeWebEvidenceUrl(value) !== undef
 
 const sourceSchema = z.object({
   source_id: z.string().regex(/^WEB-[a-f0-9]{16}$/u),
-  search_call_id: z.string().trim().min(1),
-  fetch_call_id: z.string().trim().min(1),
-  search_result_seq: z.number().int().nonnegative(),
-  fetch_call_seq: z.number().int().nonnegative(),
-  fetch_result_seq: z.number().int().nonnegative(),
-  queries: z.array(z.string().trim().min(1)).min(1),
-  discovered_url: httpUrl,
   requested_url: httpUrl,
   final_url: httpUrl,
   status_code: z.number().int().min(200).max(299),
@@ -30,12 +23,6 @@ const sourceSchema = z.object({
     writer_attempt: z.number().int().positive(),
   }).strict().optional(),
 }).strict().superRefine((source, context) => {
-  if (normalizeWebEvidenceUrl(source.discovered_url) !== normalizeWebEvidenceUrl(source.requested_url)) {
-    context.addIssue({ code: 'custom', message: 'Fetched URL must be discovered by its search call' })
-  }
-  if (!(source.search_result_seq < source.fetch_call_seq && source.fetch_call_seq < source.fetch_result_seq)) {
-    context.addIssue({ code: 'custom', message: 'Web search must complete before Web fetch' })
-  }
   if (source.snapshot_path !== `analysis/web-sources/${source.source_id}.md`) {
     context.addIssue({ code: 'custom', message: 'Snapshot path must be owned by its source id' })
   }
@@ -47,19 +34,15 @@ const ledgerSchema = z.object({
   sources: z.array(sourceSchema),
 }).strict().superRefine((ledger, context) => {
   const sourceIds = new Set<string>()
-  const fetchCallIds = new Set<string>()
   for (const [index, source] of ledger.sources.entries()) {
     if (sourceIds.has(source.source_id)) context.addIssue({ code: 'custom', path: ['sources', index, 'source_id'], message: 'Source id must be unique' })
-    const fetchIdentity = `${source.chapter_context?.child_session_id ?? 'evidence_mapping'}\u0000${source.fetch_call_id}`
-    if (fetchCallIds.has(fetchIdentity)) context.addIssue({ code: 'custom', path: ['sources', index, 'fetch_call_id'], message: 'Fetch call id must be unique within its Agent Session' })
     sourceIds.add(source.source_id)
-    fetchCallIds.add(fetchIdentity)
   }
 })
 
-/** One verified search-to-fetch source recorded by the Bid Host. */
+/** Host 保存的成功 Web fetch 正文来源。 */
 export type WebEvidenceSource = z.infer<typeof sourceSchema>
-/** S3-owned ledger that also retains verified S6 Chapter Writer sources. */
+/** S4 与 S5 共用的 Web 正文快照清单。 */
 export type WebEvidenceSourcesArtifact = z.infer<typeof ledgerSchema>
 
 /**
@@ -98,12 +81,11 @@ export function webEvidenceContentSha256(content: string): string {
 
 /**
  * Derive a stable, filename-safe source id from one fetched page.
- * @param fetchCallId - 当前 Child Session 实际执行的 Web fetch Call ID。
  * @param finalUrl - provider-returned final URL.
  * @param contentSha256 - digest of the model-visible snapshot text.
  * @returns the `WEB-` prefixed short digest used by the ledger and snapshot filename.
  */
-export function webEvidenceSourceId(fetchCallId: string, finalUrl: string, contentSha256: string): string {
-  const digest = createHash('sha256').update(`${fetchCallId}\0${finalUrl}\0${contentSha256}`, 'utf8').digest('hex')
+export function webEvidenceSourceId(finalUrl: string, contentSha256: string): string {
+  const digest = createHash('sha256').update(`${finalUrl}\0${contentSha256}`, 'utf8').digest('hex')
   return `WEB-${digest.slice(0, 16)}`
 }

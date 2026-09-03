@@ -49,9 +49,11 @@ S4 与 S5 共用 `buildWritableSectionWorklist` 的目录遍历。Host 私有 pl
 
 S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告 file_id、文件名与原因。Prompt 与 Guard 共用预检后的绝对路径，支持工作目录与 Session 目录不同的 Windows/POSIX Host。grep 可访问分块目录或登记的分块文件，read 仅可访问索引或登记的分块文件；tender、outline_framework、完整 document.md 与 Session 外路径不被授权。本地证据还必须有当前 Child 成功 read 正文的日志。
 
-没有可靠资料是正常结果，以空材料和 `missing_topics` 表达。JSON、Schema、章节归属和材料引用问题可以在同一 Child 有限修复；Corpus、工具、Provider、文件系统与结果关联异常立即失败，不发送模型 repair。执行日志保存失败分类及 initial/supplemental；页面分别显示两类任务数量。
+没有可靠资料是正常结果，以空材料和 `missing_topics` 表达。JSON、Schema、章节归属和材料引用问题可以在同一 Child 有限修复。grep 按 DSH 结构化错误码分类：`SEARCH_INVALID_PATTERN`、`SEARCH_RAW_OUTPUT_OVERFLOW` 和协作取消 `SEARCH_ABORTED` 允许 Child 调整查询，`SEARCH_FAILED` 中止 batch；预检资料在 read 时不可用仍立即失败。Corpus、Provider、Host 和结果关联异常不发送模型 repair。执行日志保存失败分类及 initial/supplemental；页面分别显示两类任务数量。
 
-S4 的每个 Mapping Task 在同一 Child Session 内修复，Web 来源校验读取该 Child 各轮次的真实工具结果。搜索结果必须包含抓取 URL，且搜索返回早于抓取调用、抓取调用早于成功返回；修复可以复用前一轮搜索，但不能借用其他任务的搜索或抓取。Host 按 Session ID 关联恢复前后的 Agent，最终章节中的 Web material 始终绑定产生该 material 的任务自己的 Snapshot；补充映射替换章节时也同步替换来源。重复的无效 URL 按规范化结果只报告一次，最终仍验证 ledger、Snapshot 文件及正文哈希。
+Outline Refinement 在候选生成与复核后执行 Schema、目录结构、覆盖和质量 Validator；模型产物问题共用本次目录深化的 `maxRepairAttempts`，只向 Main Agent 发送修复问题，不重跑已完成的 Mapping Child。JSON 与 Schema 耗尽分别返回 `OUTLINE_REFINEMENT_JSON_INVALID`、`OUTLINE_REFINEMENT_SCHEMA_INVALID`，目录规则保留具体 Validator 错误码；Provider、文件系统和 Host invariant 异常仍立即失败。
+
+S4 的每个 Mapping Task 在同一 Child Session 内修复，Web 来源校验读取该 Child 各轮次的真实工具结果。搜索结果必须包含抓取 URL，且搜索返回早于抓取调用、抓取调用早于成功返回；修复可以复用前一轮搜索，但不能借用其他任务的搜索或抓取。Host 按 Session ID 关联恢复前后的 Agent，最终章节中的 Web material 始终绑定产生该 material 的任务自己的 Snapshot；补充映射替换章节时也同步替换来源。最终确认按 Evidence Map 实际引用裁剪 ledger 并删除失去引用的 Snapshot，即使无需补充映射也执行。重复的无效 URL 按规范化结果只报告一次，最终仍验证 ledger、Snapshot 文件及正文哈希。
 
 S5 uses `outline/confirmed-outline.json` as its only structure source. Each Writer receives its Section, related S2 records, stable response points, Section evidence, exact framework draft chunks referenced by that Section, and bounded dependency handoffs. Framework bodies are writing input for preservation, adaptation, or rewriting, never factual Evidence. The Reviewer receives only Host-injected data and structured output. Missing enterprise facts remain unresolved and cannot be replaced by Web sources.
 
