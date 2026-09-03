@@ -1,86 +1,50 @@
 # @deepseek-ai/dsh-web-search-deepseek
 
-English | [中文](README.zh.md)
+网页搜索策略桥接插件：把 [web 服务](../web/README.md) 的搜索请求交给当前 [LLM Provider](../../llm/llm/README.md) 提供的 hosted `web_search`。插件依赖 `web`、`llm`、`agentDefaultModel`，面向模型的工具仍由 [tool-web](../tool-web/README.md) 注册。
 
-A [DeepSeek](https://deepseek.com)-backed `WebSearchProvider` for the harness [web capability seam](../web/README.md) (`ctx.web`). It calls DeepSeek's **Anthropic-compatible Messages API** (`POST {baseURL}/messages`) with the native `web_search_20250305` server tool enabled, and maps the structured `web_search_tool_result` blocks DeepSeek returns into the seam's normalized `WebSearchResult`.
+包名、settings namespace 和 web 服务注册 ID `deepseek-official` 保持稳定，供已有组合引用；该 ID 不决定实际使用的模型 Provider。
 
-This is an **implementation** package: it registers a provider into `ctx.web`, resolves its credential for each search through the optional `ctx.credentials` seam, records the auxiliary request in the initiating Agent session when one exists, and does not register a model-facing tool. Like `@deepseek-ai/dsh-llm-deepseek`, it is a function/namespace plugin (`inject: ['web']`). The Anthropic wire shape is a provider-private detail — it does **not** make this provider depend on `ctx.llm`.
+## 配置
 
-## How it differs from a dedicated search endpoint
-
-Exa and Perplexity expose dedicated search endpoints; DeepSeek does not. Instead this provider issues a **full Messages model call** carrying the `web_search` server tool, so one search costs a complete model turn in latency and tokens — heavier than a pure retrieval endpoint. DeepSeek runs the search server-side and returns **structured** `web_search_tool_result` blocks; the provider parses those blocks and **never scrapes URLs out of model prose**.
-
-**Strict mode**: if the response carries no `web_search_tool_result` block (native search did not trigger), the provider throws `WebError` `WEB_PROVIDER_ERROR` rather than degrading to prose-scraping.
-
-It reuses the `DEEPSEEK_API_KEY` credential reference (no new secret) but **not** `$DEEPSEEK_BASE_URL`: the search endpoint is the Anthropic-compatible base (`https://api.deepseek.com/anthropic/v1`), distinct from the chat-completions base (`https://api.deepseek.com`) the LLM adapter uses. A mounted credentials service is authoritative; without one, the provider falls back to the launching process environment. The reference is resolved for each search, so a key stored or rotated by the Web Models page reaches the next call without a restart.
-
-## Config
-
-| Key | Default | Meaning |
+| 字段 | 默认 | 行为 |
 |---|---|---|
-| `apiKey` | omitted | Literal DeepSeek API key. Prefer `apiKeyEnv` so no secret enters configuration; a non-empty literal wins. |
-| `apiKeyEnv` | `DEEPSEEK_API_KEY` | Credential reference resolved for each search through `ctx.credentials`, or from the process environment when that seam is absent. A missing value fails the call as `WEB_PROVIDER_CREDENTIAL_MISSING`. |
-| `baseURL` | `https://api.deepseek.com/anthropic/v1` | Anthropic-compatible endpoint base; `/messages` is appended. Falls back to `$DEEPSEEK_SEARCH_BASE_URL` from any environment layer; do not reuse `$DEEPSEEK_BASE_URL`, which belongs to the chat-completions LLM adapter. An unparseable value makes the provider unavailable. |
-| `model` | `deepseek-v4-flash` | Anthropic-format model name. |
-| `apiVersion` | `2023-06-01` | `anthropic-version` header value. |
-| `maxTokens` | `4096` | Positive-integer upper bound on generated tokens for the Messages request. |
-| `maxUses` | `5` | Positive-integer maximum `web_search` server-tool uses per request. |
+| `provider` | 省略 | 跟随发起搜索的 Agent 最近请求中的 Provider；没有 Agent 时读取全局默认。显式设置时只调用指定 Provider。 |
+| `maxUses` | `5` | 一次辅助请求允许的 hosted 搜索次数，必须为正整数。 |
 
-```yaml
-- id: web-search-deepseek
-  name: '@deepseek-ai/dsh-web-search-deepseek'
-  config:
-    apiKeyEnv: DEEPSEEK_API_KEY
-    baseURL: https://gateway.internal/anthropic/v1
-```
+插件页只编辑这些策略字段。API Key、Base URL 和模型由模型页及 Provider 的 settings namespace 管理；插件页不读写凭据。显式搜索 Provider 与任务 Provider 不同时，使用该搜索 Provider 模型目录的首项；可在模型页调整目录顺序。没有模型或没有 hosted-search 能力时明确失败，不自动换用其他 Provider。
 
-The entry above is the base layer of the `web-search-deepseek` Settings section: a user layer over it reaches the NEXT search, because the provider projects the section per call rather than capturing it at registration. The seam's provider selection therefore never flickers when an endpoint or model changes. `apiKey` carries `role('secret')`, so it never rides a `describe()` response in any layer — a configuration surface learns only whether the credentials domain holds a value for the reference `apiKeyEnv` names, never whether a layer carries a literal key.
+## 旧配置迁移
 
-## Mapping
+首次搜索在发送请求前，将 `web-search-deepseek` 中的 `apiKey`、`apiKeyEnv`、`baseURL`、`model`、`apiVersion`、`maxTokens` 移入 `llm-deepseek.search`。已配置的 Provider 字段优先，迁移先持久化目标，再删除旧 user 层字段；失败时不会先丢弃旧值。组合文件内的静态字段保留作为迁移输入，Provider 中的显式配置仍优先。迁移需要可写的 settings 服务和已注册的 DeepSeek Provider；缺少它们时报明确信息，不忽略原连接。
 
-DeepSeek returns no provider-generated answer content this provider trusts as `content`, so `content` is omitted. `sources[]` comes from `web_search_result` items inside `web_search_tool_result` blocks: `url` ← `url`, `title` ← `title`, and `publishedAt` ← `page_age`. Snippets live separately as URL-keyed `cited_text` entries in a text block's `citations[]`; the provider joins them, leaving `snippet` absent when no excerpt exists.
+默认搜索共用 DeepSeek Provider 的凭据引用。不同于聊天的旧搜索凭据作为 Provider 内部覆盖保留，不要求用户重新输入；literal key 按 secret schema 脱敏。新保存动作不向搜索策略 namespace 写密钥。
 
-Results are deduplicated by URL because one request may surface the same page across searches. DeepSeek exposes `maxUses`, not a result-count knob, so the seam enforces `maxResults` by truncating `sources[]` and setting `truncated`.
+## 结果与错误
 
-Provider failures become `WEB_PROVIDER_ERROR`; caller cancellation becomes `WEB_ABORTED`. HTTP redirects are rejected before the `Location` target is contacted and surface as `WEB_PROVIDER_ERROR`.
+DeepSeek 继续发送 Anthropic-compatible Messages 请求和 `web_search_20250305`，解析结构化搜索结果及 citation 摘要。GPT 发送 Responses 请求和 `tools: [{type: 'web_search'}]`，解析完成的 search call sources 与 URL annotations。两者统一返回 `WebSearchResult.sources`，不把生成答案写入 `content`；web 服务负责最终 `maxResults` 截断。
 
-## Request logging
+发现 URL 后，Agent 继续调用 `web_fetch` 获取原文。工具结果与调用日志保持现有结构，证据映射沿用 search/fetch provenance 校验；本插件不创建证据或解释供应商数据以外的业务字段。
 
-Immediately before dispatch, a search running under an initiating Agent appends the log-only `web/deepseek-search-llm-request` session event. It contains the resolved endpoint, API version, and exact secret-free JSON body sent to DeepSeek; headers and credentials are excluded. Credential failures and cancellations before dispatch create no event, while later HTTP or response failures leave the attempted request durable. Direct programmatic provider calls outside an Agent have no initiating session to log.
+缺少搜索能力时报 `UNSUPPORTED_CAPABILITY`；GPT 不兼容的 Responses 端点时报 `UNSUPPORTED_RESPONSES_API`；无效或未完成的搜索结果时报 `WEB_PROVIDER_ERROR`。取消沿调用信号传播，HTTP 重定向在联系目标前被拒绝。错误包含 Provider 信息，不回显认证头或实际密钥。
 
 ## Model Experience
 
-### Auxiliary DeepSeek search request
+### What the model sees
 
-#### What the model sees
+辅助模型接收 `Perform a web search for the query: <query>` 和 Provider 所需的 hosted 工具定义。会话模型通过原 `web_search` 工具收到 URL、标题、日期和有来源的摘要；不会将辅助模型的生成答案当作网页原文。
 
-A separate DeepSeek model receives exactly `Perform a web search for the query: <query>` as its user text and one native `web_search` server-tool definition. This request is not part of the conversation model's context.
+### Token effect
 
-#### Token effect
+每次搜索产生独立模型请求和服务端检索成本；`maxUses` 限制搜索次数。结果仍受 web 服务的来源数限制。
 
-Separate provider input and output tokens are incurred for each search; `maxTokens` caps generated output and `maxUses` caps native search uses.
+### KV Cache effect
 
-#### KV Cache effect
+搜索请求独立于会话缓存；工具结果按原调用链追加到会话上下文，不修改已有消息。
 
-Independent of the conversation request cache. The auxiliary instruction and native tool definition can form a stable prefix, but each changed query or model route prevents reuse from its first difference.
+## Request logging
 
-### Conversation tool result, indirectly
-
-#### What the model sees
-
-Through [`dsh-tool-web`](../tool-web/README.md), the conversation model sees deduplicated URLs, titles, dates, and citation snippets from structured search blocks; provider prose is not trusted as an answer. This provider's exact failures include the actionable missing-credential message, `DeepSeek search credential resolution failed: <error>`, `DeepSeek search aborted`, `DeepSeek search request failed: <error>`, `DeepSeek returned no web_search_tool_result blocks; the request may not have triggered native web search`, and `DeepSeek returned an unprocessable response body: <error>`; HTTP failures preserve the provider message. The consumer owns the error wrapper.
-
-#### Token effect
-
-Zero direct conversation tokens from registration. Result tokens scale with returned sources and snippets, then the seam enforces the requested source bound.
-
-#### KV Cache effect
-
-Append-only; newly visible content follows the reusable request prefix and does not invalidate existing KV-cache entries.
+Agent 内的搜索在发送前追加 `web/provider-search-llm-request`，保存 Provider、解析后的端点、可选协议版本和实际 JSON 请求体。认证头与密钥不进入事件。旧 `web/deepseek-search-llm-request` 类型保留以读取既有会话日志。直接在 Agent 外调用时没有关联会话。
 
 ## Known Limitations and Deferred Work
 
-- **One search costs a full Messages model turn** — latency plus generated tokens, with up to `maxUses` server-side searches; DeepSeek exposes no dedicated retrieval endpoint.
-- **Dynamic credential availability resolves inside the operation** — the synchronous `available()` contract can establish that a resolver exists but cannot query an asynchronous credential store. A selected keyless provider therefore fails the search with `WEB_PROVIDER_CREDENTIAL_MISSING`; the stable `web_search` schema remains registered. Caller cancellation races this preflight locally, but cannot force an arbitrary credential backend itself to stop work.
-- **Over-returned sources still cost tokens** — with no result-count knob on the wire, `maxResults` is enforced only post-hoc by seam truncation.
-- **Uncited results carry no `snippet`** — a source gains one only when a `text` block citation (`cited_text`) matches its URL.
+能力目录表示已安装实现，不探测远端账号或网关授权。兼容服务可能拒绝 hosted search，此时错误直接返回。旧配置迁移采用两个 namespace 的先写后删，不提供跨 namespace 事务；中断后可安全重试。旧静态组合在只读部署中需要由部署方将连接字段移动到 Provider。

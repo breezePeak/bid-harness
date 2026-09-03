@@ -23,6 +23,8 @@ export interface ConfigurableProviderView {
   settingsPath: string[]
   /** Whether the route is currently registered (its models are requestable). */
   active: boolean
+  /** Operations supplied by the installed provider and its capability plugins. */
+  capabilities?: ('chat' | 'tools' | 'web_search')[]
   /**
    * Whether the owning adapter knows this route only because configuration
    * declared it. Absent when the adapter draws no such distinction, so a

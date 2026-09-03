@@ -6,7 +6,7 @@ The SDK provider runs each subagent as a complete DeepSeek Harness runtime in a 
 
 ## Start and ownership
 
-`start(request)` resolves the child's working directory, spawns the runtime through `DeepSeekHarness`, and completes the `initialize` handshake (with the configured `provider`/`model` route and optional `maxTokens` output cap) before it fulfills. Fulfillment therefore means the child runtime is ready and ownership has transferred to the caller. A spawn, handshake, or pre-publication cancellation failure rejects only after the subprocess has been reaped; a working-directory resolution failure rejects before anything is spawned.
+`start(request)` 在启动子进程前解析工作目录和模型。默认继承父任务最后一次已记录请求的 Provider/model；父任务尚无请求时使用创建选项。部署可同时配置 `provider`、`model` 覆盖继承值，缺少其中一项会在加载时报错。`DeepSeekHarness` 通过 `initialize` 将确定的选择及可选 `maxTokens` 传给子进程；完成握手后才返回运行句柄。启动、握手或发布前取消失败会先回收进程。
 
 The working directory resolves exactly like the ACP backend, through the seam's shared out-of-process helpers ([`dsh-subagent`](../subagent/README.md)): the configured `cwd` override when set (validated once at load), else the delegating parent session's cwd — never the server process's own cwd. The resolved path becomes the child process cwd and the workspace cwd of its SDK session.
 
@@ -20,7 +20,7 @@ The SDK client returns an owned child activity rather than a prompt result. The 
 
 ## Capabilities and context
 
-The provider advertises no start-time capabilities (`outputSchema`/`depthLimit`/`toolFilter`/`persona` all false) and `inheritsParentContext: false`: the child is a fresh runtime in another process, and the only parent-derived input is the workspace cwd. `dsh-tool-subagent` deployments over this provider set `maxDepth: 'provider-managed'` — the child harness owns its own recursion budget.
+The provider advertises no start-time capabilities (`outputSchema`/`depthLimit`/`toolFilter`/`persona` all false) and `inheritsParentContext: false`: the child receives no parent conversation. It inherits workspace and model selection, while owning its own tools and credentials. `dsh-tool-subagent` deployments over this provider set `maxDepth: 'provider-managed'` — the child harness owns its own recursion budget.
 
 ## Configuration
 
@@ -30,8 +30,8 @@ The provider advertises no start-time capabilities (`outputSchema`/`depthLimit`/
 | `command` | required | Executable spawned per run (the child runtime bin or packaged exe). |
 | `args` | `[]` | Command arguments (typically the child's `cordis.yml` path). |
 | `cwd` | parent session cwd | Working-directory override; same validation as [`subagent-acp`](../subagent-acp/README.md). |
-| `provider` | `deepseek-official` | Provider route sent in the child's `initialize`. |
-| `model` | `deepseek-v4-flash` | Model sent in the child's `initialize`. |
+| `provider` | 父任务 Provider | 与 `model` 一起覆盖子进程握手中的模型选择。 |
+| `model` | 父任务 model | 与 `provider` 一起配置。 |
 | `maxTokens` | adapter/provider route default | Per-request output-token cap sent in the child's `initialize`; it applies to the child root agent and its in-process descendants. |
 | `env` | `{}` | Explicit child environment layered over a credential-scrubbed parent environment (e.g. the child's own `DEEPSEEK_API_KEY`, or `DSH_CORDIS_CONFIG`). |
 | `shutdownTimeoutMs` | `1000` | Bound on the protocol `shutdown` exchange during dispose. |
@@ -54,6 +54,8 @@ The provider advertises no start-time capabilities (`outputSchema`/`depthLimit`/
 ```
 
 ## Process boundary
+
+子进程组合必须安装继承到的 Provider，并在子进程凭据存储或显式 `env` 中配置密钥。继承 GPT 选择不会自动转发父进程密钥；子进程未安装 GPT 时明确拒绝，不回退 DeepSeek。
 
 The child environment is the [`dsh-subprocess`](../../subprocess/README.md) seam's `scrubbedParentEnv()` base — ambient credential-shaped and `DSH_*` names dropped — with explicit `config.env` values merged after the scrub. The child is spawned by the SDK client rather than through `ctx.subprocess` (the subprocess README's documented exception for SDK-managed transports), which is why this backend applies the scrub itself. The JSON-RPC wire is the real serialization boundary.
 

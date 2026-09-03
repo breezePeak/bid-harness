@@ -337,6 +337,13 @@ export interface ToolSchema {
   parameters: Record<string, unknown>
 }
 
+/** Assembled model output; callers inspect finish for provider errors or cancellation. */
+export interface GenerateResult {
+  message: Message
+  finish: FinishReason
+  usage?: TokenUsage
+}
+
 /** A single model request, fully assembled. */
 export interface GenerateOptions {
   /** Registered provider route selecting the adapter instance. */

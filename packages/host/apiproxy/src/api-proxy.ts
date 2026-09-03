@@ -3290,6 +3290,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           settingsNs: entry.settingsNs,
           settingsPath: [...entry.settingsPath],
           active: active.has(entry.provider),
+          capabilities: (['chat', 'tools', 'web_search'] as const).filter(capability => ctx.llm.supports(entry.provider, capability)),
           ...entry.declared === undefined ? {} : { declared: entry.declared },
         }))
         // Routes registered without a directory declaration still appear —
@@ -3303,6 +3304,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             settingsNs: '',
             settingsPath: [],
             active: true,
+            capabilities: (['chat', 'tools', 'web_search'] as const).filter(capability => ctx.llm.supports(provider.id, capability)),
           })
         }
         return Promise.resolve(ok(request, { providers: views }))

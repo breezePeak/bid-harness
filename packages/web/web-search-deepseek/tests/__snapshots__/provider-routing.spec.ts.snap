@@ -1,0 +1,43 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Provider routing through a Loader-created Agent > deepseek-official executes search → fetch through the existing tool loop 1`] = `
+{
+  "calls": [
+    "web_search",
+    "web_fetch",
+  ],
+  "discovery": [
+    {
+      "max_uses": 5,
+      "name": "web_search",
+      "type": "web_search_20250305",
+    },
+  ],
+  "final": [
+    {
+      "text": "完成",
+      "type": "text",
+    },
+  ],
+}
+`;
+
+exports[`Provider routing through a Loader-created Agent > gpt executes search → fetch through the existing tool loop 1`] = `
+{
+  "calls": [
+    "web_search",
+    "web_fetch",
+  ],
+  "discovery": [
+    {
+      "type": "web_search",
+    },
+  ],
+  "final": [
+    {
+      "text": "完成",
+      "type": "text",
+    },
+  ],
+}
+`;

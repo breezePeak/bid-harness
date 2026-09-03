@@ -11,6 +11,7 @@
     "@deepseek-ai/cordis-plugin-timer": "workspace:*",
     "@deepseek-ai/dsh-acp-demo": "workspace:*",
     "@deepseek-ai/dsh-agent": "workspace:*",
+    "@deepseek-ai/dsh-agent-default-model": "workspace:*",
     "@deepseek-ai/dsh-agent-loop": "workspace:*",
     "@deepseek-ai/dsh-agent-spine-demo": "workspace:*",
     "@deepseek-ai/dsh-app-boot": "workspace:*",
@@ -113,6 +114,7 @@
     "@deepseek-ai/dsh-user-approval": "workspace:*",
     "@deepseek-ai/dsh-user-questions": "workspace:*",
     "@deepseek-ai/dsh-web": "workspace:*",
+    "@deepseek-ai/dsh-web-search-deepseek": "workspace:*",
     "@deepseek-ai/dsh-web-fetch-http": "workspace:*",
     "@deepseek-ai/dsh-workflow-worker-thread": "workspace:*",
     "@deepseek-ai/dsh-agent-instructions": "workspace:*"

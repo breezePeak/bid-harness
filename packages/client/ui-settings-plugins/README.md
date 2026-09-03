@@ -8,7 +8,7 @@ The **Plugins** settings section and its **Plugin configuration** tab. The secti
 
 The configurable tab reads which settings namespaces the Host serves and dispatches one slot key per namespace, so what renders is the intersection of two ledgers: the namespaces a live Host plugin registered, and the cards registered under those keys. A served namespace no card claims renders nothing — another surface owns it, or this deployment ships no browser half for it — and a card whose namespace this deployment does not serve is never dispatched, so an uncomposed plugin leaves no trace and does not hold the tab back from its empty line. The empty line waits for the Host's first answer, so an unanswered read never reads as "this deployment configures no plugin". Cards appear in the order they registered, which is stable for the cards one package installs together and not stable across plugins: apply order between packages is unconstrained.
 
-The cards this package ships cover the shell executor (`bash`), the agent loop's tool-call parallelism (`agent-loop`), and the DeepSeek search provider (`web-search-deepseek`).
+The cards this package ships cover the shell executor (`bash`), the agent loop's tool-call parallelism (`agent-loop`), 以及网页搜索策略（`web-search-deepseek`）。
 
 ## Extension point
 
@@ -20,9 +20,9 @@ A card stages what the user types and writes it only when they save. Each contro
 
 Saving writes each staged field through the client settings scope, which fences every write with the namespace revision it read, so a form that has drifted from the document is refused rather than overwriting a concurrent change. The Host is the only authority on whether a value was accepted — its validators own the constraints no schema can express — so the card reads the section back afterwards and reports a save that did not land, keeping those drafts for the user to correct.
 
-A key can also be written from another surface — the Models page addresses the same reference — which changes no settings section, so the card re-reads on the forwarded `credentials/reference-updated` event for the reference it watches.
+网页搜索卡只保存 `provider` 与 `maxUses`。省略 provider 跟随当前任务选择，在 Agent 外跟随全局默认；显式选项只列出已激活且提供 `web_search` 能力的 Provider。能力列表随 `llm/adapters-updated` 刷新，已保存但不可用的选择仍显示为不可用，不会替换为其他 Provider。
 
-A field's presence in the raw user layer — not its value — is what marks it overridden; a reset clears that field so it re-inherits the composition layer. Secret-role fields never ride a response, so a key control starts blank, reports only whether one is configured, and writes through the credentials domain rather than the settings section; a blank draft writes nothing and keeps the stored key.
+API Key、Base URL 和模型由模型页管理；网页搜索卡不读写 credentials。字段重置沿用现有分层设置行为，单次请求最多搜索次数仍通过 `maxUses` 限制。
 
 ## Model Experience
 

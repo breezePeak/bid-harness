@@ -16,6 +16,7 @@ export const configurableProviderViewSchema = z.object({
   settingsNs: z.string(),
   settingsPath: z.array(z.string()),
   active: z.boolean(),
+  capabilities: z.array(z.enum(['chat', 'tools', 'web_search'])).optional(),
   declared: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<ConfigurableProviderView>>
 

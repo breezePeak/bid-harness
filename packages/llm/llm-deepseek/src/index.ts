@@ -20,6 +20,7 @@ import { launchEnvironmentOf, type LaunchEnvironmentSnapshot } from '@deepseek-a
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { getOrCreateAnonymousUserId, type AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
+import { DeepSeekSearchProvider, DEEPSEEK_DEFAULT_API_VERSION, DEEPSEEK_DEFAULT_MAX_TOKENS } from './search.ts'
 import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_FILE_EXPIRY_SECONDS,
@@ -71,6 +72,8 @@ export { DeepSeekUploadIndex, deepSeekFileScope } from './upload-index.ts'
 export type { DeepSeekUploadRecord } from './upload-index.ts'
 export type { RequestDefaults } from './serialize.ts'
 export type * from './types.ts'
+export * from './search.ts'
+export type * from './search-types.ts'
 
 export const name = 'llm-deepseek'
 export const inject = ['llm']
@@ -104,6 +107,21 @@ const MODEL_MODALITIES = ['text', 'image'] as const satisfies readonly ModelModa
  * reasoning effort resolves to `high`.
  */
 export interface Config {
+  /** Anthropic-compatible hosted-search connection overrides, owned by this Provider. */
+  search?: {
+    /** Optional Messages base; omission derives /anthropic/v1 from the chat base. */
+    baseURL?: string
+    /** Legacy search model override; omission follows the task's selected model. */
+    model?: string
+    /** Legacy literal search key retained during migration; never returned by settings.describe. */
+    apiKey?: string
+    /** Optional legacy credential reference when search used a different account. */
+    apiKeyEnv?: string
+    /** Anthropic-compatible protocol version. */
+    apiVersion?: string
+    /** Hosted-search output token limit. */
+    maxTokens?: number
+  }
   /** Credential reference (environment-variable name) resolved per request; defaults to `DEEPSEEK_API_KEY`. */
   apiKeyEnv?: string
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
@@ -157,6 +175,14 @@ const catalogModel: z<DeepSeekCatalogModel> = z.object({
 })
 
 export const Config: z<Config> = z.object({
+  search: z.object({
+    baseURL: z.string(),
+    model: z.string(),
+    apiKey: z.string().role('secret'),
+    apiKeyEnv: z.string().role('credential-ref'),
+    apiVersion: z.string(),
+    maxTokens: z.number().step(1).min(1),
+  }),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   baseURL: z.string(),
   thinking: z.union(['enabled', 'disabled']),
@@ -445,6 +471,25 @@ export function apply(ctx: Context, config: Config): void {
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below.
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
+  ctx.llm.registerWebSearch(PROVIDER, async (request, searchOptions) => {
+    const connection = options()
+    const search = current().search
+    const base = connection.baseURL.replace(/\/+$/u, '').replace(/\/v1$/u, '')
+    const provider = new DeepSeekSearchProvider(() => ({
+      baseURL: search?.baseURL ?? launchEnvironmentOf(ctx).get('DEEPSEEK_SEARCH_BASE_URL')?.value ?? `${base}/anthropic/v1`,
+      model: search?.model ?? searchOptions.model,
+      apiVersion: search?.apiVersion ?? DEEPSEEK_DEFAULT_API_VERSION,
+      maxTokens: search?.maxTokens ?? DEEPSEEK_DEFAULT_MAX_TOKENS,
+      maxUses: searchOptions.maxUses,
+      ...search?.apiKey === undefined ? {} : { apiKey: search.apiKey },
+      apiKeyEnv: credentialRef(search?.apiKeyEnv ?? connection.apiKeyEnv),
+      resolveApiKey: () => resolveApiKey({ ...connection, apiKeyEnv: credentialRef(search?.apiKeyEnv ?? connection.apiKeyEnv) }),
+      recordRequest: (value) => {
+        searchOptions.recordRequest({ provider: PROVIDER, endpoint: value.endpoint, apiVersion: value.apiVersion, body: value.body })
+      },
+    }))
+    return provider.search(request, searchOptions.signal)
+  })
   let registeredPolicy = options().retryPolicy
   const ensureRegistrationFacts = (): void => {
     const policy = options().retryPolicy

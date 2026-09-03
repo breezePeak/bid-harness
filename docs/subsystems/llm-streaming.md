@@ -6,6 +6,14 @@ The conversation and streaming types from [`packages/llm`](../../packages/llm/RE
 
 Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
+## Provider 能力与非流式结果
+
+`LlmRuntime` 同时管理模型路由和可选的 hosted-search 贡献。`LlmCapability` 的值为 `chat`、`tools`、`web_search`；`supports(provider, capability)` 查询已安装实现，能力声明不代表远端账号已获授权。默认 Provider/model 由 [`agent-default-model`](../../packages/core/agent-default-model/README.md) 解析，连接与凭据由对应适配器拥有。
+
+`generate(options)` 通过现有 `stream(options)` 与 `BlockAssembler` 返回 `GenerateResult`：包含已组装 `message`、终止原因 `finish` 和可选 `usage`。工具块、reasoning 及模型 replay 数据沿用相同消息类型；失败保留在 `finish`，与流式协议一致。
+
+`HostedWebSearch` 接收 `WebSearchRequest` 和 `HostedSearchOptions`，后者携带本次 `model`、`maxUses`、取消信号及 `recordRequest`。记录器在派发前接收不含认证头的 `HostedSearchRequest`（Provider、endpoint、可选协议版本与 body）。`WebSearchResult` 的 URL/title/snippet 沿用 [Web 服务](web.md) 的发现结果；读取正文仍由 fetch 提供。声明位于 [`search.ts`](../../packages/llm/llm/src/search.ts)，Provider 通过 `registerWebSearch` 注册并随插件卸载释放贡献。
+
 <a id="content-blocks-and-messages"></a>
 
 ## Content blocks and messages

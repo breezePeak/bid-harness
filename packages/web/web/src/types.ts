@@ -5,55 +5,10 @@
  * @module @deepseek-ai/dsh-web/types
  */
 
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+export { WebError } from '@deepseek-ai/dsh-llm'
 
-/**
- * What one search-capable backend is asked to search. Each request carries one
- * query; a consumer may issue several requests. `maxResults` is a
- * `dsh-tool-web`-layer bound passed through unchanged and enforced on the way
- * back by the seam (see {@link WebSearchResult}).
- */
-export interface WebSearchRequest {
-  readonly query: string
-  /**
-   * Upper bound on returned sources; the seam truncates to it. Omitted = no
-   * bound. `dsh-tool-web` always sets it. A provider whose API supports a
-   * result-count control (Exa's `numResults`) should apply it at the request
-   * layer as a cost/latency optimization; the seam enforces the bound
-   * regardless.
-   */
-  readonly maxResults?: number
-}
-
-/**
- * Normalized search outcome. `content` is optional provider-generated answer
- * text or summary (Exa and DeepSeek return none; Perplexity returns a
- * generated answer).
- * `sources[]` is the portable citation shape. `truncated` is set by the seam
- * when it cut `sources[]` down to `maxResults`.
- */
-export interface WebSearchResult {
-  /** Optional provider-generated answer text, search context, or summary. */
-  readonly content?: string
-  /** Citeable sources, already truncated to the request's `maxResults`. */
-  readonly sources: readonly WebSearchSource[]
-  /** True when the seam dropped sources to honor `maxResults`. */
-  readonly truncated: boolean
-}
-
-/**
- * One citeable source. A source always has a URL; `title`, `snippet`, and
- * `publishedAt` are optional because not every provider returns them — forcing
- * adapters to invent them would make the seam lie (Perplexity citations may be
- * URL-only). `dsh-tool-web` renders `title ?? hostname(url)` for display.
- */
-export interface WebSearchSource {
-  readonly url: string
-  readonly title?: string
-  readonly snippet?: string
-  /** Publication/crawl timestamp as a provider-supplied ISO-8601 string. */
-  readonly publishedAt?: string
-}
+import type { WebSearchRequest, WebSearchResult } from '@deepseek-ai/dsh-llm'
+export type { WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-llm'
 
 /**
  * What one fetch-capable backend is asked to retrieve. The request deliberately
@@ -118,13 +73,3 @@ export interface WebFetchProvider {
   /** Retrieve one URL; honor `signal` for cancellation. */
   fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>
 }
-
-/**
- * Typed web error with a machine-routable, open-string `code` and chained `cause`.
- * Consumers must tolerate provider-specific codes. Shared codes cover unavailable,
- * missing, unusable, ambiguous, or duplicate providers, cancellation, and provider failure;
- * the local fetch provider additionally distinguishes invalid or blocked URLs, redirects,
- * size and timeout limits, and unsupported content types. Tool execution exposes the code in
- * structured error metadata.
- */
-export class WebError extends HarnessError {}

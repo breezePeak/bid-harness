@@ -6,6 +6,9 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
+import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
+import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import {
   DeepSeekSearchProvider,
@@ -322,13 +325,13 @@ describe('DeepSeekSearchProvider error handling', () => {
   it('maps an HTTP error to WEB_PROVIDER_ERROR with the provider message', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: { message: 'rate limited' } }, { status: 429 })))
     await expect(searchProvider(options).search({ query: 'q' }))
-      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR', message: 'rate limited' }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR', message: 'DeepSeek Provider search request failed: rate limited' }))
   })
 
   it('handles a string-form error body', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'bad request' }, { status: 400 })))
     await expect(searchProvider(options).search({ query: 'q' }))
-      .rejects.toThrow(expect.objectContaining({ message: 'bad request' }))
+      .rejects.toThrow(expect.objectContaining({ message: 'DeepSeek Provider search request failed: bad request' }))
   })
 
   it('keeps a status-line message when the error body is not JSON', async () => {
@@ -399,12 +402,20 @@ describe('DeepSeekSearchProvider error handling', () => {
   })
 })
 
+async function modelContext(key?: string): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(AgentDefaultModel, { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+  await ctx.plugin(DeepSeek, { ...(key === undefined ? {} : { search: { apiKey: key } }) })
+  return ctx
+}
+
 describe('web-search-deepseek plugin registration', () => {
   it('registers the provider into ctx.web (HMR-safe)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(searchResponse())))
-    const ctx = new Context()
+    const ctx = await modelContext('env-key')
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
-    const fiber = await ctx.plugin(deepseekPlugin, { apiKey: 'ds-key' })
+    const fiber = await ctx.plugin(deepseekPlugin, {})
     await expect(ctx.web.search({ query: 'q' })).resolves.toMatchObject({ truncated: false })
     await fiber.dispose()
     await expect(ctx.web.search({ query: 'q' }))
@@ -412,23 +423,24 @@ describe('web-search-deepseek plugin registration', () => {
   })
 
   it('rejects maxTokens: 0 at plugin construction', async () => {
-    const ctx = new Context()
+    const ctx = await modelContext('env-key')
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
-    await expect(ctx.plugin(deepseekPlugin, { apiKey: 'ds-key', maxTokens: 0 }))
+    const legacy = { maxTokens: 0 }
+    await expect(ctx.plugin(deepseekPlugin, legacy))
       .rejects.toThrow(/maxTokens expected number >= 1/)
   })
 
   it('rejects maxUses: 0 at plugin construction', async () => {
-    const ctx = new Context()
+    const ctx = await modelContext('env-key')
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
-    await expect(ctx.plugin(deepseekPlugin, { apiKey: 'ds-key', maxUses: 0 }))
+    await expect(ctx.plugin(deepseekPlugin, { maxUses: 0 }))
       .rejects.toThrow(/maxUses expected number >= 1/)
   })
 
   it('rejects a fractional maxUses at plugin construction', async () => {
-    const ctx = new Context()
+    const ctx = await modelContext('env-key')
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
-    await expect(ctx.plugin(deepseekPlugin, { apiKey: 'ds-key', maxUses: 1.5 }))
+    await expect(ctx.plugin(deepseekPlugin, { maxUses: 1.5 }))
       .rejects.toThrow(/maxUses expected number multiple of 1/)
   })
 
@@ -443,18 +455,18 @@ describe('web-search-deepseek plugin registration', () => {
     const unwrapped = loader.unwrapExports(deepseekPlugin) as Record<string, unknown>
     expect(unwrapped).toBe(deepseekPlugin)
     expect(unwrapped.name).toBe('web-search-deepseek')
-    expect(unwrapped.inject).toEqual(['web'])
+    expect(unwrapped.inject).toEqual(['web', 'llm', 'agentDefaultModel'])
     expect(typeof unwrapped.apply).toBe('function')
   })
 
   it('boots over ctx.web through the unwrapped module without an inject error', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(searchResponse())))
-    const ctx = new Context()
+    const ctx = await modelContext('env-key')
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
     const loader = Object.create(Loader.prototype) as Loader
     const unwrapped = loader.unwrapExports(deepseekPlugin) as Parameters<Context['plugin']>[0]
     // A collapsed export shape (dropped inject) would throw "without inject" here.
-    const fiber = await ctx.plugin(unwrapped, { apiKey: 'ds-key' })
+    const fiber = await ctx.plugin(unwrapped, {})
     await expect(ctx.web.search({ query: 'q' })).resolves.toMatchObject({ truncated: false })
     await fiber.dispose()
   })
@@ -465,9 +477,9 @@ describe('web-search-deepseek plugin registration', () => {
     try {
       const fetchMock = vi.fn(async () => jsonResponse(searchResponse()))
       vi.stubGlobal('fetch', fetchMock)
-      const ctx = new Context()
+      const ctx = await modelContext('env-key')
       await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
-      deepseekPlugin.apply(ctx, {})
+      await ctx.plugin(deepseekPlugin, {})
       await ctx.web.search({ query: 'q' })
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
       expect(url).toBe('https://api.deepseek.com/anthropic/v1/messages')
@@ -486,14 +498,14 @@ describe('web-search-deepseek plugin registration', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-web-search-credentials-'))
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(searchResponse()))
     vi.stubGlobal('fetch', fetchMock)
-    const ctx = new Context()
+    const ctx = await modelContext()
     try {
       await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
       await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
-      await ctx.plugin(deepseekPlugin, { baseURL: 'https://api.deepseek.test/anthropic/v1' })
+      await ctx.plugin(deepseekPlugin, {})
 
       await expect(ctx.web.search({ query: 'missing' }))
-        .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CREDENTIAL_MISSING' }))
+        .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
 
       const ref = credentialRef('DEEPSEEK_API_KEY')
       await ctx.credentials.set(ref, 'stored-key')
@@ -515,7 +527,7 @@ describe('web-search-deepseek plugin registration', () => {
     const prev = process.env.DEEPSEEK_API_KEY
     delete process.env.DEEPSEEK_API_KEY
     try {
-      const ctx = new Context()
+      const ctx = await modelContext()
       await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
       await ctx.plugin(deepseekPlugin, {})
       let caught: unknown
@@ -524,9 +536,9 @@ describe('web-search-deepseek plugin registration', () => {
       } catch (error: unknown) {
         caught = error
       }
-      expect(caught).toMatchObject({ code: 'WEB_PROVIDER_CREDENTIAL_MISSING' })
+      expect(caught).toMatchObject({ code: 'WEB_PROVIDER_ERROR' })
       if (!(caught instanceof Error)) throw new Error('search did not throw an Error')
-      expect(caught.message).toMatch(/store it through the credentials service.*Models page/s)
+      expect(caught.message).toMatch(/store DEEPSEEK_API_KEY through the credentials service.*Models page/s)
     } finally {
       if (prev !== undefined) process.env.DEEPSEEK_API_KEY = prev
     }

@@ -70,8 +70,9 @@ export function resolveChildAgentOptions(
   requested: AgentOptions | undefined,
   childDepth: number,
 ): AgentOptions {
-  const parentProvider = parent.options.provider
-  const parentModel = parent.options.model
+  const selected = parent.session.requestHeader()?.config
+  const parentProvider = selected?.provider ?? parent.options.provider
+  const parentModel = selected?.model ?? parent.options.model
   const parentMaxTokens = parent.options.maxTokens
   return {
     ...parentProvider !== undefined ? { provider: parentProvider } : {},

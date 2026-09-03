@@ -8,15 +8,14 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { WebError } from '@deepseek-ai/dsh-llm'
+import type { WebSearchRequest, WebSearchResult } from '@deepseek-ai/dsh-llm'
 import type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
   WebSearchProvider,
-  WebSearchRequest,
-  WebSearchResult,
 } from './types.ts'
-import { WebError } from './types.ts'
 
 export {
   WebError,

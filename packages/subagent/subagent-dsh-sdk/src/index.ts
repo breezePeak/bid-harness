@@ -3,8 +3,8 @@
  * Harness runtime in its own process — own `cordis.yml`-decided composition,
  * session, model route, and tools — driven over stdio JSON-RPC through the
  * TypeScript SDK client, so it shares no Cordis context and advertises no
- * parent-enforced start capabilities; the ONE thing it reads off
- * `request.parent` is the session's workspace cwd. This plugin uses named
+ * parent-enforced start capabilities. It inherits the parent's workspace cwd
+ * and model route unless deployment configuration overrides them. This plugin uses named
  * exports only; a default would hide its loader metadata (see
  * `docs/postmortem/0001-acp-default-export-drops-inject.md`).
  * @module @deepseek-ai/dsh-subagent-dsh-sdk
@@ -42,10 +42,10 @@ export interface Config {
    * fails.
    */
   cwd?: string
-  /** Provider route the child runtime initializes with (default `deepseek-official`). */
-  provider: string
-  /** Model the child runtime initializes with (default `deepseek-v4-flash`). */
-  model: string
+  /** Explicit child Provider override; set together with model, otherwise inherit the parent request. */
+  provider?: string
+  /** Explicit child model override; set together with provider. */
+  model?: string
   /** Optional per-request output-token cap for the child runtime. */
   maxTokens?: number
   /**
@@ -73,8 +73,8 @@ export const Config: z<Config> = z.object({
   command: z.string().required(),
   args: z.array(z.string()).default([]),
   cwd: z.string(),
-  provider: z.string().default('deepseek-official'),
-  model: z.string().default('deepseek-v4-flash'),
+  provider: z.string().min(1),
+  model: z.string().min(1),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   env: z.dict(z.string()).default({}),
   shutdownTimeoutMs: z.number().default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
@@ -82,8 +82,8 @@ export const Config: z<Config> = z.object({
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
 })
 
-/** The shape after schemastery applied the defaults (`cwd` and `maxTokens` have none). */
-type ResolvedConfig = Required<Omit<Config, 'cwd' | 'maxTokens'>> & Pick<Config, 'cwd' | 'maxTokens'>
+/** Validated deployment settings, retaining optional workspace and model overrides. */
+type ResolvedConfig = Required<Omit<Config, 'cwd' | 'maxTokens' | 'provider' | 'model'>> & Pick<Config, 'cwd' | 'maxTokens' | 'provider' | 'model'>
 
 /**
  * The SDK provider. Advertises NO start-time capabilities: an out-of-process
@@ -98,12 +98,16 @@ class SdkSubagentProvider implements SubagentProvider {
   constructor(readonly name: string, private readonly ctx: Context, private readonly config: ResolvedConfig) {}
 
   start(request: SubagentStartRequest) {
+    const selected = request.parent.session.requestHeader()?.config ?? request.parent.options
+    const provider = this.config.provider ?? selected.provider
+    const model = this.config.model ?? selected.model
+    if (provider === undefined || model === undefined) throw new Error('subagent-dsh-sdk requires a resolved parent Provider/model or an explicit pair')
     const spec: SdkRunSpec = {
       command: this.config.command,
       args: this.config.args,
       cwd: resolveChildCwd('subagent-dsh-sdk', this.config.cwd, request.parent.session.header.cwd),
-      provider: this.config.provider,
-      model: this.config.model,
+      provider,
+      model,
       ...this.config.maxTokens === undefined ? {} : { maxTokens: this.config.maxTokens },
       env: this.config.env,
       shutdownTimeoutMs: this.config.shutdownTimeoutMs,
@@ -122,6 +126,9 @@ class SdkSubagentProvider implements SubagentProvider {
 export function apply(ctx: Context, config: Config): void {
   // schemastery (Config) has already filled every defaulted field.
   const resolved = config as ResolvedConfig
+  if ((resolved.provider === undefined) !== (resolved.model === undefined)) {
+    throw new TypeError('subagent-dsh-sdk provider and model must be configured together')
+  }
   assertPositiveFinite('subagent-dsh-sdk', 'shutdownTimeoutMs', resolved.shutdownTimeoutMs)
   assertPositiveFinite('subagent-dsh-sdk', 'disposeEofGraceMs', resolved.disposeEofGraceMs)
   assertPositiveFinite('subagent-dsh-sdk', 'disposeGraceMs', resolved.disposeGraceMs)

@@ -26,7 +26,7 @@ async function bench(served?: string[]) {
   const locale = new LocaleRuntime(ctx)
   locale.setLocale('zh')
   ctx.provide('locale', locale)
-  const describeCredentials = vi.fn(() => Promise.resolve({ rpcId: 'c', result: { ok: false, error: {} } }))
+  const describeProviders = vi.fn(() => Promise.resolve({ rpcId: 'c', result: { ok: false, error: {} } }))
   const describeSettings = vi.fn(() => Promise.resolve(served === undefined
     ? { rpcId: 's', result: { ok: false, error: {} } }
     : {
@@ -50,11 +50,11 @@ async function bench(served?: string[]) {
     isLoopback: true,
     api: {
       settings: { describe: describeSettings },
-      credentials: { describe: describeCredentials },
+      llm: { providers: describeProviders },
     },
   } as never)
   await ctx.plugin({ inject: [...settingsInject], apply: settingsApply }).await()
-  return { ctx, slots: ctx.get('slots') as SlotRegistry, describeCredentials, describeSettings }
+  return { ctx, slots: ctx.get('slots') as SlotRegistry, describeProviders, describeSettings }
 }
 
 function declareRoot(slots: SlotRegistry): () => void {
@@ -171,31 +171,29 @@ describe('ui-settings-plugins apply', () => {
     await vi.waitFor(() => { expect(describeSettings).toHaveBeenCalled() })
   })
 
-  it('re-reads the credential when the Host reports the watched reference changed', async () => {
-    const { ctx, slots, describeCredentials } = await bench()
+  it('re-reads capabilities when the Provider topology changes', async () => {
+    const { ctx, slots, describeProviders } = await bench()
     declareRoot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
-    await vi.waitFor(() => { expect(describeCredentials).toHaveBeenCalled() })
-    describeCredentials.mockClear()
+    await vi.waitFor(() => { expect(describeProviders).toHaveBeenCalled() })
+    describeProviders.mockClear()
 
-    // A key written on another surface changes no settings section, so this
-    // event is the only thing that reaches the card.
-    ctx.remote.$dispatch('credentials/reference-updated', ['DEEPSEEK_API_KEY'])
+    ctx.remote.$dispatch('llm/adapters-updated', [])
 
-    await vi.waitFor(() => { expect(describeCredentials).toHaveBeenCalledTimes(1) })
+    await vi.waitFor(() => { expect(describeProviders).toHaveBeenCalledTimes(1) })
   })
 
-  it('ignores a credential change for a reference no card watches', async () => {
-    const { ctx, slots, describeCredentials } = await bench()
+  it('does not request credentials for the search policy card', async () => {
+    const { ctx, slots, describeProviders } = await bench()
     declareRoot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
-    await vi.waitFor(() => { expect(describeCredentials).toHaveBeenCalled() })
-    describeCredentials.mockClear()
+    await vi.waitFor(() => { expect(describeProviders).toHaveBeenCalled() })
+    describeProviders.mockClear()
 
     ctx.remote.$dispatch('credentials/reference-updated', ['SOME_OTHER_KEY'])
     await Promise.resolve()
 
-    expect(describeCredentials).not.toHaveBeenCalled()
+    expect(describeProviders).not.toHaveBeenCalled()
   })
 
   it('registers into a declaration that arrives after apply', async () => {

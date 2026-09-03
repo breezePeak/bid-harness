@@ -129,6 +129,7 @@ export function pathOps(
 function layoutOf(ns: string): EditorLayout {
   if (ns === 'llm-deepseek') return 'deepseek'
   if (ns === 'llm-pi-ai') return 'pi-ai'
+  if (ns === 'llm-gpt') return 'pi-ai'
   return 'unknown'
 }
 
@@ -356,7 +357,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
       ? t('keyEnvLocked')
       : keyState?.configured === true && props.credentialRequired !== true
         ? t('keyStored')
-        : family === 'pi-ai' ? t('keyPlaceholderNative') : t('keyPlaceholder')
+        : family === 'pi-ai' && namespace.ns !== 'llm-gpt' ? t('keyPlaceholderNative') : t('keyPlaceholder')
     /** What both family editors take: the rows, whose layer owns them, and the two writes. */
     const catalogProps = {
       models,

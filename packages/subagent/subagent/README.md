@@ -6,6 +6,10 @@ The subagent seam lets one agent delegate work to a child through a named provid
 
 The [subagent family overview](../README.md) maps implementations and model-facing consumers. This package owns the provider registry, shared request and result contracts, durable descriptors, and continuable-child orchestration. Multiple named providers may coexist behind that contract.
 
+## 模型继承
+
+同进程一次性与可继续子 Agent 从父级最近的 `request/header.config` 继承 Provider 与模型；父级尚未发起请求时才读取创建选项。显式 `agentOptions` 保留覆盖能力。可继续子级在异步创建前捕获该选择，并把相同值写入描述符供冷恢复使用；全局默认变化不重定向已捕获的子任务。外部 ACP、Codex 和 Claude Code 运行时继续由各自提供方管理。
+
 ## Service API
 
 `SubagentRuntime` has these operations:

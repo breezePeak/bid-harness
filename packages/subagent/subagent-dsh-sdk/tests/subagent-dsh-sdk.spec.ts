@@ -26,8 +26,15 @@ import {
 
 const fakeRuntime = fileURLToPath(new URL('../../../sdk/client/tests/fake-runtime.ts', import.meta.url))
 
-/** A parent Agent stub. The SDK backend reads exactly one thing off it: the session header's cwd (the workspace its child inherits). */
-const fakeParent = { id: 'parent', session: { header: { cwd: process.cwd() } } } as unknown as Agent
+/** Parent metadata and logged route consumed by the out-of-process backend. */
+const fakeParent = {
+  id: 'parent',
+  options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+  session: {
+    header: { cwd: process.cwd() },
+    requestHeader: () => ({ config: { provider: 'gpt', model: 'gpt-5.2' } }),
+  },
+} as unknown as Agent
 
 function request(text = 'p', signal = new AbortController().signal) {
   return { label: text, prompt: [{ type: 'text' as const, text }], parent: fakeParent, signal }
@@ -44,8 +51,6 @@ async function setup(fakeEnv: Record<string, string> = {}, config: Partial<sdk.C
     providerName: 'dsh-sdk',
     command: process.execPath,
     args: [fakeRuntime],
-    provider: 'fake-provider',
-    model: 'fake-model',
     env: fakeEnv,
     ...config,
   })
@@ -105,11 +110,14 @@ describe('dsh-subagent-dsh-sdk provider', () => {
     await ctx.fiber.dispose()
   })
 
-  it('initializes the child with the configured provider/model/maxTokens and the parent cwd', async () => {
+  it.each([true, false])('initializes the child with an explicit route (%s), otherwise inherits the parent request', async (explicit) => {
     const tmp = mkdtempSync(join(tmpdir(), 'subagent-dsh-sdk-init-'))
     const recordFile = join(tmp, 'init.jsonl')
     try {
-      const ctx = await setup({ FAKE_RECORD_INIT: recordFile }, { maxTokens: 4096 })
+      const ctx = await setup({ FAKE_RECORD_INIT: recordFile }, {
+        maxTokens: 4096,
+        ...explicit ? { provider: 'fake-provider', model: 'fake-model' } : {},
+      })
       const run = await ctx.subagents.start('dsh-sdk', request())
       await run.result
       await run.dispose()
@@ -117,8 +125,8 @@ describe('dsh-subagent-dsh-sdk provider', () => {
       const records = readFileSync(recordFile, 'utf8').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
       expect(records).toEqual([{
         cwd: process.cwd(),
-        provider: 'fake-provider',
-        model: 'fake-model',
+        provider: explicit ? 'fake-provider' : 'gpt',
+        model: explicit ? 'fake-model' : 'gpt-5.2',
         maxTokens: 4096,
       }])
       await ctx.fiber.dispose()
@@ -393,6 +401,15 @@ describe('dsh-subagent-dsh-sdk provider', () => {
     await ctx.fiber.dispose()
   })
 
+  it('rejects a Provider override without its model', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SubagentRuntime)
+    await expect(ctx.plugin(sdk, {
+      providerName: 'sdk', command: 'true', args: [], provider: 'gpt', env: {},
+    })).rejects.toThrow('provider and model must be configured together')
+    await ctx.fiber.dispose()
+  })
+
   it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid maxTokens %s at load',
     async (maxTokens) => {
@@ -464,7 +481,7 @@ describe('dsh-subagent-dsh-sdk provider', () => {
 
   it('fails loud when neither config cwd nor parent session cwd exists', async () => {
     const ctx = await setup()
-    const parent = { id: 'parent', session: { header: {} } } as unknown as Agent
+    const parent = { id: 'parent', options: fakeParent.options, session: { header: {}, requestHeader: () => undefined } } as unknown as Agent
     await expect(ctx.subagents.start('dsh-sdk', {
       label: 'p', prompt: [{ type: 'text' as const, text: 'p' }], parent, signal: new AbortController().signal,
     }))

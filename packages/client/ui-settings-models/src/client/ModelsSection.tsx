@@ -18,6 +18,7 @@ import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
+import { DefaultProviderEditor } from './DefaultProviderEditor.tsx'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
 import type { ModelsSettingsStore, ProviderRow } from './store.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
@@ -273,6 +274,7 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
   // step: whether the user already has a provider to talk to.
   const anyUsable = state.rows.some(providerUsable)
   const configured = state.rows.filter(row => row.configured)
+  const defaultNamespace = state.namespaces.get('agent-default-model')
   const addable = state.rows.filter(row => !row.configured && row.entry.settingsNs !== '')
   const addTarget = adding ? editing : undefined
   const addNamespace = addTarget === undefined ? undefined : state.namespaces.get(addTarget.settingsNs)
@@ -285,6 +287,8 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
     <div className={styles['section']}>
       <h2 className={styles['title']}>{t('title')}</h2>
       <p className={styles['intro']}>{t('intro')}</p>
+      {defaultNamespace !== undefined && <DefaultProviderEditor key={defaultNamespace.revision}
+        namespace={defaultNamespace} api={api} writable={state.writable} onSaved={() => { void controller.load() }} />}
       {!state.writable && state.status === 'ready' ? <p className={styles['notice']}>{t('readOnly')}</p> : null}
       {savedIdentity === undefined
         ? null

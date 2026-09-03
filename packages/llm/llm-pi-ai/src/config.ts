@@ -296,7 +296,8 @@ const modelFields = {
   compat: compatProfile,
 }
 
-const modelProfile: z<PiAiModelProfile> = z.object({
+/** Model catalog schema shared by the generic adapter and the GPT Provider. */
+export const modelProfile: z<PiAiModelProfile> = z.object({
   id: z.string().required(),
   ...modelFields,
 })

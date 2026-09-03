@@ -8,7 +8,7 @@
  * @module dsh-llm-deepseek/adapter
  */
 
-import { attributionHeaders, contentHasImage, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError, offloadRequestImagesWithPolicy, ProviderRequestId, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, contentHasImage, CONTEXT_WINDOW_EXCEEDED_CODE, errorChain, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError, offloadRequestImagesWithPolicy, ProviderRequestId, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   GenerateOptions,
@@ -626,13 +626,13 @@ export class DeepSeekAdapter extends LlmAdapter {
         try {
           const parsed = JSON.parse(rawResponse) as WireError
           providerError = parsed.error
-          if (providerError?.message) message = providerError.message
+          if (providerError?.message) message = `DeepSeek Provider request failed: ${providerError.message.replaceAll(apiKey, '[REDACTED]')}`
         } catch {
           // The HTTP status remains authoritative when a gateway returns malformed JSON.
         }
         const detail = [providerError?.code, providerError?.type, providerError?.message]
           .filter((field): field is string => typeof field === 'string')
-          .join(' ')
+          .join(' ').replaceAll(apiKey, '[REDACTED]')
         const staleFile = usedFiles.length > 0 && providerRejectedFileId(detail)
         if (staleFile) {
           await Promise.all(staleMappings(usedFiles, detail).map(file => (
@@ -649,7 +649,7 @@ export class DeepSeekAdapter extends LlmAdapter {
         const delay = providerRetryAfterMs(response.headers.get('retry-after'))
         const id = requestId(response.headers)
         throw new LlmError(message, httpErrorCode(response.status, providerError), {
-          cause: new Error(rawResponse.length > 0 ? rawResponse : `DeepSeek HTTP ${response.status}`),
+          cause: new Error(rawResponse.length > 0 ? rawResponse.replaceAll(apiKey, '[REDACTED]') : `DeepSeek HTTP ${response.status}`),
           status: response.status,
           ...delay === undefined ? {} : { providerRetryAfterMs: delay },
           ...id === undefined ? {} : { requestId: id },
@@ -659,7 +659,22 @@ export class DeepSeekAdapter extends LlmAdapter {
         throw new LlmError('DeepSeek API returned no response body', 'EMPTY_RESPONSE')
       }
 
-      yield* translate(parseSse(response.body, onActivity))
+      try {
+        for await (const chunk of translate(parseSse(response.body, onActivity))) {
+          if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+            yield { ...chunk, reason: { ...chunk.reason, failure: {
+              ...chunk.reason.failure,
+              message: chunk.reason.failure.message.replaceAll(apiKey, '[REDACTED]'),
+              code: chunk.reason.failure.code.replaceAll(apiKey, '[REDACTED]').replaceAll(apiKey.toUpperCase(), '[REDACTED]'),
+            } } }
+          } else yield chunk
+        }
+      } catch (error) {
+        if (signal.aborted) throw error
+        const message = errorChain(error)
+        throw new LlmError(`DeepSeek Provider request failed: ${message.replaceAll(apiKey, '[REDACTED]')}`,
+          error instanceof LlmError ? error.code : 'TRANSPORT')
+      }
       return
     }
   }

@@ -8,6 +8,12 @@ A second, library-backed implementation of the same seam exists in `@deepseek-ai
 
 The package root exposes the Cordis plugin contract and `DeepSeekAdapter`; wire serialization, SSE parsing, and chunk translation helpers are not part of that root contract.
 
+## Hosted search
+
+同一 `deepseek-official` Provider 提供聊天、函数工具与 hosted `web_search`。搜索复用本包的 [Anthropic Messages 传输](src/search.ts)，发送 `web_search_20250305`，沿用引用摘要与结构化来源解析；没有搜索结果块时明确失败。
+
+搜索默认复用 `llm-deepseek.apiKeyEnv` 和当前任务模型。默认地址由聊天 Base URL 去掉末尾 `/v1` 后追加 `/anthropic/v1`；`DEEPSEEK_SEARCH_BASE_URL` 或 Provider 内的 `search.baseURL` 可以覆盖它。`search.apiVersion` 默认 `2023-06-01`，`search.maxTokens` 默认 4096。旧配置的搜索专用模型、引用或 literal key 位于 `llm-deepseek.search`，保留原连接的可用性；`search.apiKey` 按 secret 字段脱敏。迁移和搜索策略见 [web-search-deepseek](../../web/web-search-deepseek/README.md)。
+
 ## Config
 
 ```yaml

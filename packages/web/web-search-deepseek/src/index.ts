@@ -1,138 +1,112 @@
-/**
- * Register a DeepSeek-backed provider in `ctx.web`. It calls the Anthropic-compatible Messages API
- * with native `web_search_20250305`. The provider reuses `DEEPSEEK_API_KEY` but not
- * `DEEPSEEK_BASE_URL`, because search and chat-completions use different bases.
- * @module @deepseek-ai/dsh-web-search-deepseek
- */
+/** Web-search policy over the selected LLM Provider, with migration of legacy DeepSeek settings. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type { HostedSearchRequest } from '@deepseek-ai/dsh-llm'
+import { WebError } from '@deepseek-ai/dsh-web'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import type { SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-web'
-import {
-  DeepSeekSearchProvider,
-  DEEPSEEK_DEFAULT_API_VERSION,
-  DEEPSEEK_DEFAULT_BASE_URL,
-  DEEPSEEK_DEFAULT_MAX_TOKENS,
-  DEEPSEEK_DEFAULT_MAX_USES,
-  DEEPSEEK_DEFAULT_MODEL,
-} from './provider.ts'
-import type { DeepSeekSearchProviderOptions } from './provider.ts'
+import type { DeepSeekSearchLlmRequest } from './provider.ts'
 
-export {
-  DeepSeekSearchProvider,
-  DEEPSEEK_DEFAULT_API_VERSION,
-  DEEPSEEK_DEFAULT_BASE_URL,
-  DEEPSEEK_DEFAULT_MAX_TOKENS,
-  DEEPSEEK_DEFAULT_MAX_USES,
-  DEEPSEEK_DEFAULT_MODEL,
-  DEEPSEEK_PROVIDER_ID,
-} from './provider.ts'
-export type { DeepSeekSearchLlmRequest, DeepSeekSearchProviderOptions } from './provider.ts'
+export * from './provider.ts'
 
-/** Cordis plugin name used by loader diagnostics. */
 export const name = 'web-search-deepseek'
+export const inject = ['web', 'llm', 'agentDefaultModel']
 
-/** The web seam this provider registers into. */
-export const inject = ['web']
+/** The persisted namespace is retained so existing plugin policies keep their address. */
+export const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace('web-search-deepseek')
+const PROVIDER_NS = settingsNamespace('llm-deepseek')
 
-const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'
-
-/** Plugin config (all optional — `apply` fills env-var and constant defaults). */
+/** Search routing and cost policy. Legacy connection fields are migration inputs only. */
 export interface Config {
-  /** Literal DeepSeek API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
-  apiKey?: string
-  /** Credential reference resolved for each search; defaults to `DEEPSEEK_API_KEY`. */
-  apiKeyEnv?: string
-  /** Anthropic-compatible endpoint base; `/messages` is appended. */
-  baseURL?: string
-  /** Anthropic-format model name. Defaults to `deepseek-v4-flash`. */
-  model?: string
-  /** `anthropic-version` header value. Defaults to `2023-06-01`. */
-  apiVersion?: string
-  /** Upper bound on generated tokens for the Messages request. Defaults to 4096. */
-  maxTokens?: number
-  /** Maximum `web_search` server-tool uses per request. Defaults to 5. */
+  /** Omission follows the initiating Agent's provider, or the global default outside an Agent. */
+  provider?: string
+  /** Maximum hosted searches in one auxiliary request. */
   maxUses?: number
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  apiKey?: string
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  apiKeyEnv?: string
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  baseURL?: string
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  model?: string
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  apiVersion?: string
+  /** @deprecated Migrated to the DeepSeek Provider. */
+  maxTokens?: number
 }
 
 export const Config: z<Config> = z.object({
+  provider: z.string(),
+  maxUses: z.number().step(1).min(1).default(5),
   apiKey: z.string().role('secret'),
-  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
-  // Declared here rather than only at the use site: a configuration surface
-  // renders the resolved section, so a default the schema does not carry reads
-  // there as no value at all.
+  apiKeyEnv: z.string().role('credential-ref'),
   baseURL: z.string(),
-  model: z.string().default(DEEPSEEK_DEFAULT_MODEL),
-  apiVersion: z.string().default(DEEPSEEK_DEFAULT_API_VERSION),
-  maxTokens: z.number().step(1).min(1).default(DEEPSEEK_DEFAULT_MAX_TOKENS),
-  maxUses: z.number().step(1).min(1).default(DEEPSEEK_DEFAULT_MAX_USES),
+  model: z.string(),
+  apiVersion: z.string(),
+  maxTokens: z.number().step(1).min(1),
 })
 
-/**
- * Environment variable naming this provider's endpoint. Deliberately distinct
- * from `$DEEPSEEK_BASE_URL`, which belongs to the chat-completions adapter:
- * search speaks the Anthropic-compatible Messages API, so one variable cannot
- * serve both.
- */
-const SEARCH_BASE_URL_ENV = 'DEEPSEEK_SEARCH_BASE_URL'
-
-/** Settings namespace carrying this provider's endpoint, model, and key reference. */
-export const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace('web-search-deepseek')
-
-/**
- * Project one resolved section into the options the provider serves its next
- * search with. Environment fallbacks stay here rather than in the provider:
- * every value it reads is already fully defaulted.
- * @param ctx - plugin context supplying the credential and environment planes.
- * @param config - the currently authoritative section.
- * @returns options for one search.
- */
-function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOptions {
-  const apiKeyEnv = credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
-  const literalApiKey = config.apiKey !== undefined && config.apiKey.length > 0
-    ? config.apiKey
-    : undefined
-  return {
-    ...literalApiKey === undefined ? {} : { apiKey: literalApiKey },
-    resolveApiKey: async () => {
-      const credentials = ctx.get('credentials')
-      if (credentials !== undefined) return (await credentials.resolve(apiKeyEnv))?.value
-      // Without the seam the environment is the whole credential plane.
-      const ambient = launchEnvironmentOf(ctx).get(apiKeyEnv)
-      return ambient !== undefined && ambient.value.length > 0 ? ambient.value : undefined
-    },
-    apiKeyEnv,
-    baseURL: config.baseURL
-      ?? launchEnvironmentOf(ctx).get(SEARCH_BASE_URL_ENV)?.value
-      ?? DEEPSEEK_DEFAULT_BASE_URL,
-    model: config.model ?? DEEPSEEK_DEFAULT_MODEL,
-    apiVersion: config.apiVersion ?? DEEPSEEK_DEFAULT_API_VERSION,
-    maxTokens: config.maxTokens ?? DEEPSEEK_DEFAULT_MAX_TOKENS,
-    maxUses: config.maxUses ?? DEEPSEEK_DEFAULT_MAX_USES,
-    recordRequest: (request) => {
-      ctx.get('agents')?.currentInitiator()?.session.append(
-        'web/deepseek-search-llm-request',
-        request,
-      )
-    },
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** Legacy DeepSeek search request retained for existing logs. */
+    'web/deepseek-search-llm-request': DeepSeekSearchLlmRequest
+    /** Exact secret-free hosted-search request, recorded before dispatch. */
+    'web/provider-search-llm-request': HostedSearchRequest
   }
 }
 
-/** Register the DeepSeek search provider with `ctx.web`. */
-export function apply(ctx: Context, config: Config): void {
-  let current: () => Config = () => config
-  installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, config, {
-    setSource: (source) => {
-      current = source
-    },
-    // The registration carries no resolved value: the provider projects the
-    // section per search, so a committed change needs no re-registration.
+/** Move connection fields before dispatch; a failed write leaves the original values recoverable. */
+async function migrateLegacy(ctx: Context, config: Config): Promise<void> {
+  const fields = ['apiKey', 'apiKeyEnv', 'baseURL', 'model', 'apiVersion', 'maxTokens'] as const
+  const present = fields.filter(field => config[field] !== undefined)
+  if (present.length === 0) return
+  const settings = ctx.get('settings')
+  const target = settings?.get(PROVIDER_NS) as { search?: Record<string, unknown> } | undefined
+  if (settings === undefined || target === undefined || !settings.writable) {
+    throw new WebError('DeepSeek Provider search settings require a writable settings service for migration', 'WEB_PROVIDER_ERROR')
+  }
+  const ops: SettingsPathOp[] = present.filter(field => target.search?.[field] === undefined)
+    .map(field => ({ op: 'set', path: ['search', field], value: config[field] }))
+  if (ops.length > 0) await settings.mutate(PROVIDER_NS, ops)
+  await settings.mutate(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, present.map(field => ({ op: 'unset', path: [field] })))
+}
+
+/**
+ * Register a web-tool adapter preserving the existing discovery/fetch result pipeline.
+ * @param ctx - context exposing web, LLM, and default model services.
+ * @param entry - composition policy and optional legacy migration input.
+ */
+export function apply(ctx: Context, entry: Config): void {
+  let current: () => Config = () => entry
+  installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, entry, {
+    setSource: (source) => { current = source },
     onChange: () => {},
   })
-  ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))
+  ctx.web.registerSearchProvider({
+    // Existing cordis.yml files select this web-service registration by id.
+    id: 'deepseek-official',
+    available: () => true,
+    async search(request, signal) {
+      const policy = current()
+      const agent = ctx.get('agents')?.currentInitiator()
+      const logged = agent?.session.requestHeader()?.config
+      const selected = logged ?? (agent?.options.provider !== undefined && agent.options.model !== undefined
+        ? { provider: agent.options.provider, model: agent.options.model }
+        : ctx.agentDefaultModel.currentSelection())
+      const route = policy.provider ?? selected.provider
+      const model = route === selected.provider ? selected.model : (await ctx.llm.listModels(route))[0]?.id
+      if (model === undefined) throw new WebError(`Provider "${route}" has no configured search model`, 'WEB_PROVIDER_ERROR')
+      await migrateLegacy(ctx, policy)
+      return ctx.llm.webSearch(route, request, {
+        model, maxUses: policy.maxUses ?? 5,
+        ...signal === undefined ? {} : { signal },
+        recordRequest: (value) => { agent?.session.append('web/provider-search-llm-request', value) },
+      })
+    },
+  })
 }

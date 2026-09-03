@@ -352,68 +352,41 @@ describe('AgentLoopCard', () => {
 describe('WebSearchCard', () => {
   function renderWebSearch(state: Partial<WebSearchCardState> = {}) {
     const store = createSnapshotStore<WebSearchCardState>({
-      ...settled,
-      baseURL: field(''),
-      maxUses: field('5'),
-      apiKey: field(''),
-      apiKeyConfigured: false,
-      apiKeyWritable: true,
-      ...state,
+      ...settled, provider: field(''), maxUses: field('5'),
+      providers: [{ id: 'gpt', name: 'GPT' }], providerError: false, ...state,
     })
     const actions = cardActions()
     const props = { ...actions, t, useWebSearchCard: bindSnapshotSelector(store) } as unknown as WebSearchCardProps
     render(<WebSearchCard {...props} />)
+    fireEvent.click(screen.getByText(en.webSearchTitle))
     return actions
   }
 
-  it('reports whether a key is configured without ever showing one', () => {
-    renderWebSearch({ apiKeyConfigured: true })
-    fireEvent.click(screen.getByText(en.webSearchTitle))
-
-    expect(screen.getByText(en.webSearchApiKeySet)).toBeTruthy()
-    expect(screen.getByLabelText(en.webSearchApiKey)).toHaveProperty('type', 'password')
-  })
-
-  it('keeps the key control usable while the settings document is read-only', () => {
-    const actions = renderWebSearch({ writable: false })
-    fireEvent.click(screen.getByText(en.webSearchTitle))
-
-    const key = screen.getByLabelText(en.webSearchApiKey)
-    expect(key).toHaveProperty('disabled', false)
-    expect(screen.getByLabelText(en.webSearchBaseUrl)).toHaveProperty('disabled', true)
-
-    fireEvent.change(key, { target: { value: 'ds-secret' } })
-
-    expect(actions.edit).toHaveBeenCalledWith('apiKey', 'ds-secret')
-  })
-
-  it('disables the key control when the reference itself is not writable', () => {
-    // A key coming from the process environment: the settings document is
-    // writable, the credential is not.
-    renderWebSearch({ apiKeyConfigured: true, apiKeyWritable: false })
-    fireEvent.click(screen.getByText(en.webSearchTitle))
-
-    expect(screen.getByLabelText(en.webSearchApiKey)).toHaveProperty('disabled', true)
-    expect(screen.getByLabelText(en.webSearchBaseUrl)).toHaveProperty('disabled', false)
-  })
-
-  it('stages the endpoint, the search budget, and their resets', () => {
-    const actions = renderWebSearch({
-      baseURL: field('https://search.test/v1', { overridden: true }),
-      maxUses: field('3', { overridden: true }),
-    })
-    fireEvent.click(screen.getByText(en.webSearchTitle))
-
-    fireEvent.change(screen.getByLabelText(en.webSearchBaseUrl), { target: { value: 'https://other.test' } })
+  it('shows policy controls and directs connection configuration to Models', () => {
+    const actions = renderWebSearch()
+    expect(screen.queryByLabelText(en.webSearchApiKey)).toBeNull()
+    expect(screen.queryByLabelText(en.webSearchBaseUrl)).toBeNull()
+    expect(screen.getByRole('option', { name: '跟随默认 Provider' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('搜索 Provider'), { target: { value: 'gpt' } })
     fireEvent.change(screen.getByLabelText(en.webSearchMaxUses), { target: { value: '4' } })
-    const resets = screen.getAllByRole('button', { name: en.reset })
-    expect(resets).toHaveLength(2)
-    for (const reset of resets) fireEvent.click(reset)
+    expect(actions.edit.mock.calls).toEqual([['provider', 'gpt'], ['maxUses', '4']])
+  })
 
-    expect(actions.edit.mock.calls).toEqual([
-      ['baseURL', 'https://other.test'],
-      ['maxUses', '4'],
-    ])
-    expect(actions.resetField.mock.calls).toEqual([['baseURL'], ['maxUses']])
+  it('keeps an unavailable saved Provider visible without substituting another', () => {
+    renderWebSearch({ provider: field('removed') })
+    expect(screen.getByRole('option', { name: 'removed（不可用）' })).toBeTruthy()
+    expect(screen.getByLabelText('搜索 Provider')).toHaveProperty('value', 'removed')
+  })
+
+  it('disables policy editing on a read-only document', () => {
+    renderWebSearch({ writable: false })
+    expect(screen.getByLabelText('搜索 Provider')).toHaveProperty('disabled', true)
+    expect(screen.getByLabelText(en.webSearchMaxUses)).toHaveProperty('disabled', true)
+  })
+
+  it('resets the per-request search budget', () => {
+    const actions = renderWebSearch({ maxUses: field('3', { overridden: true }) })
+    fireEvent.click(screen.getByRole('button', { name: en.reset }))
+    expect(actions.resetField).toHaveBeenCalledWith('maxUses')
   })
 })

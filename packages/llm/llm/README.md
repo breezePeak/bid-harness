@@ -4,6 +4,12 @@ English | [中文](README.zh.md)
 
 Provider-neutral LLM vocabulary and abstract service. This package defines the canonical language spoken by the agent loop, session logs, and every plugin.
 
+## Provider 能力
+
+`ctx.llm` 是模型 Provider 的统一注册与调用入口：`registerAdapter` 注册路由，`resolveModelInfo(provider, model)` 查询指定路由的模型元数据，`stream` 返回统一分块，`generate` 用同一流协议组装消息、结束原因和 usage。`supports(provider, capability)` 查询已安装路由的 `chat`、`tools`、`web_search` 能力；聊天与函数工具属于现有适配器协议，hosted search 由 Provider 通过 `registerWebSearch` 显式贡献，卸载时同步撤销。能力表示已安装实现，不保证某个远端网关或模型允许该操作。
+
+`webSearch(provider, request, options)` 只分发到指定路由，缺少能力时报 `UNSUPPORTED_CAPABILITY`，不会自动改用其他 Provider。搜索返回发现的来源；网页抓取和证据校验仍属于 web 工具及业务层。全局默认选择由 [agent-default-model](../../core/agent-default-model/README.md) 持久化，避免模型注册表依赖 Agent 生命周期。
+
 ## Service: `LlmRuntime` (ctx key: `llm`)
 
 An adapter registry plus a single streaming call API, interceptable via a waterfall event.

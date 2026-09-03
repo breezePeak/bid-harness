@@ -6,6 +6,10 @@ import type { Fiber } from '@deepseek-ai/cordis'
 import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import WebRuntime from '@deepseek-ai/dsh-web'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
+import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
+import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import * as deepseekPlugin from '@deepseek-ai/dsh-web-search-deepseek'
 import { WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-web-search-deepseek'
 
@@ -48,9 +52,12 @@ const ONE_RESULT = {
 async function boot(): Promise<{ ctx: Context; settingsFiber: Fiber; pluginFiber: Fiber }> {
   const ctx = new Context()
   await ctx.plugin(WebRuntime, {})
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(AgentDefaultModel, { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
   const settingsFiber = ctx.plugin(MemorySettings)
   await settingsFiber.await()
-  const pluginFiber = ctx.plugin(deepseekPlugin, { apiKey: 'ds-key', baseURL: 'https://search.entry.test/v1' })
+  await ctx.plugin(DeepSeek, { search: { apiKey: 'ds-key', baseURL: 'https://search.entry.test/v1' } })
+  const pluginFiber = ctx.plugin(deepseekPlugin, {})
   await pluginFiber.await()
   return { ctx, settingsFiber, pluginFiber }
 }
@@ -79,8 +86,8 @@ describe('web-search-deepseek settings section', () => {
     const bench = await boot()
     expect(await searchOnce(bench.ctx)).toContain('https://search.entry.test/v1')
 
-    await bench.ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
-      baseURL: 'https://search.stored.test/v1',
+    await bench.ctx.settings.update(settingsNamespace('llm-deepseek'), {
+      search: { baseURL: 'https://search.stored.test/v1' },
     })
 
     expect(await searchOnce(bench.ctx)).toContain('https://search.stored.test/v1')
@@ -101,8 +108,8 @@ describe('web-search-deepseek settings section', () => {
 
   it('falls back to the composition entry when the settings provider detaches', async () => {
     const bench = await boot()
-    await bench.ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
-      baseURL: 'https://search.stored.test/v1',
+    await bench.ctx.settings.update(settingsNamespace('llm-deepseek'), {
+      search: { baseURL: 'https://search.stored.test/v1' },
     })
     expect(await searchOnce(bench.ctx)).toContain('https://search.stored.test/v1')
 

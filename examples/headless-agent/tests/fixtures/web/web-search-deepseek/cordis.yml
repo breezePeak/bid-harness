@@ -1,0 +1,19 @@
+[
+  { "id": "llm", "name": "@deepseek-ai/dsh-llm" },
+  { "id": "settings", "name": "@deepseek-ai/dsh-settings-file" },
+  { "id": "credentials", "name": "@deepseek-ai/dsh-credentials-local" },
+  { "id": "defaultModel", "name": "@deepseek-ai/dsh-agent-default-model", "config": { "provider": "deepseek-official", "model": "deepseek-v4-flash" } },
+  { "id": "deepseek", "name": "@deepseek-ai/dsh-llm-deepseek" },
+  { "id": "gpt", "name": "@deepseek-ai/dsh-llm-pi-ai/gpt" },
+  { "id": "agents", "name": "@deepseek-ai/dsh-agent" },
+  { "id": "loop", "name": "@deepseek-ai/dsh-agent-loop", "config": { "agents": [] } },
+  { "id": "sessions", "name": "@deepseek-ai/dsh-session" },
+  { "id": "persistence", "name": "@deepseek-ai/dsh-session-persistence-jsonl" },
+  { "id": "prompt", "name": "@deepseek-ai/dsh-system-prompt", "config": { "persona": "使用搜索和读取工具查阅标准。" } },
+  { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
+  { "id": "web", "name": "@deepseek-ai/dsh-web", "config": { "searchProvider": "deepseek-official" } },
+  { "id": "search", "name": "@deepseek-ai/dsh-web-search-deepseek" },
+  { "id": "toolWeb", "name": "@deepseek-ai/dsh-tool-web" },
+  { "id": "subagents", "name": "@deepseek-ai/dsh-subagent" },
+  { "id": "spawn", "name": "@deepseek-ai/dsh-subagent-spawn-in-process" }
+]

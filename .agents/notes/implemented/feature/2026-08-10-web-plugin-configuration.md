@@ -6,6 +6,8 @@ English | [中文](2026-08-10-web-plugin-configuration.zh.md)
 
 > The three sections, the layering, and the staged-save form remain current. The Host allowlist and the unkeyed card list are superseded by the [plugin-owned settings surface](../architecture/2026-08-12-plugin-owned-settings-surface.md): every registered namespace is served, and cards are keyed on the namespace they edit.
 
+搜索连接与凭据由模型 Provider 管理，搜索卡只编辑 Provider 选择与预算；详见 [统一模型 Provider](../architecture/2026-09-03-unified-model-providers.md)。本文的默认工具启用、分层配置与显式保存决策继续适用。
+
 ## Problem
 
 Everything a plugin can be configured with lived in `cordis.yml`. A user who wanted a longer shell timeout, a different search endpoint, or fewer parallel tool calls had to find the composition file, know its shape, and restart — while the Models page had shown for months that a settings namespace can be edited from the browser and take effect immediately.
@@ -22,7 +24,7 @@ Three host-plane plugins register their own settings namespace, and one browser-
 
 **A section is a subset when the plugin config is bigger than what a user owns.** `agent-loop` exposes only `maxParallelToolCalls`; its `agents` array is consumed once when the service starts, so a stored change there could only look like it had an effect.
 
-**The provider projects, rather than captures.** `web-search-deepseek` hands its provider a thunk instead of an options value, so an endpoint or model change reaches the next search without re-registering the provider — which would make the web seam's provider selection observable to the user as a flicker.
+**按操作捕获配置。**搜索策略与 Provider 连接在开始使用时捕获，配置修改不会把旧密钥发送到新地址。
 
 **Exposure stays a Host allowlist.** The three namespaces join `WEB_SETTINGS_NAMESPACES`; registration alone still never crosses the transport, and a namespace absent from that list answers `settings-not-exposed` exactly as an unregistered one does.
 
@@ -43,7 +45,7 @@ Three host-plane plugins register their own settings namespace, and one browser-
 
 ## Consequences
 
-A user edits the shell's command timeout and output cap, the agent loop's parallel tool-call cap, and the search provider's key, endpoint, and per-request budget from the settings page, with each field marking whether they set it and offering a reset.
+用户通过插件页编辑 shell 超时、工具并行度、搜索 Provider 和单次搜索预算；模型页负责所有 Provider 的连接与凭据。
 
 Two costs are real. Adding a fourth plugin still requires an entry in the apiproxy allowlist, so the page's reach is a Host decision rather than a plugin's. And the plugins the web deployment moved into the agent plane — the file tools, the skills, compaction, the todo tool — appear nowhere here, which is most of what a user might expect to find; their configuration remains the preset editor's.
 

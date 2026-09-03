@@ -30,6 +30,8 @@ import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
 import { contentHasImage, projectImagesForTextModel } from './content.ts'
+import { BlockAssembler } from './assembler.ts'
+import type { HostedSearchOptions, HostedWebSearch, LlmCapability, WebSearchRequest, WebSearchResult } from './search.ts'
 
 export * from './attribution.ts'
 export * from './brand.ts'
@@ -37,6 +39,7 @@ export * from './never.ts'
 export * from './error.ts'
 export * from './api-key.ts'
 export * from './types.ts'
+export * from './search.ts'
 export * from './content.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
@@ -310,6 +313,7 @@ export interface DirectoryRegistrationHandle {
  */
 export class LlmRuntime extends Service {
   private adapters = new Map<string, AdapterRegistration>()
+  private searches = new Map<string, HostedWebSearch>()
   private directory = new Map<string, LlmConfigurableProvider>()
   private discoveries = new Map<
     string,
@@ -445,6 +449,47 @@ export class LlmRuntime extends Service {
    */
   listProviders(): LlmProviderInfo[] {
     return [...this.adapters.values()].map(({ provider }) => ({ ...provider }))
+  }
+
+  /**
+   * Attach hosted search to a model provider; unloading removes that capability.
+   * @param provider - registered model route served by this search implementation.
+   * @param search - provider-owned discovery using the provider's connection settings.
+   * @returns disposer for the capability contribution.
+   */
+  registerWebSearch(provider: string, search: HostedWebSearch): () => void {
+    if (this.searches.has(provider)) throw new LlmError(`duplicate web_search capability for provider "${provider}"`, 'DUPLICATE_ADAPTER')
+    const dispose = this.ctx.effect(() => {
+      this.searches.set(provider, search)
+      this.emitAdaptersUpdated()
+      return () => { this.searches.delete(provider); this.emitAdaptersUpdated() }
+    }, 'llm.registerWebSearch()')
+    return () => { void dispose() }
+  }
+
+  /**
+   * Query an installed provider capability without reading its credentials.
+   * @param provider - model provider route.
+   * @param capability - operation required by a consumer.
+   * @returns whether that route and operation are registered.
+   */
+  supports(provider: string, capability: LlmCapability): boolean {
+    return this.adapters.has(provider) && (capability !== 'web_search' || this.searches.has(provider))
+  }
+
+  /**
+   * Discover URLs through one explicitly selected model provider, without fallback.
+   * @param provider - route captured for this operation.
+   * @param request - query and optional source limit.
+   * @param options - captured model, cancellation, and request recorder.
+   * @returns normalized discovery results; fetched evidence remains the web service's responsibility.
+   */
+  webSearch(provider: string, request: WebSearchRequest, options: HostedSearchOptions): Promise<WebSearchResult> {
+    const search = this.searches.get(provider)
+    if (!this.adapters.has(provider) || search === undefined) {
+      return Promise.reject(new LlmError(`Provider "${provider}" does not support web_search`, 'UNSUPPORTED_CAPABILITY'))
+    }
+    return search(request, options)
   }
 
   /**
@@ -984,6 +1029,22 @@ export class LlmRuntime extends Service {
    */
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     return this.streamWithRegistration(options)
+  }
+
+  /**
+   * Assemble a non-streaming result using the same provider, tools, usage, and failure protocol.
+   * @param options - full provider-neutral request.
+   * @returns assistant message, finish outcome, and optional token usage.
+   */
+  async generate(options: GenerateOptions): Promise<import('./types.ts').GenerateResult> {
+    const assembler = new BlockAssembler()
+    for await (const chunk of this.stream(options)) assembler.push(chunk)
+    return {
+      message: assembler.message({ kind: 'model', provider: options.provider, model: options.model,
+        ...assembler.replayState === undefined ? {} : { replayState: assembler.replayState } }),
+      finish: assembler.finish,
+      ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+    }
   }
 
   private streamWithRegistration(

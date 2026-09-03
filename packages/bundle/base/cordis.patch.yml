@@ -95,6 +95,9 @@
     - id: llm-pi-ai
       name: '@deepseek-ai/dsh-llm-pi-ai'
 
+    - id: llm-gpt
+      name: '@deepseek-ai/dsh-llm-pi-ai/gpt'
+
     - id: session-persistence-jsonl
       name: '@deepseek-ai/dsh-session-persistence-jsonl'
       config:
@@ -394,8 +397,8 @@
         argumentsPreviewChars: 500
 
     # Web providers stay on the Host plane while model-facing tools are mounted
-    # globally or by an Agent preset. DeepSeek search resolves the same
-    # DEEPSEEK_API_KEY credential the Models page manages for chat. Search is a
+    # globally or by an Agent preset. Hosted search follows the task's model
+    # Provider unless the search policy selects another capable route. Search is a
     # full auxiliary model request with server-side retrieval, so this shipped
     # route gets 60s while the provider-neutral tool default remains 30s. The
     # anonymous HTTP fetch provider retains its own transport and size defaults;
@@ -408,8 +411,6 @@
 
     - id: web-search-deepseek
       name: '@deepseek-ai/dsh-web-search-deepseek'
-      config:
-        apiKeyEnv: DEEPSEEK_API_KEY
 
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'

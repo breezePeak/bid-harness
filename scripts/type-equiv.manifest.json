@@ -1363,17 +1363,17 @@
     {
       "doc": "docs/subsystems/web.md",
       "symbol": "WebSearchRequest",
-      "source": "packages/web/web/src/types.ts"
+      "source": "packages/llm/llm/src/search.ts"
     },
     {
       "doc": "docs/subsystems/web.md",
       "symbol": "WebSearchResult",
-      "source": "packages/web/web/src/types.ts"
+      "source": "packages/llm/llm/src/search.ts"
     },
     {
       "doc": "docs/subsystems/web.md",
       "symbol": "WebSearchSource",
-      "source": "packages/web/web/src/types.ts"
+      "source": "packages/llm/llm/src/search.ts"
     },
     {
       "doc": "docs/subsystems/web.md",

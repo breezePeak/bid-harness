@@ -6,6 +6,22 @@ Generic multi-provider adapter for the harness LLM seam backed by [`@earendil-wo
 
 The package root exposes the Cordis plugin contract, `PiAiAdapter`, and `supportedProtocols()`; profile resolution, catalog materialization, provider construction, replay conversion, and stream conversion remain package-internal.
 
+## GPTProvider
+
+子入口 `@deepseek-ai/dsh-llm-pi-ai/gpt` 注册固定 `gpt` 路由，配置 namespace 为 `llm-gpt`。主调用复用 `PiAiAdapter` 的消息转换、函数工具、SSE、usage、reasoning/replay 和取消处理，固定使用 `openai-responses`。
+
+| 配置 | 默认 | 含义 |
+|---|---|---|
+| `baseURL` | `https://api.openai.com/v1` | 官方或 CPA 等 Responses 兼容服务；HTTP(S) 根地址自动补 `/v1`，保留部署路径，禁止 URL 内嵌凭据。 |
+| `apiKeyEnv` | `OPENAI_API_KEY` | 现有 credentials 服务的引用；模型页写入密钥，字段留空保留原值。 |
+| `models` | `[{id: gpt-5.2}]` | 复用 pi-ai 模型目录字段，可编辑 ID、名称和容量，配置层可声明 reasoningEfforts、input；模型必须为所用端点实际支持的型号。 |
+| `timeoutMs` / `streamIdleTimeoutMs` | 300000 | 请求与空闲超时，单位毫秒。 |
+| `retryPolicy` | 现有 normal 策略 | 同一路由的重试，不切换 Provider。 |
+
+聊天和辅助搜索都发送到 `{baseURL}/responses`。搜索携带 `tools: [{type: 'web_search'}]`、`tool_choice: 'required'`、`include: ['web_search_call.action.sources']`；只接受完成的搜索调用中的结构化 URL 及 URL annotations，不采用生成答案作为证据。返回 404/405/501 的 Responses 端点明确报 `UNSUPPORTED_RESPONSES_API`；没有搜索调用或未完成的结果报 `WEB_PROVIDER_ERROR`，不静默降级。
+
+模型目录可以通过现有 `llm.discoverModels` 从 `{baseURL}/models` 读取；端点未提供列表时可手工填写。远端是否支持 hosted search 由该端点决定，注册能力本身不触发付费探测。
+
 ## Config
 
 Configure credentials, the model catalog, and deployment-specific transport settings per provider, keyed by the provider route itself. Each profile may set a `retryPolicy`; omission uses normal mode with five retries. `apiKeyEnv` is a credential *reference* resolved per request, so no secret enters this file. Omitting it leaves the route unauthenticated, which for an installed catalog route means pi-ai's provider-native ambient discovery; a configured reference that resolves to nothing fails the request with `MISSING_CREDENTIAL` instead, because falling through would authenticate with whatever unrelated key the environment happens to hold. One credential serves every model on its route.

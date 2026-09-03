@@ -4,6 +4,10 @@ English | [中文](README.zh.md)
 
 The API gateway shared by every client consists of the TypeScript API contract (`src/api/`, zero Node dependencies, importable from the browser), the fetch carrier pair (`src/fetch/`: `toFetchHandler` on the host side, `AbstractApiClient` plus platform subclasses on the client side), and the host-side implementation (`src/api-proxy.ts`: `createApiProxy` plus the default-exported `ApiProxyService` gateway plugin — config `{nativeOpen?, sessionExportCompressionLevel?, coldBlankProbeMaxBytes?}`, provides `ctx.apiProxy`). This package registers no routes; carriers such as HTTP wrap `ctx.apiProxy` themselves. The shipped Web composition lives in [`packages/bundle/web-app/cordis.patch.yml`](../../bundle/web-app/cordis.patch.yml), while its default Agent model selection belongs to [`@deepseek-ai/dsh-agent-default-model`](../../core/agent-default-model/README.md) in the base bundle.
 
+## Provider 能力目录
+
+`llm.providers` 的每行包含 `capabilities`，由 LLM 注册表查询已安装的聊天、函数工具和 hosted-search 实现得到。模型页与搜索策略页共享此目录；响应不包含凭据内容，默认选择仍由下述 `agent-default-model` 管理。
+
 ## The shared Agent default (`agent-default-model` Settings section)
 
 `ApiProxyService` consumes `ctx.agentDefaultModel`; it does not own a provider/model config or settings section. The shared service registers `{provider, model, reasoningEffort?}` under `agent-default-model`: the base bundle's composition entry is the lower layer and `settings.yaml` layers the user's choice over it.
