@@ -24,6 +24,19 @@ describe('GPT Provider protocol', () => {
   })
 
   it.each([
+    { type: 'web_search_call', action: { sources: [{ url: 'https://source.test', title: '来源' }] } },
+    { type: 'web_search_call', results: [{ url: 'https://source.test', title: '来源' }] },
+    { type: 'message', content: [{ annotations: [{ type: 'url_citation', url: 'https://source.test', title: '来源' }] }] },
+    { type: 'message', content: [{ annotations: [{ type: 'web_search_result_location', url: 'https://source.test', title: '来源' }] }] },
+  ])('GPT / CPA 四种结构化来源均进入 sources：%j', (item) => {
+    expect(mapResponsesSearch({ status: 'completed', output: [item] })).toEqual({ sources: [{ url: 'https://source.test', title: '来源' }], truncated: false })
+  })
+
+  it('普通回答中的 URL 不成为正式来源', () => {
+    expect(mapResponsesSearch({ output: [{ type: 'web_search_call', action: { sources: [] } }, { type: 'message', content: [{ text: 'https://invented.test' }] }] }).sources).toEqual([])
+  })
+
+  it.each([
     null, { output: {} }, { output: [{ type: 'message', content: [{ text: 'https://invented.test' }] }] },
     { output: [{ type: 'web_search_call', status: 'failed' }] },
     { status: 'incomplete', output: [{ type: 'web_search_call', status: 'completed' }] },

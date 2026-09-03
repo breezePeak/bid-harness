@@ -87,7 +87,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
-  it('shows the current S3 Mapping Task counts while the Host runs evidence mapping', async () => {
+  it('shows the current S4 Mapping Task counts while the Host runs evidence mapping', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 10,
       initial: 8,

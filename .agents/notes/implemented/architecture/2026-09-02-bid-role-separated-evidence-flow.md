@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+本记录的逐叶任务、Section 指纹、补映射和事件级来源证明决策已由[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)取代；下文相关内容保留原决策背景，不作为当前行为依据。Corpus 路径授权、同会话修复、文件角色与阶段职责中未被取代的约束仍有效。
+
 固定流程改为六阶段：S1 文件接入、S2 招标分析、S3 目录生成、S4 证据映射、S5 章节写作、S6 DOCX 导出。目录确认分别内置在 S3 初稿和 S4 最终目录；每章 Reviewer 内置在 S5，不再存在 `outline_confirmation` 与 `book_review` 阶段。
 
 S2 只保存 Project、Requirements、完整 Scoring 原文和 Compliance，不包含响应点。S3 由 Agent 按评分语义生成候选响应点，再以独立语义复核检查完整场景；Host 按评分 Artifact 哈希和单调序列分配稳定 `RP-*` ID。Agent 按主框架、补充框架和无关框架适配人工目录，并在 Section 上保存精确标题路径引用；同一响应点可以覆盖多个可写 Section。S3 校验通过后保存 `outline/initial-confirmed-outline.json`，用户可在同阶段编辑、重新生成或确认。

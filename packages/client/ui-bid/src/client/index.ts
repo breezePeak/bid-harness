@@ -60,7 +60,7 @@ export interface BidStagePanelInjected {
   confirmOutline?: (request: { expected_revision: number; expected_draft_sha256: string }) => Promise<void>
   /** Host outline-regeneration action, installed when the Bid action API is composed. */
   regenerateOutline?: (request: { feedback: string; expected_revision: number; expected_draft_sha256: string }) => Promise<void>
-  /** Host S3 progress and tender-analysis review actions, installed when the Bid action API is composed. */
+  /** Host S4 progress and tender-analysis review actions, installed when the Bid action API is composed. */
   getEvidenceMappingProgress?: () => Promise<BidEvidenceMappingProgress | null>
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>

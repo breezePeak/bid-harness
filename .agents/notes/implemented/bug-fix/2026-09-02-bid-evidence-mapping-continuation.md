@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+本记录的逐叶任务、Section 指纹、补映射和事件级来源证明决策已由[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)取代；下文相关内容保留原决策背景，不作为当前行为依据。Corpus 路径授权、同会话修复、文件角色与阶段职责中未被取代的约束仍有效。
+
 Evidence Mapping Executor 为每个 Mapping Task 建立一个 fresh-context、可继续的 Child，并在同一 Child 的后续轮次投递 Host 的具体校验问题。Child 的最终回复是原始 JSON；Host 在每轮 idle 后从该轮 assistant 消息读取 JSON，并继续执行严格 partial Schema、覆盖、Corpus 和网页证据校验。执行日志的所有 attempts 因而共享同一 `child_session_id`。
 
 Web 来源以当前任务的 Child Session 为范围。Host 在一次阶段执行内按 Session ID 和 callId 累计真实工具返回，每轮与该 Child 的完整持久化事件配对并重新计算快照。Session ID 允许关联恢复前后的 Agent 实例；持久化事件用于证明调用与返回顺序，不能从展示文本伪造缺失的 canonical result。有效来源必须满足 URL 来自 search sources、fetch 成功且正文非空，以及 `search_result_seq < fetch_call_seq < fetch_result_seq`。

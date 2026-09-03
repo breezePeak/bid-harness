@@ -37,7 +37,7 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，在 per-Session 锁内准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。Host 还会在 `agent/session-start` 调用同一 `drive()`，因此 Session 创建与恢复都从日志归约出的真实状态继续。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑。
 
-六阶段固定为 S1 文件接入、S2 招标分析、S3 目录生成、S4 证据映射、S5 章节写作、S6 DOCX 导出。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断整本输出。
+六阶段固定为 S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射、S5 正文编写、S6 导出标书。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断整本输出。
 
 S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目技术重点；`scoring.json` 只保存评分原文、分值与简单规范化字段，不含评分响应点。纯商务、资格和报价评分不得进入 `scoring.json`。Validator 检查覆盖、严格 schema、来源文件、分块和引用行后，S2 停在 `tender_analysis/waiting_user`。
 
@@ -50,7 +50,7 @@ S2 首次提取后立即执行 Validator；通过时进入 `tender_analysis/wait
 
 S3 先按评分语义产生候选响应点，再由独立语义复核回看评分场景是否完整；Host 用评分 Artifact 哈希和单调序列建立稳定目录。Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录，按主框架、补充框架和无关框架明确适配，并在 Section 上保存精确 `framework_refs`。目录质量复核负责语义粒度；Host 只校验确定性的 Schema、树、ID、覆盖和框架引用，不要求响应点全局唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
 
-S4 的 Host 按可写叶子生成一章一个任务，Child 只接收本章语义、关联 S2 记录和已预检的 Corpus 绝对路径。Main Agent 根据首轮证据只深化一次目录；Host 按同一 SHA-256 指纹规则识别新增或语义变化的章节并补映射。Evidence Map schema v9 保存最终可写 Section 的材料、缺口、写作维度和 Host 生成的 `section_fingerprint`。用户最终编辑也必须完成补映射与 Validator 校验后才能发布确认文件进入 S5。祖先标题参与后代指纹，兄弟排序不参与。普通 reference 只允许 reference/background，reference_bid 还允许 reuse/adapt；Web 来源继续验证同 Child 的 search→fetch、Snapshot 与正文哈希。详细规则见[章节证据新鲜度记录](../../../.agents/notes/implemented/architecture/2026-09-03-bid-section-evidence-freshness.md)。
+S4 按目录业务分支分批映射，Evidence 以 Section ID 保存；目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
 
 S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。主 Agent 只写章节关系计划；Host 按强依赖 DAG 调度 Writer，并按每个 Section 的 `framework_refs` 注入精确框架正文分块。框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。企业事实缺少本地依据时保留 `unresolved_topics`，不得由框架或 Web 资料替代。
 

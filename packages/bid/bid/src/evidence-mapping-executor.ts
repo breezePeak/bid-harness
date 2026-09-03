@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -6,18 +5,21 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { finalAssistantOutput } from '@deepseek-ai/dsh-subagent'
-import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import { BidStageExecutionError, type BidEvidenceMappingProgress, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
+import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 import { evidenceChunkId } from './document-chunk.ts'
 import { mappingCorpusToolGuard, resolveMappingCorpusLocations, type MappingCorpusLocation } from './evidence-mapping-corpus.ts'
-import { buildWritableSectionWorklist, sectionEvidenceContext, sectionEvidenceFingerprint } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, sectionEvidenceContext, reconcileSectionEvidence } from './section-evidence-context.ts'
 import {
   EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
   EVIDENCE_MAPPING_SCHEMA_VERSION,
   parseEvidenceMapArtifact,
   parseEvidenceMappingPartialResult,
+  localEvidenceMaterialSchema,
+  transientWebEvidenceMaterialSchema,
   type EvidenceMappingPartialResult,
   type EvidenceMapArtifact,
   type EvidenceMappingPlan,
@@ -49,9 +51,6 @@ import {
   WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   normalizeWebEvidenceUrl,
   parseWebEvidenceSourcesArtifact,
-  webEvidenceContentSha256,
-  webEvidenceSourceId,
-  type WebEvidenceSource,
   type WebEvidenceSourcesArtifact,
 } from './web-evidence-source-artifacts.ts'
 
@@ -71,41 +70,38 @@ const MAIN_AGENT_TOOLS = ['read', 'write'] as const
 const MAPPING_AGENT_TOOLS = ['grep', 'read', 'web_search', 'web_fetch'] as const
 
 /**
- * 从当前可写叶子确定任务拓扑；补充阶段只选择无有效指纹的章节。
- * @param outline - 当前目录。
- * @param phase - 初始或补充映射。
- * @param evidence - 可复用的既有证据。
- * @returns Host 私有任务计划。
+ * 按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属叶子合为一批。
+ * @param outline - 初步确认目录。
+ * @returns 按目录顺序生成的执行批次，每个可写 Section 恰好属于一个 Task。
  */
-export function buildEvidenceMappingPlan(outline: OutlineArtifact, phase: EvidenceMappingTask['phase'], evidence?: EvidenceMapArtifact): EvidenceMappingPlan {
+export function buildEvidenceMappingPlan(outline: OutlineArtifact): EvidenceMappingPlan {
   const sections = buildWritableSectionWorklist(outline)
-  const tasks = sections.map((section) => {
-    const fingerprint = sectionEvidenceFingerprint(outline, section)
-    return {
-      task_id: phase === 'initial' ? `MAP-INIT-${section.id}` : `MAP-SUP-${section.id}-${fingerprint.slice(0, 12)}`,
-      phase, section_id: section.id, section_fingerprint: fingerprint,
-      title: section.title, heading_path: sectionEvidenceContext(outline, section).heading_path,
+  const byId = new Map(outline.sections.map(section => [section.id, section]))
+  const roots = outline.sections.filter(section => section.parent_id === null)
+  const root = roots.length === 1 ? roots[0] : undefined
+  const container = root !== undefined && !root.writable ? root.id : undefined
+  const groups = new Map<string, EvidenceMappingTask>()
+  for (const section of sections) {
+    let branch = section
+    while (branch.parent_id !== null && branch.parent_id !== container) {
+      const parent = byId.get(branch.parent_id)
+      if (parent === undefined) throw new Error(`evidence-mapping-section-missing:${branch.parent_id}`)
+      branch = parent
     }
-  }).filter((task) => {
-    const previous = evidence?.section_mappings.filter(mapping => mapping.section_id === task.section_id)
-    return previous?.length !== 1 || previous[0]?.section_fingerprint !== task.section_fingerprint
-  })
-  return {
-    schema_version: EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
-    outline_fingerprint: createHash('sha256').update(JSON.stringify(sections.map(section => [section.id, sectionEvidenceFingerprint(outline, section)]))).digest('hex'),
-    tasks,
+    if (container !== undefined && branch.writable && branch.parent_id === container) {
+      const parent = byId.get(container)
+      if (parent === undefined) throw new Error(`evidence-mapping-section-missing:${container}`)
+      branch = parent
+    }
+    let task = groups.get(branch.id)
+    if (task === undefined) {
+      task = { task_id: `MAP-INIT-${branch.id}`, phase: 'initial', section_ids: [], title: branch.title,
+        heading_path: sectionEvidenceContext(outline, branch).heading_path }
+      groups.set(branch.id, task)
+    }
+    task.section_ids.push(section.id)
   }
-}
-
-async function loadRetainedWebSnapshots(workspace: BidWorkspace): Promise<EvidenceMappingWebSnapshot[]> {
-  const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
-  return Promise.all(ledger.sources.map(async (source) => {
-    const path = join(workspace.sessionRoot, source.snapshot_path)
-    await assertNoLinkedPath(workspace.root, path)
-    const content = await readFile(path, 'utf8')
-    if (webEvidenceContentSha256(content) !== source.content_sha256) throw new Error('evidence-mapping-retained-snapshot-hash-mismatch')
-    return { source, content }
-  }))
+  return { schema_version: EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION, tasks: [...groups.values()] }
 }
 
 /** Default Host limit for simultaneous S4 Mapping Subagents. */
@@ -115,121 +111,6 @@ export const DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY = 3
 export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOptions {
   /** Maximum Mapping Subagents that may run simultaneously. */
   maxConcurrency?: number
-  /** 最终确认仅映射缺失或过期章节，不再深化目录。 */
-  confirmationOutline?: OutlineArtifact
-}
-
-/** 同一 Child Session 的 Web 工具结果及其持久化调用、返回事件位置。 */
-export interface EvidenceMappingWebObservation {
-  readonly callId: string
-  readonly name: 'web_search' | 'web_fetch'
-  readonly arguments: unknown
-  readonly result: Readonly<ToolExecutionResult>
-  readonly callSeq: number
-  readonly resultSeq: number
-  readonly resultTime: number
-}
-
-/** One verified ledger record plus the exact bounded text returned to the Agent. */
-export interface EvidenceMappingWebSnapshot {
-  readonly source: WebEvidenceSource
-  readonly content: string
-}
-
-/** Canonical in-process Web outcome captured before durable correlation. */
-export interface EvidenceMappingCapturedWebResult {
-  readonly exec: Readonly<ToolExecution>
-  readonly result: Readonly<ToolExecutionResult>
-}
-
-function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || item.trim().length === 0)) return undefined
-  return value.map(item => (item as string).trim())
-}
-
-function searchSources(value: unknown): Array<{ url: string }> | undefined {
-  const output = record(value)
-  if (!Array.isArray(output?.sources)) return undefined
-  const sources: Array<{ url: string }> = []
-  for (const candidate of output.sources) {
-    const source = record(candidate)
-    if (typeof source?.url !== 'string' || normalizeWebEvidenceUrl(source.url) === undefined) continue
-    sources.push({ url: source.url })
-  }
-  return sources
-}
-
-function fetchValue(value: unknown): { url: string; statusCode: number; truncated: boolean; bodyContent: string } | undefined {
-  const output = record(value)
-  const body = record(output?.body)
-  if (typeof output?.url !== 'string' || normalizeWebEvidenceUrl(output.url) === undefined
-    || typeof output.statusCode !== 'number' || !Number.isInteger(output.statusCode)
-    || typeof output.truncated !== 'boolean' || typeof body?.content !== 'string') return undefined
-  return { url: output.url, statusCode: output.statusCode, truncated: output.truncated, bodyContent: body.content }
-}
-
-function modelVisibleFetchText(result: Readonly<ToolExecutionResult>): string | undefined {
-  if (result.isError || result.content.length !== 1) return undefined
-  const block = result.content[0]
-  return block?.type === 'text' && block.text.trim().length > 0 ? block.text : undefined
-}
-
-/**
- * 将同一 Child Session 的真实 Web 工具结果关联为来源快照，允许 search 和 fetch 分属不同修复轮次。
- * @param observations - 当前 Child Session 的工具结果及其持久化事件位置，不能混入其他 Child 的记录。
- * @returns 按顺序完成 search、fetch 且包含非空模型可见正文的来源快照。
- */
-export function buildEvidenceMappingWebSnapshots(
-  observations: readonly EvidenceMappingWebObservation[],
-): EvidenceMappingWebSnapshot[] {
-  const searches = observations.flatMap((observation) => {
-    if (observation.name !== 'web_search' || observation.result.isError) return []
-    const args = record(observation.arguments)
-    const queries = stringArray(args?.queries)
-    const sources = searchSources(observation.result.value)
-    return queries === undefined || sources === undefined ? [] : [{ observation, queries, sources }]
-  })
-  const snapshots: EvidenceMappingWebSnapshot[] = []
-  for (const observation of observations) {
-    if (observation.name !== 'web_fetch' || observation.result.isError) continue
-    const args = record(observation.arguments)
-    const requestedUrl = typeof args?.url === 'string' ? args.url : undefined
-    const requestedNormalized = requestedUrl === undefined ? undefined : normalizeWebEvidenceUrl(requestedUrl)
-    const fetched = fetchValue(observation.result.value)
-    const content = modelVisibleFetchText(observation.result)
-    if (requestedUrl === undefined || requestedNormalized === undefined || fetched === undefined || content === undefined
-      || fetched.statusCode < 200 || fetched.statusCode >= 300 || fetched.bodyContent.trim().length === 0) continue
-    const search = searches.find(candidate => candidate.observation.resultSeq < observation.callSeq
-      && candidate.sources.some(source => normalizeWebEvidenceUrl(source.url) === requestedNormalized))
-    if (search === undefined) continue
-    const discovered = search.sources.find(source => normalizeWebEvidenceUrl(source.url) === requestedNormalized)
-    if (discovered === undefined) continue
-    const contentSha256 = webEvidenceContentSha256(content)
-    const sourceId = webEvidenceSourceId(observation.callId, fetched.url, contentSha256)
-    const meta = record(observation.result.meta)
-    const effectiveTruncated = typeof meta?.truncated === 'boolean' ? meta.truncated : fetched.truncated
-    snapshots.push({
-      content,
-      source: {
-        source_id: sourceId,
-        search_call_id: search.observation.callId,
-        fetch_call_id: observation.callId,
-        search_result_seq: search.observation.resultSeq,
-        fetch_call_seq: observation.callSeq,
-        fetch_result_seq: observation.resultSeq,
-        queries: search.queries,
-        discovered_url: discovered.url,
-        requested_url: requestedUrl,
-        final_url: fetched.url,
-        status_code: fetched.statusCode,
-        truncated: effectiveTruncated,
-        fetched_at: new Date(observation.resultTime).toISOString(),
-        content_sha256: contentSha256,
-        snapshot_path: `analysis/web-sources/${sourceId}.md`,
-      },
-    })
-  }
-  return snapshots
 }
 
 async function removeAttemptPath(path: string): Promise<void> {
@@ -242,57 +123,9 @@ async function removeAttemptPath(path: string): Promise<void> {
   }
 }
 
-/**
- * 按 Session ID 将捕获的 Web 结果与持久化事件配对，支持同会话恢复后的 Agent 实例。
- * @param agent - 持有目标 Session 事件的 Agent。
- * @param boundarySeq - 采集范围之前的最后事件序号；传入 -1 采集整个 Child Session。
- * @param captured - 该 Session 在采集范围内的真实 Web 工具结果，以 callId 索引。
- * @returns 按调用序号排序、已配对调用与返回事件的观察记录。
- */
-export function collectEvidenceMappingWebObservations(
-  agent: Agent,
-  boundarySeq: number,
-  captured: ReadonlyMap<string, EvidenceMappingCapturedWebResult>,
-): EvidenceMappingWebObservation[] {
-  const events = agent.session.events.filter(event => event.seq > boundarySeq)
-  const calls = new Map(events.flatMap(event => event.type === 'tool/call' && REQUIRED_WEB_TOOLS.includes(event.data.name as typeof REQUIRED_WEB_TOOLS[number])
-    ? [[String(event.data.callId), event] as const]
-    : []))
-  const results = new Map(events.flatMap(event => event.type === 'tool/result'
-    ? [[String(event.data.message.source.callId), event] as const]
-    : []))
-  const observations: EvidenceMappingWebObservation[] = []
-  for (const [callId, call] of calls) {
-    const resultEvent = results.get(callId)
-    if (resultEvent === undefined) throw new Error(`Bid evidence mapping cannot correlate Web tool result ${callId}`)
-    const capturedResult = captured.get(callId)
-    const durableBlock = resultEvent.data.message.content[0]
-    if (capturedResult === undefined) {
-      if (!durableBlock.isError) throw new Error(`Bid evidence mapping lost canonical Web tool result ${callId}`)
-      continue
-    }
-    if (capturedResult.exec.agent?.session.id !== agent.session.id || capturedResult.exec.name !== call.data.name) {
-      throw new Error(`Bid evidence mapping Web tool identity mismatch ${callId}`)
-    }
-    observations.push({
-      callId,
-      name: call.data.name as 'web_search' | 'web_fetch',
-      arguments: capturedResult.exec.arguments,
-      result: capturedResult.result,
-      callSeq: call.seq,
-      resultSeq: resultEvent.seq,
-      resultTime: resultEvent.time,
-    })
-  }
-  for (const callId of captured.keys()) if (!calls.has(callId)) {
-    throw new Error(`Bid evidence mapping observed unlogged Web tool result ${callId}`)
-  }
-  return observations.sort((left, right) => left.callSeq - right.callSeq)
-}
-
 async function writeWebEvidenceArtifacts(
   workspace: BidWorkspace,
-  snapshots: readonly EvidenceMappingWebSnapshot[],
+  snapshots: readonly WebEvidenceSnapshot[],
 ): Promise<void> {
   for (const snapshot of snapshots) {
     const absolute = join(workspace.sessionRoot, ...snapshot.source.snapshot_path.split('/'))
@@ -349,7 +182,7 @@ const evidenceMappingExecutionLogSchema = z.object({
   observed_max_concurrency: z.number().int().nonnegative(),
   tasks: z.array(z.object({
     task_id: z.string().min(1),
-    phase: z.enum(['initial', 'supplemental']),
+    phase: z.literal('initial'),
     title: z.string().min(1),
     status: z.enum(['pending', 'running', 'completed', 'failed']),
     attempts: z.array(z.object({
@@ -366,7 +199,7 @@ const evidenceMappingExecutionLogSchema = z.object({
 interface CompletedMappingTask {
   task: EvidenceMappingTask
   result: EvidenceMappingPartialResult
-  snapshots: EvidenceMappingWebSnapshot[]
+  snapshots: WebEvidenceSnapshot[]
 }
 
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
@@ -415,7 +248,7 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
         break
     }
   }
-  return { total: log.tasks.length, initial: log.tasks.filter(task => task.phase === 'initial').length, supplemental: log.tasks.filter(task => task.phase === 'supplemental').length, completed, running, not_started: notStarted, failed }
+  return { total: log.tasks.length, initial: log.tasks.length, supplemental: 0, completed, running, not_started: notStarted, failed }
 }
 
 function subagentTaskContext(value: unknown): unknown {
@@ -439,21 +272,23 @@ export function renderEvidenceMappingSubagentTask(
   inputs: EvidenceMappingInputs,
   locations: readonly MappingCorpusLocation[],
 ): string {
-  const section = inputs.outline.sections.find(item => item.id === task.section_id)
-  if (section === undefined) throw new Error('evidence-mapping-section-missing:' + task.section_id)
-  const sections = [section]
+  const sections = task.section_ids.map((id) => {
+    const section = inputs.outline.sections.find(item => item.id === id)
+    if (section === undefined) throw new Error('evidence-mapping-section-missing:' + id)
+    return section
+  })
   const requirementIds = new Set(sections.flatMap(section => section.requirement_ids))
   const scoringIds = new Set(sections.flatMap(section => section.scoring_ids))
   const responsePointIds = new Set(sections.flatMap(section => section.scoring_response_point_ids ?? []))
-  const complianceIds = new Set(sectionEvidenceContext(inputs.outline, section).compliance_ids)
+  const complianceIds = new Set(sections.flatMap(section => sectionEvidenceContext(inputs.outline, section).compliance_ids))
   const requirements = inputs.requirements.requirements.filter(item => requirementIds.has(item.id))
   const scoring = inputs.scoring.scoring_items.filter(item => scoringIds.has(item.id))
   const responsePoints = inputs.responsePoints.points.filter(item => responsePointIds.has(item.id))
   const compliance = inputs.compliance.compliance_items.filter(item => complianceIds.has(item.id))
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
-    `Mapping Task：${JSON.stringify({ task_id: task.task_id, phase: task.phase, section_id: task.section_id, title: task.title, heading_path: task.heading_path })}`,
-    `当前 Section Blueprints：${JSON.stringify(sections.map(section => ({ ...section, heading_path: task.heading_path })))}`,
+    `Mapping Task：${JSON.stringify({ task_id: task.task_id, phase: task.phase, section_ids: task.section_ids, title: task.title, heading_path: task.heading_path })}`,
+    `当前 Section Blueprints：${JSON.stringify(sections.map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path })))}`,
     `Project 摘要：${JSON.stringify(subagentTaskContext(inputs.project))}`,
     `相关 Requirements：${JSON.stringify(subagentTaskContext(requirements))}`,
     `相关 Scoring：${JSON.stringify(subagentTaskContext(scoring))}`,
@@ -470,7 +305,7 @@ export function renderEvidenceMappingSubagentTask(
     `最终回复必须是一个原始 JSON 对象（不得使用 Markdown code fence、解释文字或其他前后缀），包含 task_id=${task.task_id}、section_mappings、refinement_suggestions。不得写文件。`,
     '返回结构必须严格使用以下字段名和枚举值，不能使用旧版资料或来源映射字段：',
     '{"task_id":"...","section_mappings":[{"section_id":"SEC-001","local_materials":[{"source_kind":"reference","file_id":"...","chunk":"chunk_0001","usage":"reference","summary":"..."}],"web_materials":[{"url":"https://...","usage":"reference","summary":"...","supports":"..."}],"missing_topics":[],"writing_dimensions":[]}],"refinement_suggestions":[]}',
-    '当前任务唯一的 Section 必须恰好返回一次。没有资料时材料数组为 []，missing_topics 写明缺口；writing_dimensions 可以为空。refinement_suggestions 只记录资料研究后可能需要的拆分、合并、层级、must_answer、表图或写作提示调整，不套固定数量规则。',
+    '当前任务的每个 Section 必须恰好返回一次。没有资料时材料数组为 []，missing_topics 写明缺口；writing_dimensions 可以为空。refinement_suggestions 只记录资料研究后可能需要的拆分、合并、层级、must_answer、表图或写作提示调整，不套固定数量规则。',
     '提交前逐项检查：task_id 等于当前任务；每个已分配 Section 恰好出现一次；本地 material 只使用已读取内容的 source_kind + file_id + chunk_XXXX；web material 均来自当前任务完成的 web_search → web_fetch。发现问题先修正完整结果，再返回完整 JSON。',
   ].join('\n')
 }
@@ -565,42 +400,99 @@ function exactCoverage(expected: readonly string[], actual: readonly string[], k
   for (const id of expectedSet) if (!actualSet.has(id)) issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING', message: `${kind} mapping 缺少已分配 ID ${id}。` })
 }
 
+function emptyMappingResult(task: EvidenceMappingTask, reason: string): EvidenceMappingPartialResult {
+  return {
+    task_id: task.task_id, refinement_suggestions: [],
+    section_mappings: task.section_ids.map(section_id => ({
+      section_id, local_materials: [], web_materials: [], writing_dimensions: [],
+      missing_topics: [`资料映射未完成，S5 需补充：${reason}`],
+    })),
+  }
+}
+
+/** 修复耗尽后逐章节保留可解析结果，单条无效材料不能丢弃同批其他章节。 */
+function salvageMappingResult(raw: unknown, task: EvidenceMappingTask): EvidenceMappingPartialResult {
+  const result = emptyMappingResult(task, 'Child 返回的章节或材料无效。')
+  const input = record(raw)
+  if (input?.task_id !== task.task_id || !Array.isArray(input.section_mappings)) return result
+  const candidates = input.section_mappings
+  result.section_mappings = result.section_mappings.map((empty) => {
+    const matches = candidates.filter(value => record(value)?.section_id === empty.section_id)
+    const mapping = matches.length === 1 ? record(matches[0]) : undefined
+    if (mapping === undefined) return empty
+    try {
+      const parsed = parseEvidenceMappingPartialResult({
+        task_id: task.task_id, section_mappings: [mapping], refinement_suggestions: [],
+      }).section_mappings[0]
+      return parsed === undefined ? empty : parsed
+    } catch (error) {
+      if (!(error instanceof ZodError)) throw error
+    }
+    const local = Array.isArray(mapping.local_materials) ? mapping.local_materials : []
+    const web = Array.isArray(mapping.web_materials) ? mapping.web_materials : []
+    const parsedLocal = local.flatMap((value) => {
+      const parsed = localEvidenceMaterialSchema.safeParse(value)
+      return parsed.success ? [parsed.data] : []
+    })
+    const parsedWeb = web.flatMap((value) => {
+      const parsed = transientWebEvidenceMaterialSchema.safeParse(value)
+      return parsed.success ? [parsed.data] : []
+    })
+    try {
+      const parsed = parseEvidenceMappingPartialResult({
+        task_id: task.task_id, refinement_suggestions: [], section_mappings: [{
+          ...mapping, local_materials: parsedLocal, web_materials: parsedWeb,
+          missing_topics: [...(Array.isArray(mapping.missing_topics) ? mapping.missing_topics : []), ...empty.missing_topics],
+        }],
+      }).section_mappings[0]
+      return parsed === undefined ? empty : parsed
+    } catch (error) {
+      if (!(error instanceof ZodError)) throw error
+      return empty
+    }
+  })
+  if (Array.isArray(input.refinement_suggestions)) result.refinement_suggestions = input.refinement_suggestions.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  return result
+}
+
 async function validatePartialResult(
   workspace: BidWorkspace,
   locations: readonly MappingCorpusLocation[],
-  child: Agent,
   task: EvidenceMappingTask,
   result: EvidenceMappingPartialResult,
-  snapshots: readonly EvidenceMappingWebSnapshot[],
+  snapshots: readonly WebEvidenceSnapshot[],
 ): Promise<StageValidationIssue[]> {
   const issues: StageValidationIssue[] = []
   if (result.task_id !== task.task_id) issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_TASK_MISMATCH', message: `Child 返回 task_id ${result.task_id}，预期 ${task.task_id}。` })
-  exactCoverage([task.section_id], result.section_mappings.map(item => item.section_id), 'Section', issues)
-  const localMaterials = result.section_mappings.flatMap(item => item.local_materials)
-  const readResults = new Set(child.session.events.flatMap(event => event.type === 'tool/result' && !event.data.message.content[0].isError
-    ? [String(event.data.message.source.callId)] : []))
-  for (const material of localMaterials) {
+  exactCoverage(task.section_ids, result.section_mappings.map(item => item.section_id), 'Section', issues)
+  for (const mapping of result.section_mappings) for (const material of [...mapping.local_materials]) {
     const location = locations.find(item => item.file_id === material.file_id && item.role === material.source_kind)
     const chunk = location?.chunks.find(item => item.id === material.chunk)
-    if (chunk === undefined) {
-      issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_LOCAL_EVIDENCE_INVALID', message: '本地 Evidence 的 source_kind、file_id 或 chunk 无效。' })
-      continue
+    try {
+      if (chunk === undefined) throw new Error('evidence-mapping-local-material-invalid')
+      await assertNoLinkedPath(workspace.root, chunk.path)
+      if (!(await lstat(chunk.path)).isFile()) throw new Error('evidence-mapping-chunk-unavailable')
+    } catch {
+      const message = `本地资料不可用：${material.file_id} / ${material.chunk}`
+      issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_LOCAL_EVIDENCE_INVALID', message })
+      mapping.local_materials = mapping.local_materials.filter(item => item !== material)
+      mapping.missing_topics.push(message)
     }
-    await assertNoLinkedPath(workspace.root, chunk.path)
-    if (!(await lstat(chunk.path)).isFile()) throw new Error('evidence-mapping-chunk-unavailable')
-    const read = child.session.events.some((event) => {
-      if (event.type !== 'tool/call' || event.data.name !== 'read' || !readResults.has(String(event.data.callId))) return false
-      const path = record(JSON.parse(event.data.arguments))?.file_path
-      return typeof path === 'string' && child.session.header.cwd !== undefined && relative(chunk.path, resolve(child.session.header.cwd, path)) === ''
-    })
-    if (!read) issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_LOCAL_UNREAD', message: '必须 read Chunk 正文后才能引用：' + material.file_id + ' / ' + material.chunk })
   }
   const verifiedUrls = new Set(snapshots.flatMap(snapshot => [
     normalizeWebEvidenceUrl(snapshot.source.requested_url), normalizeWebEvidenceUrl(snapshot.source.final_url),
-  ]).filter((value): value is string => value !== undefined))
-  const webMaterials = result.section_mappings.flatMap(item => item.web_materials)
-  for (const material of uniqueWebMaterials(webMaterials)) if (!verifiedUrls.has(normalizeWebEvidenceUrl(material.url) ?? '')) {
-    issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID', message: `Web Evidence 缺少当前 task 的 search-to-fetch 结果：${material.url}` })
+  ]))
+  for (const mapping of result.section_mappings) {
+    mapping.web_materials = mapping.web_materials.filter((material) => {
+      if (verifiedUrls.has(normalizeWebEvidenceUrl(material.url))) return true
+      const message = `Web Evidence 缺少当前 task 的成功 fetch 正文：${material.url}`
+      issues.push({ code: 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID', message })
+      mapping.missing_topics.push(message)
+      return false
+    })
+    if (mapping.local_materials.length === 0 && mapping.web_materials.length === 0 && mapping.missing_topics.length === 0) {
+      mapping.missing_topics.push('未找到可用资料，S5 需按本章要求补充。')
+    }
   }
   return issues
 }
@@ -645,8 +537,8 @@ export function mergeEvidenceMappingPartialResults(
 
 function snapshotForWebMaterial(
   material: TransientWebEvidenceMaterial,
-  snapshots: readonly EvidenceMappingWebSnapshot[],
-): EvidenceMappingWebSnapshot {
+  snapshots: readonly WebEvidenceSnapshot[],
+): WebEvidenceSnapshot {
   const normalized = normalizeWebEvidenceUrl(material.url)
   const snapshot = snapshots.find(candidate => normalizeWebEvidenceUrl(candidate.source.requested_url) === normalized
     || normalizeWebEvidenceUrl(candidate.source.final_url) === normalized)
@@ -656,8 +548,8 @@ function snapshotForWebMaterial(
 
 function bindWebMaterial(
   material: TransientWebEvidenceMaterial,
-  snapshot: EvidenceMappingWebSnapshot,
-  used: Map<string, EvidenceMappingWebSnapshot>,
+  snapshot: WebEvidenceSnapshot,
+  used: Map<string, WebEvidenceSnapshot>,
 ): WebEvidenceMaterial {
   used.set(snapshot.source.source_id, snapshot)
   return {
@@ -673,39 +565,24 @@ function buildEvidenceMap(
   merged: MergedEvidenceMappingResults,
   tasks: readonly CompletedMappingTask[],
   outline: OutlineArtifact,
-  retained?: { map: EvidenceMapArtifact; snapshots: EvidenceMappingWebSnapshot[] },
-): { map: EvidenceMapArtifact; snapshots: EvidenceMappingWebSnapshot[] } {
-  const sourcesBySection = new Map<string, Map<string, EvidenceMappingWebSnapshot>>()
+): { map: EvidenceMapArtifact; snapshots: WebEvidenceSnapshot[] } {
+  const sourcesBySection = new Map<string, Map<string, WebEvidenceSnapshot>>()
   for (const task of tasks) for (const mapping of task.result.section_mappings) {
-    const sources = sourcesBySection.get(mapping.section_id) ?? new Map<string, EvidenceMappingWebSnapshot>()
+    const sources = sourcesBySection.get(mapping.section_id) ?? new Map<string, WebEvidenceSnapshot>()
     for (const material of mapping.web_materials) {
       sources.set(normalizeWebEvidenceUrl(material.url) ?? material.url, snapshotForWebMaterial(material, task.snapshots))
     }
     sourcesBySection.set(mapping.section_id, sources)
   }
-  const used = new Map<string, EvidenceMappingWebSnapshot>()
+  const used = new Map<string, WebEvidenceSnapshot>()
   const map = parseEvidenceMapArtifact({
     schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
     section_mappings: buildWritableSectionWorklist(outline).map((section) => {
       const mapping = merged.section_mappings.find(item => item.section_id === section.id)
-      const fingerprint = sectionEvidenceFingerprint(outline, section)
-      if (mapping === undefined) {
-        const previous = retained?.map.section_mappings.find(item =>
-          item.section_id === section.id && item.section_fingerprint === fingerprint)
-        if (previous === undefined) throw new Error('evidence-mapping-current-section-missing:' + section.id)
-        for (const material of previous.web_materials) {
-          const snapshot = retained?.snapshots.find(item => item.source.source_id === material.source_id)
-          if (snapshot === undefined) throw new Error('evidence-mapping-retained-snapshot-missing')
-          used.set(snapshot.source.source_id, snapshot)
-        }
-        return previous
-      }
-      const owner = tasks.findLast(task => task.task.section_id === section.id)
-      if (owner?.task.section_fingerprint !== fingerprint) throw new Error('evidence-mapping-task-fingerprint-mismatch')
+      if (mapping === undefined) throw new Error('evidence-mapping-current-section-missing:' + section.id)
       const transient = uniqueWebMaterials(mapping.web_materials)
       return {
         section_id: section.id,
-        section_fingerprint: fingerprint,
         local_materials: uniqueMaterials(mapping.local_materials),
         web_materials: transient.map((material) => {
           const snapshot = sourcesBySection.get(section.id)?.get(normalizeWebEvidenceUrl(material.url) ?? material.url)
@@ -904,13 +781,11 @@ async function executeEvidenceMappingRun(
   const requiredTools = [...new Set([...MAIN_AGENT_TOOLS, ...MAPPING_AGENT_TOOLS])]
   const missingTools = requiredTools.filter(name => !registered.has(name))
   if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
-  if (options.confirmationOutline === undefined) {
-    await removeAttemptPath(artifactPath)
-    await removeAttemptPath(planPath)
-    await removeAttemptPath(logPath)
-    await removeAttemptPath(sourceLedgerPath)
-    await removeAttemptPath(webSourcesRoot)
-  }
+  await removeAttemptPath(artifactPath)
+  await removeAttemptPath(planPath)
+  await removeAttemptPath(logPath)
+  await removeAttemptPath(sourceLedgerPath)
+  await removeAttemptPath(webSourcesRoot)
   await mkdir(webSourcesRoot, { recursive: true, mode: 0o700 })
   const target = await fs.resolve(artifactPath)
   agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
@@ -932,15 +807,11 @@ async function executeEvidenceMappingRun(
     scoring: parseTenderScoringArtifact(scoringRaw),
     responsePoints: parseScoringResponsePointCatalog(responsePointsRaw),
     compliance: parseTenderComplianceArtifact(complianceRaw),
-    outline: options.confirmationOutline ?? parseOutlineArtifact(outlineRaw),
+    outline: parseOutlineArtifact(outlineRaw),
   }
   if (!catalogMatchesScoring(inputs.responsePoints, inputs.scoring)) throw new Error('evidence-mapping-response-point-catalog-mismatch')
   const manifest = await workspace.readManifest()
-  const retained = options.confirmationOutline === undefined ? undefined : {
-    map: parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json')),
-    snapshots: await loadRetainedWebSnapshots(workspace),
-  }
-  const plan = buildEvidenceMappingPlan(inputs.outline, retained === undefined ? 'initial' : 'supplemental', retained?.map)
+  const plan = buildEvidenceMappingPlan(inputs.outline)
   await writeJson(planPath, plan)
 
   const executionLog: EvidenceMappingExecutionLog = {
@@ -948,11 +819,6 @@ async function executeEvidenceMappingRun(
     max_concurrency: maxConcurrency,
     observed_max_concurrency: 0,
     tasks: plan.tasks.map(item => ({ task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending', attempts: [], final_child_session_id: null })),
-  }
-  if (retained !== undefined) {
-    const previous = evidenceMappingExecutionLogSchema.parse(await readJson(workspace, LOG_PATH))
-    executionLog.tasks.unshift(...previous.tasks.filter(item => !plan.tasks.some(task => task.task_id === item.task_id)))
-    executionLog.observed_max_concurrency = previous.observed_max_concurrency
   }
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
@@ -965,7 +831,7 @@ async function executeEvidenceMappingRun(
     exec.agent?.session.id === agent.session.id ? refinementWriteReason(exec, workspace) : undefined)
   const controller = new AbortController()
   const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
-  const capturedByChild = new Map<string, Map<string, EvidenceMappingCapturedWebResult>>()
+  const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
   const guardFailures = new Map<string, unknown>()
   const liftChildReadGuard = tools.guard((exec) => {
     try { return mappingCorpusToolGuard(locations, String(agent.session.id), exec) } catch (error) {
@@ -977,19 +843,14 @@ async function executeEvidenceMappingRun(
   const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
     const childId = exec.agent?.session.id
     if (childId === undefined || exec.agent?.session.header.parentSession !== agent.id) return
-    if (result.isError && (exec.name === 'read'
-      || (exec.name === 'grep' && result.error.info?.code === 'SEARCH_FAILED'))
-      && mappingCorpusToolGuard(locations, String(agent.session.id), exec) === undefined) {
-      controller.abort(new Error('EVIDENCE_MAPPING_FILESYSTEM_ERROR: ' + exec.name))
-      return
-    }
     if (!REQUIRED_WEB_TOOLS.includes(exec.name as typeof REQUIRED_WEB_TOOLS[number])) return
-    const captured = capturedByChild.get(String(childId)) ?? new Map<string, EvidenceMappingCapturedWebResult>()
+    const captured = capturedByChild.get(String(childId)) ?? new Map<string, CapturedWebResult>()
     captured.set(String(exec.callId), { exec, result })
     capturedByChild.set(String(childId), captured)
   }, { global: true })
   let activeTasks = 0
 
+  const maxMappingRepairs = Math.min(1, options.maxRepairAttempts)
   const runTask = async (
     mappingTask: EvidenceMappingTask,
     runInputs: EvidenceMappingInputs,
@@ -1006,7 +867,7 @@ async function executeEvidenceMappingRun(
     try {
       const started = await subagents.startContinuable({
         provider: 'spawn',
-        label: 'S4 · ' + (mappingTask.phase === 'initial' ? '初始' : '补充') + ' · ' + mappingTask.heading_path.join(' / '),
+        label: 'S4 · ' + mappingTask.heading_path.join(' / '),
         request: {
           parent: agent,
           prompt: [{ type: 'text', text: basePrompt }],
@@ -1020,7 +881,7 @@ async function executeEvidenceMappingRun(
       if (child === undefined) throw new Error(`Bid evidence mapping Child ${started.childId} was not published`)
       let outputEventStart = 0
       try {
-        for (let attempt = 0; attempt <= options.maxRepairAttempts; attempt++) {
+        for (let attempt = 0; attempt <= maxMappingRepairs; attempt++) {
           try {
             signal.throwIfAborted()
             if (attempt === 0) await waitForMappingChildIdle(child, signal)
@@ -1028,19 +889,20 @@ async function executeEvidenceMappingRun(
             throwForFailedTurn(child, outputEventStart)
             if (guardFailures.has(String(started.childId))) throw guardFailures.get(String(started.childId))
             const captured = capturedByChild.get(String(started.childId)) ?? new Map()
-            const snapshots = buildEvidenceMappingWebSnapshots(
-              collectEvidenceMappingWebObservations(child, -1, captured),
-            )
+            const snapshots = buildWebEvidenceSnapshots(captured.values())
             const issues: StageValidationIssue[] = []
             let partial: EvidenceMappingPartialResult | undefined
+            let raw: unknown
             try {
-              partial = parseEvidenceMappingPartialResult(readMappingChildResult(child, outputEventStart))
+              raw = readMappingChildResult(child, outputEventStart)
+              partial = parseEvidenceMappingPartialResult(raw)
             } catch (error: unknown) {
               if (!(error instanceof ZodError) && !(error instanceof SyntaxError)) throw error
               issues.push(...partialResultIssues(error))
             }
+            if (attempt === maxMappingRepairs && partial === undefined) partial = salvageMappingResult(raw, mappingTask)
             if (partial !== undefined) {
-              issues.push(...await validatePartialResult(workspace, locations, child, mappingTask, partial, snapshots))
+              issues.push(...await validatePartialResult(workspace, locations, mappingTask, partial, snapshots))
             }
             const accepted = partial !== undefined && issues.length === 0
             log.attempts.push({
@@ -1049,7 +911,8 @@ async function executeEvidenceMappingRun(
               issues: issues.map(({ code, message }) => ({ code, message })),
             })
             await persistLog()
-            if (accepted && partial !== undefined) {
+            if (partial !== undefined && (accepted || attempt === maxMappingRepairs)) {
+              if (!accepted) partial = salvageMappingResult(partial, mappingTask)
               log.status = 'completed'
               log.final_child_session_id = String(started.childId)
               await persistLog()
@@ -1065,7 +928,7 @@ async function executeEvidenceMappingRun(
             await persistLog()
             throw new BidStageExecutionError(latestIssues)
           }
-          if (attempt < options.maxRepairAttempts) {
+          if (attempt < maxMappingRepairs) {
             outputEventStart = child.session.events.length
             await subagents.followup(agent, started.childId, [{
               type: 'text', text: renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues),
@@ -1083,8 +946,8 @@ async function executeEvidenceMappingRun(
     } catch (error) {
       log.status = 'failed'
       await persistLog()
-      controller.abort()
-      throw error
+      if (signal.aborted) throw error
+      return { task: mappingTask, result: emptyMappingResult(mappingTask, latestIssues.length > 0 ? latestIssues.map(issue => issue.message).join('; ') : String(error)), snapshots: [] }
     } finally {
       activeTasks--
     }
@@ -1120,24 +983,14 @@ async function executeEvidenceMappingRun(
   try {
     const initialResults = await runBatch(plan.tasks, inputs)
     const initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
-    const preliminary = buildEvidenceMap(initialMerged, initialResults, inputs.outline, retained)
+    const preliminary = buildEvidenceMap(initialMerged, initialResults, inputs.outline)
     await writeWebEvidenceArtifacts(workspace, preliminary.snapshots)
     await writeJson(artifactPath, preliminary.map)
     signal.throwIfAborted()
-    if (retained === undefined) {
-      const refined = await refineOutline(agent, workspace, inputs, initialMerged.refinement_suggestions, options.maxRepairAttempts, signal)
-      const supplementalPlan = buildEvidenceMappingPlan(refined, 'supplemental', preliminary.map)
-      await writeJson(planPath, { ...supplementalPlan, tasks: [...plan.tasks, ...supplementalPlan.tasks] })
-      executionLog.tasks.push(...supplementalPlan.tasks.map(item => ({
-        task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending' as const, attempts: [], final_child_session_id: null,
-      })))
-      await persistLog()
-      const supplementalResults = await runBatch(supplementalPlan.tasks, { ...inputs, outline: refined })
-      const merged = mergeEvidenceMappingPartialResults(supplementalResults.map(item => item.result))
-      const built = buildEvidenceMap(merged, supplementalResults, refined, preliminary)
-      await writeWebEvidenceArtifacts(workspace, built.snapshots)
-      await writeJson(artifactPath, built.map)
-    }
+    const refined = await refineOutline(agent, workspace, inputs, initialMerged.refinement_suggestions, options.maxRepairAttempts, signal)
+    const reconciled = reconcileSectionEvidence(refined, preliminary.map)
+    await writeJson(artifactPath, reconciled)
+    await pruneWebEvidenceArtifacts(workspace, reconciled)
   } finally {
     liftObserver()
     liftChildReadGuard()
@@ -1150,11 +1003,11 @@ async function executeEvidenceMappingRun(
 }
 
 /**
- * 执行确定性 S4 映射，基础设施异常立即失败并持久化诊断。
+ * 执行一轮分组资料映射及一次目录深化；普通任务失败保留章节缺口。
  * @param agent - 当前父 Agent。
  * @param workspace - Session 工作区。
  * @param task - S4 阶段任务。
- * @param options - 并发、有限模型修复和最终确认目录。
+ * @param options - 并发、有限模型修复及取消信号。
  * @returns 已通过校验的阶段 Artifact。
  */
 export async function executeEvidenceMapping(

@@ -38,7 +38,8 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, buildEvidenceMappingPlan, executeEvidenceMapping, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { reconcileSectionEvidence } from './section-evidence-context.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -143,19 +144,15 @@ export * from './evidence-mapping-artifacts.ts'
 export * from './section-evidence-context.ts'
 export * from './evidence-mapping-corpus.ts'
 export * from './web-evidence-source-artifacts.ts'
+export * from './web-evidence-snapshot.ts'
 export {
-  buildEvidenceMappingWebSnapshots,
-  collectEvidenceMappingWebObservations,
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
   mergeEvidenceMappingPartialResults,
   readEvidenceMappingProgress,
   renderEvidenceMappingSubagentTask,
   buildEvidenceMappingPlan,
-  type EvidenceMappingCapturedWebResult,
   type MergedEvidenceMappingResults,
-  type EvidenceMappingWebObservation,
-  type EvidenceMappingWebSnapshot,
 } from './evidence-mapping-executor.ts'
 export type { EvidenceMappingExecutionOptions } from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
@@ -1084,9 +1081,9 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * Read the current S3 Mapping Task counts while evidence mapping runs.
-   * @param session - Bid Session that owns the S3 execution log.
-   * @returns task counts, or null when S3 is not running or has not produced its log.
+   * Read the current S4 Mapping Task counts while evidence mapping runs.
+   * @param session - Bid Session that owns the S4 execution log.
+   * @returns task counts, or null when S4 is not running or has not produced its log.
    */
   @Remote('getEvidenceMappingProgress')
   async getEvidenceMappingProgress(session: Session): Promise<BidEvidenceMappingProgress | null> {
@@ -1261,28 +1258,9 @@ export class BidHostRuntime extends TypertRemoteService {
         if (runtime.stage === 'evidence_mapping') {
           const evidencePath = within(workspace.sessionRoot, 'analysis/evidence-map.json')
           const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-          const plan = buildEvidenceMappingPlan(candidate, 'supplemental', evidence)
-          if (plan.tasks.length > 0) {
-            session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
-            try {
-              await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
-                maxRepairAttempts: this.config.modelStageRepairAttempts,
-                maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-                confirmationOutline: candidate,
-                signal: operation.controller.signal,
-              })
-            } catch (error) {
-              const issues = error instanceof BidStageExecutionError ? [...error.issues] : [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: String(error) }]
-              session.append('bid.stage.failed', { stage: 'evidence_mapping', status: 'failed', reason: String(error), issues })
-              throw new BidStageExecutionError(issues)
-            }
-            session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
-          } else {
-            const writable = new Set(candidate.sections.filter(section => section.writable).map(section => section.id))
-            evidence.section_mappings = evidence.section_mappings.filter(mapping => writable.has(mapping.section_id))
-            await writeFileAtomic(evidencePath, JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
-            await pruneWebEvidenceArtifacts(workspace, evidence)
-          }
+          const reconciled = reconcileSectionEvidence(candidate, evidence)
+          await writeFileAtomic(evidencePath, JSON.stringify(reconciled, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
+          await pruneWebEvidenceArtifacts(workspace, reconciled)
           const validation = await validateEvidenceMapping(workspace, 'evidence_mapping', [
             { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
             { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { buildEvidenceMappingPlan, buildChapterWorklist, buildWritableSectionWorklist, sectionEvidenceFingerprint, validateSectionEvidenceFreshness, type EvidenceMapArtifact, type OutlineArtifact, type OutlineSection } from '@deepseek-ai/dsh-bid'
+import { expect, it } from 'vitest'
+import { buildEvidenceMappingPlan, buildChapterWorklist, buildWritableSectionWorklist, validateSectionEvidenceCoverage, reconcileSectionEvidence, type EvidenceMapArtifact, type OutlineArtifact, type OutlineSection } from '@deepseek-ai/dsh-bid'
 
 function section(id: string, parent_id: string | null, order: number): OutlineSection {
   return { id, parent_id, order, level: parent_id === null ? 1 : 2, title: id, purpose: '说明方案', writable: true, must_answer: ['回答要求'], requirement_ids: [], scoring_ids: [], compliance_ids: [], scoring_response_point_ids: [], origin: 'generated', scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] }
@@ -13,60 +13,67 @@ function outline(): OutlineArtifact {
 }
 
 function evidence(value: OutlineArtifact): EvidenceMapArtifact {
-  return { schema_version: 9, section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, section_fingerprint: sectionEvidenceFingerprint(value, section), local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
+  return { schema_version: 10, section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
 }
 
-it('S4 与 S5 按同一个目录遍历定义，一章恰好一个初始任务', () => {
-  const value = outline()
-  const plan = buildEvidenceMappingPlan(value, 'initial')
-  expect(plan.tasks.map(task => task.section_id)).toEqual(['A', 'B', 'C'])
-  expect(plan.tasks.map(task => task.task_id)).toEqual(['MAP-INIT-A', 'MAP-INIT-B', 'MAP-INIT-C'])
-  expect(plan.tasks.map(task => task.heading_path)).toEqual([['ROOT', 'A'], ['ROOT', 'B'], ['C']])
+it('14 个可写叶子按两个业务分支分为 2 个 Task，S5 仍逐章节写作', () => {
+  const value: OutlineArtifact = { ...outline(), sections: [
+    { ...section('ROOT', null, 1), writable: false, must_answer: [] },
+    ...['TECH', 'DELIVERY'].flatMap((id, index) => [
+      { ...section(id, 'ROOT', index + 1), writable: false, must_answer: [] },
+      ...Array.from({ length: 7 }, (_, leaf) => ({ ...section(`${id}-${leaf}`, id, leaf + 1), level: 3 })),
+    ]),
+  ] }
+  const plan = buildEvidenceMappingPlan(value)
+  expect(plan.tasks).toHaveLength(2)
+  expect(plan.tasks.map(task => task.section_ids.length)).toEqual([7, 7])
+  expect(plan.tasks.flatMap(task => task.section_ids)).toEqual(buildChapterWorklist(value).map(section => section.id))
   expect(buildChapterWorklist(value)).toEqual(buildWritableSectionWorklist(value))
-  expect(plan.tasks.every(task => task.title === value.sections.find(section => section.id === task.section_id)!.title)).toBe(true)
-  expect(buildEvidenceMappingPlan({ ...value, sections: [...value.sections].reverse() }, 'initial')).toEqual(plan)
+  expect(buildEvidenceMappingPlan({ ...value, sections: [...value.sections].reverse() })).toEqual(plan)
   value.sections.find(section => section.id === 'ROOT')!.writable = true
-  expect(() => buildEvidenceMappingPlan(value, 'initial')).toThrow('OUTLINE_SHARED_WRITABLE_NOT_LEAF')
+  expect(() => buildEvidenceMappingPlan(value)).toThrow('OUTLINE_SHARED_WRITABLE_NOT_LEAF')
 })
 
-describe('Section 检索语义指纹', () => {
-  it.each(['purpose', 'must_answer', 'requirement_ids', 'scoring_ids', 'scoring_response_point_ids', 'compliance_ids', 'writing_notes', 'suggested_tables', 'suggested_figures'] as const)('%s 改变只补映射对应章节', (field) => {
-    const value = outline()
-    const before = evidence(value)
-    const target = value.sections.find(section => section.id === 'A')!
-    if (field === 'purpose') target.purpose = '新的检索目标'
-    else target[field] = ['新要求']
-    const tasks = buildEvidenceMappingPlan(value, 'supplemental', before).tasks
-    expect(tasks.map(task => task.section_id)).toEqual(['A'])
-    expect(tasks[0]!.phase).toBe('supplemental')
-  })
-
-  it('祖先标题变化使后代过期，兄弟排序与原数组顺序不影响指纹', () => {
-    const value = outline()
-    const before = evidence(value)
-    value.sections.find(section => section.id === 'A')!.order = 2
-    value.sections.find(section => section.id === 'B')!.order = 1
-    value.sections.reverse()
-    expect(buildEvidenceMappingPlan(value, 'supplemental', before).tasks).toEqual([])
-    value.sections.find(section => section.id === 'ROOT')!.title = '新的技术主题'
-    expect(buildEvidenceMappingPlan(value, 'supplemental', before).tasks.map(task => task.section_id)).toEqual(['B', 'A'])
-  })
-
-  it('全局合规变化刷新所有可写章节', () => {
-    const value = outline()
-    const before = evidence(value)
-    value.global_compliance_ids.push('COMP-1')
-    expect(buildEvidenceMappingPlan(value, 'supplemental', before).tasks).toHaveLength(3)
-  })
+it('单根目录直属的 14 个叶子合为一个执行批次', () => {
+  const value: OutlineArtifact = { ...outline(), sections: [
+    { ...section('ROOT', null, 1), writable: false, must_answer: [] },
+    ...Array.from({ length: 14 }, (_, index) => section(`SEC-${index}`, 'ROOT', index + 1)),
+  ] }
+  expect(buildEvidenceMappingPlan(value).tasks.map(task => task.section_ids.length)).toEqual([14])
 })
 
-it.each(['missing', 'duplicate', 'unknown', 'stale'] as const)('拒绝 %s Evidence', (scenario) => {
+it('标题、父级、写作提示和合规变化不会使 Evidence stale', () => {
+  const value = outline()
+  const before = evidence(value)
+  value.sections.find(section => section.id === 'ROOT')!.title = '新标题'
+  value.sections.find(section => section.id === 'A')!.writing_notes.push('新提示')
+  value.global_compliance_ids.push('COMP-NEW')
+  expect(validateSectionEvidenceCoverage(value, before)).toEqual([])
+  expect(reconcileSectionEvidence(value, before)).toEqual(before)
+})
+
+it('新增、删除和拆分章节确定性 reconcile，不丢失保留章节的材料', () => {
+  const value = outline()
+  const before = evidence(value)
+  before.section_mappings[0]!.local_materials.push({ source_kind: 'reference', file_id: 'REF', chunk: 'chunk_0001', usage: 'reference', summary: '原资料' })
+  value.sections = value.sections.filter(section => section.id !== 'B')
+  const parent = value.sections.find(section => section.id === 'A')!
+  parent.writable = false
+  parent.must_answer = []
+  value.sections.push(...[1, 2].map(order => ({ ...section(`A-${order}`, 'A', order), level: 3 })), section('NEW', null, 3))
+  const result = reconcileSectionEvidence(value, before)
+  expect(result.section_mappings.map(mapping => mapping.section_id)).toEqual(['A-1', 'A-2', 'C', 'NEW'])
+  expect(result.section_mappings[0]!.local_materials).toEqual(before.section_mappings[0]!.local_materials)
+  expect(result.section_mappings[0]!.missing_topics.join()).toContain('重新筛选')
+  expect(result.section_mappings.at(-1)).toMatchObject({ local_materials: [], web_materials: [], missing_topics: [expect.any(String)] })
+  expect(validateSectionEvidenceCoverage(value, result)).toEqual([])
+})
+
+it.each(['missing', 'duplicate', 'unknown'] as const)('拒绝 %s Evidence', (scenario) => {
   const value = outline()
   const map = evidence(value)
-  const codes = { missing: 'MISSING', duplicate: 'DUPLICATE', unknown: 'UNKNOWN', stale: 'STALE' }
   if (scenario === 'missing') map.section_mappings.pop()
   if (scenario === 'duplicate') map.section_mappings.push(map.section_mappings[0]!)
   if (scenario === 'unknown') map.section_mappings[0]!.section_id = 'UNKNOWN'
-  if (scenario === 'stale') map.section_mappings[0]!.section_fingerprint = '0'.repeat(64)
-  expect(validateSectionEvidenceFreshness(value, map).map(issue => issue.code)).toContain('EVIDENCE_MAPPING_SECTION_' + codes[scenario])
+  expect(validateSectionEvidenceCoverage(value, map).map(issue => issue.code)).toContain('EVIDENCE_MAPPING_SECTION_' + scenario.toUpperCase())
 })

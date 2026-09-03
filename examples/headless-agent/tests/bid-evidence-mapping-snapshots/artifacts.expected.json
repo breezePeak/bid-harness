@@ -1,13 +1,13 @@
 {
   "map": {
-    "schema_version": 9,
+    "schema_version": 10,
     "section_mappings": [
       {
         "local_materials": [],
         "web_materials": [
           {
-            "source_id": "WEB-65a0ba9fa1010f90",
-            "snapshot_path": "analysis/web-sources/WEB-65a0ba9fa1010f90.md",
+            "source_id": "WEB-0e9a5edb153f120c",
+            "snapshot_path": "analysis/web-sources/WEB-0e9a5edb153f120c.md",
             "usage": "reference",
             "summary": "要求访问控制与审计。",
             "supports": "支持安全方案。"
@@ -15,7 +15,6 @@
         ],
         "missing_topics": [],
         "section_id": "SEC-SECURITY",
-        "section_fingerprint": "92367c017f9460366cbcba56218b6e5b3a028d73aab022084cdfa1e77e873dad",
         "writing_dimensions": [
           "身份鉴别与访问控制",
           "安全审计"
@@ -24,31 +23,22 @@
     ]
   },
   "ledger": {
-    "schema_version": 1,
+    "schema_version": 2,
     "stage": "evidence_mapping",
     "sources": [
       {
-        "source_id": "WEB-65a0ba9fa1010f90",
-        "search_call_id": "search-source",
-        "fetch_call_id": "fetch-source",
-        "search_result_seq": 47,
-        "fetch_call_seq": 67,
-        "fetch_result_seq": 68,
-        "queries": [
-          "访问控制安全审计官方标准"
-        ],
-        "discovered_url": "https://official.example/standard",
+        "source_id": "WEB-0e9a5edb153f120c",
         "requested_url": "https://official.example/standard",
         "final_url": "https://official.example/standard",
         "status_code": 200,
         "truncated": false,
         "fetched_at": "<TIME>",
-        "content_sha256": "12b974f1190c248d5a167a1808e54af9e48dab8b45de87b0439b5f60b2b9d37d",
-        "snapshot_path": "analysis/web-sources/WEB-65a0ba9fa1010f90.md"
+        "content_sha256": "e826483c6d203e59d7f892c45ba8007e9d76eff13b926dd273becbe4b78073fb",
+        "snapshot_path": "analysis/web-sources/WEB-0e9a5edb153f120c.md"
       }
     ]
   },
   "snapshots": [
-    "Fetched https://official.example/standard (HTTP 200)\n\n官方标准要求访问控制与安全审计。"
+    "官方标准要求访问控制与安全审计。"
   ]
 }

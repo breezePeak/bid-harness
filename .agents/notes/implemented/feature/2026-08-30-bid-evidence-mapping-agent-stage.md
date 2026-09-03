@@ -10,6 +10,8 @@ S3 需要同时理解整个项目、覆盖全部技术 Requirement、Scoring 与
 
 ## Decision
 
+本记录的逐叶任务、Section 指纹、补映射和事件级来源证明决策已由[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)取代；下文相关内容保留原决策背景，不作为当前行为依据。Corpus 路径授权、同会话修复、文件角色与阶段职责中未被取代的约束仍有效。
+
 S4 保留 `evidence_mapping` 阶段、正式 Artifact 和 Orchestrator 推进方式。任务拓扑由 Host 按 `outline/initial-confirmed-outline.json` 的可写叶子确定，一章一个任务；Child 负责资料检索语义，Main Agent 只执行一次证据驱动的目录深化。[章节证据新鲜度](../architecture/2026-09-03-bid-section-evidence-freshness.md)规定任务计划、指纹与最终用户编辑后的补映射。
 
 Host 复用 `@deepseek-ai/dsh-subagent` 的 `spawn` Provider，在可配置并发上限内为每个任务启动 fresh-context Child Session。Child 以 Section Blueprint 和由其引用派生的 Requirement、Scoring、Response Point、Compliance 为首要上下文，只获得 Host 已预检的 `reference`/`reference_bid` 绝对路径，直接返回 `section_mappings` 与目录深化建议。工具限制为 `grep`、`read`、`web_search`、`web_fetch`，深度上限为 1；招标文件与人工框架不能作为 Evidence。模型输出问题在同一可继续 Child 的后续轮次有限修复；基础设施错误立即失败，已接受的兄弟结果保持不变。

@@ -109,7 +109,7 @@ function fileRules(projection: BidClientProjection, t: TranslateBid): string | u
 
 /**
  * Render a Bid Session from the current Host projection. Local state is
- * limited to browser-selected files, request feedback, and polled S3 task counts; actions never
+ * limited to browser-selected files, request feedback, and polled S4 task counts; actions never
  * mutate the projected stage or status.
  * @param props - standard projection hook, Host-action callbacks, and locale.
  * @returns the Bid panel, or null for a non-Bid Session or unavailable projection.

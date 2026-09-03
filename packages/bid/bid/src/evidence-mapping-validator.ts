@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { ZodError } from 'zod'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
-import { validateSectionEvidenceFreshness } from './section-evidence-context.ts'
+import { validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
@@ -59,7 +59,8 @@ async function validateWebSource(
   try {
     const path = within(workspace.sessionRoot, source.snapshot_path)
     await assertNoLinkedPath(workspace.root, path)
-    if (!(await lstat(path)).isFile() || webEvidenceContentSha256(await readFile(path, 'utf8')) !== source.content_sha256) throw new Error('invalid')
+    const content = await readFile(path, 'utf8')
+    if (!(await lstat(path)).isFile() || content.trim().length === 0 || webEvidenceContentSha256(content) !== source.content_sha256) throw new Error('invalid')
     return true
   } catch {
     reject(
@@ -129,7 +130,7 @@ export async function validateEvidenceMapping(
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
     await validateOutlineFrameworkRefs(workspace, outline, issues)
     validateOutlineGenerationQuality(outline, quality, requirements, scoring, catalog, issues)
-    issues.push(...validateSectionEvidenceFreshness(outline, map))
+    issues.push(...validateSectionEvidenceCoverage(outline, map))
     for (const mapping of map.section_mappings) {
       await Promise.all(mapping.local_materials.map(material => validateLocalMaterial(workspace, manifest, material, issues)))
     }

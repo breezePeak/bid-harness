@@ -6,6 +6,8 @@ Generic multi-provider adapter for the harness LLM seam backed by [`@earendil-wo
 
 The package root exposes the Cordis plugin contract, `PiAiAdapter`, and `supportedProtocols()`; profile resolution, catalog materialization, provider construction, replay conversion, and stream conversion remain package-internal.
 
+GPT / CPA 的 Responses 搜索从 `web_search_call.action.sources`、`web_search_call.results`、`url_citation` 和 `web_search_result_location` 解析 HTTP(S) 来源并按 URL 去重；普通回答正文中的 URL 不进入 `WebSearchResult.sources`。
+
 ## GPTProvider
 
 子入口 `@deepseek-ai/dsh-llm-pi-ai/gpt` 注册固定 `gpt` 路由，配置 namespace 为 `llm-gpt`。主调用复用 `PiAiAdapter` 的消息转换、函数工具、SSE、usage、reasoning/replay 和取消处理，固定使用 `openai-responses`。

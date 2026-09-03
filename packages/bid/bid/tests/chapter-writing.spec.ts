@@ -8,11 +8,10 @@ import type { SubagentResult, SubagentRun, SubagentStartRequest } from '@deepsee
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { pickChapterContext, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
-import type { EvidenceMappingWebSnapshot } from '../src/evidence-mapping-executor.ts'
+import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
-  sectionEvidenceFingerprint,
   buildBidStageTask,
   executeChapterWriting,
   getBidStagePolicy,
@@ -40,8 +39,8 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 9, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, section_fingerprint: sectionEvidenceFingerprint(outlineFixture(), outlineFixture().sections[index]!), local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 1, stage: 'evidence_mapping', sources: [] })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 10, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [] })}\n`)
   const outline = outlineFixture()
   await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
   const outlineSha256 = outlineArtifactSha256(outline)
@@ -152,12 +151,12 @@ async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
   await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
   await writeFile(join(workspace.sessionRoot, `analysis/web-sources/${sourceId}.md`), snapshot)
   await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-    schema_version: 1,
+    schema_version: 2,
     stage: 'evidence_mapping',
     sources: [{
-      source_id: sourceId, search_call_id: 'search-ledger', fetch_call_id: 'fetch-ledger',
-      search_result_seq: 1, fetch_call_seq: 2, fetch_result_seq: 3, queries: ['公开技术'],
-      discovered_url: 'https://example.com/standard', requested_url: 'https://example.com/standard',
+      source_id: sourceId,
+
+      requested_url: 'https://example.com/standard',
       final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: fetchedAt,
       content_sha256: webEvidenceContentSha256(snapshot), snapshot_path: `analysis/web-sources/${sourceId}.md`,
     }],
@@ -276,12 +275,6 @@ function fixtureAgent(
               value: { url: fetchedUrl, statusCode: 200, body: { kind: 'text', content: '官方正文' }, truncated: false },
               meta: { truncated: false },
             }
-            ;(localAgent.session.events as unknown[]).push(
-              { seq: 1, time: Date.parse(fetchedAt) - 3, type: 'tool/call', data: { callId: 'search-1', name: 'web_search' } },
-              { seq: 2, time: Date.parse(fetchedAt) - 2, type: 'tool/result', data: { message: { source: { callId: 'search-1' }, content: [{ isError: false }] } } },
-              { seq: 3, time: Date.parse(fetchedAt) - 1, type: 'tool/call', data: { callId: 'fetch-1', name: 'web_fetch' } },
-              { seq: 4, time: Date.parse(fetchedAt), type: 'tool/result', data: { message: { source: { callId: 'fetch-1' }, content: [{ isError: false }] } } },
-            )
             const listener = listeners.get('tools/result')
             listener?.({ agent: localAgent, name: 'web_search', callId: 'search-1', arguments: { queries: ['官方标准'] } }, searchResult)
             listener?.({ agent: localAgent, name: 'web_fetch', callId: 'fetch-1', arguments: { url: fetchedUrl } }, fetchResult)
@@ -375,10 +368,10 @@ describe('chapter-writing executor', () => {
       scoring,
       compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
       evidence: parseEvidenceMapArtifact({
-        schema_version: 9,
+        schema_version: 10,
         section_mappings: [{
           section_id: 'SEC-1',
-          section_fingerprint: sectionEvidenceFingerprint(outlineFixture(), outlineFixture().sections[1]!),
+
           local_materials: [
             { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
             { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
@@ -555,12 +548,12 @@ describe('chapter-writing executor', () => {
     expect(fixture.disposed).toHaveLength(6)
   })
 
-  it('persists a Writer search-to-fetch source without requiring Web for other chapters', async () => {
+  it('S5 空 Evidence 章节可写作和补搜，成功 fetch 不依赖事件日志', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-ledger-')), 'session')
     const outline = await writeInputs(workspace)
     await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
     await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-      schema_version: 1, stage: 'evidence_mapping', sources: [],
+      schema_version: 2, stage: 'evidence_mapping', sources: [],
     })}\n`)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, undefined, true)
 
@@ -574,7 +567,7 @@ describe('chapter-writing executor', () => {
     ))
     expect(ledger.sources).toHaveLength(1)
     expect(ledger.sources[0]).toMatchObject({
-      search_call_id: 'search-1', fetch_call_id: 'fetch-1',
+
       chapter_context: { section_id: 'SEC-1', child_session_id: 'child-1', writer_attempt: 1 },
     })
     expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方正文')
@@ -730,7 +723,7 @@ describe('chapter-writing executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-')), 'session')
     await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-      schema_version: 1, stage: 'evidence_mapping', sources: [],
+      schema_version: 2, stage: 'evidence_mapping', sources: [],
     })}\n`)
     const section = outlineFixture().sections[1]!
     const context = emptyChapterContext(section)
@@ -752,10 +745,10 @@ describe('chapter-writing executor', () => {
         handoff: emptyHandoff(section.id),
       },
     }
-    const childASnapshots: EvidenceMappingWebSnapshot[] = [{
+    const childASnapshots: WebEvidenceSnapshot[] = [{
       source: {
-        source_id: 'WEB-aaaaaaaaaaaaaaaa', search_call_id: 'search-a', fetch_call_id: 'fetch-a', search_result_seq: 1,
-        fetch_call_seq: 2, fetch_result_seq: 3, queries: ['A'], discovered_url: 'https://a.example/doc',
+        source_id: 'WEB-aaaaaaaaaaaaaaaa',
+
         requested_url: 'https://a.example/doc', final_url: 'https://a.example/doc', status_code: 200, truncated: false,
         fetched_at: fetchedAt, content_sha256: 'a'.repeat(64), snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
       },

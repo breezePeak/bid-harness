@@ -1,7 +1,6 @@
-/** S4 与 S5 共用的章节遍历、检索语义及证据新鲜度校验。 */
-import { createHash } from 'node:crypto'
+/** S4 与 S5 共用的章节遍历、检索上下文及证据集合校验。 */
 import { BidStageExecutionError, type StageValidationIssue } from './control-plane-contract.ts'
-import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
+import { EVIDENCE_MAPPING_SCHEMA_VERSION, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
 
@@ -33,7 +32,7 @@ export function buildWritableSectionWorklist(outline: OutlineArtifact): OutlineS
 }
 
 /**
- * 取影响检索的语义字段；排序编号和展示属性不参与指纹。
+ * 取当前章节及祖先的检索上下文。
  * @param outline - 已验证结构的目录。
  * @param section - 该目录中的可写章节。
  * @returns 固定字段顺序的检索上下文，包括祖先标题与全局合规要求。
@@ -66,35 +65,54 @@ export function sectionEvidenceContext(outline: OutlineArtifact, section: Outlin
 }
 
 /**
- * 计算 Host 所有的 Section 检索上下文 SHA-256。
- * @param outline - 当前目录。
- * @param section - 当前章节。
- * @returns 固定序列化的 SHA-256 十六进制摘要。
- */
-export function sectionEvidenceFingerprint(outline: OutlineArtifact, section: OutlineSection): string {
-  return createHash('sha256').update(JSON.stringify(sectionEvidenceContext(outline, section))).digest('hex')
-}
-
-/**
- * 校验证据集合与每个章节的检索上下文完全匹配。
+ * 校验证据集合恰好覆盖每个可写章节。
  * @param outline - 待确认或已确认目录。
  * @param evidence - Host 持久化的 Evidence Map。
- * @returns 缺失、重复、未知章节与过期证据问题。
+ * @returns 缺失、重复、未知章节问题。
  */
-export function validateSectionEvidenceFreshness(outline: OutlineArtifact, evidence: EvidenceMapArtifact): StageValidationIssue[] {
-  const expected = new Map(buildWritableSectionWorklist(outline).map(section => [section.id, sectionEvidenceFingerprint(outline, section)]))
+export function validateSectionEvidenceCoverage(outline: OutlineArtifact, evidence: EvidenceMapArtifact): StageValidationIssue[] {
+  const expected = new Set(buildWritableSectionWorklist(outline).map(section => section.id))
   const seen = new Set<string>()
   const issues: StageValidationIssue[] = []
   for (const mapping of evidence.section_mappings) {
-    const fingerprint = expected.get(mapping.section_id)
     const codes = [
-      ...(fingerprint === undefined ? ['EVIDENCE_MAPPING_SECTION_UNKNOWN'] : []),
+      ...(!expected.has(mapping.section_id) ? ['EVIDENCE_MAPPING_SECTION_UNKNOWN'] : []),
       ...(seen.has(mapping.section_id) ? ['EVIDENCE_MAPPING_SECTION_DUPLICATE'] : []),
-      ...(fingerprint !== undefined && mapping.section_fingerprint !== fingerprint ? ['EVIDENCE_MAPPING_SECTION_STALE'] : []),
     ]
     for (const code of codes) issues.push({ code, message: `章节 ${mapping.section_id} 的 Evidence 与当前目录不匹配。`, artifact: 'analysis/evidence-map.json' })
     seen.add(mapping.section_id)
   }
   for (const id of expected.keys()) if (!seen.has(id)) issues.push({ code: 'EVIDENCE_MAPPING_SECTION_MISSING', message: `章节 ${id} 缺少 Evidence Mapping。`, artifact: 'analysis/evidence-map.json' })
   return issues
+}
+
+/**
+ * 按 section_id 对齐目录与证据；拆分为子章节时继承最近祖先资料并提示 S5 筛选。
+ * @param outline - 最终目录。
+ * @param evidence - 已完成的资料映射。
+ * @returns 每个可写章节恰好一条映射；新增章节以缺口表示未检索状态。
+ */
+export function reconcileSectionEvidence(outline: OutlineArtifact, evidence: EvidenceMapArtifact): EvidenceMapArtifact {
+  const mappings = new Map(evidence.section_mappings.map(mapping => [mapping.section_id, mapping]))
+  const sections = new Map(outline.sections.map(section => [section.id, section]))
+  return {
+    schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
+    section_mappings: buildWritableSectionWorklist(outline).map((section) => {
+      const existing = mappings.get(section.id)
+      if (existing !== undefined) return existing
+      let parent = section.parent_id
+      while (parent !== null) {
+        const inherited = mappings.get(parent)
+        if (inherited !== undefined) return {
+          ...inherited, section_id: section.id,
+          missing_topics: [...inherited.missing_topics, '章节拆分继承资料，S5 需按当前章节重新筛选并补充。'],
+        }
+        parent = sections.get(parent)?.parent_id ?? null
+      }
+      return {
+        section_id: section.id, local_materials: [], web_materials: [], writing_dimensions: [],
+        missing_topics: ['新增章节尚无资料，S5 需按当前章节检索并补充。'],
+      }
+    }),
+  }
 }

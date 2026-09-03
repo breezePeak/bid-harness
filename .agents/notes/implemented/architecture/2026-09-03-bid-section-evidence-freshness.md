@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+本记录的逐叶任务、Section 指纹、补映射和事件级来源证明决策已由[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)取代；下文相关内容保留原决策背景，不作为当前行为依据。Corpus 路径授权、同会话修复、文件角色与阶段职责中未被取代的约束仍有效。
+
 Mapping Task topology is Host-owned and exactly one task per writable leaf Section; semantic research remains Agent-owned.
 
 S4 与 S5 共用可写叶子的树遍历。Host plan v4 保存唯一 Section ID、确定性 task_id、真实标题路径、initial/supplemental、Section 指纹和目录摘要。Child 不接收其他 Section，只接收本章检索上下文、关联 S2 记录和预检 Corpus 定位。Main Agent 只负责一轮目录深化及复核。

@@ -73,17 +73,20 @@ export function mapResponsesSearch(payload: unknown): WebSearchResult {
       searched = true
       if ('action' in item && typeof item.action === 'object' && item.action !== null
         && 'sources' in item.action && Array.isArray(item.action.sources)) item.action.sources.forEach(add)
+      if ('results' in item && Array.isArray(item.results)) item.results.forEach(add)
     }
+    if (item.type === 'url_citation' || item.type === 'web_search_result_location') add(item)
     if (item.type === 'message' && 'content' in item && Array.isArray(item.content)) {
       for (const block of item.content as unknown[]) {
         if (typeof block !== 'object' || block === null || !('annotations' in block) || !Array.isArray(block.annotations)) continue
         for (const annotation of block.annotations as unknown[]) {
-          if (typeof annotation === 'object' && annotation !== null && 'type' in annotation && annotation.type === 'url_citation') add(annotation)
+          if (typeof annotation === 'object' && annotation !== null && 'type' in annotation
+            && (annotation.type === 'url_citation' || annotation.type === 'web_search_result_location')) add(annotation)
         }
       }
     }
   }
-  if (!searched) throw new LlmError('GPT Provider returned no hosted web_search call', 'WEB_PROVIDER_ERROR')
+  if (!searched && sources.size === 0) throw new LlmError('GPT Provider returned no hosted web_search call', 'WEB_PROVIDER_ERROR')
   return { sources: [...sources.values()], truncated: false }
 }
 

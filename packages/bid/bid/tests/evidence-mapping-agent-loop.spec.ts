@@ -52,8 +52,6 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       if (repair) expect(JSON.stringify(agent.session.events)).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
       expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json'])
       const source = ledger.sources[0]!
-      expect(source.search_result_seq).toBeLessThan(source.fetch_call_seq)
-      expect(source.fetch_call_seq).toBeLessThan(source.fetch_result_seq)
       expect(source.content_sha256).toBe(webEvidenceContentSha256(await readFile(join(workspace.sessionRoot, source.snapshot_path), 'utf8')))
       const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
         tasks: Array<{ attempts: Array<{ accepted: boolean; child_session_id: string; issues: Array<{ code: string }> }> }>
