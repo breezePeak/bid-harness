@@ -31,6 +31,7 @@ import {
 } from './chapter-writing-plan-artifacts.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
+import { buildWritableSectionWorklist, validateSectionEvidenceFreshness } from './section-evidence-context.ts'
 import {
   buildEvidenceMappingWebSnapshots,
   collectEvidenceMappingWebObservations,
@@ -186,24 +187,7 @@ interface DependencyChapterContext {
  * @param outline - parsed confirmed outline.
  * @returns writable sections in deterministic execution order.
  */
-export function buildChapterWorklist(outline: OutlineArtifact): OutlineSection[] {
-  const children = new Map<string | null, OutlineSection[]>()
-  for (const section of outline.sections) {
-    const siblings = children.get(section.parent_id) ?? []
-    siblings.push(section)
-    children.set(section.parent_id, siblings)
-  }
-  for (const siblings of children.values()) siblings.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
-  const ordered: OutlineSection[] = []
-  const visit = (parentId: string | null): void => {
-    for (const section of children.get(parentId) ?? []) {
-      ordered.push(section)
-      visit(section.id)
-    }
-  }
-  visit(null)
-  return ordered.filter(section => section.writable)
-}
+export const buildChapterWorklist = buildWritableSectionWorklist
 
 function uniqueBy<T>(values: readonly T[], identity: (value: T) => string): T[] {
   const seen = new Set<string>()
@@ -244,7 +228,8 @@ export function pickChapterContext(raw: {
   const responsePointIds = new Set(raw.section.scoring_response_point_ids ?? [])
   const complianceIds = new Set([...raw.section.compliance_ids, ...raw.globalComplianceIds])
   const mapping = raw.evidence.section_mappings.find(item => item.section_id === raw.section.id)
-  const localMaterials = uniqueBy(mapping?.local_materials ?? [], localIdentity)
+  if (mapping === undefined) throw new Error('EVIDENCE_MAPPING_SECTION_MISSING: ' + raw.section.id)
+  const localMaterials = uniqueBy(mapping.local_materials, localIdentity)
   return {
     section: raw.section,
     contentPath: `chapters/sections/${String(raw.sequence).padStart(4, '0')}.md`,
@@ -257,9 +242,9 @@ export function pickChapterContext(raw: {
     relatedMaterials: localMaterials.filter(material => material.source_kind === 'reference'),
     referenceBidMaterials: localMaterials.filter(material => material.source_kind === 'reference_bid'),
     frameworkDraftMaterials: [],
-    webMaterials: uniqueBy(mapping?.web_materials ?? [], webIdentity),
-    writingDimensions: [...new Set(mapping?.writing_dimensions ?? [])],
-    missingTopics: [...new Set(mapping?.missing_topics ?? [])],
+    webMaterials: uniqueBy(mapping.web_materials, webIdentity),
+    writingDimensions: [...new Set(mapping.writing_dimensions)],
+    missingTopics: [...new Set(mapping.missing_topics)],
     localReadLocations: [],
     frameworkReadLocations: [],
     webReadLocations: [],
@@ -759,8 +744,8 @@ export function validateChapterReview(
       ...review.compliance_coverage,
     ]
     if (review.blocking_issues.length > 0 || covered.some(item => item.status !== 'covered')
-      || review.quality_checks.legacy_project_pollution_free !== true
-      || review.quality_checks.placeholder_free !== true) {
+      || ! review.quality_checks.legacy_project_pollution_free
+      || ! review.quality_checks.placeholder_free) {
       issues.push({ code: 'CHAPTER_REVIEW_PASS_INVALID', message: 'Reviewer pass 必须覆盖所有必答项且不得保留阻塞质量问题。', path: 'verdict' })
     }
   }
@@ -881,6 +866,8 @@ export async function executeChapterWriting(
   if (!catalogMatchesScoring(responsePointCatalog, scoring)) throw new Error('chapter-writing-response-point-catalog-mismatch')
   const compliance = parseTenderComplianceArtifact(complianceRaw)
   const evidence = parseEvidenceMapArtifact(evidenceRaw)
+  const freshnessIssues = validateSectionEvidenceFreshness(outline, evidence)
+  if (freshnessIssues.length > 0) throw new Error(freshnessIssues.map(issue => issue.code + ': ' + issue.message).join('; '))
   const webSources = parseWebEvidenceSourcesArtifact(webSourcesRaw)
   const manifest = await workspace.readManifest()
   const tools = agent.ctx.get('tools')

@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   BidWorkspace,
+  parseOutlineArtifact,
+  sectionEvidenceFingerprint,
   parseEvidenceMapArtifact,
   parseEvidenceMappingPartialResult,
   parseTenderScoringArtifact,
@@ -25,8 +27,8 @@ const artifacts: StageArtifact[] = [
 
 function evidenceMap(value: Partial<EvidenceMapArtifact> = {}): EvidenceMapArtifact {
   return {
-    schema_version: 8,
-    section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['总体技术架构'] }],
+    schema_version: 9,
+    section_mappings: [{ section_id: 'SEC-1', section_fingerprint: '0'.repeat(64), local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['总体技术架构'] }],
     ...value,
   }
 }
@@ -107,6 +109,11 @@ function local(source_kind: LocalEvidenceMaterial['source_kind'], file_id: strin
 }
 
 async function writeMap(workspace: BidWorkspace, map: EvidenceMapArtifact): Promise<void> {
+  const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')))
+  for (const mapping of map.section_mappings) {
+    const section = outline.sections.find(section => section.id === mapping.section_id)
+    if (section !== undefined) mapping.section_fingerprint = sectionEvidenceFingerprint(outline, section)
+  }
   await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(map))
 }
 
@@ -118,7 +125,7 @@ async function writeWebSource(workspace: BidWorkspace, content = 'Fetched https:
   return { source_id, snapshot_path, usage: 'reference', summary: '说明安全控制措施。', supports: '支持安全控制措施的设计。' }
 }
 
-describe('evidence-map v8 schema', () => {
+describe('evidence-map v9 schema', () => {
   it('rejects the previous schema version and preserves local-material permissions', () => {
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), schema_version: 7 })).toThrow()
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, local_materials: [{ source_kind: 'reference', file_id: 'file', chunk: 'chunk_0001', usage: 'adapt', summary: '资料。' }] }] })).toThrow()
@@ -132,6 +139,21 @@ describe('evidence-map v8 schema', () => {
 })
 
 describe('evidence-mapping validator', () => {
+  it.each(['missing', 'duplicate', 'unknown', 'stale'] as const)('最终 Validator 拒绝 %s 章节映射', async (scenario) => {
+    const { workspace } = await fixture()
+    await writeMap(workspace, evidenceMap())
+    const path = join(workspace.sessionRoot, 'analysis/evidence-map.json')
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(path, 'utf8')))
+    if (scenario === 'missing') map.section_mappings = []
+    if (scenario === 'duplicate') map.section_mappings.push(map.section_mappings[0]!)
+    if (scenario === 'unknown') map.section_mappings[0]!.section_id = 'UNKNOWN'
+    if (scenario === 'stale') map.section_mappings[0]!.section_fingerprint = '0'.repeat(64)
+    await writeFile(path, JSON.stringify(map))
+    const result = await validateEvidenceMapping(workspace, 'evidence_mapping', artifacts)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_SECTION_' + scenario.toUpperCase())
+  })
+
   it('accepts permitted local materials and tender-only missing topics', async () => {
     const value = await fixture()
     if (value.reference.file === undefined || value.reference.chunk === undefined || value.referenceBid.file === undefined || value.referenceBid.chunk === undefined) throw new Error('local fixtures missing')

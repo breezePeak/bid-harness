@@ -1,6 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { ZodError } from 'zod'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
+import { validateSectionEvidenceFreshness } from './section-evidence-context.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
@@ -128,15 +129,10 @@ export async function validateEvidenceMapping(
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
     await validateOutlineFrameworkRefs(workspace, outline, issues)
     validateOutlineGenerationQuality(outline, quality, requirements, scoring, catalog, issues)
-    const expectedSections = new Set(outline.sections.filter(section => section.writable).map(section => section.id))
-    const actualSections = new Set<string>()
-    for (const [index, mapping] of map.section_mappings.entries()) {
-      if (!expectedSections.has(mapping.section_id)) reject(issues, 'EVIDENCE_MAPPING_SECTION_UNKNOWN', `Unknown writable section ${mapping.section_id}.`, MAP_PATH, `section_mappings[${index}]`)
-      if (actualSections.has(mapping.section_id)) reject(issues, 'EVIDENCE_MAPPING_SECTION_DUPLICATE', `Section ${mapping.section_id} is mapped more than once.`, MAP_PATH, `section_mappings[${index}]`)
-      actualSections.add(mapping.section_id)
+    issues.push(...validateSectionEvidenceFreshness(outline, map))
+    for (const mapping of map.section_mappings) {
       await Promise.all(mapping.local_materials.map(material => validateLocalMaterial(workspace, manifest, material, issues)))
     }
-    for (const id of expectedSections) if (!actualSections.has(id)) reject(issues, 'EVIDENCE_MAPPING_SECTION_MISSING', `Writable section ${id} has no evidence mapping.`, MAP_PATH)
     const validity = await Promise.all(web.sources.map(async source => [
       source,
       await validateWebSource(workspace, source, issues),

@@ -38,12 +38,12 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, buildEvidenceMappingPlan, executeEvidenceMapping, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
-import type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
@@ -57,7 +57,7 @@ import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { BID_STAGES, isBidDocumentRole } from './control-plane-contract.ts'
+import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
   BidEvidenceMappingProgress,
@@ -140,6 +140,8 @@ export { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 export type { ModelStageExecutionOptions } from './model-stage-repair.ts'
 export { validateTenderAnalysis } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
+export * from './section-evidence-context.ts'
+export * from './evidence-mapping-corpus.ts'
 export * from './web-evidence-source-artifacts.ts'
 export {
   buildEvidenceMappingWebSnapshots,
@@ -149,7 +151,7 @@ export {
   mergeEvidenceMappingPartialResults,
   readEvidenceMappingProgress,
   renderEvidenceMappingSubagentTask,
-  renderEvidenceMappingTask,
+  buildEvidenceMappingPlan,
   type EvidenceMappingCapturedWebResult,
   type MergedEvidenceMappingResults,
   type EvidenceMappingWebObservation,
@@ -455,10 +457,10 @@ function parseBinaryUploadFiles(value: string): BidBinaryUploadFile[] {
       throw new Error('bid-invalid-file-data')
     }
     return {
-      name: record.name as string,
-      role: record.role as BidDocumentRole,
-      ...(record.mediaType === undefined ? {} : { mediaType: record.mediaType as string }),
-      size: record.size as number,
+      name: record.name,
+      role: record.role,
+      ...(record.mediaType === undefined ? {} : { mediaType: record.mediaType }),
+      size: record.size,
     }
   })
 }
@@ -930,9 +932,9 @@ export class BidHostRuntime extends TypertRemoteService {
         session,
         {
           canExecute: () => false,
-          execute: async () => { throw new Error('file intake could not reconstruct every selected file') },
+          execute: () => Promise.reject(new Error('file intake could not reconstruct every selected file')),
         },
-        { validate: async () => ({ ok: true }) },
+        { validate: () => Promise.resolve({ ok: true }) },
       )
       const failed = await orchestrator.runCurrentProgramStage()
       await this.ctx.sessions.flush(session)
@@ -1259,19 +1261,51 @@ export class BidHostRuntime extends TypertRemoteService {
         if (runtime.stage === 'evidence_mapping') {
           const evidencePath = within(workspace.sessionRoot, 'analysis/evidence-map.json')
           const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-          const existing = new Map(evidence.section_mappings.map(mapping => [mapping.section_id, mapping]))
-          evidence.section_mappings = candidate.sections.filter(section => section.writable).map(section => existing.get(section.id) ?? {
-            section_id: section.id,
-            local_materials: [],
-            web_materials: [],
-            missing_topics: ['该章节由用户在最终目录确认时新增，写作阶段需补充资料。'],
-            writing_dimensions: [],
-          })
-          await writeFileAtomic(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+          const plan = buildEvidenceMappingPlan(candidate, 'supplemental', evidence)
+          if (plan.tasks.length > 0) {
+            session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
+            try {
+              await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
+                maxRepairAttempts: this.config.modelStageRepairAttempts,
+                maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+                confirmationOutline: candidate,
+                signal: operation.controller.signal,
+              })
+            } catch (error) {
+              const issues = error instanceof BidStageExecutionError ? [...error.issues] : [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: String(error) }]
+              session.append('bid.stage.failed', { stage: 'evidence_mapping', status: 'failed', reason: String(error), issues })
+              throw new BidStageExecutionError(issues)
+            }
+            session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
+          } else {
+            const writable = new Set(candidate.sections.filter(section => section.writable).map(section => section.id))
+            evidence.section_mappings = evidence.section_mappings.filter(mapping => writable.has(mapping.section_id))
+            await writeFileAtomic(evidencePath, JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
+          }
+          const validation = await validateEvidenceMapping(workspace, 'evidence_mapping', [
+            { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
+            { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
+            { stage: 'evidence_mapping', type: 'outline', path: 'outline/outline.json' },
+            { stage: 'evidence_mapping', type: 'outline_quality_report', path: 'outline/quality-report.json' },
+          ])
+          if (!validation.ok) throw new BidStageExecutionError(validation.issues)
         }
         await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        if (runtime.stage === 'evidence_mapping') {
+          const confirmationPath = within(workspace.sessionRoot, 'outline/confirmation.json')
+          await assertNoLinkedPath(workspace.root, confirmationPath)
+          const confirmation = parseOutlineConfirmationArtifact({
+            schema_version: 2, scope: 'technical_bid', decision: 'confirmed',
+            source_outline_sha256: draft.source_outline_sha256,
+            confirmed_outline_sha256: outlineArtifactSha256(candidate),
+            confirmed_draft_revision: draft.revision,
+            confirmed_draft_sha256: draft.draft_outline_sha256,
+          })
+          await writeFileAtomic(confirmationPath, `${JSON.stringify(confirmation, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        }
       } catch (error) {
         await rm(confirmedPath, { force: true })
+        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.sessionRoot, 'outline/confirmation.json'), { force: true })
         throw error
       }
       const artifactRefs: StageArtifact[] = runtime.stage === 'outline_generation' ? [
@@ -1289,13 +1323,14 @@ export class BidHostRuntime extends TypertRemoteService {
         .confirmValidatedStage(runtime.stage, artifactRefs)
       if (!confirmation.ok) {
         await rm(confirmedPath, { force: true })
+        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.sessionRoot, 'outline/confirmation.json'), { force: true })
         return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy outline validation.', issues: confirmation.validation.issues } }
       }
       await rm(within(workspace.sessionRoot, 'outline/draft.json'), { force: true })
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
-    } catch {
-      return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the outline.' } }
+    } catch (error) {
+      return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: error instanceof Error ? error.message : String(error), ...(error instanceof BidStageExecutionError ? { issues: error.issues } : {}) } }
     } finally { this.finishOperation(session.id, operation) }
   }
 

@@ -12,6 +12,7 @@ import type { EvidenceMappingWebSnapshot } from '../src/evidence-mapping-executo
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
+  sectionEvidenceFingerprint,
   buildBidStageTask,
   executeChapterWriting,
   getBidStagePolicy,
@@ -39,7 +40,7 @@ async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof o
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 8, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
+  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 9, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, section_fingerprint: sectionEvidenceFingerprint(outlineFixture(), outlineFixture().sections[index]!), local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
   await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 1, stage: 'evidence_mapping', sources: [] })}\n`)
   const outline = outlineFixture()
   await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
@@ -374,9 +375,10 @@ describe('chapter-writing executor', () => {
       scoring,
       compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
       evidence: parseEvidenceMapArtifact({
-        schema_version: 8,
+        schema_version: 9,
         section_mappings: [{
           section_id: 'SEC-1',
+          section_fingerprint: sectionEvidenceFingerprint(outlineFixture(), outlineFixture().sections[1]!),
           local_materials: [
             { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
             { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },

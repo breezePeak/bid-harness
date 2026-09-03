@@ -90,6 +90,8 @@ describe('BidStagePanel', () => {
   it('shows the current S3 Mapping Task counts while the Host runs evidence mapping', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 10,
+      initial: 8,
+      supplemental: 2,
       completed: 3,
       running: 2,
       not_started: 5,
@@ -100,7 +102,7 @@ describe('BidStagePanel', () => {
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(await screen.findByText('映射任务：共 10 个 · 已完成 3 · 映射中 2 · 未开始 5')).toBeTruthy()
+    expect(await screen.findByText('映射任务：初始 8 个 · 补充 2 个 · 共 10 个 · 已完成 3 · 映射中 2 · 未开始 5')).toBeTruthy()
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
@@ -610,8 +612,8 @@ describe('ui-bid browser plugin', () => {
     })
     const uploadedBytes = await new Promise<Uint8Array>((resolve, reject) => {
       const reader = new FileReader()
-      reader.addEventListener('load', () => resolve(new Uint8Array(reader.result as ArrayBuffer)))
-      reader.addEventListener('error', () => reject(reader.error))
+      reader.addEventListener('load', () => { resolve(new Uint8Array(reader.result as ArrayBuffer)) })
+      reader.addEventListener('error', () => { reject(reader.error ?? new Error('FileReader failed')) })
       reader.readAsArrayBuffer(init.body as Blob)
     })
     expect(uploadedBytes).toEqual(Uint8Array.from([...tenderBytes, ...referenceBidBytes]))

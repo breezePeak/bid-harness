@@ -10,6 +10,8 @@
 
 面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S7 处于 `book_review/waiting_user` 时，审核项自动切换到三栏审核工作台：左栏保留同一 Session 的 Transcript 和 Composer，中栏只读渲染章节 Markdown，右栏显示 Host 返回的审核摘要、问题和限制。工作台通过专用 Remote 读取审核报告与章节，并仅在用户明确确认后调用完成审核操作。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 
+S4 运行时，状态行分别显示 Host 返回的初始任务数与补充任务数。初始数量等于初步确认目录中的可写叶子数；目录深化和最终用户编辑产生的补映射计入补充数量，任务名称使用真实章节标题路径。
+
 ## 模型体验
 
 没有直接影响。本包不添加提示词内容，也不发送普通 Session prompt；文件持久化、工作流事件与所有模型可见的 Bid 输入均由 Host 拥有。

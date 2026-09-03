@@ -429,6 +429,8 @@ export function BidStagePanel({
           {mappingProgress !== null && <span className={css.mappingProgress} role="status">
             {t('mapping.progress', {
               total: mappingProgress.total,
+              initial: mappingProgress.initial,
+              supplemental: mappingProgress.supplemental,
               completed: mappingProgress.completed,
               running: mappingProgress.running,
               notStarted: mappingProgress.not_started,

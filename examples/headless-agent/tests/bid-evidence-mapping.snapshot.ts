@@ -33,6 +33,8 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
         .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
       expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 2]])
       expect(childLog).toContain('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+      expect(childLog).toContain('本地资料只有实施流程。')
+      expect(childLog).not.toContain('EISDIR')
 
       const sessionRoot = join(cwd, '.bid-harness/sessions', header.parentSession!)
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
@@ -45,7 +47,7 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const artifacts = JSON.stringify({
         map, ledger: { ...ledger, sources: ledger.sources.map(source => ({ ...source, fetched_at: '<TIME>' })) }, snapshots,
       }, null, 2) + '\n'
-      const transcript = normalizeSessionSnapshot(childLog, { sessionIds: [header.parentSession!, header.id], cwd })
+      const transcript = normalizeSessionSnapshot(childLog, { sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const expected = { 'child.expected.jsonl': transcript, 'artifacts.expected.json': artifacts }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })
