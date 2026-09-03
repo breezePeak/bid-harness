@@ -27,7 +27,7 @@ function reject(issues: StageValidationIssue[], code: string, message: string, a
 
 async function readJson(workspace: BidWorkspace, path: string, issues: StageValidationIssue[]): Promise<unknown> {
   try {
-    const target = within(workspace.sessionRoot, path)
+    const target = within(workspace.projectRoot, path)
     await assertNoLinkedPath(workspace.root, target)
     if (!(await lstat(target)).isFile()) throw new Error('not-file')
     return JSON.parse(await readFile(target, 'utf8'))
@@ -50,7 +50,7 @@ async function validateMaterial(
 
 async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEvidenceSource): Promise<boolean> {
   try {
-    const path = within(workspace.sessionRoot, source.snapshot_path)
+    const path = within(workspace.projectRoot, source.snapshot_path)
     await assertNoLinkedPath(workspace.root, path)
     if (!(await lstat(path)).isFile()) return false
     return webEvidenceContentSha256(await readFile(path, 'utf8')) === source.content_sha256
@@ -87,7 +87,7 @@ async function validateWebMaterials(
 
 /**
  * Validate complete S6 output against the confirmed outline and durable material sources.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param stage - stage that produced the declared Artifact.
  * @param artifacts - Executor-declared Artifact set.
  * @returns validation success or all deterministic S6 issues.
@@ -205,7 +205,7 @@ export async function validateChapterWriting(
       }
     }
     try {
-      const body = within(workspace.sessionRoot, chapter.content_path)
+      const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
       if (!(await lstat(body)).isFile() || markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim())) throw new Error('empty')
@@ -223,7 +223,7 @@ export async function validateChapterWriting(
       for (const item of coverage) {
         if (item.evidence_quotes.some(quote => !markdown.includes(quote))) throw new Error('review-quote-invalid')
       }
-    } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the session, or empty.', chapter.content_path) }
+    } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the project, or empty.', chapter.content_path) }
   }
   for (const id of writable.keys()) if (!actual.has(id)) reject(issues, 'CHAPTER_WRITING_SECTION_MISSING', 'The manifest omits a writable confirmed section.', MANIFEST)
   for (const id of writable.keys()) if (!loggedSections.has(id)) reject(issues, 'CHAPTER_WRITING_LOG_SECTION_MISSING', 'The execution log omits a writable confirmed section.', LOG)

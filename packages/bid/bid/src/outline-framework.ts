@@ -46,12 +46,12 @@ function parseFrameworkStructure(value: unknown): OutlineFrameworkHeading[] {
 
 async function readFrameworkHeadings(workspace: BidWorkspace, file: ManifestFile): Promise<OutlineFrameworkHeading[]> {
   if (file.structurePath !== null) {
-    const path = within(workspace.sessionRoot, file.structurePath)
+    const path = within(workspace.projectRoot, file.structurePath)
     await assertNoLinkedPath(workspace.root, path)
     return parseFrameworkStructure(JSON.parse(await readFile(path, 'utf8')))
   }
   if (file.chunkIndexPath === null) throw new Error('outline-framework-chunk-index-missing')
-  const path = within(workspace.sessionRoot, file.chunkIndexPath)
+  const path = within(workspace.projectRoot, file.chunkIndexPath)
   await assertNoLinkedPath(workspace.root, path)
   const index = parseDocumentChunkIndex(JSON.parse(await readFile(path, 'utf8')))
   const headings = new Map<string, OutlineFrameworkHeading>()
@@ -69,7 +69,7 @@ async function readFrameworkHeadings(workspace: BidWorkspace, file: ManifestFile
 
 /**
  * Read successful outline frameworks as ordered heading trees.
- * @param workspace - Session workspace containing the imported framework files.
+ * @param workspace - project workspace containing the imported framework files.
  * @returns framework heading trees in manifest order.
  */
 export async function loadOutlineFrameworkStructures(workspace: BidWorkspace): Promise<OutlineFrameworkStructure[]> {
@@ -85,7 +85,7 @@ export async function loadOutlineFrameworkStructures(workspace: BidWorkspace): P
 
 /**
  * Validate only the durable file and heading identities carried by framework references.
- * @param workspace - Session workspace containing the imported framework files.
+ * @param workspace - project workspace containing the imported framework files.
  * @param outline - outline whose Section references require validation.
  * @param issues - mutable deterministic validation issue sink.
  * @returns nothing.
@@ -123,7 +123,7 @@ export interface FrameworkDraftMaterial {
 
 /**
  * Resolve exact-heading framework chunks without treating them as factual Evidence.
- * @param workspace - Session workspace containing the imported framework files.
+ * @param workspace - project workspace containing the imported framework files.
  * @param refs - exact framework file and heading references from one Section.
  * @returns matching draft chunks with validated absolute paths.
  */
@@ -137,12 +137,12 @@ export async function resolveFrameworkDraftMaterials(
     const file = manifest.files.find(candidate => String(candidate.id) === reference.file_id
       && candidate.role === 'outline_framework' && candidate.parseStatus === 'success')
     if (file?.chunkIndexPath === null || file?.chunkIndexPath === undefined || file.chunksPath === null) continue
-    const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
+    const indexPath = within(workspace.projectRoot, file.chunkIndexPath)
     await assertNoLinkedPath(workspace.root, indexPath)
     const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
     for (const chunk of index.chunks.filter(candidate => candidate.heading_path.length === reference.heading_path.length
       && candidate.heading_path.every((heading, index) => heading === reference.heading_path[index]))) {
-      const chunkPath = join(workspace.sessionRoot, file.chunksPath, chunk.path)
+      const chunkPath = join(workspace.projectRoot, file.chunksPath, chunk.path)
       await assertNoLinkedPath(workspace.root, chunkPath)
       materials.push({
         file_id: reference.file_id, heading_path: [...reference.heading_path], chunk: chunk.id,

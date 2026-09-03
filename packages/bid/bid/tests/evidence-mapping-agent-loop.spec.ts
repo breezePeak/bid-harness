@@ -78,10 +78,10 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     try {
       const { agent, workspace, sourceUrl, outcome } = await runEvidenceMappingLoop(ctx, root, repair)
       expect(outcome).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
-      const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+      const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
       expect(ledger.sources).toHaveLength(1)
       expect(ledger.sources[0]?.requested_url).toBe(sourceUrl)
-      const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+      const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       expect(map.section_mappings[0]?.web_materials).toEqual([{
         source_id: ledger.sources[0]!.source_id,
         snapshot_path: ledger.sources[0]!.snapshot_path,
@@ -90,7 +90,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         supports: '支持安全方案。',
       }])
       expect(map.section_mappings[0]?.local_materials).toEqual([])
-      expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
+      expect(await readFile(join(workspace.projectRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
       expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping')).toBe(true)
       expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
         'read', 'read', 'write', ...(repair ? ['write'] : []), 'read', 'read', 'write',
@@ -98,8 +98,8 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       if (repair) expect(JSON.stringify(agent.session.events)).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
       expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json'])
       const source = ledger.sources[0]!
-      expect(source.content_sha256).toBe(webEvidenceContentSha256(await readFile(join(workspace.sessionRoot, source.snapshot_path), 'utf8')))
-      const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      expect(source.content_sha256).toBe(webEvidenceContentSha256(await readFile(join(workspace.projectRoot, source.snapshot_path), 'utf8')))
+      const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
         tasks: Array<{ attempts: Array<{ accepted: boolean; child_session_id: string; issues: Array<{ code: string }> }> }>
       }
       const attempts = log.tasks[0]!.attempts

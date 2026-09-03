@@ -28,13 +28,13 @@ function isWithin(root: string, target: string): boolean {
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
 }
 
-/** Resolve an untrusted durable path only when it remains in the Session workspace. */
-function resolveStoredPath(sessionRoot: string, base: string, candidate: string): string {
+/** Resolve an untrusted durable path only when it remains in the project workspace. */
+function resolveStoredPath(projectRoot: string, base: string, candidate: string): string {
   if (isAbsolute(candidate) || /^[a-z]:/iu.test(candidate) || /^\\\\/u.test(candidate)) {
     throw new Error('absolute path')
   }
   const target = resolve(base, candidate)
-  if (!isWithin(sessionRoot, target)) throw new Error('path traversal')
+  if (!isWithin(projectRoot, target)) throw new Error('path traversal')
   return target
 }
 
@@ -66,9 +66,9 @@ function resolveRecordPath(
   issues: StageValidationIssue[],
 ): string | null {
   try {
-    return resolveStoredPath(workspace.sessionRoot, workspace.sessionRoot, candidate)
+    return resolveStoredPath(workspace.projectRoot, workspace.projectRoot, candidate)
   } catch {
-    reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_SESSION', 'A manifest path leaves the Bid Session workspace.', candidate)
+    reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_PROJECT', 'A manifest path leaves the Bid project workspace.', candidate)
     return null
   }
 }
@@ -165,22 +165,22 @@ async function validateSuccessfulRecord(
   }
 
   try {
-    const indexedDocument = resolveStoredPath(workspace.sessionRoot, chunksRoot, index.source_document)
+    const indexedDocument = resolveStoredPath(workspace.projectRoot, chunksRoot, index.source_document)
     if (document !== null && indexedDocument !== document) {
       reject(issues, 'FILE_INTAKE_CHUNK_INDEX_INVALID', 'The chunk index names a different source document.', record.chunkIndexPath)
     }
   } catch {
-    reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_SESSION', 'The chunk index source path leaves the Bid Session workspace.', record.chunkIndexPath)
+    reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_PROJECT', 'The chunk index source path leaves the Bid project workspace.', record.chunkIndexPath)
   }
 
   const chunkPaths = new Set(index.chunks.map(chunk => chunk.path))
   for (const chunk of index.chunks) {
     try {
-      const chunkPath = resolveStoredPath(workspace.sessionRoot, chunksRoot, chunk.path)
+      const chunkPath = resolveStoredPath(workspace.projectRoot, chunksRoot, chunk.path)
       if (!isWithin(chunksRoot, chunkPath)) throw new Error('chunk path leaves chunk directory')
       await requireFile(workspace.root, chunkPath, `${record.chunksPath}/${chunk.path}`, 'FILE_INTAKE_CHUNK_MISSING', issues)
     } catch {
-      reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_SESSION', 'A chunk path leaves its Bid corpus directory.', chunk.path)
+      reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_PROJECT', 'A chunk path leaves its Bid corpus directory.', chunk.path)
     }
     for (const adjacent of [chunk.prev_chunk, chunk.next_chunk]) {
       if (adjacent !== null && !chunkPaths.has(adjacent)) {
@@ -207,10 +207,10 @@ async function validateSuccessfulRecord(
 
 /**
  * Validate the current file-intake batch against its durable workspace artifacts.
- * @param workspace - Session-isolated Bid workspace selected by the Host.
+ * @param workspace - Project-scoped Bid workspace selected by the Host.
  * @param batch - records returned by this exact import attempt.
  * @param stage - orchestrator stage requesting validation.
- * @param artifacts - session-relative artifacts returned by the executor.
+ * @param artifacts - project-relative artifacts returned by the executor.
  * @returns explicit issues, or authorization for the stage to complete.
  */
 export async function validateFileIntake(
@@ -230,9 +230,9 @@ export async function validateFileIntake(
       continue
     }
     try {
-      resolveStoredPath(workspace.sessionRoot, workspace.sessionRoot, artifact.path)
+      resolveStoredPath(workspace.projectRoot, workspace.projectRoot, artifact.path)
     } catch {
-      reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_SESSION', 'A stage artifact path leaves the Bid Session workspace.', artifact.path)
+      reject(issues, 'FILE_INTAKE_PATH_OUTSIDE_PROJECT', 'A stage artifact path leaves the Bid project workspace.', artifact.path)
     }
   }
   if (!artifacts.some(artifact => (

@@ -14,7 +14,7 @@ export interface ResolvedEvidenceChunk {
 
 /**
  * Resolve local Evidence by exact source role, file id, and chunk id.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param manifest - current validated manifest.
  * @param material - local Evidence reference.
  * @returns the owning manifest file, indexed entry, and Host-canonical absolute path.
@@ -33,12 +33,12 @@ export async function resolveEvidenceChunk(
   }
   const chunkId = evidenceChunkId(material.chunk)
   if (chunkId === undefined) throw new Error('evidence-chunk-id-invalid')
-  const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
+  const indexPath = within(workspace.projectRoot, file.chunkIndexPath)
   await assertNoLinkedPath(workspace.root, indexPath)
   const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
   const entry = index.chunks.find(candidate => candidate.id === chunkId)
   if (entry === undefined) throw new Error('evidence-chunk-id-unknown')
-  const path = within(workspace.sessionRoot, posix.join(file.chunksPath, entry.path))
+  const path = within(workspace.projectRoot, posix.join(file.chunksPath, entry.path))
   await assertNoLinkedPath(workspace.root, path)
   if (!(await lstat(path)).isFile()) throw new Error('evidence-chunk-file-invalid')
   return { file, entry, path }

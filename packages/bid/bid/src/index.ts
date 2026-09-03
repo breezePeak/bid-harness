@@ -1,12 +1,13 @@
 /**
  * Workspace-local import, parsing, manifest, and DOCX-export primitives for
- * the bid profile.  The caller supplies the selected workspace and session;
+ * the bid profile. The caller supplies the selected project workspace;
  * this module never stores an ambient current workspace or emits file bytes to
  * a model request.
  */
 
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname, resolve, sep } from 'node:path'
@@ -52,6 +53,7 @@ import { validateOutlineDraftForConfirmation } from './outline-confirmation-vali
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import { buildChapterWorklist, DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY, executeChapterWriting } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
+import { executeDocxExport, validateDocxExport } from './docx-export.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
@@ -59,6 +61,7 @@ import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
+import { checkpointBidProjectState, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
@@ -187,7 +190,10 @@ export {
 } from './chapter-writing-executor.ts'
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
+export { executeDocxExport, validateDocxExport } from './docx-export.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
+export { readBidProjectState, writeBidProjectState, checkpointBidProjectState } from './project-state.ts'
+export type { BidProjectState } from './project-state.ts'
 
 /** Durable result of parsing one imported bid file. */
 export type ParseStatus = 'pending' | 'success' | 'needs_ocr' | 'failed'
@@ -204,7 +210,7 @@ export interface BidConfig {
   maxFileBytes: number
   maxFiles: number
   maxTotalBytes: number
-  sessionDirectory: string
+  projectDirectory: string
   outputDirectory: string
   enableDocxExport: boolean
   font: string
@@ -219,7 +225,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   maxFileBytes: 200 * 1024 * 1024,
   maxFiles: 20,
   maxTotalBytes: 500 * 1024 * 1024,
-  sessionDirectory: '.bid-harness/sessions',
+  projectDirectory: '.bid-harness',
   outputDirectory: 'output',
   enableDocxExport: true,
   font: 'Microsoft YaHei',
@@ -512,11 +518,24 @@ function intakeError(error: unknown): BidFileIntakeResult {
 
 /** Host service for Bid projection, prompt admission, and dedicated file intake. */
 interface ActiveBidOperation {
+  readonly key: BidProjectKey
+  readonly session: Session
+  readonly workspace: BidWorkspace
+  ready: boolean
   controller: AbortController
   readonly done: Promise<void>
   readonly settle: () => void
   reservedForReset: boolean
   interaction?: boolean
+}
+
+type BidProjectKey = string & { readonly __bidProjectKey: unique symbol }
+
+/** 同一目录的符号链接及 Windows 大小写别名共用一把项目锁。 */
+function projectKey(session: Session): BidProjectKey {
+  if (session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+  const path = realpathSync(session.header.cwd)
+  return (process.platform === 'win32' ? path.toLowerCase() : path) as BidProjectKey
 }
 
 /**
@@ -552,29 +571,87 @@ export class BidHostRuntime extends TypertRemoteService {
   static Config = Config
 
   private readonly config: Config
-  private readonly inFlight = new Map<string, ActiveBidOperation>()
+  private readonly inFlight = new Map<BidProjectKey, ActiveBidOperation>()
 
-  /** Reserve one Session mutation until its async work reaches quiescence. */
-  private beginOperation(sessionId: string): ActiveBidOperation {
-    if (this.inFlight.has(sessionId)) {
-      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
+  /** 在第一次异步操作前占用项目，直到落盘和所有执行器完成。 */
+  private beginOperation(session: Session): ActiveBidOperation {
+    const key = projectKey(session)
+    if (this.inFlight.has(key)) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Bid 操作正在执行。')
     }
     const settled = Promise.withResolvers<void>()
     const operation: ActiveBidOperation = {
+      key,
+      session,
+      workspace: new BidWorkspace(key, workspaceConfig(this.config)),
+      ready: false,
       controller: new AbortController(),
       done: settled.promise,
       settle: settled.resolve,
       reservedForReset: false,
     }
-    this.inFlight.set(sessionId, operation)
+    this.inFlight.set(key, operation)
     return operation
   }
 
-  /** Release an operation, preserving its slot when a reset is taking ownership. */
-  private finishOperation(sessionId: string, operation: ActiveBidOperation): void {
-    if (this.inFlight.get(sessionId) !== operation) return
-    if (!operation.reservedForReset) this.inFlight.delete(sessionId)
-    operation.settle()
+  /** 先持久化稳定状态，再释放项目；重置接管期间保留锁。 */
+  private async finishOperation(session: Session, operation: ActiveBidOperation, persist = true): Promise<void> {
+    const key = operation.key
+    try {
+      if (operation.ready && persist) {
+        const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+        if (runtime.status === 'running' && this.inFlight.get(key) === operation) session.append('bid.stage.failed', {
+          stage: runtime.stage, status: 'failed', reason: '阶段执行因后端停止而中断，请重试当前阶段。',
+        })
+        await this.checkpoint(operation)
+      }
+    } finally {
+      if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
+      operation.settle()
+    }
+  }
+
+  /** 项目文件是操作授权依据，旧 Session 的投影在持锁后重新加载。 */
+  private async prepareOperation(operation: ActiveBidOperation): Promise<BidRuntimeState> {
+    const saved = await readBidProjectState(operation.workspace)
+    const runtime: BidRuntimeState = saved?.runtime.status === 'running'
+      ? { stage: saved.runtime.stage, status: 'failed', failureReason: '阶段执行因后端停止而中断，请重试当前阶段。' }
+      : saved?.runtime ?? BID_INITIAL_RUNTIME_STATE
+    const state = saved === undefined || saved.runtime.status === 'running'
+      ? await checkpointBidProjectState(operation.workspace, runtime)
+      : saved
+    operation.session.append('bid.project.resumed', { runtime: state.runtime, revision: state.revision })
+    operation.ready = true
+    await this.publishProjectState(operation, state)
+    return state.runtime
+  }
+
+  /** 只广播控制状态；每个 Session 保留独立的聊天、工具及模型上下文。 */
+  private async publishProjectState(operation: ActiveBidOperation, state: BidProjectState): Promise<void> {
+    const key = operation.key
+    const sessions = [operation.session, ...this.ctx.sessions.list().filter((session) => {
+      if (session === operation.session) return false
+      if (!isBidMainSession(session) || session.header.cwd === undefined) return false
+      try { return projectKey(session) === key } catch (error) {
+        // 已删除或不可访问的其他工作区不参与当前项目的实时投影。
+        if (['ENOENT', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
+        throw error
+      }
+    })]
+    for (const session of sessions) {
+      const last = session.events.at(-1)
+      if (last?.type !== 'bid.project.resumed' || last.data.revision !== state.revision) {
+        session.append('bid.project.resumed', { runtime: state.runtime, revision: state.revision })
+      }
+    }
+    await Promise.all(sessions.map(session => this.ctx.sessions.flush(session)))
+  }
+
+  /** 执行器启动前及 Host 操作结束后共用的原子项目检查点。 */
+  private async checkpoint(operation: ActiveBidOperation): Promise<void> {
+    const runtime = operation.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    const state = await checkpointBidProjectState(operation.workspace, runtime)
+    await this.publishProjectState(operation, state)
   }
 
   /**
@@ -593,7 +670,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (resolveSessionPreset(session) !== 'bid') return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
-      if (this.inFlight.has(session.id)) return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
+      if (session.header.cwd !== undefined && this.inFlight.has(projectKey(session))) return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
       if (projection.composer.enabled) return
       const reason = projection.composer.reason
       return {
@@ -603,11 +680,19 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     installStageInteractionTools(ctx,
       (agent, request, signal) => this.executeStageInteraction(agent, request, signal),
-      session => this.inFlight.get(session.id)?.interaction === true)
+      session => session.header.cwd !== undefined && this.inFlight.get(projectKey(session))?.interaction === true)
+    ctx.inject(['tools'], (toolCtx) => {
+      toolCtx.effect(() => toolCtx.tools.guard((execution) => {
+        const session = execution.agent?.session
+        if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined) return
+        const operation = this.inFlight.get(projectKey(session))
+        if (operation !== undefined && operation.session !== session) return 'BID_OPERATION_IN_PROGRESS'
+      }))
+    })
     ctx.on('agent/session-start', ({ agent }) => {
       const cwd = agent.session.header.cwd
       if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
-      void this.driveStartedSession(agent, cwd)
+      void this.driveStartedSession(agent, cwd).catch(error => ctx.logger.warn(`Bid 项目启动失败：${String(error)}`))
     }, { global: true })
     ctx.inject(['webServer'], (webCtx) => {
       const webServer = webCtx.get('webServer') as unknown as BidBinaryUploadWebServer
@@ -619,28 +704,29 @@ export class BidHostRuntime extends TypertRemoteService {
     })
   }
 
-  /** Main Agent 的阶段动作使用同一个 Session 锁；失败恢复已保存产物，不产生确认事件。 */
+  /** Main Agent 的阶段动作使用项目锁；失败恢复已保存产物，不产生确认事件。 */
   private async executeStageInteraction(agent: Agent, input: unknown, callerSignal: AbortSignal): Promise<unknown> {
     const { session } = agent
     const request = stageInteractionSchema.parse(input)
     if (!isBidMainSession(session) || session.header.cwd === undefined) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
-    if (this.inFlight.has(session.id)) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (runtime.status !== 'waiting_user' || (request.action !== 'bid_stage_inspect' && runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || (request.action === 'bid_evidence_remap' && runtime.stage !== 'evidence_mapping')) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前阶段不允许该操作。')
+    if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
     callerSignal.throwIfAborted()
-    const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-    const operation = this.beginOperation(session.id)
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const operation = this.beginOperation(session)
     operation.interaction = true
     const signal = AbortSignal.any([callerSignal, operation.controller.signal])
     let started = false
+    let runtime = BID_INITIAL_RUNTIME_STATE
     let restored = true
     const backup = new Map<string, string | null>()
     try {
+      runtime = await this.prepareOperation(operation)
+      if (runtime.status !== 'waiting_user' || (request.action !== 'bid_stage_inspect' && runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || (request.action === 'bid_evidence_remap' && runtime.stage !== 'evidence_mapping')) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前阶段不允许该操作。')
       if (request.action === 'bid_stage_inspect') return await inspectBidStage(workspace, session)
       const base = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== base.revision || request.expected_draft_sha256 !== base.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: base } }
       for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json'] : [])]) {
-        const absolute = within(workspace.sessionRoot, path)
+        const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         try { backup.set(absolute, await readFile(absolute, 'utf8')) } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -650,6 +736,7 @@ export class BidHostRuntime extends TypertRemoteService {
       signal.throwIfAborted()
       session.append('bid.stage.started', { stage: runtime.stage, status: 'running' })
       started = true
+      await this.checkpoint(operation)
       const operations = request.action === 'bid_outline_regenerate_scope'
         ? await generateScopedOutlineOperations(agent, base, request.section_ids, request.feedback, signal)
         : request.action === 'bid_outline_apply_operations' ? parseOutlineEditOperations(request.operations) : []
@@ -660,7 +747,7 @@ export class BidHostRuntime extends TypertRemoteService {
       signal.throwIfAborted()
       const draft = mutation.value
       const persist = async (path: string, value: unknown): Promise<void> => {
-        const absolute = within(workspace.sessionRoot, path)
+        const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
       }
@@ -709,23 +796,34 @@ export class BidHostRuntime extends TypertRemoteService {
         if (restored) session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
         else session.append('bid.stage.failed', { stage: runtime.stage, status: 'failed', reason: '阶段交互失败且产物恢复未完成，请重试。' })
       }
-      try { await this.ctx.sessions.flush(session) } finally { this.finishOperation(session.id, operation) }
+      try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
     }
   }
 
-  /** Continue implemented automatic stages after a Bid Session starts or resumes. */
+  /** 新聊天仅从项目文件恢复控制状态，等待中的项目不重复运行阶段。 */
   private async driveStartedSession(agent: Agent, cwd: string): Promise<void> {
     const { session } = agent
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (runtime.status === 'waiting_user' || (runtime.stage === 'file_intake' && runtime.status === 'pending')) return
-    if (this.inFlight.has(session.id)) return
-    const operation = this.beginOperation(session.id)
+    const key = projectKey(session)
+    for (let active = this.inFlight.get(key); active !== undefined; active = this.inFlight.get(key)) {
+      const checkpoint = active.session.events.findLast(event => event.type === 'bid.project.resumed')
+      if (checkpoint !== undefined) {
+        const runtime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+        session.append('bid.project.resumed', { runtime, revision: checkpoint.data.revision })
+        await this.ctx.sessions.flush(session)
+      }
+      await active.done
+    }
+    const operation = this.beginOperation(session)
+    let driven = false
     try {
-      const workspace = new BidWorkspace(cwd, session.id, workspaceConfig(this.config))
+      const runtime = await this.prepareOperation(operation)
+      if (runtime.status !== 'pending' || runtime.stage === 'file_intake') return
+      driven = true
+      const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
       await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
       await this.ctx.sessions.flush(session)
     } finally {
-      this.finishOperation(session.id, operation)
+      await this.finishOperation(session, operation, driven)
     }
   }
 
@@ -734,32 +832,39 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
-        execute: task => task.stage === 'tender_analysis'
-          ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
-          : task.stage === 'evidence_mapping'
-            ? executeEvidenceMapping(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-              signal,
-            })
-            : task.stage === 'outline_generation'
-              ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
-              : task.stage === 'chapter_writing'
-                ? executeChapterWriting(agent, workspace, task, {
-                  maxRepairAttempts: this.config.modelStageRepairAttempts,
-                  maxConcurrency: this.config.chapterWritingMaxConcurrency,
-                  signal,
-                })
-                : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`)),
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'docx_export',
+        execute: async (task) => {
+          const operation = this.inFlight.get(projectKey(agent.session))
+          if (operation !== undefined) await this.checkpoint(operation)
+          if (task.stage === 'docx_export') return executeDocxExport(workspace, signal)
+          return task.stage === 'tender_analysis'
+            ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
+            : task.stage === 'evidence_mapping'
+              ? executeEvidenceMapping(agent, workspace, task, {
+                maxRepairAttempts: this.config.modelStageRepairAttempts,
+                maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+                signal,
+              })
+              : task.stage === 'outline_generation'
+                ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
+                : task.stage === 'chapter_writing'
+                  ? executeChapterWriting(agent, workspace, task, {
+                    maxRepairAttempts: this.config.modelStageRepairAttempts,
+                    maxConcurrency: this.config.chapterWritingMaxConcurrency,
+                    signal,
+                  })
+                  : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`))
+        },
       },
       {
-        validate: (stage, artifacts) => stage === 'tender_analysis'
-          ? validateTenderAnalysis(workspace, stage, artifacts)
-          : stage === 'evidence_mapping'
-            ? validateEvidenceMapping(workspace, stage, artifacts)
-            : stage === 'chapter_writing' ? validateChapterWriting(workspace, stage, artifacts)
-              : validateOutlineGeneration(workspace, stage, artifacts),
+        validate: (stage, artifacts) => stage === 'docx_export'
+          ? validateDocxExport(workspace, stage, artifacts)
+          : stage === 'tender_analysis'
+            ? validateTenderAnalysis(workspace, stage, artifacts)
+            : stage === 'evidence_mapping'
+              ? validateEvidenceMapping(workspace, stage, artifacts)
+              : stage === 'chapter_writing' ? validateChapterWriting(workspace, stage, artifacts)
+                : validateOutlineGeneration(workspace, stage, artifacts),
       },
       signal,
     )
@@ -778,29 +883,28 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
     }
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) {
-      throw new BidOrchestratorError(
-        'BID_STAGE_RESET_NOT_ALLOWED',
-        `Cannot reset future Bid stage ${JSON.stringify(stage)} while the current stage is ${JSON.stringify(runtime.stage)}.`,
-      )
-    }
-    let operation = this.inFlight.get(session.id)
-    if (operation !== undefined) {
-      if (operation.reservedForReset) {
-        throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid stage reset is already running for this Session.')
+    const key = projectKey(session)
+    const prior = this.inFlight.get(key)
+    if (prior !== undefined) {
+      if (prior.reservedForReset || prior.session !== session) {
+        throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Bid 操作正在执行。')
       }
-      operation.reservedForReset = true
-      operation.controller.abort()
-      if (runtime.status === 'running') agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
-      await Promise.all([operation.done, agent.whenIdle()])
-      operation.controller = new AbortController()
-    } else {
-      operation = this.beginOperation(session.id)
+      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
+      this.inFlight.delete(key)
     }
+    const operation = this.beginOperation(session)
+    operation.reservedForReset = true
     try {
+      if (prior !== undefined) {
+        prior.controller.abort()
+        agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+        await Promise.all([prior.done, agent.whenIdle()])
+      }
+      const runtime = await this.prepareOperation(operation)
+      if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
       agent.inbox.clear()
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const resetPaths: Readonly<Record<BidStage, readonly string[]>> = {
         file_intake: ['analysis', 'outline', 'chapters', 'output'],
         tender_analysis: ['analysis', 'outline', 'chapters', 'output'],
@@ -833,7 +937,7 @@ export class BidHostRuntime extends TypertRemoteService {
         chapter_writing: ['chapters', 'output'],
         docx_export: ['output'],
       }
-      const paths = resetPaths[stage].map(path => within(workspace.sessionRoot, path))
+      const paths = resetPaths[stage].map(path => within(workspace.projectRoot, path))
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       await Promise.all(paths.map(path => rm(path, { recursive: true, force: true })))
       clearStageContext(session, stage)
@@ -843,7 +947,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return next
     } finally {
       operation.reservedForReset = false
-      this.finishOperation(session.id, operation)
+      await this.finishOperation(session, operation)
     }
   }
 
@@ -879,12 +983,12 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       return intakeRejected('BID_SESSION_REQUIRED', 'File intake requires a Bid Session with a Host workspace.')
     }
-    if (this.inFlight.has(session.id)) {
+    if (this.inFlight.has(projectKey(session))) {
       return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
     }
-    const operation = this.beginOperation(session.id)
+    const operation = this.beginOperation(session)
     try {
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
       }
@@ -897,7 +1001,7 @@ export class BidHostRuntime extends TypertRemoteService {
           failures,
         )
       }
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
       validateBidFileBatch(incoming, workspace.config)
@@ -905,8 +1009,9 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'docx_export',
           execute: async (task) => {
+            await this.checkpoint(operation)
             if (task.stage === 'file_intake') {
               try {
                 imported = await workspace.import(incoming)
@@ -919,6 +1024,7 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
+            if (task.stage === 'docx_export') return executeDocxExport(workspace, operation.controller.signal)
             const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts, signal: operation.controller.signal }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
@@ -934,17 +1040,19 @@ export class BidHostRuntime extends TypertRemoteService {
           },
         },
         {
-          validate: (stage, artifacts) => stage === 'file_intake'
-            ? validateFileIntake(workspace, imported, stage, artifacts, incoming)
-            : stage === 'tender_analysis'
-              ? validateTenderAnalysis(workspace, stage, artifacts)
-              : stage === 'evidence_mapping'
-                ? validateEvidenceMapping(workspace, stage, artifacts)
-                : stage === 'outline_generation'
-                  ? validateOutlineGeneration(workspace, stage, artifacts)
-                  : stage === 'chapter_writing'
-                    ? validateChapterWriting(workspace, stage, artifacts)
-                    : validateOutlineGeneration(workspace, stage, artifacts),
+          validate: (stage, artifacts) => stage === 'docx_export'
+            ? validateDocxExport(workspace, stage, artifacts)
+            : stage === 'file_intake'
+              ? validateFileIntake(workspace, imported, stage, artifacts, incoming)
+              : stage === 'tender_analysis'
+                ? validateTenderAnalysis(workspace, stage, artifacts)
+                : stage === 'evidence_mapping'
+                  ? validateEvidenceMapping(workspace, stage, artifacts)
+                  : stage === 'outline_generation'
+                    ? validateOutlineGeneration(workspace, stage, artifacts)
+                    : stage === 'chapter_writing'
+                      ? validateChapterWriting(workspace, stage, artifacts)
+                      : validateOutlineGeneration(workspace, stage, artifacts),
         },
         operation.controller.signal,
       )
@@ -986,7 +1094,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return intakeError(error)
     } finally {
-      this.finishOperation(session.id, operation)
+      await this.finishOperation(session, operation)
     }
   }
 
@@ -1023,10 +1131,10 @@ export class BidHostRuntime extends TypertRemoteService {
   /** Record an S1 failure when a selected binary upload cannot be fully reconstructed. */
   private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return intakeError(error)
-    if (this.inFlight.has(session.id)) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
-    const operation = this.beginOperation(session.id)
+    if (this.inFlight.has(projectKey(session))) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
+    const operation = this.beginOperation(session)
     try {
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('upload_files')) {
         return intakeRejected('BID_FILE_INTAKE_NOT_ALLOWED', 'File intake is not allowed in the current Bid stage state.')
       }
@@ -1034,7 +1142,10 @@ export class BidHostRuntime extends TypertRemoteService {
         session,
         {
           canExecute: () => false,
-          execute: () => Promise.reject(new Error('file intake could not reconstruct every selected file')),
+          execute: async () => {
+            await this.checkpoint(operation)
+            throw new Error('file intake could not reconstruct every selected file')
+          },
         },
         { validate: () => Promise.resolve({ ok: true }) },
       )
@@ -1044,7 +1155,7 @@ export class BidHostRuntime extends TypertRemoteService {
     } catch (caught) {
       return intakeError(caught)
     } finally {
-      this.finishOperation(session.id, operation)
+      await this.finishOperation(session, operation)
     }
   }
 
@@ -1058,18 +1169,18 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       return retryRejected('BID_SESSION_REQUIRED', 'Retry requires a Bid Session with a Host workspace.')
     }
-    if (this.inFlight.has(session.id)) {
+    if (this.inFlight.has(projectKey(session))) {
       return retryRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
     }
-    const operation = this.beginOperation(session.id)
+    const operation = this.beginOperation(session)
     try {
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('retry_stage')) {
         return retryRejected('BID_RETRY_NOT_ALLOWED', 'Retry is not allowed in the current Bid stage state.')
       }
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
       const next = await orchestrator.retry()
       await this.ctx.sessions.flush(session)
@@ -1083,7 +1194,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return retryRejected('BID_RETRY_FAILED', 'The Bid Host could not retry the current stage.')
     } finally {
-      this.finishOperation(session.id, operation)
+      await this.finishOperation(session, operation)
     }
   }
 
@@ -1091,8 +1202,8 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('getReviewWorkbench')
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
     const workspace = this.requireReviewWorkspace(session)
-    const outlinePath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
-    const logPath = within(workspace.sessionRoot, 'chapters/execution-log.json')
+    const outlinePath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
+    const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await Promise.all([assertNoLinkedPath(workspace.root, outlinePath), assertNoLinkedPath(workspace.root, logPath)])
     const outlineRaw = await readFile(outlinePath, 'utf8')
     const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
@@ -1106,9 +1217,9 @@ export class BidHostRuntime extends TypertRemoteService {
       let contentAvailable = false
       let reviewStatus: BidReviewWorkbenchView['outline'][number]['review_status'] = 'not_started'
       if (section.writable && index >= 0) {
-        try { contentAvailable = (await readFile(within(workspace.sessionRoot, `chapters/sections/${serial}.md`), 'utf8')).trim().length > 0 } catch { contentAvailable = false }
+        try { contentAvailable = (await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')).trim().length > 0 } catch { contentAvailable = false }
         try {
-          const review = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.sessionRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+          const review = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
           reviewStatus = review.verdict === 'pass' ? 'pass' : 'needs_attention'
         } catch {
           reviewStatus = execution?.status === 'failed' ? 'failed' : contentAvailable ? 'reviewing' : 'not_started'
@@ -1145,7 +1256,7 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('getReviewChapter')
   async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView> {
     const workspace = this.requireReviewWorkspace(session)
-    const outlinePath = within(workspace.sessionRoot, 'outline/confirmed-outline.json')
+    const outlinePath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
     await assertNoLinkedPath(workspace.root, outlinePath)
     const outlineRaw = await readFile(outlinePath, 'utf8')
     const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
@@ -1157,10 +1268,10 @@ export class BidHostRuntime extends TypertRemoteService {
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const serial = String(index + 1).padStart(4, '0')
     let markdown: string | null = null
-    try { markdown = await readFile(within(workspace.sessionRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
+    try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
     let review: BidReviewChapterView['review'] = { status: markdown === null ? 'not_started' : 'reviewing', issues: [] }
     try {
-      const artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.sessionRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+      const artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
       review = {
         status: artifact.verdict === 'pass' ? 'pass' : 'needs_attention',
         issues: artifact.blocking_issues.map((detail, issueIndex) => ({
@@ -1171,7 +1282,7 @@ export class BidHostRuntime extends TypertRemoteService {
     let evidenceStatus: BidReviewChapterView['evidence_status'] = 'missing'
     let materials: BidReviewMaterialView[] = []
     try {
-      const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(within(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+      const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(within(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       const mapping = evidence.section_mappings.find(item => item.section_id === section.id)
       evidenceStatus = mapping !== undefined && mapping.local_materials.length + mapping.web_materials.length > 0 ? 'available' : 'missing'
       if (mapping !== undefined) {
@@ -1200,8 +1311,8 @@ export class BidHostRuntime extends TypertRemoteService {
   private requireReviewWorkspace(session: Session): BidWorkspace {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (runtime.stage !== 'chapter_writing') throw new Error('BID_REVIEW_NOT_ALLOWED')
-    return new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+    if (runtime.stage !== 'chapter_writing' && runtime.stage !== 'docx_export') throw new Error('BID_REVIEW_NOT_ALLOWED')
+    return new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
   }
 
   /**
@@ -1214,7 +1325,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (runtime.stage !== 'evidence_mapping' || runtime.status !== 'running') return null
-    return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config)))
+    return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)))
   }
 
   /** Read the editable S2 conclusions only while tender analysis waits for confirmation. */
@@ -1223,11 +1334,11 @@ export class BidHostRuntime extends TypertRemoteService {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (runtime.stage !== 'tender_analysis' || runtime.status !== 'waiting_user') throw new Error('Tender-analysis confirmation is not allowed in the current Bid stage state.')
-    const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-    const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
-    const requirementsPath = within(workspace.sessionRoot, 'analysis/requirements.json')
-    const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
-    const compliancePath = within(workspace.sessionRoot, 'analysis/compliance.json')
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const projectPath = within(workspace.projectRoot, 'analysis/project.json')
+    const requirementsPath = within(workspace.projectRoot, 'analysis/requirements.json')
+    const scoringPath = within(workspace.projectRoot, 'analysis/scoring.json')
+    const compliancePath = within(workspace.projectRoot, 'analysis/compliance.json')
     await Promise.all([projectPath, requirementsPath, scoringPath, compliancePath].map(path => assertNoLinkedPath(workspace.root, path)))
     const [project, requirements, scoring, compliance] = await Promise.all([
       readFile(projectPath, 'utf8'), readFile(requirementsPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(compliancePath, 'utf8'),
@@ -1247,18 +1358,18 @@ export class BidHostRuntime extends TypertRemoteService {
     operations: readonly TenderAnalysisEditOperation[],
   ): Promise<BidTenderAnalysisConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Tender-analysis confirmation requires a Bid Session with a Host workspace.' } }
-    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
-    const operation = this.beginOperation(session.id)
+    if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    const operation = this.beginOperation(session)
     try {
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_tender_analysis')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Tender-analysis confirmation is not allowed in the current Bid stage state.' } }
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-      const projectPath = within(workspace.sessionRoot, 'analysis/project.json')
-      const requirementsPath = within(workspace.sessionRoot, 'analysis/requirements.json')
-      const scoringPath = within(workspace.sessionRoot, 'analysis/scoring.json')
-      const compliancePath = within(workspace.sessionRoot, 'analysis/compliance.json')
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+      const projectPath = within(workspace.projectRoot, 'analysis/project.json')
+      const requirementsPath = within(workspace.projectRoot, 'analysis/requirements.json')
+      const scoringPath = within(workspace.projectRoot, 'analysis/scoring.json')
+      const compliancePath = within(workspace.projectRoot, 'analysis/compliance.json')
       await Promise.all([projectPath, requirementsPath, scoringPath, compliancePath].map(path => assertNoLinkedPath(workspace.root, path)))
       const [projectRaw, requirementsRaw, scoringRaw, complianceRaw] = await Promise.all([
         readFile(projectPath, 'utf8'), readFile(requirementsPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(compliancePath, 'utf8'),
@@ -1307,7 +1418,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return { ok: true, value: confirmation.state }
     } catch {
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: 'The Bid Host could not confirm the tender analysis.' } }
-    } finally { this.finishOperation(session.id, operation) }
+    } finally { await this.finishOperation(session, operation) }
   }
 
   /** Read the S4 draft only while its user-confirmation stage owns the session. */
@@ -1320,44 +1431,48 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('getOutlineDraft')
   async getOutlineDraft(session: Session): Promise<OutlineDraftView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline confirmation is not allowed in the current Bid stage state.')
-    const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
-    return getOrCreateOutlineDraft(workspace)
+    const key = projectKey(session)
+    for (let active = this.inFlight.get(key); active !== undefined; active = this.inFlight.get(key)) await active.done
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline confirmation is not allowed in the current Bid stage state.')
+      return await getOrCreateOutlineDraft(operation.workspace)
+    } finally { await this.finishOperation(session, operation, false) }
   }
 
   /** Apply one CAS-protected edit batch to the Host-persisted S5 draft. */
   @Remote('applyOutlineDraftOperations')
   async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
-    if (this.inFlight.has(session.id)) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline draft editing is not allowed in the current Bid stage state.')
-    const operation = this.beginOperation(session.id)
+    if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
+    const operation = this.beginOperation(session)
     try {
-      return await mutateOutlineDraft(new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config)), request)
-    } finally { this.finishOperation(session.id, operation) }
+      const runtime = await this.prepareOperation(operation)
+      if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline draft editing is not allowed in the current Bid stage state.')
+      return await mutateOutlineDraft(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)), request)
+    } finally { await this.finishOperation(session, operation) }
   }
 
   /** Apply and validate user operations before atomically publishing S5 artifacts. */
   @Remote('confirmOutline')
   async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
-    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
-    const operation = this.beginOperation(session.id)
+    if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    const operation = this.beginOperation(session)
     try {
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
       const candidate = draft.outline
       const sharedInputs = await Promise.all([
         'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json', 'analysis/scoring-response-points.json',
       ].map(async (path): Promise<unknown> => JSON.parse(
-        await readFile(within(workspace.sessionRoot, path), 'utf8'),
+        await readFile(within(workspace.projectRoot, path), 'utf8'),
       ) as unknown))
       const prevalidation = validateOutlineDraftForConfirmation(
         candidate,
@@ -1370,9 +1485,9 @@ export class BidHostRuntime extends TypertRemoteService {
       const confirmedRelative = runtime.stage === 'outline_generation'
         ? 'outline/initial-confirmed-outline.json'
         : 'outline/confirmed-outline.json'
-      const confirmedPath = within(workspace.sessionRoot, confirmedRelative)
-      const outlinePath = within(workspace.sessionRoot, 'outline/outline.json')
-      const qualityPath = within(workspace.sessionRoot, 'outline/quality-report.json')
+      const confirmedPath = within(workspace.projectRoot, confirmedRelative)
+      const outlinePath = within(workspace.projectRoot, 'outline/outline.json')
+      const qualityPath = within(workspace.projectRoot, 'outline/quality-report.json')
       await Promise.all([confirmedPath, outlinePath, qualityPath].map(path => assertNoLinkedPath(workspace.root, path)))
       try {
         const quality = JSON.parse(await readFile(qualityPath, 'utf8')) as Record<string, unknown>
@@ -1380,7 +1495,7 @@ export class BidHostRuntime extends TypertRemoteService {
         await writeFileAtomic(outlinePath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         await writeFileAtomic(qualityPath, `${JSON.stringify(quality, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         if (runtime.stage === 'evidence_mapping') {
-          const evidencePath = within(workspace.sessionRoot, 'analysis/evidence-map.json')
+          const evidencePath = within(workspace.projectRoot, 'analysis/evidence-map.json')
           const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
           const reconciled = reconcileSectionEvidence(candidate, evidence)
           await writeFileAtomic(evidencePath, JSON.stringify(reconciled, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
@@ -1395,7 +1510,7 @@ export class BidHostRuntime extends TypertRemoteService {
         }
         await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         if (runtime.stage === 'evidence_mapping') {
-          const confirmationPath = within(workspace.sessionRoot, 'outline/confirmation.json')
+          const confirmationPath = within(workspace.projectRoot, 'outline/confirmation.json')
           await assertNoLinkedPath(workspace.root, confirmationPath)
           const confirmation = parseOutlineConfirmationArtifact({
             schema_version: 2, scope: 'technical_bid', decision: 'confirmed',
@@ -1408,7 +1523,7 @@ export class BidHostRuntime extends TypertRemoteService {
         }
       } catch (error) {
         await rm(confirmedPath, { force: true })
-        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.sessionRoot, 'outline/confirmation.json'), { force: true })
+        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.projectRoot, 'outline/confirmation.json'), { force: true })
         throw error
       }
       const artifactRefs: StageArtifact[] = runtime.stage === 'outline_generation' ? [
@@ -1426,15 +1541,15 @@ export class BidHostRuntime extends TypertRemoteService {
         .confirmValidatedStage(runtime.stage, artifactRefs)
       if (!confirmation.ok) {
         await rm(confirmedPath, { force: true })
-        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.sessionRoot, 'outline/confirmation.json'), { force: true })
+        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.projectRoot, 'outline/confirmation.json'), { force: true })
         return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy outline validation.', issues: confirmation.validation.issues } }
       }
-      await rm(within(workspace.sessionRoot, 'outline/draft.json'), { force: true })
+      await rm(within(workspace.projectRoot, 'outline/draft.json'), { force: true })
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
     } catch (error) {
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: error instanceof Error ? error.message : String(error), ...(error instanceof BidStageExecutionError ? { issues: error.issues } : {}) } }
-    } finally { this.finishOperation(session.id, operation) }
+    } finally { await this.finishOperation(session, operation) }
   }
 
   /** Regenerate a temporary S4-quality candidate from the current persisted S5 draft. */
@@ -1444,24 +1559,26 @@ export class BidHostRuntime extends TypertRemoteService {
     request: OutlineDraftIdentityRequest & { readonly feedback: string },
   ): Promise<BidOutlineRegenerationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline regeneration requires a Bid Session with a Host workspace.' } }
-    if (this.inFlight.has(session.id)) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
+    if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     const normalized = request.feedback.trim()
     if (normalized.length === 0) return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
-    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
-    const operation = this.beginOperation(session.id)
+    const operation = this.beginOperation(session)
     let started = false
+    let runtime = BID_INITIAL_RUNTIME_STATE
     try {
+      runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) throw new Error('Bid Session has no live Agent')
-      const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
       session.append('bid.stage.started', { stage: runtime.stage, status: 'running' })
       started = true
-      const outlinePath = within(workspace.sessionRoot, 'outline/outline.json')
-      const qualityPath = within(workspace.sessionRoot, 'outline/quality-report.json')
-      const changeSetPath = within(workspace.sessionRoot, 'outline/regeneration/change-set.json')
+      await this.checkpoint(operation)
+      const outlinePath = within(workspace.projectRoot, 'outline/outline.json')
+      const qualityPath = within(workspace.projectRoot, 'outline/quality-report.json')
+      const changeSetPath = within(workspace.projectRoot, 'outline/regeneration/change-set.json')
       await Promise.all([outlinePath, qualityPath, changeSetPath].map(path => assertNoLinkedPath(workspace.root, path)))
       const [originalOutline, originalQuality] = await Promise.all([readFile(outlinePath, 'utf8'), readFile(qualityPath, 'utf8')])
       let candidate: OutlineArtifact | undefined
@@ -1490,7 +1607,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       await writeFileAtomic(outlinePath, originalOutline, { mode: 0o600, dirMode: 0o700 })
       await writeFileAtomic(qualityPath, originalQuality, { mode: 0o600, dirMode: 0o700 })
-      const regenerationRoot = within(workspace.sessionRoot, 'outline/regeneration')
+      const regenerationRoot = within(workspace.projectRoot, 'outline/regeneration')
       await assertNoLinkedPath(workspace.root, regenerationRoot)
       await mkdir(regenerationRoot, { recursive: true, mode: 0o700 })
       await writeFileAtomic(within(regenerationRoot, 'candidate-outline.json'), candidateRaw, { mode: 0o600, dirMode: 0o700 })
@@ -1504,7 +1621,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }
     } finally {
       if (started) session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
-      try { await this.ctx.sessions.flush(session) } finally { this.finishOperation(session.id, operation) }
+      try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
     }
   }
 }
@@ -1545,7 +1662,7 @@ export interface ManifestFile {
   parseError: string | null
 }
 
-/** Versioned session manifest for imported bid files. */
+/** Versioned project manifest for imported bid files. */
 export interface BidManifest { version: typeof BID_MANIFEST_VERSION; files: ManifestFile[] }
 
 /** File bytes and browser-supplied metadata accepted by the importer. */
@@ -1655,7 +1772,7 @@ export function validateBidFileBatch(files: readonly IncomingFile[], config: Bid
 export { within } from './workspace-path.ts'
 
 function validateConfig(config: BidConfig): void {
-  if (!config.sessionDirectory || !config.outputDirectory || config.maxFileBytes <= 0
+  if (!config.projectDirectory || !config.outputDirectory || config.maxFileBytes <= 0
     || config.maxFiles <= 0 || config.maxTotalBytes <= 0
     || !Number.isInteger(config.documentChunk.minChars) || !Number.isInteger(config.documentChunk.targetChars)
     || !Number.isInteger(config.documentChunk.maxChars) || config.documentChunk.minChars <= 0
@@ -1722,39 +1839,45 @@ function parseDeterministic(extension: string, bytes: Uint8Array): string {
   throw new Error('bid-unsupported-file-type')
 }
 
-/** Session-isolated workspace importer. */
+/** 同一 Workspace 内所有 Bid Session 共用的项目文件。 */
 export class BidWorkspace {
   /** Absolute workspace root. */
   readonly root: string
-  /** Absolute directory that owns the session. */
-  readonly sessionRoot: string
+  /** Absolute directory that owns the Bid project. */
+  readonly projectRoot: string
   /** Absolute directory containing original uploads. */
   readonly inputRoot: string
   /** Absolute directory containing parsed document corpora. */
   readonly corpusRoot: string
   /** Absolute directory allowed to receive exports. */
   readonly outputRoot: string
-  /** Absolute path to the versioned session manifest. */
+  /** Absolute path to the versioned project manifest. */
   readonly manifestPath: string
+  /** 项目进度的持久化文件，不包含聊天上下文。 */
+  readonly projectStatePath: string
   /** Validated import and export limits for this workspace. */
   readonly config: BidConfig
 
-  constructor(workspaceRoot: string, sessionId: string, options?: BidConfig) {
+  /**
+   * @param workspaceRoot 已存在的项目目录；解析目录别名后共享产物。
+   * @param options 项目的导入、分块和导出配置。
+   */
+  constructor(workspaceRoot: string, options?: BidConfig) {
     const config = options ?? DEFAULT_BID_CONFIG
     validateConfig(config)
     this.config = config
-    if (!/^[a-z0-9][a-z0-9_-]{0,127}$/iu.test(sessionId)) throw new Error('bid-invalid-session-id')
-    this.root = resolve(workspaceRoot)
-    this.sessionRoot = within(this.root, `${config.sessionDirectory}/${sessionId}`)
-    this.inputRoot = resolve(this.sessionRoot, 'input')
-    this.corpusRoot = resolve(this.sessionRoot, 'corpus')
-    this.outputRoot = resolve(this.sessionRoot, config.outputDirectory)
-    this.manifestPath = resolve(this.sessionRoot, 'manifest.json')
+    this.root = realpathSync(workspaceRoot)
+    this.projectRoot = within(this.root, config.projectDirectory)
+    this.inputRoot = resolve(this.projectRoot, 'input')
+    this.corpusRoot = resolve(this.projectRoot, 'corpus')
+    this.outputRoot = within(this.projectRoot, config.outputDirectory)
+    this.manifestPath = resolve(this.projectRoot, 'manifest.json')
+    this.projectStatePath = resolve(this.projectRoot, 'project-state.json')
   }
 
   /**
    * Import, parse independently, and atomically publish this batch's manifest.
-   * @param files - Validated upload bytes to import into the session.
+   * @param files - Validated upload bytes to import into the project.
    * @returns Manifest entries with process-local absolute paths.
    */
   async import(files: readonly IncomingFile[]): Promise<ImportedFile[]> {
@@ -1768,7 +1891,7 @@ export class BidWorkspace {
       const extension = extname(originalName).toLocaleLowerCase('en-US')
       const storedName = uniqueName(originalName, used)
       const inputPath = `input/${storedName}`
-      const input = within(this.sessionRoot, inputPath)
+      const input = within(this.projectRoot, inputPath)
       await atomicBytes(this.root, input, file.bytes)
       const hash = createHash('sha256').update(file.bytes).digest('hex')
       const record: ManifestFile = { id: hash as BidFileId, role: file.role ?? 'tender', originalName, inputPath, corpusPath: null,
@@ -1779,7 +1902,7 @@ export class BidWorkspace {
         const documentPath = `${corpusPath}/document.md`
         record.corpusPath = corpusPath
         if (extension === '.pdf' || extension === '.docx' || extension === '.doc') {
-          const corpus = within(this.sessionRoot, corpusPath)
+          const corpus = within(this.projectRoot, corpusPath)
           await assertNoLinkedPath(this.root, corpus)
           const result = await extractDocument({ sourcePath: input, outputDir: corpus })
           if (result.parseStatus === 'failed' || result.parseStatus === 'unsupported_format') {
@@ -1791,7 +1914,7 @@ export class BidWorkspace {
           record.metadataPath = `${corpusPath}/metadata.json`
           record.parseStatus = result.parseStatus
         } else {
-          const document = within(this.sessionRoot, documentPath)
+          const document = within(this.projectRoot, documentPath)
           await assertNoLinkedPath(this.root, document)
           await writeFileAtomic(
             document,
@@ -1803,12 +1926,12 @@ export class BidWorkspace {
         }
         if (record.parseStatus === 'success') {
           const chunksPath = `${corpusPath}/chunks`
-          const chunks = within(this.sessionRoot, chunksPath)
+          const chunks = within(this.projectRoot, chunksPath)
           await assertNoLinkedPath(this.root, chunks)
           await chunkDocument({
-            documentPath: within(this.sessionRoot, documentPath),
-            structurePath: record.structurePath === null ? null : within(this.sessionRoot, record.structurePath),
-            metadataPath: record.metadataPath === null ? null : within(this.sessionRoot, record.metadataPath),
+            documentPath: within(this.projectRoot, documentPath),
+            structurePath: record.structurePath === null ? null : within(this.projectRoot, record.structurePath),
+            metadataPath: record.metadataPath === null ? null : within(this.projectRoot, record.metadataPath),
             outputDir: chunks,
             config: this.config.documentChunk,
           })
@@ -1824,11 +1947,11 @@ export class BidWorkspace {
       imported.push({
         ...record,
         absoluteInputPath: input,
-        absoluteDocumentPath: record.documentPath === null ? null : within(this.sessionRoot, record.documentPath),
-        absoluteStructurePath: record.structurePath === null ? null : within(this.sessionRoot, record.structurePath),
-        absoluteMetadataPath: record.metadataPath === null ? null : within(this.sessionRoot, record.metadataPath),
-        absoluteChunksPath: record.chunksPath === null ? null : within(this.sessionRoot, record.chunksPath),
-        absoluteChunkIndexPath: record.chunkIndexPath === null ? null : within(this.sessionRoot, record.chunkIndexPath),
+        absoluteDocumentPath: record.documentPath === null ? null : within(this.projectRoot, record.documentPath),
+        absoluteStructurePath: record.structurePath === null ? null : within(this.projectRoot, record.structurePath),
+        absoluteMetadataPath: record.metadataPath === null ? null : within(this.projectRoot, record.metadataPath),
+        absoluteChunksPath: record.chunksPath === null ? null : within(this.projectRoot, record.chunksPath),
+        absoluteChunkIndexPath: record.chunkIndexPath === null ? null : within(this.projectRoot, record.chunkIndexPath),
       })
     }
     await assertNoLinkedPath(this.root, this.manifestPath)
@@ -1837,7 +1960,7 @@ export class BidWorkspace {
   }
 
   /**
-   * Read the durable manifest, treating a missing session as empty.
+   * Read the durable manifest, treating a missing project as empty.
    * @returns The current manifest version.
    */
   async readManifest(): Promise<BidManifest> {
@@ -1852,7 +1975,7 @@ export class BidWorkspace {
   /**
    * Render the persisted, model-visible file inventory for a user message.
    * @param request - User request that follows the file inventory.
-   * @returns The request prefixed by session-relative corpus paths and statuses.
+   * @returns The request prefixed by project-relative corpus paths and statuses.
    */
   async messageInventory(request: string): Promise<string> {
     const manifest = await this.readManifest()
@@ -1867,16 +1990,16 @@ export class BidWorkspace {
   }
 
   /**
-   * Export a session-local Markdown file to the output directory only.
-   * @param source - Session-relative Markdown source path.
-   * @param destination - Session-relative DOCX destination below the output directory.
+   * Export a project-local Markdown file to the output directory only.
+   * @param source - Project-relative Markdown source path.
+   * @param destination - Project-relative DOCX destination below the output directory.
    * @returns The workspace-relative path exposed to the caller.
    */
   async exportDocx(source: string, destination = `${this.config.outputDirectory}/技术标.docx`): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
-    const sourcePath = within(this.sessionRoot, source)
+    const sourcePath = within(this.projectRoot, source)
     if (!source.endsWith('.md')) throw new Error('bid-source-must-be-markdown')
-    const destinationPath = within(this.sessionRoot, destination)
+    const destinationPath = within(this.projectRoot, destination)
     if (!destinationPath.startsWith(`${this.outputRoot}${sep}`)) throw new Error('bid-output-path-required')
     const markdown = await readFile(sourcePath, 'utf8')
     const body = markdownToDocx(markdown, this.config)
@@ -1888,14 +2011,17 @@ export class BidWorkspace {
     return this.relative(destination)
   }
 
-  private relative(path: string): string { return `${this.config.sessionDirectory}/${basename(this.sessionRoot)}/${path.replaceAll('\\', '/')}` }
+  private relative(path: string): string { return `${this.config.projectDirectory}/${path.replaceAll('\\', '/')}` }
 }
 
 function markdownToDocx(markdown: string, config: BidConfig): (Paragraph | Table)[] {
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
   const blocks: (Paragraph | Table)[] = []
   for (const node of root.children) {
-    if (node.type === 'heading') blocks.push(new Paragraph({ heading: node.depth === 1 ? 'Heading1' : node.depth === 2 ? 'Heading2' : 'Heading3', children: [new TextRun({ text: textOf(node), font: config.font, size: config.headingSize })] }))
+    if (node.type === 'heading') blocks.push(new Paragraph({
+      heading: ({ 1: 'Heading1', 2: 'Heading2', 3: 'Heading3', 4: 'Heading4', 5: 'Heading5', 6: 'Heading6' } as const)[node.depth],
+      children: [new TextRun({ text: textOf(node), font: config.font, size: config.headingSize })],
+    }))
     else if (node.type === 'paragraph') blocks.push(new Paragraph({ spacing: { after: 160, line: 360 }, children: [new TextRun({ text: textOf(node), font: config.font, size: config.bodySize })] }))
     else if (node.type === 'list') for (const item of node.children) blocks.push(new Paragraph({
       ...node.ordered ? { numbering: { reference: 'default-numbering', level: 0 } } : { bullet: { level: 0 } },

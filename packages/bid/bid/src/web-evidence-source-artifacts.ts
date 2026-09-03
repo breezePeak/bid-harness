@@ -47,7 +47,7 @@ export type WebEvidenceSourcesArtifact = z.infer<typeof ledgerSchema>
 
 /**
  * Parse a Host-owned Web evidence ledger through the strict current schema.
- * @param value - untrusted JSON value read from the Session Workspace.
+ * @param value - untrusted JSON value read from the Project Workspace.
  * @returns the validated current ledger.
  */
 export function parseWebEvidenceSourcesArtifact(value: unknown): WebEvidenceSourcesArtifact {

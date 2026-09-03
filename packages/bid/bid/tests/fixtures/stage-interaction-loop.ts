@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { BidHostRuntime, BidOrchestratorError, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
+import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 
@@ -19,19 +19,20 @@ function answer(text: string): StreamChunk[] {
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */
 export async function runFullOutlineRegenerationLoop(ctx: Context, root: string) {
   const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(BidHostRuntime)
   const draft = await getOrCreateOutlineDraft(workspace)
   const candidate = { ...draft.outline, sections: draft.outline.sections.map(section => ({ ...section, title: `${section.title}方案` })) }
-  const original = await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')
-  const quality = await readFile(join(workspace.sessionRoot, 'outline/quality-report.json'), 'utf8')
+  const original = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
+  const quality = await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')
   const changeSet = { schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256,
     changes: outlineRegenerationChanges(draft.outline, candidate).map(change => ({ ...change, reason: '明确方案标题' })) }
   parentScript.push(
-    call('write', { file_path: join(workspace.sessionRoot, 'outline/outline.json'), content: JSON.stringify(candidate) }),
-    call('write', { file_path: join(workspace.sessionRoot, 'outline/regeneration/change-set.json'), content: JSON.stringify(changeSet) }),
+    call('write', { file_path: join(workspace.projectRoot, 'outline/outline.json'), content: JSON.stringify(candidate) }),
+    call('write', { file_path: join(workspace.projectRoot, 'outline/regeneration/change-set.json'), content: JSON.stringify(changeSet) }),
     answer('目录已重生成。'),
-    call('write', { file_path: join(workspace.sessionRoot, 'outline/quality-report.json'), content: quality }),
+    call('write', { file_path: join(workspace.projectRoot, 'outline/quality-report.json'), content: quality }),
     answer('目录已复核。'),
   )
   const start = agent.session.events.length
@@ -39,14 +40,15 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
     expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256, feedback: '明确方案标题',
   })
   return { result, draft: await getOrCreateOutlineDraft(workspace),
-    canonicalPreserved: await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8') === original,
+    canonicalPreserved: await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8') === original,
     state: agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
-    transitions: agent.session.events.slice(start).filter(event => event.type.startsWith('bid.')).map(event => event.type) }
+    transitions: agent.session.events.slice(start).filter(event => event.type.startsWith('bid.') && event.type !== 'bid.project.resumed').map(event => event.type) }
 }
 
 /** @param ctx 真实 Loader 或测试装配。 @param root 临时工作区。 @returns 不含环境路径的阶段交互结果。 */
 export async function runStageInteractionLoop(ctx: Context, root: string, checkRejections = false) {
   const { agent, workspace, parentScript, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
   if (ctx.get('sessionProjections') === undefined) await ctx.plugin(SessionProjectionRegistry)
   const hostFiber = ctx.get('bid') === undefined ? ctx.plugin(BidHostRuntime) : undefined
   await hostFiber
@@ -75,7 +77,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   for (const input of ['现在是什么情况？', '这样可以吗？', '可以', '没问题']) {
     await send(input, [call('bid_stage_inspect', {}), answer('仍需点击正式确认按钮。')])
   }
-  const outlinePath = join(workspace.sessionRoot, 'outline/outline.json')
+  const outlinePath = join(workspace.projectRoot, 'outline/outline.json')
   const original = await readFile(outlinePath, 'utf8')
   await send('更新目录', [call('write', { file_path: outlinePath, content: '{}' }), answer('请使用阶段工具修改。')])
   const rawWriteBlocked = await readFile(outlinePath, 'utf8') === original
@@ -88,21 +90,21 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const target = split.outline.sections.find(item => item.parent_id === sectionId)!
   childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: target.id, title: '实施准备与资源核查' }])))
   await send('实施准备这一节重新规划一下', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
-  const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+  const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   childScript.push(answer(JSON.stringify({ task_id: `MAP-REMAP-${sectionId}`, section_mappings: [{ section_id: target.id, local_materials: [], web_materials: [], missing_topics: ['缺少当前章节专用资料'], writing_dimensions: ['资源核查'] }], refinement_suggestions: [] })))
   await send('这一节资料不对，重新找', [call('bid_evidence_remap', { ...await identity(), section_ids: [target.id], mode: 'replace', reason: '资料不对' }), answer('已更新，请重新确认。')])
   const finalDraft = await getOrCreateOutlineDraft(workspace)
-  const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+  const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   if (checkRejections) {
     const paths = [
       'outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', 'analysis/evidence-map.json',
       'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json',
     ]
-    const baseline = await Promise.all(paths.map(path => readFile(join(workspace.sessionRoot, path), 'utf8')))
+    const baseline = await Promise.all(paths.map(path => readFile(join(workspace.projectRoot, path), 'utf8')))
     childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: split.outline.sections.find(item => item.id !== target.id && item.writable)!.id, title: '范围外修改' }])))
     await send('只改实施准备', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '完善实施准备' }), answer('修改被拒绝。')])
     await send('重映射不存在的章节', [call('bid_evidence_remap', { ...await identity(), section_ids: ['SEC-UNKNOWN'] }), answer('请明确目标章节。')])
-    const after = await Promise.all(paths.map(path => readFile(join(workspace.sessionRoot, path), 'utf8')))
+    const after = await Promise.all(paths.map(path => readFile(join(workspace.projectRoot, path), 'utf8')))
     if (JSON.stringify(after) !== JSON.stringify(baseline)) throw new Error('失败后未恢复阶段产物')
   }
   const untouchedEvidencePreserved = map.section_mappings.filter(item => item.section_id !== target.id)

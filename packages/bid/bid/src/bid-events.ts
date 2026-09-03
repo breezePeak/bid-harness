@@ -1,8 +1,9 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
-import type { BidStage, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import type { BidRuntimeState, BidStage, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
+  'bid.project.resumed',
   'bid.stage.started',
   'bid.stage.completed',
   'bid.stage.failed',
@@ -16,6 +17,12 @@ export type BidSessionEventType = typeof BID_SESSION_EVENT_TYPES[number]
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /**
+     * 将 Workspace 的项目进度应用到当前聊天的 Bid 投影，不附带聊天历史。
+     * @param runtime 已持久化的项目控制状态。
+     * @param revision 项目状态文件的修订号。
+     */
+    'bid.project.resumed': { runtime: BidRuntimeState; revision: number }
     /** A stage began execution and is the control plane's current running stage. */
     'bid.stage.started': { stage: BidStage; status: 'running' }
     /** A stage passed validation; artifacts remain in the workspace at these references. */

@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Workspace-local intake and shared bid control-plane types for the bid-writing profile. `BidWorkspace` saves supported PDF, DOCX, DOC, XLSX, XLS, TXT, and Markdown files below `.bid-harness/sessions/<session>/`. Every imported file receives `corpus/<stored-name>/document.md`; PDF, DOCX, and DOC additionally receive `structure.json` and `metadata.json` from `extractDocument()`. Manifest version 3 records the corpus and artifact paths. The caller persists `messageInventory()` with the user's request, so the agent sees workspace-relative source, document, chunk, and structure paths and can use its normal `grep` and `read` tools.
+Workspace-local intake and shared bid control-plane types for the bid-writing profile. `BidWorkspace` saves supported PDF, DOCX, DOC, XLSX, XLS, TXT, and Markdown files below `.bid-harness/`. Every imported file receives `corpus/<stored-name>/document.md`; PDF, DOCX, and DOC additionally receive `structure.json` and `metadata.json` from `extractDocument()`. Manifest version 3 records the corpus and artifact paths. The caller persists `messageInventory()` with the user's request, so the agent sees workspace-relative source, document, chunk, and structure paths and can use its normal `grep` and `read` tools.
 
 PDF, DOCX, and DOC share one parser entry:
 
@@ -17,25 +17,27 @@ await extractDocument({
 
 PDF extraction uses text positions to retain physical lines and emits `<!-- page: N -->` comments. Text-free PDFs write their corpus with `needs_ocr`; this package does not run OCR. DOCX extraction retains Word headings, lists, and tables without inventing page numbers. DOC extraction uses the pure-JavaScript `word-extractor` parser, so Windows, macOS, and Linux require no Word, LibreOffice, `antiword`, or other system executable. DOC text retains paragraphs and tab-separated table cells, but the binary format does not expose dependable Markdown heading levels or page numbers through this parser.
 
-Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A parse failure retains the original file and records the stable extraction error in `manifest.json`. Reusing an extraction output directory atomically replaces the three complete corpus files through `dsh-atomic-write`. `exportDocx()` accepts only session-local Markdown and writes under the session output directory.
+Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A parse failure retains the original file and records the stable extraction error in `manifest.json`. Reusing an extraction output directory atomically replaces the three complete corpus files through `dsh-atomic-write`. `exportDocx()` accepts only project-local Markdown and writes under the project output directory.
 
 ## Control plane types
 
 The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, the `BidUploadFile` request and `BidFileIntakeResult` response, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
 
-The five `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
+The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
 
 ## Control plane runtime
 
-`BidOrchestrator` binds one DSH Session and restores state from `Session.events` through the sole `reduceBidRuntimeState()` reducer. `runCurrentProgramStage()` executes the pending or failed program-owned stage once. `drive()` follows each current `StagePolicy` while the Executor reports `canExecute(stage)`, and stops at user input, an unsupported pending stage, failure, or final completion. Fresh file intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
+`project-state.json` 保存 Workspace 级项目进度；新 Session 通过 `bid.project.resumed` 初始化当前控制面，不复制旧聊天。`BidOrchestrator` 在执行所用 Session 中通过 `reduceBidRuntimeState()` 归约已同步的状态。详见[项目生命周期](README.zh.md#控制面-runtime)。 `runCurrentProgramStage()` executes the pending or failed program-owned stage once. `drive()` follows each current `StagePolicy` while the Executor reports `canExecute(stage)`, and stops at user input, an unsupported pending stage, failure, or final completion. Fresh project intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
 
 `registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and Host-configured file limits. The fixed stages are S1 material upload, S2 tender analysis, S3 initial outline generation, S4 outline generation / material mapping, S5 body writing, and S6 bid document export.
 
-The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a per-Session lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. The Host also calls `drive()` on `agent/session-start`, so creation and resume use the same log-derived continuation.
+The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
 S2 writes only Project, Requirements, Scoring, and Compliance; scoring text stays whole and contains no response-point field. S3 independently reviews semantically derived response points, lets the Host assign stable `RP-*` identities, adapts optional framework trees, stores exact framework heading references, generates an initial outline, and owns its first user confirmation. One response point may belong to multiple writable Sections. S4 按目录业务分支分批研究资料，一个 Task 可包含多个 Section。一轮映射后深化一次目录，Host 按 Section ID 对齐 Evidence，再交用户确认。
 
 In S5, the Host schedules independent Writers from the confirmed outline and makes each valid body available before its Reviewer starts. A review repair receives at most one new Writer attempt. If the second review still reports problems, the durable review remains `needs_attention` and does not block the book or S6 export.
+
+S6 自动校验确认目录与完整章节集合，按目录顺序和层级组合正文并通过既有 DOCX primitive 生成 `outputDirectory/bid.docx`；通过产物校验后 checkpoint 为 completed。详见[导出规则](README.zh.md#s2s5-质量控制)。
 
 ## Model Experience
 
@@ -43,7 +45,7 @@ In S5, the Host schedules independent Writers from the confirmed outline and mak
 
 S2、S3、S4 的 `waiting_user` 开放普通消息，`running` 禁止发送。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
-所有修改使用 Host 的 Session 锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 提交；范围外节点及选中根位置不得改变。拆分保留父 ID，子章节继承引用和候选资料；新增章节保留资料缺口。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
+所有修改使用 Host 的项目锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 提交；范围外节点及选中根位置不得改变。拆分保留父 ID，子章节继承引用和候选资料；新增章节保留资料缺口。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
 
 S4 交互重映射与初始映射共用执行器、Corpus Guard、Child 调度、有限修复、Web Snapshot 和 Validator。指定可写叶子只运行该叶子，指定结构节点展开其可写后代，不运行无关章节，也不再次深化整本目录。`replace` 替换目标章节的旧 Evidence；`supplement` 保留并去重合并材料、写作维度和缺口。计划和任务日志展示最近一轮映射，未选中章节及其 Web 快照保留；最终正式确认按引用清理快照。
 
@@ -57,7 +59,7 @@ S3 performs independent semantic response-point review and outline quality revie
 
 S4 与 S5 共用 `buildWritableSectionWorklist` 的目录遍历。Host 私有 plan schema v5 按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批。每个 Task 的 `section_ids` 包含本批章节，每个可写 Section 恰好属于一个 Task。Evidence Map schema v10 以 `section_id` 为身份；最终只检查可写章节覆盖、未知 ID 和重复 ID，不检查标题、父级或写作提示的指纹。
 
-S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告 file_id、文件名与原因。Prompt 与 Guard 共用绝对路径。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；tender、outline_framework、完整 document.md 与 Session 外路径不被授权。本地 Evidence 验证文件身份、角色、分块存在和文件归属、路径安全，不要求 Child read 日志证明。
+S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告 file_id、文件名与原因。Prompt 与 Guard 共用绝对路径。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；tender、outline_framework、完整 document.md 与项目外路径不被授权。本地 Evidence 验证文件身份、角色、分块存在和文件归属、路径安全，不要求 Child read 日志证明。
 
 普通 Mapping 最多在同一 Child 修复一次。无资料、无搜索结果、fetch 失败、无效材料和 Child 异常均以章节 `missing_topics` 降级；有效的同批章节和其他 Task 继续执行。不可解析的章节保留空材料。用户取消、Host 持久化或权限机制故障仍可中止阶段。执行日志记录每次结果和诊断，进度中的 supplemental 数量固定为 0。
 

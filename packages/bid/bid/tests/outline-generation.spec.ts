@@ -110,23 +110,23 @@ const researchDrivenOutline: OutlineArtifact = {
 }
 
 async function fixture(): Promise<BidWorkspace> {
-  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-generation-')), 'session')
-  await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-generation-')))
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await Promise.all([
-    writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
-    writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
-    writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
-    writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify({ schema_version: 1, scope: 'technical_bid', scoring_sha256: scoringArtifactSha256(scoringArtifact), next_sequence: 2, points: [{ id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })),
-    writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 7, research_topics: [], requirement_mappings: [], scoring_mappings: [], response_point_mappings: [{ response_point_id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['进度控制'] }] })),
+    writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
+    writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
+    writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
+    writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify({ schema_version: 1, scope: 'technical_bid', scoring_sha256: scoringArtifactSha256(scoringArtifact), next_sequence: 2, points: [{ id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })),
+    writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify({ schema_version: 7, research_topics: [], requirement_mappings: [], scoring_mappings: [], response_point_mappings: [{ response_point_id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', response_point: '说明实施阶段和进度保障', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['进度控制'] }] })),
   ])
   return workspace
 }
 
 async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact, qualityIssues: string[] = []): Promise<void> {
-  await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
-    writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`),
-    writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), `${JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`),
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), `${JSON.stringify({
       schema_version: 3,
       scope: 'technical_bid',
       checked_requirement_ids: requirements.requirements.map(item => item.id),
@@ -166,7 +166,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     let idleCalls = 0
     const whenIdle = vi.fn(async () => {
       idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
       if (idleCalls === 4) await publishOutline(workspace, reviewedOutline)
     })
     const services = {
@@ -215,7 +215,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     let idleCalls = 0
     const whenIdle = vi.fn(async () => {
       idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
       if (idleCalls === 4) await publishOutline(workspace, researchDrivenOutline)
     })
     const services = {
@@ -225,7 +225,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
 
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
-    const outline = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    const outline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
     expect(outline.sections[0]).toMatchObject({
       title: '数据安全保障体系',
       must_answer: ['说明数据分类分级、访问控制和安全审计措施。'],
@@ -238,10 +238,10 @@ describe('outline-generation Blueprint Quality Review', () => {
     let idleCalls = 0
     const whenIdle = vi.fn(async () => {
       idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
       if (idleCalls === 4) {
-        await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
-        await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), `${JSON.stringify(coarseOutline)}\n`)
+        await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(coarseOutline)}\n`)
       }
       if (idleCalls === 5) await publishOutline(workspace, reviewedOutline)
     })
@@ -269,7 +269,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(reviewMessage.content[0]?.text).not.toContain('不得超过 4 个')
     expect(reviewMessage.content[0]?.text).not.toContain('不得超过 3 个')
     expect(reviewMessage.content[0]?.text).toContain('quality-report.json')
-    expect(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
@@ -277,13 +277,13 @@ describe('outline-generation Blueprint Quality Review', () => {
     const workspace = await fixture()
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {
-      if (whenIdle.mock.calls.length === 2) await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+      if (whenIdle.mock.calls.length === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
       if (whenIdle.mock.calls.length === 4) {
-        await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
-        await writeFile(join(workspace.sessionRoot, 'outline/outline.json'), JSON.stringify({ ...reviewedOutline, schema_version: 0 }))
+        await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify({ ...reviewedOutline, schema_version: 0 }))
       }
       if (whenIdle.mock.calls.length === 5) {
-        await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
+        await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
           schema_version: 0, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [], reviewed_section_ids: [], issues: [],
         }))
       }
@@ -325,7 +325,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     await publishOutline(workspace, reviewedOutline)
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
-    await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
+    await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
       schema_version: 3,
       scope: 'technical_bid',
       checked_requirement_ids: ['REQ-ORG'],
@@ -340,7 +340,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     await publishOutline(workspace, reviewedOutline, ['实施章节仍然过粗。'])
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
-    await writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), '')
+    await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), '')
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts)))
       .toContain('OUTLINE_GENERATION_INPUT_INVALID')
   })

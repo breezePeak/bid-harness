@@ -32,20 +32,20 @@ import {
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
 
 async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<typeof outlineFixture>> {
-  await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
-  await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
-  await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify({ schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null, project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['交付'], technical_scope: ['技术'], delivery_scope: ['实施'], implementation_constraints: ['周期'], key_technical_points: ['架构'], source_refs: source, analyzed_tender_files: ['tender'] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify({ schema_version: 1, requirements: [1, 2, 3].map(index => ({ id: `REQ-${index}`, category: '技术', raw_text: `要求${index}`, normalized_requirement: `响应要求${index}`, mandatory: true, source_refs: source })) })}\n`)
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/project.json'), `${JSON.stringify({ schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null, project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['交付'], technical_scope: ['技术'], delivery_scope: ['实施'], implementation_constraints: ['周期'], key_technical_points: ['架构'], source_refs: source, analyzed_tender_files: ['tender'] })}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), `${JSON.stringify({ schema_version: 1, requirements: [1, 2, 3].map(index => ({ id: `REQ-${index}`, category: '技术', raw_text: `要求${index}`, normalized_requirement: `响应要求${index}`, mandatory: true, source_refs: source })) })}\n`)
   const scoring = { schema_version: 1 as const, scoring_items: [1, 2, 3].map(index => ({ id: `SCORE-${index}`, parent: null, group: null, title: `评分${index}`, raw_text: `评分${index}`, criterion: `覆盖评分${index}`, score: 1, score_range: null, must_answer: true, source_refs: source })) }
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 10, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
-  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [] })}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ schema_version: 10, section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [] })}\n`)
   const outline = outlineFixture()
-  await writeFile(join(workspace.sessionRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
+  await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
   const outlineSha256 = outlineArtifactSha256(outline)
-  await writeFile(join(workspace.sessionRoot, 'outline/confirmation.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 })}\n`)
+  await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 })}\n`)
   return outline
 }
 
@@ -136,22 +136,22 @@ function manifestFile(id: string, role: 'tender' | 'outline_framework' | 'refere
 }
 
 async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
-  await mkdir(workspace.sessionRoot, { recursive: true })
+  await mkdir(workspace.projectRoot, { recursive: true })
   const files = [
     manifestFile('TENDER', 'tender'), manifestFile('FRAMEWORK', 'outline_framework'),
     manifestFile('REFERENCE', 'reference'), manifestFile('REFERENCE-BID', 'reference_bid'),
   ]
   await writeFile(workspace.manifestPath, `${JSON.stringify({ version: 4, files })}\n`)
   for (const file of files) {
-    await mkdir(join(workspace.sessionRoot, file.chunksPath), { recursive: true })
-    await writeFile(join(workspace.sessionRoot, file.chunkIndexPath), `${JSON.stringify(chunkIndex)}\n`)
-    await writeFile(join(workspace.sessionRoot, file.chunksPath, 'chunk_0001.md'), `${file.role} 正文\n`)
+    await mkdir(join(workspace.projectRoot, file.chunksPath), { recursive: true })
+    await writeFile(join(workspace.projectRoot, file.chunkIndexPath), `${JSON.stringify(chunkIndex)}\n`)
+    await writeFile(join(workspace.projectRoot, file.chunksPath, 'chunk_0001.md'), `${file.role} 正文\n`)
   }
   const snapshot = '公开技术资料\n'
   const sourceId = 'WEB-aaaaaaaaaaaaaaaa'
-  await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
-  await writeFile(join(workspace.sessionRoot, `analysis/web-sources/${sourceId}.md`), snapshot)
-  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+  await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, `analysis/web-sources/${sourceId}.md`), snapshot)
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
     schema_version: 2,
     stage: 'evidence_mapping',
     sources: [{
@@ -320,7 +320,7 @@ function fixtureAgent(
     whenIdle: vi.fn(async () => {
       if (!planPending) return
       planPending = false
-      await writeFile(join(workspace.sessionRoot, 'chapters/execution-plan.json'), `${JSON.stringify({
+      await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), `${JSON.stringify({
         schema_version: 2,
         scope: 'technical_bid',
         confirmed_outline_sha256: outlineArtifactSha256(outline),
@@ -340,7 +340,7 @@ function fixtureAgent(
 describe('chapter-writing executor', () => {
   it('uses the current execution-plan schema version in the planning prompt', async () => {
     const outline = outlineFixture()
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-plan-prompt-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-plan-prompt-')))
     const prompt = renderChapterExecutionPlanTask(
       { id: 'parent' } as unknown as Agent,
       workspace,
@@ -414,10 +414,10 @@ describe('chapter-writing executor', () => {
   })
 
   it('allows reference and framework draft chunks plus ledger Web snapshots', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-read-guard-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-read-guard-')))
     const outline = await writeInputs(workspace)
     await seedReadableMaterials(workspace)
-    const evidencePath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const evidence = JSON.parse(await readFile(evidencePath, 'utf8')) as {
       section_mappings: Array<{ local_materials: unknown[]; web_materials: unknown[] }>
     }
@@ -453,7 +453,7 @@ describe('chapter-writing executor', () => {
       arguments: { [argument]: path },
       agent: { session: { id: SessionId('guard-child'), header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
     } as unknown as ToolExecution)
-    const sessionPath = (path: string): string => join(workspace.sessionRoot, ...path.split('/'))
+    const sessionPath = (path: string): string => join(workspace.projectRoot, ...path.split('/'))
     expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks/chunk_0001.md'))).toBeUndefined()
     expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/reference_bid/chunks/chunk_0001.md'))).toBeUndefined()
@@ -465,7 +465,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('resolves the exact referenced framework body for the chapter writer', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-framework-draft-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-framework-draft-')))
     await seedReadableMaterials(workspace)
 
     const materials = await resolveFrameworkDraftMaterials(workspace, [{
@@ -479,7 +479,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('accepts any Web material whose ledger snapshot and hash are real', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-ledger-material-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-ledger-material-')))
     await seedReadableMaterials(workspace)
     const section = outlineFixture().sections[1]!
     const candidate: ChapterCandidate = {
@@ -508,14 +508,14 @@ describe('chapter-writing executor', () => {
   })
 
   it('overlaps independent spawn children and unlocks a strong dependency only after acceptance', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, { 'SEC-3': ['SEC-1'] }, false)
     const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 2 })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
-    await expect(readFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
     expect(fixture.tools.restrict).toHaveBeenCalledWith({ allow: ['read', 'write'] })
     const planningPrompt = JSON.stringify(fixture.followup.mock.calls[0]?.[0])
@@ -550,9 +550,9 @@ describe('chapter-writing executor', () => {
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },
       { stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' },
     ])
-    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')))
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
     expect(manifest.chapters.map(chapter => chapter.section_id)).toEqual(['SEC-1', 'SEC-2', 'SEC-3'])
-    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/execution-log.json'), 'utf8')))
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
     expect(log.sections.every(section => section.status === 'completed'
       && section.final_writer_child_session_id !== null && section.final_reviewer_child_session_id !== null)).toBe(true)
     expect(fixture.subagents.start).toHaveBeenCalledTimes(6)
@@ -572,10 +572,10 @@ describe('chapter-writing executor', () => {
   })
 
   it('S5 空 Evidence 章节可写作和补搜，成功 fetch 不依赖事件日志', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-ledger-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-ledger-')))
     const outline = await writeInputs(workspace)
-    await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
-    await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+    await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
       schema_version: 2, stage: 'evidence_mapping', sources: [],
     })}\n`)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, undefined, true)
@@ -586,16 +586,16 @@ describe('chapter-writing executor', () => {
     })
 
     const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(
-      await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8'),
+      await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8'),
     ))
     expect(ledger.sources).toHaveLength(1)
     expect(ledger.sources[0]).toMatchObject({
 
       chapter_context: { section_id: 'SEC-1', child_session_id: 'child-1', writer_attempt: 1 },
     })
-    expect(await readFile(join(workspace.sessionRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方正文')
+    expect(await readFile(join(workspace.projectRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方正文')
     const manifest = parseChapterWritingManifest(JSON.parse(
-      await readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8'),
+      await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8'),
     ))
     expect(manifest.chapters[0]?.web_materials_used).toEqual([{
       source_id: ledger.sources[0]?.source_id,
@@ -609,7 +609,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('fails before Main-Agent planning when the spawn provider is absent', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-provider-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-provider-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
     fixture.subagents.getProvider.mockReturnValue(undefined)
@@ -619,7 +619,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('fails before Main-Agent planning when spawn cannot enforce the Child policy', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-capability-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-capability-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
     fixture.subagents.getProvider.mockReturnValue({
@@ -633,7 +633,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('uses a new spawn Child for repair and publishes only the accepted candidate', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, true, attempt => attempt !== 1)
 
@@ -642,13 +642,13 @@ describe('chapter-writing executor', () => {
     expect(fixture.starts).toHaveLength(4)
     expect(fixture.starts[1]?.request.label).toContain('修复 1')
     expect(promptText(fixture.starts[1]!.request)).toContain('CHAPTER_WRITING_MUST_ANSWER_INVALID')
-    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/execution-log.json'), 'utf8')))
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
     expect(log.sections[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true, true])
-    expect(await readFile(join(workspace.sessionRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('# SEC-1')
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('# SEC-1')
   })
 
   it('keeps scheduling an unrelated ready section while another branch is repairing', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-wave-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-wave-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, false, attempt => attempt !== 1)
     const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
@@ -677,7 +677,7 @@ describe('chapter-writing executor', () => {
       return { stopReason: 'completed', output: [], structured: { section_id: candidate.section_id, metadata: candidate.metadata } }
     }, 'CHAPTER_SUBAGENT_CANDIDATE_INVALID'],
   ])('repairs a %s in a new Child', async (_name, firstResult, issueCode) => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-result-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-result-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (attempt, request) =>
       attempt === 1 ? firstResult(request) : { stopReason: 'completed', output: [], structured: candidateFrom(request) })
@@ -693,7 +693,7 @@ describe('chapter-writing executor', () => {
   })
 
   it('aborts and disposes sibling runs without publishing a manifest when one branch exhausts repair', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-failure-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-failure-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, false, () => true, attempt =>
       attempt === 1 ? { stopReason: 'error', output: [] } : { stopReason: 'completed', output: [], structured: undefined })
@@ -706,12 +706,12 @@ describe('chapter-writing executor', () => {
     fixture.starts[0]!.resolve()
     await expect(execution).rejects.toThrow('SEC-1')
     expect(fixture.disposed.sort()).toEqual(['child-1', 'child-2'])
-    await expect(readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
   })
 
   it('fails S6 without a manifest when Child startup fails', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-start-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-start-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
     fixture.subagents.start.mockRejectedValueOnce(new Error('provider unavailable'))
@@ -720,32 +720,32 @@ describe('chapter-writing executor', () => {
       maxRepairAttempts: 0,
       maxConcurrency: 1,
     })).rejects.toThrow('infrastructure failed for SEC-1')
-    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.sessionRoot, 'chapters/execution-log.json'), 'utf8')))
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
     expect(log.sections[0]).toMatchObject({ section_id: 'SEC-1', status: 'failed', attempts: [] })
-    await expect(readFile(join(workspace.sessionRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('cleans stale S6 artifacts and replans on a stage retry', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-retry-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-retry-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
-    await mkdir(join(workspace.sessionRoot, 'chapters/sections'), { recursive: true })
-    await writeFile(join(workspace.sessionRoot, 'chapters/sections/stale.md'), 'stale')
+    await mkdir(join(workspace.projectRoot, 'chapters/sections'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/stale.md'), 'stale')
 
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 2,
     })
 
-    await expect(readFile(join(workspace.sessionRoot, 'chapters/sections/stale.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/stale.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
     expect(fixture.starts).toHaveLength(3)
   })
 
   it('rejects additional Web evidence that belongs to another Child', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-')), 'session')
-    await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
-    await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-')))
+    await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
       schema_version: 2, stage: 'evidence_mapping', sources: [],
     })}\n`)
     const section = outlineFixture().sections[1]!

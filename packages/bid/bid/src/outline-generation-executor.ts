@@ -102,7 +102,7 @@ function latestOutlineFeedback(agent: Agent): string | undefined {
 
 /** Render the S3 semantic scoring analysis assignment. */
 function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     `当前阶段：${task.stage} / 评分响应点分析`,
     `Bid Session：${agent.id}`,
@@ -117,11 +117,11 @@ function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, 
 /**
  * Render the independent S3 semantic review that repairs the candidate in place.
  * @param agent - live Bid Agent receiving the review assignment.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @returns model-visible semantic review instructions.
  */
 export function renderResponsePointSemanticReviewTask(agent: Agent, workspace: BidWorkspace): string {
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     '当前阶段：outline_generation / Response Point Semantic Review',
     `Bid Session：${agent.id}`,
@@ -141,13 +141,13 @@ export function renderOutlineGenerationTask(
   frameworks: readonly OutlineFrameworkStructure[] = [],
 ): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const feedback = regeneration?.feedback ?? latestOutlineFeedback(agent)
   return [
     `当前阶段：${task.stage}`,
     `目标：${task.objective}`,
     `Bid Session：${agent.id}`,
-    `Session Workspace：${root}`,
+    `Project Workspace：${root}`,
     '先读取以下结构化 Artifact：',
     ...task.inputs.map(path => `- ${root}/${path}`),
     `本阶段只允许调用：${task.allowedTools.join(', ')}。不得 Web Search、bash 或重新进行全库资料映射。`,
@@ -182,7 +182,7 @@ export function renderOutlineGenerationTask(
 /** Render the required post-draft review assignment for the live Bid Agent. */
 function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     `当前阶段：${task.stage} / Blueprint Quality Review`,
     `Bid Session：${agent.id}`,
@@ -201,7 +201,7 @@ function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace,
 /**
  * Render one Validator-guided S4 repair assignment.
  * @param agent - live Bid Agent receiving the repair assignment.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued outline-generation task and Tool policy.
  * @param issues - latest browser-safe S4 validation issues.
  * @returns model-visible instructions for the original Blueprint files.
@@ -214,7 +214,7 @@ export function renderOutlineGenerationRepairTask(
   regeneration?: OutlineGenerationExecutionOptions['regeneration'],
 ): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     `当前阶段：${task.stage} / Artifact Repair`,
     `Bid Session：${agent.id}`,
@@ -235,7 +235,7 @@ export function renderOutlineGenerationRepairTask(
 /**
  * Execute S3 through the live Agent and return its expected Artifacts.
  * @param agent - live Bid Agent used for Blueprint generation and repair.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued outline-generation task and Tool policy.
  * @param options - Host-owned limit for Validator-guided repair turns.
  * @returns the validated Blueprint Artifact descriptor.
@@ -249,7 +249,7 @@ export async function executeOutlineGeneration(
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.signal)
   const frameworks = await loadOutlineFrameworkStructures(workspace)
-  const outlineRoot = join(workspace.sessionRoot, 'outline')
+  const outlineRoot = join(workspace.projectRoot, 'outline')
   const artifactPaths = [OUTLINE_ARTIFACT, QUALITY_REPORT_ARTIFACT, RESPONSE_POINT_CANDIDATE]
   if (options.regeneration !== undefined) artifactPaths.push(REGENERATION_CHANGE_SET)
   await assertNoLinkedPath(workspace.root, outlineRoot)
@@ -258,7 +258,7 @@ export async function executeOutlineGeneration(
   const tools = agent.ctx.get('tools')
   if (fs === undefined || tools === undefined) throw new Error('Bid outline generation requires fs and tools services')
   await Promise.all(artifactPaths.map(async (artifact) => {
-    const artifactPath = join(workspace.sessionRoot, artifact)
+    const artifactPath = join(workspace.projectRoot, artifact)
     await rm(artifactPath, { force: true })
     const target = await fs.resolve(artifactPath)
     agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
@@ -279,9 +279,9 @@ export async function executeOutlineGeneration(
       options.signal?.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointSemanticReviewTask(agent, workspace) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
       await waitForModelStageIdle(agent, options.signal)
-      const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/scoring.json'), 'utf8')))
-      const candidate = parseScoringResponsePointCandidate(JSON.parse(await readFile(join(workspace.sessionRoot, RESPONSE_POINT_CANDIDATE), 'utf8')))
-      await writeFileAtomic(join(workspace.sessionRoot, RESPONSE_POINT_CATALOG), `${JSON.stringify(createScoringResponsePointCatalog(scoring, candidate), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+      const candidate = parseScoringResponsePointCandidate(JSON.parse(await readFile(join(workspace.projectRoot, RESPONSE_POINT_CANDIDATE), 'utf8')))
+      await writeFileAtomic(join(workspace.projectRoot, RESPONSE_POINT_CATALOG), `${JSON.stringify(createScoringResponsePointCatalog(scoring, candidate), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     }
     options.signal?.throwIfAborted()
     agent.followup(createUserMessage({ content: [{ type: 'text', text: renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))

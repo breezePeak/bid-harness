@@ -23,23 +23,25 @@ function text(result: { content: { type: string; text?: string }[] }): string {
 }
 
 describe('BidWorkspace', () => {
-  it('keeps deterministic imports isolated and only exposes relative inventory paths', async () => {
+  it('stores imports in the shared project and only exposes relative inventory paths', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'session_1')
+    const bid = new BidWorkspace(root)
+    expect(bid.projectRoot).toBe(join(root, '.bid-harness'))
+    expect(bid.projectStatePath).toBe(join(root, '.bid-harness', 'project-state.json'))
     const file = (await bid.import([{ name: '公司资料.txt', type: 'text/plain', bytes: new TextEncoder().encode('企业资料') }]))[0]!
     expect(file.parseStatus).toBe('success')
     expect(await readFile(file.absoluteDocumentPath!, 'utf8')).toBe('企业资料')
     expect(file.chunksPath).toBe('corpus/公司资料.txt/chunks')
     expect(JSON.parse(await readFile(file.absoluteChunkIndexPath!, 'utf8'))).toMatchObject({ schema_version: 1, chunk_count: 1 })
     const inventory = await bid.messageInventory('编写技术标')
-    expect(inventory).toContain('.bid-harness/sessions/session_1/input/公司资料.txt')
-    expect(inventory).toContain('.bid-harness/sessions/session_1/corpus/公司资料.txt/document.md')
+    expect(inventory).toContain('.bid-harness/input/公司资料.txt')
+    expect(inventory).toContain('.bid-harness/corpus/公司资料.txt/document.md')
     expect(inventory).not.toContain(root)
   })
 
   it('persists every document role and renders its model-visible inventory name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'roles')
+    const bid = new BidWorkspace(root)
     const bytes = new TextEncoder().encode('项目资料')
     await bid.import([
       { name: '招标.txt', role: 'tender', bytes },
@@ -68,16 +70,16 @@ describe('BidWorkspace', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
     const outside = await mkdtemp(join(tmpdir(), 'dsh-bid-outside-'))
     await symlink(outside, join(root, '.bid-harness'), process.platform === 'win32' ? 'junction' : 'dir')
-    const bid = new BidWorkspace(root, 'linked')
+    const bid = new BidWorkspace(root)
 
     await expect(bid.import([{ name: '要求.txt', bytes: new TextEncoder().encode('内容') }]))
       .rejects.toThrow('bid-workspace-symbolic-link')
-    await expect(access(join(outside, 'sessions'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(access(join(outside, 'input'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('imports DOC and DOCX through corpus manifests', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'session_docs')
+    const bid = new BidWorkspace(root)
     const docx = new Document({ sections: [{ children: [new Paragraph({ text: '技术要求', heading: 'Heading1' }), new Paragraph('项目实施管理')] }] })
     const imported = await bid.import([
       { name: '历史投标书.doc', type: 'application/msword', bytes: await readFile(fixture('bid-document.doc')) },
@@ -105,10 +107,10 @@ describe('BidWorkspace', () => {
 
   it('makes imported PDF corpus searchable and readable through the DSH tools', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'session_search')
+    const bid = new BidWorkspace(root)
     const imported = (await bid.import([{ name: '招标文件.pdf', bytes: await readFile(fixture('bid-document.pdf')) }]))[0]!
     expect(imported.parseStatus).toBe('success')
-    const modelChunksPath = `.bid-harness/sessions/session_search/${imported.chunksPath}`
+    const modelChunksPath = `.bid-harness/${imported.chunksPath}`
     const chunkIndex = JSON.parse(await readFile(imported.absoluteChunkIndexPath!, 'utf8')) as { chunks: { path: string; prev_chunk: string | null }[] }
     const chunkContents = await Promise.all(chunkIndex.chunks.map(entry => readFile(join(imported.absoluteChunksPath!, entry.path), 'utf8')))
     const matchingIndex = chunkContents.findIndex((value, index) => value.includes('项目实施管理') && chunkIndex.chunks[index]!.prev_chunk !== null)
@@ -155,14 +157,14 @@ describe('BidWorkspace', () => {
     expect(() => within('C:\\workspace', '\\\\server\\secret')).toThrow('bid-absolute-path')
     expect(() => within('C:\\workspace', '.')).toThrow('bid-path-traversal')
     expect(() => within('C:\\workspace', '../secret')).toThrow('bid-path-traversal')
-    const bid = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-')), 'session_2')
+    const bid = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-')))
     await expect(bid.import([{ name: 'x.exe', bytes: new Uint8Array([1]) }])).rejects.toThrow('bid-unsupported-file-type')
     await expect(bid.import([{ name: 'x.txt', bytes: new Uint8Array() }])).rejects.toThrow('bid-empty-file')
   })
 
   it('preflights the complete batch before writing any valid prefix', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'preflight')
+    const bid = new BidWorkspace(root)
 
     await expect(bid.import([
       { name: 'valid.txt', bytes: new TextEncoder().encode('valid') },
@@ -174,26 +176,25 @@ describe('BidWorkspace', () => {
 
   it('validates workspace configuration and every import limit', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    expect(() => new BidWorkspace(root, 'bad session')).toThrow('bid-invalid-session-id')
     for (const patch of [
-      { sessionDirectory: '' }, { outputDirectory: '' }, { maxFileBytes: 0 }, { maxFiles: 0 }, { maxTotalBytes: 0 },
+      { projectDirectory: '' }, { outputDirectory: '' }, { maxFileBytes: 0 }, { maxFiles: 0 }, { maxTotalBytes: 0 },
       { documentChunk: { minChars: 10, targetChars: 5, maxChars: 20 } },
-    ]) expect(() => new BidWorkspace(root, 'session', { ...DEFAULT_BID_CONFIG, ...patch })).toThrow('bid-invalid-config')
+    ]) expect(() => new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, ...patch })).toThrow('bid-invalid-config')
 
-    const limited = new BidWorkspace(root, 'limited', { ...DEFAULT_BID_CONFIG, maxFiles: 1, maxFileBytes: 1, maxTotalBytes: 1 })
+    const limited = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, maxFiles: 1, maxFileBytes: 1, maxTotalBytes: 1 })
     await expect(limited.import([])).rejects.toThrow('bid-file-count-limit')
     await expect(limited.import([
       { name: 'a.txt', bytes: new Uint8Array([1]) },
       { name: 'b.txt', bytes: new Uint8Array([1]) },
     ])).rejects.toThrow('bid-file-count-limit')
     await expect(limited.import([{ name: 'a.txt', bytes: new Uint8Array([1, 2]) }])).rejects.toThrow('bid-total-size-limit')
-    const fileLimited = new BidWorkspace(root, 'file-limited', { ...DEFAULT_BID_CONFIG, maxFileBytes: 1 })
+    const fileLimited = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, maxFileBytes: 1 })
     await expect(fileLimited.import([{ name: 'a.txt', bytes: new Uint8Array([1, 2]) }])).rejects.toThrow('bid-file-size-limit')
   })
 
   it('imports text, Markdown, duplicate names, and workbook tables deterministically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'deterministic')
+    const bid = new BidWorkspace(root)
     const book = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([
       ['项目|名称', '说明'], ['实施', '第一行\n第二行'], ['', ''],
@@ -223,7 +224,7 @@ describe('BidWorkspace', () => {
   it('records deterministic and document parse failures without aborting the batch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
     const config = { ...DEFAULT_BID_CONFIG, allowedExtensions: [...DEFAULT_BID_CONFIG.allowedExtensions, '.foo'] }
-    const bid = new BidWorkspace(root, 'failures', config)
+    const bid = new BidWorkspace(root, config)
     const imported = await bid.import([
       { name: 'bad.txt', bytes: new Uint8Array([0xff]), type: 'text/custom' },
       { name: 'bad.pdf', bytes: new TextEncoder().encode('not pdf') },
@@ -244,7 +245,7 @@ describe('BidWorkspace', () => {
 
   it('does not chunk a corpus that needs OCR', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'needs_ocr')
+    const bid = new BidWorkspace(root)
     const imported = (await bid.import([{ name: '扫描件.pdf', bytes: await readFile(fixture('scanned-document.pdf')) }]))[0]!
     expect(imported).toMatchObject({ parseStatus: 'needs_ocr', chunksPath: null, chunkIndexPath: null })
     expect(imported.absoluteChunksPath).toBeNull()
@@ -253,8 +254,8 @@ describe('BidWorkspace', () => {
 
   it('rejects invalid manifests and renders needs-OCR inventory', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
-    const bid = new BidWorkspace(root, 'manifest')
-    await mkdir(bid.sessionRoot, { recursive: true })
+    const bid = new BidWorkspace(root)
+    await mkdir(bid.projectRoot, { recursive: true })
     await writeFile(bid.manifestPath, '{')
     await expect(bid.readManifest()).rejects.toThrow()
     await writeFile(bid.manifestPath, JSON.stringify({ version: 1, files: [] }))
@@ -281,21 +282,21 @@ describe('BidWorkspace', () => {
     const delegated = await parseBidDocument({ sourcePath: fixture('bid-document.pdf'), outputDir: join(root, 'delegated') })
     expect(delegated.parseStatus).toBe('success')
 
-    const bid = new BidWorkspace(root, 'export')
-    await mkdir(join(bid.sessionRoot, 'drafts'), { recursive: true })
-    await writeFile(join(bid.sessionRoot, 'drafts', '技术标.md'), '# 一级\n\n## 二级\n\n### 三级\n\n正文\n\n1. 有序\n\n- 无序\n\n| 项目 | 要求 |\n| --- | --- |\n| 实施 | 完整 |\n\n---\n')
+    const bid = new BidWorkspace(root)
+    await mkdir(join(bid.projectRoot, 'drafts'), { recursive: true })
+    await writeFile(join(bid.projectRoot, 'drafts', '技术标.md'), '# 一级\n\n## 二级\n\n### 三级\n\n正文\n\n1. 有序\n\n- 无序\n\n| 项目 | 要求 |\n| --- | --- |\n| 实施 | 完整 |\n\n---\n')
     const destination = await bid.exportDocx('drafts/技术标.md')
-    expect(destination).toBe('.bid-harness/sessions/export/output/技术标.docx')
-    expect((await readFile(join(bid.sessionRoot, 'output', '技术标.docx'))).byteLength).toBeGreaterThan(0)
+    expect(destination).toBe('.bid-harness/output/技术标.docx')
+    expect((await readFile(join(bid.projectRoot, 'output', '技术标.docx'))).byteLength).toBeGreaterThan(0)
 
-    await writeFile(join(bid.sessionRoot, 'drafts', 'empty.md'), '')
-    await expect(bid.exportDocx('drafts/empty.md', 'output/empty.docx')).resolves.toBe('.bid-harness/sessions/export/output/empty.docx')
-    await mkdir(join(bid.sessionRoot, 'output', 'conflict.docx'))
+    await writeFile(join(bid.projectRoot, 'drafts', 'empty.md'), '')
+    await expect(bid.exportDocx('drafts/empty.md', 'output/empty.docx')).resolves.toBe('.bid-harness/output/empty.docx')
+    await mkdir(join(bid.projectRoot, 'output', 'conflict.docx'))
     await expect(bid.exportDocx('drafts/empty.md', 'output/conflict.docx')).rejects.toThrow()
     await expect(bid.exportDocx('drafts/技术标.txt')).rejects.toThrow('bid-source-must-be-markdown')
     await expect(bid.exportDocx('drafts/技术标.md', 'elsewhere/out.docx')).rejects.toThrow('bid-output-path-required')
 
-    const disabled = new BidWorkspace(root, 'disabled', { ...DEFAULT_BID_CONFIG, enableDocxExport: false })
+    const disabled = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, enableDocxExport: false })
     await expect(disabled.exportDocx('draft.md')).rejects.toThrow('bid-docx-export-disabled')
   })
 })

@@ -75,7 +75,7 @@ class BidAnalysisAdapter extends LlmAdapter {
     if (session === undefined) throw new Error('Bid analysis adapter has no Session')
     this.call += 1
     const phase = (this.call - 1) % 3
-    const base = `.bid-harness/sessions/${session.id}`
+    const base = '.bid-harness'
     if (phase === 0) {
       yield* this.toolCalls([
         { name: 'read', args: { file_path: `${base}/manifest.json` } },
@@ -87,20 +87,20 @@ class BidAnalysisAdapter extends LlmAdapter {
     if (phase === 1) {
       const failThisAttempt = this.failFirstAnalysis
       this.failFirstAnalysis = false
-      const sessionRoot = join(session.cwd, '.bid-harness', 'sessions', session.id)
-      const manifest = JSON.parse(await readFile(join(sessionRoot, 'manifest.json'), 'utf8')) as {
+      const projectRoot = join(session.cwd, '.bid-harness')
+      const manifest = JSON.parse(await readFile(join(projectRoot, 'manifest.json'), 'utf8')) as {
         files: AnalysisManifestFile[]
       }
       const tenderFiles = manifest.files.filter(file => file.role === 'tender' && file.parseStatus === 'success')
       const sources = await Promise.all(tenderFiles.map(async (file) => {
         if (file.chunksPath === null || file.chunkIndexPath === null) throw new Error('Tender file has no chunks')
-        const index = JSON.parse(await readFile(join(sessionRoot, file.chunkIndexPath), 'utf8')) as {
+        const index = JSON.parse(await readFile(join(projectRoot, file.chunkIndexPath), 'utf8')) as {
           chunks: Array<{ path: string }>
         }
         const chunk = index.chunks[0]
         if (chunk === undefined) throw new Error('Tender file has no chunk entry')
         const chunkPath = `${file.chunksPath}/${chunk.path}`
-        const lines = (await readFile(join(sessionRoot, chunkPath), 'utf8')).split('\n')
+        const lines = (await readFile(join(projectRoot, chunkPath), 'utf8')).split('\n')
         const rawText = lines.find(line => line.trim().length > 0)?.trim()
         if (rawText === undefined) throw new Error('Tender chunk has no source text')
         return {
@@ -303,8 +303,8 @@ describe('web e2e: Bid file intake', () => {
 
     const sessionCwd = agent.session.header.cwd
     if (sessionCwd === undefined) throw new Error('Bid session has no workspace cwd')
-    const sessionRoot = join(sessionCwd, '.bid-harness', 'sessions', sessionId)
-    const manifestPath = join(sessionRoot, 'manifest.json')
+    const projectRoot = join(sessionCwd, '.bid-harness')
+    const manifestPath = join(projectRoot, 'manifest.json')
     expect((await stat(manifestPath)).isFile()).toBe(true)
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
       version: number
@@ -340,10 +340,10 @@ describe('web e2e: Bid file intake', () => {
       parseStatus: 'success',
     })
     const fixtureBytes = await readFile(INTAKE_FIXTURE)
-    expect(await readFile(join(sessionRoot, imported.inputPath))).toEqual(fixtureBytes)
-    expect(await readFile(join(sessionRoot, documentPath))).toEqual(fixtureBytes)
+    expect(await readFile(join(projectRoot, imported.inputPath))).toEqual(fixtureBytes)
+    expect(await readFile(join(projectRoot, documentPath))).toEqual(fixtureBytes)
 
-    const chunkIndexPath = join(sessionRoot, chunkIndexRelativePath)
+    const chunkIndexPath = join(projectRoot, chunkIndexRelativePath)
     expect((await stat(chunkIndexPath)).isFile()).toBe(true)
     const chunkIndex = JSON.parse(await readFile(chunkIndexPath, 'utf8')) as {
       chunk_count: number
@@ -352,10 +352,10 @@ describe('web e2e: Bid file intake', () => {
     expect(chunkIndex.chunk_count).toBeGreaterThan(0)
     expect(chunkIndex.chunks).toHaveLength(chunkIndex.chunk_count)
     for (const chunk of chunkIndex.chunks) {
-      expect((await stat(join(sessionRoot, chunksPath, chunk.path))).isFile()).toBe(true)
+      expect((await stat(join(projectRoot, chunksPath, chunk.path))).isFile()).toBe(true)
     }
     for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
-      expect((await stat(join(sessionRoot, 'analysis', name))).isFile()).toBe(true)
+      expect((await stat(join(projectRoot, 'analysis', name))).isFile()).toBe(true)
     }
 
     const persisted = await scaffold.ctx.sessionPersistence.readFrom(sessionId, 0)

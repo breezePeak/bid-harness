@@ -37,7 +37,7 @@ export function isBidMainSession(session: Session): boolean {
 
 /** @param workspace 会话工作区。 @param path 会话内相对路径。 @returns 已拒绝链接路径的 JSON 数据。 */
 export async function readStageJson(workspace: BidWorkspace, path: string): Promise<unknown> {
-  const absolute = within(workspace.sessionRoot, path)
+  const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   return JSON.parse(await readFile(absolute, 'utf8'))
 }

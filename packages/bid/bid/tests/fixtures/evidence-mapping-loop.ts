@@ -3,7 +3,7 @@ import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -147,20 +147,20 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('本地资料只有实施流程。') },
   ])
   if (tender === undefined || reference === undefined || reference.chunkIndexPath === null || reference.chunksPath === null) throw new Error('S4 integration corpus missing')
-  const chunkIndex = JSON.parse(await readFile(join(workspace.sessionRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+  const chunkIndex = JSON.parse(await readFile(join(workspace.projectRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = `${reference.chunksPath}/${chunkIndex.chunks[0]!.path}`
   const sourceRef = { file_id: tender.id, chunk, line_start: 1, line_end: 1 }
-  await mkdir(join(workspace.sessionRoot, 'analysis'), { recursive: true })
-  await writeFile(join(workspace.sessionRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1, project_name: '访问控制项目', tender_name: null, purchaser: null, owner: null, project_background: ['安全建设'], project_objectives: ['访问控制'], project_scope: ['技术方案'], technical_scope: ['安全'], delivery_scope: ['方案'], implementation_constraints: [], key_technical_points: ['访问控制'], source_refs: [sourceRef], analyzed_tender_files: [tender.id] }))
-  await writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1, project_name: '访问控制项目', tender_name: null, purchaser: null, owner: null, project_background: ['安全建设'], project_objectives: ['访问控制'], project_scope: ['技术方案'], technical_scope: ['安全'], delivery_scope: ['方案'], implementation_constraints: [], key_technical_points: ['访问控制'], source_refs: [sourceRef], analyzed_tender_files: [tender.id] }))
+  await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
   const scoring = { schema_version: 1 as const, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '安全', raw_text: '安全审计', criterion: '方案完整', score: 5, score_range: null, must_answer: true, source_refs: [sourceRef] }] }
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
-  await writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明访问控制' }] })))
-  await writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
-  await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明访问控制' }] })))
+  await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
+  await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
-    writeFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{ id: 'SEC-SECURITY', parent_id: null, order: 1, level: 1, title: '访问控制与安全审计', purpose: '响应安全技术要求。', writable: true, must_answer: ['说明访问控制与安全审计措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', scoring_response_point_ids: ['RP-000001'], scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明访问控制' }], suggested_tables: [], suggested_figures: [], writing_notes: [] }] })),
-    writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })),
+    writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{ id: 'SEC-SECURITY', parent_id: null, order: 1, level: 1, title: '访问控制与安全审计', purpose: '响应安全技术要求。', writable: true, must_answer: ['说明访问控制与安全审计措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', scoring_response_point_ids: ['RP-000001'], scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明访问控制' }], suggested_tables: [], suggested_figures: [], writing_notes: [] }] })),
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })),
   ])
   return { chunk, requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
 }
@@ -189,12 +189,12 @@ function partialResult(url: string) {
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false) {
   const sessionId = SessionId('s3-real-loop')
-  const workspace = new BidWorkspace(root, sessionId)
+  const workspace = new BidWorkspace(root)
   const s2 = await prepareS2(workspace)
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
-  const workspacePath = relative(root, workspace.sessionRoot).replaceAll('\\', '/')
-  const initialOutline = await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
+  const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
+  const initialOutline = await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
   const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })
   const [corpus] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
   if (corpus === undefined) throw new Error('missing reference corpus')
@@ -232,6 +232,9 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root, ...(interactive ? { agentPreset: 'bid' } : {}) })
+  // Loader 装配的 Host 必须完成项目初始化，才能设置本场景的 S4 起点。
+  const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: Session; done: Promise<void> }> } | undefined
+  await [...host?.inFlight.values() ?? []].find(operation => operation.session === agent.session)?.done
   agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
   agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
   agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })

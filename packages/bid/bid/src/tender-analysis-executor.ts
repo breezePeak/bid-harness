@@ -33,20 +33,20 @@ const TECHNICAL_SCORING_ANCHORS = '技术评分、技术评审、技术评价、
 /**
  * Render the complete dynamic S2 assignment injected into the Bid Agent.
  * @param agent Live Agent that owns the Bid Session.
- * @param workspace Session-scoped Bid workspace.
+ * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @returns Dynamic assignment text for the Agent follow-up.
  */
 export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
-  const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const manifestPath = `${workspacePath}/manifest.json`
   const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage}`,
     `目标：${task.objective}`,
     `Bid Session：${agent.id}`,
-    `Session Workspace：${workspacePath}`,
+    `Project Workspace：${workspacePath}`,
     `首先读取：${manifestPath}`,
     '只把 manifest 中 role=tender 且 parseStatus=success 的文件作为本阶段权威来源；reference 资料不得产生招标要求、评分项或合规规则。',
     `本阶段只允许调用：${task.allowedTools.join(', ')}。`,
@@ -56,7 +56,7 @@ export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, 
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。grep 只用于定位，不得为每一个评分项重复全局搜索。命中后先 read 该文件 chunks/index.json，利用 order、prev_chunk、next_chunk 和 heading_path 从命中 chunk 的小窗口开始连续阅读相邻 chunk；评分表在边界处截断时才沿 prev_chunk 或 next_chunk 扩展，直到技术评分结束或进入商务、价格、资格或明显无关章节。完成该区域后仅再 grep 一次，检查是否有远离当前区域的技术评分锚点；只有发现新的远距离区域时，才读取该位置附近的连续 chunk 并补充评分项。',
     '完成前写入以下四个 UTF-8 JSON 文件：',
     ...artifactPaths.map(path => `- ${path}`),
-    '四个文件共同使用 schema_version=1。source_refs 必须是非空数组，元素严格包含 file_id、chunk、line_start、line_end；chunk 使用 Session Workspace 相对路径并且必须属于该 tender 文件。',
+    '四个文件共同使用 schema_version=1。source_refs 必须是非空数组，元素严格包含 file_id、chunk、line_start、line_end；chunk 使用 Project Workspace 相对路径并且必须属于该 tender 文件。',
     'project.json 严格包含 schema_version, project_name, tender_name, purchaser, owner, project_background, project_objectives, project_scope, technical_scope, delivery_scope, implementation_constraints, key_technical_points, source_refs, analyzed_tender_files。project_background 说明建设背景，project_objectives 说明建设目标，implementation_constraints 只记录影响技术方案的实施约束，key_technical_points 根据本项目招标文件概括技术标必须重点说明的内容。未知单值写 null，未知数组写 []，不得补全或套用通用模板；analyzed_tender_files 列出全部成功解析 tender 文件的 manifest id。',
     'requirements.json 严格包含 schema_version, requirements；每项严格包含 id, category, raw_text, normalized_requirement, mandatory, source_refs，并按可独立响应的语义原子化。',
     'scoring.json 严格包含 schema_version, scoring_items；只收录技术评分及其技术子项，排除资格、商务和价格评分。每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, source_refs。must_answer 必须是 boolean：该项必须在技术标响应时为 true，否则为 false；不得把评分响应点或字符串数组写入该字段。raw_text 忠实保留完整评分原文，criterion 只做评分规则规范化；不得拆解评分响应点。score_range 为 null 或 {min,max}。',
@@ -92,7 +92,7 @@ function requestedWritePath(argumentsValue: unknown): string | undefined {
 /**
  * Render the sole S2 repair assignment from Host-produced validation issues.
  * @param agent Live Agent that owns the Bid Session.
- * @param workspace Session-scoped Bid workspace.
+ * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @param issues Browser-safe issues produced by the S2 Validator.
  * @returns Dynamic repair assignment for one Agent follow-up.
@@ -104,13 +104,13 @@ export function renderTenderAnalysisRepairTask(
   issues: readonly StageValidationIssue[],
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
-  const workspacePath = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const paths = repairArtifacts(task, issues)
   const artifactPaths = paths.map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage} / Artifact Repair`,
     `Bid Session：${agent.id}`,
-    `Session Workspace：${workspacePath}`,
+    `Project Workspace：${workspacePath}`,
     '预校验未通过。依据下列 Host Validator 问题修改原正式 Artifact：',
     ...issues.map(issue => [
       `- code: ${issue.code}`,
@@ -133,7 +133,7 @@ export function renderTenderAnalysisRepairTask(
 /**
  * Execute S2 through the live Harness Agent and return expected Artifact references after quiescence.
  * @param agent Live Agent that owns the Bid Session.
- * @param workspace Session-scoped Bid workspace.
+ * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @param options Host-owned repair-turn limit for this execution.
  * @returns Expected Artifact references for Validator inspection.
@@ -146,20 +146,20 @@ export async function executeTenderAnalysis(
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.signal)
-  const analysisRoot = join(workspace.sessionRoot, 'analysis')
+  const analysisRoot = join(workspace.projectRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
   const fs = agent.ctx.get('fs')
   const tools = agent.ctx.get('tools')
   if (fs === undefined || tools === undefined) throw new Error('Bid tender analysis requires fs and tools services')
   await Promise.all(task.requiredArtifacts.map(async (path) => {
-    const artifactPath = join(workspace.sessionRoot, path)
+    const artifactPath = join(workspace.projectRoot, path)
     await rm(artifactPath, { force: true })
     const target = await fs.resolve(artifactPath)
     agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
   }))
   const allowed = new Set(task.allowedTools)
-  let writablePaths = new Set(task.requiredArtifacts.map(path => resolve(workspace.sessionRoot, path)))
+  let writablePaths = new Set(task.requiredArtifacts.map(path => resolve(workspace.projectRoot, path)))
   const liftRestriction = tools.restrict({ allow: task.allowedTools })
   const liftGuard = tools.guard((exec) => {
     if (!allowed.has(exec.name)) return `Bid stage ${task.stage} allows only ${task.allowedTools.join(', ')}`
@@ -186,7 +186,7 @@ export async function executeTenderAnalysis(
     let prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
     for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
       options.signal?.throwIfAborted()
-      writablePaths = new Set(repairArtifacts(task, prevalidation.issues).map(path => resolve(workspace.sessionRoot, path)))
+      writablePaths = new Set(repairArtifacts(task, prevalidation.issues).map(path => resolve(workspace.projectRoot, path)))
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, prevalidation.issues) }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },

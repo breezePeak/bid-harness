@@ -29,7 +29,7 @@ async function fixture(tenderText = '# 项目\n\n必须按期交付，技术方�
   referenceSource: TenderSourceRef
 }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-tender-analysis-'))
-  const workspace = new BidWorkspace(root, 'session')
+  const workspace = new BidWorkspace(root)
   const [tender, reference] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('# 历史材料\n\n旧项目要求。') },
@@ -42,9 +42,9 @@ async function fixture(tenderText = '# 项目\n\n必须按期交付，技术方�
   const tenderIndex = JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
   const referenceIndex = JSON.parse(await readFile(reference.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }
   const tenderChunk = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
-  const tenderChunkLineEnd = (await readFile(join(workspace.sessionRoot, tenderChunk), 'utf8')).split('\n').length
+  const tenderChunkLineEnd = (await readFile(join(workspace.projectRoot, tenderChunk), 'utf8')).split('\n').length
   const referenceChunk = `${reference.chunksPath}/${referenceIndex.chunks[0]!.path}`
-  const referenceChunkLineEnd = (await readFile(join(workspace.sessionRoot, referenceChunk), 'utf8')).split('\n').length
+  const referenceChunkLineEnd = (await readFile(join(workspace.projectRoot, referenceChunk), 'utf8')).split('\n').length
   return {
     workspace,
     tenderId: tender.id,
@@ -98,7 +98,7 @@ function documents(tenderId: string, source: TenderSourceRef): Record<string, un
 }
 
 async function publish(workspace: BidWorkspace, docs: Record<string, unknown>): Promise<void> {
-  const root = join(workspace.sessionRoot, 'analysis')
+  const root = join(workspace.projectRoot, 'analysis')
   await mkdir(root, { recursive: true })
   await Promise.all(Object.entries(docs).map(([name, value]) => (
     writeFile(join(root, name), `${JSON.stringify(value)}\n`)
@@ -132,11 +132,11 @@ describe('tender-analysis validator', () => {
     const manifest = await value.workspace.readManifest()
     const tender = manifest.files.find(file => file.id === value.tenderId)
     if (tender?.chunksPath === null || tender?.chunkIndexPath === null || tender === undefined) throw new Error('test corpus was not chunked')
-    const index = JSON.parse(await readFile(join(value.workspace.sessionRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+    const index = JSON.parse(await readFile(join(value.workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
     const uncited = index.chunks[1]?.path
     if (uncited === undefined) throw new Error('test corpus needs multiple chunks')
     await publish(value.workspace, documents(value.tenderId, value.source))
-    await rm(join(value.workspace.sessionRoot, tender.chunksPath, uncited))
+    await rm(join(value.workspace.projectRoot, tender.chunksPath, uncited))
 
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
   })
@@ -148,7 +148,7 @@ describe('tender-analysis validator', () => {
       '# 技术评分', technicalScoring,
       '# 价格评分', '报价得分 30 分。',
     ].join('\n\n'))
-    const citedText = await readFile(join(value.workspace.sessionRoot, value.source.chunk), 'utf8')
+    const citedText = await readFile(join(value.workspace.projectRoot, value.source.chunk), 'utf8')
     const docs = documents(value.tenderId, value.source)
     const requirements = docs['requirements.json'] as { requirements: unknown[] }
     const compliance = docs['compliance.json'] as { compliance_items: unknown[] }
@@ -302,8 +302,8 @@ describe('tender-analysis validator', () => {
     const value = await fixture()
     const docs = documents(value.tenderId, value.source)
     await publish(value.workspace, docs)
-    await writeFile(join(value.workspace.sessionRoot, 'analysis/scoring.json'), '{')
-    await rm(join(value.workspace.sessionRoot, 'analysis/compliance.json'))
+    await writeFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), '{')
+    await rm(join(value.workspace.projectRoot, 'analysis/compliance.json'))
     const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
     expect(result).toMatchObject({ ok: false, issues: expect.arrayContaining([
       {

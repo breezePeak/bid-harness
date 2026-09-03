@@ -25,7 +25,7 @@ function reject(issues: StageValidationIssue[], code: string, message: string, a
 
 async function readJson(workspace: BidWorkspace, path: string, issues: StageValidationIssue[]): Promise<unknown> {
   try {
-    const absolute = within(workspace.sessionRoot, path)
+    const absolute = within(workspace.projectRoot, path)
     await assertNoLinkedPath(workspace.root, absolute)
     if (!(await lstat(absolute)).isFile()) throw new Error('not-file')
     return JSON.parse(await readFile(absolute, 'utf8'))
@@ -57,7 +57,7 @@ async function validateWebSource(
   issues: StageValidationIssue[],
 ): Promise<boolean> {
   try {
-    const path = within(workspace.sessionRoot, source.snapshot_path)
+    const path = within(workspace.projectRoot, source.snapshot_path)
     await assertNoLinkedPath(workspace.root, path)
     const content = await readFile(path, 'utf8')
     if (!(await lstat(path)).isFile() || content.trim().length === 0 || webEvidenceContentSha256(content) !== source.content_sha256) throw new Error('invalid')

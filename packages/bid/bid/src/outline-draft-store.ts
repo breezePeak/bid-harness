@@ -11,7 +11,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 /** Host workspace paths needed by the draft store without importing the Host entrypoint. */
 interface OutlineDraftWorkspace {
   readonly root: string
-  readonly sessionRoot: string
+  readonly projectRoot: string
 }
 
 /** CAS identity and operations required for one S5 mutation. */
@@ -33,20 +33,20 @@ export type OutlineDraftMutationResult =
   | { readonly ok: false; readonly error: { readonly code: 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_OUTLINE_DRAFT_PERSIST_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current: OutlineDraftView } }
 
 async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise<unknown> {
-  const absolute = within(workspace.sessionRoot, path)
+  const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
 /**
- * @param workspace Session Bid workspace.
+ * @param workspace Bid project workspace.
  * @param persist 是否持久化初始化或源目录刷新；只读 inspect 使用 false。
  * @returns Existing or initialized Host-owned draft.
  */
 export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, persist = true): Promise<OutlineDraftView> {
   const source = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
   const sourceHash = outlineArtifactSha256(source)
-  const path = within(workspace.sessionRoot, 'outline/draft.json')
+  const path = within(workspace.projectRoot, 'outline/draft.json')
   await assertNoLinkedPath(workspace.root, path)
   try {
     const existing = parseOutlineDraft(JSON.parse(await readFile(path, 'utf8')))
@@ -69,7 +69,7 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, 
 }
 
 /**
- * @param workspace Session Bid workspace.
+ * @param workspace Bid project workspace.
  * @param request CAS identity and edit batch.
  * @returns Persisted draft or a recoverable rejection.
  */
@@ -108,7 +108,7 @@ export async function mutateOutlineDraft(
     return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The edit violates S5 structure or coverage rules.', issues, current } }
   }
   const next: OutlineDraftView = { ...current, revision: current.revision + 1, draft_outline_sha256: hash, outline: candidate }
-  const path = within(workspace.sessionRoot, 'outline/draft.json')
+  const path = within(workspace.projectRoot, 'outline/draft.json')
   try {
     await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
   } catch {
@@ -118,7 +118,7 @@ export async function mutateOutlineDraft(
 }
 
 /**
- * @param workspace Session Bid workspace.
+ * @param workspace Bid project workspace.
  * @param request Expected draft identity.
  * @param candidate S4-validated candidate.
  * @returns Persisted replacement or a recoverable rejection.
@@ -136,7 +136,7 @@ export async function replaceOutlineDraft(
   const hash = outlineArtifactSha256(parsed)
   if (hash === current.draft_outline_sha256) return { ok: true, value: current }
   const next: OutlineDraftView = { ...current, revision: current.revision + 1, draft_outline_sha256: hash, outline: parsed }
-  const path = within(workspace.sessionRoot, 'outline/draft.json')
+  const path = within(workspace.projectRoot, 'outline/draft.json')
   try {
     await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
   } catch {

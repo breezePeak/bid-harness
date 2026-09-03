@@ -38,14 +38,14 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       expect(childLog).toContain('本地资料只有实施流程。')
       expect(childLog).not.toContain('EISDIR')
 
-      const sessionRoot = join(cwd, '.bid-harness/sessions', header.parentSession!)
-      const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
-      const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+      const projectRoot = join(cwd, '.bid-harness')
+      const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+      const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
       expect(ledger.sources).toHaveLength(1)
       expect(map.section_mappings[0]!.web_materials[0]).toMatchObject({
         source_id: ledger.sources[0]!.source_id, snapshot_path: ledger.sources[0]!.snapshot_path,
       })
-      const snapshots = await Promise.all(ledger.sources.map(source => readFile(join(sessionRoot, source.snapshot_path), 'utf8')))
+      const snapshots = await Promise.all(ledger.sources.map(source => readFile(join(projectRoot, source.snapshot_path), 'utf8')))
       const artifacts = JSON.stringify({
         map, ledger: { ...ledger, sources: ledger.sources.map(source => ({ ...source, fetched_at: '<TIME>' })) }, snapshots,
       }, null, 2) + '\n'

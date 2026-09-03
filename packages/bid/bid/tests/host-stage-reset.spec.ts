@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -6,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
-  BID_STAGES,
+  BID_STAGES, BidWorkspace, checkpointBidProjectState, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState,
   BidHostRuntime,
   type BidRuntimeState,
   type Config,
@@ -14,6 +15,10 @@ import {
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 
 interface TestOperation {
+  readonly session: unknown
+  readonly workspace: BidWorkspace
+  readonly key: string
+  readonly ready: boolean
   controller: AbortController
   readonly done: Promise<void>
   readonly settle: () => void
@@ -26,7 +31,7 @@ interface TestHost {
   readonly inFlight: Map<string, TestOperation>
   automaticOrchestrator: (
     agent: Agent,
-    workspace: { readonly sessionRoot: string },
+    workspace: { readonly projectRoot: string },
     signal?: AbortSignal,
   ) => { drive: () => Promise<BidRuntimeState> }
 }
@@ -45,13 +50,17 @@ describe('Bid Host stage reset', () => {
     session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
     session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
 
-    const evidencePath = join(cwd, '.bid-harness', 'sessions', session.id, 'analysis', 'evidence-map.json')
+    const evidencePath = join(cwd, '.bid-harness', 'analysis', 'evidence-map.json')
     await mkdir(dirname(evidencePath), { recursive: true })
     await writeFile(evidencePath, '{}\n')
 
+    const workspace = new BidWorkspace(cwd)
+    await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
+    const key = process.platform === 'win32' ? realpathSync(cwd).toLowerCase() : realpathSync(cwd)
     const prior = Promise.withResolvers<undefined>()
     const idle = Promise.withResolvers<undefined>()
     const operation: TestOperation = {
+      session, workspace, key, ready: true,
       controller: new AbortController(),
       done: prior.promise,
       settle: () => prior.resolve(undefined),
@@ -73,14 +82,14 @@ describe('Bid Host stage reset', () => {
     })
     let resetSignal: AbortSignal | undefined
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { sessions: { flush } },
+      ctx: { sessions: { flush, list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
         chapterWritingMaxConcurrency: 1, trustedHosts: [],
       } satisfies Config,
-      inFlight: new Map([[session.id, operation]]),
-      automaticOrchestrator: (_agent: Agent, _workspace: { readonly sessionRoot: string }, signal?: AbortSignal) => {
+      inFlight: new Map([[key, operation]]),
+      automaticOrchestrator: (_agent: Agent, _workspace: { readonly projectRoot: string }, signal?: AbortSignal) => {
         resetSignal = signal
         return { drive }
       },
@@ -108,7 +117,7 @@ describe('Bid Host stage reset', () => {
     expect(resetSignal).toBeDefined()
     expect(resetSignal?.aborted).toBe(false)
     expect(flush).toHaveBeenCalledWith(session)
-    expect(host.inFlight.has(session.id)).toBe(false)
+    expect(host.inFlight.has(key)).toBe(false)
   })
 
   it.each(BID_STAGES)('clears %s and later-stage model context before rerunning', async (stage) => {
@@ -125,6 +134,7 @@ describe('Bid Host stage reset', () => {
       if (candidate !== 'docx_export') session.append('bid.stage.completed', { stage: candidate, status: 'completed', artifacts: [] })
       return message
     })
+    await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
     const stageIndex = BID_STAGES.indexOf(stage)
     const clear = vi.fn()
     const agent = {
@@ -147,7 +157,7 @@ describe('Bid Host stage reset', () => {
       return { stage, status: 'waiting_user' }
     })
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { sessions: { flush: vi.fn(async () => {}) } },
+      ctx: { sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,

@@ -33,12 +33,12 @@ function reportArtifactParseFailure(error: unknown, issues: StageValidationIssue
 
 async function parseJson(workspace: BidWorkspace, path: string, issues: StageValidationIssue[]): Promise<unknown> {
   try {
-    const absolute = within(workspace.sessionRoot, path)
+    const absolute = within(workspace.projectRoot, path)
     await assertNoLinkedPath(workspace.root, absolute)
     if (!(await lstat(absolute)).isFile()) throw new Error('not-file')
   } catch { reject(issues, 'OUTLINE_GENERATION_INPUT_INVALID', 'A required outline-generation input is missing or invalid.', path) }
   try {
-    const absolute = within(workspace.sessionRoot, path)
+    const absolute = within(workspace.projectRoot, path)
     return JSON.parse(await readFile(absolute, 'utf8'))
   } catch (error) {
     const message = error instanceof Error ? error.message : 'invalid JSON'

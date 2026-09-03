@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -9,6 +9,77 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 describe('Bid client projection', () => {
+  it('相同项目状态的新修订不推送投影，失败问题变化仍刷新客户端', async () => {
+    const ctx = new Context()
+    const sessions = await ctx.plugin(SessionStore)
+    const projections = await ctx.plugin(SessionProjectionRegistry)
+    const disposeProjection = registerBidRuntimeProjection(ctx.sessionProjections)
+    const listener = vi.fn()
+    const unsubscribe = ctx.sessionProjections.onChanged(listener)
+    try {
+      const session = ctx.sessions.create()
+      const waiting = { stage: 'evidence_mapping' as const, status: 'waiting_user' as const }
+      session.append('bid.project.resumed', { runtime: waiting, revision: 1 })
+      expect(listener).toHaveBeenCalledTimes(1)
+      session.append('bid.project.resumed', { runtime: { ...waiting }, revision: 2 })
+      expect(listener).toHaveBeenCalledTimes(1)
+
+      const failed = {
+        stage: 'chapter_writing' as const, status: 'failed' as const, failureReason: '章节缺少资料。',
+        failureIssues: [{ code: 'MISSING_EVIDENCE', message: '缺少施工参数。', artifact: 'chapters/section-1.md', path: 'body' }],
+      }
+      session.append('bid.project.resumed', { runtime: failed, revision: 3 })
+      expect(listener).toHaveBeenCalledTimes(2)
+      session.append('bid.project.resumed', { runtime: {
+        ...failed,
+        failureIssues: [{ path: 'body', artifact: 'chapters/section-1.md', message: '缺少施工参数。', code: 'MISSING_EVIDENCE' }],
+      }, revision: 4 })
+      expect(listener).toHaveBeenCalledTimes(2)
+      session.append('bid.project.resumed', { runtime: {
+        ...failed, failureIssues: [{ ...failed.failureIssues[0]!, message: '缺少项目进度参数。' }],
+      }, revision: 5 })
+      expect(listener).toHaveBeenCalledTimes(3)
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime.failureIssues?.[0]?.message)
+        .toBe('缺少项目进度参数。')
+    } finally {
+      unsubscribe()
+      disposeProjection()
+      await projections.dispose()
+      await sessions.dispose()
+    }
+  })
+
+  it('将项目恢复事件应用到当前 Session，并继续处理当前阶段确认', async () => {
+    const ctx = new Context()
+    const sessions = await ctx.plugin(SessionStore)
+    const projections = await ctx.plugin(SessionProjectionRegistry)
+    const disposeProjection = registerBidRuntimeProjection(ctx.sessionProjections)
+    try {
+      const session = ctx.sessions.create()
+      session.append('bid.project.resumed', {
+        runtime: { stage: 'evidence_mapping', status: 'waiting_user' }, revision: 12,
+      })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+        runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+        allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
+        composer: { enabled: true },
+      })
+      session.append('bid.user_confirmation.received', { stage: 'evidence_mapping', confirmed: true })
+      session.append('bid.stage.completed', { stage: 'evidence_mapping', status: 'completed', artifacts: [] })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
+        .toEqual({ stage: 'chapter_writing', status: 'pending' })
+      session.append('bid.project.resumed', {
+        runtime: { stage: 'outline_generation', status: 'pending' }, revision: 14,
+      })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
+        .toEqual({ stage: 'outline_generation', status: 'pending' })
+    } finally {
+      disposeProjection()
+      await projections.dispose()
+      await sessions.dispose()
+    }
+  })
+
   it('derives allowed actions and composer capability from host runtime state', () => {
     expect(getBidClientProjection({ stage: 'file_intake', status: 'pending' })).toEqual({
       runtime: { stage: 'file_intake', status: 'pending' },

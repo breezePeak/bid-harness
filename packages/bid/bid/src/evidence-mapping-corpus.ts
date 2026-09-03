@@ -19,7 +19,7 @@ export interface MappingCorpusLocation {
 
 /**
  * 在启动 Child 前验证所有成功解析的 Evidence Corpus。
- * @param workspace - 拥有 Corpus 的 Session 工作区。
+ * @param workspace - 拥有 Corpus 的 项目工作区。
  * @param manifest - 当前文件清单。
  * @returns Prompt、Guard 与 Evidence 验证共用的绝对路径。
  * @throws EVIDENCE_MAPPING_CORPUS_INVALID，包含文件身份及具体损坏原因。
@@ -30,16 +30,16 @@ export async function resolveMappingCorpusLocations(workspace: BidWorkspace, man
     if (file.parseStatus !== 'success' || (file.role !== 'reference' && file.role !== 'reference_bid')) continue
     try {
       if (file.chunksPath === null || file.chunkIndexPath === null || file.corpusPath === null) throw new Error('缺少 chunks 或 index 路径')
-      const corpus = within(workspace.sessionRoot, file.corpusPath)
+      const corpus = within(workspace.projectRoot, file.corpusPath)
       within(workspace.corpusRoot, relative(workspace.corpusRoot, corpus))
       if (relative(join(workspace.corpusRoot, basename(file.inputPath)), corpus) !== '') throw new Error('Corpus 不属于该上传文件')
-      const chunks = within(workspace.sessionRoot, file.chunksPath)
-      const indexPath = within(workspace.sessionRoot, file.chunkIndexPath)
+      const chunks = within(workspace.projectRoot, file.chunksPath)
+      const indexPath = within(workspace.projectRoot, file.chunkIndexPath)
       if (relative(join(corpus, 'chunks'), chunks) !== '' || relative(join(chunks, 'index.json'), indexPath) !== '') throw new Error('chunks/index 不属于该文件的 Corpus')
       await assertNoLinkedPath(workspace.root, indexPath)
       if (!(await lstat(chunks)).isDirectory() || !(await lstat(indexPath)).isFile()) throw new Error('chunks 或 index 类型错误')
       const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
-      if (file.documentPath === null || relative(within(workspace.sessionRoot, file.documentPath), resolve(chunks, index.source_document)) !== '') throw new Error('index 指向其他文件正文')
+      if (file.documentPath === null || relative(within(workspace.projectRoot, file.documentPath), resolve(chunks, index.source_document)) !== '') throw new Error('index 指向其他文件正文')
       const ids = new Set<string>()
       const entries: MappingCorpusLocation['chunks'] = []
       for (const entry of index.chunks) {

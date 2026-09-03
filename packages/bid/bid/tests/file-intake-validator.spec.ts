@@ -25,7 +25,7 @@ async function textBatch(...names: string[]): Promise<{
   imported: ImportedFile[]
 }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-validator-'))
-  const workspace = new BidWorkspace(root, 'validator')
+  const workspace = new BidWorkspace(root)
   const imported = await workspace.import(names.map(name => ({
     name,
     bytes: new TextEncoder().encode(`# ${name}\n\n有效内容。`),
@@ -118,7 +118,7 @@ describe('file-intake validator', () => {
     expect(issueCodes(await validateFileIntake(traversed.workspace, matchingBatch, 'file_intake', [
       ...artifact,
       { stage: 'file_intake', type: 'other', path: '../outside.json' },
-    ]))).toContain('FILE_INTAKE_PATH_OUTSIDE_SESSION')
+    ]))).toContain('FILE_INTAKE_PATH_OUTSIDE_PROJECT')
     expect(issueCodes(await validateFileIntake(traversed.workspace, matchingBatch, 'file_intake', [])))
       .toContain('FILE_INTAKE_MANIFEST_ARTIFACT_MISSING')
     expect(issueCodes(await validateFileIntake(traversed.workspace, matchingBatch, 'file_intake', [
@@ -126,7 +126,7 @@ describe('file-intake validator', () => {
     ]))).toContain('FILE_INTAKE_MANIFEST_ARTIFACT_MISSING')
 
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-validator-'))
-    const office = new BidWorkspace(root, 'office')
+    const office = new BidWorkspace(root)
     const imported = await office.import([{
       name: '历史投标书.doc',
       bytes: await readFile(fixture('bid-document.doc')),
@@ -138,7 +138,7 @@ describe('file-intake validator', () => {
 
   it('requires one successfully parsed tender but ignores other settled parse failures', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-validator-'))
-    const workspace = new BidWorkspace(root, 'non-success')
+    const workspace = new BidWorkspace(root)
     const imported = await workspace.import([
       { name: '扫描件.pdf', bytes: await readFile(fixture('scanned-document.pdf')) },
       { name: '损坏.txt', bytes: new Uint8Array([0xff]) },
@@ -146,7 +146,7 @@ describe('file-intake validator', () => {
     expect(issueCodes(await validateFileIntake(workspace, imported, 'file_intake', [...artifact])))
       .toEqual(['FILE_INTAKE_NO_SUCCESSFUL_TENDER'])
 
-    const mixed = new BidWorkspace(root, 'mixed')
+    const mixed = new BidWorkspace(root)
     const mixedImported = await mixed.import([
       { name: '有效招标.txt', role: 'tender', bytes: new TextEncoder().encode('有效招标内容') },
       { name: '扫描件.pdf', role: 'reference', bytes: await readFile(fixture('scanned-document.pdf')) },

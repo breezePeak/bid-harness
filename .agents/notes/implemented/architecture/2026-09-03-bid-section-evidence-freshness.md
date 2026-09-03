@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-模型生成的任务分组允许 Section 合并或重复，无法保证任务数等于目录中的可写叶子数。Manifest 的 Corpus 路径以 Session 为基准，Child 却继承父工作目录；目录 grep 与文件 read 共用过滤规则又拒绝正常搜索。仅按 Section ID 保存证据无法识别目录语义变化，最终用户编辑还可能直接产生空证据占位。把这些 Host 故障交给模型修复会重复消耗同一任务的 Token。
+模型生成的任务分组允许 Section 合并或重复，无法保证任务数等于目录中的可写叶子数。Manifest 的 Corpus 路径以 Bid 项目目录为基准，Child 却继承父工作目录；目录 grep 与文件 read 共用过滤规则又拒绝正常搜索。仅按 Section ID 保存证据无法识别目录语义变化，最终用户编辑还可能直接产生空证据占位。把这些 Host 故障交给模型修复会重复消耗同一任务的 Token。
 
 ## Decision
 
@@ -16,7 +16,7 @@ S4 与 S5 共用可写叶子的树遍历。Host plan v4 保存唯一 Section ID�
 
 Evidence Map v9 保存 Host 计算的 section_fingerprint。指纹使用固定字段序列化与 SHA-256，包含祖先标题路径、purpose、must_answer、业务引用、全局及本章合规要求、writing_notes 和表图建议。Section 的排序与展示属性不参与指纹。目录深化和用户最终编辑都使用同一指纹规则选择补充任务；已删或变为 structural 的 Section 不进入最终 Evidence Map。最终 Validator 与 S5 准入检查集合相等、无重复及指纹相等。
 
-Corpus 预检仅处理成功解析的 reference/reference_bid，验证 Session 内归属、符号链接、索引 Schema 和登记分块是否存在。绝对路径同时用于 Prompt、Guard 和材料校验。grep 授权分块根目录或登记分块，read 授权索引或登记分块；本地引用还必须对应当前 Child 成功 read 的日志。损坏 Corpus 在任何 Child 启动前以 EVIDENCE_MAPPING_CORPUS_INVALID 失败并写入具体文件诊断。
+Corpus 预检仅处理成功解析的 reference/reference_bid，验证项目内归属、符号链接、索引 Schema 和登记分块是否存在。绝对路径同时用于 Prompt、Guard 和材料校验。grep 授权分块根目录或登记分块，read 授权索引或登记分块；本地引用还必须对应当前 Child 成功 read 的日志。损坏 Corpus 在任何 Child 启动前以 EVIDENCE_MAPPING_CORPUS_INVALID 失败并写入具体文件诊断。
 
 材料为空可以正常完成；模型 JSON、Schema、Section 归属、未读分块和 Web 来源不完整允许同 Child 有限修复。grep 使用 `result.error.info.code` 区分搜索条件错误与基础设施故障：无效表达式、原始输出溢出和协作取消允许当前 Child 调整查询，`SEARCH_FAILED` 中止 batch；合法路径本身不能证明失败来自文件系统。预检资料在 read 期间不可用、Host、Provider、Guard 和 Web 结果关联异常立即使任务及阶段失败。
 

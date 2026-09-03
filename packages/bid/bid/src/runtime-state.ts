@@ -1,11 +1,25 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import { BID_STAGES, type BidStage } from './control-plane-contract.ts'
+import { z } from 'zod'
+import { BID_STAGES, STAGE_RUN_STATUSES, type BidStage } from './control-plane-contract.ts'
 import type {
   BidClientProjection,
   BidRuntimeState,
   BidStagePolicy,
   BidStageTask,
 } from './control-plane-contract.ts'
+
+/** Bid 项目文件和客户端投影允许的控制状态字段，不包含聊天内容。 */
+export const bidRuntimeSchema = z.object({
+  stage: z.enum(BID_STAGES),
+  status: z.enum(STAGE_RUN_STATUSES),
+  failureReason: z.string().optional(),
+  failureIssues: z.array(z.object({
+    code: z.string(),
+    message: z.string(),
+    artifact: z.string().optional(),
+    path: z.string().optional(),
+  }).strict()).readonly().optional(),
+}).strict()
 
 /** Runtime state produced by an empty Bid session log. */
 export const BID_INITIAL_RUNTIME_STATE: BidRuntimeState = Object.freeze({ stage: 'file_intake', status: 'pending' })
@@ -109,6 +123,24 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
 /** Fold one committed session event into replayable Bid runtime state. */
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
+    case 'bid.project.resumed': {
+      const runtime = event.data.runtime
+      const sameIssues = state.failureIssues === runtime.failureIssues || (
+        state.failureIssues !== undefined && runtime.failureIssues !== undefined
+        && state.failureIssues.length === runtime.failureIssues.length
+        && state.failureIssues.every((issue, index) => {
+          const next = runtime.failureIssues?.[index]
+          return issue.code === next?.code && issue.message === next?.message
+            && issue.artifact === next?.artifact && issue.path === next?.path
+        })
+      )
+      if (state.stage === runtime.stage && state.status === runtime.status
+        && state.failureReason === runtime.failureReason && sameIssues) return state
+      return { ...runtime,
+        ...runtime.failureIssues === undefined ? {} : {
+          failureIssues: runtime.failureIssues.map(issue => ({ ...issue })),
+        } }
+    }
     case 'bid.stage.started':
       return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed' || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
         ? { stage: state.stage, status: 'running' } : state

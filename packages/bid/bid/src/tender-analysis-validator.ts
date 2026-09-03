@@ -143,7 +143,7 @@ async function parseArtifact(
 ): Promise<unknown> {
   let absolute: string
   try {
-    absolute = within(workspace.sessionRoot, path)
+    absolute = within(workspace.projectRoot, path)
     await assertNoLinkedPath(workspace.root, absolute)
     if (!(await lstat(absolute)).isFile()) throw new Error('not a regular file')
   } catch {
@@ -183,11 +183,11 @@ async function readTenderCorpusText(workspace: BidWorkspace, manifest: BidManife
   const texts = await Promise.all(tenderRecords(manifest).map(async (record) => {
     if (record.chunksPath === null || record.chunkIndexPath === null) return ''
     const chunksPath = record.chunksPath
-    const indexPath = within(workspace.sessionRoot, record.chunkIndexPath)
+    const indexPath = within(workspace.projectRoot, record.chunkIndexPath)
     await assertNoLinkedPath(workspace.root, indexPath)
     const index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
     const chunks = await Promise.all(index.chunks.map(async (entry) => {
-      const chunkPath = within(workspace.sessionRoot, posix.join(chunksPath, entry.path))
+      const chunkPath = within(workspace.projectRoot, posix.join(chunksPath, entry.path))
       await assertNoLinkedPath(workspace.root, chunkPath)
       return readFile(chunkPath, 'utf8')
     }))
@@ -296,7 +296,7 @@ async function validateSourceRef(
     const chunksPath = record.chunksPath
     let index: ReturnType<typeof parseDocumentChunkIndex>
     try {
-      const indexPath = within(workspace.sessionRoot, record.chunkIndexPath)
+      const indexPath = within(workspace.projectRoot, record.chunkIndexPath)
       await assertNoLinkedPath(workspace.root, indexPath)
       index = parseDocumentChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
     } catch {
@@ -305,7 +305,7 @@ async function validateSourceRef(
     const entry = index.chunks.find(chunk => posix.join(chunksPath, chunk.path) === ref.chunk)
     if (entry === undefined) continue
     try {
-      const chunkPath = within(workspace.sessionRoot, ref.chunk)
+      const chunkPath = within(workspace.projectRoot, ref.chunk)
       await assertNoLinkedPath(workspace.root, chunkPath)
       const chunk = await readFile(chunkPath, 'utf8')
       const lines = chunk.split('\n')
@@ -341,8 +341,8 @@ function validateCoverage(
 }
 
 /**
- * Validate all S2 Artifacts and their citations against the current Bid Session workspace.
- * @param workspace Session-scoped Bid workspace.
+ * Validate all S2 Artifacts and their citations against the current Bid project workspace.
+ * @param workspace Workspace 级 Bid 项目.
  * @param stage Orchestrator stage that declares the expected Artifact paths.
  * @param artifacts Artifact references returned by the executor.
  * @returns Validation success or all detected schema and citation issues.

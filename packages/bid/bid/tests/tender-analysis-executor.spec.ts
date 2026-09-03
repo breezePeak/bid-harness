@@ -20,7 +20,7 @@ describe('tender-analysis Agent executor', () => {
       whenIdle: vi.fn(async () => { controller.abort() }),
       followup,
     } as unknown as Agent
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-cancel-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-cancel-')))
 
     await expect(executeTenderAnalysis(
       agent,
@@ -51,7 +51,7 @@ describe('tender-analysis Agent executor', () => {
       followup,
       whenIdle,
     } as unknown as Agent
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-executor-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-executor-')))
     const task = buildBidStageTask('tender_analysis')
 
     const result = await executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: 1 })
@@ -69,15 +69,15 @@ describe('tender-analysis Agent executor', () => {
     )
     expect(policy({ name: 'read' })).toBeUndefined()
     expect(policy({ name: 'bash' })).toContain('allows only grep, read, write')
-    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/scoring.json') } })).toBeUndefined()
-    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/unrelated.json') } })).toContain('may write only its current Artifact paths')
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'analysis/scoring.json') } })).toBeUndefined()
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'analysis/unrelated.json') } })).toContain('may write only its current Artifact paths')
     expect(liftGuard).toHaveBeenCalledOnce()
     expect(liftRestriction).toHaveBeenCalledOnce()
     expect(followup).toHaveBeenCalledTimes(2)
     const message = followup.mock.calls[0]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
     const repair = followup.mock.calls[1]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
     expect(message.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
-    expect(message.content[0]?.text).toContain('首先读取：.bid-harness/sessions/session/manifest.json')
+    expect(message.content[0]?.text).toContain('首先读取：.bid-harness/manifest.json')
     expect(message.content[0]?.text).toContain('只把 manifest 中 role=tender')
     expect(message.content[0]?.text).toContain('当前只分析技术标')
     expect(message.content[0]?.text).toContain('投标报价、价格评分')
@@ -98,7 +98,7 @@ describe('tender-analysis Agent executor', () => {
   })
 
   it('stops after the initial extraction when all S2 Artifacts pass validation', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-one-pass-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-one-pass-')))
     const [tender] = await workspace.import([{
       name: 'technical-scoring.md',
       role: 'tender',
@@ -112,7 +112,7 @@ describe('tender-analysis Agent executor', () => {
     if (tender === undefined || tender.chunksPath === null || tender.absoluteChunkIndexPath === null) throw new Error('test corpus was not chunked')
     const chunk = (JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }).chunks[0]?.path
     if (chunk === undefined) throw new Error('test corpus has no chunks')
-    const sourcePath = join(workspace.sessionRoot, tender.chunksPath, chunk)
+    const sourcePath = join(workspace.projectRoot, tender.chunksPath, chunk)
     const source = { file_id: tender.id, chunk: `${tender.chunksPath}/${chunk}`, line_start: 1, line_end: (await readFile(sourcePath, 'utf8')).split('\n').length }
     const output = {
       project: { schema_version: 1, project_name: '项目', tender_name: null, purchaser: null, owner: null, project_background: ['背景'], project_objectives: ['目标'], project_scope: ['范围'], technical_scope: ['技术'], delivery_scope: ['交付'], implementation_constraints: ['约束'], key_technical_points: ['评分'], source_refs: [source], analyzed_tender_files: [tender.id] },
@@ -125,10 +125,10 @@ describe('tender-analysis Agent executor', () => {
       idleCount++
       if (idleCount !== 2) return
       await Promise.all([
-        writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify(output.project)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify(output.requirements)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(output.scoring)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify(output.compliance)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/project.json'), `${JSON.stringify(output.project)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), `${JSON.stringify(output.requirements)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), `${JSON.stringify(output.scoring)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), `${JSON.stringify(output.compliance)}\n`),
       ])
     })
     const liftRestriction = vi.fn()
@@ -151,7 +151,7 @@ describe('tender-analysis Agent executor', () => {
   })
 
   it('limits a scoring repair to scoring.json', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-scoring-repair-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-scoring-repair-')))
     const [tender] = await workspace.import([{
       name: 'technical-scoring.md',
       role: 'tender',
@@ -168,10 +168,10 @@ describe('tender-analysis Agent executor', () => {
     const whenIdle = vi.fn(async () => {
       if (whenIdle.mock.calls.length !== 2) return
       await Promise.all([
-        writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify(project)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify(requirements)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`),
-        writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify(compliance)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/project.json'), `${JSON.stringify(project)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), `${JSON.stringify(requirements)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`),
+        writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), `${JSON.stringify(compliance)}\n`),
       ])
     })
     let policy: (exec: { name: string; arguments?: unknown }) => string | undefined = () => undefined
@@ -190,12 +190,12 @@ describe('tender-analysis Agent executor', () => {
     await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
 
     expect(agent.followup).toHaveBeenCalledTimes(2)
-    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/scoring.json') } })).toBeUndefined()
-    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/requirements.json') } })).toContain('may write only its current Artifact paths')
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'analysis/scoring.json') } })).toBeUndefined()
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'analysis/requirements.json') } })).toContain('may write only its current Artifact paths')
   })
 
   it('renders only browser-safe issue fields in the repair assignment', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-repair-task-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-repair-task-')))
     const text = renderTenderAnalysisRepairTask(
       { id: 'session' } as Agent,
       workspace,
@@ -211,11 +211,11 @@ describe('tender-analysis Agent executor', () => {
     expect(text).toContain('不得创建 final、fixed、new 或 v2 文件')
     expect(text).toContain('must_answer 必须为 true 或 false')
     expect(text).toContain('analysis/scoring.json')
-    expect(text).not.toContain(`${workspace.sessionRoot.replaceAll('\\', '/')}/analysis/project.json`)
+    expect(text).not.toContain(`${workspace.projectRoot.replaceAll('\\', '/')}/analysis/project.json`)
   })
 
   it('renders dynamic paths without embedding document bodies', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-task-')), 'session')
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-task-')))
     const agent = { id: 'session' } as Agent
     const text = renderTenderAnalysisTask(agent, workspace, buildBidStageTask('tender_analysis'))
     expect(text).toContain('chunks/index.json')

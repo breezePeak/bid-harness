@@ -131,7 +131,7 @@ async function writeWebEvidenceArtifacts(
   retained: WebEvidenceSourcesArtifact['sources'] = [],
 ): Promise<void> {
   for (const snapshot of snapshots) {
-    const absolute = join(workspace.sessionRoot, ...snapshot.source.snapshot_path.split('/'))
+    const absolute = join(workspace.projectRoot, ...snapshot.source.snapshot_path.split('/'))
     await assertNoLinkedPath(workspace.root, absolute)
     await writeFile(absolute, snapshot.content, { encoding: 'utf8', mode: 0o600 })
   }
@@ -150,14 +150,14 @@ async function writeWebEvidenceLedger(workspace: BidWorkspace, ledger: WebEviden
   }
   const retained = new Set(ledger.sources.map(source => source.snapshot_path))
   const obsolete = previous?.sources.filter(source => !retained.has(source.snapshot_path)) ?? []
-  for (const source of obsolete) await assertNoLinkedPath(workspace.root, join(workspace.sessionRoot, source.snapshot_path))
-  await writeJson(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), ledger)
-  for (const source of obsolete) await rm(join(workspace.sessionRoot, source.snapshot_path), { force: true })
+  for (const source of obsolete) await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, source.snapshot_path))
+  await writeJson(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), ledger)
+  for (const source of obsolete) await rm(join(workspace.projectRoot, source.snapshot_path), { force: true })
 }
 
 /**
  * 按最终 Evidence Map 的实际引用裁剪 Web ledger，并删除失去引用的快照。
- * @param workspace - Session 工作区。
+ * @param workspace - 项目工作区。
  * @param evidence - 最终章节证据。
  * @returns ledger 和快照清理完成；文件系统异常向调用方传播。
  */
@@ -206,7 +206,7 @@ interface CompletedMappingTask {
 }
 
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
-  const absolute = join(workspace.sessionRoot, path)
+  const absolute = join(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
@@ -221,7 +221,7 @@ async function writeJson(path: string, value: unknown): Promise<void> {
  * @returns Validated task records, or null before Host scheduling creates the log.
  */
 export async function readEvidenceMappingLog(workspace: BidWorkspace): Promise<EvidenceMappingExecutionLog | null> {
-  const logPath = join(workspace.sessionRoot, LOG_PATH)
+  const logPath = join(workspace.projectRoot, LOG_PATH)
   await assertNoLinkedPath(workspace.root, logPath)
   let raw: string
   try {
@@ -630,7 +630,7 @@ function refinementWriteReason(exec: Readonly<ToolExecution>, workspace: BidWork
   if (typeof filePath !== 'string' || cwd === undefined) return 'S4 Outline Refinement write requires a target path.'
   const target = resolve(cwd, filePath)
   const allowed = [REFINED_OUTLINE_CANDIDATE_PATH, QUALITY_PATH]
-    .map(path => join(workspace.sessionRoot, path))
+    .map(path => join(workspace.projectRoot, path))
   return allowed.includes(target) ? undefined : 'S4 Outline Refinement may write only its candidate and quality report.'
 }
 
@@ -644,10 +644,10 @@ async function refineOutline(
 ): Promise<OutlineArtifact> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid outline refinement requires tools service')
-  const candidatePath = join(workspace.sessionRoot, REFINED_OUTLINE_CANDIDATE_PATH)
-  const qualityPath = join(workspace.sessionRoot, QUALITY_PATH)
+  const candidatePath = join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH)
+  const qualityPath = join(workspace.projectRoot, QUALITY_PATH)
   await Promise.all([removeAttemptPath(candidatePath), removeAttemptPath(qualityPath)])
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const assignment = [
     '当前阶段：evidence_mapping / Outline Refinement',
     `读取 ${root}/outline/initial-confirmed-outline.json、${root}/analysis/evidence-map.json 以及 S2 Artifact。`,
@@ -677,8 +677,8 @@ async function refineOutline(
   }
   let repairAttempts = 0
   const parseArtifact = async <T>(path: string, parse: (value: unknown) => T, issues: StageValidationIssue[]): Promise<T | undefined> => {
-    await assertNoLinkedPath(workspace.root, join(workspace.sessionRoot, path))
-    const content = await readFile(join(workspace.sessionRoot, path), 'utf8')
+    await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, path))
+    const content = await readFile(join(workspace.projectRoot, path), 'utf8')
     try { return parse(JSON.parse(content)) } catch (error) {
       if (error instanceof SyntaxError) issues.push({ code: 'OUTLINE_REFINEMENT_JSON_INVALID', message: error.message, artifact: path })
       else if (error instanceof ZodError) issues.push(...error.issues.map(issue => ({
@@ -734,7 +734,7 @@ async function refineOutline(
     const refined = normalizeRefinedOutline(inputs.outline, candidate)
     quality.reviewed_section_ids = refined.sections.map(section => section.id)
     await Promise.all([
-      writeJson(join(workspace.sessionRoot, OUTLINE_PATH), refined),
+      writeJson(join(workspace.projectRoot, OUTLINE_PATH), refined),
       writeJson(qualityPath, quality),
     ])
     return refined
@@ -747,7 +747,7 @@ async function refineOutline(
 /**
  * Execute S4 through the live Agent and return its expected Artifacts.
  * @param agent - live Bid Agent used for evidence mapping.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued evidence-mapping task and Tool policy.
  * @param options - Host-owned limits for Mapping Task retries and concurrency.
  * @returns the evidence map and Host-owned Web source ledger descriptors.
@@ -768,12 +768,12 @@ async function executeEvidenceMappingRun(
   }
   if (options.remap === undefined) await waitForModelStageIdle(agent, options.signal)
   options.signal?.throwIfAborted()
-  const analysisRoot = join(workspace.sessionRoot, 'analysis')
-  const artifactPath = join(workspace.sessionRoot, 'analysis/evidence-map.json')
-  const planPath = join(workspace.sessionRoot, PLAN_PATH)
-  const logPath = join(workspace.sessionRoot, LOG_PATH)
-  const sourceLedgerPath = join(workspace.sessionRoot, 'analysis/web-evidence-sources.json')
-  const webSourcesRoot = join(workspace.sessionRoot, 'analysis/web-sources')
+  const analysisRoot = join(workspace.projectRoot, 'analysis')
+  const artifactPath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+  const planPath = join(workspace.projectRoot, PLAN_PATH)
+  const logPath = join(workspace.projectRoot, LOG_PATH)
+  const sourceLedgerPath = join(workspace.projectRoot, 'analysis/web-evidence-sources.json')
+  const webSourcesRoot = join(workspace.projectRoot, 'analysis/web-sources')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
   const fs = agent.ctx.get('fs')
@@ -1048,7 +1048,7 @@ async function executeEvidenceMappingRun(
 /**
  * 执行一轮分组资料映射及一次目录深化；普通任务失败保留章节缺口。
  * @param agent - 当前父 Agent。
- * @param workspace - Session 工作区。
+ * @param workspace - 项目工作区。
  * @param task - S4 阶段任务。
  * @param options - 并发、有限模型修复及取消信号。
  * @returns 已通过校验的阶段 Artifact。
@@ -1080,8 +1080,8 @@ export async function executeEvidenceMapping(
       }
       log.failure = issues.map(({ code, message }) => ({ code, message }))
       for (const task of log.tasks) if (task.status !== 'completed') task.status = 'failed'
-      await assertNoLinkedPath(workspace.root, join(workspace.sessionRoot, LOG_PATH))
-      await writeJson(join(workspace.sessionRoot, LOG_PATH), log)
+      await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, LOG_PATH))
+      await writeJson(join(workspace.projectRoot, LOG_PATH), log)
     } catch (logError) {
       throw new BidStageExecutionError([...issues, { code: 'EVIDENCE_MAPPING_LOG_WRITE_FAILED', message: logError instanceof Error ? logError.message : String(logError) }])
     }

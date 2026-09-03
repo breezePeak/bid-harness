@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按实时阶段仅注册给 Bid Main Agent；执行入口重新检查身份、阶段、CAS 和 Session 锁。`bid_stage_inspect` 返回当前编号树、实际 ID、业务引用、材料缺口和映射任务；模型负责自然语言定位，Host 不把展示编号当内部 ID。
+S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按实时阶段仅注册给 Bid Main Agent；执行入口重新检查身份、阶段、CAS 和项目锁。`bid_stage_inspect` 返回当前编号树、实际 ID、业务引用、材料缺口和映射任务；模型负责自然语言定位，Host 不把展示编号当内部 ID。
 
 目录编辑复用 `mutateOutlineDraft`；局部重生成与整本重生成共用反馈要求，独立无工具 Child 只返回编辑操作，Host 验证范围后走同一 Draft mutation。初始 S4 与 targeted remap 共用映射执行器，仅任务范围、Evidence 合并方式和是否深化目录不同。`replace` 不保留目标旧证据，`supplement` 按本地文件/分块或 Web source ID 去重；无关章节不重新运行。
 
@@ -23,6 +23,8 @@ S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按�
 **每次目录修改全量重新映射。** 无关章节会重复研究；仅标题微调不必重映射，新增和拆分章节可以先保留明确缺口或候选资料。
 
 **在阶段工具内运行等待 Main Agent 空闲的生成流程。** 工具本身占用该 Agent，形成自等待。局部目录规划由独立 Child 返回操作，资料 remap 只等待 Mapping Child。
+
+项目文件、跨 Session 进度同步及共享锁由[Workspace 项目记录](../architecture/2026-09-03-bid-workspace-project.md)约束。
 
 ## Consequences
 

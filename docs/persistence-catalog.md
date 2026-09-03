@@ -239,6 +239,23 @@ Types: [TokenUsage](subsystems/llm-streaming.md)
 
 Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/types.ts)
 
+### `bid.project.resumed/*`
+
+<a id="bidprojectresumed--log-only"></a>
+
+#### `bid.project.resumed` — log-only
+
+```ts persistence-catalog
+/**
+ * 将 Workspace 的项目进度应用到当前聊天的 Bid 投影，不附带聊天历史。
+ * @param runtime 已持久化的项目控制状态。
+ * @param revision 项目状态文件的修订号。
+ */
+'bid.project.resumed': { runtime: BidRuntimeState; revision: number }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:25`](../packages/bid/bid/src/bid-events.ts)
+
 ### `bid.stage.completed/*`
 
 <a id="bidstagecompleted--log-only"></a>
@@ -250,7 +267,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:22`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:29`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -269,7 +286,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:22`](../packages/bid/bid/src/bid-ev
 'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:30`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.reset/*`
 
@@ -286,7 +303,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:30`](../packages/bid/bid/src/bid-ev
 'bid.stage.reset': { stage: BidStage; status: 'pending' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:36`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -299,7 +316,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:36`](../packages/bid/bid/src/bid-ev
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:20`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -316,10 +333,10 @@ Source: [`packages/bid/bid/src/bid-events.ts:20`](../packages/bid/bid/src/bid-ev
  */
 'bid.user_confirmation.received':
   | { stage: BidStage; confirmed: true }
-  | { stage: 'outline_confirmation'; confirmed: false; feedback: string }
+  | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:52`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -332,7 +349,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-ev
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:38`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 
@@ -1095,8 +1112,19 @@ Source: [`packages/core/session/src/types.ts:264`](../packages/core/session/src/
 #### `web/deepseek-search-llm-request` — log-only
 
 ```ts persistence-catalog
-/** Secret-free auxiliary DeepSeek search request recorded before dispatch. */
+/** Legacy DeepSeek search request retained for existing logs. */
 'web/deepseek-search-llm-request': DeepSeekSearchLlmRequest
 ```
 
-Source: [`packages/web/web-search-deepseek/src/provider.ts:83`](../packages/web/web-search-deepseek/src/provider.ts)
+Source: [`packages/web/web-search-deepseek/src/index.ts:57`](../packages/web/web-search-deepseek/src/index.ts)
+
+<a id="webprovider-search-llm-request--log-only"></a>
+
+#### `web/provider-search-llm-request` — log-only
+
+```ts persistence-catalog
+/** Exact secret-free hosted-search request, recorded before dispatch. */
+'web/provider-search-llm-request': HostedSearchRequest
+```
+
+Source: [`packages/web/web-search-deepseek/src/index.ts:59`](../packages/web/web-search-deepseek/src/index.ts)

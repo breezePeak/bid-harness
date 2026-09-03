@@ -291,7 +291,7 @@ function chapterReadGuard(
   if (typeof path !== 'string') return 'S5 Chapter Child 必须为 read 或 grep 指定一个路径。'
   const cwd = session.header.cwd
   if (cwd === undefined) return 'S5 Chapter Child 缺少工作区路径。'
-  const target = relative(workspace.sessionRoot, resolve(cwd, path)).replaceAll('\\', '/')
+  const target = relative(workspace.projectRoot, resolve(cwd, path)).replaceAll('\\', '/')
   if (/^analysis\/web-sources\/WEB-[a-f0-9]{16}\.md$/u.test(target)) {
     return readableWebPaths.has(target) ? undefined : 'S5 Chapter Child 只可读取 Host 账本登记的 Web Snapshot。'
   }
@@ -307,7 +307,7 @@ function chapterReadGuard(
 /**
  * Render the sole Main-Agent S5 assignment: relation planning.
  * @param agent - live Bid Agent receiving the planning assignment.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目。
  * @param outline - confirmed outline whose writable sections require planning.
  * @param outlineHash - SHA-256 of the confirmed outline.
  * @param inputs - S2 records used for semantic relation analysis.
@@ -325,7 +325,7 @@ export function renderChapterExecutionPlanTask(
     compliance: ReturnType<typeof parseTenderComplianceArtifact>
   },
 ): string {
-  const root = relative(workspace.root, workspace.sessionRoot).replaceAll('\\', '/')
+  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const writable = buildChapterWorklist(outline)
   const firstId = writable[0]?.id ?? 'SECTION-ID'
   const secondId = writable[1]?.id
@@ -468,7 +468,7 @@ async function resolveChapterReadLocations(
       file_id: material.file_id,
       chunk: material.chunk,
       chunk_path: relative(workspace.root, resolved.path).replaceAll('\\', '/'),
-      chunk_index_path: relative(workspace.root, join(workspace.sessionRoot, ...resolved.file.chunkIndexPath.split('/'))).replaceAll('\\', '/'),
+      chunk_index_path: relative(workspace.root, join(workspace.projectRoot, ...resolved.file.chunkIndexPath.split('/'))).replaceAll('\\', '/'),
     }
   }))
   context.frameworkDraftMaterials = await resolveFrameworkDraftMaterials(workspace, context.section.framework_refs ?? [])
@@ -481,7 +481,7 @@ async function resolveChapterReadLocations(
     const source = webSources.find(candidate => candidate.source_id === material.source_id
       && candidate.snapshot_path === material.snapshot_path)
     if (source === undefined) throw new Error(`chapter-writing-web-source-invalid:${material.source_id}`)
-    const absolute = join(workspace.sessionRoot, ...source.snapshot_path.split('/'))
+    const absolute = join(workspace.projectRoot, ...source.snapshot_path.split('/'))
     await assertNoLinkedPath(workspace.root, absolute)
     return {
       source_id: source.source_id,
@@ -492,7 +492,7 @@ async function resolveChapterReadLocations(
 }
 
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
-  const target = join(workspace.sessionRoot, path)
+  const target = join(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, target)
   return JSON.parse(await readFile(target, 'utf8'))
 }
@@ -505,7 +505,7 @@ async function persistChapterWebSnapshots(
   snapshots: readonly WebEvidenceSnapshot[],
 ): Promise<WebEvidenceSnapshot[]> {
   if (snapshots.length === 0) return []
-  const ledgerPath = join(workspace.sessionRoot, 'analysis/web-evidence-sources.json')
+  const ledgerPath = join(workspace.projectRoot, 'analysis/web-evidence-sources.json')
   const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
   const bound = snapshots.map((snapshot): WebEvidenceSnapshot => {
     return {
@@ -529,7 +529,7 @@ async function persistChapterWebSnapshots(
   })
   for (const snapshot of bound) {
     const source = snapshot.source
-    const absolute = join(workspace.sessionRoot, ...source.snapshot_path.split('/'))
+    const absolute = join(workspace.projectRoot, ...source.snapshot_path.split('/'))
     await assertNoLinkedPath(workspace.root, absolute)
     await writeFileAtomic(absolute, snapshot.content, { mode: 0o600, dirMode: 0o700 })
   }
@@ -588,7 +588,7 @@ async function webMaterialValid(
     && candidate.snapshot_path === material.snapshot_path)
   if (source === undefined) return false
   try {
-    const path = join(workspace.sessionRoot, ...source.snapshot_path.split('/'))
+    const path = join(workspace.projectRoot, ...source.snapshot_path.split('/'))
     await assertNoLinkedPath(workspace.root, path)
     if (!(await lstat(path)).isFile()) return false
     const content = await readFile(path, 'utf8')
@@ -656,7 +656,7 @@ async function validateAndBindChapterCandidate(
 
 /**
  * Validate an in-memory Child candidate before the Host writes either chapter file.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param context - focused current-section inputs.
  * @param candidate - schema-valid structured Child result.
  * @param webSnapshots - successful fetch snapshots from this section's Child attempts.
@@ -787,7 +787,7 @@ async function loadValidPlan(
 ): Promise<ChapterExecutionPlan> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid chapter planning requires tools service')
-  const absolutePlanPath = join(workspace.sessionRoot, PLAN_PATH)
+  const absolutePlanPath = join(workspace.projectRoot, PLAN_PATH)
   const liftRestriction = tools.restrict({ allow: [...MAIN_AGENT_TOOLS] })
   const liftGuard = tools.guard(exec => planWriteReason(exec, absolutePlanPath))
   try {
@@ -821,7 +821,7 @@ async function loadValidPlan(
  * Execute S5 as Main-Agent relation planning followed by Host-scheduled spawn Subagents.
  * The Host validates each structured result before atomically publishing chapter files.
  * @param agent - live parent Bid Agent used only for relation planning and Child lineage.
- * @param workspace - Session-scoped Bid workspace.
+ * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued S5 assignment.
  * @param options - Host-owned repair and concurrency limits.
  * @returns the execution plan, execution log, and chapter manifest descriptors.
@@ -883,7 +883,7 @@ export async function executeChapterWriting(
   const missingTools = requiredTools.filter(name => !registered.has(name))
   if (missingTools.length > 0) throw new Error(`Bid chapter writing requires registered tools: ${missingTools.join(', ')}`)
 
-  const chaptersRoot = join(workspace.sessionRoot, 'chapters')
+  const chaptersRoot = join(workspace.projectRoot, 'chapters')
   await assertNoLinkedPath(workspace.root, chaptersRoot)
   await rm(chaptersRoot, { recursive: true, force: true })
   await mkdir(join(chaptersRoot, 'sections'), { recursive: true, mode: 0o700 })
@@ -928,7 +928,7 @@ export async function executeChapterWriting(
   }
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
-    logWrites = logWrites.then(() => writeJson(join(workspace.sessionRoot, LOG_PATH), executionLog))
+    logWrites = logWrites.then(() => writeJson(join(workspace.projectRoot, LOG_PATH), executionLog))
     return logWrites
   }
   await persistLog()
@@ -1056,8 +1056,8 @@ export async function executeChapterWriting(
           await persistLog()
           if (accepted && candidate !== undefined) {
             log.final_writer_child_session_id = String(run.id)
-            await writeFileAtomic(join(workspace.sessionRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
-            await writeJson(join(workspace.sessionRoot, context.metadataPath), candidate.metadata)
+            await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
+            await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
             await persistLog()
             const reviewLabel = `S5 · ${serial} · 审查 ${attempt + 1} · ${context.section.title}`
             const reviewStartedAt = new Date().toISOString()
@@ -1098,7 +1098,7 @@ export async function executeChapterWriting(
               if (review !== undefined && (reviewIssues.length === 0 || attempt === maxWriterAttempts - 1)) {
                 const reviewPath = `chapters/reviews/${serial}.json`
                 const candidateSha256 = chapterCandidateSha256(candidate.markdown)
-                await writeJson(join(workspace.sessionRoot, reviewPath), {
+                await writeJson(join(workspace.projectRoot, reviewPath), {
                   ...review,
                   candidate_sha256: candidateSha256,
                   writer_child_session_id: String(run.id),
@@ -1181,7 +1181,7 @@ export async function executeChapterWriting(
     if (chapter === undefined) throw new Error(`Bid chapter manifest missing completed section ${section.id}`)
     return chapter.entry
   })
-  await writeJson(join(workspace.sessionRoot, MANIFEST_PATH), {
+  await writeJson(join(workspace.projectRoot, MANIFEST_PATH), {
     schema_version: CHAPTER_WRITING_SCHEMA_VERSION,
     scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash,

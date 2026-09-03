@@ -32,7 +32,7 @@ function evidenceMap(value: Partial<EvidenceMapArtifact> = {}): EvidenceMapArtif
 }
 
 async function fixture(options: { onlyTender?: boolean } = {}) {
-  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-map-')), 'session')
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-map-')))
   const imported = await workspace.import([
     { name: 'tender.md', role: 'tender' as const, bytes: new TextEncoder().encode('提供项目实施方案。技术架构合理得 5 分。') },
     ...(options.onlyTender === true ? [] : [
@@ -51,28 +51,28 @@ async function fixture(options: { onlyTender?: boolean } = {}) {
   const source = [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }]
   const scoringRaw = { schema_version: 1 as const, scoring_items: [{ id: 'S-1', parent: null, group: '技术', title: '架构', raw_text: '技术架构合理得 5 分', criterion: '架构合理', score: 5, score_range: null, must_answer: true, source_refs: source }] }
   const scoring = parseTenderScoringArtifact(scoringRaw)
-  await mkdir(join(workspace.sessionRoot, 'analysis/web-sources'), { recursive: true })
-  await mkdir(join(workspace.sessionRoot, 'outline'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
-    writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({
       schema_version: 1,
       requirements: [{ id: 'R-1', category: '技术', raw_text: '提供项目实施方案', normalized_requirement: '提供项目实施方案', mandatory: true, source_refs: source }],
     })),
-    writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), JSON.stringify(scoringRaw)),
-    writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
-    writeFile(join(workspace.sessionRoot, 'analysis/scoring-response-points.json'), JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoringRaw)),
+    writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
+    writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify({
       schema_version: 1,
       scope: 'technical_bid',
       scoring_sha256: scoringArtifactSha256(scoring),
       next_sequence: 2,
       points: [{ id: 'RP-000001', scoring_id: 'S-1', order: 1, text: '说明总体技术架构' }],
     })),
-    writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
       schema_version: 2,
       stage: 'evidence_mapping',
       sources: [],
     })),
-    writeFile(join(workspace.sessionRoot, 'outline/outline.json'), JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify({
       schema_version: 3,
       scope: 'technical_bid',
       document_title: '技术标',
@@ -84,7 +84,7 @@ async function fixture(options: { onlyTender?: boolean } = {}) {
         suggested_tables: [], suggested_figures: [], writing_notes: [],
       }],
     })),
-    writeFile(join(workspace.sessionRoot, 'outline/quality-report.json'), JSON.stringify({
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
       schema_version: 3,
       scope: 'technical_bid',
       checked_requirement_ids: ['R-1'],
@@ -107,14 +107,14 @@ function local(source_kind: LocalEvidenceMaterial['source_kind'], file_id: strin
 }
 
 async function writeMap(workspace: BidWorkspace, map: EvidenceMapArtifact): Promise<void> {
-  await writeFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), JSON.stringify(map))
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify(map))
 }
 
 async function writeWebSource(workspace: BidWorkspace, content = 'Fetched https://example.com/standard (HTTP 200)\n\n标准正文。'): Promise<WebEvidenceMaterial> {
   const source_id = 'WEB-0123456789abcdef'
   const snapshot_path = `analysis/web-sources/${source_id}.md`
-  await writeFile(join(workspace.sessionRoot, snapshot_path), content)
-  await writeFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [{ source_id, requested_url: 'https://example.com/standard', final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: '2026-08-31T00:00:00.000Z', content_sha256: webEvidenceContentSha256(content), snapshot_path }] }))
+  await writeFile(join(workspace.projectRoot, snapshot_path), content)
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [{ source_id, requested_url: 'https://example.com/standard', final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: '2026-08-31T00:00:00.000Z', content_sha256: webEvidenceContentSha256(content), snapshot_path }] }))
   return { source_id, snapshot_path, usage: 'reference', summary: '说明安全控制措施。', supports: '支持安全控制措施的设计。' }
 }
 
@@ -135,7 +135,7 @@ describe('evidence-mapping validator', () => {
   it.each(['missing', 'duplicate', 'unknown'] as const)('最终 Validator 拒绝 %s 章节映射', async (scenario) => {
     const { workspace } = await fixture()
     await writeMap(workspace, evidenceMap())
-    const path = join(workspace.sessionRoot, 'analysis/evidence-map.json')
+    const path = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(path, 'utf8')))
     if (scenario === 'missing') map.section_mappings = []
     if (scenario === 'duplicate') map.section_mappings.push(map.section_mappings[0]!)
@@ -169,12 +169,12 @@ describe('evidence-mapping validator', () => {
     const web = await writeWebSource(value.workspace)
     await writeMap(value.workspace, evidenceMap({ section_mappings: [{ ...evidenceMap().section_mappings[0]!, web_materials: [web] }] }))
     await expect(validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
-    await writeFile(join(value.workspace.sessionRoot, web.snapshot_path), 'tampered')
+    await writeFile(join(value.workspace.projectRoot, web.snapshot_path), 'tampered')
     const modified = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
     expect(modified.ok).toBe(false)
     if (!modified.ok) expect(modified.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_WEB_SOURCE_INVALID')
-    await rm(join(value.workspace.sessionRoot, web.snapshot_path), { force: true })
-    await symlink(join(value.workspace.root, 'linked-web-source'), join(value.workspace.sessionRoot, web.snapshot_path), 'junction')
+    await rm(join(value.workspace.projectRoot, web.snapshot_path), { force: true })
+    await symlink(join(value.workspace.root, 'linked-web-source'), join(value.workspace.projectRoot, web.snapshot_path), 'junction')
     const linked = await validateEvidenceMapping(value.workspace, 'evidence_mapping', artifacts)
     expect(linked.ok).toBe(false)
     if (!linked.ok) expect(linked.issues.map(issue => issue.code)).toContain('EVIDENCE_MAPPING_WEB_SOURCE_INVALID')
