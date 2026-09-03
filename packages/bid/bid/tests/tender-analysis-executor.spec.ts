@@ -35,7 +35,7 @@ describe('tender-analysis Agent executor', () => {
     const liftRestriction = vi.fn()
     const liftGuard = vi.fn()
     const restrict = vi.fn(() => liftRestriction)
-    let policy: (exec: { name: string }) => string | undefined = () => undefined
+    let policy: (exec: { name: string; arguments?: unknown }) => string | undefined = () => undefined
     const guard = vi.fn((next: typeof policy) => {
       policy = next
       return liftGuard
@@ -54,9 +54,9 @@ describe('tender-analysis Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-executor-')), 'session')
     const task = buildBidStageTask('tender_analysis')
 
-    const result = await executeTenderAnalysis(agent, workspace, task)
+    const result = await executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: 1 })
 
-    expect(whenIdle).toHaveBeenCalledTimes(6)
+    expect(whenIdle).toHaveBeenCalledTimes(3)
     expect(restrict).toHaveBeenCalledWith({ allow: ['grep', 'read', 'write'] })
     expect(guard).toHaveBeenCalledOnce()
     expect(resolve).toHaveBeenCalledTimes(4)
@@ -69,12 +69,13 @@ describe('tender-analysis Agent executor', () => {
     )
     expect(policy({ name: 'read' })).toBeUndefined()
     expect(policy({ name: 'bash' })).toContain('allows only grep, read, write')
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/scoring.json') } })).toBeUndefined()
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/unrelated.json') } })).toContain('may write only its current Artifact paths')
     expect(liftGuard).toHaveBeenCalledOnce()
     expect(liftRestriction).toHaveBeenCalledOnce()
-    expect(followup).toHaveBeenCalledTimes(5)
+    expect(followup).toHaveBeenCalledTimes(2)
     const message = followup.mock.calls[0]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
-    const coverageAudit = followup.mock.calls[1]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
-    const repair = followup.mock.calls[2]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
+    const repair = followup.mock.calls[1]?.[0] as { content: Array<{ type: string; text: string }>; source: unknown }
     expect(message.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
     expect(message.content[0]?.text).toContain('首先读取：.bid-harness/sessions/session/manifest.json')
     expect(message.content[0]?.text).toContain('只把 manifest 中 role=tender')
@@ -84,12 +85,10 @@ describe('tender-analysis Agent executor', () => {
     expect(message.content[0]?.text).toContain('评分响应点留给 S3 分析')
     expect(message.content[0]?.text).toContain('允许提取、压缩、去冗余和原子化')
     expect(message.content[0]?.text).toContain('不得改变原文的关键数字、单位')
-    expect(coverageAudit.source).toEqual({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
-    expect(coverageAudit.content[0]?.text).toContain('Coverage Audit')
-    expect(coverageAudit.content[0]?.text).toContain('技术评分、技术评审、技术评价')
-    expect(coverageAudit.content[0]?.text).toContain('动态形成搜索词')
-    expect(coverageAudit.content[0]?.text).toContain('逐项遍历 requirements、scoring_items 和 compliance_items')
-    expect(coverageAudit.content[0]?.text).toContain('引用真实合法')
+    expect(message.content[0]?.text).toContain('评分区域锚点')
+    expect(message.content[0]?.text).toContain('prev_chunk、next_chunk 和 heading_path')
+    expect(message.content[0]?.text).toContain('远离当前区域的技术评分锚点')
+    expect(message.content[0]?.text).toContain('must_answer 必须是 boolean')
     expect(repair.content[0]?.text).toContain('Artifact Repair')
     expect(repair.content[0]?.text).toContain('TENDER_ANALYSIS_TENDER_MISSING')
     expect(repair.content[0]?.text).toContain('只允许调用：grep, read, write')
@@ -98,9 +97,9 @@ describe('tender-analysis Agent executor', () => {
     expect(result.map(artifact => artifact.path)).toEqual(task.requiredArtifacts)
   })
 
-  it('gives the live Agent a coverage-audit turn to repair omitted technical scoring', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-coverage-audit-')), 'session')
-    await workspace.import([{
+  it('stops after the initial extraction when all S2 Artifacts pass validation', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-one-pass-')), 'session')
+    const [tender] = await workspace.import([{
       name: 'technical-scoring.md',
       role: 'tender',
       bytes: new TextEncoder().encode([
@@ -110,21 +109,27 @@ describe('tender-analysis Agent executor', () => {
         '技术评分标准：方案完整性满分 10 分。',
       ].join('\n\n')),
     }])
-    const scoringPath = join(workspace.sessionRoot, 'analysis/scoring.json')
-    const firstPass = { schema_version: 1, scoring_items: [] }
-    const repaired = {
-      schema_version: 1,
-      scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '技术评分', raw_text: '技术评分标准', criterion: '技术方案完整', score: 10, score_range: null, must_answer: true, source_refs: [{ file_id: 'technical-scoring', chunk: 'corpus/technical-scoring/chunks/chunk_0001.md', line_start: 1, line_end: 1 }] }],
+    if (tender === undefined || tender.chunksPath === null || tender.absoluteChunkIndexPath === null) throw new Error('test corpus was not chunked')
+    const chunk = (JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }).chunks[0]?.path
+    if (chunk === undefined) throw new Error('test corpus has no chunks')
+    const sourcePath = join(workspace.sessionRoot, tender.chunksPath, chunk)
+    const source = { file_id: tender.id, chunk: `${tender.chunksPath}/${chunk}`, line_start: 1, line_end: (await readFile(sourcePath, 'utf8')).split('\n').length }
+    const output = {
+      project: { schema_version: 1, project_name: '项目', tender_name: null, purchaser: null, owner: null, project_background: ['背景'], project_objectives: ['目标'], project_scope: ['范围'], technical_scope: ['技术'], delivery_scope: ['交付'], implementation_constraints: ['约束'], key_technical_points: ['评分'], source_refs: [source], analyzed_tender_files: [tender.id] },
+      requirements: { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '系统功能要求：应支持审计日志。', normalized_requirement: '支持审计日志。', mandatory: true, source_refs: [source] }] },
+      scoring: { schema_version: 1, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '技术评分', raw_text: '技术评分标准：方案完整性满分 10 分。', criterion: '方案完整性', score: 10, score_range: null, must_answer: true, source_refs: [source] }] },
+      compliance: { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: 'technical', raw_text: '系统功能要求：应支持审计日志。', normalized_rule: '支持审计日志。', severity: 'mandatory', source_refs: [source] }] },
     }
     let idleCount = 0
-    let observedFirstPass: unknown
     const whenIdle = vi.fn(async () => {
       idleCount++
-      if (idleCount === 2) await writeFile(scoringPath, `${JSON.stringify(firstPass)}\n`)
-      if (idleCount === 3) {
-        observedFirstPass = JSON.parse(await readFile(scoringPath, 'utf8'))
-      }
-      if (idleCount === 4) await writeFile(scoringPath, `${JSON.stringify(repaired)}\n`)
+      if (idleCount !== 2) return
+      await Promise.all([
+        writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify(output.project)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify(output.requirements)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(output.scoring)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify(output.compliance)}\n`),
+      ])
     })
     const liftRestriction = vi.fn()
     const liftGuard = vi.fn()
@@ -141,12 +146,52 @@ describe('tender-analysis Agent executor', () => {
 
     await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
 
-    expect(observedFirstPass).toEqual(firstPass)
-    expect(JSON.parse(await readFile(scoringPath, 'utf8'))).toEqual(repaired)
-    expect(agent.followup).toHaveBeenCalledTimes(3)
-    const repairMessage = vi.mocked(agent.followup).mock.calls[2]?.[0] as { content: Array<{ text: string }> }
-    expect(repairMessage.content[0]?.text).toContain('analysis/project.json')
-    expect(repairMessage.content[0]?.text).toContain('必须调用 write')
+    expect(whenIdle).toHaveBeenCalledTimes(2)
+    expect(agent.followup).toHaveBeenCalledOnce()
+  })
+
+  it('limits a scoring repair to scoring.json', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-scoring-repair-')), 'session')
+    const [tender] = await workspace.import([{
+      name: 'technical-scoring.md',
+      role: 'tender',
+      bytes: new TextEncoder().encode('技术要求：应支持审计日志。\n\n技术评分：方案完整性满分 10 分。'),
+    }])
+    if (tender === undefined || tender.chunksPath === null || tender.absoluteChunkIndexPath === null) throw new Error('test corpus was not chunked')
+    const chunk = (JSON.parse(await readFile(tender.absoluteChunkIndexPath, 'utf8')) as { chunks: Array<{ path: string }> }).chunks[0]?.path
+    if (chunk === undefined) throw new Error('test corpus has no chunks')
+    const source = { file_id: tender.id, chunk: `${tender.chunksPath}/${chunk}`, line_start: 1, line_end: 1 }
+    const project = { schema_version: 1, project_name: '项目', tender_name: null, purchaser: null, owner: null, project_background: ['背景'], project_objectives: ['目标'], project_scope: ['范围'], technical_scope: ['技术'], delivery_scope: ['交付'], implementation_constraints: ['约束'], key_technical_points: ['评分'], source_refs: [source], analyzed_tender_files: [tender.id] }
+    const requirements = { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '技术要求：应支持审计日志。', normalized_requirement: '支持审计日志。', mandatory: true, source_refs: [source] }] }
+    const scoring = { schema_version: 1, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '技术评分', raw_text: '技术评分：方案完整性满分 10 分。', criterion: '方案完整性', score: 10, score_range: null, must_answer: ['错误类型'], source_refs: [source] }] }
+    const compliance = { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: 'technical', raw_text: '技术要求：应支持审计日志。', normalized_rule: '支持审计日志。', severity: 'mandatory', source_refs: [source] }] }
+    const whenIdle = vi.fn(async () => {
+      if (whenIdle.mock.calls.length !== 2) return
+      await Promise.all([
+        writeFile(join(workspace.sessionRoot, 'analysis/project.json'), `${JSON.stringify(project)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/requirements.json'), `${JSON.stringify(requirements)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`),
+        writeFile(join(workspace.sessionRoot, 'analysis/compliance.json'), `${JSON.stringify(compliance)}\n`),
+      ])
+    })
+    let policy: (exec: { name: string; arguments?: unknown }) => string | undefined = () => undefined
+    const agent = {
+      id: 'session',
+      ctx: {
+        get: (name: 'tools' | 'fs') => name === 'tools'
+          ? { restrict: vi.fn(() => vi.fn()), guard: vi.fn((next: typeof policy) => { policy = next; return vi.fn() }) }
+          : { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
+        emit: vi.fn(),
+      },
+      followup: vi.fn(),
+      whenIdle,
+    } as unknown as Agent
+
+    await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
+
+    expect(agent.followup).toHaveBeenCalledTimes(2)
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/scoring.json') } })).toBeUndefined()
+    expect(policy({ name: 'write', arguments: { file_path: join(workspace.sessionRoot, 'analysis/requirements.json') } })).toContain('may write only its current Artifact paths')
   })
 
   it('renders only browser-safe issue fields in the repair assignment', async () => {
@@ -164,6 +209,9 @@ describe('tender-analysis Agent executor', () => {
     )
     expect(text).toContain('scoring_items[2].criterion')
     expect(text).toContain('不得创建 final、fixed、new 或 v2 文件')
+    expect(text).toContain('must_answer 必须为 true 或 false')
+    expect(text).toContain('analysis/scoring.json')
+    expect(text).not.toContain(`${workspace.sessionRoot.replaceAll('\\', '/')}/analysis/project.json`)
   })
 
   it('renders dynamic paths without embedding document bodies', async () => {

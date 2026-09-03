@@ -215,16 +215,19 @@ function hasTechnicalScoringSignal(value: string): boolean {
   ))
 }
 
-function validateCompleteness(
+async function validateCompleteness(
+  workspace: BidWorkspace,
+  manifest: BidManifest,
   artifacts: ParsedArtifacts,
-  tenderCorpus: string,
   issues: StageValidationIssue[],
-): void {
-  const corpus = stripTenderChunkMetadata(tenderCorpus)
-  const normalizedCorpus = normalizeTenderCorpusText(tenderCorpus)
+): Promise<void> {
   const requirementsEmpty = artifacts.requirements.requirements.length === 0
   const scoringEmpty = artifacts.scoring.scoring_items.length === 0
   const complianceEmpty = artifacts.compliance.compliance_items.length === 0
+  if (!requirementsEmpty && !scoringEmpty) return
+  const tenderCorpus = await readTenderCorpusText(workspace, manifest)
+  const corpus = stripTenderChunkMetadata(tenderCorpus)
+  const normalizedCorpus = normalizeTenderCorpusText(tenderCorpus)
   if (requirementsEmpty && scoringEmpty && complianceEmpty && hasSubstantiveTenderText(normalizedCorpus)) {
     reject(
       issues,
@@ -271,18 +274,20 @@ async function validateSourceRef(
   manifest: BidManifest,
   ref: TenderSourceRef,
   issues: StageValidationIssue[],
+  artifact: string,
+  path: string,
 ): Promise<void> {
   const candidates = manifest.files.filter(file => file.id === ref.file_id)
   if (candidates.length === 0) {
-    reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN', 'A source reference names no manifest file.', ref.chunk)
+    reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN', 'A source reference names no manifest file.', artifact, path)
     return
   }
   if (candidates.every(file => file.role !== 'tender')) {
-    reject(issues, 'TENDER_ANALYSIS_SOURCE_ROLE_INVALID', 'A reference file cannot authorize tender requirements.', ref.chunk)
+    reject(issues, 'TENDER_ANALYSIS_SOURCE_ROLE_INVALID', 'A reference file cannot authorize tender requirements.', artifact, path)
     return
   }
   if (candidates.every(file => file.parseStatus !== 'success')) {
-    reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_INVALID', 'A source reference names an unparsed tender file.', ref.chunk)
+    reject(issues, 'TENDER_ANALYSIS_SOURCE_FILE_INVALID', 'A source reference names an unparsed tender file.', artifact, path)
     return
   }
   for (const record of candidates) {
@@ -306,14 +311,14 @@ async function validateSourceRef(
       const lines = chunk.split('\n')
       const lineCount = lines.length
       if (ref.line_start > lineCount || ref.line_end > lineCount) {
-        reject(issues, 'TENDER_ANALYSIS_SOURCE_LINE_INVALID', 'A source line range leaves its chunk.', ref.chunk)
+        reject(issues, 'TENDER_ANALYSIS_SOURCE_LINE_INVALID', 'A source line range leaves its chunk.', artifact, path)
       }
       return
     } catch {
       break
     }
   }
-  reject(issues, 'TENDER_ANALYSIS_SOURCE_CHUNK_INVALID', 'A source reference does not name a real chunk owned by its tender file.', ref.chunk)
+  reject(issues, 'TENDER_ANALYSIS_SOURCE_CHUNK_INVALID', 'A source reference does not name a real chunk owned by its tender file.', artifact, path)
 }
 
 function validateCoverage(
@@ -391,7 +396,7 @@ export async function validateTenderAnalysis(
     compliance: compliance as TenderComplianceArtifact,
   }
   validateCoverage(parsed.project, manifest, issues)
-  validateCompleteness(parsed, await readTenderCorpusText(workspace, manifest), issues)
+  await validateCompleteness(workspace, manifest, parsed, issues)
   validateTechnicalScoring(parsed.scoring, issues)
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
@@ -403,16 +408,18 @@ export async function validateTenderAnalysis(
     }
   }
   await Promise.all([
-    ...parsed.project.source_refs.map(ref => validateSourceRef(workspace, manifest, ref, issues)),
-    ...parsed.requirements.requirements.flatMap(item => item.source_refs.map(
-      ref => validateSourceRef(workspace, manifest, ref, issues),
+    ...parsed.project.source_refs.map((ref, index) => validateSourceRef(
+      workspace, manifest, ref, issues, 'analysis/project.json', `source_refs[${index}]`,
     )),
-    ...parsed.scoring.scoring_items.flatMap(item => item.source_refs.map(
-      ref => validateSourceRef(workspace, manifest, ref, issues),
-    )),
-    ...parsed.compliance.compliance_items.flatMap(item => item.source_refs.map(
-      ref => validateSourceRef(workspace, manifest, ref, issues),
-    )),
+    ...parsed.requirements.requirements.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/requirements.json', `requirements[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
+    ...parsed.scoring.scoring_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/scoring.json', `scoring_items[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
+    ...parsed.compliance.compliance_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/compliance.json', `compliance_items[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
   ])
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

@@ -4,7 +4,9 @@ import { dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
+  BID_STAGES,
   BidHostRuntime,
   type BidRuntimeState,
   type Config,
@@ -61,6 +63,7 @@ describe('Bid Host stage reset', () => {
       session,
       cancel,
       whenIdle: vi.fn(() => idle.promise),
+      inbox: { clear: vi.fn() },
     } as unknown as Agent
     const flush = vi.fn(async () => {})
     const drive = vi.fn(async (): Promise<BidRuntimeState> => {
@@ -106,5 +109,56 @@ describe('Bid Host stage reset', () => {
     expect(resetSignal?.aborted).toBe(false)
     expect(flush).toHaveBeenCalledWith(session)
     expect(host.inFlight.has(session.id)).toBe(false)
+  })
+
+  it.each(BID_STAGES)('clears %s and later-stage model context before rerunning', async (stage) => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-context-'))
+    const session = ctx.sessions.create(SessionId(`bid-reset-context-${stage}`), { meta: { cwd, agentPreset: 'bid' } })
+    const messages = BID_STAGES.map((candidate) => {
+      session.append('bid.stage.started', { stage: candidate, status: 'running' })
+      const message = session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: `${candidate} context` }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+      }), { surfaceOp: 'append' })
+      if (candidate !== 'docx_export') session.append('bid.stage.completed', { stage: candidate, status: 'completed', artifacts: [] })
+      return message
+    })
+    const stageIndex = BID_STAGES.indexOf(stage)
+    const clear = vi.fn()
+    const agent = {
+      id: session.id,
+      session,
+      cancel: vi.fn(),
+      whenIdle: vi.fn(async () => {}),
+      inbox: { clear },
+    } as unknown as Agent
+    const drive = vi.fn(async (): Promise<BidRuntimeState> => {
+      expect(session.surface.nodes).toEqual([
+        ...messages.slice(0, stageIndex).map(message => message.seq),
+        session.surface.nodes.at(-1),
+      ])
+      const resetContext = session.events.findLast(event => event.type === 'user/message')
+      expect(resetContext).toMatchObject({
+        data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice' } },
+        sourceEventSeqs: messages.slice(stageIndex).map(message => message.seq),
+      })
+      return { stage, status: 'waiting_user' }
+    })
+    const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
+      ctx: { sessions: { flush: vi.fn(async () => {}) } },
+      config: {
+        allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
+        modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
+        chapterWritingMaxConcurrency: 1, trustedHosts: [],
+      } satisfies Config,
+      inFlight: new Map(),
+      automaticOrchestrator: () => ({ drive }),
+    }) as TestHost
+
+    await expect(BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage))
+      .resolves.toEqual({ stage, status: 'waiting_user' })
+    expect(clear).toHaveBeenCalledOnce()
   })
 })

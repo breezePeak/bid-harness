@@ -127,6 +127,20 @@ describe('tender-analysis validator', () => {
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
   })
 
+  it('does not read uncited tender chunks when requirements and scoring are nonempty', async () => {
+    const value = await fixture(`# 项目\n\n${'技术方案必须完整响应。'.repeat(1_000)}\n\n${'实施方案必须可行。'.repeat(1_000)}`)
+    const manifest = await value.workspace.readManifest()
+    const tender = manifest.files.find(file => file.id === value.tenderId)
+    if (tender?.chunksPath === null || tender?.chunkIndexPath === null || tender === undefined) throw new Error('test corpus was not chunked')
+    const index = JSON.parse(await readFile(join(value.workspace.sessionRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+    const uncited = index.chunks[1]?.path
+    if (uncited === undefined) throw new Error('test corpus needs multiple chunks')
+    await publish(value.workspace, documents(value.tenderId, value.source))
+    await rm(join(value.workspace.sessionRoot, tender.chunksPath, uncited))
+
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+  })
+
   it('accepts only technical items from a mixed scoring tender and rejects a classified commercial item', async () => {
     const technicalScoring = '系统总体技术方案 10 分。项目实施方案 8 分。数据安全方案 7 分。'
     const value = await fixture([
@@ -273,8 +287,15 @@ describe('tender-analysis validator', () => {
     requirements.requirements[0]!.source_refs = [{ ...value.source, file_id: 'missing-file' }]
     await publish(value.workspace, docs)
 
-    expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
-      .toContain('TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN')
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)).resolves.toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([{
+        code: 'TENDER_ANALYSIS_SOURCE_FILE_UNKNOWN',
+        artifact: 'analysis/requirements.json',
+        path: 'requirements[0].source_refs[0]',
+        message: 'A source reference names no manifest file.',
+      }]),
+    })
   })
 
   it('distinguishes missing files from invalid JSON', async () => {

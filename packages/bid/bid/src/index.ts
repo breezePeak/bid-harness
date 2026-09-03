@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -514,6 +515,34 @@ interface ActiveBidOperation {
   reservedForReset: boolean
 }
 
+/**
+ * Replace model-visible messages produced by one Bid stage and every later stage.
+ * The durable log remains intact for replay and audit.
+ * @param session Live Bid session whose model-visible history is reset.
+ * @param stage First stage whose context is discarded.
+ */
+function clearStageContext(session: Session, stage: BidStage): void {
+  const stageIndex = BID_STAGES.indexOf(stage)
+  const predecessor = stageIndex === 0 ? undefined : BID_STAGES[stageIndex - 1]
+  const completedPredecessor = predecessor === undefined ? undefined : session.events.findLast(event => (
+    event.type === 'bid.stage.completed' && event.data.stage === predecessor
+  ))
+  const nodes = session.surface.nodes
+  const start = nodes.findIndex(seq => seq > (completedPredecessor?.seq ?? -1))
+  if (start < 0) return
+  const shadowed = nodes.slice(start)
+  const first = shadowed[0]
+  const last = shadowed.at(-1)
+  if (first === undefined || last === undefined) return
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `阶段 ${stage} 已重置。此前该阶段及后续阶段的上下文已清除；仅依据当前工作区文件和后续阶段指令重新执行。` }],
+    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: `已清除 ${stage} 及后续阶段上下文。` },
+  }), {
+    surfaceOp: { op: 'replace', start: first, end: last },
+    sourceEventSeqs: [...shadowed],
+  })
+}
+
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
   static Config = Config
@@ -666,6 +695,7 @@ export class BidHostRuntime extends TypertRemoteService {
       operation = this.beginOperation(session.id)
     }
     try {
+      agent.inbox.clear()
       const workspace = new BidWorkspace(session.header.cwd, session.id, workspaceConfig(this.config))
       const resetPaths: Readonly<Record<BidStage, readonly string[]>> = {
         file_intake: ['analysis', 'outline', 'chapters', 'output'],
@@ -702,6 +732,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const paths = resetPaths[stage].map(path => within(workspace.sessionRoot, path))
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       await Promise.all(paths.map(path => rm(path, { recursive: true, force: true })))
+      clearStageContext(session, stage)
       session.append('bid.stage.reset', { stage, status: 'pending' })
       const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
       await this.ctx.sessions.flush(session)

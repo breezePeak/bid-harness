@@ -46,7 +46,7 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 ## Model Experience
 ## S2–S5 质量控制
 
-S2 在首次提取后以同一 live Agent 强制执行 Coverage Audit。Requirement、Scoring item 和 Compliance item 的 `raw_text` 可以在引用原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题，并严格校验每个 `source_refs` 的文件身份、解析状态、chunk 归属、行号范围和 Workspace 路径安全；Validator 不要求 `raw_text` 逐字存在于引用范围。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`，且只能覆盖四个正式 S2 Artifact。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
+S2 首次提取后立即执行 Validator；通过时进入 `tender_analysis/waiting_user`。技术评分提取先以 grep 定位评分区域，再从 `chunks/index.json` 的相邻关系读取连续小窗口，并只用一次轻量 grep 寻找远距离的额外评分区域。Requirement、Scoring item 和 Compliance item 的 `raw_text` 可以在引用原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。`must_answer` 是 boolean，表示该评分项是否必须在技术标响应；评分响应点仍由 S3 拆解。Validator 分别返回 Artifact 缺失、JSON 语法和严格 Schema 问题，并严格校验每个 `source_refs` 的文件身份、解析状态、chunk 归属、行号范围和 Workspace 路径安全；Validator 不要求 `raw_text` 逐字存在于引用范围，且仅在 Requirements 或 Scoring 为空时读取完整招标语料执行异常空结果检查。Executor 用最新 Issues 执行可配置的多轮 Repair，只允许 `grep`、`read` 和 `write`；每轮只允许修改 Issues 指向的 Artifact 和字段。重置任一阶段会取消待处理输入，并从模型可见上下文移除该阶段及后续阶段的消息；原始会话日志仍用于审计和回放。Orchestrator 的最终 Validator 通过后才进入 `tender_analysis/waiting_user`。
 
 S3 先按评分语义产生候选响应点，再由独立语义复核回看评分场景是否完整；Host 用评分 Artifact 哈希和单调序列建立稳定目录。Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录，按主框架、补充框架和无关框架明确适配，并在 Section 上保存精确 `framework_refs`。目录质量复核负责语义粒度；Host 只校验确定性的 Schema、树、ID、覆盖和框架引用，不要求响应点全局唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
 
