@@ -1,0 +1,20 @@
+# S4 源码回放使用真实 Agent、Subagent 和持久化服务；外部文件及 Web 返回与包测试共用。
+- name: '@deepseek-ai/dsh-llm'
+- name: '@deepseek-ai/dsh-session'
+- name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: './.session-store'
+    compression: none
+- name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    persona: test
+- name: '@deepseek-ai/dsh-tools'
+- name: '../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
+- name: '@deepseek-ai/dsh-agent'
+- name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents: []
+- name: '@deepseek-ai/dsh-subagent'
+- name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+  config:
+    providerName: spawn

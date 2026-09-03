@@ -44,6 +44,7 @@ describe('Web evidence source Artifact schema', () => {
     ['snapshot path', ledger({ ...source, snapshot_path: '../escape.md' })],
     ['hash', ledger({ ...source, content_sha256: 'invalid' })],
     ['ordering', ledger({ ...source, fetch_call_seq: 1 })],
+    ['fetch result ordering', ledger({ ...source, fetch_result_seq: source.fetch_call_seq })],
     ['URL association', ledger({ ...source, requested_url: 'https://other.example/source' })],
     ['extra field', ledger({ ...source, unexpected: true })],
   ])('rejects invalid %s', (_name, value) => {

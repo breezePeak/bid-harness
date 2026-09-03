@@ -98,7 +98,7 @@ export function webEvidenceContentSha256(content: string): string {
 
 /**
  * Derive a stable, filename-safe source id from one fetched page.
- * @param fetchCallId - current-attempt Web fetch Call ID.
+ * @param fetchCallId - 当前 Child Session 实际执行的 Web fetch Call ID。
  * @param finalUrl - provider-returned final URL.
  * @param contentSha256 - digest of the model-visible snapshot text.
  * @returns the `WEB-` prefixed short digest used by the ledger and snapshot filename.

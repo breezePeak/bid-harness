@@ -1,0 +1,53 @@
+{
+  "map": {
+    "schema_version": 8,
+    "section_mappings": [
+      {
+        "local_materials": [],
+        "web_materials": [
+          {
+            "source_id": "WEB-65a0ba9fa1010f90",
+            "snapshot_path": "analysis/web-sources/WEB-65a0ba9fa1010f90.md",
+            "usage": "reference",
+            "summary": "要求访问控制与审计。",
+            "supports": "支持安全方案。"
+          }
+        ],
+        "missing_topics": [],
+        "section_id": "SEC-SECURITY",
+        "writing_dimensions": [
+          "身份鉴别与访问控制",
+          "安全审计"
+        ]
+      }
+    ]
+  },
+  "ledger": {
+    "schema_version": 1,
+    "stage": "evidence_mapping",
+    "sources": [
+      {
+        "source_id": "WEB-65a0ba9fa1010f90",
+        "search_call_id": "search-source",
+        "fetch_call_id": "fetch-source",
+        "search_result_seq": 31,
+        "fetch_call_seq": 51,
+        "fetch_result_seq": 52,
+        "queries": [
+          "访问控制安全审计官方标准"
+        ],
+        "discovered_url": "https://official.example/standard",
+        "requested_url": "https://official.example/standard",
+        "final_url": "https://official.example/standard",
+        "status_code": 200,
+        "truncated": false,
+        "fetched_at": "<TIME>",
+        "content_sha256": "12b974f1190c248d5a167a1808e54af9e48dab8b45de87b0439b5f60b2b9d37d",
+        "snapshot_path": "analysis/web-sources/WEB-65a0ba9fa1010f90.md"
+      }
+    ]
+  },
+  "snapshots": [
+    "Fetched https://official.example/standard (HTTP 200)\n\n官方标准要求访问控制与安全审计。"
+  ]
+}

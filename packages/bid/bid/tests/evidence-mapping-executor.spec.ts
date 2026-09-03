@@ -5,17 +5,23 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   BidWorkspace,
   buildBidStageTask,
   buildEvidenceMappingWebSnapshots,
+  collectEvidenceMappingWebObservations,
   createScoringResponsePointCatalog,
   executeEvidenceMapping,
   getBidStagePolicy,
   parseWebEvidenceSourcesArtifact,
+  parseEvidenceMapArtifact,
+  parseOutlineArtifact,
   readEvidenceMappingProgress,
   renderEvidenceMappingTask,
+  webEvidenceContentSha256,
+  type EvidenceMappingPartialResult,
+  type EvidenceMappingTask,
   type EvidenceMappingWebObservation,
 } from '@deepseek-ai/dsh-bid'
 
@@ -107,6 +113,20 @@ function mappingFixture(
   const starts: Array<{ request: ContinuableStartSpec; resolve(): void }> = []
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
+  const onReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
+  let webObserver: ((exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void) | undefined
+  const emitWeb = (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]) => {
+    for (const outcome of outcomes) {
+      const callSeq = child.session.events.length
+      ;(child.session.events as unknown[]).push(
+        { type: 'tool/call', seq: callSeq, data: { callId: outcome.callId, name: outcome.name } },
+        { type: 'tool/result', seq: callSeq + 1, time: outcome.resultTime, data: { message: { source: { callId: outcome.callId }, content: [{ isError: outcome.result.isError }] } } },
+      )
+      webObserver?.({
+        agent: child, callId: outcome.callId, name: outcome.name, arguments: outcome.arguments,
+      } as ToolExecution, outcome.result)
+    }
+  }
   const plan = {
     schema_version: 3, global_analysis: ['按章节拆分。'], research_notes: ['普通资料供各章节交叉检索。'],
     tasks: [
@@ -114,14 +134,14 @@ function mappingFixture(
       { task_id: 'TASK-2', title: '章节二', objective: '处理第二章', section_ids: ['SEC-2'], research_topics: [] },
     ],
   }
-  const partial = (request: { prompt: readonly { type: string; text?: string }[] }) => {
+  const partial = (request: { prompt: readonly { type: string; text?: string }[] }, child: Agent) => {
     const line = promptText(request).split('\n').find(value => value.startsWith('Mapping Task：'))
     if (line === undefined) throw new Error('mapping task missing')
     const task = JSON.parse(line.slice('Mapping Task：'.length)) as typeof plan.tasks[number]
     const attempt = (taskAttempts.get(task.task_id) ?? 0) + 1
     taskAttempts.set(task.task_id, attempt)
     const local = { source_kind: 'reference' as const, file_id: material.fileId, chunk: material.chunk, usage: 'reference' as const, summary: '统一资料。' }
-    return {
+    const result: EvidenceMappingPartialResult = {
       task_id: task.task_id,
       section_mappings: repairFirst && task.task_id === 'TASK-1' && attempt === 1
         ? []
@@ -130,6 +150,8 @@ function mappingFixture(
         })),
       refinement_suggestions: [],
     }
+    onReply(child, result, attempt)
+    return result
   }
   const spawnProvider: Pick<SubagentProvider, 'capabilities' | 'inheritsParentContext' | 'prepareContinuable'> = {
     capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
@@ -151,14 +173,12 @@ function mappingFixture(
       ] }, whenIdle: () => idle } as unknown as Agent
       const settle = () => {
         ;(localAgent.session.events as unknown[]).push({
-          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request)) }] }, seq: localAgent.session.events.length },
+          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request, localAgent)) }] }, seq: localAgent.session.events.length },
           seq: localAgent.session.events.length,
         })
         active--
         settleIdle()
       }
-      const original = localAgent.whenIdle
-      localAgent.whenIdle = () => original()
       children.set(String(id), localAgent)
       childRequests.set(String(id), request)
       starts.push({ request, resolve: settle })
@@ -175,7 +195,7 @@ function mappingFixture(
         const request = childRequests.get(String(childId))
         if (request === undefined) throw new Error('missing continuable fixture request')
         ;(child.session.events as unknown[]).push({
-          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request)) }] }, seq: child.session.events.length },
+          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(partial(request.request, child)) }] }, seq: child.session.events.length },
           seq: child.session.events.length,
         })
         active--
@@ -208,14 +228,185 @@ function mappingFixture(
     pendingMain = ''
   })
   const agents = { get: (id: SessionId) => children.get(String(id)) }
-  const agent = { id: 'session', session: { header: { cwd: workspace.root }, events: [] }, ctx: { agents, get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn(() => () => {}) }, followup, whenIdle } as unknown as Agent
+  const agent = { id: 'session', session: { header: { cwd: workspace.root }, events: [] }, ctx: { agents, get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on: vi.fn((_event: string, observer: typeof webObserver) => { webObserver = observer; return () => { webObserver = undefined } }) }, followup, whenIdle } as unknown as Agent
   return {
     agent, starts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
-    guards, disposed, maxActive: () => maxActive, taskAttempts,
+    guards, disposed, maxActive: () => maxActive, taskAttempts, onReply, emitWeb, plan, children,
   }
 }
 
+const webUrl = 'https://official.example/a'
+
+function webMaterial(url = webUrl) {
+  return { url, usage: 'reference' as const, summary: '官方技术依据。', supports: '支持技术响应。' }
+}
+
+function webResearch(taskId: string) {
+  const search = observation({
+    callId: `${taskId}-search`, name: 'web_search', arguments: { queries: ['官方技术依据'] }, callSeq: 1, resultSeq: 2,
+    value: { sources: [{ url: `${webUrl}#source` }], truncated: false },
+  })
+  const fetch = observation({
+    callId: `${taskId}-fetch`, name: 'web_fetch', arguments: { url: webUrl }, callSeq: 3, resultSeq: 4,
+    value: { url: webUrl, statusCode: 200, body: { kind: 'text', content: `${taskId} 正文` }, truncated: false },
+    content: `Fetched ${webUrl} (HTTP 200)\n\n${taskId} 正文`,
+  })
+  return { search, fetch }
+}
+
 describe('evidence-mapping Agent executor', () => {
+  it.each([
+    { replaceAgent: false, completedBeforeRepair: false },
+    { replaceAgent: true, completedBeforeRepair: false },
+    { replaceAgent: false, completedBeforeRepair: true },
+  ])('retains task Web provenance across repair: %j', async ({ replaceAgent, completedBeforeRepair }) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-repair-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const { search, fetch } = webResearch('TASK-1')
+    fixture.onReply.mockImplementation((child, result, attempt) => {
+      if (result.task_id !== 'TASK-1') return
+      result.section_mappings[0]!.web_materials = [webMaterial()]
+      if (completedBeforeRepair) {
+        if (attempt === 1) {
+          fixture.emitWeb(child, [search, fetch])
+          result.section_mappings = []
+        }
+      } else fixture.emitWeb(child, attempt === 1 ? [search] : [fetch])
+    })
+    if (replaceAgent) {
+      const followup = fixture.subagents.followup.getMockImplementation()!
+      fixture.subagents.followup.mockImplementation(async (...args) => {
+        const previous = fixture.children.get(args[1])!
+        fixture.children.set(args[1], { ...previous })
+        return followup(...args)
+      })
+    }
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(ledger.sources).toHaveLength(1)
+    expect(ledger.sources[0]).toMatchObject({ search_call_id: search.callId, fetch_call_id: fetch.callId })
+    expect(map.section_mappings[0]!.web_materials[0]).toMatchObject({
+      source_id: ledger.sources[0]!.source_id, snapshot_path: ledger.sources[0]!.snapshot_path,
+    })
+    expect(fixture.taskAttempts.get('TASK-1')).toBe(2)
+    expect(fixture.taskAttempts.get('TASK-2')).toBe(1)
+    expect(fixture.subagents.followup.mock.calls[0]![2][0]!.text).toContain(
+      completedBeforeRepair ? 'EVIDENCE_MAPPING_PARTIAL_MISSING' : 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID',
+    )
+    const child = fixture.children.get('child-1')!
+    expect(child.session.events.filter(event => event.type === 'tool/call' && event.data.name === 'web_search')).toHaveLength(1)
+  })
+
+  it.each([
+    { reverse: false, sharedSection: false },
+    { reverse: true, sharedSection: false },
+    { reverse: true, sharedSection: true },
+  ])('binds the same URL to the task whose material survives merging: %j', async ({ reverse, sharedSection }) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-owners-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    if (sharedSection) fixture.plan.tasks[1]!.section_ids.push('SEC-1')
+    fixture.onReply.mockImplementation((child, result) => {
+      const { search, fetch } = webResearch(result.task_id)
+      fixture.emitWeb(child, [search, fetch])
+      for (const mapping of result.section_mappings) mapping.web_materials = [webMaterial()]
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const ordered = reverse ? [...fixture.starts].reverse() : fixture.starts
+    ordered.forEach((start) => { start.resolve() })
+    await execution
+
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(ledger.sources).toHaveLength(sharedSection ? 1 : 2)
+    for (const [index, mapping] of map.section_mappings.entries()) {
+      const bound = mapping.web_materials[0]!
+      const source = ledger.sources.find(source => source.source_id === bound.source_id)!
+      const taskId = sharedSection ? 'TASK-2' : `TASK-${index + 1}`
+      expect(source.fetch_call_id).toBe(`${taskId}-fetch`)
+      expect(bound.snapshot_path).toBe(source.snapshot_path)
+      const content = await readFile(join(workspace.sessionRoot, source.snapshot_path), 'utf8')
+      expect(content).toContain(`${taskId} 正文`)
+      expect(source.content_sha256).toBe(webEvidenceContentSha256(content))
+    }
+  })
+
+  it('rebinds a refined section to its supplemental task even when the URL is unchanged', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-supplement-')), 'session')
+    const inputs = await writeInputs(workspace)
+    const refined = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
+    refined.sections[0]!.title = '深化后的技术响应'
+    const fixture = mappingFixture(workspace, inputs, false, refined)
+    fixture.onReply.mockImplementation((child, result) => {
+      const { search, fetch } = webResearch(result.task_id)
+      fixture.emitWeb(child, [search, fetch])
+      result.section_mappings[0]!.web_materials = [webMaterial()]
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    const preliminary = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    const initialSourceId = preliminary.section_mappings[0]!.web_materials[0]!.source_id
+    fixture.starts[2]!.resolve()
+    await execution
+
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-map.json'), 'utf8')))
+    const bound = map.section_mappings[0]!.web_materials[0]!
+    expect(ledger.sources).toHaveLength(2)
+    expect(ledger.sources.some(source => source.source_id === initialSourceId)).toBe(false)
+    expect(ledger.sources.find(source => source.source_id === bound.source_id)?.fetch_call_id).toBe('MAP-SUP-001-fetch')
+  })
+
+  it.each(['fetch only', 'sibling search', 'late search', 'unknown URL'])('rejects task Web evidence with %s', async (scenario) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-reject-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.onReply.mockImplementation((child, result) => {
+      const { search, fetch } = webResearch(result.task_id)
+      if (result.task_id === 'TASK-1') {
+        if (scenario === 'sibling search') fixture.emitWeb(child, [search])
+        return
+      }
+      result.section_mappings[0]!.web_materials = [webMaterial()]
+      fixture.emitWeb(child, scenario === 'late search' ? [fetch, search]
+        : scenario === 'unknown URL' ? [{ ...search, result: { ...search.result, value: { sources: [{ url: 'https://other.example/a' }] } } as ToolExecutionResult }, fetch]
+          : [fetch])
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
+    const rejection = expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await rejection
+  })
+
+  it('reports each normalized invalid URL once across sections', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-dedup-')), 'session')
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.plan.tasks.splice(1)
+    fixture.plan.tasks[0]!.section_ids.push('SEC-2')
+    fixture.onReply.mockImplementation((_child, result) => {
+      result.section_mappings.forEach((mapping, index) => {
+        mapping.web_materials = [webMaterial(`${webUrl}#${index}`), webMaterial(`${webUrl}?different=1`)]
+      })
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
+    const rejection = expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await rejection
+    const log = JSON.parse(await readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      tasks: Array<{ attempts: Array<{ issues: Array<{ code: string }> }> }>
+    }
+    expect(log.tasks[0]!.attempts[0]!.issues).toHaveLength(2)
+    expect(log.tasks[0]!.attempts[0]!.issues.every(issue => issue.code === 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')).toBe(true)
+  })
+
   it('keeps the Main Agent on global planning and delegates bounded local research to Child Sessions', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')), 'session')
     const material = await writeInputs(workspace)
@@ -342,9 +533,9 @@ describe('evidence-mapping Agent executor', () => {
     })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.slice(0, 2).forEach(start => start.resolve())
+    fixture.starts.slice(0, 2).forEach((start) => { start.resolve() })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) })
-    fixture.starts.slice(2).forEach(start => start.resolve())
+    fixture.starts.slice(2).forEach((start) => { start.resolve() })
     await execution
 
     const finalOutline = JSON.parse(await readFile(join(workspace.sessionRoot, 'outline/outline.json'), 'utf8')) as {
@@ -359,9 +550,9 @@ describe('evidence-mapping Agent executor', () => {
       section_mappings: Array<{ section_id: string }>
     }
     expect(map.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-003', 'SEC-004', 'SEC-2'])
-    expect(fixture.starts.slice(2).map(start => JSON.parse(
+    expect(fixture.starts.slice(2).map(start => (JSON.parse(
       promptText(start.request.request).split('\n').find(value => value.startsWith('Mapping Task：'))!.slice('Mapping Task：'.length),
-    ).section_ids)).toEqual([['SEC-003'], ['SEC-004']])
+    ) as EvidenceMappingTask).section_ids)).toEqual([['SEC-003'], ['SEC-004']])
   })
 
   it('rejects a local material whose declared source kind does not match the manifest role', async () => {
@@ -374,7 +565,7 @@ describe('evidence-mapping Agent executor', () => {
     })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_PARTIAL_LOCAL_EVIDENCE_INVALID')
     await expect(readFile(join(workspace.sessionRoot, 'analysis/evidence-mapping-log.json'), 'utf8'))
       .resolves.toContain('source_kind、file_id 或 chunk 无效')
@@ -435,8 +626,8 @@ describe('evidence-mapping Agent executor', () => {
       maxConcurrency: 2,
     })).rejects.toMatchObject({
       name: 'BidStageExecutionError',
-      message: expect.stringContaining(`${code} ${detail}`),
-      issues: expect.arrayContaining([expect.objectContaining({ code })]),
+      message: expect.stringContaining(`${code} ${detail}`) as unknown,
+      issues: expect.arrayContaining([expect.objectContaining({ code })]) as unknown,
     })
   })
 
@@ -475,7 +666,7 @@ describe('evidence-mapping Agent executor', () => {
 
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1, maxConcurrency: 2 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await expect(execution).resolves.toHaveLength(4)
     expect(removedBeforeRepair).toBe(true)
   })
@@ -506,6 +697,22 @@ describe('evidence-mapping Web source reduction', () => {
     statusMeta: { truncated: false },
   })
 
+  it('checks captured ownership by Session ID even when a sibling uses the same call id', () => {
+    const child = { session: { id: SessionId('current-child'), events: [
+      { type: 'tool/call', seq: 1, data: { callId: search.callId, name: search.name } },
+      { type: 'tool/result', seq: 2, time: search.resultTime, data: { message: { source: { callId: search.callId }, content: [{ isError: false }] } } },
+    ] } } as unknown as Agent
+    const capture = (sessionId: string) => new Map([[search.callId, {
+      exec: {
+        callId: search.callId, name: search.name, arguments: search.arguments, agent: { session: { id: SessionId(sessionId) } },
+      } as ToolExecution,
+      result: search.result,
+    }]])
+    expect(collectEvidenceMappingWebObservations(child, -1, capture('current-child'))).toHaveLength(1)
+    expect(() => collectEvidenceMappingWebObservations(child, -1, capture('sibling-child'))).toThrow('Web tool identity mismatch')
+    expect(() => collectEvidenceMappingWebObservations(child, -1, new Map())).toThrow('lost canonical Web tool result')
+  })
+
   it('creates a source only from an ordered successful search-to-fetch chain', () => {
     const snapshots = buildEvidenceMappingWebSnapshots([search, fetch])
     expect(snapshots).toHaveLength(1)
@@ -523,6 +730,8 @@ describe('evidence-mapping Web source reduction', () => {
     ['URL mismatch', [search, { ...fetch, arguments: { url: 'https://other.example/page' } }]],
     ['fetch failure', [search, observation({ callId: 'fetch-1', name: 'web_fetch', arguments: fetch.arguments, callSeq: 3, resultSeq: 4, isError: true })]],
     ['non-2xx fetch', [search, observation({ callId: 'fetch-1', name: 'web_fetch', arguments: fetch.arguments, callSeq: 3, resultSeq: 4, value: { url: 'https://official.example/standard', statusCode: 404, body: { kind: 'text', content: 'missing' }, truncated: false } })]],
+    ['empty fetched body', [search, observation({ callId: 'fetch-1', name: 'web_fetch', arguments: fetch.arguments, callSeq: 3, resultSeq: 4, value: { url: 'https://official.example/standard', statusCode: 200, body: { kind: 'text', content: '  ' }, truncated: false } })]],
+    ['empty model-visible text', [search, { ...fetch, result: { ...fetch.result, content: [{ type: 'text' as const, text: '  ' }] } }]],
   ])('does not verify %s', (_name, observations) => {
     expect(buildEvidenceMappingWebSnapshots(observations)).toEqual([])
   })

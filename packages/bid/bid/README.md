@@ -47,6 +47,8 @@ S3 performs independent semantic response-point review and outline quality revie
 
 S4 stores local evidence by exact `source_kind + file_id + chunk_XXXX` and Web evidence by a Host-owned Snapshot identity and hash. The Main Agent plans Section batches, each Child returns direct Section mappings and refinement suggestions, and the Main Agent performs one evidence-informed refinement. The Host preserves existing IDs, assigns stable IDs to new Sections, and schedules one supplemental mapping batch for new or changed writable Sections. Every final writable Section occurs exactly once; missing material remains explicit in `missing_topics`.
 
+S4 的每个 Mapping Task 在同一 Child Session 内修复，Web 来源校验读取该 Child 各轮次的真实工具结果。搜索结果必须包含抓取 URL，且搜索返回早于抓取调用、抓取调用早于成功返回；修复可以复用前一轮搜索，但不能借用其他任务的搜索或抓取。Host 按 Session ID 关联恢复前后的 Agent，最终章节中的 Web material 始终绑定产生该 material 的任务自己的 Snapshot；补充映射替换章节时也同步替换来源。重复的无效 URL 按规范化结果只报告一次，最终仍验证 ledger、Snapshot 文件及正文哈希。
+
 S5 uses `outline/confirmed-outline.json` as its only structure source. Each Writer receives its Section, related S2 records, stable response points, Section evidence, exact framework draft chunks referenced by that Section, and bounded dependency handoffs. Framework bodies are writing input for preservation, adaptation, or rewriting, never factual Evidence. The Reviewer receives only Host-injected data and structured output. Missing enterprise facts remain unresolved and cannot be replaced by Web sources.
 
 ### Inventory text
