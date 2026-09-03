@@ -12,9 +12,9 @@ Evidence Mapping Executor 为每个 Mapping Task 建立一个 fresh-context、�
 
 Web 来源以当前任务的 Child Session 为范围。Host 在一次阶段执行内按 Session ID 和 callId 累计真实工具返回，每轮与该 Child 的完整持久化事件配对并重新计算快照。Session ID 允许关联恢复前后的 Agent 实例；持久化事件用于证明调用与返回顺序，不能从展示文本伪造缺失的 canonical result。有效来源必须满足 URL 来自 search sources、fetch 成功且正文非空，以及 `search_result_seq < fetch_call_seq < fetch_result_seq`。
 
-Host 在合并章节结论时保留原任务的快照归属。同章节、同规范化 URL 的覆盖顺序同时决定 material 和快照；目录深化的补充任务替换章节时，其来源也随结论替换。最终 ledger 只写入最终章节实际引用的 sources，并执行文件、路径和哈希校验。相同无效 URL 的重复引用只生成一条 partial 校验问题。
+Host 在合并章节结论时保留原任务的快照归属。每个 Child 只负责一个可写 Section；目录深化的补充任务替换章节时，其来源也随结论替换。最终 ledger 只写入最终章节实际引用的 sources，并执行文件、路径和哈希校验。相同无效 URL 的重复引用只生成一条 partial 校验问题。
 
-Host 对结果中的 `file_id` 仅在前 24 个字符唯一匹配 manifest 文件时还原完整 id，随后仍以完整 id 和 chunk 验证。不能唯一匹配的值保持原样并按原有规则拒绝。
+Host 按 manifest 的完整 file_id 和 chunk 身份验证本地证据，并要求当前 Child 有成功 read 正文的日志。模型输出错误与基础设施错误的重试分类见[章节证据新鲜度](../architecture/2026-09-03-bid-section-evidence-freshness.md)。
 
 ## Alternatives considered
 

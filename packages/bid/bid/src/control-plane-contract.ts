@@ -25,6 +25,10 @@ export type StageRunStatus = typeof STAGE_RUN_STATUSES[number]
 
 /** Current count of Host-owned S4 Mapping Tasks by execution state. */
 export interface BidEvidenceMappingProgress {
+  /** 初步确认目录中的可写叶子任务数。 */
+  readonly initial: number
+  /** 目录深化或用户编辑产生的补充任务数。 */
+  readonly supplemental: number
   /** Number of Mapping Tasks in the approved execution plan. */
   readonly total: number
   /** Mapping Tasks whose Child result the Host accepted. */
@@ -33,7 +37,7 @@ export interface BidEvidenceMappingProgress {
   readonly running: number
   /** Mapping Tasks that have not started a Child Session. */
   readonly not_started: number
-  /** Mapping Tasks that exhausted their repair attempts. */
+  /** Mapping Tasks 因基础设施异常或模型修复耗尽而失败。 */
   readonly failed: number
 }
 

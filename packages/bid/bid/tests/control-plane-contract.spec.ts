@@ -58,9 +58,11 @@ describe('bid control-plane public contract', () => {
     expect(task).toMatchObject({ stage: 'tender_analysis', requiredArtifacts: ['analysis/requirements.json'] })
   })
 
-  it('exports S3 Mapping progress through the browser-safe entry', () => {
+  it('exports S4 Mapping progress through the browser-safe entry', () => {
     expectTypeOf<BidEvidenceMappingProgress>().toEqualTypeOf<{
       readonly total: number
+      readonly initial: number
+      readonly supplemental: number
       readonly completed: number
       readonly running: number
       readonly not_started: number

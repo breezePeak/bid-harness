@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 8 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 9 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -68,6 +68,7 @@ const partialMappingSchema = z.object({
 /** Evidence available to one final writable outline section. */
 export const sectionEvidenceMappingSchema = mappingSchema.extend({
   section_id: z.string().min(1),
+  section_fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
   writing_dimensions: z.array(z.string().min(1)),
 }).strict()
 
@@ -77,21 +78,21 @@ const evidenceMapSchema = z.object({
 }).strict()
 
 /** Version of the Host-private S4 task plan. */
-export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 3 as const
+export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 4 as const
 
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
-  objective: z.string().min(1),
-  section_ids: z.array(z.string().min(1)).min(1),
-  research_topics: z.array(z.string().min(1)),
+  phase: z.enum(['initial', 'supplemental']),
+  section_id: z.string().min(1),
+  section_fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  heading_path: z.array(z.string().min(1)).min(1),
 }).strict()
 
 const evidenceMappingPlanSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),
-  global_analysis: z.array(z.string().min(1)).min(1),
-  research_notes: z.array(z.string().min(1)),
-  tasks: z.array(evidenceMappingTaskSchema).min(1),
+  outline_fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  tasks: z.array(evidenceMappingTaskSchema),
 }).strict()
 
 const partialSectionMappingSchema = partialMappingSchema.extend({
@@ -116,9 +117,9 @@ export type WebEvidenceMaterial = z.infer<typeof webEvidenceMaterialSchema>
 export type SectionEvidenceMapping = z.infer<typeof sectionEvidenceMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
-/** One Main-Agent-authored S4 work item executed in an independent Child Session. */
+/** Host 生成的一章一个 S4 任务。 */
 export type EvidenceMappingTask = z.infer<typeof evidenceMappingTaskSchema>
-/** Host-private Main-Agent task plan for S4. */
+/** Host 私有的确定性 S4 任务计划。 */
 export type EvidenceMappingPlan = z.infer<typeof evidenceMappingPlanSchema>
 /** Strict partial Evidence Map returned by one Mapping Subagent. */
 export type EvidenceMappingPartialResult = z.infer<typeof evidenceMappingPartialResultSchema>

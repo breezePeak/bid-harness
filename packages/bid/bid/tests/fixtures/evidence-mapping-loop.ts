@@ -1,5 +1,5 @@
 /** S4 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -7,7 +7,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
 import {
-  BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping, validateEvidenceMapping,
+  BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
+  validateEvidenceMapping, resolveMappingCorpusLocations,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -78,9 +79,12 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
       pattern: { type: 'string', required: true }, path: { type: 'string', required: true },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: async args => (await readFile(resolve(root, args.path), 'utf8')).includes(args.pattern)
-      ? `${args.path}: access control`
-      : '',
+    execute: async (args) => {
+      const path = resolve(root, args.path)
+      const files = (await lstat(path)).isDirectory() ? (await readdir(path)).filter(file => file.endsWith('.md')).map(file => join(path, file)) : [path]
+      const matches = await Promise.all(files.map(async file => (await readFile(file, 'utf8')).includes(args.pattern) ? file : ''))
+      return matches.filter(Boolean).join('\n')
+    },
   })))
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'write', description: 'Write a UTF-8 file.', parameters: {
@@ -166,7 +170,7 @@ function transientWebMaterial(url: string) {
 function partialResult(url: string) {
   const web = transientWebMaterial(url)
   return {
-    task_id: 'TASK-SECURITY',
+    task_id: 'MAP-INIT-SEC-SECURITY',
     section_mappings: [{ section_id: 'SEC-SECURITY', local_materials: [], web_materials: [web], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'] }],
     refinement_suggestions: [],
   }
@@ -186,34 +190,13 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.sessionRoot).replaceAll('\\', '/')
-  const planPath = `${workspacePath}/analysis/evidence-mapping-plan.json`
-  const plan = JSON.stringify({
-    schema_version: 3,
-    global_analysis: ['访问控制章节由一个任务负责。'],
-    research_notes: ['本地资料与公开标准结合。'],
-    tasks: [{
-      task_id: 'TASK-SECURITY',
-      title: '访问控制与审计',
-      objective: '定位本地实施资料并补充公开技术依据。',
-      section_ids: ['SEC-SECURITY'],
-      research_topics: ['访问控制安全审计官方标准'],
-    }],
-  })
   const initialOutline = await readFile(join(workspace.sessionRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
   const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })
-  const script = [
-    toolCall('read-manifest', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/manifest.json` }),
-    toolCall('read-project', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/project.json` }),
-    toolCall('read-requirements', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/requirements.json` }),
-    toolCall('read-scoring', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/scoring.json` }),
-    toolCall('read-response-points', 'read', { file_path: `${workspacePath}/analysis/scoring-response-points.json` }),
-    toolCall('read-compliance', 'read', { file_path: `${relative(root, workspace.sessionRoot).replaceAll('\\', '/')}/analysis/compliance.json` }),
-    toolCall('write-plan', 'write', { file_path: planPath, content: plan }),
-    finalText('规划完成。'),
-  ]
+  const [corpus] = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
+  if (corpus === undefined) throw new Error('missing reference corpus')
   const childScript = [
-    toolCall('grep-local', 'grep', { pattern: '实施流程', path: `${workspacePath}/${s2.chunk}` }),
-    toolCall('read-chunk', 'read', { file_path: `${workspacePath}/${s2.chunk}` }),
+    toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
+    toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
     ...(repair ? [finalText(JSON.stringify(partialResult(sourceUrl)))] : []),
     toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
@@ -233,7 +216,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
     finalText('复核完成。'),
   ]
-  ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, [...script, ...refinementScript], childScript)))
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, refinementScript, childScript)))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })

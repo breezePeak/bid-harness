@@ -76,7 +76,7 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
     '不得使用 Web Search、grep 或生成章节正文。',
   ],
   evidence_mapping: [
-    '按已确认初步目录的可写 Section 拆分 Mapping Tasks，只处理技术标范围。',
+    'Host 按已确认初步目录的可写叶子生成一章一个 Mapping Task，只处理技术标范围。',
     '每个 Child 只接收当前 Section 及其关联 Requirement、Scoring、Response Point、Compliance 和 corpus 定位。',
     '优先搜索本地资料；是否补充 Web Research 由 Agent 按章节需要判断。',
     '资料缺失写入 missing_topics，不得因此删除招标要求或评分章节。',
@@ -110,7 +110,7 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
     case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed')
+      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed' || (state.stage === 'evidence_mapping' && state.status === 'waiting_user'))
         ? { stage: state.stage, status: 'running' } : state
     case 'bid.stage.failed':
       return event.data.stage === state.stage && state.status === 'running'
