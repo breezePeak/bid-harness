@@ -37,6 +37,9 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       expect(childLog).toContain('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
       expect(childLog).toContain('SEARCH_INVALID_PATTERN')
       expect(childLog).toContain('SEARCH_RAW_OUTPUT_OVERFLOW')
+      expect(childLog).toContain('submit_evidence_mapping')
+      expect(childLog).toContain('reference_bid')
+      expect(childLog).toContain('INVALID_ARGS')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })
       expect(childLog).toContain('S4 Mapping Child 只允许 grep 资料分块目录或文件，read 资料索引或已登记分块文件。')
       expect(childLog).not.toContain('需要访问控制与安全审计方案。')
@@ -47,7 +50,7 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const [finalHeaderLine, ...finalEventLines] = finalCheckLog.trimEnd().split('\n')
       const finalHeader = JSON.parse(finalHeaderLine!) as SessionHeader
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
-      expect(finalEvents.filter(event => event.type === 'tool/call')).toEqual([])
+      expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['submit_evidence_mapping'])
       expect(finalCheckLog).toContain('https://official.example/standard')
 
       const projectRoot = join(cwd, '.bid-harness')

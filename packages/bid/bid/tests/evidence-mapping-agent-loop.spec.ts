@@ -99,7 +99,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(await readFile(join(workspace.projectRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
       expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping')).toBe(true)
       expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
-        'read', 'read', 'write', ...(repair ? ['write'] : []), 'read', 'read', 'write',
+        'read', 'write', ...(repair ? ['write'] : []),
       ])
       if (repair) expect(JSON.stringify(agent.session.events)).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
       expect(buildBidStageTask('evidence_mapping').requiredArtifacts).toEqual(['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json'])

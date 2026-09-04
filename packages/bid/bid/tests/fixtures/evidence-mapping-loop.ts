@@ -187,7 +187,8 @@ function partialResult(url: string, taskId = 'MAP-INIT-SEC-SECURITY') {
       },
     }],
     refinement_suggestions: [],
-    branch_summaries: [],
+    ...(taskId.startsWith('MAP-INIT-') ? { outline_operations: [] } : {}),
+    ...(taskId === 'MAP-FINAL-CHECK' ? { branch_summaries: [], unchanged_section_ids: [] } : {}),
   }
 }
 
@@ -205,7 +206,6 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
-  const initialOutline = await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
   const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
@@ -219,29 +219,32 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
+    toolCall('submit-invalid-usage', 'submit_evidence_mapping', {
+      ...partialResult(sourceUrl),
+      section_mappings: [{
+        ...partialResult(sourceUrl).section_mappings[0]!,
+        local_materials: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference_bid', summary: '非法枚举回放。' }],
+        web_materials: [],
+      }],
+    }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
-    ...(repair ? [finalText(JSON.stringify(partialResult(sourceUrl)))] : []),
+    ...(repair ? [toolCall('submit-before-fetch', 'submit_evidence_mapping', partialResult(sourceUrl))] : []),
     toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
     ...(!repair ? [
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
     ] : []),
-    finalText(JSON.stringify(partialResult(sourceUrl))),
-    finalText(JSON.stringify(partialResult(sourceUrl, 'MAP-FINAL-CHECK'))),
+    toolCall('submit-after-fetch', 'submit_evidence_mapping', partialResult(sourceUrl)),
+    toolCall('submit-final-check', 'submit_evidence_mapping', partialResult(sourceUrl, 'MAP-FINAL-CHECK')),
   ]
   const refinementScript = [
-    toolCall('read-initial-outline', 'read', { file_path: `${workspacePath}/outline/initial-confirmed-outline.json` }),
-    toolCall('read-section-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
-    toolCall('write-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: repair ? '{}' : initialOutline }),
-    finalText('目录无需深化。'),
-    ...(repair ? [
-      toolCall('repair-refined-outline', 'write', { file_path: `${workspacePath}/outline/refined-outline.candidate.json`, content: initialOutline }),
-      finalText('目录产物已修复。'),
-    ] : []),
     toolCall('read-refined-outline', 'read', { file_path: `${workspacePath}/outline/refined-outline.candidate.json` }),
-    toolCall('read-refined-map', 'read', { file_path: `${workspacePath}/analysis/evidence-map.json` }),
-    toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
-    finalText('复核完成。'),
+    toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: repair ? '{}' : quality }),
+    finalText('全局目录复核完成。'),
+    ...(repair ? [
+      toolCall('repair-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
+      finalText('质量报告已修复。'),
+    ] : []),
   ]
   const adapter = new ScriptedAdapter(sessionId, refinementScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))

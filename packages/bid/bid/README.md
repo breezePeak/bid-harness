@@ -57,13 +57,15 @@ After initial extraction, S2 requires the same live Agent to perform a Coverage 
 
 S3 performs independent semantic response-point review and outline quality review. Validators check strict files, stable catalog ownership, tree structure, known IDs, coverage, and exact framework references; they do not replace semantic review with string splitting, title heuristics, or global response-point uniqueness.
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Child 同时返回 Evidence、writing_dimensions、完整 writing_brief 和研究后发现的目录建议。Host 将 brief 写入 Outline；正式 Evidence Map schema v10 保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Child 同时提交 Evidence、writing_dimensions、完整 writing_brief 和基于现有 `outlineEditOperationSchema` 的分支内增量目录操作；Host 校验操作范围、合并分支、分配稳定 Section ID 并将 brief 写入 Outline。正式 Evidence Map schema v10 保持不变。
 
 S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告文件身份与原因。Prompt 使用 `F1` 等运行内短引用和绝对 Corpus 路径，Host 按定位表精确回填正式 file_id/source_kind。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；Final Check 还可读取已登记 Web 正文。tender、outline_framework、完整 document.md 与项目外路径不被授权。本地 Evidence 验证文件角色、分块归属和路径安全，不要求 Child read 日志证明。
 
-普通研究最多在同一 Child 修复一次。错误引用、工具失败、fetch 失败和模型输出错误进入执行日志，不生成 missing_topics；单条无效材料不丢弃同章有效材料。missing_topics 只表示检索并语义判断后仍存在的真实缺口。初始 Child 失败不取消其他分支；最终检查不能形成完整章节结论时阶段失败。用户取消、Host 持久化或权限机制故障仍可中止阶段。
+每个 S4 Child 使用仅在当前 Child 生效的 `submit_evidence_mapping` 工具提交结论。Host 按 Task 生成严格参数 Schema，限定当前 task_id、现有及本任务预留 section_id、可见 file_ref、材料角色允许的 usage、分支目录操作和 Final Check 分支摘要，并拒绝额外字段。参数错误以 ToolArgsError 返回模型，在当前回合内重新提交；只有成功写入权威工具结果的参数进入 Host 校验，普通文字回复不作为结果。正式 `analysis/evidence-map.json` 仍使用 schema v10，S5 不读取 S4 私有执行状态。
 
-Outline Refinement 基于各分支研究结论与内存中的全局候选资料池深化一次目录，新建、拆分及合并的叶子同步产生 purpose、must_answer、writing_notes、表图建议与业务关联。非 writable 节点具有概括下属叶子任务的 summary，不进入 Evidence Map 或 S5 独立写作队列。后续单个轻量 Final Check 检查最终叶子的任务与资料适用性，优先复用跨分支候选、删除误报缺口；仅在具体问题未解决时局部 grep/read 或联网，禁止改变目录结构。不要求增加章节数量，也不建立拆分来源图或新的资料状态机。
+成功的结构化提交继续接受章节覆盖、目录操作范围、分块归属、Web 正文快照、Writing Brief 和 Final Check 汇总等语义校验；只有这些问题或未调用提交工具才最多在同一 Child 修复一次，并保留已检索上下文。执行日志 schema v3 以 `issues` 记录本次拒绝原因，以 `warnings` 记录不阻塞接收的本次检索错误；接受的 attempt 不得保留 issues，错误也不复制到后续 attempt。单条无效材料不丢弃同章有效材料，missing_topics 只表示检索并语义判断后仍存在的真实缺口。分支修复耗尽时阶段失败，已接受分支及其目录操作写入 `analysis/evidence-mapping-checkpoint.json`；重试只调度未完成任务。Host 以同一串行写入队列先保存 Web 快照和 checkpoint，再发布 completed 日志状态。用户取消、Host 持久化或权限机制故障仍可中止阶段。
+
+目录深化与各分支资料研究在同一 Child 内完成；`outline_operations` 只传输新增、拆分、合并、移动或字段调整，无需复制完整子树。Host 合并并校验各分支结果后，Main Agent 只读取 `outline/refined-outline.candidate.json` 检查全局层级和覆盖，并且只能写 `outline/quality-report.json`，不得读取 Evidence、Web 正文或 S2 Artifact，也不得修改目录候选。后续 Final Check 以 `section_mappings` 提交变化章节，以 `unchanged_section_ids` 声明复用章节，两者必须无重复地覆盖最终可写章节；Host 恢复完整结果后仍写出 evidence-map v10。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 

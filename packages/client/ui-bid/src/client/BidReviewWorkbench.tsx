@@ -240,7 +240,6 @@ export function BidReviewWorkbench({
                       <span className={dotInfo.className} />
                     </span>
                   </button>
-                  {!section.writable && section.summary && <p className={css.branchSummary}>{section.summary}</p>}
                 </div>
               )
             })}

@@ -92,7 +92,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   await send('实施准备这一节重新规划一下', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
-  childScript.push(answer(JSON.stringify({ task_id: `MAP-REMAP-${sectionId}`, section_mappings: [{
+  childScript.push(call('submit_evidence_mapping', { task_id: `MAP-REMAP-${sectionId}`, section_mappings: [{
     section_id: target.id, local_materials: [], web_materials: [], missing_topics: ['缺少当前章节专用资料'], writing_dimensions: ['资源核查'],
     writing_brief: { purpose: '明确访问控制实施前的资源及权限配置核查', must_answer: ['实施前如何核对资源与访问权限配置'],
       writing_notes: ['列明核查责任人、资源清单和问题处理方式'], suggested_tables: ['资源与权限核查清单'], suggested_figures: [],
@@ -100,7 +100,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       scoring_ids: target.scoring_ids,
       scoring_response_point_ids: target.scoring_response_point_ids ?? [],
     },
-  }], refinement_suggestions: [] })))
+  }], refinement_suggestions: [] }))
   await send('这一节资料不对，重新找', [call('bid_evidence_remap', { ...await identity(), section_ids: [target.id], mode: 'replace', reason: '资料不对' }), answer('已更新，请重新确认。')])
   const finalDraft = await getOrCreateOutlineDraft(workspace)
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('局部资料研究覆盖了其他章节的研究基线')

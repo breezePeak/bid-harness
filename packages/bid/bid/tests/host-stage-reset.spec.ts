@@ -51,8 +51,9 @@ describe('Bid Host stage reset', () => {
     session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
 
     const evidencePath = join(cwd, '.bid-harness', 'analysis', 'evidence-map.json')
+    const mappingCheckpointPath = join(cwd, '.bid-harness', 'analysis', 'evidence-mapping-checkpoint.json')
     await mkdir(dirname(evidencePath), { recursive: true })
-    await writeFile(evidencePath, '{}\n')
+    await Promise.all([writeFile(evidencePath, '{}\n'), writeFile(mappingCheckpointPath, '{}\n')])
 
     const workspace = new BidWorkspace(cwd)
     await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
@@ -77,6 +78,7 @@ describe('Bid Host stage reset', () => {
     const flush = vi.fn(async () => {})
     const drive = vi.fn(async (): Promise<BidRuntimeState> => {
       await expect(access(evidencePath)).rejects.toThrow()
+      await expect(access(mappingCheckpointPath)).rejects.toThrow()
       expect(session.events.at(-1)).toMatchObject({ type: 'bid.stage.reset', data: { stage: 'evidence_mapping' } })
       return { stage: 'evidence_mapping', status: 'waiting_user' }
     })

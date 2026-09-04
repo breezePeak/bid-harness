@@ -70,7 +70,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props()} />)
     const root = await screen.findByRole('button', { name: /技术方案/ })
     expect(root).toHaveProperty('disabled', true)
-    expect(screen.getByText('说明项目实施流程、人员分工与质量控制措施。')).toBeTruthy()
+    expect(screen.queryByText('说明项目实施流程、人员分工与质量控制措施。')).toBeNull()
   })
 
   it('polls the live S5 state and supports an explicit refresh', async () => {

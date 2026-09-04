@@ -744,7 +744,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (request.action === 'bid_stage_inspect') return await inspectBidStage(workspace, session)
       const base = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== base.revision || request.expected_draft_sha256 !== base.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: base } }
-      for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json'] : [])]) {
+      for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json', 'analysis/evidence-mapping-checkpoint.json'] : [])]) {
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         try { backup.set(absolute, await readFile(absolute, 'utf8')) } catch (error) {
@@ -925,6 +925,7 @@ export class BidHostRuntime extends TypertRemoteService {
           'analysis/scoring-response-points.json',
           'analysis/evidence-mapping-plan.json',
           'analysis/evidence-mapping-log.json',
+          'analysis/evidence-mapping-checkpoint.json',
           'analysis/evidence-map.json',
           'analysis/web-evidence-sources.json',
           'analysis/web-sources',
@@ -935,6 +936,7 @@ export class BidHostRuntime extends TypertRemoteService {
         evidence_mapping: [
           'analysis/evidence-mapping-plan.json',
           'analysis/evidence-mapping-log.json',
+          'analysis/evidence-mapping-checkpoint.json',
           'analysis/evidence-map.json',
           'analysis/web-evidence-sources.json',
           'analysis/web-sources',
