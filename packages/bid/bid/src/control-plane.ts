@@ -35,6 +35,8 @@ export type {
   BidRetryErrorCode,
   BidRetryFailure,
   BidRetryResult,
+  BidStageStartErrorCode,
+  BidStageStartResult,
   BidReviewChapterView,
   BidReviewIssueView,
   BidReviewMaterialView,

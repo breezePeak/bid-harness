@@ -78,6 +78,8 @@ import type {
   BidTenderAnalysisConfirmationResult,
   BidRetryErrorCode,
   BidRetryResult,
+  BidStageStartErrorCode,
+  BidStageStartResult,
   BidReviewWorkbenchView,
   BidReviewChapterView,
   BidReviewMaterialView,
@@ -114,6 +116,8 @@ export type {
   BidRetryErrorCode,
   BidRetryFailure,
   BidRetryResult,
+  BidStageStartErrorCode,
+  BidStageStartResult,
   BidReviewWorkbenchView,
   BidReviewChapterView,
   BidReviewMaterialView,
@@ -343,6 +347,16 @@ function docxExportRejected(
 /** Build one immutable retry success result from the Host's log-derived state. */
 function retrySuccess(value: BidRuntimeState): BidRetryResult {
   return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
+}
+
+/** Build one immutable post-reset start result. */
+function stageStartResult(
+  result: { readonly ok: true; readonly value: BidRuntimeState }
+    | { readonly ok: false; readonly code: BidStageStartErrorCode; readonly message: string },
+): BidStageStartResult {
+  return result.ok
+    ? Object.freeze({ ok: true, value: Object.freeze({ ...result.value }) })
+    : Object.freeze({ ok: false, error: Object.freeze({ code: result.code, message: result.message }) })
 }
 
 /** Minimal webserver registration face used only when the web carrier is composed. */
@@ -883,12 +897,12 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * Rewind to the current or an earlier Bid stage and immediately re-enter its normal Host driver.
-   * Active automatic work is cancelled and drained before artifacts owned by the
-   * selected stage and every later stage are removed and rerun.
+   * Rewind to the current or an earlier Bid stage and stop before its Host driver starts.
+   * Active work is cancelled and drained before artifacts owned by the selected
+   * stage and every later stage are removed.
    * @param agent - live Bid Agent receiving the scoped command.
    * @param stage - current or earlier stage named by that command.
-   * @returns the state reached after automatic execution, user gating, or failure.
+   * @returns the state at the explicit post-reset start gate.
    */
   async resetStage(agent: Agent, stage: BidStage): Promise<BidRuntimeState> {
     const { session } = agent
@@ -908,11 +922,9 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     operation.reservedForReset = true
     try {
-      if (prior !== undefined) {
-        prior.controller.abort()
-        agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
-        await Promise.all([prior.done, agent.whenIdle()])
-      }
+      prior?.controller.abort()
+      agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+      await Promise.all([prior?.done ?? Promise.resolve(), agent.whenIdle()])
       const runtime = await this.prepareOperation(operation)
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
       agent.inbox.clear()
@@ -955,12 +967,51 @@ export class BidHostRuntime extends TypertRemoteService {
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       await Promise.all(paths.map(path => rm(path, { recursive: true, force: true })))
       clearStageContext(session, stage)
-      session.append('bid.stage.reset', { stage, status: 'pending' })
-      const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
+      session.append('bid.stage.reset', { stage, status: stage === 'file_intake' ? 'pending' : 'waiting_start' })
       await this.ctx.sessions.flush(session)
-      return next
+      return session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     } finally {
       operation.reservedForReset = false
+      await this.finishOperation(session, operation)
+    }
+  }
+
+  /**
+   * Start the stage that a completed reset left at its explicit user gate.
+   * @param session - Host-resolved Bid Session whose reset state authorizes execution.
+   * @returns the stage state after normal execution reaches validation, failure, or completion.
+   */
+  @Remote('startStage')
+  async startStage(session: Session): Promise<BidStageStartResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return stageStartResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Stage start requires a Bid Session with a Host workspace.' })
+    }
+    if (this.inFlight.has(projectKey(session))) {
+      return stageStartResult({ ok: false, code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' })
+    }
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('start_stage')) {
+        return stageStartResult({ ok: false, code: 'BID_STAGE_START_NOT_ALLOWED', message: 'The current stage is not waiting for a post-reset start.' })
+      }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) {
+        return stageStartResult({ ok: false, code: 'BID_STAGE_START_FAILED', message: 'Bid Session has no live Agent.' })
+      }
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+      const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).startResetStage()
+      await this.ctx.sessions.flush(session)
+      return stageStartResult({ ok: true, value: next })
+    } catch (error: unknown) {
+      if (error instanceof BidOrchestratorError) {
+        const code = error.code === 'BID_OPERATION_IN_PROGRESS'
+          ? 'BID_OPERATION_IN_PROGRESS'
+          : 'BID_STAGE_START_NOT_ALLOWED'
+        return stageStartResult({ ok: false, code, message: error.message })
+      }
+      return stageStartResult({ ok: false, code: 'BID_STAGE_START_FAILED', message: 'The Bid Host could not start the reset stage.' })
+    } finally {
       await this.finishOperation(session, operation)
     }
   }

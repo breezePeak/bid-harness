@@ -91,6 +91,11 @@ describe('Bid client projection', () => {
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_pending' },
     })
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toEqual({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      allowedActions: ['start_stage'],
+      composer: { enabled: false, reason: 'bid.stage_start_required' },
+    })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'running' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'running' },
       allowedActions: [],
@@ -149,6 +154,16 @@ describe('Bid client projection', () => {
       runtime: { stage: 'file_intake', status: 'pending' },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.upload_required' },
+    })
+
+    const resetSession = ctx.sessions.create()
+    resetSession.append('bid.project.resumed', {
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' }, revision: 1,
+    })
+    expect(ctx.sessionProjections.snapshot(resetSession).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      allowedActions: ['start_stage'],
+      composer: { enabled: false, reason: 'bid.stage_start_required' },
     })
 
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })

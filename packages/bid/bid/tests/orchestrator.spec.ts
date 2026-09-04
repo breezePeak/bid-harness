@@ -53,6 +53,26 @@ describe('BidOrchestrator', () => {
     })
   })
 
+  it('starts a reset stage only after the explicit post-reset confirmation', async () => {
+    const current = await session()
+    const execute = vi.fn(async task => artifacts(task.stage))
+    const orchestrator = new BidOrchestrator(
+      current,
+      { canExecute: () => true, execute },
+      { validate: async () => ({ ok: true }) },
+    )
+    current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
+    current.append('bid.stage.reset', { stage: 'tender_analysis', status: 'waiting_start' })
+
+    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_start' })
+    expect(execute).not.toHaveBeenCalled()
+    await expect(orchestrator.startResetStage()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'tender_analysis' }))
+    expect(() => orchestrator.startResetStage()).toThrow(expect.objectContaining({ code: 'BID_STAGE_START_NOT_ALLOWED' }))
+  })
+
   it('leaves a cancelled stage for reset without recording a failure', async () => {
     const current = await session()
     const controller = new AbortController()

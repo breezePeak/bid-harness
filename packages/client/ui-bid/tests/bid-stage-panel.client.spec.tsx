@@ -132,6 +132,20 @@ describe('BidStagePanel', () => {
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
+  it('shows reset completion and starts only after the user confirms', async () => {
+    const startStage = vi.fn(async () => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      allowedActions: ['start_stage'],
+      composer: { enabled: false, reason: 'bid.stage_start_required' },
+    }), { startStage })} />)
+
+    expect(screen.getByText('阶段已重置完毕，请确认后开始执行')).toBeTruthy()
+    expect(screen.getByText('等待开始')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '开始本阶段' }))
+    await waitFor(() => { expect(startStage).toHaveBeenCalledOnce() })
+  })
+
   it('stays absent for a non-Bid session even when a projection is available', () => {
     const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
       selector({ byId: { session_bid: { agentPreset: 'standard' } } })
@@ -603,11 +617,16 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'pending' as const } },
       })
+    const remoteStart = vi.fn<(_sessionId: string) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'waiting_user' as const } },
+      })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
-      remote: { bid: { retryStage: remoteRetry } },
+      remote: { bid: { retryStage: remoteRetry, startStage: remoteStart } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -625,6 +644,7 @@ describe('ui-bid browser plugin', () => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
         retryStage: () => Promise<void>
+        startStage: () => Promise<void>
       }
     }
     const injected = options.inject('session_bid')
@@ -684,5 +704,7 @@ describe('ui-bid browser plugin', () => {
 
     await injected.retryStage()
     expect(remoteRetry).toHaveBeenCalledWith('session_bid')
+    await injected.startStage()
+    expect(remoteStart).toHaveBeenCalledWith('session_bid')
   })
 })

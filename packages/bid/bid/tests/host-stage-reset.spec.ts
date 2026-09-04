@@ -33,7 +33,7 @@ interface TestHost {
     agent: Agent,
     workspace: { readonly projectRoot: string },
     signal?: AbortSignal,
-  ) => { drive: () => Promise<BidRuntimeState> }
+  ) => { drive?: () => Promise<BidRuntimeState>; startResetStage?: () => Promise<BidRuntimeState> }
 }
 
 describe('Bid Host stage reset', () => {
@@ -76,13 +76,7 @@ describe('Bid Host stage reset', () => {
       inbox: { clear: vi.fn() },
     } as unknown as Agent
     const flush = vi.fn(async () => {})
-    const drive = vi.fn(async (): Promise<BidRuntimeState> => {
-      await expect(access(evidencePath)).rejects.toThrow()
-      await expect(access(mappingCheckpointPath)).rejects.toThrow()
-      expect(session.events.at(-1)).toMatchObject({ type: 'bid.stage.reset', data: { stage: 'evidence_mapping' } })
-      return { stage: 'evidence_mapping', status: 'waiting_user' }
-    })
-    let resetSignal: AbortSignal | undefined
+    const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: { sessions: { flush, list: () => [session] } },
       config: {
@@ -91,10 +85,7 @@ describe('Bid Host stage reset', () => {
         chapterWritingMaxConcurrency: 1, trustedHosts: [],
       } satisfies Config,
       inFlight: new Map([[key, operation]]),
-      automaticOrchestrator: (_agent: Agent, _workspace: { readonly projectRoot: string }, signal?: AbortSignal) => {
-        resetSignal = signal
-        return { drive }
-      },
+      automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 
     await expect(BidHostRuntime.prototype.resetStage.call(
@@ -115,14 +106,18 @@ describe('Bid Host stage reset', () => {
 
     prior.resolve(undefined)
     idle.resolve(undefined)
-    await expect(reset).resolves.toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
-    expect(resetSignal).toBeDefined()
-    expect(resetSignal?.aborted).toBe(false)
+    await expect(reset).resolves.toEqual({ stage: 'evidence_mapping', status: 'waiting_start' })
+    await expect(access(evidencePath)).rejects.toThrow()
+    await expect(access(mappingCheckpointPath)).rejects.toThrow()
+    expect(session.events.findLast(event => event.type === 'bid.stage.reset')).toMatchObject({
+      type: 'bid.stage.reset', data: { stage: 'evidence_mapping', status: 'waiting_start' },
+    })
+    expect(drive).not.toHaveBeenCalled()
     expect(flush).toHaveBeenCalledWith(session)
     expect(host.inFlight.has(key)).toBe(false)
   })
 
-  it.each(BID_STAGES)('clears %s and later-stage model context before rerunning', async (stage) => {
+  it.each(BID_STAGES.filter(stage => stage !== 'docx_export'))('clears %s and later-stage model context before waiting for start', async (stage) => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-context-'))
@@ -146,18 +141,7 @@ describe('Bid Host stage reset', () => {
       whenIdle: vi.fn(async () => {}),
       inbox: { clear },
     } as unknown as Agent
-    const drive = vi.fn(async (): Promise<BidRuntimeState> => {
-      expect(session.surface.nodes).toEqual([
-        ...messages.slice(0, stageIndex).map(message => message.seq),
-        session.surface.nodes.at(-1),
-      ])
-      const resetContext = session.events.findLast(event => event.type === 'user/message')
-      expect(resetContext).toMatchObject({
-        data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice' } },
-        sourceEventSeqs: messages.slice(stageIndex).map(message => message.seq),
-      })
-      return { stage, status: 'waiting_user' }
-    })
+    const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: { sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
       config: {
@@ -170,7 +154,18 @@ describe('Bid Host stage reset', () => {
     }) as TestHost
 
     await expect(BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage))
-      .resolves.toEqual({ stage, status: 'waiting_user' })
+      .resolves.toEqual({ stage, status: stage === 'file_intake' ? 'pending' : 'waiting_start' })
+    expect(session.surface.nodes).toEqual([
+      ...messages.slice(0, stageIndex).map(message => message.seq),
+      session.surface.nodes.at(-1),
+    ])
+    const resetContext = session.events.findLast(event => event.type === 'user/message')
+    expect(resetContext).toMatchObject({
+      data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice' } },
+      sourceEventSeqs: messages.slice(stageIndex).map(message => message.seq),
+    })
     expect(clear).toHaveBeenCalledOnce()
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' })
+    expect(drive).not.toHaveBeenCalled()
   })
 })

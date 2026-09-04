@@ -5,7 +5,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
-import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -34,9 +33,11 @@ import {
   type WebEvidenceMaterial,
 } from './evidence-mapping-artifacts.ts'
 import {
+  OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
   parseOutlineArtifact,
   parseOutlineQualityReport,
   type OutlineArtifact,
+  type OutlineQualityReport,
 } from './outline-generation-artifacts.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { validateOutlineFrameworkRefs } from './outline-framework.ts'
@@ -76,7 +77,6 @@ const CHECKPOINT_PATH = 'analysis/evidence-mapping-checkpoint.json'
 const REFINED_OUTLINE_CANDIDATE_PATH = 'outline/refined-outline.candidate.json'
 const OUTLINE_PATH = 'outline/outline.json'
 const QUALITY_PATH = 'outline/quality-report.json'
-const MAIN_AGENT_TOOLS = ['read', 'write'] as const
 const MAPPING_AGENT_TOOLS = ['grep', 'read', 'web_search', 'web_fetch'] as const
 const MAPPING_SUBMISSION_TOOL = 'submit_evidence_mapping'
 const MAX_BRANCH_NEW_SECTIONS = 100
@@ -1068,31 +1068,17 @@ function buildEvidenceMap(
   return { map, snapshots: [...used.values()] }
 }
 
-function normalizeRefinedOutline(initial: OutlineArtifact, candidate: OutlineArtifact): OutlineArtifact {
-  const existing = new Set(initial.sections.map(section => section.id))
-  let next = initial.sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
-  const replacements = new Map(candidate.sections.filter(section => !existing.has(section.id)).map(section => [
-    section.id, `SEC-${String(++next).padStart(3, '0')}`,
-  ]))
-  return parseOutlineArtifact({
-    ...candidate,
-    sections: candidate.sections.map(section => ({
-      ...section,
-      id: replacements.get(section.id) ?? section.id,
-      parent_id: section.parent_id === null ? null : replacements.get(section.parent_id) ?? section.parent_id,
-    })),
+function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSchema {
+  const ids = (values: readonly string[]): JsonSchemaNode => ({ type: 'array', items: stringChoice(values) })
+  return closedObject({
+    schema_version: { type: 'integer', const: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION },
+    scope: { type: 'string', const: 'technical_bid' },
+    checked_requirement_ids: ids(inputs.requirements.requirements.map(item => item.id)),
+    checked_scoring_ids: ids(inputs.scoring.scoring_items.map(item => item.id)),
+    checked_scoring_response_point_ids: ids(inputs.responsePoints.points.map(item => item.id)),
+    reviewed_section_ids: ids(inputs.outline.sections.map(item => item.id)),
+    issues: stringArray('仅记录不阻断发布的业务层级、章节边界或覆盖建议；没有问题时返回空数组。'),
   })
-}
-
-function refinementWriteReason(exec: Readonly<ToolExecution>, workspace: BidWorkspace): string | undefined {
-  if (exec.name !== 'write') return undefined
-  const filePath = record(exec.arguments)?.file_path
-  const cwd = exec.agent?.session.header.cwd
-  if (typeof filePath !== 'string' || cwd === undefined) return 'S4 Outline Refinement write requires a target path.'
-  const target = resolve(cwd, filePath)
-  const allowed = [QUALITY_PATH]
-    .map(path => join(workspace.projectRoot, path))
-  return allowed.includes(target) ? undefined : 'S4 Outline Review may write only its quality report.'
 }
 
 async function reviewRefinedOutline(
@@ -1102,110 +1088,75 @@ async function reviewRefinedOutline(
   maxRepairAttempts: number,
   signal: AbortSignal,
 ): Promise<OutlineArtifact> {
-  const tools = agent.ctx.get('tools')
-  if (tools === undefined) throw new Error('Bid outline refinement requires tools service')
+  const subagents = agent.ctx.get('subagents')
+  if (subagents === undefined) throw new Error('Bid outline review requires subagents service')
   const candidatePath = join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH)
   const qualityPath = join(workspace.projectRoot, QUALITY_PATH)
   await Promise.all([removeAttemptPath(candidatePath), removeAttemptPath(qualityPath)])
   await writeJson(candidatePath, inputs.outline)
-  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   const review = [
     '当前阶段：evidence_mapping / Outline Review',
-    `读取 ${root}/${REFINED_OUTLINE_CANDIDATE_PATH}。目录结构、Writing Brief 和父节点 summary 已由各分支 Mapping Subagent 生成并由 Host 合并校验。`,
-    '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理。不得读取 Evidence、Web 正文或 S2 Artifact，不得修改目录候选。',
-    `写入 ${root}/${QUALITY_PATH}，严格包含 schema_version=3、scope="technical_bid"、checked_requirement_ids、checked_scoring_ids、checked_scoring_response_point_ids、reviewed_section_ids、issues。issues 可记录非阻断建议。不得进行第二轮目录深化。`,
+    '目录结构、Writing Brief 和父节点 summary 已由各分支 Mapping Subagent 生成并由 Host 合并校验。',
+    '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理。不得进行第二轮目录深化。',
+    '通过结构化输出返回质量报告；issues 只记录非阻断建议。',
+    `待复核目录：${JSON.stringify(inputs.outline)}`,
   ].join('\n')
-  const liftRestriction = tools.restrict({ allow: [...MAIN_AGENT_TOOLS] })
-  const liftGuard = tools.guard(exec => refinementWriteReason(exec, workspace))
-  const waitForArtifact = async (path: string, eventStart: number): Promise<void> => {
-    const deadline = Date.now() + 5 * 60_000
-    while (true) {
-      await waitForModelStageIdle(agent, signal)
-      throwForFailedTurn(agent, eventStart)
-      try { if ((await lstat(path)).isFile()) return } catch (error) {
-        if (record(error)?.code !== 'ENOENT') throw error
-      }
-      if (Date.now() >= deadline) throw new Error(`Bid outline refinement did not produce ${path}`)
-      await new Promise<void>(resolve => setTimeout(resolve, 25))
-    }
-  }
-  let repairAttempts = 0
-  let reviewedStructure: string | undefined
-  const structure = (outline: OutlineArtifact): string => JSON.stringify(outline.sections.map(section => ({
-    id: section.id, parent_id: section.parent_id, order: section.order, level: section.level,
-    title: section.title, writable: section.writable,
-  })))
-  const parseArtifact = async <T>(path: string, parse: (value: unknown) => T, issues: StageValidationIssue[]): Promise<T | undefined> => {
-    await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, path))
-    const content = await readFile(join(workspace.projectRoot, path), 'utf8')
-    try { return parse(JSON.parse(content)) } catch (error) {
-      if (error instanceof SyntaxError) issues.push({ code: 'OUTLINE_REFINEMENT_JSON_INVALID', message: error.message, artifact: path })
-      else if (error instanceof ZodError) issues.push(...error.issues.map(issue => ({
-        code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: issue.message, artifact: path, path: issue.path.join('.'),
-      })))
-      else throw error
-    }
-  }
-  const validateAndRepair = async (reviewed: boolean) => {
-    while (true) {
-      signal.throwIfAborted()
-      const issues: StageValidationIssue[] = []
-      const candidate = await parseArtifact(REFINED_OUTLINE_CANDIDATE_PATH, parseOutlineArtifact, issues)
-      const quality = reviewed ? await parseArtifact(QUALITY_PATH, parseOutlineQualityReport, issues) : undefined
-      if (candidate !== undefined) {
-        if (reviewed && structure(candidate) !== reviewedStructure) issues.push({
-          code: 'OUTLINE_REFINEMENT_REVIEW_STRUCTURE_CHANGED', message: '目录深化后的复核只允许修正写作指引和摘要，请恢复已完成的目录结构。', artifact: REFINED_OUTLINE_CANDIDATE_PATH,
-        })
-        validateOutlineSharedStructure(candidate.sections, issues)
-        validateOutlineSharedCoverage(candidate, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
-        await validateOutlineFrameworkRefs(workspace, candidate, issues)
-        if (quality !== undefined) {
-          quality.reviewed_section_ids = candidate.sections.map(section => section.id)
-          validateOutlineGenerationQuality(candidate, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues)
-        }
-      }
-      if (issues.length === 0 && candidate !== undefined) return { candidate, quality }
-      const repairIssues = issues.map(issue => ({
-        ...issue,
-        artifact: issue.artifact === OUTLINE_PATH ? REFINED_OUTLINE_CANDIDATE_PATH : issue.artifact,
-      }))
-      if (repairAttempts >= maxRepairAttempts) throw new BidStageExecutionError(repairIssues)
-      repairAttempts++
-      const eventStart = agent.session.events.length
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: [
-        '当前阶段：evidence_mapping / Outline Review Repair',
-        `根据 Validator 问题只修复 ${root}/${QUALITY_PATH}。不得修改目录候选，也不得读取 Evidence 或 S2 Artifact。`,
+  const hostIssues: StageValidationIssue[] = []
+  validateOutlineSharedStructure(inputs.outline.sections, hostIssues)
+  validateOutlineSharedCoverage(inputs.outline, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, hostIssues)
+  await validateOutlineFrameworkRefs(workspace, inputs.outline, hostIssues)
+  if (hostIssues.length > 0) throw new BidStageExecutionError(hostIssues)
+  let repairIssues: StageValidationIssue[] = []
+  for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
+    signal.throwIfAborted()
+    const run = await subagents.start('spawn', {
+      label: `S4 · 全局目录复核${attempt === 0 ? '' : ` · 修复 ${attempt}`}`,
+      parent: agent,
+      prompt: [{ type: 'text', text: [review, ...attempt === 0 ? [] : [
+        '上一份质量报告未通过校验。只修复报告字段并重新返回完整报告。',
         ...renderStageRepairIssues(repairIssues),
-      ].join('\n') }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await waitForMappingChildReply(agent, eventStart, signal)
-      await waitForArtifact(reviewed ? qualityPath : candidatePath, eventStart)
+      ]].join('\n') }],
+      signal,
+      outputSchema: outlineQualityOutputSchema(inputs),
+      toolFilter: { allow: [] },
+      maxDepth: 1,
+      persona: '你是技术标目录轻量复核 Subagent。只审查 Host 注入的目录，不检索资料、不调用工具、不派生其他 Agent，并通过结构化输出返回质量报告。',
+    })
+    let quality: OutlineQualityReport | undefined
+    const issues: StageValidationIssue[] = []
+    try {
+      const result = await run.result
+      if (result.stopReason !== 'completed') issues.push({
+        code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID',
+        message: `目录复核 Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`,
+        artifact: QUALITY_PATH,
+      })
+      else if (result.structured === undefined) issues.push({
+        code: 'OUTLINE_REFINEMENT_STRUCTURED_MISSING', message: '目录复核 Subagent 未返回结构化质量报告。', artifact: QUALITY_PATH,
+      })
+      else try { quality = parseOutlineQualityReport(result.structured) } catch (error) {
+        if (!(error instanceof ZodError)) throw error
+        issues.push(...error.issues.map(issue => ({
+          code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: issue.message, artifact: QUALITY_PATH, path: issue.path.join('.'),
+        })))
+      }
+      if (quality !== undefined) validateOutlineGenerationQuality(
+        inputs.outline, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues,
+      )
+    } finally {
+      await run.dispose()
     }
+    if (issues.length === 0 && quality !== undefined) {
+      await Promise.all([
+        writeJson(join(workspace.projectRoot, OUTLINE_PATH), inputs.outline),
+        writeJson(qualityPath, quality),
+      ])
+      return inputs.outline
+    }
+    repairIssues = issues
+    if (attempt === maxRepairAttempts) throw new BidStageExecutionError(issues)
   }
-  try {
-    signal.throwIfAborted()
-    const hostIssues: StageValidationIssue[] = []
-    validateOutlineSharedStructure(inputs.outline.sections, hostIssues)
-    validateOutlineSharedCoverage(inputs.outline, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, hostIssues)
-    await validateOutlineFrameworkRefs(workspace, inputs.outline, hostIssues)
-    if (hostIssues.length > 0) throw new BidStageExecutionError(hostIssues)
-    reviewedStructure = structure(inputs.outline)
-    signal.throwIfAborted()
-    const reviewStart = agent.session.events.length
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: review }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await waitForArtifact(qualityPath, reviewStart)
-    const { candidate, quality } = await validateAndRepair(true)
-    if (quality === undefined) throw new Error('evidence-mapping-refinement-quality-missing')
-    const refined = normalizeRefinedOutline(inputs.outline, candidate)
-    quality.reviewed_section_ids = refined.sections.map(section => section.id)
-    await Promise.all([
-      writeJson(join(workspace.projectRoot, OUTLINE_PATH), refined),
-      writeJson(qualityPath, quality),
-    ])
-    return refined
-  } finally {
-    liftGuard()
-    liftRestriction()
-  }
+  throw new Error('evidence-mapping-outline-review-unreachable')
 }
 
 /**
@@ -1252,12 +1203,12 @@ async function executeEvidenceMappingRun(
   if (spawnProvider === undefined || spawnProvider.inheritsParentContext) {
     throw new Error('Bid evidence mapping requires a fresh-context spawn subagent provider')
   }
-  if (spawnProvider.prepareContinuable === undefined || !spawnProvider.capabilities.depthLimit
-    || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
-    throw new Error('Bid evidence mapping requires a continuable spawn provider with depth-limit, tool-filter, and persona capabilities')
+  if (spawnProvider.prepareContinuable === undefined || !spawnProvider.capabilities.outputSchema
+    || !spawnProvider.capabilities.depthLimit || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
+    throw new Error('Bid evidence mapping requires a structured-output continuable spawn provider with depth-limit, tool-filter, and persona capabilities')
   }
   const registered = new Set(tools.schemas(localRun ? undefined : agent).map(schema => schema.name))
-  const requiredTools = [...new Set([...(!localRun ? MAIN_AGENT_TOOLS : []), ...MAPPING_AGENT_TOOLS])]
+  const requiredTools = [...MAPPING_AGENT_TOOLS]
   const missingTools = requiredTools.filter(name => !registered.has(name))
   if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
   const artifacts: StageArtifact[] = [
@@ -1411,8 +1362,6 @@ async function executeEvidenceMappingRun(
     for (const mapping of saved.result.section_mappings) acceptedMappings.set(mapping.section_id, mapping)
   }
   let candidateMappings: CandidateMapping[] = [...previousCandidates, ...checkpoint.tasks.flatMap(item => item.result.section_mappings)]
-  const liftParentGuard = tools.guard(exec =>
-    exec.agent?.session.id === agent.session.id ? refinementWriteReason(exec, workspace) : undefined)
   const controller = new AbortController()
   const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
   const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
@@ -1777,7 +1726,6 @@ async function executeEvidenceMappingRun(
     liftSubmissionSetup()
     liftObserver()
     liftChildReadGuard()
-    liftParentGuard()
     await stateWrites
   }
   if (options.remap === undefined) {

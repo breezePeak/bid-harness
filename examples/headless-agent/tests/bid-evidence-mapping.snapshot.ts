@@ -25,8 +25,8 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
-      expect(childLogs).toHaveLength(2)
-      const childLog = childLogs.find(log => !log.includes('MAP-FINAL-CHECK'))
+      expect(childLogs).toHaveLength(4)
+      const childLog = childLogs.find(log => log.includes('MAP-INIT-'))
       if (childLog === undefined) throw new Error('缺少持久化 Child 日志')
       const [headerLine, ...eventLines] = childLog.trimEnd().split('\n')
       const header = JSON.parse(headerLine!) as SessionHeader
@@ -52,6 +52,14 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
       expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['submit_evidence_mapping'])
       expect(finalCheckLog).toContain('https://official.example/standard')
+      const refinementLogs = childLogs.filter(log => !log.includes('MAP-INIT-') && !log.includes('MAP-FINAL-CHECK'))
+      expect(refinementLogs).toHaveLength(2)
+      const rejectedRefinementLog = refinementLogs.find(log => !log.includes('OUTLINE_GENERATION_QUALITY_SECTION_MISSING'))
+      const acceptedRefinementLog = refinementLogs.find(log => log.includes('OUTLINE_GENERATION_QUALITY_SECTION_MISSING'))
+      if (rejectedRefinementLog === undefined || acceptedRefinementLog === undefined) throw new Error('缺少隔离目录复核及修复日志')
+      expect(rejectedRefinementLog).toContain('submit-refinement-incomplete')
+      expect(acceptedRefinementLog).toContain('submit-refinement-quality')
+      expect(refinementLogs.every(log => !log.includes('tool/call') || log.includes('structured_output'))).toBe(true)
 
       const projectRoot = join(cwd, '.bid-harness')
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(projectRoot, 'outline/outline.json'), 'utf8')))
@@ -70,14 +78,19 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const artifacts = JSON.stringify({
         outline, map, ledger: { ...ledger, sources: ledger.sources.map(source => ({ ...source, fetched_at: '<TIME>' })) }, snapshots,
       }, null, 2) + '\n'
-      const sessionIds = [header.parentSession!, header.id, finalHeader.id]
+      const refinementHeaders = refinementLogs.map(log => JSON.parse(log.split('\n')[0]!) as SessionHeader)
+      const sessionIds = [header.parentSession!, header.id, finalHeader.id, ...refinementHeaders.map(item => item.id)]
       const transcript = normalizeSessionSnapshot(childLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const finalCheck = normalizeSessionSnapshot(finalCheckLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
-      const parentLog = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === header.parentSession)
-      if (parentLog === undefined) throw new Error('缺少持久化父 Agent 日志')
-      expect(parentLog).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
-      const refinement = normalizeSessionSnapshot(parentLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
-      const expected = { 'child.expected.jsonl': transcript, 'refinement.expected.jsonl': refinement, 'final-check.expected.jsonl': finalCheck, 'artifacts.expected.json': artifacts }
+      const rejectedRefinement = normalizeSessionSnapshot(rejectedRefinementLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
+      const refinement = normalizeSessionSnapshot(acceptedRefinementLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
+      const expected = {
+        'child.expected.jsonl': transcript,
+        'refinement-rejected.expected.jsonl': rejectedRefinement,
+        'refinement.expected.jsonl': refinement,
+        'final-check.expected.jsonl': finalCheck,
+        'artifacts.expected.json': artifacts,
+      }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })
         for (const [name, content] of Object.entries(expected)) await writeFile(join(fixtureDir, name), content)

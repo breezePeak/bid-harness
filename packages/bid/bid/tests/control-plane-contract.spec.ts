@@ -22,7 +22,7 @@ describe('bid control-plane public contract', () => {
       'chapter_writing',
       'docx_export',
     ])
-    expect(STAGE_RUN_STATUSES).toEqual(['pending', 'running', 'waiting_user', 'failed', 'completed'])
+    expect(STAGE_RUN_STATUSES).toEqual(['pending', 'waiting_start', 'running', 'waiting_user', 'failed', 'completed'])
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
       'bid.stage.started',
@@ -111,7 +111,7 @@ describe('bid control-plane public contract', () => {
     }>()
     expectTypeOf<SessionEventMap['bid.stage.reset']>().toEqualTypeOf<{
       stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
-      status: 'pending'
+      status: 'pending' | 'waiting_start'
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<
       | {

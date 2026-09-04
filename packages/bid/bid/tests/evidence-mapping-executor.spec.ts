@@ -147,6 +147,13 @@ function mappingFixture(
   const submissionCandidates = vi.fn((value: unknown): unknown[] => [value])
   const submissionResults: Readonly<ToolExecutionResult>[] = []
   const serializeQuality = vi.fn((content: string) => content)
+  const outlineReviewPrompts: string[] = []
+  const outlineReviewRequests: Array<{
+    toolFilter?: { allow?: readonly string[] }
+    maxDepth?: number
+    prompt: Array<{ type: string; text: string }>
+  }> = []
+  const outlineReviewDisposals: Array<ReturnType<typeof vi.fn>> = []
   const onReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
   const onFinalReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
   const fileRefs = new Map<string, { file_id: string; source_kind: 'reference' | 'reference_bid' }>()
@@ -313,6 +320,34 @@ function mappingFixture(
   const childRequests = new Map<string, ContinuableStartSpec>()
   const subagents = {
     getProvider: vi.fn(() => spawnProvider),
+    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: string; text: string }> }) => {
+      outlineReviewRequests.push(request)
+      const prompt = request.prompt.map(item => item.text).join('\n')
+      outlineReviewPrompts.push(prompt)
+      const marker = '待复核目录：'
+      const candidate = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length).split('\n')[0]!) as {
+        sections: Array<{ id: string; requirement_ids: string[]; scoring_ids: string[]; scoring_response_point_ids?: string[] }>
+      }
+      const serialized = serializeQuality(JSON.stringify({
+        schema_version: 3,
+        scope: 'technical_bid',
+        checked_requirement_ids: [...new Set(candidate.sections.flatMap(item => item.requirement_ids))],
+        checked_scoring_ids: [...new Set(candidate.sections.flatMap(item => item.scoring_ids))],
+        checked_scoring_response_point_ids: [...new Set(candidate.sections.flatMap(item => item.scoring_response_point_ids ?? []))],
+        reviewed_section_ids: candidate.sections.map(item => item.id),
+        issues: [],
+      }))
+      let structured: unknown
+      try { structured = JSON.parse(serialized) } catch { structured = undefined }
+      const dispose = vi.fn(async () => {})
+      outlineReviewDisposals.push(dispose)
+      return {
+        id: SessionId(`outline-review-${outlineReviewPrompts.length}`),
+        localAgent: undefined,
+        result: Promise.resolve({ output: [], structured, stopReason: 'completed' as const }),
+        dispose,
+      }
+    }),
     registerContinuableSetup: vi.fn((contribution: (childCtx: Context) => () => void) => {
       continuableSetup = contribution
       return () => { continuableSetup = undefined }
@@ -433,7 +468,7 @@ function mappingFixture(
     agent, starts, finalStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
     childGuards, disposed, maxActive: () => maxActive, taskAttempts, onReply, onFinalReply, serializeReply, submissionCandidates,
     submissionResults,
-    serializeQuality, emitWeb, children,
+    serializeQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
     emitToolResult: (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => webObserver?.(exec, result),
   }
 }
@@ -910,8 +945,12 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.observed_max_concurrency).toBe(2)
     expect(log.tasks.every(item => item.final_child_session_id !== null)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
-    expect(fixture.followup).toHaveBeenCalledTimes(1)
-    expect(fixture.followup.mock.calls.every(call => !JSON.stringify(call).includes('Main-Agent Planning'))).toBe(true)
+    expect(fixture.followup).not.toHaveBeenCalled()
+    expect(fixture.outlineReviewPrompts).toHaveLength(1)
+    expect(fixture.outlineReviewPrompts[0]).not.toContain('Main-Agent Planning')
+    expect(fixture.outlineReviewRequests[0]).toMatchObject({ toolFilter: { allow: [] }, maxDepth: 1 })
+    expect(fixture.outlineReviewPrompts[0]).not.toContain('全局候选资料池')
+    expect(fixture.outlineReviewDisposals[0]).toHaveBeenCalledTimes(1)
     expect(fixture.disposed).toHaveLength(3)
     expect(fixture.finalStarts).toHaveLength(1)
   })
@@ -1245,7 +1284,7 @@ describe('S4 Host 准入与最终确认', () => {
   })
 
   it.each([
-    ['json', 'OUTLINE_REFINEMENT_JSON_INVALID'],
+    ['json', 'OUTLINE_REFINEMENT_STRUCTURED_MISSING'],
     ['schema', 'OUTLINE_REFINEMENT_SCHEMA_INVALID'],
   ])('全局目录复核的 quality %s 由 Validator 引导修复，成功 Mapping Child 不重跑', async (kind, code) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-refinement-repair-')))
@@ -1255,12 +1294,13 @@ describe('S4 Host 准入与最终确认', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach(start => start.resolve())
     await execution
-    const repairs = fixture.followup.mock.calls.filter(call => JSON.stringify(call).includes('Outline Review Repair'))
+    const repairs = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('上一份质量报告未通过校验'))
     expect(repairs).toHaveLength(1)
     expect(JSON.stringify(repairs)).toContain(code)
     expect(fixture.starts).toHaveLength(2)
     expect([...fixture.taskAttempts.values()]).toEqual([1, 1, 1])
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
+    expect(fixture.followup).not.toHaveBeenCalled()
   })
 
   it('全局目录复核 repair 耗尽保留质量报告错误及已完成 Mapping Task', async () => {
@@ -1268,14 +1308,14 @@ describe('S4 Host 准入与最终确认', () => {
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     fixture.serializeQuality.mockReturnValue('{')
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 2 })
-    const rejection = expect(execution).rejects.toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_JSON_INVALID', artifact: 'outline/quality-report.json' }] })
+    const rejection = expect(execution).rejects.toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURED_MISSING', artifact: 'outline/quality-report.json' }] })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach(start => start.resolve())
     await rejection
-    expect(fixture.followup.mock.calls.filter(call => JSON.stringify(call).includes('Outline Review Repair'))).toHaveLength(2)
+    expect(fixture.outlineReviewPrompts.filter(prompt => prompt.includes('上一份质量报告未通过校验'))).toHaveLength(2)
     expect([...fixture.taskAttempts.values()]).toEqual([1, 1])
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as { failure: Array<{ code: string }>; tasks: Array<{ status: string }> }
-    expect(log.failure.map(issue => issue.code)).toEqual(['OUTLINE_REFINEMENT_JSON_INVALID'])
+    expect(log.failure.map(issue => issue.code)).toEqual(['OUTLINE_REFINEMENT_STRUCTURED_MISSING'])
     expect(log.tasks.map(task => task.status)).toEqual(['completed', 'completed'])
   })
 

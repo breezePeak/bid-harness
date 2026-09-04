@@ -26,7 +26,7 @@ export type BidStagePanelProps =
   & InjectFace<BidStagePanelInjected>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
+type PendingAction = 'upload' | 'start' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -44,6 +44,7 @@ function stageKey(stage: BidStage): BidKey {
 function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'error' | undefined {
   switch (status) {
     case 'pending': return undefined
+    case 'waiting_start': return 'warning'
     case 'waiting_user': return 'warning'
     case 'running': return 'ongoing'
     case 'failed': return 'error'
@@ -56,6 +57,7 @@ function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'er
 function statusKey(status: StageRunStatus): BidKey {
   switch (status) {
     case 'pending': return 'status.pending'
+    case 'waiting_start': return 'status.waiting_start'
     case 'running': return 'status.running'
     case 'waiting_user': return 'status.waiting_user'
     case 'failed': return 'status.failed'
@@ -66,6 +68,7 @@ function statusKey(status: StageRunStatus): BidKey {
 }
 
 function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
+  if (status === 'waiting_start') return 'prompt.stage_waiting_start'
   switch (stage) {
     case 'file_intake':
       if (status === 'running') return 'prompt.file_intake_running'
@@ -88,6 +91,7 @@ function composerReason(projection: BidClientProjection, t: TranslateBid): strin
   if (projection.composer.enabled) return undefined
   switch (projection.composer.reason) {
     case 'bid.upload_required': return t('reason.bid.upload_required')
+    case 'bid.stage_start_required': return t('reason.bid.stage_start_required')
     case 'bid.stage_running': return t('reason.bid.stage_running')
     case 'bid.stage_pending': return t('reason.bid.stage_pending')
     case 'bid.tender_analysis_confirmation_required': return t('reason.bid.tender_analysis_confirmation_required')
@@ -122,6 +126,7 @@ export function BidStagePanel({
   setReviewViewAvailable,
   reviewSurface,
   uploadFiles,
+  startStage,
   retryStage,
   confirmOutline,
   regenerateOutline,
@@ -266,6 +271,7 @@ export function BidStagePanel({
   if (!isBidSession || projection === undefined) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
+  const canStart = projection.allowedActions.includes('start_stage')
   const canRetry = projection.allowedActions.includes('retry_stage')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
@@ -646,6 +652,18 @@ export function BidStagePanel({
               onClick={() => { invoke('retry', retryStage) }}
             >
               {t('action.retry')}
+            </Button>
+          )}
+          {canStart && (
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<IconCheckOutline14 />}
+              disabled={requestPending !== null || startStage === undefined}
+              title={startStage === undefined ? t('action.unavailable') : undefined}
+              onClick={() => { invoke('start', startStage) }}
+            >
+              {requestPending === 'start' ? t('action.starting') : t('action.start_stage')}
             </Button>
           )}
           {(canConfirm || canRegenerate) && (

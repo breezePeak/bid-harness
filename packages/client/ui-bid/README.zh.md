@@ -10,6 +10,8 @@
 
 面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S5 审核项使用三栏工作台展示目录、正文、资料和 Reviewer 状态，通过专用 Remote 读取审核报告与章节；完成后的 Word 导出通过 `bid/exportDocx` 生成独立文件，不改变 S5 Projection。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 
+S2–S5 重置完成后，面板显示 `waiting_start` 和“开始本阶段”按钮，并保持 Composer 禁用。按钮调用 `bid/startStage`；成功进入执行状态后才恢复该阶段的常规进度展示，避免重置操作在用户确认前自动消耗模型调用。
+
 S4 运行时，状态行分别显示 Host 返回的初始任务数与补充任务数。初始数量等于初步确认目录中的可写叶子数；目录深化和最终用户编辑产生的补映射计入补充数量，任务名称使用真实章节标题路径。
 
 ## 模型体验

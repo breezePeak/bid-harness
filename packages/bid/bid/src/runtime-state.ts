@@ -142,7 +142,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         } }
     }
     case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'failed' || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
+      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'failed' || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
         ? { stage: state.stage, status: 'running' } : state
     case 'bid.stage.failed':
       return event.data.stage === state.stage && state.status === 'running'
@@ -151,7 +151,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : state
     case 'bid.stage.reset':
       return BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.stage)
-        ? { stage: event.data.stage, status: 'pending' }
+        ? { stage: event.data.stage, status: event.data.status }
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage && getBidStagePolicy(state.stage).userGate !== 'none'
@@ -177,6 +177,7 @@ export function getBidClientProjection(
   const fileView = fileLimits.allowedExtensions === undefined ? { ...fileLimits }
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
+  if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
   if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
   if (runtime.status === 'completed') return {
     runtime: { ...runtime },

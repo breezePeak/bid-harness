@@ -179,16 +179,20 @@ describe('Workspace 项目与独立 Session', () => {
     } finally { release() }
   })
 
-  it('reset 删除后续产物并使下一个 Session 从 outline_generation 接管', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+  it('reset 删除后续产物并等待用户确认，确认后才执行当前阶段', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const a = await fresh('session-a')
-    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'waiting_start' })
+    expect(executor.execute).not.toHaveBeenCalled()
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(runtime(b.session)).toEqual({ stage: 'outline_generation', status: 'waiting_start' })
     expect(b.session.deriveMessages()).toEqual([])
+    executor.canExecute = stage => stage === 'outline_generation'
+    expect(await ctx.bid.startStage(b.session)).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
+    expect(executor.execute).toHaveBeenCalledOnce()
   })
 
   it('等待确认投影出现后，目录读取等待操作落盘并返回实际目录', async () => {

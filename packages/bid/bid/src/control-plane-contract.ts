@@ -14,6 +14,7 @@ export type BidStage = typeof BID_STAGES[number]
 /** The stage execution states owned by the control plane. */
 export const STAGE_RUN_STATUSES = [
   'pending',
+  'waiting_start',
   'running',
   'waiting_user',
   'failed',
@@ -57,6 +58,7 @@ export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
 /** User actions the Bid Host may admit for the current projection. */
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
+  'start_stage',
   'retry_stage',
   'export_docx',
   'confirm_tender_analysis',
@@ -137,6 +139,7 @@ export type StageValidationResult =
 /** Stable host reason codes for a disabled Bid composer. */
 export type BidComposerReason =
   | 'bid.upload_required'
+  | 'bid.stage_start_required'
   | 'bid.stage_pending'
   | 'bid.stage_running'
   | 'bid.tender_analysis_confirmation_required'
@@ -270,6 +273,18 @@ export interface BidRetryFailure {
 export type BidRetryResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidRetryFailure }
+
+/** Stable business rejection codes returned by the post-reset stage start action. */
+export type BidStageStartErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_STAGE_START_NOT_ALLOWED'
+  | 'BID_STAGE_START_FAILED'
+
+/** Result returned after the user starts a reset stage. */
+export type BidStageStartResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: BidStageStartErrorCode; readonly message: string } }
 
 /** Stable business rejection codes returned by an on-demand DOCX export. */
 export type BidDocxExportErrorCode =

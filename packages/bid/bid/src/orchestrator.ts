@@ -63,6 +63,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RETRY_NOT_ALLOWED'
+  | 'BID_STAGE_START_NOT_ALLOWED'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
 
 /** Host-side rejection for an operation that is invalid in current session state. */
@@ -146,6 +147,26 @@ export class BidOrchestrator {
         })
         return this.state
       }
+      const settlement = await this.executeStage(state.stage)
+      return settlement === 'completed' ? this.driveLoop() : this.state
+    })
+  }
+
+  /**
+   * Start the stage selected by a completed reset and continue to its normal stopping point.
+   * @returns the state at validation, failure, or workflow completion.
+   * @throws {@link BidOrchestratorError} unless the current stage is waiting for this explicit start.
+   */
+  startResetStage(): Promise<BidRuntimeState> {
+    this.assertIdle()
+    const state = this.state
+    if (state.status !== 'waiting_start' || state.stage === 'file_intake') {
+      throw new BidOrchestratorError(
+        'BID_STAGE_START_NOT_ALLOWED',
+        `cannot start Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+      )
+    }
+    return this.begin(async () => {
       const settlement = await this.executeStage(state.stage)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })

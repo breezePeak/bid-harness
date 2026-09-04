@@ -36,11 +36,11 @@ declare module '@deepseek-ai/dsh-session/types' {
      */
     'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
     /**
-     * A user command returned the current stage to its pending entry state.
+     * A user command cleared the current and later stages and now waits for an explicit start.
      * @param stage Current stage selected by the scoped reset command.
-     * @param status Stable pending entry status.
+     * @param status Stable post-reset user gate.
      */
-    'bid.stage.reset': { stage: BidStage; status: 'pending' }
+    'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
     /**

@@ -10,7 +10,7 @@ S4 Child 以普通回复输出 JSON 时，枚举、字段名、Task 身份或文
 
 Evidence Mapping Executor 为每个 Mapping Task 预留 Child Session ID，并通过 continuable setup 在该 Child 作用域注册 S4 私有 `submit_evidence_mapping` 工具。动态 JSON Schema 限定当前 task_id、现有及本任务预留 section_id、可见 file_ref、文件角色允许的 usage、完整字段集合和 Final Check 分支摘要；工具随后复用现有文件引用解析、Zod Schema 与领域校验，不建立第二套 Artifact 数据模型。
 
-初始任务使用现有 `outlineEditOperationSchema` 提交分支内增量目录操作，而不返回完整目录子树。Host 在工具执行时拒绝跨分支引用，在语义校验时应用操作、校验目录覆盖并为新增节点分配稳定 ID。合并后的目录候选由 Main Agent 只读复核，Main Agent 只能写质量报告。Final Check 只提交变化章节和 `unchanged_section_ids`，Host 从已接受映射恢复完整结果。
+初始任务使用现有 `outlineEditOperationSchema` 提交分支内增量目录操作，而不返回完整目录子树。Host 在工具执行时拒绝跨分支引用，在语义校验时应用操作、校验目录覆盖并为新增节点分配稳定 ID。合并后的目录候选交给一个无工具、最大深度为 1 的全新复核 Child；该 Child 不继承主 Session 历史，只接收候选目录并通过结构化输出返回质量报告，因此不能改写候选或再次派生子 Agent。Final Check 只提交变化章节和 `unchanged_section_ids`，Host 从已接受映射恢复完整结果。
 
 无效参数抛出 ToolArgsError，由模型在当前回合重新调用。一次提交只有在成功的权威 `tools/result` 事件后才生效，成功后结束当前回合并阻止更多工具调用。一次 S4 操作持有提交代次和已接收结果，使同一 Session 冷恢复出的新 Agent Activation 能继续提交；每个 Activation 只持有自己的待提交执行记录和 disposer。未产生成功提交时，Host 记录 `EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING`。
 
@@ -28,4 +28,4 @@ Host 只为章节覆盖、目录操作、分块归属、网页正文快照、Wri
 
 ## Consequences
 
-参数错误不产生 Host attempt；语义失败保留一次同会话修复。小型目录操作、逐任务 checkpoint 和 Final Check 差量提交限制模型上下文与重复工作；结构失败不再伪装成完成。S4 增加 Child 作用域工具及私有执行状态，不改变通用 subagent 接口、Evidence Map v10 或 S5。聚焦执行器测试覆盖动态 Schema、分支操作范围、断点续跑、缺失提交、语义修复、告警归属、日志版本和 S4→S5 读取；真实 Agent Loop 与 keyless 快照固定同回合工具纠错及后续语义修复。
+参数错误不产生 Host attempt；语义失败保留一次同会话修复。小型目录操作、逐任务 checkpoint 和 Final Check 差量提交限制模型上下文与重复工作；结构失败不再伪装成完成。目录复核不再携带主 Session 的累计上下文，也不能通过写文件引入重复 Section ID。S4 增加 Child 作用域工具及私有执行状态，不改变通用 subagent 接口、Evidence Map v10 或 S5。聚焦执行器测试覆盖动态 Schema、分支操作范围、断点续跑、缺失提交、语义修复、告警归属、日志版本和 S4→S5 读取；真实 Agent Loop 与 keyless 快照固定同回合工具纠错及后续语义修复。

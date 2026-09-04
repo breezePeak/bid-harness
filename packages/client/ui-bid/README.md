@@ -8,6 +8,8 @@ Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversati
 
 The panel mirrors `projection.composer.enabled` and its stable reason code into `ctx.conversation.blocks` for the same Session. The review-items view remains available throughout S5 and after S5 completes, retaining chapter and Reviewer status plus an on-demand Word export button. Existing `docx_export/completed` projects render as completed S5 projects. A non-Bid preset or unavailable projection clears the block and hides the panel, preserving the ordinary composer and attachment path for non-Bid Sessions.
 
+After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, keeps the composer disabled, and exposes one “Start this stage” action backed by `bid/startStage`. Reset itself never starts model execution.
+
 ## Model Experience
 
 目录确认与章节写作工作台在父节点标题下显示简短 summary，折叠子树后仍可了解下属章节的主要内容。写作工作台按祖先到当前章节的 `order` 显示完整层级编号，与正文标题编号一致；折叠不改变编号，悬停显示完整编号与标题。

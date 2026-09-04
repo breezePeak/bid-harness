@@ -54,6 +54,8 @@ export interface BidStagePanelInjected {
   ) => Promise<readonly BidFileIntakeFileResult[]>
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
+  /** Start the current stage after a reset has finished and the user confirms. */
+  startStage?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
   getOutlineDraft?: () => Promise<OutlineDraftView>
   applyOutlineDraftOperations?: (request: OutlineDraftMutationRequest) => Promise<OutlineDraftView>
@@ -134,6 +136,18 @@ export function apply(ctx: ClientContext): void {
         const result = await ctx.remote.bid.retryStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      startStage: async () => {
+        const remote = ctx.remote.bid as unknown as {
+          startStage(id: SessionId): Promise<{
+            ok: boolean
+            value: { ok: boolean; error?: Parameters<typeof actionFailure>[0] }
+            error: Parameters<typeof actionFailure>[0]
+          }>
+        }
+        const result = await remote.startStage(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_START_FAILED', message: '阶段启动失败。' })
       },
       getEvidenceMappingProgress: async () => {
         const result = await ctx.remote.bid.getEvidenceMappingProgress(sessionId)

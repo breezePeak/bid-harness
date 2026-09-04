@@ -235,18 +235,14 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
     ] : []),
     toolCall('submit-after-fetch', 'submit_evidence_mapping', partialResult(sourceUrl)),
+    ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
+      ...JSON.parse(quality), reviewed_section_ids: [],
+    })] : []),
+    toolCall('submit-refinement-quality', 'structured_output', JSON.parse(quality)),
     toolCall('submit-final-check', 'submit_evidence_mapping', partialResult(sourceUrl, 'MAP-FINAL-CHECK')),
   ]
-  const refinementScript = [
-    toolCall('read-refined-outline', 'read', { file_path: `${workspacePath}/outline/refined-outline.candidate.json` }),
-    toolCall('write-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: repair ? '{}' : quality }),
-    finalText('全局目录复核完成。'),
-    ...(repair ? [
-      toolCall('repair-refinement-quality', 'write', { file_path: `${workspacePath}/outline/quality-report.json`, content: quality }),
-      finalText('质量报告已修复。'),
-    ] : []),
-  ]
-  const adapter = new ScriptedAdapter(sessionId, refinementScript, childScript)
+  const parentScript: StreamChunk[][] = []
+  const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root, ...(interactive ? { agentPreset: 'bid' } : {}) })
@@ -267,7 +263,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 
   const outcome = await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
-  return { agent, workspace, sourceUrl, outcome, parentScript: refinementScript, childScript }
+  return { agent, workspace, sourceUrl, outcome, parentScript, childScript }
 }
 
 /**

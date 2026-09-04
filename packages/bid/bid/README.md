@@ -65,7 +65,7 @@ S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏
 
 成功的结构化提交继续接受章节覆盖、目录操作范围、分块归属、Web 正文快照、Writing Brief 和 Final Check 汇总等语义校验；只有这些问题或未调用提交工具才最多在同一 Child 修复一次，并保留已检索上下文。执行日志 schema v3 以 `issues` 记录本次拒绝原因，以 `warnings` 记录不阻塞接收的本次检索错误；接受的 attempt 不得保留 issues，错误也不复制到后续 attempt。单条无效材料不丢弃同章有效材料，missing_topics 只表示检索并语义判断后仍存在的真实缺口。分支修复耗尽时阶段失败，已接受分支及其目录操作写入 `analysis/evidence-mapping-checkpoint.json`；重试只调度未完成任务。Host 以同一串行写入队列先保存 Web 快照和 checkpoint，再发布 completed 日志状态。用户取消、Host 持久化或权限机制故障仍可中止阶段。
 
-目录深化与各分支资料研究在同一 Child 内完成；`outline_operations` 只传输新增、拆分、合并、移动或字段调整，无需复制完整子树。Host 合并并校验各分支结果后，Main Agent 只读取 `outline/refined-outline.candidate.json` 检查全局层级和覆盖，并且只能写 `outline/quality-report.json`，不得读取 Evidence、Web 正文或 S2 Artifact，也不得修改目录候选。后续 Final Check 以 `section_mappings` 提交变化章节，以 `unchanged_section_ids` 声明复用章节，两者必须无重复地覆盖最终可写章节；Host 恢复完整结果后仍写出 evidence-map v10。
+目录深化与各分支资料研究在同一 Child 内完成；`outline_operations` 只传输新增、拆分、合并、移动或字段调整，无需复制完整子树。Host 合并并校验各分支结果后，启动一个无工具、不可继续派生的全新目录复核 Child；该 Child 只接收合并后的目录候选并以结构化结果返回质量报告，不继承主 Session 历史，也不读取 Evidence、Web 正文或 S2 Artifact。后续 Final Check 以 `section_mappings` 提交变化章节，以 `unchanged_section_ids` 声明复用章节，两者必须无重复地覆盖最终可写章节；Host 恢复完整结果后仍写出 evidence-map v10。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 
@@ -86,6 +86,8 @@ S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果�
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
 S5 uses `outline/confirmed-outline.json` as its only structure source. Each Writer receives its Section, related S2 records, stable response points, Section evidence, exact framework draft chunks referenced by that Section, and bounded dependency handoffs. Framework bodies are writing input for preservation, adaptation, or rewriting, never factual Evidence. The Reviewer receives only Host-injected data and structured output. Missing enterprise facts remain unresolved and cannot be replaced by Web sources.
+
+阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；用户通过 UI 的“开始本阶段”或 `/bid-start` 明确确认后，才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
 
 ### Inventory text
 
