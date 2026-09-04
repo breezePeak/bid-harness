@@ -128,7 +128,7 @@ describe('BidStagePanel', () => {
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(await screen.findByText('映射任务：初始 8 个 · 补充 2 个 · 共 10 个 · 已完成 3 · 映射中 2 · 未开始 5')).toBeTruthy()
+    expect(await screen.findByText('研究任务：分支 8 个 · 复核 2 个 · 共 10 个 · 已完成 3 · 进行中 2 · 未开始 5')).toBeTruthy()
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
@@ -383,6 +383,14 @@ describe('BidStagePanel', () => {
     expect(selectReviewView).toHaveBeenCalledOnce()
 
     view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'docx_export', status: 'completed' },
+      allowedActions: ['export_docx'],
+      composer: { enabled: false, reason: 'bid.completed' },
+    }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
+    expect(setReviewViewAvailable).toHaveBeenLastCalledWith(true)
+    expect(screen.getByText('正文编写')).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'tender_analysis', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
@@ -409,6 +417,30 @@ describe('BidStagePanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith({ expected_revision: 1, expected_draft_sha256: 'b'.repeat(64) }) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
+  })
+
+  it('discards an action failure after the Host advances the stage', async () => {
+    const retry = Promise.withResolvers<undefined>()
+    const retryStage = vi.fn(() => retry.promise)
+    const view = render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'file_intake', status: 'failed', failureReason: '网络错误' },
+      allowedActions: ['retry_stage'],
+    }), { retryStage })} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
+    view.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+      allowedActions: ['confirm_outline'],
+      composer: { enabled: true },
+    }), { retryStage, getOutlineDraft: async () => outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] }) })} />)
+    await waitFor(() => { expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy() })
+    await act(async () => {
+      retry.reject(new Error('client api: bid/retryStage failed: Failed to fetch (internal)'))
+      await retry.promise.catch(() => {})
+    })
+
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('shows every technical scoring item, emits controlled S2 edits, and keeps invalid confirmation editable', async () => {

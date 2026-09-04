@@ -422,6 +422,8 @@ export function OutlineConfirmationReview({
                 </div>
               </div>
 
+              {!section.writable && section.summary && <p className={css.branchSummary}>{section.summary}</p>}
+
               {/* 详情及写作要求编辑 */}
               {isDetailOpen && (
                 <div className={css.cardDetails}>

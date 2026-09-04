@@ -208,8 +208,21 @@ export function apply(ctx: ClientContext): void {
     embeddedChat: false,
     inject: (sessionId: SessionId) => {
       const remote = ctx.remote.bid as unknown as {
-        getReviewWorkbench(id: SessionId): Promise<{ ok: boolean; value: unknown }>
-        getReviewChapter(id: SessionId, sectionId: string): Promise<{ ok: boolean; value: unknown }>
+        getReviewWorkbench(id: SessionId): Promise<{
+          ok: boolean
+          value: unknown
+          error: Parameters<typeof actionFailure>[0]
+        }>
+        getReviewChapter(id: SessionId, sectionId: string): Promise<{
+          ok: boolean
+          value: unknown
+          error: Parameters<typeof actionFailure>[0]
+        }>
+        exportDocx(id: SessionId): Promise<{
+          ok: boolean
+          value: { ok: boolean; value?: { path: string }; error?: Parameters<typeof actionFailure>[0] }
+          error: Parameters<typeof actionFailure>[0]
+        }>
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
       const conversation = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)?.get('conversation') as {
@@ -218,13 +231,21 @@ export function apply(ctx: ClientContext): void {
       return {
         getWorkbench: async () => {
           const result = await remote.getReviewWorkbench(sessionId)
-          if (!result.ok) throw new Error('BID_REVIEW_NOT_ALLOWED')
+          if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewWorkbenchView
         },
         getChapter: async (sectionId: string) => {
           const result = await remote.getReviewChapter(sessionId, sectionId)
-          if (!result.ok) throw new Error('BID_REVIEW_NOT_ALLOWED')
+          if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
+        },
+        exportDocx: async () => {
+          const result = await remote.exportDocx(sessionId)
+          if (!result.ok) throw actionFailure(result.error)
+          if (!result.value.ok || result.value.value === undefined) {
+            throw actionFailure(result.value.error ?? { code: 'BID_DOCX_EXPORT_FAILED', message: 'Word 导出失败。' })
+          }
+          return result.value.value
         },
         retryStage: async () => {
           const result = await remote.retryStage(sessionId)

@@ -1,0 +1,56 @@
+{
+  "map": {
+    "schema_version": 10,
+    "section_mappings": [
+      {
+        "local_materials": [],
+        "web_materials": [],
+        "missing_topics": [
+          "缺少实施流程参考资料。"
+        ],
+        "section_id": "SEC-SECURITY",
+        "writing_dimensions": [
+          "身份鉴别与访问控制",
+          "安全审计"
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "section_id": "SEC-SECURITY",
+    "covered_must_answer": [
+      "说明访问控制与安全审计措施。"
+    ],
+    "covered_scoring_response_point_ids": [
+      "RP-000001"
+    ],
+    "covered_scoring_response_points": [
+      {
+        "scoring_id": "SCORE-1",
+        "response_point": "说明访问控制"
+      }
+    ],
+    "local_materials_used": [
+      {
+        "source_kind": "reference",
+        "file_id": "4bd88a6a65cc5585238663025fdb442c52aa7be376b34822456a2294c80d699f",
+        "chunk": "chunk_0001",
+        "usage": "reference",
+        "summary": "支撑本章实施流程的组织与步骤安排。"
+      }
+    ],
+    "web_materials_used": [],
+    "unresolved_topics": [],
+    "handoff": {
+      "section_id": "SEC-SECURITY",
+      "decisions": [],
+      "terminology": [],
+      "numbers_and_parameters": [],
+      "interfaces": [],
+      "deployment_constraints": [],
+      "cross_reference_targets": [],
+      "unresolved_topics": []
+    }
+  },
+  "markdown": "# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n"
+}

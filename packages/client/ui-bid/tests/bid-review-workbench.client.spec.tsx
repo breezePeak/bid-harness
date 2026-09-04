@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
@@ -9,7 +9,7 @@ afterEach(cleanup)
 const workbench = {
   schema_version: 1 as const,
   outline: [
-    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: false },
+    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: false },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
   ],
   summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0 },
@@ -36,6 +36,27 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('成功刷新后清除之前的请求错误', async () => {
+    const getWorkbench = vi.fn(async () => workbench).mockRejectedValueOnce(new Error('BID_REVIEW_NOT_ALLOWED'))
+    render(<BidReviewWorkbench {...props({ getWorkbench })} />)
+    expect(await screen.findByText('BID_REVIEW_NOT_ALLOWED')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    expect(screen.queryByText('BID_REVIEW_NOT_ALLOWED')).toBeNull()
+  })
+
+  it('较早请求的迟到错误不会覆盖成功刷新的页面', async () => {
+    let rejectOld!: (reason: Error) => void
+    const pending = new Promise<typeof workbench>((_resolve, reject) => { rejectOld = reject })
+    const getWorkbench = vi.fn(async () => workbench).mockReturnValueOnce(pending)
+    render(<BidReviewWorkbench {...props({ getWorkbench })} />)
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    await act(async () => { rejectOld(new Error('旧请求失败')) })
+    expect(screen.queryByText('旧请求失败')).toBeNull()
+    expect(screen.getByText('章节正文')).toBeTruthy()
+  })
+
   it('shows chapter content as soon as the writer publishes it', async () => {
     render(<BidReviewWorkbench {...props()} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
@@ -49,6 +70,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props()} />)
     const root = await screen.findByRole('button', { name: /技术方案/ })
     expect(root).toHaveProperty('disabled', true)
+    expect(screen.getByText('说明项目实施流程、人员分工与质量控制措施。')).toBeTruthy()
   })
 
   it('polls the live S5 state and supports an explicit refresh', async () => {
@@ -68,6 +90,30 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByText('章节写作失败：writer failed')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
     await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
+  })
+
+  it('keeps the review workbench mounted and exports Word repeatedly after S5 completes', async () => {
+    const exportDocx = vi.fn()
+      .mockResolvedValueOnce({ path: 'output/bid-1.docx' })
+      .mockResolvedValueOnce({ path: 'output/bid-2.docx' })
+    render(<BidReviewWorkbench {...props({
+      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' }, allowedActions: ['export_docx'] }),
+      exportDocx,
+    })} />)
+
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    const button = screen.getByRole('button', { name: '导出 Word' })
+    fireEvent.click(button)
+    await waitFor(() => { expect(exportDocx).toHaveBeenCalledTimes(1) })
+    expect(await screen.findByText('Word 已导出：output/bid-1.docx')).toHaveProperty('title', 'output/bid-1.docx')
+    fireEvent.click(button)
+    await waitFor(() => { expect(exportDocx).toHaveBeenCalledTimes(2) })
+    expect(screen.getByText('Word 已导出：output/bid-2.docx')).toHaveProperty('title', 'output/bid-2.docx')
+  })
+
+  it('keeps legacy completed S6 projects in the S5 review workbench', async () => {
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'docx_export', status: 'completed' } }) })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
   })
 
   it('does not render for a non-Bid Session', () => {

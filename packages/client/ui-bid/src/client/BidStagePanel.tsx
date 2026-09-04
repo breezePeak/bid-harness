@@ -150,6 +150,8 @@ export function BidStagePanel({
   const selectedFilesSessionId = useRef(sessionId)
   const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
+  const requestEpoch = useRef(0)
+  const actionErrorVisible = useRef(false)
   const alive = useRef(true)
   const draftRef = useRef<OutlineDraftView | null>(null)
   const draftQueue = useRef<Promise<void>>(Promise.resolve())
@@ -193,7 +195,8 @@ export function BidStagePanel({
   const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
   const embedConversation = false
-  const reviewViewAvailable = canConfirm || canConfirmAnalysis || projection?.runtime.stage === 'chapter_writing'
+  const reviewViewAvailable = canConfirm || canConfirmAnalysis
+    || projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
   const reviewStateKey = reviewViewAvailable && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   useEffect(() => {
@@ -230,6 +233,16 @@ export function BidStagePanel({
   }, [sessionId, projection?.runtime.stage])
 
   useEffect(() => {
+    requestEpoch.current += 1
+    pendingAction.current = null
+    setRequestPending(null)
+    if (actionErrorVisible.current) {
+      actionErrorVisible.current = false
+      setRequestError(null)
+    }
+  }, [sessionId, projection?.runtime.stage, projection?.runtime.status])
+
+  useEffect(() => {
     if (!canConfirm || getOutlineDraft === undefined) return
     let active = true
     void getOutlineDraft().then((value) => { if (alive.current && active) {
@@ -259,17 +272,20 @@ export function BidStagePanel({
 
   const invoke = (kind: PendingAction, action: (() => Promise<void>) | undefined): void => {
     if (action === undefined || pendingAction.current !== null) return
+    const epoch = requestEpoch.current
     pendingAction.current = kind
+    actionErrorVisible.current = false
     setRequestPending(kind)
     setRequestError(null)
     void action().then(() => {
-      if (!alive.current) return
+      if (!alive.current || requestEpoch.current !== epoch) return
       pendingAction.current = null
       setRequestPending(null)
     }, (reason: unknown) => {
-      if (!alive.current) return
+      if (!alive.current || requestEpoch.current !== epoch) return
       pendingAction.current = null
       setRequestPending(null)
+      actionErrorVisible.current = true
       setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: reason instanceof BidActionError ? reason.issues : [] })
     })
   }
@@ -352,6 +368,7 @@ export function BidStagePanel({
     ? projection.runtime.failureIssues ?? []
     : []
   const dotState = statusDot(projection.runtime.status)
+  const displayStage = projection.runtime.stage === 'docx_export' ? 'chapter_writing' : projection.runtime.stage
 
   const persistOperation = (operation: OutlineEditOperation): void => {
     if (applyOutlineDraftOperations === undefined) return
@@ -427,9 +444,9 @@ export function BidStagePanel({
           {dotState === undefined
             ? <IconChecklistOutline14 className={css.lead} />
             : <StateDot state={dotState} />}
-          <span className={css.stage}>{t(stageKey(projection.runtime.stage))}</span>
+          <span className={css.stage}>{t(stageKey(displayStage))}</span>
           <span className={css.message} role="status">
-            {t(promptKey(projection.runtime.stage, projection.runtime.status))}
+            {t(promptKey(displayStage, projection.runtime.status))}
           </span>
           {mappingProgress !== null && <span className={css.mappingProgress} role="status">
             {t('mapping.progress', {

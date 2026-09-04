@@ -58,7 +58,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/web-evidence-sources.json', 'outline/confirmed-outline.json',
     ], allowedTools: ['grep', 'read', 'write', 'web_search', 'web_fetch'], forbiddenTools: ['bash'], requiredArtifacts: [
       'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json',
-    ], validator: 'chapter-writing-validator', userGate: 'none', nextStage: 'docx_export',
+    ], validator: 'chapter-writing-validator', userGate: 'none', nextStage: null,
   },
   docx_export: {
     stage: 'docx_export', executor: 'program', requiredInputs: ['outline/confirmed-outline.json', 'chapters/manifest.json'],
@@ -178,7 +178,12 @@ export function getBidClientProjection(
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
   if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
-  if (runtime.status === 'completed') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.completed' }, ...fileView }
+  if (runtime.status === 'completed') return {
+    runtime: { ...runtime },
+    allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export' ? ['export_docx'] : [],
+    composer: { enabled: false, reason: 'bid.completed' },
+    ...fileView,
+  }
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
   if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
   if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }

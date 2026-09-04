@@ -23,6 +23,8 @@ export type {
   BidComposerReason,
   BidDocumentRole,
   BidEvidenceMappingProgress,
+  BidDocxExportErrorCode,
+  BidDocxExportResult,
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
   BidFileIntakeFailure,

@@ -1,4 +1,48 @@
 {
+  "outline": {
+    "schema_version": 3,
+    "scope": "technical_bid",
+    "document_title": "技术标",
+    "global_compliance_ids": [],
+    "sections": [
+      {
+        "id": "SEC-SECURITY",
+        "parent_id": null,
+        "order": 1,
+        "level": 1,
+        "title": "访问控制与安全审计",
+        "purpose": "为访问控制项目说明权限控制与安全审计措施，响应安全技术评分。",
+        "writable": true,
+        "must_answer": [
+          "说明访问控制与安全审计措施。"
+        ],
+        "requirement_ids": [
+          "REQ-1"
+        ],
+        "scoring_ids": [
+          "SCORE-1"
+        ],
+        "compliance_ids": [],
+        "origin": "generated",
+        "scoring_response_point_ids": [
+          "RP-000001"
+        ],
+        "scoring_response_points": [
+          {
+            "scoring_id": "SCORE-1",
+            "response_point": "说明访问控制"
+          }
+        ],
+        "suggested_tables": [
+          "角色权限与审计记录对照表"
+        ],
+        "suggested_figures": [],
+        "writing_notes": [
+          "分别说明身份鉴别、权限授予和审计记录的执行方法。"
+        ]
+      }
+    ]
+  },
   "map": {
     "schema_version": 10,
     "section_mappings": [

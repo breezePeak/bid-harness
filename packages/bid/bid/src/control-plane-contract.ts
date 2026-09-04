@@ -58,6 +58,7 @@ export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
   'retry_stage',
+  'export_docx',
   'confirm_tender_analysis',
   'confirm_outline',
   'regenerate_outline',
@@ -270,6 +271,21 @@ export type BidRetryResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: BidRetryFailure }
 
+/** Stable business rejection codes returned by an on-demand DOCX export. */
+export type BidDocxExportErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_DOCX_EXPORT_NOT_ALLOWED'
+  | 'BID_DOCX_EXPORT_FAILED'
+
+/** Result returned after an on-demand DOCX export settles without changing S5 state. */
+export type BidDocxExportResult =
+  | { readonly ok: true; readonly value: { readonly path: string } }
+  | {
+    readonly ok: false
+    readonly error: { readonly code: BidDocxExportErrorCode; readonly message: string; readonly issues?: readonly StageValidationIssue[] }
+  }
+
 /** Per-section writing state exposed by the S5 workbench. */
 export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready' | 'completed' | 'failed'
 
@@ -284,6 +300,7 @@ export interface BidReviewWorkbenchView {
     readonly parent_id: string | null
     readonly order: number
     readonly title: string
+    readonly summary?: string
     readonly writable: boolean
     readonly writing_status: BidChapterWritingStatus
     readonly review_status: BidChapterReviewStatus

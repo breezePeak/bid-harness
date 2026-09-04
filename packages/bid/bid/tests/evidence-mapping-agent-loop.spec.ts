@@ -12,7 +12,7 @@ import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import { buildBidStageTask, parseWebEvidenceSourcesArtifact, parseEvidenceMapArtifact, webEvidenceContentSha256 } from '@deepseek-ai/dsh-bid'
+import { buildBidStageTask, parseOutlineArtifact, parseWebEvidenceSourcesArtifact, parseEvidenceMapArtifact, webEvidenceContentSha256 } from '@deepseek-ai/dsh-bid'
 import IntegrationFileSystem, { runEvidenceMappingLoop } from './fixtures/evidence-mapping-loop.ts'
 import { runFullOutlineRegenerationLoop, runStageInteractionLoop } from './fixtures/stage-interaction-loop.ts'
 
@@ -62,7 +62,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       })
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
-  it.each([false, true])('completes evidence mapping through one Child (repair: %s)', async (repair) => {
+  it.each([false, true])('完成章节研究与复用候选资料的 Final Check（repair: %s）', async (repair) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-loop-'))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -90,6 +90,12 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         supports: '支持安全方案。',
       }])
       expect(map.section_mappings[0]?.local_materials).toEqual([])
+      const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+      expect(outline.sections[0]).toMatchObject({
+        purpose: '为访问控制项目说明权限控制与安全审计措施，响应安全技术评分。',
+        writing_notes: ['分别说明身份鉴别、权限授予和审计记录的执行方法。'],
+        suggested_tables: ['角色权限与审计记录对照表'],
+      })
       expect(await readFile(join(workspace.projectRoot, ledger.sources[0]!.snapshot_path), 'utf8')).toContain('官方标准要求访问控制与安全审计')
       expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping')).toBe(true)
       expect(agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
@@ -100,12 +106,17 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       const source = ledger.sources[0]!
       expect(source.content_sha256).toBe(webEvidenceContentSha256(await readFile(join(workspace.projectRoot, source.snapshot_path), 'utf8')))
       const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
-        tasks: Array<{ attempts: Array<{ accepted: boolean; child_session_id: string; issues: Array<{ code: string }> }> }>
+        tasks: Array<{
+          task_id: string
+          phase: string
+          attempts: Array<{ accepted: boolean; child_session_id: string; issues: Array<{ code: string }> }>
+        }>
       }
       const attempts = log.tasks[0]!.attempts
       expect(attempts.map(attempt => attempt.accepted)).toEqual(repair ? [false, true] : [true])
       expect(new Set(attempts.map(attempt => attempt.child_session_id)).size).toBe(1)
       if (repair) expect(attempts[0]!.issues[0]!.code).toBe('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+      expect(log.tasks[1]).toMatchObject({ task_id: 'MAP-FINAL-CHECK', phase: 'final_check', attempts: [{ accepted: true }] })
     } finally {
       await ctx.fiber.dispose()
     }

@@ -131,6 +131,18 @@ export async function validateEvidenceMapping(
     await validateOutlineFrameworkRefs(workspace, outline, issues)
     validateOutlineGenerationQuality(outline, quality, requirements, scoring, catalog, issues)
     issues.push(...validateSectionEvidenceCoverage(outline, map))
+    const mappings = new Map(map.section_mappings.map(mapping => [mapping.section_id, mapping]))
+    for (const section of outline.sections) {
+      if (!section.writable) {
+        if (section.summary === undefined) reject(issues, 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', `目录分支 ${section.id} 缺少叶子章节内容摘要。`, OUTLINE_PATH)
+        continue
+      }
+      if (section.purpose.trim().length === 0 || section.must_answer.some(answer => answer.trim().length === 0)
+        || section.scoring_response_point_ids === undefined
+        || ![...section.writing_notes, ...mappings.get(section.id)?.writing_dimensions ?? []].some(note => note.trim().length > 0)) {
+        reject(issues, 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE', `章节 ${section.id} 需要明确写作目标、必答问题和展开维度或写作要求。`, OUTLINE_PATH)
+      }
+    }
     for (const mapping of map.section_mappings) {
       await Promise.all(mapping.local_materials.map(material => validateLocalMaterial(workspace, manifest, material, issues)))
     }

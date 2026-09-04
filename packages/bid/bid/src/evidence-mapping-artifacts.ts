@@ -82,7 +82,7 @@ export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 5 as const
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
-  phase: z.literal('initial'),
+  phase: z.enum(['initial', 'final_check']),
   section_ids: z.array(z.string().min(1)).min(1),
   heading_path: z.array(z.string().min(1)).min(1),
 }).strict()
@@ -92,9 +92,22 @@ const evidenceMappingPlanSchema = z.object({
   tasks: z.array(evidenceMappingTaskSchema),
 }).strict()
 
+/** 章节研究给出的写作任务；Host 将其写回同一章节的 Blueprint。 */
+export const sectionWritingBriefSchema = z.object({
+  purpose: z.string().trim().min(1),
+  must_answer: z.array(z.string().trim().min(1)).min(1),
+  writing_notes: z.array(z.string().trim().min(1)),
+  suggested_tables: z.array(z.string().trim().min(1)),
+  suggested_figures: z.array(z.string().trim().min(1)),
+  requirement_ids: z.array(z.string().min(1)),
+  scoring_ids: z.array(z.string().min(1)),
+  scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
+}).strict()
+
 const partialSectionMappingSchema = partialMappingSchema.extend({
   section_id: z.string().min(1),
   writing_dimensions: z.array(z.string().min(1)),
+  writing_brief: sectionWritingBriefSchema,
 }).strict()
 
 /** Strict URL-bearing result returned by one Mapping Subagent before Host binding. */
@@ -102,6 +115,7 @@ export const evidenceMappingPartialResultSchema = z.object({
   task_id: z.string().min(1),
   section_mappings: z.array(partialSectionMappingSchema),
   refinement_suggestions: z.array(z.string().min(1)),
+  branch_summaries: z.array(z.object({ section_id: z.string().min(1), summary: z.string().trim().min(1) }).strict()).optional(),
 }).strict()
 
 /** Parsed local material reference. */
@@ -120,6 +134,8 @@ export type EvidenceMappingTask = z.infer<typeof evidenceMappingTaskSchema>
 export type EvidenceMappingPlan = z.infer<typeof evidenceMappingPlanSchema>
 /** Strict partial Evidence Map returned by one Mapping Subagent. */
 export type EvidenceMappingPartialResult = z.infer<typeof evidenceMappingPartialResultSchema>
+/** 已研究的章节写作任务，不包含目录结构或资料引用。 */
+export type SectionWritingBrief = z.infer<typeof sectionWritingBriefSchema>
 
 /**
  * Parse an evidence map through the current schema.

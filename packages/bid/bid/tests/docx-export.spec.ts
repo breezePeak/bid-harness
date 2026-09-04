@@ -85,4 +85,14 @@ describe('Bid DOCX export', () => {
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '')
     await expect(executeDocxExport(workspace)).rejects.toThrow('章节正文为空')
   })
+
+  it('校验输出目录内的按需文件并拒绝路径逃逸', async () => {
+    const { workspace } = await exportFixture()
+    const artifacts = await executeDocxExport(workspace, undefined, 'deliverables/bid-1.docx')
+    await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
+    await writeFile(join(workspace.projectRoot, 'escaped.docx'), await readFile(join(workspace.outputRoot, 'bid-1.docx')))
+    await expect(validateDocxExport(workspace, 'docx_export', [{
+      stage: 'docx_export', type: 'docx', path: 'deliverables/../escaped.docx',
+    }])).resolves.toMatchObject({ ok: false })
+  })
 })

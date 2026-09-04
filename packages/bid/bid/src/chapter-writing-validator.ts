@@ -152,8 +152,8 @@ export async function validateChapterWriting(
     }
     const acceptedWriters = section.attempts.filter(attempt => attempt.role === 'writer' && attempt.accepted)
     const acceptedReviewers = section.attempts.filter(attempt => attempt.role === 'reviewer' && attempt.accepted)
-    if (acceptedWriters.at(-1)?.child_session_id !== section.final_writer_child_session_id
-      || acceptedReviewers.at(-1)?.child_session_id !== section.final_reviewer_child_session_id) {
+    if (!acceptedWriters.some(attempt => attempt.child_session_id === section.final_writer_child_session_id)
+      || !acceptedReviewers.some(attempt => attempt.child_session_id === section.final_reviewer_child_session_id)) {
       reject(issues, 'CHAPTER_WRITING_LOG_FINAL_CHILD_INVALID', 'Each chapter must identify its final Writer and Reviewer Child Session.', LOG)
     }
   }
@@ -214,6 +214,9 @@ export async function validateChapterWriting(
       const review = parseChapterReviewArtifact(reviewRaw)
       if (review.section_id !== chapter.section_id || review.candidate_sha256 !== chapter.review_sha256
         || review.candidate_sha256 !== chapterCandidateSha256(markdown)) throw new Error('review-invalid')
+      const sectionLog = executionLog.sections.find(section => section.section_id === chapter.section_id)
+      if (sectionLog === undefined || review.writer_child_session_id !== sectionLog.final_writer_child_session_id
+        || review.reviewer_child_session_id !== sectionLog.final_reviewer_child_session_id) throw new Error('review-child-invalid')
       const coverage = [
         ...review.must_answer_coverage,
         ...review.requirement_coverage,

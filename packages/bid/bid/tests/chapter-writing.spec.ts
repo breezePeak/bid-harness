@@ -5,9 +5,12 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import { resolveChildDepth } from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { pickChapterContext, renderChapterExecutionPlanTask, validateChapterCandidate, type ChapterContext } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
+import { validateChapterWriting } from '../src/chapter-writing-validator.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
@@ -104,6 +107,7 @@ function emptyChapterContext(section: ReturnType<typeof outlineFixture>['section
     webMaterials: [],
     writingDimensions: [],
     missingTopics: [],
+    availableLocalCorpus: [],
     localReadLocations: [],
     frameworkReadLocations: [],
     webReadLocations: [],
@@ -198,7 +202,11 @@ function reviewFrom(request: SubagentStartRequest) {
   const blueprintLine = lines.find(line => line.startsWith('Current Chapter Blueprint：'))
   if (candidateLine === undefined || blueprintLine === undefined) throw new Error('missing reviewer context')
   const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string; must_answer: string[]; requirement_ids: string[]; scoring_response_point_ids: string[]; compliance_ids: string[] }
-  const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: ['正文'], issue: null })
+  const candidate = JSON.parse(candidateLine.slice('Writer Candidate：'.length)) as { markdown: string }
+  const quoteOptionsLine = lines.find(line => line.startsWith('Quote Options：'))!
+  const quoteOptions = JSON.parse(quoteOptionsLine.slice('Quote Options：'.length)) as Record<string, string>
+  const quote = Object.entries(quoteOptions).find(([, text]) => candidate.markdown.includes(text) && !text.startsWith('#'))![0]
+  const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: [quote], issue: null })
   return {
     schema_version: 2 as const, section_id: section.id, verdict: 'pass' as const,
     must_answer_coverage: section.must_answer.map(coverage),
@@ -246,6 +254,8 @@ function fixtureAgent(
   const subagents = {
     getProvider: vi.fn<(_name: string) => typeof spawnProvider | undefined>(() => spawnProvider),
     start: vi.fn(async (_name: string, request: SubagentStartRequest): Promise<SubagentRun> => {
+      resolveChildDepth(request.parent, request.maxDepth)
+      if (request.outputSchema !== undefined) assertSupportedJsonSchema(request.outputSchema)
       if (request.toolFilter?.allow?.length === 0) {
         const id = SessionId(`reviewer-${++attempt}`)
         const localAgent = { id, session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] } } as unknown as Agent
@@ -257,8 +267,10 @@ function fixtureAgent(
       const id = SessionId(`child-${currentAttempt}`)
       const localAgent = {
         id,
+        ctx: { tools },
         session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] as unknown[] },
       } as unknown as Agent
+      listeners.get('agent/created')?.({ agent: localAgent })
       let settle!: () => void
       let settled = false
       const result = new Promise<SubagentResult>((resolve) => {
@@ -311,6 +323,7 @@ function fixtureAgent(
   const listeners = new Map<string, (...args: unknown[]) => void>()
   const agent = {
     id: 'parent',
+    options: {},
     session: { header: { cwd: workspace.root }, events: [] },
     ctx: {
       get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents : undefined,
@@ -338,6 +351,177 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
+  it('审查错误宣称通过时仍按实际内容缺口修订，保留问题并继续其他章节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-review-verdict-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: {
+        ...candidateFrom(request), markdown: '# 实施方案\n\n正文内容\n\n按项目技术要求组织实施、执行质量复核并交付完整成果。',
+      },
+    }))
+    const start = fixture.subagents.start.getMockImplementation()!
+    fixture.subagents.start.mockImplementation(async (provider, request) => {
+      const run = await start(provider, request)
+      if (request.toolFilter?.allow?.length !== 0) return run
+      const review = reviewFrom(request)
+      return { ...run, result: Promise.resolve({ stopReason: 'completed', output: [], structured: {
+        ...review, must_answer_coverage: review.must_answer_coverage.map(item => ({ ...item, status: 'missing', evidence_quotes: [], issue: '缺少具体措施' })),
+      } }) }
+    })
+    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
+    expect(artifacts).toHaveLength(3)
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    expect(fixture.starts).toHaveLength(6)
+    const review = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')) as {
+      verdict: string
+      requirement_coverage: Array<{ evidence_quotes: string[] }>
+      blocking_issues: string[]
+    }
+    expect(review.verdict).toBe('repair')
+    expect(review.requirement_coverage[0]?.evidence_quotes).toEqual(['正文内容'])
+    expect(review.blocking_issues.join('；')).toContain('未覆盖：回答1')
+    expect(promptText(fixture.starts[1]!.request)).toContain('未覆盖：回答1')
+  })
+
+  it('结构化提交只接受实际资料身份、允许用法与正文原文引句', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-material-schema-')))
+    const outline = await writeInputs(workspace)
+    await seedReadableMaterials(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
+    const request = fixture.starts[0]!.request
+    const schema = request.outputSchema!
+    const candidate = candidateFrom(request)
+    if (!('metadata' in candidate)) throw new Error('Expected writer candidate')
+    const validateMaterial = (source_kind: string, file_id: string, usage: string) => validateJsonSchemaValue(schema, {
+      ...candidate,
+      metadata: { ...candidate.metadata, local_materials_used: [{ source_kind, file_id, usage, chunk: 'chunk_0001', summary: '资料依据' }] },
+    })
+    expect(validateMaterial('reference', 'REFERENCE', 'reference')).toEqual([])
+    expect(validateMaterial('reference_bid', 'REFERENCE-BID', 'adapt')).toEqual([])
+    expect(validateMaterial('reference_bid', 'REFERENCE-BI', 'adapt')).not.toEqual([])
+    expect(validateMaterial('reference', 'FRAMEWORK', 'reference')).not.toEqual([])
+    expect(validateMaterial('reference', 'REFERENCE-BID', 'reference')).not.toEqual([])
+    expect(validateMaterial('reference', 'REFERENCE', 'adapt')).not.toEqual([])
+    const reviewRequest = fixture.subagents.start.mock.calls.find(([, request]) => request.toolFilter?.allow?.length === 0)![1]
+    const review = reviewFrom(reviewRequest)
+    expect(validateJsonSchemaValue(reviewRequest.outputSchema!, review)).toEqual([])
+    for (const quote of ['“正文”', '正', '正文。']) {
+      expect(validateJsonSchemaValue(reviewRequest.outputSchema!, {
+        ...review,
+        must_answer_coverage: review.must_answer_coverage.map(item => ({ ...item, evidence_quotes: [quote] })),
+      })).not.toEqual([])
+      expect(validateJsonSchemaValue(reviewRequest.outputSchema!, {
+        ...review,
+        claim_checks: [{ claim_quote: quote, kind: 'project_fact', status: 'unsupported', source_reference: null, issue: '无依据' }],
+      })).not.toEqual([])
+    }
+  })
+
+  it('keeps the last reviewed candidate when its content repair hits repeated transport errors', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-fallback-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) =>
+      request.label?.includes('修复 1') === true
+        ? { stopReason: 'error', output: [], diagnostic: 'LLM turn failed (PI_AI_ERROR).' }
+        : { stopReason: 'completed', output: [], structured: {
+          ...candidateFrom(request),
+          markdown: `${(() => {
+            const candidate = candidateFrom(request)
+            if (!('markdown' in candidate)) throw new Error('expected writer candidate')
+            return candidate.markdown.split('\n')[0]
+          })()}\n\n完整实施措施与质量控制。`,
+        } })
+    const start = fixture.subagents.start.getMockImplementation()!
+    fixture.subagents.start.mockImplementation(async (provider, request) => {
+      const run = await start(provider, request)
+      if (request.toolFilter?.allow?.length !== 0 || !request.label?.endsWith('章节1')) return run
+      const review = reviewFrom(request)
+      return { ...run, result: Promise.resolve({ stopReason: 'completed', output: [], structured: {
+        ...review,
+        verdict: 'repair',
+        blocking_issues: ['缺少真实设备数量，保留待核实项。'],
+      } }) }
+    })
+
+    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1,
+      maxConcurrency: 1,
+    })
+
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(log.sections[0]).toMatchObject({ status: 'completed', final_writer_child_session_id: 'child-1' })
+    expect(log.sections[0]?.attempts.filter(attempt => attempt.role === 'writer').map(attempt => attempt.stop_reason))
+      .toEqual(['completed', 'error', 'error'])
+    const review = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')) as { verdict: string }
+    expect(review.verdict).toBe('repair')
+  })
+
+  it.each([false, true])('审查引用必须逐字匹配正文，持续无效=%s', async (alwaysInvalid) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-review-repair-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    const start = fixture.subagents.start.getMockImplementation()!
+    let reviewCount = 0
+    fixture.subagents.start.mockImplementation(async (provider, request) => {
+      const run = await start(provider, request)
+      if (request.toolFilter?.allow?.length !== 0) return run
+      if (reviewCount++ > 0 && !alwaysInvalid) return run
+      const review = reviewFrom(request)
+      return { ...run, result: Promise.resolve({ stopReason: 'completed', output: [], structured: {
+        ...review, must_answer_coverage: review.must_answer_coverage.map(item => ({ ...item, evidence_quotes: ['“正文”'] })),
+      } }) }
+    })
+    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
+    if (alwaysInvalid) {
+      await expect(execution).rejects.toThrow('CHAPTER_REVIEW_QUOTE_INVALID')
+      await expect(readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } else {
+      await expect(execution).resolves.toHaveLength(3)
+      expect(fixture.starts).toHaveLength(3)
+      const repair = fixture.subagents.start.mock.calls.find(call => promptText(call[1]).includes('修复审查报告的字段或原文引用'))
+      expect(repair).toBeDefined()
+      expect(promptText(repair![1])).toContain('CHAPTER_REVIEW_QUOTE_INVALID')
+      expect(promptText(repair![1])).toContain('Project：')
+    }
+  })
+
+  it('旧版计划收到字段级修复说明，通过校验后才启动章节写作', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-plan-repair-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true)
+    const writePlan = vi.mocked(fixture.agent.whenIdle).getMockImplementation()!
+    vi.spyOn(fixture.agent, 'whenIdle').mockImplementation(async () => {
+      await writePlan()
+      if (fixture.followup.mock.calls.length !== 1) return
+      const path = join(workspace.projectRoot, 'chapters/execution-plan.json')
+      const plan = JSON.parse(await readFile(path, 'utf8')) as {
+        schema_version: number
+        sections: Array<{ depends_on?: string[]; planning_notes?: unknown }>
+      }
+      const secondSection = plan.sections[1]
+      if (secondSection === undefined) throw new Error('missing second chapter plan section')
+      plan.schema_version = 1
+      secondSection.depends_on = ['SEC-1']
+      delete secondSection.planning_notes
+      await writeFile(path, JSON.stringify(plan))
+      expect(fixture.starts).toHaveLength(0)
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 2 })
+
+    expect(fixture.followup).toHaveBeenCalledTimes(2)
+    const repair = JSON.stringify(fixture.followup.mock.calls[1]?.[0])
+    expect(repair).toContain('字段=schema_version')
+    expect(repair).toContain('字段=sections.1.depends_on.0')
+    expect(repair).toContain('字段=sections.1.planning_notes')
+    expect(repair).toContain('reason')
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+    expect(manifest.chapters).toHaveLength(3)
+  })
+
   it('uses the current execution-plan schema version in the planning prompt', async () => {
     const outline = outlineFixture()
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-plan-prompt-')))
@@ -455,13 +639,71 @@ describe('chapter-writing executor', () => {
     } as unknown as ToolExecution)
     const sessionPath = (path: string): string => join(workspace.projectRoot, ...path.split('/'))
     expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks'))).toBeUndefined()
     expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/reference_bid/chunks/chunk_0001.md'))).toBeUndefined()
     expect(guarded('grep', 'path', sessionPath('corpus/reference_bid/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/tender/chunks/chunk_0001.md'))).toContain('不可读取')
     expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath('corpus/outline_framework/chunks'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks'))).toContain('不可读取')
+    expect(guarded('grep', 'path', sessionPath('corpus/tender/chunks'))).toContain('不可读取')
+    expect(guarded('grep', 'path', sessionPath('corpus'))).toContain('只可检索')
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('账本')
+  })
+
+  it('未映射资料的定位支持当前章节补搜，实际引用写入 metadata 且不改 S4', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-local-supplement-')))
+    const outline = await writeInputs(workspace)
+    await seedReadableMaterials(workspace)
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidenceBefore = await readFile(evidencePath, 'utf8')
+    const fixture = fixtureAgent(workspace, outline)
+    const start = fixture.subagents.start.getMockImplementation()!
+    fixture.subagents.start.mockImplementation(async (provider, request) => {
+      if (request.toolFilter?.allow?.length === 0) return start(provider, request)
+      const lines = promptText(request).split('\n')
+      const corpus = JSON.parse(lines.find(line => line.startsWith('Available Local Corpus：'))!.slice('Available Local Corpus：'.length)) as Array<{
+        file_id: string
+        role: string
+        chunks_path: string
+        chunk_index_path: string
+      }>
+      expect(corpus.map(file => file.role)).toEqual(['outline_framework', 'reference', 'reference_bid'])
+      const snapshots = JSON.parse(lines.find(line => line.startsWith('Web Snapshot Read Locations：'))!.slice('Web Snapshot Read Locations：'.length)) as Array<{ source_id: string; read_path: string }>
+      expect(snapshots[0]?.source_id).toBe('WEB-aaaaaaaaaaaaaaaa')
+      const candidate = candidateFrom(request)
+      if (!('metadata' in candidate)) throw new Error('expected writer candidate')
+      if (candidate.section_id !== 'SEC-1') return start(provider, request)
+      expect(lines).toContain('Related Materials：[]')
+      const file = corpus.find(item => item.file_id === 'REFERENCE')!
+      const guard = fixture.guards.at(-1)!
+      const allowed = (name: 'grep' | 'read', path: string) => guard({
+        name, arguments: { [name === 'grep' ? 'path' : 'file_path']: path },
+        agent: { session: { header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
+      } as unknown as ToolExecution)
+      expect(allowed('grep', file.chunks_path)).toBeUndefined()
+      const chunkPath = join(file.chunks_path, 'chunk_0001.md')
+      expect(allowed('read', chunkPath)).toBeUndefined()
+      const text = (await readFile(chunkPath, 'utf8')).trim()
+      const run = await start(provider, request)
+      return { ...run, result: run.result.then(result => ({ ...result, structured: {
+        ...candidate, markdown: `# 当前章节\n\n结合 ${text}，说明本项目实施流程与质量控制要求。`,
+        metadata: { ...candidate.metadata, local_materials_used: [{
+          file_id: file.file_id, source_kind: file.role, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。',
+        }] },
+      } })) }
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
+
+    const metadata = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8'))
+    expect(metadata.local_materials_used).toEqual([{ file_id: 'REFERENCE', source_kind: 'reference', chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。' }])
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('reference 正文')
+    expect(await readFile(evidencePath, 'utf8')).toBe(evidenceBefore)
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+    expect(manifest.chapters.slice(1).every(chapter => chapter.local_materials_used.length === 0)).toBe(true)
   })
 
   it('resolves the exact referenced framework body for the chapter writer', async () => {
@@ -566,7 +808,9 @@ describe('chapter-writing executor', () => {
     }
     const reviewerCalls = fixture.subagents.start.mock.calls.filter(call => call[1].toolFilter?.allow?.length === 0)
     expect(reviewerCalls).toHaveLength(3)
-    expect(reviewerCalls.every(call => call[1].maxDepth === 0)).toBe(true)
+    expect(reviewerCalls.every(call => call[1].maxDepth === 1)).toBe(true)
+    expect(promptText(writerCalls[0]![1])).toContain('不得添加带“示例”的伪数据行')
+    expect(promptText(reviewerCalls[0]![1])).toContain('不得要求 Writer 虚构数据或添加示例记录')
     expect(new Set(fixture.starts.map(item => item.run.id)).size).toBe(3)
     expect(fixture.disposed).toHaveLength(6)
   })
@@ -632,25 +876,34 @@ describe('chapter-writing executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
-  it('uses a new spawn Child for repair and publishes only the accepted candidate', async () => {
+  it('binds confirmed-outline coverage fields instead of repairing model punctuation', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, true, attempt => attempt !== 1)
 
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
 
-    expect(fixture.starts).toHaveLength(4)
-    expect(fixture.starts[1]?.request.label).toContain('修复 1')
-    expect(promptText(fixture.starts[1]!.request)).toContain('CHAPTER_WRITING_MUST_ANSWER_INVALID')
+    expect(fixture.starts).toHaveLength(3)
+    expect(fixture.starts.every(item => !item.request.label?.includes('修复'))).toBe(true)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
-    expect(log.sections[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true, true])
+    expect(log.sections[0]?.attempts.map(attempt => attempt.accepted)).toEqual([true, true])
+    const metadata = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8'))
+    expect(metadata.covered_must_answer).toEqual(outline.sections.find(section => section.id === 'SEC-1')?.must_answer)
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('# SEC-1')
   })
 
   it('keeps scheduling an unrelated ready section while another branch is repairing', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-repair-wave-')))
     const outline = await writeInputs(workspace)
-    const fixture = fixtureAgent(workspace, outline, {}, false, attempt => attempt !== 1)
+    const fixture = fixtureAgent(workspace, outline, {}, false, () => true, (attempt, request) => {
+      const candidate = candidateFrom(request)
+      if (!('metadata' in candidate)) throw new Error('expected writer candidate')
+      return {
+        stopReason: 'completed', output: [], structured: attempt === 1
+          ? { ...candidate, metadata: { ...candidate.metadata, handoff: emptyHandoff('OTHER') } }
+          : candidate,
+      }
+    })
     const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 1,
       maxConcurrency: 2,
@@ -669,12 +922,20 @@ describe('chapter-writing executor', () => {
   })
 
   it.each([
-    ['non-completed stop reason', (): SubagentResult => ({ stopReason: 'max-tokens', output: [] }), 'CHAPTER_SUBAGENT_STOP_REASON_INVALID'],
+    ['non-completed stop reason', (): SubagentResult => ({ stopReason: 'error', output: [], diagnostic: '模型服务没有可用认证。' }), 'CHAPTER_SUBAGENT_STOP_REASON_INVALID'],
     ['missing structured result', (): SubagentResult => ({ stopReason: 'completed', output: [] }), 'CHAPTER_SUBAGENT_STRUCTURED_MISSING'],
     ['schema-invalid candidate', (request: SubagentStartRequest): SubagentResult => {
       const candidate = candidateFrom(request)
       if (!('metadata' in candidate)) throw new Error('expected writer candidate')
       return { stopReason: 'completed', output: [], structured: { section_id: candidate.section_id, metadata: candidate.metadata } }
+    }, 'CHAPTER_SUBAGENT_CANDIDATE_INVALID'],
+    ['reference material marked as adapted', (request: SubagentStartRequest): SubagentResult => {
+      const candidate = candidateFrom(request)
+      if (!('metadata' in candidate)) throw new Error('expected writer candidate')
+      return { stopReason: 'completed', output: [], structured: {
+        ...candidate,
+        metadata: { ...candidate.metadata, local_materials_used: [{ source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'adapt', summary: '公开背景资料。' }] },
+      } }
     }, 'CHAPTER_SUBAGENT_CANDIDATE_INVALID'],
   ])('repairs a %s in a new Child', async (_name, firstResult, issueCode) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-result-')))
@@ -687,16 +948,27 @@ describe('chapter-writing executor', () => {
       maxConcurrency: 1,
     })
 
-    expect(fixture.starts[1]?.request.label).toContain('修复 1')
-    expect(promptText(fixture.starts[1]!.request)).toContain(issueCode)
+    if (_name === 'non-completed stop reason') {
+      expect(fixture.starts[1]?.request.label).toContain('运行重试 1')
+      expect(promptText(fixture.starts[1]!.request)).not.toContain(issueCode)
+    } else {
+      expect(fixture.starts[1]?.request.label).toContain('修复 1')
+      expect(promptText(fixture.starts[1]!.request)).toContain(issueCode)
+    }
+    if (_name === 'reference material marked as adapted') {
+      expect(promptText(fixture.starts[1]!.request)).toContain('字段=metadata.local_materials_used.0.usage')
+      expect(promptText(fixture.starts[1]!.request)).toContain('reference material usage must be reference or background')
+    }
     expect(fixture.disposed).toHaveLength(7)
   })
 
-  it('aborts and disposes sibling runs without publishing a manifest when one branch exhausts repair', async () => {
+  it('lets unrelated chapters finish before reporting one exhausted branch', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-failure-')))
     const outline = await writeInputs(workspace)
-    const fixture = fixtureAgent(workspace, outline, {}, false, () => true, attempt =>
-      attempt === 1 ? { stopReason: 'error', output: [] } : { stopReason: 'completed', output: [], structured: undefined })
+    const fixture = fixtureAgent(workspace, outline, {}, false, () => true, (_attempt, request) =>
+      request.label?.endsWith('章节1') === true
+        ? { stopReason: 'error', output: [], diagnostic: 'LLM turn failed (PI_AI_ERROR).' }
+        : { stopReason: 'completed', output: [], structured: candidateFrom(request) })
     const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 2,
@@ -704,8 +976,13 @@ describe('chapter-writing executor', () => {
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    fixture.starts[1]!.resolve()
+    fixture.starts[2]!.resolve()
     await expect(execution).rejects.toThrow('SEC-1')
-    expect(fixture.disposed.sort()).toEqual(['child-1', 'child-2'])
+    expect(fixture.disposed).toContain('child-1')
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(log.sections.map(section => section.status)).toEqual(['failed', 'completed', 'completed'])
     await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
   })
@@ -725,7 +1002,7 @@ describe('chapter-writing executor', () => {
     await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('cleans stale S6 artifacts and replans on a stage retry', async () => {
+  it('keeps unrelated chapter files and replans when no valid checkpoint exists', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-retry-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
@@ -737,9 +1014,40 @@ describe('chapter-writing executor', () => {
       maxConcurrency: 2,
     })
 
-    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/stale.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/stale.md'), 'utf8')).resolves.toBe('stale')
     expect(fixture.followup).toHaveBeenCalledOnce()
     expect(fixture.starts).toHaveLength(3)
+  })
+
+  it('resumes a validated checkpoint without rewriting completed chapters', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-checkpoint-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+    const completedBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const priorLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    const failed = priorLog.sections.find(section => section.section_id === 'SEC-3')!
+    failed.status = 'failed'
+    failed.final_writer_child_session_id = null
+    failed.final_reviewer_child_session_id = null
+    await writeFile(logPath, `${JSON.stringify(priorLog)}\n`)
+
+    const resumed = fixtureAgent(workspace, outline)
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+
+    expect(resumed.followup).not.toHaveBeenCalled()
+    expect(resumed.starts).toHaveLength(1)
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toBe(completedBody)
+    const finalLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    expect(finalLog.sections.every(section => section.status === 'completed')).toBe(true)
+    expect(finalLog.sections[0]?.attempts).toEqual(priorLog.sections[0]?.attempts)
   })
 
   it('rejects additional Web evidence that belongs to another Child', async () => {

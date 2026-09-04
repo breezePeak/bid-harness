@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+目录编辑的发布时机与最终确认复核由[章节研究与 Blueprint](2026-09-03-bid-section-research-blueprint.md)规定：连续修改只保存 Draft，确认前完成受影响章节复核。本记录保留受控工具、CAS 和生命周期的设计依据。
+
 S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按实时阶段仅注册给 Bid Main Agent；执行入口重新检查身份、阶段、CAS 和项目锁。`bid_stage_inspect` 返回当前编号树、实际 ID、业务引用、材料缺口和映射任务；模型负责自然语言定位，Host 不把展示编号当内部 ID。
 
 目录编辑复用 `mutateOutlineDraft`；局部重生成与整本重生成共用反馈要求，独立无工具 Child 只返回编辑操作，Host 验证范围后走同一 Draft mutation。初始 S4 与 targeted remap 共用映射执行器，仅任务范围、Evidence 合并方式和是否深化目录不同。`replace` 不保留目标旧证据，`supplement` 按本地文件/分块或 Web source ID 去重；无关章节不重新运行。

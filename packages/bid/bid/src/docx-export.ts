@@ -1,6 +1,6 @@
 /** S6 按确认目录组合已完成章节；项目锁和阶段 checkpoint 由 Host 持有。 */
 import { readFile } from 'node:fs/promises'
-import { posix } from 'node:path'
+import { posix, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
@@ -39,9 +39,14 @@ function chapterBody(markdown: string, title: string, sectionId: string, depth: 
  * 仅导出与当前确认目录匹配且覆盖全部可写章节的项目正文。
  * @param workspace 已由 Host 锁定的项目。
  * @param signal 本次阶段操作的取消信号。
+ * @param destination 项目内输出路径；省略时写入固定交付文件。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
-export async function executeDocxExport(workspace: BidWorkspace, signal?: AbortSignal): Promise<StageArtifact[]> {
+export async function executeDocxExport(
+  workspace: BidWorkspace,
+  signal?: AbortSignal,
+  destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
+): Promise<StageArtifact[]> {
   signal?.throwIfAborted()
   const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
   const manifest = parseChapterWritingManifest(JSON.parse(await readProjectFile(workspace, 'chapters/manifest.json')))
@@ -65,8 +70,8 @@ export async function executeDocxExport(workspace: BidWorkspace, signal?: AbortS
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
     parts.push(chapterBody(markdown, section.title, section.id, headingDepth))
   }
-  const source = posix.join(workspace.config.outputDirectory, 'bid.md')
-  const destination = posix.join(workspace.config.outputDirectory, 'bid.docx')
+  if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
+  const source = destination.slice(0, -'.docx'.length) + '.md'
   const absolute = within(workspace.projectRoot, source)
   await assertNoLinkedPath(workspace.root, absolute)
   signal?.throwIfAborted()
@@ -87,10 +92,14 @@ export async function validateDocxExport(
   stage: BidStage,
   artifacts: readonly StageArtifact[],
 ): Promise<StageValidationResult> {
-  const path = posix.join(workspace.config.outputDirectory, 'bid.docx')
+  const path = artifacts[0]?.path ?? posix.join(workspace.config.outputDirectory, 'bid.docx')
   try {
-    if (stage !== 'docx_export' || artifacts.length !== 1 || artifacts[0]?.stage !== stage || artifacts[0].type !== 'docx' || artifacts[0].path !== path) throw new Error('invalid-export-artifact')
+    if (stage !== 'docx_export' || artifacts.length !== 1 || artifacts[0]?.stage !== stage || artifacts[0].type !== 'docx'
+      || !path.startsWith(`${workspace.config.outputDirectory}/`) || !path.endsWith('.docx')) {
+      throw new Error('invalid-export-artifact')
+    }
     const absolute = within(workspace.projectRoot, path)
+    if (!absolute.startsWith(`${workspace.outputRoot}${sep}`)) throw new Error('invalid-export-path')
     await assertNoLinkedPath(workspace.root, absolute)
     const bytes = await readFile(absolute)
     if (bytes.length < 4 || bytes.readUInt32LE(0) !== 0x04034b50) throw new Error('invalid-docx-file')

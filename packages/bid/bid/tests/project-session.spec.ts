@@ -121,19 +121,40 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.getReviewWorkbench(b.session)).toMatchObject({ outline: [{ section_id: 'SEC-1', writing_status: 'completed', content_available: true }], summary: { content_count: 1 } })
     expect(await ctx.bid.getReviewChapter(b.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
     executor.canExecute = stage => stage === 'chapter_writing'
-    expect(await ctx.bid.retryStage(b.session)).toEqual({ ok: true, value: { stage: 'docx_export', status: 'pending' } })
+    expect(await ctx.bid.retryStage(b.session)).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'chapter_writing' }))
-    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'docx_export', status: 'pending' } })
+    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
   })
 
-  it('已完成项目在新 Session 中保持完成，不自动启动 executor', async () => {
-    const { workspace, fresh, executor } = await fixture()
+  it('旧 S6 已完成项目仍保留审核工作台和按需导出动作', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture()
+    await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'docx_export', status: 'completed' })
     await fresh('session-a')
     const b = await fresh('session-b')
     expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
     expect(executor.execute).not.toHaveBeenCalled()
-    expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual([])
+    expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual(['export_docx'])
+    expect(await ctx.bid.exportDocx(b.session)).toMatchObject({ ok: true })
+    expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
+  })
+
+  it('S5 完成后可重复导出独立 Word 文件且不改变审核阶段', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('session-export')
+
+    const first = await ctx.bid.exportDocx(agent.session)
+    const second = await ctx.bid.exportDocx(agent.session)
+
+    expect(first).toMatchObject({ ok: true, value: { path: expect.stringMatching(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u) } })
+    expect(second).toMatchObject({ ok: true })
+    if (!first.ok || !second.ok) throw new Error('DOCX export failed')
+    expect(second.value.path).not.toBe(first.value.path)
+    expect((await readFile(join(workspace.projectRoot, first.value.path))).readUInt32LE(0)).toBe(0x04034b50)
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
   })
 
   it('旧 Session 日志落盘失败不会让新聊天以 S1 覆盖已有 S4 项目', async () => {
@@ -238,7 +259,7 @@ describe('Workspace 项目与独立 Session', () => {
       expect((await operationA).ok).toBe(true)
       expect((await operationC).ok).toBe(true)
       await vi.waitFor(() => expect(host.inFlight.size).toBe(0))
-      expect(runtime(d.session)).toEqual({ stage: 'docx_export', status: 'pending' })
+      expect(runtime(d.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
       expect(executor.execute).toHaveBeenCalledTimes(2)
     } finally { gate.resolve(undefined); await operationA }
   })

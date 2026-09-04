@@ -260,6 +260,7 @@ describe('in-process structured output', () => {
     const run = await ctx.subagents.start('spawn', structuredRequest(parent))
     const result = await run.result
     expect(result.stopReason).toBe('error')
+    expect(result.diagnostic).toMatch(/^LLM turn failed \([A-Za-z0-9_.:-]+\)\.$/u)
     expect(adapter.requests.length).toBe(1)
     await run.dispose()
   })

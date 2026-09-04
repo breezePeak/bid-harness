@@ -21,7 +21,7 @@ export const zh = {
   'prompt.tender_analysis': '正在分析招标文件',
   'prompt.tender_analysis_confirmation': '请检查并确认技术标分析结果',
   'prompt.evidence_mapping': '正在整理项目证据',
-  'mapping.progress': '映射任务：初始 {initial} 个 · 补充 {supplemental} 个 · 共 {total} 个 · 已完成 {completed} · 映射中 {running} · 未开始 {notStarted}',
+  'mapping.progress': '研究任务：分支 {initial} 个 · 复核 {supplemental} 个 · 共 {total} 个 · 已完成 {completed} · 进行中 {running} · 未开始 {notStarted}',
   'prompt.outline_generation': '正在生成技术标目录',
   'prompt.outline_confirmation': '请确认技术标目录',
   'outline.updated': '已更新，请重新确认。',

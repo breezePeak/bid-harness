@@ -41,9 +41,13 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 
 `bid` Agent Preset 只为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数命令。每个命令可以重置当前阶段或回退到更早阶段；自动阶段正在运行时，Host 原子占用项目，取消执行操作的主 Agent、Subagent 和并发 Worker，等待全部工作静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset` 并从阶段入口完整重跑。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
-浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 完整重跑。
+浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 重试。S5 从严格校验的章节检查点继续，其他阶段按各自执行器规则重跑。
 
-六阶段固定为 S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射、S5 正文编写、S6 导出标书。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断整本输出。
+S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题最多自动修复一次，最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
+
+S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试会严格校验原计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留有效的 completed 章节，只重新排队 failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
+
+Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
 S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目技术重点；`scoring.json` 只保存评分原文、分值与简单规范化字段，不含评分响应点。纯商务、资格和报价评分不得进入 `scoring.json`。Validator 检查覆盖、严格 schema、来源文件、分块和引用行后，S2 停在 `tender_analysis/waiting_user`。
 
@@ -60,7 +64,7 @@ S4 按目录业务分支分批映射，Evidence 以 Section ID 保存；目录�
 
 S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。主 Agent 只写章节关系计划；Host 按强依赖 DAG 调度 Writer，并按每个 Section 的 `framework_refs` 注入精确框架正文分块。框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。企业事实缺少本地依据时保留 `unresolved_topics`，不得由框架或 Web 资料替代。
 
-S6 由程序自动执行，不调用模型。导出先核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文，写入 `outputDirectory` 下的 `bid.md` 和 `bid.docx`。正文自身的标题从属于所在章节。产物校验通过后项目状态 checkpoint 为 `docx_export/completed`；失败保持 S6 并可重试。
+S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章状态常驻。审核工作台中的“导出 Word”调用 Host `exportDocx`，程序核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文；每次在 `outputDirectory` 写入一对带时间标识的 Markdown 和 DOCX 文件。导出成功或失败都不改变 S5 状态，可重复执行。已经保存为 `docx_export/completed` 的旧项目同样保留审核工作台和导出动作。
 
 
 ### Inventory 文本

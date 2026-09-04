@@ -46,8 +46,8 @@ describe('outline confirmation artifacts', () => {
   })
 
   it('updates user-editable fields without changing coverage identifiers', () => {
-    const edited = applyOutlineEdits(outline, [{ type: 'update_section', section_id: 'SEC-001', title: '已确认交付方案', purpose: '更新说明', must_answer: ['交付计划', '保障措施'] }])
-    expect(edited.sections[0]).toMatchObject({ title: '已确认交付方案', purpose: '更新说明', must_answer: ['交付计划', '保障措施'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'] })
+    const edited = applyOutlineEdits(outline, parseOutlineEditOperations([{ type: 'update_section', section_id: 'SEC-001', title: '已确认交付方案', purpose: '更新说明', summary: '说明交付计划及对应的保障措施。', must_answer: ['交付计划', '保障措施'] }]))
+    expect(edited.sections[0]).toMatchObject({ title: '已确认交付方案', purpose: '更新说明', summary: '说明交付计划及对应的保障措施。', must_answer: ['交付计划', '保障措施'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'] })
     expect(outline.sections[0]?.title).toBe('交付方案')
   })
 

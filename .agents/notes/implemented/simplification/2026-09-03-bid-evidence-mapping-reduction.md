@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+本记录的机械继承、技术错误写入缺口和最终确认免模型复核规则由[章节研究与 Blueprint](../feature/2026-09-03-bid-section-research-blueprint.md)部分取代；下文相关条目保留该选择的背景，不作为当前行为依据。业务分支分组、有限修复、文件角色及快照来源证明的取舍继续适用。
+
 [阶段交互](../feature/2026-09-03-bid-waiting-user-stage-interaction.md)允许用户明确要求局部 replace/supplement；本记录的“不启动 Mapping Child”仅指自动 reconcile 和正式确认，不限制用户主动研究。
 
 S1 → S2 → S3 → S4 → S5 → S6 的阶段和 S1–S3 业务逻辑保持不变。S4 Task 是执行批次，Section 是业务实体。Host 按目录顶层业务分支分组；唯一根目录下的结构分支各成一批，直属叶子合为一批。plan v5 保存 section_ids，Evidence Map v10 只按 section_id 保存材料、缺口和写作维度。

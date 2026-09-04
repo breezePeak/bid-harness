@@ -6,6 +6,7 @@ import {
   BidWorkspace,
   parseEvidenceMapArtifact,
   parseEvidenceMappingPartialResult,
+  parseOutlineArtifact,
   parseTenderScoringArtifact,
   scoringArtifactSha256,
   validateEvidenceMapping,
@@ -13,6 +14,7 @@ import {
   type EvidenceMapArtifact,
   type LocalEvidenceMaterial,
   type StageArtifact,
+  type SectionWritingBrief,
   type WebEvidenceMaterial,
 } from '@deepseek-ai/dsh-bid'
 
@@ -22,6 +24,14 @@ const artifacts: StageArtifact[] = [
   { stage: 'evidence_mapping', type: 'outline', path: 'outline/outline.json' },
   { stage: 'evidence_mapping', type: 'outline_quality_report', path: 'outline/quality-report.json' },
 ]
+
+const writingBrief: SectionWritingBrief = {
+  purpose: '说明部署、联调测试及验收如何满足项目实施要求。',
+  must_answer: ['各阶段如何分工并确认完成条件？'],
+  writing_notes: ['按实施阶段说明责任、输入、操作及交付物。'],
+  suggested_tables: ['实施阶段与验收条件表'], suggested_figures: [],
+  requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'],
+}
 
 function evidenceMap(value: Partial<EvidenceMapArtifact> = {}): EvidenceMapArtifact {
   return {
@@ -126,12 +136,45 @@ describe('evidence-map v10 schema', () => {
   })
 
   it('keeps Child URL results separate from durable Host references', () => {
-    expect(() => parseEvidenceMappingPartialResult({ task_id: 'TASK-1', section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [{ url: 'https://example.com/standard', usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'] }], refinement_suggestions: [] })).not.toThrow()
+    const partial = { task_id: 'TASK-1', section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [{ url: 'https://example.com/standard', usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'], writing_brief: writingBrief }], refinement_suggestions: [] }
+    expect(() => parseEvidenceMappingPartialResult(partial)).not.toThrow()
+    expect(() => parseEvidenceMappingPartialResult({
+      ...partial, section_mappings: [{ ...partial.section_mappings[0], writing_brief: undefined }],
+    })).toThrow()
+    expect(() => parseEvidenceMappingPartialResult({
+      ...partial, section_mappings: [{ ...partial.section_mappings[0], writing_brief: { ...writingBrief, must_answer: [] } }],
+    })).toThrow()
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, web_materials: [{ source_id: 'WEB-0123456789abcdef', snapshot_path: 'analysis/web-sources/WEB-fedcba9876543210.md', usage: 'reference', summary: '标准。', supports: '支持方案。' }] }] })).toThrow()
   })
 })
 
 describe('evidence-mapping validator', () => {
+  it('S3 允许未研究的摘要，S4 要求分支摘要和叶子写作维度', async () => {
+    const { workspace } = await fixture()
+    const path = join(workspace.projectRoot, 'outline/outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+    const leaf = outline.sections[0]!
+    leaf.parent_id = 'BRANCH'
+    leaf.level = 2
+    outline.sections.unshift({ ...leaf, id: 'BRANCH', parent_id: null, level: 1, title: '实施体系', writable: false, must_answer: [], scoring_response_point_ids: [], scoring_response_points: [] })
+    expect(() => parseOutlineArtifact(outline)).not.toThrow()
+    await writeFile(path, JSON.stringify(outline))
+    const qualityPath = join(workspace.projectRoot, 'outline/quality-report.json')
+    const quality = JSON.parse(await readFile(qualityPath, 'utf8')) as { reviewed_section_ids: string[] }
+    quality.reviewed_section_ids.push('BRANCH')
+    await writeFile(qualityPath, JSON.stringify(quality))
+    const map = evidenceMap()
+    map.section_mappings[0]!.writing_dimensions = []
+    await writeMap(workspace, map)
+    const rejected = await validateEvidenceMapping(workspace, 'evidence_mapping', artifacts)
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE']))
+    outline.sections[0]!.summary = '说明准备、部署、联调及验收阶段的责任分工与完成条件。'
+    leaf.writing_notes = [...writingBrief.writing_notes]
+    await writeFile(path, JSON.stringify(outline))
+    await expect(validateEvidenceMapping(workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
+  })
+
   it.each(['missing', 'duplicate', 'unknown'] as const)('最终 Validator 拒绝 %s 章节映射', async (scenario) => {
     const { workspace } = await fixture()
     await writeMap(workspace, evidenceMap())

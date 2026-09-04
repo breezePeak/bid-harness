@@ -7,8 +7,8 @@ export type { OutlineEditOperation, OutlineViewSection }
 const text = z.string().min(1)
 /** 模型与浏览器共用的结构化目录编辑参数。 */
 export const outlineEditOperationSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), must_answer: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.must_answer !== undefined),
-  z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: text, purpose: text, must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
+  z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined),
+  z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: text, purpose: text, summary: text.optional(), must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
     if (value.writable && (value.must_answer?.length ?? 0) === 0) context.addIssue({ code: 'custom', message: 'a writable section requires must_answer' })
     if (!value.writable && (value.must_answer?.length ?? 0) !== 0) context.addIssue({ code: 'custom', message: 'a structural section cannot have must_answer' })
   }),

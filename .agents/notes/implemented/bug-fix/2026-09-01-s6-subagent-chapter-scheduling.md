@@ -28,4 +28,4 @@ Host 根据有效计划维护 pending、ready、running 和 completed 状态，�
 
 S6 增加一个主 Agent 规划回合、每章至少一个 Child Session、两个可追溯 Artifact 和 Host 并发调度状态。部署必须注册支持 `outputSchema`、`toolFilter`、`maxDepth` 与 persona 的 `spawn` Provider。并发提高独立章节吞吐量，但每个运行中的 Child 都占用模型和工具资源，因此 Host 默认限制为 3，配置最大值为 8。
 
-章节正式文件只在候选通过后出现；一个分支修复不会阻塞仍有空闲并发槽的无关 ready 分支。任一章节最终失败会取消并等待其他已启动 Child 停稳，且不会生成伪完整 manifest。
+章节正式文件只在候选通过后出现；一个分支修复不会阻塞仍有空闲并发槽的无关 ready 分支。章节级失败隔离、基础设施重试与检查点恢复由[章节写作检查点与故障隔离](2026-09-04-bid-chapter-checkpoint-fault-isolation.md)补充；最终仍缺少可用候选时不生成伪完整 manifest。

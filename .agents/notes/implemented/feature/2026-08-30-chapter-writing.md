@@ -16,7 +16,7 @@ Writer 先消费现有资料，只有仍缺少公开技术知识时才执行 Sea
 
 Chapter Metadata 与 Manifest 使用 Schema v5，只保存 `local_materials_used`、`web_materials_used` 和 `unresolved_topics`。本地条目保留 `source_kind + file_id + chunk + usage`；Web 条目保留已落盘的 `source_id + snapshot_path`。Writer 候选可以临时返回 `additional_web_materials` URL，但该数组不会直接持久化，Host 绑定成功后才合入 `web_materials_used`。
 
-S5 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，并检查遍历路径、章节对应、must-answer 覆盖及所有真实资料引用。本地 Evidence 必须匹配 manifest 角色与其 Chunk index，Web 引用必须匹配来源账本中的路径和正文哈希；框架正文不进入 Evidence 使用记录。重试 S5 时先删除旧 `chapters/` 树。
+S5 Validator 将 Manifest 绑定到 confirmed-outline 哈希，要求每个可写章节恰有一个非空且非链接的正文和匹配的 Metadata，并检查遍历路径、章节对应、must-answer 覆盖及所有真实资料引用。本地 Evidence 必须匹配 manifest 角色与其 Chunk index，Web 引用必须匹配来源账本中的路径和正文哈希；框架正文不进入 Evidence 使用记录。S5 重试按[章节写作检查点与故障隔离](../bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)保留已完成章节，只重新排队未完成章节。
 
 ## Alternatives considered
 

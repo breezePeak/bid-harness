@@ -39,12 +39,12 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
-import { reconcileSectionEvidence } from './section-evidence-context.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, executeEvidenceMappingFinalCheck, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { changedWritableSectionIds, reconcileSectionEvidence } from './section-evidence-context.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
-import { parseOutlineArtifact, parseOutlineQualityReport, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { inspectBidStage, installStageInteractionTools, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
@@ -57,6 +57,7 @@ import { executeDocxExport, validateDocxExport } from './docx-export.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
+import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
@@ -67,6 +68,8 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
   BidEvidenceMappingProgress,
+  BidDocxExportErrorCode,
+  BidDocxExportResult,
   BidFileIntakeErrorCode,
   BidFileIntakeFileResult,
   BidFileIntakeResult,
@@ -96,6 +99,8 @@ export type {
   BidClientAction,
   BidDocumentRole,
   BidEvidenceMappingProgress,
+  BidDocxExportErrorCode,
+  BidDocxExportResult,
   BidClientProjection,
 
   BidComposerReason,
@@ -155,6 +160,7 @@ export * from './web-evidence-snapshot.ts'
 export {
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
+  executeEvidenceMappingFinalCheck,
   mergeEvidenceMappingPartialResults,
   readEvidenceMappingProgress,
   renderEvidenceMappingSubagentTask,
@@ -319,6 +325,19 @@ function intakeRejected(code: BidFileIntakeErrorCode, message: string, files?: r
 /** Build one immutable, sanitized retry rejection. */
 function retryRejected(code: BidRetryErrorCode, message: string): BidRetryResult {
   return Object.freeze({ ok: false, error: Object.freeze({ code, message }) })
+}
+
+/** Build one immutable on-demand DOCX export rejection. */
+function docxExportRejected(
+  code: BidDocxExportErrorCode,
+  message: string,
+  issues?: readonly StageValidationIssue[],
+): BidDocxExportResult {
+  return Object.freeze({ ok: false, error: Object.freeze({
+    code,
+    message,
+    ...(issues === undefined ? {} : { issues: Object.freeze([...issues]) }),
+  }) })
 }
 
 /** Build one immutable retry success result from the Host's log-derived state. */
@@ -746,39 +765,32 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!mutation.ok) { restored = true; return mutation }
       signal.throwIfAborted()
       const draft = mutation.value
+      if (request.action !== 'bid_evidence_remap') {
+        restored = true
+        return { ok: true, message: '已更新，请重新确认。', draft }
+      }
       const persist = async (path: string, value: unknown): Promise<void> => {
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
       }
       await persist('outline/outline.json', draft.outline)
-      const quality = parseOutlineQualityReport(await readStageJson(workspace, 'outline/quality-report.json'))
-      await persist('outline/quality-report.json', { ...quality, reviewed_section_ids: draft.outline.sections.map(section => section.id) })
-      const artifacts: StageArtifact[] = runtime.stage === 'evidence_mapping' ? [
-        { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
-        { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
-        { stage: 'evidence_mapping', type: 'outline', path: 'outline/outline.json' },
-        { stage: 'evidence_mapping', type: 'outline_quality_report', path: 'outline/quality-report.json' },
-      ] : [
-        { stage: 'outline_generation', type: 'scoring_response_points', path: 'analysis/scoring-response-points.json' },
-        { stage: 'outline_generation', type: 'outline', path: 'outline/outline.json' },
-        { stage: 'outline_generation', type: 'outline_quality_report', path: 'outline/quality-report.json' },
-      ]
-      if (runtime.stage === 'evidence_mapping') {
-        const evidence = parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json'))
-        await persist('analysis/evidence-map.json', reconcileSectionEvidence(draft.outline, evidence))
-        if (request.action === 'bid_evidence_remap') await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
-          maxRepairAttempts: this.config.modelStageRepairAttempts, maxConcurrency: this.config.evidenceMappingMaxConcurrency, signal,
-          remap: {
-            section_ids: request.section_ids, mode: request.mode, ...(request.reason === undefined ? {} : { reason: request.reason }),
-          },
-        })
+      await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
+        maxRepairAttempts: this.config.modelStageRepairAttempts, maxConcurrency: this.config.evidenceMappingMaxConcurrency, signal,
+        remap: {
+          section_ids: request.section_ids, mode: request.mode, ...(request.reason === undefined ? {} : { reason: request.reason }),
+        },
+      })
+      signal.throwIfAborted()
+      const checkedOutline = parseOutlineArtifact(await readStageJson(workspace, 'outline/outline.json'))
+      for (const relative of ['outline/outline.json', 'outline/quality-report.json']) {
+        const path = within(workspace.projectRoot, relative)
+        const content = backup.get(path)
+        if (content === undefined || content === null) throw new Error(`Missing research Artifact ${relative}`)
+        await writeFileAtomic(path, content, { mode: 0o600, dirMode: 0o700 })
       }
-      signal.throwIfAborted()
-      const validation = runtime.stage === 'evidence_mapping' ? await validateEvidenceMapping(workspace, runtime.stage, artifacts) : await validateOutlineGeneration(workspace, runtime.stage, artifacts)
-      if (!validation.ok) throw new BidStageExecutionError(validation.issues)
-      signal.throwIfAborted()
-      const updated = { ...draft, revision: Math.max(base.revision + 1, draft.revision), source_outline_sha256: draft.draft_outline_sha256 }
+      const updated = { ...draft, revision: Math.max(base.revision + 1, draft.revision),
+        outline: checkedOutline, draft_outline_sha256: outlineArtifactSha256(checkedOutline) }
       await persist('outline/draft.json', updated)
       restored = true
       return { ok: true, message: '已更新，请重新确认。', draft: updated }
@@ -1198,6 +1210,38 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
+  /** Generate a fresh Word file from completed S5 artifacts without leaving the review stage. */
+  @Remote('exportDocx')
+  async exportDocx(session: Session): Promise<BidDocxExportResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return docxExportRejected('BID_SESSION_REQUIRED', 'DOCX export requires a Bid Session with a Host workspace.')
+    }
+    if (this.inFlight.has(projectKey(session))) {
+      return docxExportRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
+    }
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('export_docx')) {
+        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', 'DOCX export is available after S5 completes.')
+      }
+      const destination = `${operation.workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
+      const artifacts = await executeDocxExport(operation.workspace, operation.controller.signal, destination)
+      const validation = await validateDocxExport(operation.workspace, 'docx_export', artifacts)
+      if (!validation.ok) {
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The generated DOCX artifact is invalid.', validation.issues)
+      }
+      return { ok: true, value: { path: destination } }
+    } catch (error: unknown) {
+      if (error instanceof BidStageExecutionError) {
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The completed chapters could not be exported.', error.issues)
+      }
+      return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The Bid Host could not export the completed chapters.')
+    } finally {
+      await this.finishOperation(session, operation, false)
+    }
+  }
+
   /** Read the live S5 writing and per-chapter review state without disclosing workspace paths. */
   @Remote('getReviewWorkbench')
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
@@ -1233,6 +1277,7 @@ export class BidHostRuntime extends TypertRemoteService {
         parent_id: section.parent_id,
         order: section.order,
         title: section.title,
+        ...(section.summary === undefined ? {} : { summary: section.summary }),
         writable: section.writable,
         writing_status: writingStatus,
         review_status: reviewStatus,
@@ -1427,7 +1472,7 @@ export class BidHostRuntime extends TypertRemoteService {
     return (await this.getOutlineDraft(session)).outline
   }
 
-  /** Read or initialize the Host-persisted S5 draft. */
+  /** 读取或初始化 S3/S4 等待用户确认的持久化 Draft。 */
   @Remote('getOutlineDraft')
   async getOutlineDraft(session: Session): Promise<OutlineDraftView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
@@ -1441,7 +1486,7 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation, false) }
   }
 
-  /** Apply one CAS-protected edit batch to the Host-persisted S5 draft. */
+  /** 使用 CAS 保存目录编辑；仅校验结构和覆盖，S4 语义复核留到最终确认。 */
   @Remote('applyOutlineDraftOperations')
   async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
@@ -1454,12 +1499,20 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation) }
   }
 
-  /** Apply and validate user operations before atomically publishing S5 artifacts. */
+  /** 确认 Draft 前仅复核语义变化的 S4 可写章节；校验失败恢复已发布产物并保留 Draft。 */
   @Remote('confirmOutline')
   async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     const operation = this.beginOperation(session)
+    const backup = new Map<string, string | null>()
+    const restore = async (): Promise<void> => {
+      for (const [path, content] of backup) {
+        if (content === null) await rm(path, { force: true })
+        else await writeFileAtomic(path, content, { mode: 0o600, dirMode: 0o700 })
+      }
+      backup.clear()
+    }
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
@@ -1468,7 +1521,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
-      const candidate = draft.outline
+      let candidate = draft.outline
       const sharedInputs = await Promise.all([
         'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json', 'analysis/scoring-response-points.json',
       ].map(async (path): Promise<unknown> => JSON.parse(
@@ -1488,18 +1541,52 @@ export class BidHostRuntime extends TypertRemoteService {
       const confirmedPath = within(workspace.projectRoot, confirmedRelative)
       const outlinePath = within(workspace.projectRoot, 'outline/outline.json')
       const qualityPath = within(workspace.projectRoot, 'outline/quality-report.json')
-      await Promise.all([confirmedPath, outlinePath, qualityPath].map(path => assertNoLinkedPath(workspace.root, path)))
+      for (const relative of [
+        'outline/outline.json', 'outline/quality-report.json', confirmedRelative,
+        ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/confirmation.json'] : []),
+      ]) {
+        const path = within(workspace.projectRoot, relative)
+        await assertNoLinkedPath(workspace.root, path)
+        try { backup.set(path, await readFile(path, 'utf8')) } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          backup.set(path, null)
+        }
+      }
       try {
+        operation.controller.signal.throwIfAborted()
+        if (runtime.stage === 'evidence_mapping') {
+          const researched = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+          const affected = changedWritableSectionIds(researched, candidate)
+          const evidencePath = within(workspace.projectRoot, 'analysis/evidence-map.json')
+          let evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+          if (affected.length > 0) {
+            const checked = await executeEvidenceMappingFinalCheck(agent, workspace, candidate, affected, {
+              maxRepairAttempts: this.config.modelStageRepairAttempts,
+              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+              signal: operation.controller.signal,
+            })
+            candidate = checked.outline
+            evidence = checked.evidence
+          }
+          const reconciled = reconcileSectionEvidence(candidate, evidence)
+          operation.controller.signal.throwIfAborted()
+          await writeFileAtomic(evidencePath, `${JSON.stringify(reconciled, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+          const ledger = parseWebEvidenceSourcesArtifact(await readStageJson(workspace, 'analysis/web-evidence-sources.json'))
+          const referenced = new Set(
+            reconciled.section_mappings.flatMap(mapping => mapping.web_materials.map(material => material.source_id)),
+          )
+          for (const source of ledger.sources.filter(source => !referenced.has(source.source_id))) {
+            const path = within(workspace.projectRoot, source.snapshot_path)
+            await assertNoLinkedPath(workspace.root, path)
+            backup.set(path, await readFile(path, 'utf8'))
+          }
+          await pruneWebEvidenceArtifacts(workspace, reconciled)
+        }
         const quality = JSON.parse(await readFile(qualityPath, 'utf8')) as Record<string, unknown>
         quality.reviewed_section_ids = candidate.sections.map(section => section.id)
         await writeFileAtomic(outlinePath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         await writeFileAtomic(qualityPath, `${JSON.stringify(quality, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         if (runtime.stage === 'evidence_mapping') {
-          const evidencePath = within(workspace.projectRoot, 'analysis/evidence-map.json')
-          const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-          const reconciled = reconcileSectionEvidence(candidate, evidence)
-          await writeFileAtomic(evidencePath, JSON.stringify(reconciled, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
-          await pruneWebEvidenceArtifacts(workspace, reconciled)
           const validation = await validateEvidenceMapping(workspace, 'evidence_mapping', [
             { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
             { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
@@ -1508,6 +1595,7 @@ export class BidHostRuntime extends TypertRemoteService {
           ])
           if (!validation.ok) throw new BidStageExecutionError(validation.issues)
         }
+        operation.controller.signal.throwIfAborted()
         await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         if (runtime.stage === 'evidence_mapping') {
           const confirmationPath = within(workspace.projectRoot, 'outline/confirmation.json')
@@ -1522,8 +1610,7 @@ export class BidHostRuntime extends TypertRemoteService {
           await writeFileAtomic(confirmationPath, `${JSON.stringify(confirmation, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         }
       } catch (error) {
-        await rm(confirmedPath, { force: true })
-        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.projectRoot, 'outline/confirmation.json'), { force: true })
+        await restore()
         throw error
       }
       const artifactRefs: StageArtifact[] = runtime.stage === 'outline_generation' ? [
@@ -1540,14 +1627,15 @@ export class BidHostRuntime extends TypertRemoteService {
         .automaticOrchestrator(agent, workspace, operation.controller.signal)
         .confirmValidatedStage(runtime.stage, artifactRefs)
       if (!confirmation.ok) {
-        await rm(confirmedPath, { force: true })
-        if (runtime.stage === 'evidence_mapping') await rm(within(workspace.projectRoot, 'outline/confirmation.json'), { force: true })
+        await restore()
         return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy outline validation.', issues: confirmation.validation.issues } }
       }
+      backup.clear()
       await rm(within(workspace.projectRoot, 'outline/draft.json'), { force: true })
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
     } catch (error) {
+      await restore()
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: error instanceof Error ? error.message : String(error), ...(error instanceof BidStageExecutionError ? { issues: error.issues } : {}) } }
     } finally { await this.finishOperation(session, operation) }
   }

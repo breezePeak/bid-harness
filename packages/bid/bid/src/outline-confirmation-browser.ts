@@ -7,6 +7,7 @@ export type OutlineEditOperation =
     readonly section_id: string
     readonly title?: string
     readonly purpose?: string
+    readonly summary?: string
     readonly must_answer?: readonly string[]
   }
   | {
@@ -16,6 +17,7 @@ export type OutlineEditOperation =
     readonly writable: boolean
     readonly title: string
     readonly purpose: string
+    readonly summary?: string
     readonly must_answer?: readonly string[]
   }
   | { readonly type: 'delete_section'; readonly section_id: string }
@@ -94,6 +96,7 @@ export function applyOutlineEdits(
       if (section === undefined) throw new Error(`unknown outline section ${operation.section_id}`)
       if (operation.title !== undefined) section.title = operation.title
       if (operation.purpose !== undefined) section.purpose = operation.purpose
+      if (operation.summary !== undefined) section.summary = operation.summary
       if (operation.must_answer !== undefined) section.must_answer = [...operation.must_answer]
     } else if (operation.type === 'add_section') {
       const id = allocateSectionId?.() ?? `SEC-${String(++nextId).padStart(3, '0')}`
@@ -103,6 +106,7 @@ export function applyOutlineEdits(
       const section: OutlineSection = {
         id, parent_id: operation.parent_id, order: operation.order, level: parent === undefined ? 1 : parent.level + 1,
         title: operation.title, purpose: operation.purpose, writable: operation.writable,
+        ...(operation.summary === undefined ? {} : { summary: operation.summary }),
         must_answer: operation.writable ? [...(operation.must_answer ?? [])] : [],
         requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
         origin: 'generated', scoring_response_point_ids: [], scoring_response_points: [],

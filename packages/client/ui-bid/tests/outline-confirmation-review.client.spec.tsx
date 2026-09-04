@@ -28,6 +28,7 @@ const testOutline: OutlineArtifact = {
       order: 1,
       level: 1,
       title: '总体技术方案',
+      summary: '说明服务拆分、接口规范与治理策略。',
       purpose: '阐述系统总体架构设计',
       writable: false,
       must_answer: [],
@@ -161,6 +162,7 @@ describe('OutlineConfirmationReview', () => {
 
     // SEC-002 应该被隐藏
     expect(screen.queryByLabelText('SEC-002 标题')).toBeNull()
+    expect(screen.getByText('说明服务拆分、接口规范与治理策略。')).toBeTruthy()
 
     // 一键全部展开
     fireEvent.click(screen.getByRole('button', { name: '全部展开' }))

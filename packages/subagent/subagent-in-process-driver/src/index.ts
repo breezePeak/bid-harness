@@ -64,6 +64,15 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
   }
 }
 
+/** Keep the durable failure category while excluding provider payload text. */
+function turnFailureDiagnostic(reason: TurnEndReason | undefined): string | undefined {
+  if (reason?.kind === 'error') {
+    const code = /^[A-Za-z0-9_.:-]{1,128}$/u.test(reason.error.code) ? reason.error.code : 'UNKNOWN'
+    return `LLM turn failed (${code}).`
+  }
+  return reason?.kind === 'interrupted' ? 'Child turn was interrupted before completion.' : undefined
+}
+
 /** Extra inputs the spawn and fork providers supply to the shared driver. */
 export interface InProcessRunOptions {
   /** Completed-turn seed for fork, or undefined for a fresh spawn. */
@@ -223,11 +232,12 @@ function readResult(
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
+  const diagnostic = cancelled ? undefined : turnFailureDiagnostic(lastEnd?.data.reason)
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      return { output, structured: structured.captured.value, stopReason }
+      return { output, structured: structured.captured.value, ...diagnostic === undefined ? {} : { diagnostic }, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason }
+  return { output, ...diagnostic === undefined ? {} : { diagnostic }, stopReason }
 }

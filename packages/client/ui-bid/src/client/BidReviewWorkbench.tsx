@@ -21,6 +21,7 @@ function classes(...parts: Array<string | undefined | false | null>): string {
 export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
+  exportDocx?: () => Promise<{ path: string }>
   setEmbeddedSurface: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
   retryStage?: () => Promise<void>
 }
@@ -41,57 +42,80 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
   not_applicable: '无需佐证',
 }
 
-/** Live read-only S5 chapter and reviewer workbench. */
+/** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, retryStage, setEmbeddedSurface,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage, setEmbeddedSurface,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
   const [workbench, setWorkbench] = useState<BidReviewWorkbenchView | null>(null)
   const [chapter, setChapter] = useState<BidReviewChapterView | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportPath, setExportPath] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
+  const requestVersion = useRef(0)
   const reviewSurfaceRef = useCallback((element: HTMLDivElement | null) => { setEmbeddedSurface('review', element) }, [setEmbeddedSurface])
   const confirmationReady = projection?.runtime.status === 'waiting_user'
     && (projection.runtime.stage === 'tender_analysis' || projection.runtime.stage === 'outline_generation' || projection.runtime.stage === 'evidence_mapping')
-  const ready = projection?.runtime.stage === 'chapter_writing'
+  const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
+  const exportReady = ready && projection?.runtime.status === 'completed'
 
-  const refresh = useCallback((): void => {
-    if (!ready) return
-    void getWorkbench().then(async (value) => {
+  const refresh = useCallback((): Promise<void> => {
+    if (!ready) return Promise.resolve()
+    const version = ++requestVersion.current
+    return getWorkbench().then(async (value) => {
+      if (version !== requestVersion.current) return
       setWorkbench(value)
       const selected = value.outline.find(item => item.section_id === selectedSectionId.current && item.content_available)
         ?? value.outline.find(item => item.content_available)
       if (selected !== undefined) {
         const next = await getChapter(selected.section_id)
+        if (version !== requestVersion.current) return
         selectedSectionId.current = next.section_id
         setChapter(next)
+      } else {
+        selectedSectionId.current = null
+        setChapter(null)
       }
-    }).catch((reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) })
+      setError(null)
+    }).catch((reason: unknown) => {
+      if (version === requestVersion.current) setError(reason instanceof Error ? reason.message : String(reason))
+    })
   }, [getChapter, getWorkbench, ready])
 
   useEffect(() => {
-    refresh()
-    if (!ready || projection.runtime.status !== 'running') return
-    const timer = window.setInterval(refresh, 1000)
-    return () => { window.clearInterval(timer) }
-  }, [projection, ready, refresh])
+    let disposed = false
+    let timer: number | undefined
+    const poll = (): void => {
+      void refresh().then(() => {
+        if (!disposed && ready && projection?.runtime.status === 'running') timer = window.setTimeout(poll, 1000)
+      })
+    }
+    poll()
+    return () => {
+      disposed = true
+      if (timer !== undefined) window.clearTimeout(timer)
+      requestVersion.current++
+    }
+  }, [projection?.runtime.status, ready, refresh])
 
   const rows = useMemo(() => {
     const items = workbench?.outline ?? []
     const children = new Map<string | null, typeof items>()
     for (const item of items) children.set(item.parent_id, [...(children.get(item.parent_id) ?? []), item])
     for (const [parent, siblings] of children) children.set(parent, [...siblings].sort((left, right) => left.order - right.order))
-    const result: Array<{ section: (typeof items)[number]; depth: number; hasChildren: boolean }> = []
-    const visit = (parent: string | null, depth: number): void => {
+    const result: Array<{ section: (typeof items)[number]; number: string; depth: number; hasChildren: boolean }> = []
+    const visit = (parent: string | null, depth: number, prefix: string): void => {
       for (const section of children.get(parent) ?? []) {
+        const number = prefix ? `${prefix}.${section.order}` : String(section.order)
         const hasChildren = (children.get(section.section_id)?.length ?? 0) > 0
-        result.push({ section, depth, hasChildren })
-        if (!collapsed.has(section.section_id)) visit(section.section_id, depth + 1)
+        result.push({ section, number, depth, hasChildren })
+        if (!collapsed.has(section.section_id)) visit(section.section_id, depth + 1, number)
       }
     }
-    visit(null, 0)
+    visit(null, 0, '')
     return result
   }, [collapsed, workbench])
 
@@ -113,23 +137,37 @@ export function BidReviewWorkbench({
   )
 
   const select = (sectionId: string): void => {
+    const version = ++requestVersion.current
+    selectedSectionId.current = sectionId
     setError(null)
     void getChapter(sectionId).then(
       (value) => {
-        selectedSectionId.current = value.section_id
+        if (version !== requestVersion.current) return
         setChapter(value)
       },
-      (reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) },
+      (reason: unknown) => {
+        if (version === requestVersion.current) setError(reason instanceof Error ? reason.message : String(reason))
+      },
     )
   }
 
   const needsAttention = workbench?.summary.needs_attention_count ?? 0
 
+  const exportWord = (): void => {
+    if (!exportReady || exporting || exportDocx === undefined) return
+    setExporting(true)
+    setError(null)
+    void exportDocx().then(
+      (value) => { setExportPath(value.path) },
+      (reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) },
+    ).finally(() => { setExporting(false) })
+  }
+
   return (
-    <section className={css.root}>
+    <section className={css.root} data-conversation-composer-overlay="">
       <header className={css.header}>
         <div className={css.headerLeft}>
-          <span className={css.headerTitle}>技术标章节写作与审核</span>
+          <span className={css.headerTitle}>技术标章节写作与审稿</span>
           <div className={css.headerStats}>
             <Pill className={css.statPill}>
               正文 {workbench?.summary.content_count ?? 0}/{workbench?.summary.chapter_count ?? 0}
@@ -142,21 +180,28 @@ export function BidReviewWorkbench({
             </Pill>
           </div>
         </div>
-        <Button variant="ghost" size="sm" icon={<IconRefreshOutline14 />} onClick={refresh}>
-          刷新
-        </Button>
+        <div className={css.headerStats}>
+          {exportPath !== null && <Pill className={css.statPill}><span title={exportPath}>Word 已导出：{exportPath}</span></Pill>}
+          <Button variant="primary" size="sm" disabled={!exportReady || exporting || exportDocx === undefined} onClick={exportWord}>
+            {exporting ? '正在导出…' : '导出 Word'}
+          </Button>
+          <Button variant="ghost" size="sm" icon={<IconRefreshOutline14 />} onClick={() => { void refresh() }}>
+            刷新
+          </Button>
+        </div>
       </header>
 
       {error !== null && <div className={css.error}>{error}</div>}
 
       <div className={css.columns}>
-        <aside className={css.left}>
+        <div className={css.left}>
           <div className={css.leftHeader}>
             <span>章节目录</span>
             <span>{rows.length} 节</span>
           </div>
-          <nav className={css.outline}>
-            {rows.map(({ section, depth, hasChildren }) => {
+          <div className={css.outline} role="navigation" aria-label="章节目录">
+            {rows.map(({ section, number, depth, hasChildren }) => {
+              const title = `${number} ${section.title}`
               const isSelected = chapter?.section_id === section.section_id
               const isCollapsed = collapsed.has(section.section_id)
               const dotInfo = getChapterDotInfo(section.writing_status, section.review_status)
@@ -187,21 +232,22 @@ export function BidReviewWorkbench({
                     type="button"
                     className={css.sectionBtn}
                     disabled={!section.content_available}
-                    title={section.title}
+                    title={title}
                     onClick={() => { select(section.section_id) }}
                   >
-                    <span className={css.sectionTitle}>{section.title}</span>
-                    <span className={css.statusDotContainer} title={`${section.title}：${dotInfo.title}`}>
+                    <span className={css.sectionTitle}>{title}</span>
+                    <span className={css.statusDotContainer} title={`${title}：${dotInfo.title}`}>
                       <span className={dotInfo.className} />
                     </span>
                   </button>
+                  {!section.writable && section.summary && <p className={css.branchSummary}>{section.summary}</p>}
                 </div>
               )
             })}
-          </nav>
-        </aside>
+          </div>
+        </div>
 
-        <main className={css.reader}>
+        <div className={css.reader} role="main" aria-label="正文阅读">
           {chapter?.markdown == null ? (
             <div className={css.emptyState}>
               <div className={css.emptyStateIcon}>
@@ -226,9 +272,9 @@ export function BidReviewWorkbench({
               </div>
             </article>
           )}
-        </main>
+        </div>
 
-        <aside className={css.review}>
+        <div className={css.review} role="complementary" aria-label="参考资料与审查">
           <div className={css.reviewHeader}>
             <h2>参考资料</h2>
             {chapter?.materials && chapter.materials.length > 0 && (
@@ -305,7 +351,7 @@ export function BidReviewWorkbench({
               </section>
             </>
           )}
-        </aside>
+        </div>
       </div>
     </section>
   )

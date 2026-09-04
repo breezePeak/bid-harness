@@ -65,6 +65,54 @@ export function sectionEvidenceContext(outline: OutlineArtifact, section: Outlin
 }
 
 /**
+ * 找出写作任务或祖先语义发生变化的叶子；分支成员变化也复核该分支的剩余叶子。
+ * @param before - 最近完成章节研究的目录。
+ * @param after - 结构校验通过的当前草稿。
+ * @returns 按当前目录顺序排列的待复核章节 ID；排序及资料展示顺序不影响结果。
+ */
+export function changedWritableSectionIds(before: OutlineArtifact, after: OutlineArtifact): string[] {
+  const contexts = (outline: OutlineArtifact): Map<string, string> => {
+    const writable = buildWritableSectionWorklist(outline)
+    const byId = new Map(outline.sections.map(section => [section.id, section]))
+    const children = new Map<string, string[]>()
+    for (const section of outline.sections) {
+      if (section.parent_id === null) continue
+      const siblings = children.get(section.parent_id) ?? []
+      siblings.push(`${section.id}:${section.writable}`)
+      children.set(section.parent_id, siblings)
+    }
+    const semantics = (section: OutlineSection) => ({
+      id: section.id,
+      title: section.title,
+      purpose: section.purpose,
+      must_answer: [...section.must_answer].sort(),
+      requirement_ids: [...section.requirement_ids].sort(),
+      scoring_ids: [...section.scoring_ids].sort(),
+      scoring_response_point_ids: [...section.scoring_response_point_ids ?? []].sort(),
+      compliance_ids: [...section.compliance_ids].sort(),
+      writing_notes: [...section.writing_notes].sort(),
+      suggested_tables: [...section.suggested_tables].sort(),
+      suggested_figures: [...section.suggested_figures].sort(),
+    })
+    return new Map(writable.map((section) => {
+      const ancestors = []
+      let parentId = section.parent_id
+      while (parentId !== null) {
+        const parent = byId.get(parentId)
+        if (parent === undefined) throw new Error(`section-evidence-parent-missing:${parentId}`)
+        ancestors.unshift({ ...semantics(parent), children: [...children.get(parent.id) ?? []].sort() })
+        parentId = parent.parent_id
+      }
+      return [section.id, JSON.stringify({
+        ...semantics(section), ancestors, global_compliance_ids: [...outline.global_compliance_ids].sort(),
+      })]
+    }))
+  }
+  const previous = contexts(before)
+  return [...contexts(after)].filter(([id, context]) => previous.get(id) !== context).map(([id]) => id)
+}
+
+/**
  * 校验证据集合恰好覆盖每个可写章节。
  * @param outline - 待确认或已确认目录。
  * @param evidence - Host 持久化的 Evidence Map。
@@ -87,31 +135,21 @@ export function validateSectionEvidenceCoverage(outline: OutlineArtifact, eviden
 }
 
 /**
- * 按 section_id 对齐目录与证据；拆分为子章节时继承最近祖先资料并提示 S5 筛选。
+ * 按 section_id 对齐目录与证据，资料适用性由章节研究及最终复核判断。
  * @param outline - 最终目录。
  * @param evidence - 已完成的资料映射。
- * @returns 每个可写章节恰好一条映射；新增章节以缺口表示未检索状态。
+ * @returns 每个可写章节恰好一条映射；新增章节为空映射，不推断资料缺口。
  */
 export function reconcileSectionEvidence(outline: OutlineArtifact, evidence: EvidenceMapArtifact): EvidenceMapArtifact {
   const mappings = new Map(evidence.section_mappings.map(mapping => [mapping.section_id, mapping]))
-  const sections = new Map(outline.sections.map(section => [section.id, section]))
   return {
     schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
     section_mappings: buildWritableSectionWorklist(outline).map((section) => {
       const existing = mappings.get(section.id)
       if (existing !== undefined) return existing
-      let parent = section.parent_id
-      while (parent !== null) {
-        const inherited = mappings.get(parent)
-        if (inherited !== undefined) return {
-          ...inherited, section_id: section.id,
-          missing_topics: [...inherited.missing_topics, '章节拆分继承资料，S5 需按当前章节重新筛选并补充。'],
-        }
-        parent = sections.get(parent)?.parent_id ?? null
-      }
       return {
         section_id: section.id, local_materials: [], web_materials: [], writing_dimensions: [],
-        missing_topics: ['新增章节尚无资料，S5 需按当前章节检索并补充。'],
+        missing_topics: [],
       }
     }),
   }
