@@ -864,7 +864,12 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   /** List session-owned directories and reject the obsolete flat-file layout. */
   private async listSessionDirs(project: string, signal?: AbortSignal): Promise<string[]> {
     signal?.throwIfAborted()
-    const entries = await readdir(project, { withFileTypes: true })
+    const entries = await readdir(project, { withFileTypes: true }).catch((error: unknown) => {
+      signal?.throwIfAborted()
+      // Windows 原子建目录的临时目录、并发删除的项目可能在扫描后消失。
+      if (isENOENT(error)) return []
+      throw error
+    })
     signal?.throwIfAborted()
     const legacy = entries.find(entry =>
       entry.isFile() && (entry.name.endsWith('.jsonl') || entry.name.endsWith('.jsonl.zstd')))

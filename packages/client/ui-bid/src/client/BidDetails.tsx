@@ -51,11 +51,18 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
       <TenderAnalysisReview value={details.tender} pending={false} readOnly onConfirm={() => {}} t={key => zh[key]} />
     </section>
   )
-  return details.outline === null ? null : (
+  if (details.outline === null) return null
+  const presentation = details.outlinePresentation
+  if (presentation === null) return <section role="alert">目录来源与发布状态缺失，请刷新详情。</section>
+  return (
     <section className={css.confirmationContainer} aria-label="目录详情">
-      <OutlineConfirmationReview outline={details.outline} readOnly
+      <OutlineConfirmationReview key={`${sessionId}:${presentation.source}`} outline={details.outline} readOnly
+        stage={projection.runtime.stage}
+        displayMode={presentation.source === 'initial_confirmed' ? 'initial' : presentation.source}
+        notice={presentation.errors.map(message => <p role="alert" key={message}>{message}</p>)}
         reviewContext={details.tender === null ? null : {
-          requirements: details.tender.requirements, scoring: details.tender.scoring, baseline: null, evidence: null,
+          requirements: details.tender.requirements, scoring: details.tender.scoring,
+          baseline: presentation.baseline, evidence: presentation.evidence,
         }}
         onUpdateSection={() => {}} onStructureOperation={() => {}}
         onIndentSection={() => {}} onOutdentSection={() => {}} t={key => zh[key]} />

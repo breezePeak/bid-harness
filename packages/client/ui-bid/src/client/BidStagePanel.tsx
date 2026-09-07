@@ -559,6 +559,10 @@ export function BidStagePanel({
     </div>
   ) : null
 
+  const mappingPercent = mappingProgress !== null && mappingProgress.total > 0
+    ? Math.min(100, Math.round((mappingProgress.completed / mappingProgress.total) * 100))
+    : 0
+
   return (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
@@ -570,8 +574,14 @@ export function BidStagePanel({
           <span className={css.message} role="status">
             {t(promptKey(displayStage, projection.runtime.status))}
           </span>
-          {mappingProgress !== null && <span className={css.mappingProgress} role="status">
-            {t('mapping.progress', {
+          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
+        </div>
+
+        {mappingProgress !== null && (
+          <div
+            className={css.mappingCard}
+            role="status"
+            aria-label={t('mapping.progress', {
               total: mappingProgress.total,
               initial: mappingProgress.initial,
               supplemental: mappingProgress.supplemental,
@@ -579,9 +589,64 @@ export function BidStagePanel({
               running: mappingProgress.running,
               notStarted: mappingProgress.not_started,
             })}
-          </span>}
-          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
-        </div>
+          >
+            <span className={css.srOnly}>
+              {t('mapping.progress', {
+                total: mappingProgress.total,
+                initial: mappingProgress.initial,
+                supplemental: mappingProgress.supplemental,
+                completed: mappingProgress.completed,
+                running: mappingProgress.running,
+                notStarted: mappingProgress.not_started,
+              })}
+            </span>
+            <div className={css.mappingHeader}>
+              <div className={css.mappingTitleGroup}>
+                <span className={css.mappingTitle}>{t('mapping.tasks.title')}</span>
+                <span className={css.mappingRatio}>
+                  {mappingProgress.completed} / {mappingProgress.total} ({mappingPercent}%)
+                </span>
+              </div>
+              <div className={css.mappingPills}>
+                <span className={`${css.pill} ${css.pillDefault}`}>
+                  {t('mapping.tasks.initial', { count: mappingProgress.initial })}
+                </span>
+                {mappingProgress.supplemental > 0 && (
+                  <span className={`${css.pill} ${css.pillDefault}`}>
+                    {t('mapping.tasks.supplemental', { count: mappingProgress.supplemental })}
+                  </span>
+                )}
+                {mappingProgress.running > 0 && (
+                  <span className={`${css.pill} ${css.pillRunning}`}>
+                    <span className={css.runningDot} />
+                    {t('mapping.tasks.running', { count: mappingProgress.running })}
+                  </span>
+                )}
+                {mappingProgress.completed > 0 && (
+                  <span className={`${css.pill} ${css.pillCompleted}`}>
+                    {t('mapping.tasks.completed', { count: mappingProgress.completed })}
+                  </span>
+                )}
+                {mappingProgress.not_started > 0 && (
+                  <span className={`${css.pill} ${css.pillPending}`}>
+                    {t('mapping.tasks.not_started', { count: mappingProgress.not_started })}
+                  </span>
+                )}
+                {(mappingProgress.failed ?? 0) > 0 && (
+                  <span className={`${css.pill} ${css.pillFailed}`}>
+                    {t('mapping.tasks.failed', { count: mappingProgress.failed ?? 0 })}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className={css.mappingProgressTrack} aria-hidden="true">
+              <div
+                className={css.mappingProgressBar}
+                style={{ width: `${mappingPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {hostFailureReason !== undefined && (
           <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
@@ -617,6 +682,7 @@ export function BidStagePanel({
                 notice={<>{updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}{errorNotice}</>}
                 reviewContext={reviewContext}
                 stage={projection.runtime.stage}
+                displayMode={projection.runtime.stage === 'evidence_mapping' ? 'final_candidate' : 'initial'}
                 draftSaveState={draftSaveState}
                 revision={draft?.revision}
                 onUpdateSection={updateSection}

@@ -28,7 +28,7 @@ it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'structured_output', 'structured_output', 'structured_output'])
+      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter'])
       expect(writerLog).toContain('Mapped Materials：[]')
       expect(writerLog).toContain('F999')
       expect(writerLog).toContain('不可用')

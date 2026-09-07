@@ -10,7 +10,10 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
-import { appendChapterWebReferences, bindChapterWriterInput, chapterWriterOutputSchema, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
+import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
+import { normalizeChapterHeadings } from './chapter-headings.ts'
+import { buildOutlineView } from './outline-confirmation-browser.ts'
+import { createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
 import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence } from './chapter-writing-review.ts'
 import type { ChapterProtocol } from './chapter-writing-protocol.ts'
 import {
@@ -279,7 +282,8 @@ export function renderChapterExecutionPlanTask(
     `项目：${relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')}`,
     `只使用私有工具：${CHAPTER_PLAN_TOOLS.join('、')}；全部输入已提供，无需读取或写入文件。`,
     '你只负责判断已确认章节之间的执行依赖与一致性关系，不得重新规划章节目标、增删或拆分章节，也不得生成章节正文或章节 metadata。',
-    '综合 purpose、must_answer、Requirement、Scoring、Compliance、技术架构、部署拓扑、数据模型、接口、周期、角色、数量、参数和交叉引用判断关系。只有后章必须复用前章已作出的方案决策时才建立 depends_on；弱关联写入 related_sections，独立章节无需枚举两两关系。',
+    '区分业务执行顺序与章节写作依赖：共用招标要求、背景、资料和术语，以及实际作业的先后流程，都不能单独成为 depends_on。只有当前章必须消费另一章尚未确定的具体方案决策、成果结构或最终索引位置时才建立强依赖。reason 必须写明需要消费什么，以及 S2 已确认资料和 S4 章节 Blueprint 为什么不能直接提供。其他关联写入 related_sections，共同约束写入全局一致性说明。',
+    '例如“项目背景与需求理解”“项目范围与基础地理数据情况”“总体要求”通常都可从现有项目资料独立写作，不应按目录顺序串成依赖链。外业先于内业是项目作业流程，不自动表示内业方案必须等外业正文完成。技术响应索引需要引用最终正文位置时，可依赖对应章节；具体接口或成果结构需由另一章首次作出方案决策时，也应保留真实依赖。不要为凑满并发而删除真实依赖。',
     `Confirmed Outline SHA-256：${outlineHash}`,
     `Confirmed Outline：${JSON.stringify(outline)}`,
     `Project：${JSON.stringify(modelContext(inputs.project))}`,
@@ -338,9 +342,10 @@ export function renderChapterSubagentTask(
     '优先阅读并使用 S4 已映射的 Related Materials、Reference Bid Materials 和 Web Materials。仅在当前章节确实缺少支撑时，围绕明确缺口在 Available Local Corpus 中 grep chunks_path → read 命中 chunk，必要时读取 index 和相邻 chunk；找到足够支撑后停止补搜，不进行全书研究。',
     '空 Evidence 可以按 Blueprint 继续写作。补搜先复用已有 Web Snapshot 与本地资料，仍缺少且适合公开检索时才执行 web_search → web_fetch 并阅读正文。补充资料仅用于当前章节，不回写已确认的 S4 Evidence Map。',
     '企业事实、产品参数、人员履历、资质、案例、业绩和既有能力只能由本地 Evidence 支撑；缺少时写入 unresolved_topics。不得虚构数字、标准号、版本、日期或内部事实。',
+    '明确区分已有事实、采购硬性要求和本次拟采用的实施方案。可以提出与采购要求相符的实施方法、职责分工、台账字段和质量控制措施，并明确写为“拟采用”“本方案设置”等方案设计；不要求采购原文逐项规定这些设计，但不得冒充既有能力、保证未经核实的硬指标或把旧项目条件迁入本项目。',
     '资料不支持真实项目数量、人员、设备或记录值时，不得添加带“示例”的伪数据行，也不得写“待补、XXX、最终填写”等占位值。管理表可以保留正式字段、填写规则和控制要求，由投标人按已核实资料填写。',
     'Related Materials 来自 reference，只用于事实、参数、企业能力、技术依据和参考，不得大段照抄。Reference Bid Materials 是旧参考标书；reuse/adapt 可读取命中 chunk 的 index 和相邻 chunks 以取得完整方案，但必须清理旧项目名称、采购人、地点、日期、周期、数量、金额、环境和客户事实。',
-    '最终必须调用 structured_output 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误可在本次 Writer 内修正后重新提交。',
+    '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，资料使用记录通过 metadata 登记。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Global Consistency Notes：${JSON.stringify(globalConsistencyNotes)}`,
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
@@ -363,7 +368,7 @@ export function renderChapterSubagentTask(
 }
 
 /**
- * Render a new one-shot repair Child assignment from the rejected candidate and safe issues.
+ * 向原章节 Writer 提供审查问题及完整候选；资料短引用沿用当前章节。
  * @param context - focused current-section inputs.
  * @param basePrompt - original complete one-chapter assignment.
  * @param candidate - rejected structured result, when one was returned.
@@ -379,7 +384,7 @@ export function renderChapterSubagentRepairTask(
   return [
     basePrompt,
     '',
-    '这是新的修复 Child Session。根据 Host 问题返回完整替代候选；不得只返回补丁。',
+    '这是同一章节 Writer 的修复轮次。保留已有研究和章节上下文，根据下列问题修改完整候选，再调用 submit_chapter；不得只返回补丁。',
     `当前候选：${JSON.stringify(candidate)}`,
     ...renderStageRepairIssues(issues),
     `只修复当前章节 ${context.section.id} 的完整正文与语义 metadata。`,
@@ -607,6 +612,7 @@ function renderChapterReviewerTask(
     'coverage 的 evidence_quote_refs 与 claim 的 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
+    '明确作为本次拟采用方案提出的实施方法、职责分工、台账字段和质量控制措施，不因采购原文未逐项列出而成为 unsupported claim。审查其是否符合采购要求、是否自洽和可执行；合理方案设计不登记为需要来源证明的既有事实。若方案冒充既有人员设备或企业能力、违反采购要求、迁入旧项目条件或作出缺少支撑的硬承诺，应说明具体问题并要求修复。',
     'set_review_summary 整体替换质量判断和额外 blocking_issues，可撤销误判。任一 missing、quality=false、unsupported 或额外阻断均得到 repair；finish 收集完整报告即可成功，不需要为结束而改成 covered。',
     `Project：${JSON.stringify(modelContext(context.project))}`,
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
@@ -922,6 +928,7 @@ export async function executeChapterWriting(
   ] = inputs
   const outline = parseConfirmedOutlineArtifact(outlineRaw)
   const confirmation = parseOutlineConfirmationArtifact(confirmationRaw)
+  const outlineNumbers = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item.number]))
   const outlineHash = outlineArtifactSha256(outline)
   if (confirmation.confirmed_outline_sha256 !== outlineHash) throw new Error('chapter-writing-confirmed-outline-mismatch')
   const project = parseTenderProjectArtifact(projectRaw)
@@ -942,9 +949,9 @@ export async function executeChapterWriting(
   if (spawnProvider === undefined || spawnProvider.inheritsParentContext) {
     throw new Error('Bid chapter writing requires a fresh-context spawn subagent provider')
   }
-  if (!spawnProvider.capabilities.outputSchema || !spawnProvider.capabilities.depthLimit
+  if (!spawnProvider.capabilities.depthLimit
     || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
-    throw new Error('Bid chapter writing requires spawn output-schema, depth-limit, tool-filter, and persona capabilities')
+    throw new Error('Bid chapter writing requires spawn depth-limit, tool-filter, and persona capabilities')
   }
   const registered = new Set(tools.schemas(agent).map(schema => schema.name))
   const requiredTools = [...new Set([...MAIN_AGENT_TOOLS, ...CHAPTER_AGENT_TOOLS])]
@@ -1052,9 +1059,12 @@ export async function executeChapterWriting(
   const failures = new Map<string, unknown>()
 
   const writeSection = async (sectionId: string): Promise<CompletedChapter> => {
+    let writer: ChapterWriterChild | undefined
     signal.throwIfAborted()
     const context = contexts.get(sectionId)
     const planned = planSections.get(sectionId)
+    const number = outlineNumbers.get(sectionId)
+    if (number === undefined) throw new Error(`章节缺少目录编号：${sectionId}`)
     const log = executionLog.sections.find(section => section.section_id === sectionId)
     if (context === undefined || planned === undefined || log === undefined) throw new Error(`Bid chapter scheduler lost section ${sectionId}`)
     log.status = 'running'
@@ -1125,7 +1135,7 @@ export async function executeChapterWriting(
         writerChildSessionId: string
         reviewerChildSessionId: string
       } | undefined
-      const maxWriterAttempts = Math.min(2, options.maxRepairAttempts + 1)
+      const maxWriterAttempts = options.maxRepairAttempts + 1
       for (let attempt = 0, infrastructureRetries = 0; attempt < maxWriterAttempts;) {
         signal.throwIfAborted()
         const writerAttempt = log.attempts.filter(item => item.role === 'writer').length + 1
@@ -1140,36 +1150,17 @@ export async function executeChapterWriting(
         const startedAt = new Date().toISOString()
         let retryInfrastructure = false
         let stopAfterReview = false
-        const writerBinding = { attached: false }
-        childSetups.set(label, (child) => {
-          writerBinding.attached = true
-          child.ctx.on('tools/execute', async (exec, next) => {
-            if (exec.agent === child && exec.name === 'structured_output') {
-              exec.signal.throwIfAborted()
-              const captured = capturedByChild.get(String(child.id))
-              await bindChapterWriterInput(
-                workspace, manifest, context, references, exec.arguments, buildWebEvidenceSnapshots(captured?.values() ?? []),
-              )
-              exec.signal.throwIfAborted()
-            }
-            return next()
-          })
-        })
-        const run = await subagents.start('spawn', {
-          label,
-          parent: agent,
-          prompt: [{ type: 'text', text: prompt }],
-          signal,
-          outputSchema: chapterWriterOutputSchema,
-          toolFilter: { allow: [...CHAPTER_AGENT_TOOLS] },
-          maxDepth: 1,
-          persona: '你是技术标章节写作 Subagent。只处理 Host 指定的一个章节，并通过结构化输出返回候选结果。',
-        })
+        writer ??= createChapterWriterChild(agent, label, options.maxRepairAttempts, async (child, value) => {
+          await bindChapterWriterInput(
+            workspace, manifest, context, references, value,
+            buildWebEvidenceSnapshots(capturedByChild.get(String(child.id))?.values() ?? []),
+          )
+        }, signal)
+        const run = writer
         let candidate: AcceptedChapterCandidate | undefined
         const issues: StageValidationIssue[] = []
         try {
-          if (!writerBinding.attached) throw new Error('S5 Writer requires in-process child setup')
-          const result = await run.result
+          const result = await run.run(prompt)
           signal.throwIfAborted()
           latestStopReason = result.stopReason
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
@@ -1189,6 +1180,9 @@ export async function executeChapterWriting(
               )
               issues.push(...validated.issues)
               candidate = validated.candidate
+              if (candidate !== undefined) {
+                candidate.markdown = normalizeChapterHeadings(candidate.markdown, context.section.title, sectionId, number)
+              }
             } catch (error: unknown) {
               issues.push(...error instanceof ZodError
                 ? error.issues.map(issue => ({ code: 'CHAPTER_SUBAGENT_CANDIDATE_INVALID', message: issue.message, path: issue.path.join('.') }))
@@ -1305,7 +1299,7 @@ export async function executeChapterWriting(
           latestStopReason = 'infrastructure-error'
           issues.push({
             code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR',
-            message: 'Chapter Subagent 结果通道发生基础设施错误。',
+            message: '当前 Writer 会话创建、续写或结果读取失败，需要重新建立会话。',
           })
           log.attempts.push({
             role: 'writer',
@@ -1321,9 +1315,8 @@ export async function executeChapterWriting(
           await persistLog()
           latestIssues = issues
           retryInfrastructure = infrastructureRetries < options.maxRepairAttempts
-        } finally {
           await run.dispose()
-          childSetups.delete(label)
+          writer = undefined
           capturedByChild.delete(String(run.id))
         }
         if (stopAfterReview) break
@@ -1349,6 +1342,11 @@ export async function executeChapterWriting(
       await persistLog()
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
       throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`)
+    } finally {
+      if (writer !== undefined) {
+        await writer.dispose()
+        capturedByChild.delete(String(writer.id))
+      }
     }
   }
 

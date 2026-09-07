@@ -13,6 +13,7 @@ import { attachChapterReview, buildChapterReviewChecklist, type ChapterReviewEvi
 import { outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
 import { validateChapterReview } from '../src/chapter-writing-executor.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
+import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -40,6 +41,60 @@ const quality = {
   project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
   placeholder_free: true, obvious_repetition_free: true,
 }
+
+describe('Writer 逐轮提交', () => {
+  it('下一轮清除旧候选；旧轮次的异步校验完成不能覆盖新提交', async () => {
+    const { agent, call } = await harness()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const runtime = createChapterProtocol<string>(agent, 'submit_chapter', 0)
+    runtime.register({
+      name: 'submit_chapter', description: '完整候选', parameters: { type: 'object' },
+      async execute(args, exec) {
+        if ((args as { value: string }).value === 'old') { entered.resolve(undefined); await release.promise }
+        return runtime.finish(exec, (args as { value: string }).value)
+      },
+    })
+    const old = call('submit_chapter', { value: 'old' })
+    await entered.promise
+    runtime.nextRound()
+    expect(runtime.captured()).toBeUndefined()
+    expect((await call('submit_chapter', { value: 'new' })).isError).toBeFalsy()
+    release.resolve(undefined)
+    expect((await old).isError).toBe(true)
+    expect(runtime.captured()).toBe('new')
+    expect((await call('submit_chapter', { value: 'duplicate' })).isError).toBe(true)
+    runtime.nextRound()
+    expect(runtime.captured()).toBeUndefined()
+    expect((await call('submit_chapter', { value: 'final' })).isError).toBeFalsy()
+    expect(runtime.captured()).toBe('final')
+  })
+
+  it('旧轮次迟到的权威工具结果不能确认新轮次提交', async () => {
+    const { ctx, agent, call } = await harness()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const runtime = createChapterProtocol<string>(agent, 'submit_chapter', 0)
+    runtime.register({
+      name: 'submit_chapter', description: '完整候选', parameters: { type: 'object' },
+      execute: (args, exec) => Promise.resolve(runtime.finish(exec, (args as { value: string }).value)),
+    })
+    const lift = ctx.on('tools/post-execute', async (exec, _result, next) => {
+      if ((exec.arguments as { value: string }).value === 'old') { entered.resolve(undefined); await release.promise }
+      return next()
+    })
+    try {
+      const old = call('submit_chapter', { value: 'old' })
+      await entered.promise
+      runtime.nextRound()
+      release.resolve(undefined)
+      await old
+      expect(runtime.captured()).toBeUndefined()
+      expect((await call('submit_chapter', { value: 'new' })).isError).toBeFalsy()
+      expect(runtime.captured()).toBe('new')
+    } finally { release.resolve(undefined); lift() }
+  })
+})
 
 describe('S5 私有关系规划', () => {
   it('仅提交特殊关系仍按目录生成全部章节，upsert 不改变顺序，全局说明 trim 去重', async () => {

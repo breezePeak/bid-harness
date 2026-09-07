@@ -448,6 +448,22 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await expect(persistence.readStoredRevision(m.id, controller.signal)).rejects.toBe(reason)
   })
 
+  it('项目目录在发现后消失时仍能列出其他会话', async () => {
+    const m = meta('project-directory-race')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const persistence = ctx.sessionPersistence as unknown as {
+      listProjectDirs(): Promise<string[]>
+    }
+    const discover = persistence.listProjectDirs.bind(persistence)
+    const missing = join(root, '.dsh-mkdir-vanished')
+    const spy = vi.spyOn(persistence, 'listProjectDirs').mockImplementation(async () => [missing, ...await discover()])
+    try {
+      const snapshots = await ctx.sessionPersistence.listSnapshots()
+      expect(snapshots.map(snapshot => snapshot.header.id)).toContain(m.id)
+    } finally { spy.mockRestore() }
+  })
+
   it('omits a snapshot artifact removed after discovery', async () => {
     const m = meta('vanishing-snapshot')
     await ctx.sessionPersistence.create(m)

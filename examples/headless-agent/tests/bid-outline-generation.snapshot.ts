@@ -11,7 +11,7 @@ import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-outline-generation-snapshots/', import.meta.url))
 
-it('S3 首次启动后遗漏 RP-000011，重试只修局部并等待用户确认', async () => {
+it('S3 未知引用失败后续修候选、需求与 RP-000011 覆盖，并等待用户确认', async () => {
   const result = await runLoaderSmoke({
     label: 'S3 局部响应点修复', tempDirPrefix: 'dsh-s3-outline-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-outline-generation-driver.ts', import.meta.url)),
@@ -27,6 +27,8 @@ it('S3 首次启动后遗漏 RP-000011，重试只修局部并等待用户确认
       expect(log).toContain('审计留存与追溯')
       expect(log).toContain('正式响应点、确认目录与其他输入只读')
       expect(log).toContain('局部响应点修复')
+      expect(log).toContain('候选字段修复')
+      expect(log).toContain('局部关联与结构修复')
       const transcript = normalizeSessionSnapshot(log, { sessionIds: ['s3-outline-recovery'], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const file = join(fixtureDir, 'session.expected.jsonl')
       if (process.env.DSH_SNAPSHOT === 'refresh') {
@@ -44,7 +46,7 @@ it('S3 首次启动后遗漏 RP-000011，重试只修局部并等待用户确认
     catalogUnchanged: true, untouchedUnchanged: true, confirmationEvents: 0,
   })
   expect(actual.outline.sections[0]?.scoring_response_point_ids).toHaveLength(11)
-  expect(actual.outline.sections[0].scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })
+  expect(actual.outline.sections[0]?.scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })
   const report = parseOutlineQualityReport(actual.report)
   expect(report.reviewed_section_ids).toEqual(['SEC-SECURITY', 'SEC-SERVICE'])
   expect(report.checked_scoring_response_point_ids).toHaveLength(11)

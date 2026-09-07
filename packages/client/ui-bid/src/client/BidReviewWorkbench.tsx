@@ -254,7 +254,7 @@ export function BidReviewWorkbench({
                 </div>
               </header>
               <div className={css.articleBody}>
-                <MarkdownText text={chapter.markdown} />
+                <MarkdownText text={chapter.markdown.replace(/^# [^\n]*(?:\n|$)\s*/u, '')} />
               </div>
             </article>
           )}

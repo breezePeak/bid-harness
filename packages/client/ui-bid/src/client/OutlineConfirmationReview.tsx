@@ -37,6 +37,8 @@ export interface OutlineConfirmationReviewProps {
   outline: OutlineArtifact
   /** 已发布详情禁止编辑，保留目录导航和关联内容。 */
   readOnly?: boolean
+  /** 目录版本的展示模式，不随工作流推进或只读权限变化。 */
+  displayMode?: 'initial' | 'final_candidate' | 'final_confirmed'
   /** 与 S2 共用顶部右侧确认位置。 */
   confirmation?: ReactNode
   feedback?: ReactNode
@@ -60,6 +62,7 @@ export interface OutlineConfirmationReviewProps {
 export function OutlineConfirmationReview({
   outline,
   readOnly = false,
+  displayMode = 'initial',
   confirmation,
   notice,
   reviewContext,
@@ -87,7 +90,8 @@ export function OutlineConfirmationReview({
   const [onlyChanges, setOnlyChanges] = useState(false)
   const [navigation, setNavigation] = useState<{ id: string; side: 'baseline' | 'current' } | null>(null)
   const baseline = reviewContext?.baseline
-  const diff = useMemo(() => baseline == null ? null : compareOutlines(baseline, outline), [baseline, outline])
+  const diff = useMemo(() => baseline == null ? null : compareOutlines(baseline, outline, reviewContext?.evidence),
+    [baseline, outline, reviewContext?.evidence])
   const currentSelected = outline.sections.find(section => section.id === selectedId)
   const selected = currentSelected ?? baseline?.sections.find(section => section.id === selectedId)
   const detailReadOnly = readOnly || currentSelected === undefined
@@ -228,7 +232,7 @@ export function OutlineConfirmationReview({
             <span className={css.docTitle} title={outline.document_title}>
               {outline.document_title || '技术标文件'}
             </span>
-            <span className={css.stagePill}>{readOnly ? '目录详情' : stageLabel}</span>
+            <span className={css.stagePill}>{displayMode === 'final_confirmed' ? '最终目录已确认 / 只读' : readOnly ? '目录详情 / 只读' : stageLabel}</span>
           </div>
           {!readOnly && <div className={css.saveStatus}>
             <span className={`${css.saveDot} ${draftSaveState === 'saving' ? css.saveDotSaving : draftSaveState === 'conflict' || draftSaveState === 'failed' ? css.saveDotConflict : ''}`} />
@@ -269,7 +273,7 @@ export function OutlineConfirmationReview({
               </span>
             </div>
           </div>
-          {confirmation != null && <div className={reviewCss.actionCard}>{confirmation}</div>}
+          {!readOnly && confirmation != null && <div className={reviewCss.actionCard}>{confirmation}</div>}
         </div>
         {notice}
         {diff !== null && <div className={css.diffSummary} aria-label="目录差异汇总">
@@ -319,8 +323,8 @@ export function OutlineConfirmationReview({
         </div>
       </header>
 
-      <div className={`${css.workbench} ${stage === 'evidence_mapping' ? css.threeColumns : ''}`}>
-        {stage === 'evidence_mapping' && <aside className={css.directoryPanel} aria-label="S3 已确认目录">
+      <div className={`${css.workbench} ${displayMode !== 'initial' ? css.threeColumns : ''}`}>
+        {displayMode !== 'initial' && <aside className={css.directoryPanel} aria-label="S3 已确认目录">
           <h3>S3 已确认目录 · 只读</h3>
           <div className={css.treeContainer} ref={baselineScroll}>
             {baseline == null && <p>未加载 S3 已确认目录</p>}
@@ -358,7 +362,7 @@ export function OutlineConfirmationReview({
           </div>
         </aside>}
         <div className={css.directoryPanel} aria-label="技术标目录">
-          <h3>{stage === 'evidence_mapping' ? 'S4 当前目录' : '当前目录'}</h3>
+          <h3>{displayMode !== 'initial' ? displayMode === 'final_confirmed' ? 'S4 最终确认目录' : 'S4 当前目录' : '当前目录'}</h3>
           <div className={css.treeContainer} ref={currentScroll}>
             {displayedSections.length === 0 && (
               <div className={css.emptySearch}>

@@ -35,6 +35,16 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('章节页眉只显示一次根标题，保留正文的目录编号', async () => {
+    render(<BidReviewWorkbench {...props({ getChapter: async () => ({
+      ...chapter, markdown: '# 1.1 实施方案\n\n## 1.1.1 工作安排\n\n章节正文',
+    }) })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    const reader = screen.getByRole('main', { name: '正文阅读' })
+    expect(reader.querySelectorAll('h1')).toHaveLength(1)
+    expect(reader.querySelector('h2')?.textContent).toBe('1.1.1 工作安排')
+  })
+
   it.each(['pending', 'failed', 'completed'] as const)('S5 %s 仍保留已有正文', async (status) => {
     render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'chapter_writing', status } }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()

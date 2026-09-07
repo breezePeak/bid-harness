@@ -22,6 +22,7 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
+import { normalizeChapterHeadings } from './chapter-headings.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
@@ -1370,6 +1371,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const serial = String(index + 1).padStart(4, '0')
     let markdown: string | null = null
     try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
+    if (markdown !== null) markdown = normalizeChapterHeadings(markdown, section.title, section.id, chain.numbers.join('.'))
     let review: BidReviewChapterView['review'] = { status: markdown === null ? 'not_started' : 'reviewing', issues: [] }
     try {
       const artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
@@ -1449,7 +1451,21 @@ export class BidHostRuntime extends TypertRemoteService {
         ? readStageJson(workspace, finalOutline ? 'outline/confirmed-outline.json' : reviewingOutline ? 'outline/outline.json' : 'outline/initial-confirmed-outline.json').then(parseOutlineArtifact)
         : null,
     ])
-    return { tender, outline, body }
+    const source = finalOutline ? 'final_confirmed' : reviewingOutline ? 'final_candidate' : 'initial_confirmed'
+    const errors: string[] = []
+    const readContext = async <T>(artifact: string, parse: (value: unknown) => T): Promise<T | null> => {
+      let value: T
+      try { value = parse(await readStageJson(workspace, artifact)) } catch (error) {
+        errors.push(`${artifact} 读取失败：${error instanceof Error ? error.message : String(error)}`)
+        return null
+      }
+      return value
+    }
+    const [baseline, evidence] = finalOutline || reviewingOutline ? await Promise.all([
+      readContext('outline/initial-confirmed-outline.json', parseOutlineArtifact),
+      readContext('analysis/evidence-map.json', parseEvidenceMapArtifact),
+    ]) : [null, null]
+    return { tender, outline, body, outlinePresentation: outline === null ? null : { source, baseline, evidence, errors } }
   }
 
   /** 读取 S2 待确认或已确认结论；编辑准入仍由 confirmTenderAnalysis 校验。 */

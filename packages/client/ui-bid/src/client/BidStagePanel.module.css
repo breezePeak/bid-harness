@@ -69,15 +69,14 @@
   white-space: nowrap;
 }
 
-.runtimeStatus,
-.mappingProgress,
-.rules {
+.runtimeStatus {
+  flex: none;
+  white-space: nowrap;
   color: var(--dsw-alias-label-tertiary);
 }
 
-.mappingProgress {
-  flex: none;
-  white-space: nowrap;
+.rules {
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .rules,
@@ -372,3 +371,128 @@
 .outlineSection textarea { min-height: 48px; resize: vertical; }
 
 .mapping { color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); }
+
+.mappingCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.mappingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mappingTitleGroup {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mappingTitle {
+  font: var(--dsw-font-xs-13);
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.mappingRatio {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.mappingPills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.pillDefault {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.pillRunning {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.pillCompleted {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.pillPending {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.pillFailed {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.runningDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulseDot 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.mappingProgressTrack {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l1);
+  overflow: hidden;
+}
+
+.mappingProgressBar {
+  height: 100%;
+  background: var(--dsw-alias-state-business-primary);
+  border-radius: 2px;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

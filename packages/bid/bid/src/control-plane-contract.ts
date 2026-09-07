@@ -168,6 +168,13 @@ export interface BidClientProjection {
 export interface BidDetailsView {
   tender: import('./tender-analysis-confirmation.ts').TenderAnalysisConfirmationView | null
   outline: import('./outline-generation-artifacts.ts').OutlineArtifact | null
+  /** 产物来源决定展示模式；与工作流阶段、编辑准入分别判断。 */
+  outlinePresentation: {
+    source: 'initial_confirmed' | 'final_candidate' | 'final_confirmed'
+    baseline: import('./outline-generation-artifacts.ts').OutlineArtifact | null
+    evidence: import('./evidence-mapping-artifacts.ts').EvidenceMapArtifact | null
+    errors: string[]
+  } | null
   body: boolean
 }
 

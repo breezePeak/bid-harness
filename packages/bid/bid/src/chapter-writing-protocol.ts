@@ -19,7 +19,7 @@ export function chapterToolArgs<T>(schema: z.ZodType<T>, value: unknown): T {
   }
 }
 
-/** 一次 planning 或 Reviewer 执行的工具及已提交结果。 */
+/** 一次 planning、Writer 或 Reviewer 执行的工具及已提交结果。 */
 export interface ChapterProtocol<T> {
   /**
    * 读取经过权威工具结果确认的提交。
@@ -38,6 +38,8 @@ export interface ChapterProtocol<T> {
    * @returns 待权威结果确认的完成回执。
    */
   finish(exec: ToolRunContext, value: T): { completed: true }
+  /** 清除本轮提交并开始下一轮；旧调用不能提交到新轮次，已释放注册不会重新启用。 */
+  nextRound(): void
   /** 释放全部注册，并禁止尚未完成的工具发布结果。 */
   dispose(): void
 }
@@ -52,7 +54,9 @@ export interface ChapterProtocol<T> {
 export function createChapterProtocol<T>(agent: Agent, finishName: string, maxContinuations: number): ChapterProtocol<T> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('S5 requires tools service')
-  const staged = new WeakMap<ToolExecution, T>()
+  let staged = new WeakMap<ToolExecution, T>()
+  const executionRounds = new WeakMap<ToolRunContext, number>()
+  let round = 0
   let pending: { parent: ToolExecution['token']; value: T } | undefined
   let captured: T | undefined
   let disposed = false
@@ -100,15 +104,24 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
         presentCall: () => ({ card: 'generic', title: definition.name }),
         async execute(args, exec) {
           ensureOpen(exec)
+          executionRounds.set(exec, round)
           return definition.execute(args, exec)
         },
       }))
     },
     finish(exec, value) {
       ensureOpen(exec)
+      if (executionRounds.get(exec) !== round) throw new ToolArgsError(['该调用所属的提交轮次已结束。'])
       staged.set(exec, value)
       exec.concludeTurn()
       return { completed: true }
+    },
+    nextRound() {
+      round++
+      staged = new WeakMap()
+      pending = undefined
+      captured = undefined
+      continuations = 0
     },
     dispose() {
       disposed = true

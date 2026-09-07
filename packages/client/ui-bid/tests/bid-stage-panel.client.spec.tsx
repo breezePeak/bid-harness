@@ -43,7 +43,7 @@ function props(
     useSessions,
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
-    getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false })),
+    getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null })),
     setDetailsAvailable: vi.fn(),
     selectReviewView: vi.fn(),
     reviewSurface: { host: () => document.body, subscribe: () => () => {} },
@@ -130,6 +130,13 @@ describe('BidStagePanel', () => {
     }), { getEvidenceMappingProgress })} />)
 
     expect(await screen.findByText('研究任务：分支 8 个 · 复核 2 个 · 共 10 个 · 已完成 3 · 进行中 2 · 未开始 5')).toBeTruthy()
+    expect(screen.getByText('研究任务')).toBeTruthy()
+    expect(screen.getByText('3 / 10 (30%)')).toBeTruthy()
+    expect(screen.getByText('分支 8')).toBeTruthy()
+    expect(screen.getByText('复核 2')).toBeTruthy()
+    expect(screen.getByText('进行中 2')).toBeTruthy()
+    expect(screen.getByText('已完成 3')).toBeTruthy()
+    expect(screen.getByText('未开始 5')).toBeTruthy()
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 

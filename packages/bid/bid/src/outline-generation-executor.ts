@@ -33,10 +33,10 @@ import {
   createScoringResponsePointCatalog,
   parseScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
-import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderScoringArtifact, type TenderRequirementsArtifact, type TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
-import { normalizeOutlineCandidate } from './outline-generation-normalization.ts'
-import { applyOutlineRepair, outlineRepairOperationSchema } from './outline-generation-repair.ts'
+import { applyOutlineRepair, outlineRepairOperationSchema, outlineAssociationRepairOperationSchema } from './outline-generation-repair.ts'
+import { inspectOutlineCandidate, applyOutlineCandidateRepair, outlineCandidateRepairSchema, parseOutlineFormatRepair } from './outline-candidate-repair.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
@@ -219,7 +219,17 @@ function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace,
  */
 export function renderOutlineGenerationRepairTask(
   agent: Agent, workspace: BidWorkspace, task: BidStageTask, issues: readonly StageValidationIssue[],
-  context: { outline: OutlineArtifact; catalog: ScoringResponsePointCatalog; scoring: TenderScoringArtifact; failure?: string | undefined },
+  context: {
+    outline: OutlineArtifact
+    catalog: ScoringResponsePointCatalog
+    scoring: TenderScoringArtifact
+    failure?: string | undefined
+    associations?: {
+      requirements: TenderRequirementsArtifact
+      compliance: TenderComplianceArtifact
+      frameworks: readonly OutlineFrameworkStructure[]
+    }
+  },
 ): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
@@ -229,17 +239,23 @@ export function renderOutlineGenerationRepairTask(
     return { ...point, scoring_raw_text: item.raw_text }
   })
   return [
-    '当前阶段：outline_generation / 局部响应点修复',
+    '当前阶段：outline_generation / ' + (context.associations === undefined ? '局部响应点修复' : '局部关联与结构修复'),
     'Bid Session：' + agent.id,
     '正式响应点清单（只读，不得修改、删除或重新分配编号）：' + root + '/' + RESPONSE_POINT_CATALOG,
     JSON.stringify(context.catalog),
     '当前目录（包含 purpose、must_answer 和已有关联）：' + JSON.stringify(context.outline),
     '未被可写叶子覆盖的响应点及所属评分原文：' + JSON.stringify(missing),
+    ...(context.associations === undefined ? [] : [
+      '权威需求原文、合规规则、合法框架文件与标题路径（只读）：' + JSON.stringify(context.associations),
+      '全部正式评分原文（只读）：' + JSON.stringify(context.scoring),
+      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。结构错误使用 move/add/delete/split/merge 或 repair_structure；repair_structure 仅修改声明节点的结构字段，只有重复 ID 才能换编号。',
+    ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
     '只返回局部编辑操作，不得重写 outline.json 或质量报告。scoring_response_point_ids 是章节最终选定的完整列表，保留已有合理关联。新增 ID 由 Host 分配。',
     '唯一输出：' + root + '/outline/repair-operations.json',
-    JSON.stringify(z.toJSONSchema(z.array(outlineRepairOperationSchema))),
+    JSON.stringify(z.toJSONSchema(z.array(context.associations === undefined
+      ? outlineRepairOperationSchema : outlineAssociationRepairOperationSchema))),
   ].join('\n')
 }
 
@@ -284,23 +300,29 @@ export async function executeOutlineGeneration(
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('S3 需要 tools 服务。')
   if (options.regeneration === undefined && await read('outline/initial-confirmed-outline.json') !== undefined) throw new Error('S3 已有用户确认目录，不能用失败重试覆盖确认结果。')
-  const scoring = parseTenderScoringArtifact(JSON.parse((await read('analysis/scoring.json')) ?? 'null'))
-  const requirements = parseTenderRequirementsArtifact(JSON.parse((await read('analysis/requirements.json')) ?? 'null'))
-  const compliance = parseTenderComplianceArtifact(JSON.parse((await read('analysis/compliance.json')) ?? 'null'))
-  const inputVersion = createHash('sha256').update(JSON.stringify(await Promise.all(task.inputs.map(async input => [input, await read(input)])))).digest('hex')
-  const stageCandidates = [OUTLINE_ARTIFACT, QUALITY_REPORT_ARTIFACT, RESPONSE_POINT_CANDIDATE, RESPONSE_POINT_CATALOG]
-  const previousVersion = await read('outline/generation-inputs.json')
-  if (previousVersion !== undefined && JSON.parse(previousVersion) !== inputVersion) {
-    for (const artifact of stageCandidates) {
-      await remove(artifact)
+  await remove(QUALITY_REPORT_ARTIFACT)
+  const readInput = async <T>(artifact: string, parse: (value: unknown) => T): Promise<T> => {
+    const raw = await read(artifact)
+    try { return parse(JSON.parse(raw ?? 'null')) } catch (error) {
+      throw new BidStageExecutionError([{ code: 'OUTLINE_GENERATION_INPUT_INVALID', artifact, message: '正式输入缺失或损坏：' + (error instanceof Error ? error.message : String(error)) }])
     }
+  }
+  const scoring = await readInput('analysis/scoring.json', parseTenderScoringArtifact)
+  const requirements = await readInput('analysis/requirements.json', parseTenderRequirementsArtifact)
+  const compliance = await readInput('analysis/compliance.json', parseTenderComplianceArtifact)
+  const inputVersion = createHash('sha256').update(JSON.stringify(await Promise.all(task.inputs.map(async input => [input, await read(input)])))).digest('hex')
+  const previousVersion = await read('outline/generation-inputs.json')
+  if (previousVersion !== undefined && await readInput('outline/generation-inputs.json', value => z.string().parse(value)) !== inputVersion) {
+    throw new BidStageExecutionError([{ code: 'OUTLINE_GENERATION_INPUT_CHANGED', artifact: 'outline/generation-inputs.json', message: 'S3 正式输入版本已变化，不能继续使用当前候选。请按阶段重置流程更新输入；已保留目录与正式 RP 清单。' }])
   }
   await write('outline/generation-inputs.json', inputVersion)
   const catalogRaw = await read(RESPONSE_POINT_CATALOG)
-  let catalog = catalogRaw === undefined ? undefined : parseScoringResponsePointCatalog(JSON.parse(catalogRaw))
+  let catalog = catalogRaw === undefined ? undefined : await readInput(RESPONSE_POINT_CATALOG, parseScoringResponsePointCatalog)
+  if (catalog === undefined && await read(OUTLINE_ARTIFACT) !== undefined) throw new BidStageExecutionError([
+    { code: 'OUTLINE_GENERATION_INPUT_INVALID', artifact: RESPONSE_POINT_CATALOG, message: '已有目录候选缺少正式 RP 清单，不能通过重新分配编号恢复。' },
+  ])
   if (catalog !== undefined && !catalogMatchesScoring(catalog, scoring)) {
-    catalog = undefined
-    for (const artifact of stageCandidates) await remove(artifact)
+    throw new BidStageExecutionError([{ code: 'OUTLINE_GENERATION_INPUT_MISMATCH', artifact: RESPONSE_POINT_CATALOG, message: '正式响应点清单与 S2 评分版本不匹配；不能通过重写正式输入修复候选。' }])
   }
   let writablePaths: string[] = []
   const allowed = new Set(task.allowedTools)
@@ -353,22 +375,79 @@ export async function executeOutlineGeneration(
     await remove(QUALITY_REPORT_ARTIFACT)
     let attempts = 0
     let repairFailure: string | undefined
-    while (true) {
-      options.signal?.throwIfAborted()
-      const outline = normalizeOutlineCandidate(JSON.parse((await read(OUTLINE_ARTIFACT)) ?? 'null'), catalog, scoring)
-      await write(OUTLINE_ARTIFACT, outline)
+    let reviewBaseline: string | undefined
+    const formalCatalog = catalog
+    const consumeRepair = (issues: readonly StageValidationIssue[]): void => {
+      if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
+        ...issues, { code: 'OUTLINE_GENERATION_REPAIR_EXHAUSTED', message: 'S3 局部修复未通过，已保留当前目录候选。' + (repairFailure ?? '') },
+      ])
+    }
+    const validate = async (outline: OutlineArtifact): Promise<StageValidationIssue[]> => {
       const issues: StageValidationIssue[] = []
       validateOutlineSharedStructure(outline.sections, issues)
-      validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
+      validateOutlineSharedCoverage(outline, requirements, scoring, compliance, formalCatalog, issues)
       await validateOutlineFrameworkRefs(workspace, outline, issues)
+      return issues
+    }
+    while (true) {
+      options.signal?.throwIfAborted()
+      const raw = (await read(OUTLINE_ARTIFACT)) ?? ''
+      const candidate = inspectOutlineCandidate(raw, catalog, scoring)
+      if (candidate.kind !== 'valid') {
+        reviewBaseline = undefined
+        if (candidate.kind === 'fields' && candidate.issues.some(issue => issue.field === null || issue.field === 'sections')) {
+          throw new BidStageExecutionError([...candidate.issues, { code: 'OUTLINE_CANDIDATE_UNRECOVERABLE', artifact: OUTLINE_ARTIFACT,
+            message: '候选缺少可恢复的目录或章节对象；字段修复不能重生成整章或整本目录，已保留原始候选。' }])
+        }
+        consumeRepair(candidate.issues)
+        const output = candidate.kind === 'format' ? 'outline/format-repair.json' : 'outline/candidate-repair.json'
+        await remove(output)
+        if (candidate.kind === 'format') {
+          await assertNoLinkedPath(workspace.root, path('outline/format-repair-source.txt'))
+          await writeFileAtomic(path('outline/format-repair-source.txt'), raw, { mode: 0o600 })
+        }
+        const repairTask = [
+          '当前阶段：outline_generation / 候选' + (candidate.kind === 'format' ? ' JSON 格式修复' : '字段修复'),
+          '问题位置与原因：' + JSON.stringify(candidate.issues), repairFailure ?? '',
+          '原始候选（只读）：\n' + raw,
+          candidate.kind === 'format'
+            ? '只修复 JSON 序列化标点和空白，保留字符串、数值、字面值及其顺序；禁止调整章节、拆解评分、重分配 RP 或重生成目录。无法在此范围内恢复时说明原因。输出恢复后的 JSON。'
+            : '只输出已定位字段的局部操作。section_index 指原始数组下标，section_id 与 path 供核对；禁止整章或整本替换。未知 ID 必须根据原文重新明确选择合法关联，不能删除未知 ID 了事、模糊替换或默认挂到某章。RP 快照由 Host 派生，修复快照错误时只选择 scoring_response_point_ids。删除额外字段用 remove=true。\n' + JSON.stringify(z.toJSONSchema(outlineCandidateRepairSchema)),
+          ...(candidate.kind === 'format' ? [] : ['权威输入（只读，不得修改）：' + JSON.stringify({ catalog, scoring, requirements, compliance, frameworks })]),
+          '唯一可写输出：' + relative(workspace.root, path(output)).replaceAll('\\', '/'),
+        ].join('\n')
+        await run(repairTask, [output])
+        let repaired: unknown
+        try {
+          repaired = candidate.kind === 'format'
+            ? parseOutlineFormatRepair(raw, (await read(output)) ?? '')
+            : applyOutlineCandidateRepair(candidate.value, JSON.parse((await read(output)) ?? 'null'), candidate.issues,
+              { catalog, scoring, requirements, compliance, frameworks })
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          repairFailure = error instanceof Error ? error.message : String(error)
+          continue
+        }
+        repairFailure = undefined
+        await write(OUTLINE_ARTIFACT, repaired)
+        continue
+      }
+      const outline = candidate.outline
+      await write(OUTLINE_ARTIFACT, outline)
+      const issues = await validate(outline)
+      if (reviewBaseline !== undefined && reviewBaseline !== JSON.stringify(outline)) {
+        reviewBaseline = undefined
+        if (issues.length === 0) consumeRepair([{ code: 'OUTLINE_GENERATION_REVIEW_INCOMPLETE', message: '质量复核修改了目录，当前候选尚需完整语义复核。' }])
+      }
       if (issues.length > 0 || repairFailure !== undefined) {
-        if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
-          ...issues, { code: 'OUTLINE_GENERATION_REPAIR_EXHAUSTED', message: 'S3 局部修复未通过，已保留当前目录候选。' + (repairFailure ?? '') },
-        ])
+        reviewBaseline = undefined
+        consumeRepair(issues)
         const operationsPath = 'outline/repair-operations.json'
         await remove(operationsPath)
+        const rpOnly = issues.length > 0 && issues.every(issue => issue.code.includes('RESPONSE_POINT'))
         const repairTask = renderOutlineGenerationRepairTask(agent, workspace, task, issues,
-          { outline, catalog, scoring, failure: repairFailure })
+          { outline, catalog, scoring, failure: repairFailure,
+            ...(rpOnly ? {} : { associations: { requirements, compliance, frameworks } }) })
         try {
           await run(repairTask, [operationsPath])
         } catch (error) {
@@ -376,8 +455,25 @@ export async function executeOutlineGeneration(
           throw new BidStageExecutionError([...issues, { code: 'OUTLINE_GENERATION_REPAIR_FAILED', message: error instanceof Error ? error.message : String(error) }])
         }
         let repaired: OutlineArtifact
-        try { repaired = applyOutlineRepair(outline, JSON.parse((await read(operationsPath)) ?? 'null'), catalog, scoring) } catch (error) {
+        const operationSchema = rpOnly ? outlineRepairOperationSchema : outlineAssociationRepairOperationSchema
+        try {
+          repaired = applyOutlineRepair(outline, z.array(operationSchema).parse(JSON.parse((await read(operationsPath)) ?? 'null')), catalog, scoring)
+        } catch (error) {
           repairFailure = error instanceof Error ? error.message : String(error)
+          continue
+        }
+        const repairedIssues = await validate(repaired)
+        const remaining = [...issues]
+        const invalid = repairedIssues.filter((issue) => {
+          if (issue.code.endsWith('_MISSING')) return false
+          const index = remaining.findIndex(previous => previous.code === issue.code
+            && previous.path === issue.path && previous.message === issue.message)
+          if (index < 0) return true
+          remaining.splice(index, 1)
+          return false
+        })
+        if (invalid.length > 0) {
+          repairFailure = '局部操作引入非法引用或结构，未保存：' + JSON.stringify(invalid)
           continue
         }
         repairFailure = undefined
@@ -385,26 +481,18 @@ export async function executeOutlineGeneration(
         await write(OUTLINE_ARTIFACT, repaired)
         continue
       }
-      const beforeReview = JSON.stringify(outline)
-      await remove(QUALITY_REPORT_ARTIFACT)
-      await remove(QUALITY_REPORT_CANDIDATE)
-      await run(renderBlueprintQualityReviewTask(agent, workspace, task) + handoff + '\n本轮完整复核目录：' + beforeReview
-        + '\n本轮完整复核的招标要求、评分及合规：' + JSON.stringify({ requirements, scoring, compliance }),
-      [OUTLINE_ARTIFACT, QUALITY_REPORT_CANDIDATE])
-      const report = outlineQualityReportSchema.pick({ schema_version: true, scope: true, issues: true }).strip()
-        .parse(JSON.parse((await read(QUALITY_REPORT_CANDIDATE)) ?? 'null'))
-      const reviewed = normalizeOutlineCandidate(JSON.parse((await read(OUTLINE_ARTIFACT)) ?? 'null'), catalog, scoring)
-      await write(OUTLINE_ARTIFACT, reviewed)
-      const reviewedIssues: StageValidationIssue[] = []
-      validateOutlineSharedStructure(reviewed.sections, reviewedIssues)
-      validateOutlineSharedCoverage(reviewed, requirements, scoring, compliance, catalog, reviewedIssues)
-      await validateOutlineFrameworkRefs(workspace, reviewed, reviewedIssues)
-      if (reviewedIssues.length > 0 || JSON.stringify(reviewed) !== beforeReview) {
-        if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
-          ...reviewedIssues, { code: 'OUTLINE_GENERATION_REVIEW_INCOMPLETE', message: 'S3 复核修改次数已用尽，已保留当前候选；修改内容尚需重新复核。' },
-        ])
+      if (reviewBaseline === undefined) {
+        reviewBaseline = JSON.stringify(outline)
+        await remove(QUALITY_REPORT_ARTIFACT)
+        await remove(QUALITY_REPORT_CANDIDATE)
+        await run(renderBlueprintQualityReviewTask(agent, workspace, task) + handoff + '\n本轮完整复核目录：' + reviewBaseline
+          + '\n本轮完整复核的招标要求、评分及合规：' + JSON.stringify({ requirements, scoring, compliance }),
+        [OUTLINE_ARTIFACT, QUALITY_REPORT_CANDIDATE])
         continue
       }
+      const report = outlineQualityReportSchema.pick({ schema_version: true, scope: true, issues: true }).strip()
+        .parse(JSON.parse((await read(QUALITY_REPORT_CANDIDATE)) ?? 'null'))
+      const reviewed = outline
       await write(QUALITY_REPORT_ARTIFACT, { ...report,
         checked_requirement_ids: requirements.requirements.map(item => item.id),
         checked_scoring_ids: scoring.scoring_items.map(item => item.id),

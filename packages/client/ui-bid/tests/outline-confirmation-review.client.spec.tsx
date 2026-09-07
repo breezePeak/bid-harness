@@ -141,7 +141,7 @@ describe('OutlineConfirmationReview', () => {
     render(
       <OutlineConfirmationReview
         outline={testOutline}
-        stage="evidence_mapping"
+        stage="evidence_mapping" displayMode="final_candidate"
         onUpdateSection={vi.fn()}
         onStructureOperation={vi.fn()}
         onIndentSection={vi.fn()}
@@ -242,7 +242,7 @@ describe('目录拖拽与差异', () => {
     expect(changes.get('SEC-002')).toMatchObject({ modified: true, moved: false })
     expect(changes.get('SEC-003')?.deleted).toBe(true)
     expect(changes.get('SEC-NEW')?.added).toBe(true)
-    render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping"
+    render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping" displayMode="final_candidate"
       reviewContext={{ baseline: testOutline, requirements: { schema_version: 1, requirements: [] },
         scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
       onUpdateSection={vi.fn()} onStructureOperation={vi.fn()} onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
@@ -273,7 +273,7 @@ describe('目录拖拽与差异', () => {
 })
 
 function renderComparison(outline: OutlineArtifact, baseline = testOutline) {
-  return render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping"
+  return render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping" displayMode="final_candidate"
     reviewContext={{ baseline, requirements: { schema_version: 1, requirements: [] },
       scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
     onUpdateSection={vi.fn()} onStructureOperation={vi.fn()} onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
@@ -333,8 +333,8 @@ describe('S4 稳定章节对应与业务差异', () => {
     fireEvent.click(within(screen.getByLabelText('S3 已确认目录')).getByRole('button', { name: '实施与交付计划' }))
     expect(screen.getByLabelText('技术标目录').querySelector('[aria-current]')).toBeNull()
     expect(screen.getByText('S4 中无对应章节 · 已删除，以下为 S3 原内容')).toBeTruthy()
-    expect((screen.getByLabelText('SEC-003 目的')).readOnly).toBe(true)
-    expect(within(screen.getByLabelText('当前章节详情')).queryByRole('button', { name: '删除', exact: true })).toBeNull()
+    expect(screen.getByLabelText<HTMLTextAreaElement>('SEC-003 目的').readOnly).toBe(true)
+    expect(within(screen.getByLabelText('当前章节详情')).queryByRole('button', { name: '删除' })).toBeNull()
     fireEvent.focus(screen.getByLabelText('NEW 标题'))
     expect(screen.getByText('S3 中无对应章节')).toBeTruthy()
     expect(screen.getByLabelText('S3 已确认目录').querySelector('[aria-current]')).toBeNull()

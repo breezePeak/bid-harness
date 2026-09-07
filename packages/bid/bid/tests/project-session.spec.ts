@@ -67,7 +67,7 @@ async function fixture() {
 
 describe('Workspace 项目与独立 Session', () => {
   it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+    const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
     for (const [path, title] of [
       ['initial-confirmed-outline.json', 'S3 已确认目录'],
@@ -96,7 +96,41 @@ describe('Workspace 项目与独立 Session', () => {
       expect(details.tender !== null).toBe(tender)
       expect(details.outline?.sections[0]?.title ?? null).toBe(title)
       expect(details.body).toBe(body)
+      if (title === null) expect(details.outlinePresentation).toBeNull()
+      else if (body || stage === 'evidence_mapping' && status === 'waiting_user') {
+        expect(details.outlinePresentation?.source).toBe(body ? 'final_confirmed' : 'final_candidate')
+        expect(details.outlinePresentation?.baseline?.sections[0]?.title).toBe('S3 已确认目录')
+        expect(details.outlinePresentation?.evidence?.section_mappings[0]?.missing_topics).toEqual(['待补充实施材料'])
+        expect(details.outlinePresentation?.errors).toEqual([])
+      } else expect(details.outlinePresentation).toEqual({ source: 'initial_confirmed', baseline: null, evidence: null, errors: [] })
     }
+    expect(executor.execute).not.toHaveBeenCalled()
+  })
+
+  it('S5 运行中读取详情不等待写作任务，不调用确认接口；上下文损坏保留最终版本状态', async () => {
+    const { ctx, workspace, fresh, host, executor } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
+    const agent = await fresh('details-in-flight')
+    agent.session.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    const review = vi.spyOn(ctx.bid, 'getOutlineReviewContext')
+    const before = agent.session.events.length
+    host.inFlight.set(process.platform === 'win32' ? workspace.root.toLowerCase() : workspace.root, { done: new Promise(() => {}) })
+    try {
+      const result = await ctx.bid.getDetails(agent.session)
+      expect(result.outlinePresentation).toMatchObject({ source: 'final_confirmed', baseline: outline, errors: [] })
+      await writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), '{')
+      await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), '{')
+      const broken = await ctx.bid.getDetails(agent.session)
+      expect(broken.outline).toEqual(outline)
+      expect(broken.outlinePresentation).toMatchObject({ source: 'final_confirmed', baseline: null, evidence: null })
+      expect(broken.outlinePresentation?.errors.join('\n')).toContain('initial-confirmed-outline.json 读取失败')
+      expect(broken.outlinePresentation?.errors.join('\n')).toContain('evidence-map.json 读取失败')
+      expect(review).not.toHaveBeenCalled()
+      expect(executor.execute).not.toHaveBeenCalled()
+      expect(agent.session.events).toHaveLength(before)
+    } finally { host.inFlight.clear() }
   })
   it('fresh Session 保留 S4 项目，聊天、推理、工具和 conversation nodes 均为空', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
@@ -152,7 +186,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(b.session)).toEqual(failed)
     expect(getBidClientProjection(runtime(b.session)).allowedActions).toContain('retry_stage')
     expect(await ctx.bid.getReviewWorkbench(b.session)).toMatchObject({ outline: [{ section_id: 'SEC-1', writing_status: 'completed', content_available: true }], summary: { content_count: 1 } })
-    expect(await ctx.bid.getReviewChapter(b.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
+    expect(await ctx.bid.getReviewChapter(b.session, 'SEC-1')).toMatchObject({ markdown: '# 1 技术方案\n\n已有正文。' })
     executor.canExecute = stage => stage === 'chapter_writing'
     expect(await ctx.bid.retryStage(b.session)).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'chapter_writing' }))
@@ -291,7 +325,7 @@ describe('Workspace 项目与独立 Session', () => {
       const d = await fresh('session-d', alias, false)
       expect(runtime(d.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
       expect(d.session.deriveMessages()).toEqual([])
-      expect(await ctx.bid.getReviewChapter(d.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
+      expect(await ctx.bid.getReviewChapter(d.session, 'SEC-1')).toMatchObject({ markdown: '# 1 技术方案\n\n已有正文。' })
       gate.resolve(undefined)
       expect((await operationA).ok).toBe(true)
       expect((await operationC).ok).toBe(true)

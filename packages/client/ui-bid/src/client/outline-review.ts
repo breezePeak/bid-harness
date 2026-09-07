@@ -1,12 +1,13 @@
 /** 目录业务字段差异与现有移动操作的展示落点。 */
-import { applyOutlineEdits, type OutlineArtifact, type OutlineEditOperation, type OutlineSection } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, type OutlineArtifact, type OutlineEditOperation, type OutlineSection, type OutlineReviewContext } from '@deepseek-ai/dsh-bid/control-plane'
 
 /**
  * @param baseline S3 已确认章节。
  * @param current S4 当前草稿。
+ * @param evidence S4 已有关联资料；S3 确认基线尚未进行资料映射。
  * @returns 按稳定 ID 归属的字段增减和结构变化，忽略编号顺延及关联集合排列。
  */
-export function compareOutlines(baseline: OutlineArtifact, current: OutlineArtifact) {
+export function compareOutlines(baseline: OutlineArtifact, current: OutlineArtifact, evidence?: OutlineReviewContext['evidence']) {
   const before = new Map(baseline.sections.map(section => [section.id, section]))
   const after = new Map(current.sections.map(section => [section.id, section]))
   const changes = new Map<string, {
@@ -47,7 +48,15 @@ export function compareOutlines(baseline: OutlineArtifact, current: OutlineArtif
     }
     const title = a !== undefined && b !== undefined && a.title !== b.title
     const writing = changedFields(writingFields, false)
-    const links = changedFields(linkFields, true)
+    const linkedFields = changedFields(linkFields, true)
+    const mapping = evidence?.section_mappings.find(item => item.section_id === id)
+    const materials = mapping === undefined ? [] : [
+      ...mapping.local_materials.map(item => `${item.source_kind === 'reference_bid' ? '旧标书' : '资料'} · ${item.file_id} / ${item.chunk} · ${item.summary}`),
+      ...mapping.web_materials.map(item => `${item.source_id} · ${item.summary} · ${item.supports}`),
+    ]
+    const evidenceAdded = a !== undefined && b !== undefined && materials.length > 0
+    if (evidenceAdded) details.push({ label: 'S4 关联资料（S3 尚未映射）', before: [], after: materials })
+    const links = linkedFields || evidenceAdded
     // 只比较两版都留在同一父节点下的章节，新增、删除与父级搬迁不会造成编号顺延误报。
     const siblings = (source: OutlineArtifact, peer: Map<string, OutlineSection>, parent: string | null) => source.sections
       .filter(section => section.parent_id === parent && peer.get(section.id)?.parent_id === parent)

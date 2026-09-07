@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
+import { normalizeChapterHeadings } from './chapter-headings.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationResult } from './control-plane-contract.ts'
@@ -18,7 +19,8 @@ async function readProjectFile(workspace: BidWorkspace, path: string): Promise<s
 }
 
 /** Markdown 标题只在当前章节内分级，代码块中的井号保持原文。 */
-function chapterBody(markdown: string, title: string, sectionId: string, depth: number): string {
+function chapterBody(markdown: string, title: string, sectionId: string, number: string, depth: number): string {
+  markdown = normalizeChapterHeadings(markdown, title, sectionId, number)
   const nodes = fromMarkdown(markdown).children
   for (const node of [...nodes].reverse()) {
     if (node.type !== 'heading') continue
@@ -28,8 +30,8 @@ function chapterBody(markdown: string, title: string, sectionId: string, depth: 
     const first = node.children[0]?.position?.start.offset
     const last = node.children.at(-1)?.position?.end.offset
     const inline = first === undefined || last === undefined ? '' : markdown.slice(first, last)
-    const text = node === nodes[0] && (inline === title || inline === sectionId)
-      ? '' : `${'#'.repeat(Math.min(6, depth + node.depth))} ${inline}`
+    const text = node === nodes[0]
+      ? '' : `${'#'.repeat(Math.min(6, depth + node.depth - 1))} ${inline}`
     markdown = markdown.slice(0, start) + text + markdown.slice(end)
   }
   return markdown.trim()
@@ -68,7 +70,7 @@ export async function executeDocxExport(
     if (chapter === undefined) continue
     const markdown = await readProjectFile(workspace, chapter.content_path)
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
-    parts.push(chapterBody(markdown, section.title, section.id, headingDepth))
+    parts.push(chapterBody(markdown, section.title, section.id, number, headingDepth))
   }
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
   const source = destination.slice(0, -'.docx'.length) + '.md'

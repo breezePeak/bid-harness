@@ -8,13 +8,13 @@ S5 把 Writer 或 Reviewer 的非正常结束与内容校验失败共用同一�
 
 ## Decision
 
-Writer 和 Reviewer 的 `stopReason=error` 使用独立运行重试计数，重新建立 one-shot Child 并复用同一语义任务，不增加内容修订序号。进程内 Subagent Driver 从 Child 的持久化 `turn/end` 提取安全的 LLM 失败代码写入 `SubagentResult.diagnostic`，不复制 Provider 消息或载荷。内容 Schema、Host 校验或有效 Reviewer 的修订结论继续使用原有内容修订计数。
+Writer 和 Reviewer 的 `stopReason=error` 使用独立运行重试计数，Writer 在同一可续写会话重试，无法继续时才重建；Reviewer 重新建立独立 Child，均复用同一语义任务，不增加内容修订序号。进程内 Subagent Driver 从 Child 的持久化 `turn/end` 提取安全的 LLM 失败代码写入 `SubagentResult.diagnostic`，不复制 Provider 消息或载荷。内容 Schema、Host 校验或有效 Reviewer 的修订结论继续使用原有内容修订计数。
 
 Host 以 `chapters/execution-log.json` 维护每章的 pending、running、completed 和 failed 状态。一个章节最终失败只记录该章，不取消无关运行；调度器继续完成所有依赖已满足的章节，依赖失败章节的节点明确标记 failed。已有有效 Reviewer 报告的候选在后续修订遭遇重复运行错误时作为 `needs_attention` 结果提交，保留其具体内容问题，不把传输错误升级为缺失章节。
 
 阶段重试先校验确认目录哈希、关系计划、执行日志顺序与依赖、正文、Metadata、Reviewer 报告、资料完整性、内容哈希、最终 Writer/Reviewer Child 身份和已接受尝试。Host 从全部无法恢复为 completed 的章节出发，沿合法计划的反向 depends_on 遍历直接与间接下游；这个闭包内的章节重置为 pending，清空最终 Writer/Reviewer 身份，保留历史 attempts 和文件。失效集合不依赖目录显示顺序，也不沿 related_sections 传播。首个 Writer 启动前写入一致的日志，依赖章节只能接收本轮前置章节的新 handoff；集合之外的合法 completed 与 repair 均复用。合法 plan 独立复用，不依赖 execution-log 已经创建；非法或目录 Hash 不匹配时重新规划。普通重试不删除章节文件；只有用户显式阶段重置才清理。具体提交和恢复校验见 [S5 私有提交协议](../architecture/2026-09-07-s5-private-submission-protocols.md)。
 
-Web 候选池与实际证据分别验证。调度前的读取位置预检和每章 W 引用分配均隔离单来源的缺失、正文 Hash 错误与不安全路径，向 Writer 保留已映射要求和明确不可用原因，允许按原规则替代或局部补搜。已发 W 不删除或复用，当前不可用来源不出现在可用表中。实际 structured_output 仍验证当前账本身份、路径和正文 Hash；不能靠删除非法引用接纳提交。整体账本解析失败、取消与 Host 写盘失败保持失败，不归类为普通坏来源。
+Web 候选池与实际证据分别验证。调度前的读取位置预检和每章 W 引用分配均隔离单来源的缺失、正文 Hash 错误与不安全路径，向 Writer 保留已映射要求和明确不可用原因，允许按原规则替代或局部补搜。已发 W 不删除或复用，当前不可用来源不出现在可用表中。实际 `submit_chapter` 仍验证当前账本身份、路径和正文 Hash；不能靠删除非法引用接纳提交。整体账本解析失败、取消与 Host 写盘失败保持失败，不归类为普通坏来源。
 
 最终正文、metadata 和 review 每次异步写入返回后都检查取消。完成日志任务实际取得串行队列时再次检查；随后一次原子 execution-log 替换构成最小完成提交，开始后允许收敛，写入成功才更新共享 completed 和最终 Child 身份。其他日志任务不能提前观察到待提交完成状态。提交前取消保留候选文件但不发布本轮全书 manifest；提交成功后发生的取消不回滚章节，重试以磁盘完成日志恢复。
 

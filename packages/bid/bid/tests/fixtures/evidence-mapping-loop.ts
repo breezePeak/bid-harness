@@ -65,7 +65,13 @@ class ScriptedAdapter extends LlmAdapter {
 /** 回放文件工具与 Host 使用同一个实际磁盘工作区。 */
 export default LocalFileSystem
 
-function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[]): void {
+/**
+ * 注册回放所需的实际磁盘读写工具及固定外部 Web 返回。
+ * @param ctx Loader 组装的工具服务。
+ * @param root 隔离工作区。
+ * @param sourceUrls 本场景允许的固定外部来源。
+ */
+export function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[]): void {
   const urls = typeof sourceUrls === 'string' ? [sourceUrls] : [...sourceUrls]
   let searchIndex = 0
   ctx.effect(() => ctx.tools.register(defineTool({
@@ -412,9 +418,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('grep-supplement', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
-    toolCall('reject-bad-reference', 'structured_output', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
-    toolCall('reject-bad-web-reference', 'structured_output', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
-    toolCall('submit-chapter', 'structured_output', candidate),
+    toolCall('reject-bad-reference', 'submit_chapter', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
+    toolCall('reject-bad-web-reference', 'submit_chapter', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
+    toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('submit-summary', 'set_review_summary', summary),
@@ -455,6 +461,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
   outline.sections.push(untouched)
   const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
+  candidate.sections[0] = { ...candidate.sections[0]!, scoring_response_point_ids: [...pointIds.slice(0, 10), 'RP-999999'], scoring_ids: ['SCORE-UNKNOWN'], requirement_ids: [] }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript = [
@@ -477,11 +484,20 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     { canExecute: stage => stage === 'outline_generation', execute: task => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
   const failed = await orchestrator.runCurrentAutomaticStage()
-  if (failed.status !== 'failed' || !failed.failureReason?.includes('RP-000011')) throw new Error('遗漏 RP 未阻止 S3')
+  if (failed.status !== 'failed' || !failed.failureReason?.includes('RP-999999')) throw new Error('未知 RP 未进入可续修的失败状态')
   const catalogBefore = await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
-  const baseline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+  const baseline = outline
   parentScript.push(
     toolCall('forbidden-catalog-write', 'write', { file_path: prefix + '/analysis/scoring-response-points.json', content: '{}' }),
+    toolCall('candidate-repair', 'write', { file_path: prefix + '/outline/candidate-repair.json', content: JSON.stringify([
+      { section_index: 0, field: 'scoring_response_point_ids', value: pointIds.slice(0, 10) },
+      { section_index: 0, field: 'scoring_ids', value: ['SCORE-1'] },
+    ]) }),
+    finalText('根据正式评分原文重新明确选择合法 RP 与评分关联。'),
+    toolCall('requirement-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([
+      { type: 'update_section', section_id: section.id, requirement_ids: section.requirement_ids },
+    ]) }),
+    finalText('将招标要求关联至现有安全方案章节。'),
     toolCall('local-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
       type: 'update_section', section_id: section.id, scoring_response_point_ids: pointIds,
       must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
@@ -490,7 +506,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     toolCall('quality-review', 'write', { file_path: prefix + '/outline/quality-report.candidate.json', content: JSON.stringify({ schema_version: 3, scope: 'technical_bid', issues: [] }) }),
     finalText('逐项复核章节归属和写作指导已完成。'),
   )
-  maxRepairAttempts = 1
+  maxRepairAttempts = 3
   const outcome = await orchestrator.retry()
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
