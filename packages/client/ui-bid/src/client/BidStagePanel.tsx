@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
-import { BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -131,6 +131,7 @@ export function BidStagePanel({
   confirmOutline,
   regenerateOutline,
   getOutlineDraft,
+  getOutlineReviewContext,
   applyOutlineDraftOperations,
   confirmTenderAnalysis,
   getTenderAnalysisForConfirmation,
@@ -142,6 +143,7 @@ export function BidStagePanel({
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
+  const [reviewContext, setReviewContext] = useState<OutlineReviewContext | null>(null)
   const [draft, setDraft] = useState<OutlineDraftView | null>(null)
   const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
   const [mappingProgress, setMappingProgress] = useState<BidEvidenceMappingProgress | null>(null)
@@ -246,6 +248,18 @@ export function BidStagePanel({
       setRequestError(null)
     }
   }, [sessionId, projection?.runtime.stage, projection?.runtime.status])
+
+  useEffect(() => {
+    setReviewContext(null)
+    if (!canConfirm || getOutlineReviewContext === undefined) return
+    let active = true
+    void getOutlineReviewContext().then((value) => {
+      if (active) setReviewContext(value)
+    }, (reason: unknown) => {
+      if (active) setRequestError({ message: reason instanceof Error ? reason.message : String(reason), issues: [] })
+    })
+    return () => { active = false }
+  }, [canConfirm, getOutlineReviewContext, sessionId, projection?.runtime.stage])
 
   useEffect(() => {
     if (!canConfirm || getOutlineDraft === undefined) return
@@ -418,6 +432,9 @@ export function BidStagePanel({
   }
 
   const structureOperation = (operation: OutlineEditOperation): void => {
+    if (operation.type === 'move_section') {
+      setDraft(current => current === null ? null : { ...current, outline: applyOutlineEdits(current.outline, [operation]) })
+    }
     persistOperation(operation)
     setRequestError(null)
   }
@@ -495,6 +512,7 @@ export function BidStagePanel({
             {canConfirm && previewOutline !== null && (
               <OutlineConfirmationReview
                 outline={previewOutline}
+                reviewContext={reviewContext}
                 stage={projection.runtime.stage}
                 draftSaveState={draftSaveState}
                 revision={draft?.revision}

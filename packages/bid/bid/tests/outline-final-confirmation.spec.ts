@@ -46,6 +46,7 @@ async function fixture() {
     })) },
     'analysis/web-evidence-sources.json': { schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION, stage: 'evidence_mapping', sources: [] },
     'outline/outline.json': outline,
+    'outline/initial-confirmed-outline.json': outline,
     'outline/quality-report.json': { schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [],
       checked_scoring_response_point_ids: [], reviewed_section_ids: outline.sections.map(section => section.id), issues: [] },
   }
@@ -73,6 +74,22 @@ async function fixture() {
 afterEach(() => { vi.clearAllMocks() })
 
 describe('S4 Draft 最终确认', () => {
+  it('读取已确认 S3 基线；移动保存和重新读取不修改基线或 Evidence', async () => {
+    const f = await fixture()
+    try {
+      const context = await f.host.getOutlineReviewContext(f.session)
+      expect(context.baseline).toEqual(f.outline)
+      const draft = await f.host.getOutlineDraft(f.session)
+      const result = await f.host.applyOutlineDraftOperations(f.session, { ...identity(draft), operations: [
+        { type: 'move_section', section_id: 'SEC-2', parent_id: null, order: 1 },
+      ] })
+      expect(result.ok).toBe(true)
+      expect((await f.host.getOutlineDraft(f.session)).outline.sections.find(section => section.id === 'SEC-2')?.order).toBe(1)
+      expect(await f.host.getOutlineReviewContext(f.session)).toEqual(context)
+      expect(executeEvidenceMappingFinalCheck).not.toHaveBeenCalled()
+    } finally { await f.ctx.fiber.dispose() }
+  })
+
   it('连续编辑保留研究基线与 CAS，确认时只复核语义变化的叶子并发布更新后的 Brief', async () => {
     const f = await fixture()
     try {

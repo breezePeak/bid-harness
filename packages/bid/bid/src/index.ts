@@ -47,7 +47,7 @@ import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { inspectBidStage, installStageInteractionTools, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
-import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
@@ -1538,6 +1538,30 @@ export class BidHostRuntime extends TypertRemoteService {
       const runtime = await this.prepareOperation(operation)
       if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline confirmation is not allowed in the current Bid stage state.')
       return await getOrCreateOutlineDraft(operation.workspace)
+    } finally { await this.finishOperation(session, operation, false) }
+  }
+
+  /**
+   * @param session 等待目录确认的 Bid 会话。
+   * @returns S3 确认基线及已有章节关联资料；不运行生成或映射。
+   */
+  @Remote('getOutlineReviewContext')
+  async getOutlineReviewContext(session: Session): Promise<OutlineReviewContext> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    const key = projectKey(session)
+    for (let active = this.inFlight.get(key); active !== undefined; active = this.inFlight.get(key)) await active.done
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if ((runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || runtime.status !== 'waiting_user') throw new Error('Outline review is not allowed in the current Bid stage state.')
+      const workspace = operation.workspace
+      const [requirements, scoring, baseline, evidence] = await Promise.all([
+        readStageJson(workspace, 'analysis/requirements.json').then(parseTenderRequirementsArtifact),
+        readStageJson(workspace, 'analysis/scoring.json').then(parseTenderScoringArtifact),
+        runtime.stage === 'evidence_mapping' ? readStageJson(workspace, 'outline/initial-confirmed-outline.json').then(parseOutlineArtifact) : null,
+        runtime.stage === 'evidence_mapping' ? readStageJson(workspace, 'analysis/evidence-map.json').then(parseEvidenceMapArtifact) : null,
+      ])
+      return { requirements, scoring, baseline, evidence }
     } finally { await this.finishOperation(session, operation, false) }
   }
 

@@ -105,6 +105,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   childScript.push(call('finish_mapping_task', {}))
   await send('这一节资料不对，重新找', [call('bid_evidence_remap', { ...await identity(), section_ids: [target.id], mode: 'replace', reason: '资料不对' }), answer('已更新，请重新确认。')])
   const finalDraft = await getOrCreateOutlineDraft(workspace)
+  const reviewContext = await ctx.bid.getOutlineReviewContext(agent.session)
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('局部资料研究覆盖了其他章节的研究基线')
   const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   if (checkRejections) {
@@ -133,6 +134,10 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
+    review: { baselineTitles: reviewContext.baseline?.sections.map(section => section.title),
+      requirementIds: reviewContext.requirements.requirements.map(item => item.id),
+      scoringIds: reviewContext.scoring.scoring_items.map(item => item.id),
+      evidenceSectionIds: reviewContext.evidence?.section_mappings.map(item => item.section_id) },
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
     target: map.section_mappings.find(item => item.section_id === target.id),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }

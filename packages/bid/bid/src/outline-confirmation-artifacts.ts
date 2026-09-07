@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { outlineArtifactSchema, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import type { TenderRequirementsArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
+
+/** Read-only inputs for S3/S4 review; never persisted in the editable draft. */
+export interface OutlineReviewContext {
+  readonly baseline: OutlineArtifact | null
+  readonly requirements: TenderRequirementsArtifact
+  readonly scoring: TenderScoringArtifact
+  readonly evidence: EvidenceMapArtifact | null
+}
 
 /** Version of the durable user confirmation record. */
 export const OUTLINE_CONFIRMATION_SCHEMA_VERSION = 2 as const

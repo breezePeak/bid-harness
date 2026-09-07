@@ -48,6 +48,21 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       "disposed": null,
       "failures": 1,
       "rawWriteBlocked": true,
+      "review": {
+        "baselineTitles": [
+          "访问控制与安全审计",
+        ],
+        "evidenceSectionIds": [
+          "SEC-SECURITY",
+          "SEC-001",
+        ],
+        "requirementIds": [
+          "REQ-1",
+        ],
+        "scoringIds": [
+          "SCORE-1",
+        ],
+      },
       "revision": 4,
       "state": {
         "stage": "evidence_mapping",

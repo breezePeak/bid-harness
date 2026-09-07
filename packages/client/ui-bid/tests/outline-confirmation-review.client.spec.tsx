@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { OutlineArtifact } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, type OutlineArtifact } from '@deepseek-ai/dsh-bid/control-plane'
 import { OutlineConfirmationReview } from '../src/client/OutlineConfirmationReview.tsx'
+import { compareOutlines, outlineDropOperation } from '../src/client/outline-review.ts'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
+Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: vi.fn(), configurable: true })
 
 const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
-  let value = zh[key] ?? String(key)
+  let value = zh[key] ?? key
   for (const [name, replacement] of Object.entries(params ?? {})) {
     value = value.replaceAll(`{${name}}`, String(replacement))
   }
@@ -81,7 +83,7 @@ const testOutline: OutlineArtifact = {
 }
 
 describe('OutlineConfirmationReview', () => {
-  it('renders stats dashboard and section cards with level distinctions', () => {
+  it('shows a compact outline with actions and metadata in the selected details', () => {
     const onUpdate = vi.fn()
     const onStructure = vi.fn()
     const onIndent = vi.fn()
@@ -115,7 +117,11 @@ describe('OutlineConfirmationReview', () => {
 
     // 章节徽章区分
     expect(screen.getByText('结构目录')).toBeTruthy()
-    expect(screen.getAllByText('正文编写').length).toBe(2)
+    expect(screen.getByLabelText('技术标目录').textContent).not.toContain('新增同级')
+    fireEvent.focus(screen.getByLabelText('SEC-002 标题'))
+    expect(screen.getByLabelText('当前章节详情').textContent).toContain('正文编写')
+    fireEvent.click(screen.getByRole('button', { name: '新增同级' }))
+    expect(onStructure).toHaveBeenCalledWith(expect.objectContaining({ parent_id: 'SEC-001', order: 2 }))
 
     // 章节编号与输入框
     expect(screen.getByLabelText('SEC-001 标题')).toBeTruthy()
@@ -191,5 +197,68 @@ describe('OutlineConfirmationReview', () => {
         writable: true,
       }),
     )
+  })
+})
+
+
+describe('目录拖拽与差异', () => {
+  it('移动完整父章节，保留关联内容并重排编号', () => {
+    const operation = outlineDropOperation(testOutline, 'SEC-001', 'SEC-003', 'after')!
+    const moved = applyOutlineEdits(testOutline, [operation])
+    expect(moved.sections.find(section => section.id === 'SEC-002')).toEqual(testOutline.sections[1])
+    expect(moved.sections.find(section => section.id === 'SEC-001')?.order).toBe(2)
+    expect(compareOutlines(testOutline, moved).get('SEC-001')).toMatchObject({ moved: true, modified: false })
+    expect(testOutline.sections[0]?.order).toBe(1)
+  })
+
+  it('跨父移动和提升层级保留叶子业务字段，禁止非法落点', () => {
+    const outline = { ...testOutline, sections: [
+      ...testOutline.sections, { ...testOutline.sections[1]!, id: 'SEC-004', title: '补充架构', order: 2 },
+    ] }
+    const operation = outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'after')!
+    const moved = applyOutlineEdits(outline, [operation])
+    expect(moved.sections.find(section => section.id === 'SEC-004')).toMatchObject({ parent_id: null, level: 1, requirement_ids: ['REQ-01', 'REQ-02'] })
+    expect(outlineDropOperation(moved, 'SEC-004', 'SEC-001', 'inside')).not.toBeNull()
+    expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'inside')).toBeNull()
+    expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'before')).toBeNull()
+    expect(outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'inside')).toBeNull()
+    expect(outlineDropOperation(outline, 'REQ-01', 'SEC-001', 'inside')).toBeNull()
+    expect(outlineDropOperation(outline, 'SEC-001', 'REQ-01', 'inside')).toBeNull()
+    expect(outlineDropOperation(testOutline, 'SEC-002', 'SEC-003', 'after')).toBeNull()
+    expect(outlineDropOperation(outline, 'SEC-001', 'SEC-001', 'inside')).toBeNull()
+  })
+
+  it('显示四类差异，过滤保留祖先，基线只读且联动选中', () => {
+    const outline = { ...testOutline, sections: [testOutline.sections[0]!, { ...testOutline.sections[1]!, title: '修改后的架构', order: 2 }, { ...testOutline.sections[2]!, id: 'SEC-NEW' }] }
+    const changes = compareOutlines(testOutline, outline)
+    expect(changes.get('SEC-002')).toMatchObject({ modified: true, moved: true })
+    expect(changes.get('SEC-003')?.deleted).toBe(true)
+    expect(changes.get('SEC-NEW')?.added).toBe(true)
+    render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping"
+      reviewContext={{ baseline: testOutline, requirements: { schema_version: 1, requirements: [] },
+        scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
+      onUpdateSection={vi.fn()} onStructureOperation={vi.fn()} onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
+    fireEvent.click(screen.getByLabelText('只看变化'))
+    expect(screen.getByLabelText('SEC-001 标题')).toBeTruthy()
+    fireEvent.focus(screen.getByLabelText('SEC-002 标题'))
+    const baseline = screen.getByLabelText('S3 已确认目录')
+    expect(baseline.querySelector('[aria-current="true"]')?.textContent).toContain('系统微服务架构设计')
+    expect(baseline.querySelectorAll('[draggable="true"], input, textarea').length).toBe(0)
+    expect(screen.getByLabelText('当前章节详情').textContent).toContain('修改后的架构')
+  })
+
+  it('只允许有效章节落点触发结构操作', async () => {
+    const onStructure = vi.fn()
+    render(<OutlineConfirmationReview outline={testOutline} onUpdateSection={vi.fn()} onStructureOperation={onStructure}
+      onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
+    const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
+    fireEvent.dragStart(screen.getByLabelText('拖动 总体技术方案'), { dataTransfer })
+    await waitFor(() => { expect(screen.getByLabelText('SEC-002 inside').getAttribute('aria-disabled')).toBe('true') })
+    fireEvent.drop(screen.getByLabelText('SEC-002 inside'), { dataTransfer })
+    expect(onStructure).not.toHaveBeenCalled()
+    fireEvent.dragOver(screen.getByLabelText('SEC-003 after'), { dataTransfer })
+    fireEvent.drop(screen.getByLabelText('SEC-003 after'), { dataTransfer })
+    expect(onStructure).toHaveBeenCalledWith({ type: 'move_section', section_id: 'SEC-001', parent_id: null, order: 2 })
+    expect(screen.getByLabelText('当前章节详情').querySelector('[draggable="true"]')).toBeNull()
   })
 })
