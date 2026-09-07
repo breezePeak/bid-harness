@@ -419,31 +419,51 @@
   background: color-mix(in srgb, var(--dsw-alias-accent-primary, #1677ff) 12%, transparent);
 }
 .muted { opacity: 0.55; }
-.diffSummary, .diffBadges, .dropTargets {
+.diffSummary, .diffBadges {
   display: flex;
   gap: 2px;
   flex-wrap: wrap;
 }
 .diffSummary { padding: 8px 20px; }
 .diffBadges { color: var(--dsw-alias-label-secondary); font-size: 11px; flex: none; gap: 4px; }
-.dropTarget, .dropDisabled {
-  flex: 1;
-  padding: 2px;
-  font-size: 11px;
-  text-align: center;
-  border: 1px dashed var(--dsw-alias-border-l1);
+.rowActions { display: flex; visibility: hidden; }
+.treeRow:hover .rowActions, .treeRow:focus-within .rowActions { visibility: visible; }
+.rowIcon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
 }
-.dropTarget { background: var(--dsw-alias-bg-layer-1); }
-.dropTarget:hover { outline: 2px solid var(--dsw-alias-label-secondary); }
-.dropDisabled { opacity: 0.35; cursor: not-allowed; }
-
+.rowIcon:hover { background: var(--dsw-alias-bg-layer-2); }
 .dropTargets {
   position: absolute;
   inset: 0;
   z-index: 2;
-}
-.dropTarget, .dropDisabled {
   display: grid;
-  place-items: center;
-  background: var(--dsw-alias-bg-layer-1);
+  grid-template-rows: 1fr 1fr;
+  grid-template-columns: 64px 1fr;
 }
+.dropTarget, .dropDisabled { position: relative; background: transparent; }
+.dropDisabled { cursor: not-allowed; }
+[data-position="before"] { grid-row: 1; grid-column: 1 / -1; }
+[data-position="after"] { grid-row: 2; grid-column: 1 / -1; }
+[data-position="inside"] { grid-row: 2; grid-column: 2; z-index: 1; }
+.dropDisabled[data-position="inside"] { pointer-events: none; }
+.dropTarget[data-active="true"]::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  border-bottom: 2px solid var(--dsw-alias-accent-primary, #1677ff);
+}
+.dropTarget[data-position="before"][data-active="true"]::after { top: -1px; bottom: auto; }
+
+.treeRow[draggable="true"] { cursor: grab; }
+.treeRow[draggable="true"]:active { cursor: grabbing; }
+.titleInput[readonly] { pointer-events: none; }

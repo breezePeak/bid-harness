@@ -9,6 +9,8 @@ import {
 import {
   Button,
   IconChevronDownOutline14,
+  IconEditOutline16,
+  IconTrashOutline16,
   IconChevronRightOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { compareOutlines, outlineDropOperation } from './outline-review.ts'
@@ -48,7 +50,11 @@ export function OutlineConfirmationReview({
   t,
 }: OutlineConfirmationReviewProps) {
   const [selectedId, setSelectedId] = useState(outline.sections[0]?.id)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
+  const titleInputs = useRef(new Map<string, HTMLInputElement>())
   const dragFrame = useRef<number>()
+  const [activeDrop, setActiveDrop] = useState<string | null>(null)
   const [draggedId, setDraggedId] = useState<string | null>(null)
   const [onlyChanges, setOnlyChanges] = useState(false)
   const baselineRows = useRef(new Map<string, HTMLDivElement>())
@@ -296,24 +302,44 @@ export function OutlineConfirmationReview({
                 key={section.id}
                 className={`${css.treeRow} ${selected?.id === section.id ? css.selected : ''} ${onlyChanges && !changed(section.id) ? css.muted : ''}`}
                 onFocus={() => { setSelectedId(section.id) }}
+                onClick={() => { setSelectedId(section.id) }}
+                draggable={editingId !== section.id}
+                // Let the browser capture the drag image before adding drop targets.
+                onDragStart={(event) => {
+                  event.dataTransfer.setData('application/x-bid-outline-section', section.id)
+                  event.dataTransfer.effectAllowed = 'move'
+                  const row = event.currentTarget
+                  event.dataTransfer.setDragImage(row, 24, 16)
+                  dragFrame.current = requestAnimationFrame(() => { setDraggedId(section.id) })
+                }}
+                onDragEnd={() => {
+                  if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current)
+                  setDraggedId(null); setActiveDrop(null)
+                }}
                 style={{ paddingLeft: `${String(indentPx)}px` }}
               >
                 {draggedId !== null && <div className={css.dropTargets}>
                   {(['before', 'inside', 'after'] as const).map((position) => {
-                    const operation = outlineDropOperation(outline, draggedId, section.id, position)
+                    const operation = position === 'after' && hasChildren && !isBranchCollapsed
+                      ? null : outlineDropOperation(outline, draggedId, section.id, position)
                     return <div key={position} role="button" tabIndex={-1} aria-disabled={operation === null}
                       aria-label={`${section.id} ${position}`}
+                      data-position={position}
+                      data-active={activeDrop === `${section.id}:${position}`}
                       className={operation === null ? css.dropDisabled : css.dropTarget}
-                      onDragOver={(event) => { if (operation !== null) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
+                      onDragLeave={() => { setActiveDrop(null) }}
+                      onDragOver={(event) => {
+                        setActiveDrop(operation === null ? null : `${section.id}:${position}`)
+                        if (operation !== null) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }
+                      }}
                       onDrop={(event) => {
                         if (operation === null) return
                         event.preventDefault()
                         onStructureOperation(operation)
                         setSelectedId(draggedId)
                         setCollapsedBranchIds(new Set())
-                        setDraggedId(null)
+                        setDraggedId(null); setActiveDrop(null)
                       }}>
-                      {{ before: '放在前面', inside: '作为子级', after: '放在后面' }[position]}
                     </div>
                   })}
                 </div>}
@@ -331,14 +357,9 @@ export function OutlineConfirmationReview({
                     <span className={css.collapsePlaceholder} />
                   )}
 
-                  <button type="button" draggable aria-label={`拖动 ${section.title}`} className={css.dragHandle}
+                  <button type="button" aria-label={`拖动 ${section.title}`} className={css.dragHandle}
                     onClick={() => { setSelectedId(section.id) }}
-                    // Let the browser capture the drag image before adding drop targets.
-                    onDragStart={(event) => { event.dataTransfer.setData('application/x-bid-outline-section', section.id); event.dataTransfer.effectAllowed = 'move'; dragFrame.current = requestAnimationFrame(() => { setDraggedId(section.id) }) }}
-                    onDragEnd={() => {
-                      if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current)
-                      setDraggedId(null)
-                    }}>⠿</button>
+                  >⠿</button>
                   <span className={css.sectionNumber} aria-label={`${section.id} 章节编号`}>
                     {number}
                   </span>
@@ -346,14 +367,37 @@ export function OutlineConfirmationReview({
                   <div className={css.titleInputWrapper}>
                     <input
                       className={css.titleInput}
+                      ref={(element) => {
+                        if (element) titleInputs.current.set(section.id, element)
+                        else titleInputs.current.delete(section.id)
+                      }}
                       aria-label={`${section.id} 标题`}
-                      value={section.title}
-                      onChange={(event) => {
-                        onUpdateSection(section.id, { title: event.target.value })
+                      readOnly={editingId !== section.id}
+                      value={editingId === section.id ? editingTitle : section.title}
+                      onChange={(event) => { setEditingTitle(event.target.value) }}
+                      onBlur={() => {
+                        if (editingId !== section.id) return
+                        if (editingTitle !== section.title) onUpdateSection(section.id, { title: editingTitle })
+                        setEditingId(null)
                       }}
                     />
                   </div>
                   {badges(section.id)}
+                  <span className={css.rowActions}>
+                    <button type="button" className={css.rowIcon} aria-label={`编辑 ${section.title}`}
+                      onClick={() => {
+                        setEditingId(section.id)
+                        setEditingTitle(section.title)
+                        titleInputs.current.get(section.id)?.focus()
+                        titleInputs.current.get(section.id)?.select()
+                      }}>
+                      <IconEditOutline16 />
+                    </button>
+                    <button type="button" className={css.rowIcon} aria-label={`删除 ${section.title}`}
+                      onClick={() => { onStructureOperation({ type: 'delete_section', section_id: section.id }) }}>
+                      <IconTrashOutline16 />
+                    </button>
+                  </span>
                 </div>
 
 

@@ -28,7 +28,7 @@ export function compareOutlines(baseline: OutlineArtifact, current: OutlineArtif
  * @param outline Formal sections only.
  * @param sourceId Dragged subtree root.
  * @param targetId Target section.
- * @param position Placement relative to target.
+ * @param position Placement relative to target; inside inserts as the first child.
  * @returns Legal move, or null before the browser accepts a drop.
  */
 export function outlineDropOperation(outline: OutlineArtifact, sourceId: string, targetId: string, position: 'before' | 'inside' | 'after'): OutlineEditOperation | null {
@@ -38,7 +38,7 @@ export function outlineDropOperation(outline: OutlineArtifact, sourceId: string,
   const parentId = position === 'inside' ? target.id : target.parent_id
   const siblings = outline.sections.filter(section => section.parent_id === parentId && section.id !== sourceId)
     .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
-  const order = position === 'inside' ? siblings.length + 1 : siblings.findIndex(section => section.id === targetId) + (position === 'before' ? 1 : 2)
+  const order = position === 'inside' ? 1 : siblings.findIndex(section => section.id === targetId) + (position === 'before' ? 1 : 2)
   const operation: OutlineEditOperation = { type: 'move_section', section_id: sourceId, parent_id: parentId, order }
   if (source.parent_id === parentId && source.order === order) return null
   let moved: OutlineArtifact

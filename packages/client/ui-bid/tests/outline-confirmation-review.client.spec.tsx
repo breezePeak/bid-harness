@@ -127,6 +127,15 @@ describe('OutlineConfirmationReview', () => {
     expect(screen.getByLabelText('SEC-001 标题')).toBeTruthy()
     expect(screen.getByLabelText('SEC-002 标题')).toBeTruthy()
     expect(screen.getByLabelText('SEC-003 标题')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '编辑 实施与交付计划' }))
+    expect(document.activeElement).toBe(screen.getByLabelText('SEC-003 标题'))
+    fireEvent.change(document.activeElement!, { target: { value: '交付验收' } })
+    expect(onUpdate).not.toHaveBeenCalled()
+    fireEvent.blur(screen.getByLabelText('SEC-003 标题'))
+    expect(onUpdate).toHaveBeenCalledWith('SEC-003', { title: '交付验收' })
+    fireEvent.click(screen.getByRole('button', { name: '删除 实施与交付计划' }))
+    expect(onStructure).toHaveBeenCalledWith({ type: 'delete_section', section_id: 'SEC-003' })
+
   })
 
   it('filters sections using the search bar', () => {
@@ -218,7 +227,7 @@ describe('目录拖拽与差异', () => {
     const operation = outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'after')!
     const moved = applyOutlineEdits(outline, [operation])
     expect(moved.sections.find(section => section.id === 'SEC-004')).toMatchObject({ parent_id: null, level: 1, requirement_ids: ['REQ-01', 'REQ-02'] })
-    expect(outlineDropOperation(moved, 'SEC-004', 'SEC-001', 'inside')).not.toBeNull()
+    expect(outlineDropOperation(moved, 'SEC-004', 'SEC-001', 'inside')).toMatchObject({ parent_id: 'SEC-001', order: 1 })
     expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'inside')).toBeNull()
     expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'before')).toBeNull()
     expect(outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'inside')).toBeNull()
@@ -251,9 +260,11 @@ describe('目录拖拽与差异', () => {
     const onStructure = vi.fn()
     render(<OutlineConfirmationReview outline={testOutline} onUpdateSection={vi.fn()} onStructureOperation={onStructure}
       onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
-    const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
+    const dataTransfer = { setDragImage: vi.fn(), setData: vi.fn(), effectAllowed: '', dropEffect: '' }
     fireEvent.dragStart(screen.getByLabelText('拖动 总体技术方案'), { dataTransfer })
     await waitFor(() => { expect(screen.getByLabelText('SEC-002 inside').getAttribute('aria-disabled')).toBe('true') })
+    expect(screen.queryByText('放在前面')).toBeNull()
+    expect(screen.getByLabelText('SEC-001 章节编号').textContent).toBe('1')
     fireEvent.drop(screen.getByLabelText('SEC-002 inside'), { dataTransfer })
     expect(onStructure).not.toHaveBeenCalled()
     fireEvent.dragOver(screen.getByLabelText('SEC-003 after'), { dataTransfer })

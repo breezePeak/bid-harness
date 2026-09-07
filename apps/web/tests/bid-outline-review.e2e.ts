@@ -11,6 +11,7 @@ import { launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh, saveFailureShot, ZH_BROWSER_LOCALE } from './support.ts'
 
 async function dragSection(page: Page, title: string, target: string): Promise<void> {
+  const originalTitles = await page.getByLabel('技术标目录', { exact: true }).locator('input').evaluateAll(elements => elements.map(element => (element as HTMLInputElement).value))
   const source = await page.getByRole('button', { name: `拖动 ${title}`, exact: true }).boundingBox()
   if (source === null) throw new Error('Missing section drag handle')
   await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
@@ -21,6 +22,12 @@ async function dragSection(page: Page, title: string, target: string): Promise<v
   const box = await destination.boundingBox()
   if (box === null) throw new Error('Missing outline drop target')
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 })
+  await page.mouse.move(box.x + box.width / 2 + 1, box.y + box.height / 2)
+  expect(await page.getByLabel('技术标目录', { exact: true }).locator('input').evaluateAll(elements => elements.map(element => (element as HTMLInputElement).value))).toEqual(originalTitles)
+  expect(await destination.evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgba(0, 0, 0, 0)')
+  await expect.poll(async () => destination.evaluate(element => getComputedStyle(element, '::after').borderBottomWidth)).toBe('2px')
+  await saveFailureShot(page, 'bid-outline-review-drag')
+  await page.mouse.move(box.x + box.width / 2 + 2, box.y + box.height / 2)
   await page.mouse.up()
 }
 
@@ -87,7 +94,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     await page.getByText('S3 章节数量 4', { exact: true }).waitFor()
     await dragSection(page, '交付验收', 'A inside')
     await expect.poll(async () => (JSON.parse(await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')) as { outline: OutlineArtifact }).outline.sections.find(item => item.id === 'B')?.parent_id).toBe('A')
-    await page.getByLabel('B 标题', { exact: true }).click()
+    await page.getByLabel('B 标题', { exact: true }).locator('..').click()
     await page.getByLabel('当前章节详情').getByText('验收标准', { exact: true }).waitFor()
     expect(await page.getByLabel('S3 已确认目录').locator('[draggable="true"]').count()).toBe(0)
     expect(await page.getByLabel('S3 已确认目录').locator('[aria-current="true"]').textContent()).toContain('交付验收')
@@ -96,7 +103,15 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     await saveFailureShot(page, 'bid-outline-review-s4')
     await page.reload()
     await page.getByText('S3 章节数量 4', { exact: true }).waitFor()
-    await expect.poll(async () => page.getByLabel('B 章节编号', { exact: true }).textContent()).toBe('1.3')
+    await expect.poll(async () => page.getByLabel('B 章节编号', { exact: true }).textContent()).toBe('1.1')
+    await page.getByLabel('NEW 标题', { exact: true }).locator('..').hover()
+    await page.getByRole('button', { name: '编辑 运维保障', exact: true }).click()
+    await page.getByLabel('NEW 标题', { exact: true }).fill('运维服务')
+    await page.getByLabel('当前章节详情').getByRole('heading').first().click()
+    await expect.poll(async () => (JSON.parse(await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')) as { outline: OutlineArtifact }).outline.sections.find(item => item.id === 'NEW')?.title).toBe('运维服务')
+    await page.getByLabel('NEW 标题', { exact: true }).locator('..').hover()
+    await page.getByRole('button', { name: '删除 运维服务', exact: true }).click()
+    await expect.poll(async () => (JSON.parse(await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')) as { outline: OutlineArtifact }).outline.sections.some(item => item.id === 'NEW')).toBe(false)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8'))).toEqual(confirmed)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8'))).toEqual(evidence)
   } catch (error) {

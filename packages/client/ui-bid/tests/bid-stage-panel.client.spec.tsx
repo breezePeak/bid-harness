@@ -525,7 +525,9 @@ describe('BidStagePanel', () => {
       applyOutlineDraftOperations: store.apply,
     })} />)
     const title = await screen.findByLabelText('SEC-1 标题')
+    fireEvent.click(screen.getByRole('button', { name: `编辑 ${(title as HTMLInputElement).value}` }))
     fireEvent.change(title, { target: { value: '更新标题' } })
+    fireEvent.blur(title)
     fireEvent.click(screen.getAllByRole('button', { name: '新增同级' })[0]!)
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]!)
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
