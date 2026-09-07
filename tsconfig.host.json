@@ -62,6 +62,7 @@
     "apps/web/tests/access-confirmation.e2e.ts",
     "apps/web/tests/agent-preset-selection.e2e.ts",
     "apps/web/tests/bid-session.e2e.ts",
+    "apps/web/tests/bid-revision.e2e.ts",
     "apps/web/tests/bid-outline-review.e2e.ts",
     "apps/web/tests/agent-preset-authoring.e2e.ts",
     "apps/web/tests/shipped-composition.e2e.ts",

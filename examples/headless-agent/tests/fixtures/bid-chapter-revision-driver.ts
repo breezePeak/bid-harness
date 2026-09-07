@@ -6,10 +6,11 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import {
-  buildBidStageTask, executeChapterWriting, parseChapterExecutionLog,
+  checkpointBidProjectState, parseChapterExecutionLog,
   type BidChapterRevisionRequest,
 } from '@deepseek-ai/dsh-bid'
 import { CallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { runChapterWritingLoop } from '../../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 
 function toolCall(id: string, name: string, args: object): StreamChunk[] {
@@ -42,6 +43,10 @@ try {
   await agent.whenIdle()
   const parentRequestCount = requests.filter(request => request.sessionId === agent.id).length
   const initialRequestCount = requests.length
+  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+  const user = ctx.sessions.create(SessionId('revision-user'), {
+    meta: { cwd: process.cwd(), agentPreset: 'bid' },
+  })
   let revisionNumber = 0
   const runRevision = async (revision: BidChapterRevisionRequest, markdown: string, invalidMarkdown?: string) => {
     revisionNumber += 1
@@ -58,14 +63,14 @@ try {
       }),
       toolCall('finish-review', 'finish_chapter_review', {}),
     )
-    await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 0, maxConcurrency: 1, revision,
-    })
+    const outcome = await ctx!.bid.reviseChapter(user, revision)
+    assert.equal(outcome.ok, true, JSON.stringify(outcome))
     const persisted = await readFile(markdownPath, 'utf8')
     assert.equal(persisted, markdown)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     assert.equal(log.sections[0]!.final_writer_child_session_id, writerId)
     assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount)
+    assert.equal(requests.filter(request => request.sessionId === user.id).length, 0)
     return persisted
   }
   const reference = (markdown: string) => ({
@@ -86,6 +91,15 @@ try {
     instruction: '请最小修改，仅将“统一使用已确认的项目术语”改为“统一使用已确认的访问控制术语”。',
     reference: { scope: 'chapter', ...reference(whole) },
   }, whole.replace('统一使用已确认的项目术语', '统一使用已确认的访问控制术语'))
+  const beforeStaleRequest = requests.length
+  const stale = await ctx.bid.reviseChapter(user, {
+    instruction: '修改旧版本', reference: { scope: 'chapter', ...reference(whole) },
+  })
+  assert.deepEqual(stale, { ok: false, error: {
+    code: 'BID_CHAPTER_REVISION_CONFLICT', message: '章节正文已变化，请重新选择章节或段落。',
+  } })
+  assert.equal(requests.length, beforeStaleRequest)
+  assert.equal(await readFile(markdownPath, 'utf8'), minimal)
   const start = minimal.indexOf('权限管理由授权审批开始')
   const end = minimal.indexOf('\n\n最终交付')
   assert.ok(start > 0 && end > start)

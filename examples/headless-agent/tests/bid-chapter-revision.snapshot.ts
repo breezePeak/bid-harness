@@ -9,7 +9,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-chapter-revision-snapshots/', import.meta.url))
-const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
+const configPath = fileURLToPath(new URL('../bid-chapter-revision.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-revision-driver.ts', import.meta.url))
 
 it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交不能落盘', async () => {
@@ -39,7 +39,10 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
       expect(writerAttempts.every(attempt => attempt.accepted && attempt.child_session_id === writerId)).toBe(true)
       const sessionIds = logs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)
       const expected = {
-        'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, {
+          sessionIds, cwd,
+          cwdAliases: [cwd.replaceAll('\\', '/'), cwd.toLowerCase().replaceAll('\\', '/')],
+        }),
         'artifacts.expected.json': JSON.stringify({
           markdown: await readFile(join(projectRoot, 'chapters/sections/0001.md'), 'utf8'),
           metadata: parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8'))),

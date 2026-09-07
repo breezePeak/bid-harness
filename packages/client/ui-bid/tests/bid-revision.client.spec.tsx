@@ -31,7 +31,7 @@ function composer() {
     useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
     useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => (
-      select(useSyncExternalStore(store.subscribe, store.getSnapshot))
+      select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot()))
     ),
     actions: store.actions, getChapter, reviseChapter, registerSubmit,
   } as BidComposerContextProps

@@ -1,5 +1,5 @@
 /** Bid composer references preserve Host content identity and exact Markdown source ranges. */
-import { defineStore } from '@deepseek-ai/dsh-client-runtime/client'
+import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client'
 import type { BidChapterRevisionRequest, BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
 
 /** The chapter drag payload contains identity only; its current content is read after drop. */
@@ -12,13 +12,18 @@ export interface BidRevisionReference {
   readonly preview: string
 }
 
+type RevisionState = { reference: BidRevisionReference | null; revision: number }
+
 /**
  * Share one unsent reference between the chapter reader and its session composer.
  * @returns A session-scoped store declaration.
  */
-export function createBidRevisionStore() {
+export function createBidRevisionStore(): EngineStoreHandle<RevisionState, {
+  setReference: (draft: RevisionState, reference: BidRevisionReference | null) => void
+  clearReference: (draft: RevisionState, submitted: BidRevisionReference) => void
+}> {
   return defineStore({
-    init: (): { reference: BidRevisionReference | null; revision: number } => ({ reference: null, revision: 0 }),
+    init: (): RevisionState => ({ reference: null, revision: 0 }),
     actions: {
       setReference: (draft, reference: BidRevisionReference | null) => { draft.reference = reference },
       clearReference: (draft, submitted: BidRevisionReference) => {
@@ -72,6 +77,6 @@ export function selectedParagraphReference(
   return {
     reference: { scope: 'paragraphs', section_id: chapter.section_id, content_sha256: chapter.content_sha256, start, end, text: chapter.markdown.slice(start, end) },
     label: `${chapter.number} ${chapter.title} · ${paragraphs.length} 段`,
-    preview: paragraphs.map(element => element.textContent ?? '').join('\n'),
+    preview: paragraphs.map(element => element.textContent).join('\n'),
   }
 }

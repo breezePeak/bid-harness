@@ -39,6 +39,33 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('章节支持拖入，正文右键将相邻完整段落添加为引用', async () => {
+    const store = createBidRevisionStore().create()
+    const markdown = '# 1.1 实施方案\n\n保留首段。\n\n修改第一段。\n\n修改第二段。\n\n保留末段。\n'
+    render(<BidReviewWorkbench {...props({
+      actions: store.actions, getChapter: async () => ({ ...chapter, markdown }),
+      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('修改第一段。')
+    const second = screen.getByText('修改第二段。')
+    const dataTransfer = { setData: vi.fn(), effectAllowed: '' }
+    const title = screen.getByRole('button', { name: /1.1 实施方案/ })
+    expect(title).toHaveProperty('draggable', true)
+    fireEvent.dragStart(title, { dataTransfer })
+    expect(dataTransfer.setData).toHaveBeenCalledWith('application/vnd.dsh.bid-chapter+json', JSON.stringify({ sessionId: 'bid', sectionId: 'SEC-1' }))
+    const range = document.createRange()
+    range.setStart(first.firstChild!, 1)
+    range.setEnd(second.firstChild!, 3)
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
+    fireEvent.click(screen.getByRole('menuitem', { name: '添加到对话框' }))
+    expect(store.getSnapshot().reference?.reference).toMatchObject({
+      scope: 'paragraphs', start: markdown.indexOf('修改第一段。'), end: markdown.indexOf('\n\n保留末段。'),
+      text: '修改第一段。\n\n修改第二段。',
+    })
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
   it('章节页眉只显示一次根标题，保留正文的目录编号', async () => {
     render(<BidReviewWorkbench {...props({ getChapter: async () => ({
       ...chapter, markdown: '# 1.1 实施方案\n\n## 1.1.1 工作安排\n\n章节正文',
