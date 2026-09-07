@@ -1,7 +1,7 @@
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import type { OutlineConfirmationIssueCode } from './outline-confirmation-issues.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
-import { catalogMatchesScoring, type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import { catalogMatchesScoring, type ScoringResponsePointCatalog, type ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 import type { TenderComplianceArtifact, TenderRequirementsArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 
 function reject(issues: StageValidationIssue[], code: OutlineConfirmationIssueCode, message: string): void {
@@ -10,6 +10,19 @@ function reject(issues: StageValidationIssue[], code: OutlineConfirmationIssueCo
 
 function unique(values: readonly string[]): boolean { return new Set(values).size === values.length }
 function normalized(value: string): string { return value.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '') }
+
+/**
+ * 计算正式响应点相对可写叶子的覆盖差集。
+ * @param outline 当前目录。
+ * @param catalog 正式清单。
+ * @returns 尚未被可写叶子覆盖的正式响应点。
+ */
+export function missingOutlineResponsePoints(outline: OutlineArtifact, catalog: ScoringResponsePointCatalog): ScoringResponsePoint[] {
+  const parents = new Set(outline.sections.map(section => section.parent_id))
+  const covered = new Set(outline.sections.filter(section => section.writable && !parents.has(section.id))
+    .flatMap(section => section.scoring_response_point_ids ?? []))
+  return catalog.points.filter(point => !covered.has(point.id))
+}
 
 /** @param sections Outline tree nodes. @param issues Mutable issue sink. @returns Nothing. */
 export function validateOutlineSharedStructure(sections: readonly OutlineSection[], issues: StageValidationIssue[]): void {
@@ -92,8 +105,12 @@ export function validateOutlineSharedCoverage(
   validateCompleteIds('COMPLIANCE', compliance.compliance_items.map(item => item.id), [...outline.global_compliance_ids, ...sections.flatMap(section => section.compliance_ids)], issues)
 
   const pointById = new Map(catalog.points.map(point => [point.id, point]))
-  const pointIds = sections.filter(section => section.writable).flatMap(section => section.scoring_response_point_ids ?? [])
-  validateCompleteIds('RESPONSE_POINT', catalog.points.map(point => point.id), pointIds, issues)
+  const pointIds = sections.flatMap(section => section.scoring_response_point_ids ?? [])
+  for (const id of pointIds) if (!pointById.has(id)) reject(issues, 'OUTLINE_SHARED_RESPONSE_POINT_UNKNOWN', '目录引用了未知响应点 ' + id + '。')
+  for (const point of missingOutlineResponsePoints(outline, catalog)) {
+    const item = scoring.scoring_items.find(item => item.id === point.scoring_id)
+    reject(issues, 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', '缺失响应点 ' + point.id + '：' + point.text + '；所属评分项 ' + point.scoring_id + '：' + (item?.raw_text ?? '') + '。必须由合适的可写叶子提供具体写作指导。')
+  }
   for (const section of sections) {
     if (!section.writable && ((section.scoring_response_point_ids?.length ?? 0) > 0
       || section.scoring_response_points.length > 0)) reject(issues, 'OUTLINE_SHARED_CONTAINER_RESPONSE_POINT_INVALID', 'Only writable sections can own scoring response points.')

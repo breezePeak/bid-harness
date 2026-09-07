@@ -1,5 +1,5 @@
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
-import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import {
   BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
+  executeOutlineGeneration, validateOutlineGeneration,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact, EVIDENCE_MAPPING_SCHEMA_VERSION, webEvidenceContentSha256, webEvidenceSourceId,
@@ -426,4 +427,76 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
   return { agent, artifacts, workspace, requests: adapter.requests }
+}
+
+/**
+ * 通过真实工具循环验证 S3 初稿遗漏后的局部续修与用户确认停点。
+ * @param ctx Loader 组装的 Agent、工具及持久化服务。
+ * @param root 场景隔离工作区。
+ * @returns 阶段失败与重试结果、正式产物及实际模型任务数。
+ */
+export async function runOutlineGenerationLoop(ctx: Context, root: string) {
+  const workspace = new BidWorkspace(root)
+  await prepareS2(workspace)
+  const prefix = relative(root, workspace.projectRoot).replaceAll('\\', '/')
+  const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
+  await rm(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'))
+  await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+  const texts = ['身份鉴别', '角色权限', '账号生命周期', '最小权限', '会话控制', '数据分类', '敏感数据保护', '访问日志', '安全告警', '异常处置', '审计留存与追溯']
+  const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+  scoring.scoring_items[0]!.raw_text = '技术方案逐项说明：' + texts.join('、') + '。'
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
+  const pointIds = texts.map((_text, index) => 'RP-' + String(index + 1).padStart(6, '0'))
+  const section = outline.sections[0]!
+  section.scoring_response_point_ids = pointIds.slice(0, 10)
+  section.must_answer = texts.slice(0, 10).map(text => '说明' + text + '的实施措施。')
+  section.scoring_ids = []
+  const untouched = { ...section, id: 'SEC-SERVICE', order: 2, title: '服务组织', purpose: '说明服务组织与协同安排。',
+    must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
+  outline.sections.push(untouched)
+  const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
+  const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
+  const sessionId = SessionId('s3-outline-recovery')
+  const parentScript = [
+    toolCall('response-points', 'write', { file_path: prefix + '/analysis/scoring-response-points.candidate.json', content: JSON.stringify(responseCandidate) }),
+    finalText('评分响应点候选已完成。'),
+    finalText('评分原文逐项复核完成。'),
+    toolCall('draft', 'write', { file_path: prefix + '/outline/outline.json', content: JSON.stringify(candidate) }),
+    finalText('初步目录候选已完成。'),
+  ]
+  const adapter = new ScriptedAdapter(sessionId, parentScript, [])
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
+  registerIntegrationTools(ctx, root, [])
+  const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
+  for (const stage of ['file_intake', 'tender_analysis'] as const) {
+    agent.session.append('bid.stage.started', { stage, status: 'running' })
+    agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
+  }
+  let maxRepairAttempts = 0
+  const orchestrator = new BidOrchestrator(agent.session,
+    { canExecute: stage => stage === 'outline_generation', execute: task => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts }) },
+    { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
+  const failed = await orchestrator.runCurrentAutomaticStage()
+  if (failed.status !== 'failed' || !failed.failureReason?.includes('RP-000011')) throw new Error('遗漏 RP 未阻止 S3')
+  const catalogBefore = await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
+  const baseline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+  parentScript.push(
+    toolCall('forbidden-catalog-write', 'write', { file_path: prefix + '/analysis/scoring-response-points.json', content: '{}' }),
+    toolCall('local-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
+      type: 'update_section', section_id: section.id, scoring_response_point_ids: pointIds,
+      must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
+    }]) }),
+    finalText('已提交审计留存与追溯的局部修复。'),
+    toolCall('quality-review', 'write', { file_path: prefix + '/outline/quality-report.candidate.json', content: JSON.stringify({ schema_version: 3, scope: 'technical_bid', issues: [] }) }),
+    finalText('逐项复核章节归属和写作指导已完成。'),
+  )
+  maxRepairAttempts = 1
+  const outcome = await orchestrator.retry()
+  const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+  const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
+  const catalogUnchanged = catalogBefore === await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
+  const untouchedUnchanged = JSON.stringify(baseline.sections[1]) === JSON.stringify(result.sections[1])
+  if (!catalogUnchanged || !untouchedUnchanged || outcome.status !== 'waiting_user') throw new Error('S3 续修改变了无关内容或跳过用户确认')
+  return { failed, outcome, catalogUnchanged, untouchedUnchanged, outline: result, report,
+    confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }
 }

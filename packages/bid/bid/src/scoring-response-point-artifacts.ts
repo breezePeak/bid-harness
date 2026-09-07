@@ -84,6 +84,7 @@ export function createScoringResponsePointCatalog(
 }
 
 /**
+ * 验证清单归属、稳定编号及每个评分项的非空连续响应点。
  * @param catalog Stable response-point catalog.
  * @param scoring Canonical scoring Artifact.
  * @returns Whether the catalog belongs to the scoring Artifact and has valid identities and per-item ordering.
@@ -98,7 +99,7 @@ export function catalogMatchesScoring(
   if (catalog.points.some(point => !scoringIds.has(point.scoring_id))) return false
   for (const scoringId of scoringIds) {
     const points = catalog.points.filter(point => point.scoring_id === scoringId)
-    if (points.some((point, index) => point.order !== index + 1)) return false
+    if (points.length === 0 || points.some((point, index) => point.order !== index + 1)) return false
   }
   const maxSequence = catalog.points.reduce((max, point) => Math.max(max, Number(point.id.slice(3))), 0)
   return catalog.next_sequence > maxSequence

@@ -1,12 +1,18 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ToolGuard, ToolExecution } from '@deepseek-ai/dsh-tools'
+import { normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
+import { applyOutlineRepair } from '../src/outline-generation-repair.ts'
+import { missingOutlineResponsePoints } from '../src/outline-shared-validator.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   BidWorkspace,
   buildBidStageTask,
   executeOutlineGeneration,
+  parseOutlineQualityReport,
   parseTenderScoringArtifact,
   parseTenderRequirementsArtifact,
   parseScoringResponsePointCatalog,
@@ -138,6 +144,28 @@ async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact,
   ])
 }
 
+async function writeReview(workspace: BidWorkspace): Promise<void> {
+  await writeFile(join(workspace.projectRoot, 'outline/quality-report.candidate.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', issues: [] }))
+}
+
+function modelAgent(workspace: BidWorkspace, respond: (prompt: string) => Promise<undefined | 'error' | 'aborted'>) {
+  const events: SessionEvent[] = []
+  let pending: string | undefined
+  const followup = vi.fn((message: { content: Array<{ text: string }> }) => { pending = message.content[0]!.text })
+  const guard = vi.fn((_guard: ToolGuard) => () => {})
+  const whenIdle = vi.fn(async () => {
+    if (pending === undefined) return
+    const prompt = pending
+    pending = undefined
+    const reason = await respond(prompt) ?? 'completed'
+    events.push({ type: 'turn/end', data: { reason: { kind: reason, error: { message: '测试模型中断' } } } } as SessionEvent)
+  })
+  const services = { tools: { restrict: vi.fn(() => () => {}), guard } }
+  const agent = { id: 'session', session: { events, header: { cwd: workspace.root } },
+    ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+  return { agent, followup, whenIdle, guard }
+}
+
 function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneration>>): string[] {
   return result.ok ? [] : result.issues.map(issue => issue.code)
 }
@@ -162,22 +190,12 @@ describe('outline-generation Blueprint Quality Review', () => {
       name: 'supplementary-framework.md', role: 'outline_framework',
       bytes: new TextEncoder().encode('# 质量保障\n'),
     }])
-    const followup = vi.fn()
-    let idleCalls = 0
-    const whenIdle = vi.fn(async () => {
-      idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (idleCalls === 4) await publishOutline(workspace, reviewedOutline)
+    const { agent, followup } = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await writeReview(workspace)
+      else await publishOutline(workspace, reviewedOutline)
     })
-    const services = {
-      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
-      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
-    }
-    const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
-
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
-
-    const draftMessage = followup.mock.calls[2]?.[0] as { content: Array<{ text: string }> }
+    const draftMessage = followup.mock.calls[0]?.[0] as { content: Array<{ text: string }> }
     expect(draftMessage.content[0]?.text).toContain('目录模式：存在人工框架')
     expect(draftMessage.content[0]?.text).toContain('总体方案')
     expect(draftMessage.content[0]?.text).toContain('实施计划')
@@ -209,97 +227,57 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts))).toContain('OUTLINE_FRAMEWORK_REF_INVALID')
   })
 
-  it('publishes the Blueprint written after response-point analysis', async () => {
+  it('首次 S3 无正式 RP 文件也能启动，生成后把准确清单交给初稿和复核', async () => {
     const workspace = await fixture()
-    const followup = vi.fn()
-    let idleCalls = 0
-    const whenIdle = vi.fn(async () => {
-      idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (idleCalls === 4) await publishOutline(workspace, researchDrivenOutline)
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    const task = buildBidStageTask('outline_generation')
+    expect(task.inputs).not.toContain('analysis/scoring-response-points.json')
+    const { agent, followup } = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('评分响应点分析')) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+      else if (prompt.includes('Response Point Semantic Review')) return
+      else if (prompt.includes('Blueprint Quality Review\n')) await writeReview(workspace)
+      else await publishOutline(workspace, researchDrivenOutline)
     })
-    const services = {
-      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
-      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
-    }
-    const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
-
-    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
-    const outline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
-    expect(outline.sections[0]).toMatchObject({
-      title: '数据安全保障体系',
-      must_answer: ['说明数据分类分级、访问控制和安全审计措施。'],
-    })
-  })
-
-  it('revises a coarse first draft in a mandatory second Agent follow-up before validation', async () => {
-    const workspace = await fixture()
-    const followup = vi.fn()
-    let idleCalls = 0
-    const whenIdle = vi.fn(async () => {
-      idleCalls += 1
-      if (idleCalls === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (idleCalls === 4) {
-        await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
-        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(coarseOutline)}\n`)
-      }
-      if (idleCalls === 5) await publishOutline(workspace, reviewedOutline)
-    })
-    const services = {
-      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
-      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
-    }
-    const agent = {
-      id: 'session',
-      session: { events: [] },
-      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
-      followup,
-      whenIdle,
-    } as unknown as Agent
-
-    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
-      .resolves.toEqual(artifacts)
-    expect(whenIdle).toHaveBeenCalledTimes(5)
+    await expect(executeOutlineGeneration(agent, workspace, task)).resolves.toEqual(artifacts)
     expect(followup).toHaveBeenCalledTimes(4)
-    const draftMessage = followup.mock.calls[2]?.[0] as { content: Array<{ text: string }> }
-    const reviewMessage = followup.mock.calls[3]?.[0] as { content: Array<{ text: string }> }
-    expect(draftMessage.content[0]?.text).toContain('本轮初稿唯一输出')
-    expect(reviewMessage.content[0]?.text).toContain('这是强制复核')
-    expect(reviewMessage.content[0]?.text).toContain('根据评分语义判断章节')
-    expect(reviewMessage.content[0]?.text).not.toContain('不得超过 4 个')
-    expect(reviewMessage.content[0]?.text).not.toContain('不得超过 3 个')
-    expect(reviewMessage.content[0]?.text).toContain('quality-report.json')
-    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    for (const index of [2, 3]) {
+      const prompt = followup.mock.calls[index]![0].content[0]!.text
+      expect(prompt).toContain('analysis/scoring-response-points.json')
+      expect(prompt).toContain('"id":"RP-000001"')
+      expect(prompt).toContain('说明实施阶段和进度保障')
+      expect(prompt).toContain('只读')
+    }
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(researchDrivenOutline)
+  })
+
+  it('质量复核修改目录后重新复核对应版本，再由 Host 生成全部已检查清单', async () => {
+    const workspace = await fixture()
+    let reviews = 0
+    const { agent, followup } = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('Blueprint Quality Review\n')) {
+        if (++reviews === 1) await publishOutline(workspace, reviewedOutline)
+        await writeReview(workspace)
+      } else await publishOutline(workspace, coarseOutline)
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    expect(reviews).toBe(2)
+    expect(followup).toHaveBeenCalledTimes(3)
+    const report = parseOutlineQualityReport(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')))
+    expect(report.reviewed_section_ids).toEqual(reviewedOutline.sections.map(section => section.id))
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
-  it('repairs an invalid reviewed Blueprint before the stage returns', async () => {
+  it('错误 Schema 保留候选并报错，不要求模型重写整本目录', async () => {
     const workspace = await fixture()
-    const followup = vi.fn()
-    const whenIdle = vi.fn(async () => {
-      if (whenIdle.mock.calls.length === 2) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
-      if (whenIdle.mock.calls.length === 4) {
-        await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
-        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify({ ...reviewedOutline, schema_version: 0 }))
-      }
-      if (whenIdle.mock.calls.length === 5) {
-        await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
-          schema_version: 0, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [], reviewed_section_ids: [], issues: [],
-        }))
-      }
-      if (whenIdle.mock.calls.length === 6) await publishOutline(workspace, reviewedOutline)
+    const invalid = { ...reviewedOutline, schema_version: 0 }
+    const { agent, followup } = modelAgent(workspace, async () => {
+      await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+      await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(invalid))
     })
-    const services = {
-      fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
-      tools: { restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) },
-    }
-    const agent = { id: 'session', session: { events: [] }, ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
-
-    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })
-
-    expect(followup).toHaveBeenCalledTimes(5)
-    expect(JSON.stringify(followup.mock.calls[4]?.[0])).toContain('Artifact Repair')
-    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).rejects.toThrow()
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(invalid)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it.each([
@@ -403,4 +381,219 @@ describe('outline-generation Blueprint Quality Review', () => {
     }
     expect(validateConfirmedOutline(outline, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
   })
+})
+
+async function catalogWithMissing(workspace: BidWorkspace) {
+  const path = join(workspace.projectRoot, 'analysis/scoring-response-points.json')
+  const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(path, 'utf8')))
+  catalog.points.push({ id: 'RP-000011', scoring_id: 'SCORE-SCHEDULE', order: 2, text: '说明延期风险识别、预警与纠偏安排' })
+  catalog.next_sequence = 12
+  await writeFile(path, JSON.stringify(catalog))
+  return catalog
+}
+
+const repairSchedule = [{ type: 'update_section', section_id: 'SEC-SCHEDULE',
+  scoring_response_point_ids: ['RP-000001', 'RP-000011'],
+  must_answer: ['列明实施阶段、里程碑和进度保障措施。', '说明延期风险识别、预警触发条件、责任人和纠偏安排。'],
+}]
+
+describe('S3 确定性规范化与局部续修', () => {
+  it('重建缺失、错误文字和错误顺序的快照，去重且幂等，不补入未选择的 RP', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    const candidate = structuredClone(reviewedOutline)
+    const section = candidate.sections[2]!
+    section.scoring_response_point_ids = ['RP-000011', 'RP-000001', 'RP-000011']
+    section.scoring_ids = []
+    section.scoring_response_points = [{ scoring_id: 'SCORE-SCHEDULE', response_point: '错误文字' }]
+    const normalized = normalizeOutlineCandidate(candidate, catalog, scoringArtifact)
+    section.scoring_response_points[0]!.response_point = ''
+    expect(normalizeOutlineCandidate(candidate, catalog, scoringArtifact)).toEqual(normalized)
+    expect(normalized.sections[2]!.scoring_response_point_ids).toEqual(['RP-000011', 'RP-000001'])
+    expect(normalized.sections[2]!.scoring_response_points.map(point => point.response_point))
+      .toEqual([catalog.points[1]!.text, catalog.points[0]!.text])
+    expect(normalized.sections[2]!.scoring_ids).toEqual(['SCORE-SCHEDULE'])
+    expect(normalizeOutlineCandidate(normalized, catalog, scoringArtifact)).toEqual(normalized)
+    expect(normalized.sections.slice(0, 2)).toEqual(reviewedOutline.sections.slice(0, 2))
+    const sectionsWithoutSnapshots = candidate.sections.map(({ scoring_response_points: _points, ...section }) => section)
+    const missingSnapshots = { ...candidate, sections: sectionsWithoutSnapshots }
+    expect(normalizeOutlineCandidate(missingSnapshots, catalog, scoringArtifact)).toEqual(normalized)
+    expect(normalizeOutlineCandidate(reviewedOutline, catalog, scoringArtifact).sections[2]!.scoring_response_point_ids)
+      .toEqual(['RP-000001'])
+  })
+
+  it('保留合法独立评分关联，不按评分编号自动添加其全部 RP', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    const independentScoring = parseTenderScoringArtifact({ ...scoring, scoring_items: [...scoring.scoring_items, { ...scoring.scoring_items[0]!, id: 'SCORE-INDEPENDENT' }] })
+    catalog.scoring_sha256 = scoringArtifactSha256(independentScoring)
+    catalog.points.push({ id: 'RP-000012', scoring_id: 'SCORE-INDEPENDENT', order: 1, text: '独立评分内容' })
+    catalog.next_sequence = 13
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[2]!.scoring_ids = ['SCORE-INDEPENDENT', 'SCORE-INDEPENDENT']
+    const result = normalizeOutlineCandidate(outline, catalog, independentScoring)
+    expect(result.sections[2]!.scoring_ids).toEqual(['SCORE-INDEPENDENT', 'SCORE-SCHEDULE'])
+    expect(result.sections[2]!.scoring_response_point_ids).toEqual(['RP-000001'])
+  })
+
+  it.each(['rp', 'scoring', 'snapshot'])('未知 %s 编号报错，不静默删去或替换', async (kind) => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    const outline = structuredClone(reviewedOutline)
+    if (kind === 'rp') outline.sections[2]!.scoring_response_point_ids = ['RP-999999']
+    else if (kind === 'scoring') outline.sections[2]!.scoring_ids = ['SCORE-UNKNOWN']
+    else outline.sections[2]!.scoring_response_points[0]!.scoring_id = 'SCORE-UNKNOWN'
+    expect(() => normalizeOutlineCandidate(outline, catalog, scoringArtifact)).toThrow(/未知/)
+  })
+
+  it('RP-000011 只修相关章节；修复任务收到正式清单、原文和当前结构', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    const { agent, followup, guard } = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('局部响应点修复')) {
+        for (const text of ['RP-000011', catalog.points[1]!.text, scoring.scoring_items[0]!.raw_text, 'SEC-ORGANIZATION', 'must_answer']) expect(prompt).toContain(text)
+        const check = guard.mock.calls[0]![0]
+        for (const file of ['analysis/scoring-response-points.json', 'outline/outline.json', 'outline/initial-confirmed-outline.json']) {
+          expect(check({ name: 'write', arguments: { file_path: join(workspace.projectRoot, file) } } as ToolExecution)).toContain('只读')
+        }
+        expect(check({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'outline/repair-operations.json') } } as ToolExecution)).toBeUndefined()
+        await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+      } else {
+        expect(prompt).toContain('Blueprint Quality Review')
+        await writeReview(workspace)
+      }
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    const result = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(result.sections.slice(0, 2)).toEqual(reviewedOutline.sections.slice(0, 2))
+    expect(result.sections[2]!.must_answer).toEqual(repairSchedule[0]!.must_answer)
+    expect(result.sections[2]!.scoring_response_points[1]!.response_point).toBe(catalog.points[1]!.text)
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(validateConfirmedOutline(result, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+  })
+
+  it('同一 RP 可由多个可写叶子共同响应；结构父节点不能替代叶子覆盖', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    const outline = applyOutlineRepair(reviewedOutline, repairSchedule, catalog, scoringArtifact)
+    outline.sections[1]!.scoring_response_point_ids = ['RP-000011', 'RP-000011']
+    const shared = normalizeOutlineCandidate(outline, catalog, scoringArtifact)
+    expect(shared.sections[1]!.scoring_response_point_ids).toEqual(['RP-000011'])
+    expect(validateConfirmedOutline(shared, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+    const structural = structuredClone(reviewedOutline)
+    structural.sections[0]!.scoring_response_point_ids = ['RP-000011']
+    const invalid = normalizeOutlineCandidate(structural, catalog, scoringArtifact)
+    expect(missingOutlineResponsePoints(invalid, catalog).map(point => point.id)).toEqual(['RP-000011'])
+    const validation = validateConfirmedOutline(invalid, requirements, scoring, compliance, catalog)
+    expect(validation.ok).toBe(false)
+    if (!validation.ok) expect(validation.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['OUTLINE_SHARED_CONTAINER_RESPONSE_POINT_INVALID', 'OUTLINE_SHARED_RESPONSE_POINT_MISSING']))
+  })
+
+  it('失败重试保留 RP 编号及目录，从遗漏处继续；未复核不能发布报告', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    const failed = modelAgent(workspace, async () => { await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), '[]') })
+    await expect(executeOutlineGeneration(failed.agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })).rejects.toThrow('RP-000011')
+    expect(failed.followup).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const retry = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('局部响应点修复')) await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+      else await writeReview(workspace)
+    })
+    await executeOutlineGeneration(retry.agent, workspace, buildBidStageTask('outline_generation'))
+    expect(retry.followup).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
+  })
+
+  it.each(['error', 'aborted'] as const)('复核 %s 即使输出报告也不能伪造完成', async (reason) => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline)
+    const { agent } = modelAgent(workspace, async () => { await writeReview(workspace); return reason })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).rejects.toThrow('未正常完成')
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+  })
+
+  it('取消局部修复保留当前目录且不发布质量报告', async () => {
+    const workspace = await fixture()
+    await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    const controller = new AbortController()
+    const { agent } = modelAgent(workspace, async () => { controller.abort(new Error('用户取消')) })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 3, signal: controller.signal })).rejects.toThrow('用户取消')
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('局部新增和拆分由模型选择 RP，新增章节 ID 由 Host 分配', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    const added = applyOutlineRepair(reviewedOutline, [{ type: 'add_section', parent_id: 'SEC-IMPLEMENTATION', order: 3, writable: true,
+      title: '延期风险控制', purpose: '说明延期风险防控', must_answer: ['说明预警条件与纠偏责任'], scoring_response_point_ids: ['RP-000011'] }], catalog, scoringArtifact)
+    expect(added.sections.slice(0, 3)).toEqual(reviewedOutline.sections)
+    expect(missingOutlineResponsePoints(added, catalog)).toEqual([])
+    const split = applyOutlineRepair(reviewedOutline, [{ type: 'split_section', section_id: 'SEC-SCHEDULE', children: [
+      { title: '阶段计划', purpose: '说明阶段计划', must_answer: ['明确各阶段里程碑'], scoring_response_point_ids: ['RP-000001'] },
+      { title: '延期防控', purpose: '说明延期防控', must_answer: ['明确延期预警、责任人与纠偏措施'], scoring_response_point_ids: ['RP-000011'] },
+    ] }], catalog, scoringArtifact)
+    expect(split.sections.slice(0, 2)).toEqual(reviewedOutline.sections.slice(0, 2))
+    expect(split.sections[2]!.writable).toBe(false)
+    expect(missingOutlineResponsePoints(split, catalog)).toEqual([])
+    expect(validateConfirmedOutline(split, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+  })
+
+  it('只补关联不提供具体写作指导的局部操作被拒绝', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    expect(() => applyOutlineRepair(reviewedOutline, [{ type: 'update_section', section_id: 'SEC-SCHEDULE', title: '实施计划', scoring_response_point_ids: ['RP-000011'] }], catalog, scoringArtifact)).toThrow('must_answer')
+  })
+
+  it('输入版本变化后不复用原目录及清单', async () => {
+    const workspace = await fixture()
+    await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    const fail = modelAgent(workspace, async () => {})
+    await expect(executeOutlineGeneration(fail.agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 0 })).rejects.toThrow()
+    const changedScoring = { ...scoring, scoring_items: [{ ...scoring.scoring_items[0]!, raw_text: '更新后的评分原文。' }] }
+    await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(changedScoring))
+    const { agent, followup } = modelAgent(workspace, async (prompt) => {
+      if (prompt.includes('评分响应点分析')) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '更新后的响应点' }] }))
+      else if (prompt.includes('Response Point Semantic Review')) return
+      else if (prompt.includes('Blueprint Quality Review\n')) await writeReview(workspace)
+      else await publishOutline(workspace, reviewedOutline)
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    expect(followup).toHaveBeenCalledTimes(4)
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    expect(catalog.points.map(point => point.text)).toEqual(['更新后的响应点'])
+  })
+
+  it('已有 S3 用户确认版本不能被失败重试覆盖', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline)
+    const confirmed = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    await writeFile(confirmed, JSON.stringify(reviewedOutline))
+    const { agent, followup } = modelAgent(workspace, async () => {})
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).rejects.toThrow('用户确认目录')
+    expect(followup).not.toHaveBeenCalled()
+    expect(JSON.parse(await readFile(confirmed, 'utf8'))).toEqual(reviewedOutline)
+  })
+
+  it('复核引入遗漏且预算耗尽时仍校验差集，保留中文缺失内容', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    await publishOutline(workspace, applyOutlineRepair(reviewedOutline, repairSchedule, catalog, scoringArtifact))
+    const { agent } = modelAgent(workspace, async () => {
+      await publishOutline(workspace, reviewedOutline)
+      await writeReview(workspace)
+    })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 0 }))
+      .rejects.toThrow(catalog.points[1]!.text)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
 })

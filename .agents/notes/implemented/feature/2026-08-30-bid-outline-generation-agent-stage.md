@@ -12,7 +12,7 @@ Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先�
 
 严格 Outline Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、purpose、是否写作、Requirement/Scoring/Compliance/Response Point 引用、结构来源、精确 `framework_refs` 和写作指引。`origin` 只取 `framework`、`generated` 或 `mixed`；结构节点必须有子节点，可写节点必须是叶子并具有具体 `must_answer`。
 
-同一 Agent 在初稿后执行 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，并写入质量报告。Host 只确定性校验树结构、引用存在性与覆盖、数组重复、精确框架标题引用、强制 Requirement 和重点 Scoring 的可写覆盖及质量报告集合；同一 Response Point 可以出现在多个可写 Section，`issues` 可保存非阻断建议。成功后由 S3 等待首次用户确认。
+同一 Agent 在初稿后执行 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，并提交质量候选；Host 在当前版本正常完成复核后发布正式报告，派生字段、覆盖差集和失败重试遵循[局部续修规则](../bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。Host 确定性校验树结构、引用存在性与覆盖、数组重复、精确框架标题引用、强制 Requirement 和重点 Scoring 的可写覆盖及质量报告集合；同一 Response Point 可以出现在多个可写 Section，`issues` 可保存非阻断建议。成功后由 S3 等待首次用户确认。
 
 ## Alternatives considered
 

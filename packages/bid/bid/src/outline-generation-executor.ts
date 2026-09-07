@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -7,11 +8,11 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
-import type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
-import { outlineRegenerationChanges } from './outline-regeneration-artifacts.ts'
+import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'
 import type { BidWorkspace } from './index.ts'
-import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import {
   DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
@@ -19,20 +20,29 @@ import {
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import {
+  type OutlineArtifact,
+  outlineQualityReportSchema,
   OUTLINE_GENERATION_SCHEMA_VERSION,
   OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
 } from './outline-generation-artifacts.ts'
-import { loadOutlineFrameworkStructures, type OutlineFrameworkStructure } from './outline-framework.ts'
+import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import {
+  catalogMatchesScoring,
+  parseScoringResponsePointCatalog,
+  type ScoringResponsePointCatalog,
   createScoringResponsePointCatalog,
   parseScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
-import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
+import { normalizeOutlineCandidate } from './outline-generation-normalization.ts'
+import { applyOutlineRepair, outlineRepairOperationSchema } from './outline-generation-repair.ts'
+import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
+const QUALITY_REPORT_CANDIDATE = 'outline/quality-report.candidate.json'
 const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.json'
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
@@ -161,8 +171,8 @@ export function renderOutlineGenerationTask(
     '根据 Project、Requirements、Scoring、Compliance 和稳定评分响应点目录设计技术标详细写作 Blueprint。此阶段不读取或推断证据映射。',
     `本轮初稿唯一输出：${root}/${OUTLINE_ARTIFACT}。Host 随后会强制发送一次 Blueprint Quality Review。`,
     `文件严格包含 schema_version=${OUTLINE_GENERATION_SCHEMA_VERSION}、scope="technical_bid"、document_title、global_compliance_ids、sections。不得写 content、body、markdown 或任何正文。`,
-    'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、scoring_response_points、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
-    '每个稳定 Response Point ID 与文本快照必须在同一 Section 中按相同顺序配对：scoring_response_point_ids 写 ["RP-000001"]，对应 scoring_response_points 写 [{"scoring_id":"SCORE-...","response_point":"该评分响应点原文"}]，绝不能写 {"id":"RP-...","text":"..."}。每个 RP 至少由一个可写叶子覆盖，也可由多个可写叶子共同支撑。',
+    'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
+    '模型只选择 scoring_response_point_ids，不必抄写 scoring_response_points；Host 从正式清单按选择顺序重建快照并合并所属 scoring_ids。每个 RP 至少由一个合适的可写叶子覆盖，也可由多个章节共同响应。不得修改正式清单或猜测 RP 编号。',
     'writable 节点必须有至少一个具体 must_answer。父评分、子评分和通用质量评分可以同时关联。结构节点 writable=false、must_answer=[] 且必须有子节点。章节标题应按技术语义表达组织、阶段、质量、风险、安全、验收等内容，但不要套固定模板。',
     '技术响应索引、偏离表或合规清单只能作为索引或附录，不能集中承担正文覆盖。mandatory Requirement 和重点 Scoring 必须在对应的实质性可写叶子中映射；索引重复引用不能替代正文拆分。',
     '每个 Requirement、Scoring 和 Compliance ID 都必须至少覆盖一次；mandatory Requirement，以及 must_answer=true、带 score 或 score_range 的 Scoring，必须关联至少一个 writable 节点。一个 ID 可出现在多个章节，但同一数组不得重复。Compliance 可以放在 global_compliance_ids 或具体章节。',
@@ -193,42 +203,43 @@ function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace,
     `本阶段只允许调用：${task.allowedTools.join(', ')}。不得 Web Search、bash 或重新进行全库资料映射。`,
     '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适的可写叶子章节；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。存在 Framework 时还要检查主要骨架、顺序和关键技术章节是否合理继承，框架过粗处是否按 RP 扩展，是否产生重复主题，framework_refs 与 origin 是否符合实际来源，旧项目污染是否清理。',
     '发现章节过粗、多个明显技术主题混在一节、评分项未真实拆解、must_answer 过泛、结构与可写职责混淆或其他问题时，先修改 outline/outline.json；保留原有严格 JSON 字段和全部引用覆盖。',
-    `修正后写入 ${root}/${QUALITY_REPORT_ARTIFACT}。文件严格包含 schema_version=${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}、scope="technical_bid"、checked_requirement_ids、checked_scoring_ids、checked_scoring_response_point_ids、reviewed_section_ids、issues。前三个 checked 数组分别列出全部现有 Requirement ID、Scoring ID 和稳定 Response Point ID。`,
+    `修正后写入 ${root}/${QUALITY_REPORT_CANDIDATE}。文件严格包含 schema_version=${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}、scope="technical_bid"、issues。checked_* 和 reviewed_section_ids 无需填写，Host 仅在本轮全部内容复核正常完成后生成。模型只需提交 schema_version、scope 和 issues。`,
     'issues 可以记录仍需用户判断的非阻断语义建议；Host 不要求它为空。完成复核和质量报告后停止；Host 会独立校验报告集合、树结构和引用覆盖。',
   ].join('\n')
 }
 
 /**
- * Render one Validator-guided S4 repair assignment.
- * @param agent - live Bid Agent receiving the repair assignment.
- * @param workspace - Workspace 级 Bid 项目.
- * @param task - Host-issued outline-generation task and Tool policy.
- * @param issues - latest browser-safe S4 validation issues.
- * @returns model-visible instructions for the original Blueprint files.
+ * 将目录差集与正式响应点交给模型，只接受现有目录编辑操作。
+ * @param agent 当前目录 Agent。
+ * @param workspace 项目工作区。
+ * @param task S3 任务。
+ * @param issues 基础校验问题。
+ * @param context 当前目录、正式清单及上一轮操作失败原因。
+ * @returns 只写局部操作候选的修复任务。
  */
 export function renderOutlineGenerationRepairTask(
-  agent: Agent,
-  workspace: BidWorkspace,
-  task: BidStageTask,
-  issues: readonly StageValidationIssue[],
-  regeneration?: OutlineGenerationExecutionOptions['regeneration'],
+  agent: Agent, workspace: BidWorkspace, task: BidStageTask, issues: readonly StageValidationIssue[],
+  context: { outline: OutlineArtifact; catalog: ScoringResponsePointCatalog; scoring: TenderScoringArtifact; failure?: string | undefined },
 ): string {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
+  const missing = missingOutlineResponsePoints(context.outline, context.catalog).map((point) => {
+    const item = context.scoring.scoring_items.find(item => item.id === point.scoring_id)
+    if (item === undefined) throw new Error('正式响应点清单引用了未知评分项 ' + point.scoring_id)
+    return { ...point, scoring_raw_text: item.raw_text }
+  })
   return [
-    `当前阶段：${task.stage} / Artifact Repair`,
-    `Bid Session：${agent.id}`,
-    'Host 预校验未通过。依据以下问题修改原文件，不得创建替代文件：',
-    `- ${root}/${OUTLINE_ARTIFACT}`,
-    `- ${root}/${QUALITY_REPORT_ARTIFACT}`,
-    ...renderStageRepairIssues(issues),
-    `outline.json 的 schema_version 必须为 ${OUTLINE_GENERATION_SCHEMA_VERSION}；quality-report.json 的 schema_version 必须为 ${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}。保留两个文件各自的严格字段集合。`,
-    ...(regeneration === undefined ? [] : [
-      `这是基于 outline/draft.json revision=${String(regeneration.revision)}、draft hash=${regeneration.draftSha256} 的重新生成修复；保留未被反馈涉及的草稿内容。`,
-      `修复候选后同步更新 ${root}/${REGENERATION_CHANGE_SET}，使其逐项准确声明相对该基线的全部实际变更。`,
-    ]),
-    '修正目录树、ID 覆盖、评分响应点和质量报告后，将 reviewed_section_ids 更新为最终全部 section ID。索引或附录不能替代实质性正文叶子的映射；主观建议可以保留在 issues。',
-    `修复时只允许调用：${task.allowedTools.join(', ')}。写完原文件后停止；Host 将重新校验。`,
+    '当前阶段：outline_generation / 局部响应点修复',
+    'Bid Session：' + agent.id,
+    '正式响应点清单（只读，不得修改、删除或重新分配编号）：' + root + '/' + RESPONSE_POINT_CATALOG,
+    JSON.stringify(context.catalog),
+    '当前目录（包含 purpose、must_answer 和已有关联）：' + JSON.stringify(context.outline),
+    '未被可写叶子覆盖的响应点及所属评分原文：' + JSON.stringify(missing),
+    ...renderStageRepairIssues(issues), context.failure ?? '',
+    '判断已有章节能否承担：能则补充关联并完善具体 must_answer；确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
+    '只返回局部编辑操作，不得重写 outline.json 或质量报告。scoring_response_point_ids 是章节最终选定的完整列表，保留已有合理关联。新增 ID 由 Host 分配。',
+    '唯一输出：' + root + '/outline/repair-operations.json',
+    JSON.stringify(z.toJSONSchema(z.array(outlineRepairOperationSchema))),
   ].join('\n')
 }
 
@@ -249,59 +260,172 @@ export async function executeOutlineGeneration(
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.signal)
   const frameworks = await loadOutlineFrameworkStructures(workspace)
-  const outlineRoot = join(workspace.projectRoot, 'outline')
-  const artifactPaths = [OUTLINE_ARTIFACT, QUALITY_REPORT_ARTIFACT, RESPONSE_POINT_CANDIDATE]
-  if (options.regeneration !== undefined) artifactPaths.push(REGENERATION_CHANGE_SET)
-  await assertNoLinkedPath(workspace.root, outlineRoot)
-  await mkdir(outlineRoot, { recursive: true, mode: 0o700 })
-  const fs = agent.ctx.get('fs')
+  const path = (artifact: string): string => join(workspace.projectRoot, artifact)
+  const read = async (artifact: string): Promise<string | undefined> => {
+    await assertNoLinkedPath(workspace.root, path(artifact))
+    try { return await readFile(path(artifact), 'utf8') } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      return undefined
+    }
+  }
+  const write = async (artifact: string, value: unknown): Promise<void> => {
+    options.signal?.throwIfAborted()
+    await assertNoLinkedPath(workspace.root, path(artifact))
+    await writeFileAtomic(path(artifact), JSON.stringify(value, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
+  }
+  const remove = async (artifact: string): Promise<void> => {
+    await assertNoLinkedPath(workspace.root, path(artifact))
+    await rm(path(artifact), { force: true })
+    const fs = agent.ctx.get('fs')
+    if (fs !== undefined) agent.ctx.emit('fs/observed', await fs.resolve(path(artifact)), { kind: 'absent' }, { agent })
+  }
+  await assertNoLinkedPath(workspace.root, path('outline'))
+  await mkdir(path('outline'), { recursive: true, mode: 0o700 })
   const tools = agent.ctx.get('tools')
-  if (fs === undefined || tools === undefined) throw new Error('Bid outline generation requires fs and tools services')
-  await Promise.all(artifactPaths.map(async (artifact) => {
-    const artifactPath = join(workspace.projectRoot, artifact)
-    await rm(artifactPath, { force: true })
-    const target = await fs.resolve(artifactPath)
-    agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
-  }))
+  if (tools === undefined) throw new Error('S3 需要 tools 服务。')
+  if (options.regeneration === undefined && await read('outline/initial-confirmed-outline.json') !== undefined) throw new Error('S3 已有用户确认目录，不能用失败重试覆盖确认结果。')
+  const scoring = parseTenderScoringArtifact(JSON.parse((await read('analysis/scoring.json')) ?? 'null'))
+  const requirements = parseTenderRequirementsArtifact(JSON.parse((await read('analysis/requirements.json')) ?? 'null'))
+  const compliance = parseTenderComplianceArtifact(JSON.parse((await read('analysis/compliance.json')) ?? 'null'))
+  const inputVersion = createHash('sha256').update(JSON.stringify(await Promise.all(task.inputs.map(async input => [input, await read(input)])))).digest('hex')
+  const stageCandidates = [OUTLINE_ARTIFACT, QUALITY_REPORT_ARTIFACT, RESPONSE_POINT_CANDIDATE, RESPONSE_POINT_CATALOG]
+  const previousVersion = await read('outline/generation-inputs.json')
+  if (previousVersion !== undefined && JSON.parse(previousVersion) !== inputVersion) {
+    for (const artifact of stageCandidates) {
+      await remove(artifact)
+    }
+  }
+  await write('outline/generation-inputs.json', inputVersion)
+  const catalogRaw = await read(RESPONSE_POINT_CATALOG)
+  let catalog = catalogRaw === undefined ? undefined : parseScoringResponsePointCatalog(JSON.parse(catalogRaw))
+  if (catalog !== undefined && !catalogMatchesScoring(catalog, scoring)) {
+    catalog = undefined
+    for (const artifact of stageCandidates) await remove(artifact)
+  }
+  let writablePaths: string[] = []
   const allowed = new Set(task.allowedTools)
   const liftRestriction = tools.restrict({ allow: task.allowedTools })
-  const liftGuard = tools.guard(exec => allowed.has(exec.name) ? undefined : `Bid stage ${task.stage} allows only ${task.allowedTools.join(', ')}`)
+  const liftGuard = tools.guard((exec) => {
+    if (!allowed.has(exec.name)) return 'S3 仅允许读取输入及写入当前任务指定的候选文件。'
+    if (exec.name !== 'write' || exec.arguments === undefined) return undefined
+    const args = z.object({ file_path: z.string() }).safeParse(exec.arguments)
+    if (!args.success || !writablePaths.some(artifact => relative(path(artifact), resolve(workspace.root, args.data.file_path)) === '')) {
+      return '正式响应点、确认目录与其他输入只读；只能写入当前任务指定的候选文件。'
+    }
+    return undefined
+  })
+  const run = async (prompt: string, outputs: string[]): Promise<void> => {
+    options.signal?.throwIfAborted()
+    writablePaths = outputs
+    const eventStart = agent.session.events.length
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
+    await waitForModelStageIdle(agent, options.signal)
+    const end = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
+    if (end?.data.reason.kind !== 'completed') {
+      const reason = end?.data.reason.kind === 'error' ? end.data.reason.error.message : end?.data.reason.kind ?? '没有完成记录'
+      throw new Error('S3 模型任务未正常完成，保留当前候选；本轮不能标记为已复核。原因：' + reason)
+    }
+    writablePaths = []
+  }
+  let completed = false
   const artifacts: StageArtifact[] = [
     { stage: 'outline_generation', type: 'scoring_response_points', path: RESPONSE_POINT_CATALOG },
     { stage: 'outline_generation', type: 'outline', path: OUTLINE_ARTIFACT },
     { stage: 'outline_generation', type: 'outline_quality_report', path: QUALITY_REPORT_ARTIFACT },
   ]
   try {
-    if (options.regeneration === undefined) {
-      options.signal?.throwIfAborted()
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointAnalysisTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await waitForModelStageIdle(agent, options.signal)
-      options.signal?.throwIfAborted()
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: renderResponsePointSemanticReviewTask(agent, workspace) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-      await waitForModelStageIdle(agent, options.signal)
-      const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
-      const candidate = parseScoringResponsePointCandidate(JSON.parse(await readFile(join(workspace.projectRoot, RESPONSE_POINT_CANDIDATE), 'utf8')))
-      await writeFileAtomic(join(workspace.projectRoot, RESPONSE_POINT_CATALOG), `${JSON.stringify(createScoringResponsePointCatalog(scoring, candidate), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    if (catalog === undefined) {
+      if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
+      if (await read(RESPONSE_POINT_CANDIDATE) === undefined) {
+        await run(renderResponsePointAnalysisTask(agent, workspace, task), [RESPONSE_POINT_CANDIDATE])
+      }
+      await run(renderResponsePointSemanticReviewTask(agent, workspace), [RESPONSE_POINT_CANDIDATE])
+      const candidate = parseScoringResponsePointCandidate(JSON.parse((await read(RESPONSE_POINT_CANDIDATE)) ?? 'null'))
+      catalog = createScoringResponsePointCatalog(scoring, candidate)
+      await write(RESPONSE_POINT_CATALOG, catalog)
     }
-    options.signal?.throwIfAborted()
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await waitForModelStageIdle(agent, options.signal)
-    options.signal?.throwIfAborted()
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: renderBlueprintQualityReviewTask(agent, workspace, task) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await waitForModelStageIdle(agent, options.signal)
-    let prevalidation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
-    for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
+    const handoff = '\n正式响应点清单（只读，不得修改、删除或重新分配编号）：' + relative(workspace.root, path(RESPONSE_POINT_CATALOG)).replaceAll('\\', '/')
+      + '\n' + JSON.stringify(catalog)
+    if (options.regeneration !== undefined || await read(OUTLINE_ARTIFACT) === undefined) {
+      await run(renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) + handoff,
+        [OUTLINE_ARTIFACT, ...(options.regeneration === undefined ? [] : [REGENERATION_CHANGE_SET])])
+    }
+    await remove(QUALITY_REPORT_ARTIFACT)
+    let attempts = 0
+    let repairFailure: string | undefined
+    while (true) {
       options.signal?.throwIfAborted()
-      agent.followup(createUserMessage({
-        content: [{ type: 'text', text: renderOutlineGenerationRepairTask(agent, workspace, task, prevalidation.issues, options.regeneration) }],
-        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-      }))
-      await waitForModelStageIdle(agent, options.signal)
-      prevalidation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
+      const outline = normalizeOutlineCandidate(JSON.parse((await read(OUTLINE_ARTIFACT)) ?? 'null'), catalog, scoring)
+      await write(OUTLINE_ARTIFACT, outline)
+      const issues: StageValidationIssue[] = []
+      validateOutlineSharedStructure(outline.sections, issues)
+      validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
+      await validateOutlineFrameworkRefs(workspace, outline, issues)
+      if (issues.length > 0 || repairFailure !== undefined) {
+        if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
+          ...issues, { code: 'OUTLINE_GENERATION_REPAIR_EXHAUSTED', message: 'S3 局部修复未通过，已保留当前目录候选。' + (repairFailure ?? '') },
+        ])
+        const operationsPath = 'outline/repair-operations.json'
+        await remove(operationsPath)
+        const repairTask = renderOutlineGenerationRepairTask(agent, workspace, task, issues,
+          { outline, catalog, scoring, failure: repairFailure })
+        try {
+          await run(repairTask, [operationsPath])
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          throw new BidStageExecutionError([...issues, { code: 'OUTLINE_GENERATION_REPAIR_FAILED', message: error instanceof Error ? error.message : String(error) }])
+        }
+        let repaired: OutlineArtifact
+        try { repaired = applyOutlineRepair(outline, JSON.parse((await read(operationsPath)) ?? 'null'), catalog, scoring) } catch (error) {
+          repairFailure = error instanceof Error ? error.message : String(error)
+          continue
+        }
+        repairFailure = undefined
+        await remove(QUALITY_REPORT_ARTIFACT)
+        await write(OUTLINE_ARTIFACT, repaired)
+        continue
+      }
+      const beforeReview = JSON.stringify(outline)
+      await remove(QUALITY_REPORT_ARTIFACT)
+      await remove(QUALITY_REPORT_CANDIDATE)
+      await run(renderBlueprintQualityReviewTask(agent, workspace, task) + handoff + '\n本轮完整复核目录：' + beforeReview
+        + '\n本轮完整复核的招标要求、评分及合规：' + JSON.stringify({ requirements, scoring, compliance }),
+      [OUTLINE_ARTIFACT, QUALITY_REPORT_CANDIDATE])
+      const report = outlineQualityReportSchema.pick({ schema_version: true, scope: true, issues: true }).strip()
+        .parse(JSON.parse((await read(QUALITY_REPORT_CANDIDATE)) ?? 'null'))
+      const reviewed = normalizeOutlineCandidate(JSON.parse((await read(OUTLINE_ARTIFACT)) ?? 'null'), catalog, scoring)
+      await write(OUTLINE_ARTIFACT, reviewed)
+      const reviewedIssues: StageValidationIssue[] = []
+      validateOutlineSharedStructure(reviewed.sections, reviewedIssues)
+      validateOutlineSharedCoverage(reviewed, requirements, scoring, compliance, catalog, reviewedIssues)
+      await validateOutlineFrameworkRefs(workspace, reviewed, reviewedIssues)
+      if (reviewedIssues.length > 0 || JSON.stringify(reviewed) !== beforeReview) {
+        if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
+          ...reviewedIssues, { code: 'OUTLINE_GENERATION_REVIEW_INCOMPLETE', message: 'S3 复核修改次数已用尽，已保留当前候选；修改内容尚需重新复核。' },
+        ])
+        continue
+      }
+      await write(QUALITY_REPORT_ARTIFACT, { ...report,
+        checked_requirement_ids: requirements.requirements.map(item => item.id),
+        checked_scoring_ids: scoring.scoring_items.map(item => item.id),
+        checked_scoring_response_point_ids: catalog.points.map(point => point.id),
+        reviewed_section_ids: reviewed.sections.map(section => section.id),
+      })
+      const validation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
+      if (!validation.ok) throw new BidStageExecutionError(validation.issues)
+      if (options.regeneration !== undefined) {
+        const draft = parseOutlineDraft(JSON.parse((await read('outline/draft.json')) ?? 'null'))
+        const changeSet = parseOutlineRegenerationChangeSet(JSON.parse((await read(REGENERATION_CHANGE_SET)) ?? 'null'))
+        await write(REGENERATION_CHANGE_SET, { ...changeSet, changes: outlineRegenerationChanges(draft.outline, reviewed).map(change => ({
+          ...change, reason: changeSet.changes.find(item => item.section_id === change.section_id && item.type === change.type)?.reason ?? '响应点覆盖修复及目录质量复核',
+        })) })
+      }
+      completed = true
+      return artifacts
     }
   } finally {
     liftGuard()
     liftRestriction()
+    if (!completed) await remove(QUALITY_REPORT_ARTIFACT)
   }
-  return artifacts
 }

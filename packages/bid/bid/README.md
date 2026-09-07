@@ -55,7 +55,9 @@ S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度�
 
 S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、技术评分项和影响技术方案的合规规则。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性；`finish_tender_analysis` 根据 staged Map 返回可修正缺项，或由 Host 补齐 schema version、空值、完整 tender 覆盖与正式 ID 后原子写入四个 Artifact。Agent 停止但未成功调用 finish 时，Executor 在配置预算内要求继续使用 staged 工具，不开放 `write`。最终 Validator 仍独立验证 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
 
-S3 performs independent semantic response-point review and outline quality review. Validators check strict files, stable catalog ownership, tree structure, known IDs, coverage, and exact framework references; they do not replace semantic review with string splitting, title heuristics, or global response-point uniqueness.
+S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把正式路径和完整 RP 数据交给目录生成、质量复核及局部修复。模型选择 scoring_response_point_ids；Host 按正式清单重建 scoring_response_points 快照、合并所属 scoring_ids 并去重，保留合法独立评分关联。未知编号报错，每个 RP 必须至少由一个合适的可写叶子覆盖，允许多个章节共同响应。
+
+遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
 S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 逐次提交现有 `outlineEditOperationSchema` 操作，Host 校验分支范围、立即应用并返回临时新章 ID；目录锁定后，Child 按 Host 返回的可写章节逐章提交 Evidence、writing_dimensions 和 writing_brief。Host 合并分支、分配稳定 Section ID 并将 brief 写入 Outline。正式 Evidence Map schema v10 保持不变。
 

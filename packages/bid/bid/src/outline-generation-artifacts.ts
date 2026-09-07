@@ -52,6 +52,14 @@ export const outlineArtifactSchema = z.object({
   sections: z.array(outlineSectionSchema).min(1),
 }).strict()
 
+/** S3 模型候选可省略派生快照；规范化后仍须通过正式目录 Schema。 */
+export const outlineCandidateSchema = outlineArtifactSchema.extend({
+  sections: z.array(z.object({
+    ...outlineSectionSchema.shape,
+    scoring_response_points: z.array(z.object({ scoring_id: z.string().min(1), response_point: z.string() }).strict()).optional(),
+  }).strict()).min(1),
+})
+
 /** Strict record of the mandatory quality review performed after S4 drafting. */
 export const outlineQualityReportSchema = z.object({
   schema_version: z.literal(OUTLINE_QUALITY_REPORT_SCHEMA_VERSION),
