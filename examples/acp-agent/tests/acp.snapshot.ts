@@ -336,6 +336,8 @@ const SCENARIOS: Scenario[] = [
     },
     posixOnly: true,
   },
+  // The recorded plan intentionally stops with active items; authored trailing
+  // calls pin tool-todo's bounded stop reminder and the reconciled whole-list write.
   { name: 'todo-write', hasModelTurn: true, recorded: true },
   {
     name: 'skill-load',
@@ -423,8 +425,9 @@ const SCENARIOS: Scenario[] = [
   { name: 'max-tokens-continue', hasModelTurn: true, recorded: false },
   // Keyless, authored (like error-finish/cancel): deterministically forcing a
   // LIVE model to repeat one call three times is not a stable recording, so
-  // the fixture scripts five identical todo_write calls and pins BOTH reminder
-  // tiers (gentle at 3, detailed at 5) as injected user/message in transcript and log.
+  // the fixture scripts five identical todo_write calls and pins BOTH repeat
+  // reminder tiers plus tool-todo's stop reconciliation as injected
+  // user/messages in transcript and log.
   { name: 'repeat-tool-reminder', hasModelTurn: true, recorded: false },
   // Authored replay: a root AGENTS.md pins the session prefix, then a read in
   // nested/ discovers its narrower AGENTS.md as a raw, metadata-bearing

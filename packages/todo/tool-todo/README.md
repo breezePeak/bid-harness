@@ -10,6 +10,8 @@ Registers one tool, `todo_write(todos: [{ content, status }])`, on `ctx.tools`. 
 
 `status` is one of `pending`, `in_progress`, or `completed`.
 
+When a normally completed turn is otherwise ready to stop after writing a list that still contains `in_progress`, the plugin steers one recorded reconciliation notice into that same turn. The model gets one additional chance to mark work actually finished as `completed` and work no longer running as `pending`. The notice is bounded to once per agent turn; an ignored notice cannot create an unbounded model loop. A later turn is not reminded about an older turn's list, and a max-token-truncated turn is never extended.
+
 ## Single owner
 
 The list belongs to the ONE agent session that called the tool. There is no subagent/shared/swarm scope: a non-agent caller (no `exec.agent`) has nowhere to write the list and is rejected. This is a deliberate scope limit — see the Agent Note.
@@ -26,7 +28,7 @@ Beyond the schema's type/required/enum checks, `execute` rejects an empty or dup
 
 ## Rendering
 
-The canonical result is `{ todos, counts: { pending, inProgress, completed } }`; its Native renderer returns the compact update acknowledgement. The tool also writes the full `todo/write` session event. UIs subscribe to the event stream and render that durable list themselves: the [web client](../../client/ui-conversation) shows a plan strip plus a dedicated tool row off the standing plan — latest `todo/write` with no later `turn/start` ([display](../../../.agents/notes/implemented/feature/2026-07-23-web-todo-display.md), [lifetime](../../../.agents/notes/implemented/feature/2026-07-28-todo-plan-clears-on-next-turn.md)).
+The canonical result is `{ todos, counts: { pending, inProgress, completed } }`; its Native renderer returns the compact update acknowledgement. The tool also writes the full `todo/write` session event. UIs subscribe to the event stream and render that durable list themselves: the [web client](../../client/ui-conversation) shows a plan strip plus a dedicated tool row off the standing plan — latest `todo/write` with no later `turn/start` ([display](../../../.agents/notes/implemented/feature/2026-07-23-web-todo-display.md), [lifetime](../../../.agents/notes/implemented/feature/2026-07-28-todo-plan-clears-on-next-turn.md), [turn-stop reconciliation](../../../.agents/notes/implemented/bug-fix/2026-09-07-todo-turn-stop-reconciliation.md)).
 
 ## Session projection
 
@@ -56,7 +58,7 @@ Prefix-stable while the definition and visibility are unchanged. Plugin lifecycl
 
 #### What the model sees
 
-Each assistant tool call retains the entire replacement list in its arguments. Success returns exactly `Updated todo list: <pending> pending, <inProgress> in progress, <completed> completed.` Stable failures are ``Error: invalid todo: `content` must be a non-empty string``, `Error: invalid todos: duplicate content "<content>"`, `Error: todo_write requires an owning agent session`, and — only where the deployment set `allowParallelInProgress: false` — `Error: invalid todos: at most one task may be in_progress (got <n>)`. The full `todo/write` session event is UI and replay state, not a second model message.
+Each assistant tool call retains the entire replacement list in its arguments. Success returns exactly `Updated todo list: <pending> pending, <inProgress> in progress, <completed> completed.` Stable failures are ``Error: invalid todo: `content` must be a non-empty string``, `Error: invalid todos: duplicate content "<content>"`, `Error: todo_write requires an owning agent session`, and — only where the deployment set `allowParallelInProgress: false` — `Error: invalid todos: at most one task may be in_progress (got <n>)`. The full `todo/write` session event is UI and replay state, not a second model message. If the latest list written in the current turn still has an active item when the turn would stop, one plugin-source user message asks the model to reconcile the complete list; it is logged and therefore appears in the next request and replay.
 
 #### Token effect
 
@@ -71,3 +73,4 @@ Append-only; newly visible content follows the reusable request prefix and does 
 - **Single-owner scope only** — the list belongs to the one calling agent session; subagent/shared/swarm scopes are a deliberate cut (see § Single owner), and a non-agent caller is rejected.
 - **The item shape is deliberately minimal** — `content` plus three-state `status`; whole-list replacement needs no stable id, priority, or active-form fields.
 - **Whole-list replacement is the only operation** — no partial updates, no read-back tool; the model must resend the entire list each call.
+- **Item completion remains model-owned** — the Host can detect that an agent turn stopped, but it cannot infer from free-form todo text whether work finished; the bounded reconciliation notice asks the model, while clients label any unresolved active declaration honestly.

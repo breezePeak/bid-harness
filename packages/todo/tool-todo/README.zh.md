@@ -10,6 +10,8 @@
 
 `status` 是 `pending`、`in_progress` 或 `completed` 之一。
 
+当本轮次将正常完成、但本轮写入的清单仍含 `in_progress` 时，插件会在同一轮次追加一次有日志记录的收尾提醒。模型获得一次额外机会，把确实完成的工作标为 `completed`，把不再运行的未完成工作标为 `pending`。每个 agent 轮次最多提醒一次；模型即使忽略，也不会形成无界模型循环。后续轮次不会因为旧轮次的清单再次收到提醒，因 token 上限截断的轮次也绝不会被延长。
+
 ## 单一所有者
 
 该列表属于调用工具的唯一 agent 会话。不存在 subagent／共享／swarm scope：非 agent 调用方（没有 `exec.agent`）无处写入列表，因此会被拒绝。这是有意设置的 scope 限制，详见 Agent Note。
@@ -26,7 +28,7 @@
 
 ## 渲染
 
-规范结果为 `{ todos, counts: { pending, inProgress, completed } }`；其 Native 渲染器返回精简的更新确认。工具还会写入完整 `todo/write` 会话事件。UI 订阅事件流，并自行渲染该持久化列表：[web 客户端](../../client/ui-conversation)基于当前有效计划（其后没有更晚 `turn/start` 的最近一次 `todo/write`）显示计划条和专属工具行（[展示](../../../.agents/notes/implemented/feature/2026-07-23-web-todo-display.zh.md)、[生命周期](../../../.agents/notes/implemented/feature/2026-07-28-todo-plan-clears-on-next-turn.zh.md)）。
+规范结果为 `{ todos, counts: { pending, inProgress, completed } }`；其 Native 渲染器返回精简的更新确认。工具还会写入完整 `todo/write` 会话事件。UI 订阅事件流，并自行渲染该持久化列表：[web 客户端](../../client/ui-conversation)基于当前有效计划（其后没有更晚 `turn/start` 的最近一次 `todo/write`）显示计划条和专属工具行（[展示](../../../.agents/notes/implemented/feature/2026-07-23-web-todo-display.zh.md)、[生命周期](../../../.agents/notes/implemented/feature/2026-07-28-todo-plan-clears-on-next-turn.zh.md)、[轮次收尾校正](../../../.agents/notes/implemented/bug-fix/2026-09-07-todo-turn-stop-reconciliation.md)）。
 
 ## 会话投影
 
@@ -56,7 +58,7 @@
 
 #### 模型看到的内容
 
-每个 assistant 工具调用都会在参数中保留整个替换列表。成功时原样返回 `Updated todo list: <pending> pending, <inProgress> in progress, <completed> completed.`。稳定失败文本为 ``Error: invalid todo: `content` must be a non-empty string``、`Error: invalid todos: duplicate content "<content>"`、`Error: todo_write requires an owning agent session`，以及——仅在部署设置了 `allowParallelInProgress: false` 时——`Error: invalid todos: at most one task may be in_progress (got <n>)`。完整 `todo/write` 会话事件是 UI 与回放状态，而非第二条模型消息。
+每个 assistant 工具调用都会在参数中保留整个替换列表。成功时原样返回 `Updated todo list: <pending> pending, <inProgress> in progress, <completed> completed.`。稳定失败文本为 ``Error: invalid todo: `content` must be a non-empty string``、`Error: invalid todos: duplicate content "<content>"`、`Error: todo_write requires an owning agent session`，以及——仅在部署设置了 `allowParallelInProgress: false` 时——`Error: invalid todos: at most one task may be in_progress (got <n>)`。完整 `todo/write` 会话事件是 UI 与回放状态，而非第二条模型消息。如果当前轮次最近写入的清单在本轮将结束时仍含活跃项，一条插件来源的 user 消息会要求模型校正完整列表；该消息进入日志，因此会出现在下一次请求与回放中。
 
 #### Token 影响
 
@@ -71,3 +73,4 @@ token 用量会随模型每次提交的完整列表增长，且这些调用参�
 - **仅单一所有者 scope**：列表属于唯一调用 agent 会话；subagent／共享／swarm scope 是有意设置的限制（参见「单一所有者」一节），非 agent 调用方会被拒绝。
 - **条目形状有意保持最小**：`content` 加三态 `status`；整表替换不需要稳定 id、优先级或 active-form 字段。
 - **整表替换是唯一操作**：没有部分更新，也没有回读工具；模型每次调用都必须重新发送完整列表。
+- **条目是否完成仍由模型判断**：Host 可以确定 agent 轮次已经停止，但无法根据自由文本 todo 推断工作是否完成；有界收尾提醒把语义判断交还模型，客户端则如实标示仍未解决的活跃声明。

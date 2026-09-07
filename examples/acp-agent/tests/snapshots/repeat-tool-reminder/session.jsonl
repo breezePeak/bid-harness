@@ -74,6 +74,26 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"DONE."}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":3}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
-{"type":"assistant/message","data":{"turn":1,"step":6,"message":{"role":"assistant","content":[{"type":"text","text":"DONE."}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"48236fa5-4888-4e27-9e17-05bc246ea622"},"usage":{"inputTokens":10,"outputTokens":3}},"sourceEventSeqs":[70,71,72,73,74],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":1,"step":6,"message":{"role":"assistant","content":[{"type":"text","text":"DONE."}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"21d88ef2-8848-44ef-922b-1432eb9122c0"},"usage":{"inputTokens":10,"outputTokens":3}},"sourceEventSeqs":[70,71,72,73,74],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":6}}
+{"type":"agent/inbox/spliced","data":{"target":"next-step","start":0,"inserted":[{"content":[{"type":"text","text":"Before ending this turn, call todo_write once to reconcile the complete list. No item may remain in_progress when the turn stops: mark work actually finished as completed and unfinished work that is not actively running as pending. Then give the final response."}],"source":{"kind":"plugin","plugin":"tool-todo"},"role":"user","id":"97bd5dc9-75f6-4be0-80eb-35d9943121f4"}]}}
+{"type":"agent/inbox/spliced","data":{"target":"next-step","start":0,"removedCount":1,"inserted":[]}}
+{"type":"step/start","data":{"turn":1,"step":7}}
+{"type":"user/message","data":{"content":[{"type":"text","text":"Before ending this turn, call todo_write once to reconcile the complete list. No item may remain in_progress when the turn stops: mark work actually finished as completed and unfinished work that is not actively running as pending. Then give the final response."}],"source":{"kind":"plugin","plugin":"tool-todo"},"role":"user","id":"97bd5dc9-75f6-4be0-80eb-35d9943121f4"},"surfaceOp":"append"}
+{"type":"assistant/chunk","data":{"turn":1,"step":7,"chunk":{"type":"block-start","index":0,"blockType":"tool-call"}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":7,"chunk":{"type":"tool-call-delta","index":0,"id":"call_todo_reconcile","name":"todo_write","argumentsDelta":"{\"todos\":[{\"content\":\"watch the kettle boil\",\"status\":\"pending\"}]}"}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":7,"chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"call_todo_reconcile","name":"todo_write","arguments":"{\"todos\":[{\"content\":\"watch the kettle boil\",\"status\":\"pending\"}]}"}}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":7,"chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}}
+{"type":"assistant/message","data":{"turn":1,"step":7,"message":{"role":"assistant","content":[{"type":"tool-call","id":"call_todo_reconcile","name":"todo_write","arguments":"{\"todos\":[{\"content\":\"watch the kettle boil\",\"status\":\"pending\"}]}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"4dd87d7c-6b24-4e2f-848b-e6ffdecda1e7"}},"sourceEventSeqs":[81,82,83,84],"surfaceOp":"append"}
+{"type":"tool/call","data":{"turn":1,"step":7,"callId":"call_todo_reconcile","name":"todo_write","arguments":"{\"todos\":[{\"content\":\"watch the kettle boil\",\"status\":\"pending\"}]}"}}
+{"type":"todo/write","data":{"todos":[{"content":"watch the kettle boil","status":"pending"}]}}
+{"type":"tool/result","data":{"turn":1,"step":7,"message":{"source":{"kind":"tool","callId":"call_todo_reconcile"},"content":[{"type":"tool-result","toolCallId":"call_todo_reconcile","content":[{"type":"text","text":"Updated todo list: 1 pending, 0 in progress, 0 completed."}],"isError":false}],"role":"user","id":"170e7216-9cc1-47b5-b303-db321c0e4fcf"}},"sourceEventSeqs":[86],"surfaceOp":"append"}
+{"type":"step/end","data":{"turn":1,"step":7}}
+{"type":"step/start","data":{"turn":1,"step":8}}
+{"type":"assistant/chunk","data":{"turn":1,"step":8,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":8,"chunk":{"type":"text-delta","index":0,"text":"List reconciled."}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":8,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"List reconciled."}}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":8,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
+{"type":"assistant/message","data":{"turn":1,"step":8,"message":{"role":"assistant","content":[{"type":"text","text":"List reconciled."}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"c83d8c09-3588-459c-bc68-de8b26d19b35"}},"sourceEventSeqs":[91,92,93,94],"surfaceOp":"append"}
+{"type":"step/end","data":{"turn":1,"step":8}}
 {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}

@@ -1,7 +1,9 @@
 /**
  * Model-facing whole-list replacement. Each call appends a `todo/write` snapshot to the calling
- * agent's session; replay is last-write-wins, and UIs render from session events. A non-agent
- * caller has no owning list and is rejected. Named exports preserve loader injection metadata.
+ * agent's session; replay is last-write-wins, and UIs render from session events. Before a turn
+ * stops, one bounded steering message asks the model to reconcile any remaining active item. A
+ * non-agent caller has no owning list and is rejected. Named exports preserve loader injection
+ * metadata.
  * @module @deepseek-ai/dsh-tool-todo
  */
 
@@ -9,6 +11,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { ZodType } from 'zod'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { TodoItem } from '@deepseek-ai/dsh-session'
 // Type-only: resolves ctx.sessionProjections for the optional unit child.
@@ -65,6 +69,12 @@ const DESCRIPTION_TAIL =
   + 'single-step tasks. Statuses: `pending` (not started), `in_progress` (being '
   + 'worked on now), `completed` (finished).'
 
+const RECONCILE_MESSAGE =
+  'Before ending this turn, call todo_write once to reconcile the complete list. '
+  + 'No item may remain in_progress when the turn stops: mark work actually finished '
+  + 'as completed and unfinished work that is not actively running as pending. Then '
+  + 'give the final response.'
+
 /**
  * The model-facing description for one activation. The active-status clause is the only part that
  * varies, because it is the only instruction the parallel policy changes.
@@ -110,6 +120,28 @@ function toTodoList(raw: { content: string; status: string }[], allowParallel: b
   return todos
 }
 
+interface CurrentTurnTodoState {
+  todos: readonly TodoItem[] | undefined
+  hitMaxTokens: boolean
+}
+
+/** Return the latest todo snapshot and truncation state since the current turn started. */
+function currentTurnTodoState(agent: Agent): CurrentTurnTodoState {
+  let todos: readonly TodoItem[] | undefined
+  let hitMaxTokens = false
+  for (let index = agent.session.events.length - 1; index >= 0; index--) {
+    const event = agent.session.events[index]
+    if (event?.type === 'todo/write' && todos === undefined) todos = event.data.todos
+    if (event?.type === 'assistant/chunk'
+      && event.data.chunk.type === 'finish'
+      && event.data.chunk.reason.kind === 'max-tokens') {
+      hitMaxTokens = true
+    }
+    if (event?.type === 'turn/start') return { todos, hitMaxTokens }
+  }
+  return { todos, hitMaxTokens }
+}
+
 /** Wire payload schema of the `todos` projection (whole list or pre-first-write null). */
 const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([
   zod.array(zod.object({
@@ -127,6 +159,17 @@ const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([
  */
 export function apply(ctx: Context, config: Config): void {
   const allowParallel = config.allowParallelInProgress
+  const remindedTurn = new WeakMap<Agent, number>()
+  ctx.on('agent/turn-stopping', ({ agent, turn, signal }) => {
+    if (signal.aborted || remindedTurn.get(agent) === turn) return
+    const state = currentTurnTodoState(agent)
+    if (state.hitMaxTokens || !state.todos?.some(todo => todo.status === 'in_progress')) return
+    remindedTurn.set(agent, turn)
+    agent.steer(createUserMessage({
+      content: [{ type: 'text', text: RECONCILE_MESSAGE }],
+      source: { kind: 'plugin', plugin: name },
+    }))
+  })
   // The unit child activates only when a projection registry is composed
   // (headless assemblies without the seam stay unaffected). Standing-plan fold:
   // latest whole todo/write list, cleared by the next turn/start (turn/end keeps

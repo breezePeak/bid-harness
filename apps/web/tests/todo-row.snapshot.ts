@@ -3,7 +3,8 @@
 // client.js` bundles through AppWebEntry's ModuleLoader path against the
 // keyless FixtureApiClient transport, opens the fixture session, and pins the
 // two surfaces the fixture's parallel plan (turn 74, two items `in_progress`)
-// reaches — the `todo_write` tool row and the dock's plan strip.
+// reaches — the `todo_write` tool row and the dock's plan strip — across the
+// fixture's running -> cancelled session transition.
 //
 // The row is pinned as three separate fields on purpose. `summary=` is the
 // ellipsized text and `suffix=` is ToolRow's non-shrinking `summarySuffix`
@@ -29,19 +30,25 @@ function todoShape(row: Element, panel: Element): string {
   const first = (from: Element, name: string): string =>
     pick(from, name)[0]?.textContent?.trim() ?? '<absent>'
   const items = [...panel.querySelectorAll('[data-status]')]
-    .map(item => `item=${item.getAttribute('data-status')} ${item.textContent?.trim() ?? ''}`)
+    .map((item) => {
+      const active = item.getAttribute('data-active')
+      const activeField = active === null ? '' : ` active=${active}`
+      return `item=${item.getAttribute('data-status')}${activeField} ${item.textContent?.trim() ?? ''}`
+    })
   return [
     `row=${row.getAttribute('data-tool')}`,
     `title=${first(row, 'title')}`,
     `summary=${first(row, 'summary')}`,
     `suffix=${first(row, 'summarySuffix')}`,
     `panel=${first(panel, 'progress')}`,
+    `spinning-glyphs=${pick(panel, 'glyphProgress').length}`,
+    `unfinished-glyphs=${pick(panel, 'glyphUnfinished').length}`,
     ...items,
   ].join('\n')
 }
 
 describe('assembled todo surfaces', () => {
-  it('renders the parallel plan as a row summary, a separate active count, and the dock plan strip', async () => {
+  it('renders the parallel plan as active only while its session is running', async () => {
     mountAssembledApp()
 
     const tree = await screen.findByRole('tree', { name: 'Sessions' }, { timeout: 10_000 })
@@ -61,7 +68,20 @@ describe('assembled todo surfaces', () => {
     if (toggle === null) throw new Error('the plan strip must expose its expand toggle')
     if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle)
 
-    const shape = todoShape(row, panel)
+    const active = todoShape(row, panel)
+    // The resident fixture is waiting on three question fields and then an
+    // approval. Resolve both gates so the ordinary running composer exposes
+    // its real session.cancel action.
+    for (let index = 0; index < 3; index += 1) {
+      fireEvent.click(await screen.findByRole('button', { name: 'Skip this question' }))
+    }
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow once' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop generating' }))
+    await waitFor(() => {
+      expect(panel.querySelectorAll('[data-active="false"]')).toHaveLength(2)
+      expect(panel.textContent).toContain('2 unfinished')
+    })
+    const shape = `running\n${active}\n\nstopped\n${todoShape(row, panel)}`
     if (REFRESHING_GOLDEN) {
       mkdirSync(dirname(EXPECTED), { recursive: true })
       writeFileSync(EXPECTED, shape)

@@ -131,6 +131,10 @@
   animation: todo-progress-spin 1s linear infinite;
 }
 
+.glyphUnfinished {
+  color: var(--dsw-alias-label-caption);
+}
+
 @keyframes todo-progress-spin {
   to {
     transform: rotate(360deg);

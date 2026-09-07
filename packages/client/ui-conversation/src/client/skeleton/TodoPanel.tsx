@@ -20,6 +20,8 @@ import css from './TodoPanel.module.css'
 export interface TodoPanelProps {
   /** The session's current plan (empty renders nothing) — selected by the dock adapter. */
   todos: readonly TodoItem[]
+  /** Whether the owning agent is currently running. */
+  running: boolean
   /** The dock entry's locale seat, passed down as a plain prop. */
   t: TodoDockProps['t']
 }
@@ -43,11 +45,18 @@ function CompletedGlyph() {
   )
 }
 
-/** In-progress: business-blue ring fading out; CSS spins the svg. */
-function ProgressGlyph() {
+/** Active work spins in business blue; an unresolved declaration after settlement stays static. */
+function ProgressGlyph({ running }: { running: boolean }) {
   const gradientId = useId()
   return (
-    <svg width={14} height={14} viewBox="0 0 14 14" fill="none" aria-hidden="true" className={css.glyphProgress}>
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+      className={running ? css.glyphProgress : css.glyphUnfinished}
+    >
       <defs>
         <linearGradient id={gradientId} x1="2.5" y1="12" x2="10.5" y2="3.5" gradientUnits="userSpaceOnUse">
           <stop stopColor="currentColor" />
@@ -68,10 +77,10 @@ function PendingGlyph() {
   )
 }
 
-function StatusGlyph({ status }: { status: TodoItem['status'] }) {
+function StatusGlyph({ status, running }: { status: TodoItem['status']; running: boolean }) {
   switch (status) {
     case 'completed': return <CompletedGlyph />
-    case 'in_progress': return <ProgressGlyph />
+    case 'in_progress': return <ProgressGlyph running={running} />
     case 'pending': return <PendingGlyph />
     /* v8 ignore next -- closed TodoItem status union */
     default: return assertNever(status)
@@ -79,7 +88,7 @@ function StatusGlyph({ status }: { status: TodoItem['status'] }) {
 }
 
 /** Header summary: "·"-joined per-status counts; zero-count segments are omitted as noise (a non-empty list keeps at least one). */
-function progressLabel(todos: readonly TodoItem[], t: TodoPanelProps['t']): string {
+function progressLabel(todos: readonly TodoItem[], running: boolean, t: TodoPanelProps['t']): string {
   const done = todos.filter(item => item.status === 'completed').length
   const active = todos.filter(item => item.status === 'in_progress').length
   const pending = todos.length - done - active
@@ -87,12 +96,12 @@ function progressLabel(todos: readonly TodoItem[], t: TodoPanelProps['t']): stri
   // separator breathing room needs a literal wide space.
   return [
     ...done > 0 ? [t('todo.progress.done', { done })] : [],
-    ...active > 0 ? [t('todo.progress.active', { active })] : [],
+    ...active > 0 ? [t(running ? 'todo.progress.active' : 'todo.progress.unfinished', { active })] : [],
     ...pending > 0 ? [t('todo.progress.pending', { pending })] : [],
   ].join('\u2002·\u2002')
 }
 
-export function TodoPanel({ todos, t }: TodoPanelProps) {
+export function TodoPanel({ todos, running, t }: TodoPanelProps) {
   const [collapsed, setCollapsed] = useState(true)
   if (todos.length === 0) return null
 
@@ -107,7 +116,7 @@ export function TodoPanel({ todos, t }: TodoPanelProps) {
         >
           <span className={css.lead} aria-hidden><IconChecklistOutline14 /></span>
           <span className={css.title}>{t('todo.title')}</span>
-          <span className={css.progress}>{progressLabel(todos, t)}</span>
+          <span className={css.progress}>{progressLabel(todos, running, t)}</span>
           <span className={css.chevron} aria-hidden>
             {collapsed ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
           </span>
@@ -115,8 +124,13 @@ export function TodoPanel({ todos, t }: TodoPanelProps) {
         {!collapsed && (
           <ul className={css.list}>
             {todos.map(item => (
-              <li key={item.content} className={css.item} data-status={item.status}>
-                <span className={css.glyph} aria-hidden><StatusGlyph status={item.status} /></span>
+              <li
+                key={item.content}
+                className={css.item}
+                data-status={item.status}
+                data-active={item.status === 'in_progress' ? running : undefined}
+              >
+                <span className={css.glyph} aria-hidden><StatusGlyph status={item.status} running={running} /></span>
                 <span className={css.content}>{item.content}</span>
               </li>
             ))}
@@ -130,10 +144,11 @@ export function TodoPanel({ todos, t }: TodoPanelProps) {
 /** Full props of a dock entry: InputZone owner share + session standard kit + global seat + the locale seat. */
 export type TodoDockProps = PropsRuntime<'conversation.input.dock'> & PropsLocale<'conversation'>
 
-/** Dock adapter: reads the host-computed 'todos' projection (whole list; absent or null renders nothing). */
-export function TodoDock({ useProjection, t }: TodoDockProps) {
+/** Dock adapter: combines the Host-computed list with the authoritative agent-running bit. */
+export function TodoDock({ useProjection, useSession, t }: TodoDockProps) {
   const todos = useProjection('todos')
-  return <TodoPanel todos={todos ?? []} t={t} />
+  const running = useSession(session => session.running)
+  return <TodoPanel todos={todos ?? []} running={running} t={t} />
 }
 
 /**
