@@ -110,7 +110,7 @@ async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
   })}\n`)
 }
 
-function candidateFrom(request: SubagentStartRequest, valid = true, withWebEvidence = false) {
+function candidateFrom(request: SubagentStartRequest, _valid = true, withWebEvidence = false) {
   if (promptText(request).includes('Writer Candidate：')) return reviewFrom(request)
   const line = promptText(request).split('\n').find(value => value.startsWith('Current Chapter Blueprint：'))
   if (line === undefined) throw new Error('missing blueprint')
@@ -169,7 +169,7 @@ interface DeferredRun {
 
 function fixtureAgent(
   workspace: BidWorkspace,
-  outline: ReturnType<typeof outlineFixture>,
+  _outline: ReturnType<typeof outlineFixture>,
   dependencies: Record<string, string[]> = {},
   automatic = true,
   validCandidate: (attempt: number, request: SubagentStartRequest) => boolean = () => true,
@@ -997,7 +997,9 @@ describe('chapter-writing executor', () => {
     const retained = await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')
     const damagedPath = join(workspace.projectRoot, 'chapters/reviews/0002.json')
     const damaged = parseChapterReviewArtifact(JSON.parse(await readFile(damagedPath, 'utf8')))
-    damaged.must_answer_coverage[0].evidence_quotes = ['正文中不存在的引句']
+    const firstCoverage = damaged.must_answer_coverage[0]
+    if (firstCoverage === undefined) throw new Error('missing must-answer coverage')
+    firstCoverage.evidence_quotes = ['正文中不存在的引句']
     await writeFile(damagedPath, JSON.stringify(damaged))
     const resumed = fixtureAgent(workspace, outline)
     await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
