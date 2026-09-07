@@ -22,14 +22,15 @@ it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
       expect(childLogs).toHaveLength(2)
-      const writerLog = childLogs.find(log => log.includes('Available Local Corpus：'))
+      const writerLog = childLogs.find(log => log.includes('Available Evidence Files：'))
       if (writerLog === undefined) throw new Error('缺少持久化 Writer 日志')
       const [headerLine, ...eventLines] = writerLog.trimEnd().split('\n')
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'structured_output'])
-      expect(writerLog).toContain('Related Materials：[]')
+      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'structured_output', 'structured_output'])
+      expect(writerLog).toContain('Mapped Materials：[]')
+      expect(writerLog).toContain('F999')
       expect(writerLog).toContain('S5 Chapter Child 不可读取 tender 或未入库资料。')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })
       expect(writerLog).not.toContain('需要访问控制与安全审计方案。')
@@ -40,7 +41,7 @@ it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
       expect(map.section_mappings[0]!.local_materials).toEqual([])
       const metadata = parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8')))
       expect(metadata.local_materials_used).toEqual([{
-        source_kind: 'reference', file_id: expect.any(String), chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。',
+        source_kind: 'reference', file_id: metadata.local_materials_used[0]?.file_id, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。',
       }])
       const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(projectRoot, 'chapters/manifest.json'), 'utf8')))
       expect(manifest.chapters).toHaveLength(1)
@@ -49,6 +50,8 @@ it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
       const expected = {
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'reviewer.expected.jsonl': normalizeSessionSnapshot(childLogs.find(log => log.includes('Evidence Pack：'))!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'artifacts.expected.json': JSON.stringify({ map, metadata, markdown }, null, 2) + '\n',
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {

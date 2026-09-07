@@ -13,7 +13,7 @@ import {
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
-  parseTenderScoringArtifact, CHAPTER_EXECUTION_SCHEMA_VERSION, EVIDENCE_MAPPING_SCHEMA_VERSION,
+  parseTenderScoringArtifact, EVIDENCE_MAPPING_SCHEMA_VERSION,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -36,6 +36,7 @@ function finalText(text: string): StreamChunk[] {
 
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
+  readonly requests: GenerateOptions[] = []
   constructor(
     private readonly parentId: SessionId,
     private readonly parentScript: StreamChunk[][],
@@ -49,6 +50,7 @@ class ScriptedAdapter extends LlmAdapter {
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
     if (!this.interactive && options.messages.at(-1)?.source.kind === 'subagent-settled') {
       yield* finalText('等待 Host 下发目录深化任务。')
       return
@@ -344,7 +346,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 }
 
 /**
- * 通过真实 Writer 工具和 Reviewer 结构化提交，补充 S4 未映射的本地资料。
+ * 通过真实 Writer 工具和 Reviewer 私有分批提交，补充 S4 未映射的本地资料。
  * @param ctx - Loader 组装的 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @returns 章节阶段产物及工作区；S4 map 变更时抛错。
@@ -377,27 +379,13 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   if (corpus === undefined || tender.chunksPath === null) throw new Error('缺少 S5 回放资料')
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
   const candidate = {
-    section_id: section.id,
     markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。',
     metadata: {
-      section_id: section.id, covered_must_answer: section.must_answer,
-      covered_scoring_response_point_ids: section.scoring_response_point_ids,
-      covered_scoring_response_points: section.scoring_response_points,
-      local_materials_used: [{ source_kind: corpus.role, file_id: corpus.file_id, chunk: corpus.chunks[0]!.id, usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
-      web_materials_used: [], additional_web_materials: [], unresolved_topics: [],
-      handoff: {
-        section_id: section.id, decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
-        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
-      },
+      local_materials_used: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
     },
   }
-  const coverage = { status: 'covered', evidence_quotes: ['Q2'], issue: null }
-  const review = {
-    schema_version: 2, section_id: section.id, verdict: 'pass',
-    must_answer_coverage: section.must_answer.map(item => ({ item, ...coverage })),
-    requirement_coverage: [{ requirement_id: 'REQ-1', item: '提供访问控制方案', ...coverage }],
-    response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明访问控制', ...coverage }],
-    compliance_coverage: [], claim_checks: [],
+  const coverage = { status: 'covered', evidence_quote_refs: ['Q2'], issue: null }
+  const summary = {
     quality_checks: {
       project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
       placeholder_free: true, obvious_repetition_free: true,
@@ -405,23 +393,25 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     blocking_issues: [],
   }
   const parentScript = [
-    toolCall('write-chapter-plan', 'write', { file_path: `${workspacePath}/chapters/execution-plan.json`, content: JSON.stringify({
-      schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION, scope: 'technical_bid', confirmed_outline_sha256: outlineHash,
-      global_consistency_notes: ['统一使用访问控制项目名称和权限审计术语。'], sections: [{ section_id: section.id, depends_on: [], related_sections: [], planning_notes: [] }],
-    }) }),
-    finalText('章节依赖规划完成。'),
+    toolCall('add-plan-note', 'add_global_consistency_note', { note: '统一使用访问控制项目名称和权限审计术语。' }),
+    toolCall('finish-plan', 'finish_chapter_plan', {}),
   ]
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('grep-supplement', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
+    toolCall('reject-bad-reference', 'structured_output', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
     toolCall('submit-chapter', 'structured_output', candidate),
-    toolCall('submit-review', 'structured_output', review),
+    toolCall('review-incomplete', 'finish_chapter_review', {}),
+    toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
+    toolCall('submit-summary', 'set_review_summary', summary),
+    toolCall('finish-review', 'finish_chapter_review', {}),
   ]
-  ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, parentScript, childScript)))
+  const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, 'https://official.example/standard')
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
-  return { agent, artifacts, workspace }
+  return { agent, artifacts, workspace, requests: adapter.requests }
 }

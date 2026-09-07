@@ -34,6 +34,8 @@ interface SubagentCapabilities {
 
 ## The one-shot start request
 
+in-process one-shot 在 Child 发布前等待 `subagent/child-setup` serial 事件。事件以父 Agent 为作用域，携带 `parent`、`childContext` 和当前 `ResolvedSubagentStartRequest`，用于本次调用的私有能力组合；监听器异常回滚创建，注册随 Child scope 释放。监听器不得驱动 Child。具体时序见 [in-process driver](../../packages/subagent/subagent-in-process-driver/README.md#start-contract)。
+
 The tool layer builds this request from the model input and its own config; the service validates it against the named provider before `start`. Required `parent` supplies the session cwd, lineage, and delegation depth. Optional output schema, depth, tool filter, and persona require matching capability flags. Unsupported schemas fail at start; in-process backends scope filters and personas to child creation and implement the supported object-rooted schema with a forced capture tool.
 
 ```ts type-equiv

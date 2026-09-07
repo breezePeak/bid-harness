@@ -133,8 +133,13 @@ export function validateChapterExecutionPlan(
   const dependencies = new Map(plan.sections.map(section => [section.section_id, section.depends_on.map(item => item.section_id)]))
   const visiting = new Set<string>()
   const visited = new Set<string>()
+  let cycle: string[] = []
   const visit = (sectionId: string): boolean => {
-    if (visiting.has(sectionId)) return true
+    if (visiting.has(sectionId)) {
+      const path = [...visiting]
+      cycle = [...path.slice(path.indexOf(sectionId)), sectionId]
+      return true
+    }
     if (visited.has(sectionId)) return false
     visiting.add(sectionId)
     for (const dependency of dependencies.get(sectionId) ?? []) {
@@ -144,6 +149,6 @@ export function validateChapterExecutionPlan(
     visited.add(sectionId)
     return false
   }
-  if ([...dependencies.keys()].some(visit)) issues.push(issue('CHAPTER_PLAN_DEPENDENCY_CYCLE', '章节强依赖不得形成环。', 'sections'))
+  if ([...dependencies.keys()].some(visit)) issues.push(issue('CHAPTER_PLAN_DEPENDENCY_CYCLE', `章节强依赖形成环：${cycle.join(' → ')}。请修正这些章节的 depends_on。`, 'sections'))
   return issues
 }

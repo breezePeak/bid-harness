@@ -12,7 +12,6 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
 })
-
 const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
   let value = zh[key]
   for (const [name, replacement] of Object.entries(params ?? {})) {
@@ -489,6 +488,9 @@ describe('BidStagePanel', () => {
     })} />)
 
     expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
+    // 默认折叠状态下，点击展开板块查看表格和编辑项
+    fireEvent.click(screen.getByRole('button', { name: /项目整体情况/ }))
+    fireEvent.click(screen.getByRole('button', { name: /技术评分要点/ }))
     expect(screen.getByDisplayValue('总体方案')).toBeTruthy()
     expect(screen.getByDisplayValue('实施方案')).toBeTruthy()
     fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
@@ -595,7 +597,6 @@ describe('BidStagePanel', () => {
     expect(await screen.findByLabelText('SEC-001 章节编号')).toBeTruthy()
   })
 })
-
 describe('ui-bid browser plugin', () => {
   it('covers every Host S5 issue with the same browser repair action', () => {
     expect(Object.keys(OUTLINE_CONFIRMATION_REPAIR_ACTIONS).sort()).toEqual(Object.keys(OUTLINE_CONFIRMATION_ISSUES).sort())
@@ -710,5 +711,78 @@ describe('ui-bid browser plugin', () => {
     expect(remoteRetry).toHaveBeenCalledWith('session_bid')
     await injected.startStage()
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
+  })
+
+  it('supports double clicking content cards to activate editing and saving changes in S2 review', async () => {
+    const confirmTenderAnalysis = vi.fn(async () => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'waiting_user' },
+      allowedActions: ['confirm_tender_analysis'],
+      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
+    }), {
+      confirmTenderAnalysis,
+      getTenderAnalysisForConfirmation: async () => ({
+        project: {
+          schema_version: 1, project_name: '原项目名称', tender_name: '原招标名称', purchaser: '采购方', owner: '业主单位',
+          project_background: ['项目背景条目一', '项目背景条目二'], project_objectives: ['目标一'], project_scope: ['范围一'],
+          technical_scope: ['技术范围一'], delivery_scope: ['交付范围一'], implementation_constraints: ['约束一'],
+          key_technical_points: ['技术重点一'], source_refs: [], analyzed_tender_files: ['tender'],
+        },
+        scoring: {
+          schema_version: 1,
+          scoring_items: [{
+            id: 'SCORE-1', parent: null, group: '技术评分', title: '初始评分项',
+            raw_text: '初始评分条款原文', criterion: '初始评分标准', score: 10, score_range: null, must_answer: true,
+            source_refs: [],
+          }],
+        },
+        requirements: { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '要求原文', normalized_requirement: '初始技术要求', mandatory: true, source_refs: [] }] },
+        compliance: { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: '合规', raw_text: '合规原文', normalized_rule: '初始合规规则', severity: 'mandatory', source_refs: [] }] },
+      }),
+    })} />)
+
+    expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
+    // 打开页面后默认处于折叠状态，表格内容初始不可见
+    expect(screen.queryByText('原项目名称')).toBeNull()
+
+    // 测试折叠/展开功能：点击手风琴按钮展开“项目整体情况”板块
+    const projectHeaderBtn = screen.getByRole('button', { name: /项目整体情况/ })
+    fireEvent.click(projectHeaderBtn)
+    // 展开后表格内容正常可见
+    expect(screen.getByText('原项目名称')).toBeTruthy()
+    expect(screen.getByText('项目背景条目一')).toBeTruthy()
+    expect(screen.getByText('项目背景条目二')).toBeTruthy()
+
+    // 再次点击折叠
+    fireEvent.click(projectHeaderBtn)
+    expect(screen.queryByText('原项目名称')).toBeNull()
+
+    // 再次点击展开进行后续编辑操作验证
+    fireEvent.click(projectHeaderBtn)
+    expect(screen.getByText('原项目名称')).toBeTruthy()
+
+    // 双击“项目名称”单元格激活编辑
+    const projectNameCell = screen.getByText('原项目名称').closest('[class*="cellEditable"]')!
+    fireEvent.doubleClick(projectNameCell)
+
+    // 激活后出现编辑操作按钮“完成”和“取消”
+    const completeBtns = screen.getAllByRole('button', { name: '完成' })
+    expect(completeBtns.length).toBeGreaterThan(0)
+
+    // 修改输入框内容并点击“完成”
+    const input = screen.getByDisplayValue('原项目名称')
+    fireEvent.change(input, { target: { value: '双击修改后的新项目名称' } })
+    fireEvent.click(completeBtns[0]!)
+
+    // 编辑态退出，直观文本展示新内容
+    expect(screen.getByText('双击修改后的新项目名称')).toBeTruthy()
+
+    // 顶部红框确认按钮提交
+    fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
+    await waitFor(() => {
+      expect(confirmTenderAnalysis).toHaveBeenCalledWith(expect.arrayContaining([
+        { type: 'update_project', fields: { project_name: '双击修改后的新项目名称' } },
+      ]))
+    })
   })
 })

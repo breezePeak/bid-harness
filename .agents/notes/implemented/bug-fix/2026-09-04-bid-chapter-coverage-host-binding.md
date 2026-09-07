@@ -8,7 +8,7 @@ S5 Writer 必须把确认目录中的 `must_answer`、评分响应点 ID 和评�
 
 ## Decision
 
-Host 在章节候选通过结构化 Schema 解析后，从当前确认目录 Section 绑定 `covered_must_answer`、`covered_scoring_response_point_ids` 和 `covered_scoring_response_points`，并以绑定后的值生成正式 Metadata。Writer 返回的同名字段只满足统一输出 Schema，不作为正式索引的来源。
+Host 在 Writer 语义输入解析时，从当前确认目录 Section 绑定 `covered_must_answer`、`covered_scoring_response_point_ids` 和 `covered_scoring_response_points`，并以绑定后的值生成正式 Metadata。Writer 不提交这些索引；简化输入与资料绑定由 [S5 私有提交协议](../architecture/2026-09-07-s5-private-submission-protocols.md)规定。
 
 正文覆盖仍由独立 Reviewer 按当前 Section 的必答项、需求、评分响应点和合规项逐项检查。缺项会触发正文修订或形成 `needs_attention`，因此 Host 绑定索引不会把未覆盖正文标记为已通过。该决定补充[章节写作由 Host 调度独立 Subagent](2026-09-01-s6-subagent-chapter-scheduling.md)中的 Host 提交职责，原记录仍保留其并发、隔离和失败处理决策。
 

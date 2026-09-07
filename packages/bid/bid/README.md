@@ -71,21 +71,22 @@ S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公�
 
 S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文，不重新规划章节目标或拆章。Writer 优先使用 S4 Evidence，遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 及登记 Web Snapshot 中有限 grep/read；相邻分块按索引读取，tender 始终禁止。补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map；framework 保持草稿身份，不作事实 Evidence。
 
-S5 执行计划使用当前 `CHAPTER_EXECUTION_SCHEMA_VERSION`；强依赖包含章节 ID 与原因，每章包含 `planning_notes`。计划与 Writer 候选的严格校验失败会保留字段路径和要求供模型修复。Writer 和 Reviewer 都是 Main Agent 的一层子代理，绝对深度上限为 1；Reviewer 不开放资料检索或委派工具。
+S5 以 `outline/confirmed-outline.json` 为唯一章节结构。Main Agent 只通过 `add_global_consistency_note`、`set_chapter_relations` 和 `finish_chapter_plan` 判断关系，不使用文件工具。Host 按目录遍历预置全部可写章节，补齐身份、版本和 Hash；至少一项真实全局说明及无环强依赖校验通过后原子写入 `execution-plan.json`。仅有合法 plan、尚无 execution-log 时也复用计划。
 
-Reviewer 接收当前项目事实与章节相关输入；引文提交为当前候选的原文选项编号，Host 回填完整原文并保留 Markdown 标记，模型无需逐字重抄。编号和原文对照随 Reviewer 输入记录，正式报告仅保存原文。报告字段或引用无效时，Host 在同一正文上按 `modelStageRepairAttempts` 重试 Reviewer；只有有效报告中的内容问题才交给 Writer。修复预算用尽也不保存无效报告或将章节标记为完成。
+Writer 只提交完整 `markdown` 与语义 `metadata`，空数组和 handoff 成员可省略。三个 `section_id` 与三个 `covered_*` 索引由 Host 按 Blueprint 绑定；覆盖索引不代表正文已经响应。资料使用本章稳定的 M（映射材料）、F（可补搜文件）和 W（已验证网页）引用，工具读取仍使用真实路径。相同资料经不同短引用提交时按真实身份去重，语义冲突可恢复地拒绝。框架只作为 preserve/adapt/rewrite 写作输入，不进入 M/F Evidence；新 URL 必须有当前 Writer 的成功 fetch 正文。引用、chunk、usage 和 Snapshot Hash 在 `structured_output` 完成前校验，允许当前 Writer 修正。
 
-Reviewer 宣称 `pass` 但同时记录未覆盖项、阻塞问题、旧项目污染或占位内容时，Host 将结论收紧为 `repair` 并保留具体缺口，交给 Writer 修订；第二轮仍有内容缺口时按 `needs_attention` 保存，其他章节继续执行。
+Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通过 `set_review_summary` 替换质量检查与额外阻断，再用 `finish_chapter_review` 提交。Host 提供含全局 Compliance 的 canonical R Checklist、当前候选 Q 原文与只读 E Evidence Pack；证据包包含相关 S2 确认事实、实际使用的本地 chunk、Hash 验证后的 Web 正文及前置 handoff，明确各来源的证明范围。每批可提交多项并分别返回接受项和失败项；漏 R 或 summary 的 finish 保留记录并返回缺项。普通文本结束时在同一 Child 内按 `modelStageRepairAttempts` 有限续行。
 
-Writer 的结构化提交限定当前已解析资料的完整 ID、对应类型和允许用法。截断 ID、框架冒充参考资料以及普通资料的复用用法会在提交工具内被拒绝，模型可在当前写作会话中修正；Host 仍校验实际资料与分块。
+Host 从记录确定 verdict：任一 coverage=missing、quality=false、unsupported claim 或额外阻断都为 `repair`。成功 finish 表示报告收集完整，可以是 repair。正文在 Reviewer 启动前即可读取；最多一次完整候选替换式修复，修复仍不通过或遇到持续传输错误时保留最近的合法已审候选和真实问题，不增加全部章节必须 pass 的查看、完成或导出限制。
+
+私有工具通过 in-process 的 `subagent/child-setup` 在 Child 发布前安装，以真实 Agent 和本次章节尝试隔离。finish 调用 `concludeTurn()`，只在权威 `tools/result`（嵌套调用同时等待外层结果）成功后确认；结束或释放后不能修改结果。Writer、Reviewer 均为 fresh-context 一层 Child，默认章节并发为 3，强依赖等待、弱关联不阻塞。路径、持久化字段和版本不变；M/F/W/R/Q/E 不进入外部 Artifact。
 
 Writer 或 Reviewer 异常结束时，执行日志和阶段失败消息保留 Provider 提供的安全诊断，便于区分模型服务故障与产物校验问题。
 
-S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误会使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试会严格校验原计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留有效的 completed 章节，只重新排队 failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
+S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证原计划、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份，保留包括合法 repair 在内的 completed 章节，重排未完成或产物损坏的章节。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。
 
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
-S5 uses `outline/confirmed-outline.json` as its only structure source. Each Writer receives its Section, related S2 records, stable response points, Section evidence, exact framework draft chunks referenced by that Section, and bounded dependency handoffs. Framework bodies are writing input for preservation, adaptation, or rewriting, never factual Evidence. The Reviewer receives only Host-injected data and structured output. Missing enterprise facts remain unresolved and cannot be replaced by Web sources.
 
 阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；用户通过 UI 的“开始本阶段”或 `/bid-start` 明确确认后，才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
 
@@ -111,4 +112,4 @@ The persisted inventory is append-only conversation content. Importing files in 
 - DOC extraction preserves text, paragraph breaks, list markers, and tab-separated table cells but not all binary Word styling.
 - DOCX and DOC page fields remain `null` because their source structures do not provide dependable pagination.
 - DOCX export supports headings, paragraphs, lists, and tables; it does not apply a company Word template.
-- S5 receives cancellation only from its owned execution failure path; wiring parent-session stop signals into the chapter controller remains pending.
+- S5 的证明范围与资料身份由 Host 校验，原文是否真正支持某项内容仍由 Reviewer 判断；无密钥回放验证协议，不能替代真实模型的语义质量评估。

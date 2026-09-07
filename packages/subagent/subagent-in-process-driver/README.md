@@ -12,7 +12,7 @@ The driver follows this sequence:
 
 1. Validate the parent depth and optional absolute `maxDepth`, then derive child depth as parent depth plus one and persist it in the child session header.
 2. Call `parent.ctx.agents.create` directly, passing the required request signal into the factory's creation transaction.
-3. During that transaction's unpublished setup window, install the requested persona, tool restriction, and structured-output runtime.
+3. 在尚未发布的 setup 中安装 persona、工具限制和结构化输出运行时，再等待父 Agent 作用域的 `subagent/child-setup`。监听器可根据真实 parent、child 与解析后的 request 安装本次 Child 私有能力；异常或取消由创建事务回滚。
 4. Publish the child, retain the returned `AgentHandle`, and drive one task with `child.followup(prompt)` followed by `child.whenIdle()`.
 5. Read the child's own output — its last non-empty assistant message (an empty-content message that records usage is skipped), or its accumulated assistant text when no such message exists — and the final durable turn reason from the complete owned child run, excluding any fork seed.
 

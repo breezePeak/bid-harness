@@ -508,7 +508,7 @@ export function BidStagePanel({
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
         {reviewHost !== null && (canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
-          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ minHeight: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
             {canConfirm && previewOutline !== null && (
               <OutlineConfirmationReview
                 outline={previewOutline}

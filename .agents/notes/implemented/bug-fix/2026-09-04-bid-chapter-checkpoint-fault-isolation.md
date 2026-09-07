@@ -12,7 +12,7 @@ Writer 和 Reviewer 的 `stopReason=error` 使用独立运行重试计数，重�
 
 Host 以 `chapters/execution-log.json` 维护每章的 pending、running、completed 和 failed 状态。一个章节最终失败只记录该章，不取消无关运行；调度器继续完成所有依赖已满足的章节，依赖失败章节的节点明确标记 failed。已有有效 Reviewer 报告的候选在后续修订遭遇重复运行错误时作为 `needs_attention` 结果提交，保留其具体内容问题，不把传输错误升级为缺失章节。
 
-阶段重试先校验确认目录哈希、关系计划、执行日志顺序与依赖、正文、Metadata、Reviewer 报告、内容哈希、最终 Writer/Reviewer Child 身份和已接受尝试。全部一致的 completed 章节恢复到内存调度状态；failed、running 和 pending 章节重置为 pending 并保留历史尝试。普通重试不删除章节文件，也不重新运行关系规划。检查点不完整时重新规划和执行，但仍不删除现有章节文件；只有用户显式执行阶段重置时才按重置命令清理。
+阶段重试先校验确认目录哈希、关系计划、执行日志顺序与依赖、正文、Metadata、Reviewer 报告、资料完整性、内容哈希、最终 Writer/Reviewer Child 身份和已接受尝试。全部一致的 completed 章节恢复到内存调度状态，包括合法 repair；未完成或产物损坏的章节重置为 pending 并保留历史尝试。合法 plan 独立复用，不依赖 execution-log 已经创建；非法或目录 Hash 不匹配时重新规划。普通重试不删除章节文件；只有用户显式阶段重置才清理。具体提交和恢复校验见 [S5 私有提交协议](../architecture/2026-09-07-s5-private-submission-protocols.md)。
 
 缺少真实数量、人员、设备或记录值时，Writer 只保留正式字段、填写规则和控制要求，不添加示例数据行。Reviewer 不得要求虚构值或示例记录，并把带“示例、待补、XXX、最终填写”等内容的已填行判定为占位，避免两轮审查采用相反标准。
 

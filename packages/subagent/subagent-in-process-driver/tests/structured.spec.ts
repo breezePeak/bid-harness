@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, CallId, type ContentBlock, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
@@ -96,6 +97,45 @@ function toolNames(request: GenerateOptions): string[] {
 }
 
 describe('in-process structured output', () => {
+  it('one-shot child setup runs before publication and the first model request, then unwinds on disposal', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('done')])
+    let childId: SessionId | undefined
+    parent.ctx.on('subagent/child-setup', ({ parent: owner, childContext, request }) => {
+      const child = childContext.agent as Agent
+      expect(owner).toBe(parent)
+      expect(request.label).toBe('private-setup')
+      expect(ctx.agents.get(child.id)).toBeUndefined()
+      childId = child.id
+      child.ctx.tools.register({ name: 'private_child_tool', description: 'private', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: '{}' }] }, execute: async () => ({}) })
+    })
+    const run = await ctx.subagents.start('spawn', { parent, label: 'private-setup', prompt: [{ type: 'text', text: 'task' }], signal: testToolSignal })
+    expect((await run.result).stopReason).toBe('completed')
+    expect(adapter.requests[0]?.tools?.map(tool => tool.name)).toContain('private_child_tool')
+    expect(ctx.tools.schemas(parent).map(tool => tool.name)).not.toContain('private_child_tool')
+    await run.dispose()
+    expect(ctx.agents.get(childId!)).toBeUndefined()
+  })
+
+  it.each(['throw', 'abort'])('private child setup %s rolls back registrations before publishing or requesting the model', async (mode) => {
+    const { ctx, parent, adapter } = await setup([])
+    const controller = new AbortController()
+    let released = false
+    let childId: SessionId | undefined
+    parent.ctx.on('subagent/child-setup', ({ childContext }) => {
+      const child = childContext.agent as Agent
+      childId = child.id
+      child.ctx.effect(() => () => { released = true })
+      child.ctx.tools.register({ name: 'private_child_tool', description: 'private', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: '{}' }] }, execute: async () => ({}) })
+      if (mode === 'throw') throw new Error('setup rejected')
+      controller.abort()
+    })
+    await expect(ctx.subagents.start('spawn', { parent, prompt: [{ type: 'text', text: 'task' }], signal: controller.signal })).rejects.toThrow()
+    expect(released).toBe(true)
+    expect(ctx.agents.get(childId!)).toBeUndefined()
+    expect(adapter.requests).toHaveLength(0)
+    expect(ctx.tools.schemas(parent).map(tool => tool.name)).not.toContain('private_child_tool')
+  })
+
   it('captures a valid structured_output call and surfaces result.structured', async () => {
     const { ctx, parent } = await setup([
       toolCallResponse('c1', STRUCTURED_OUTPUT_TOOL, { answer: 42, note: 'done' }),

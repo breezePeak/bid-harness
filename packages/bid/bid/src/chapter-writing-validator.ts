@@ -4,12 +4,12 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
-import { buildChapterWorklist } from './chapter-writing-executor.ts'
+import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
-import { parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import {
   parseWebEvidenceSourcesArtifact,
@@ -107,15 +107,18 @@ export async function validateChapterWriting(
     || new Set(artifacts.map(artifact => artifact.path)).size !== expectedArtifacts.size) {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID', 'The executor must return the execution plan, execution log, and chapter manifest exactly once.', MANIFEST)
   }
-  const [manifestRaw, planRaw, logRaw, outlineRaw, scoringRaw, catalogRaw] = await Promise.all([
+  const [manifestRaw, planRaw, logRaw, outlineRaw, scoringRaw, catalogRaw, requirementsRaw, complianceRaw] = await Promise.all([
     readJson(workspace, MANIFEST, issues), readJson(workspace, PLAN, issues),
     readJson(workspace, LOG, issues), readJson(workspace, 'outline/confirmed-outline.json', issues),
     readJson(workspace, 'analysis/scoring.json', issues),
     readJson(workspace, 'analysis/scoring-response-points.json', issues),
+    readJson(workspace, 'analysis/requirements.json', issues),
+    readJson(workspace, 'analysis/compliance.json', issues),
   ])
   if (
     manifestRaw === undefined || planRaw === undefined || logRaw === undefined
     || outlineRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
+    || requirementsRaw === undefined || complianceRaw === undefined
   ) return { ok: false, issues }
   let chapters
   let plan
@@ -123,6 +126,8 @@ export async function validateChapterWriting(
   let outline
   let scoring
   let catalog
+  let requirements
+  let compliance
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
     plan = parseChapterExecutionPlan(planRaw)
@@ -130,6 +135,8 @@ export async function validateChapterWriting(
     outline = parseConfirmedOutlineArtifact(outlineRaw)
     scoring = parseTenderScoringArtifact(scoringRaw)
     catalog = parseScoringResponsePointCatalog(catalogRaw)
+    requirements = parseTenderRequirementsArtifact(requirementsRaw)
+    compliance = parseTenderComplianceArtifact(complianceRaw)
   } catch {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or scoring inputs have invalid fields.', MANIFEST)
     return { ok: false, issues }
@@ -217,15 +224,13 @@ export async function validateChapterWriting(
       const sectionLog = executionLog.sections.find(section => section.section_id === chapter.section_id)
       if (sectionLog === undefined || review.writer_child_session_id !== sectionLog.final_writer_child_session_id
         || review.reviewer_child_session_id !== sectionLog.final_reviewer_child_session_id) throw new Error('review-child-invalid')
-      const coverage = [
-        ...review.must_answer_coverage,
-        ...review.requirement_coverage,
-        ...review.response_point_coverage,
-        ...review.compliance_coverage,
-      ]
-      for (const item of coverage) {
-        if (item.evidence_quotes.some(quote => !markdown.includes(quote))) throw new Error('review-quote-invalid')
-      }
+      issues.push(...validateChapterReview({
+        section,
+        requirements: requirements.requirements.filter(item => section.requirement_ids.includes(item.id)),
+        responsePoints: catalog.points.filter(item => (section.scoring_response_point_ids ?? []).includes(item.id)),
+        compliance: compliance.compliance_items.filter(item =>
+          [...section.compliance_ids, ...outline.global_compliance_ids].includes(item.id)),
+      }, { section_id: section.id, markdown, metadata: chapter }, review))
     } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the project, or empty.', chapter.content_path) }
   }
   for (const id of writable.keys()) if (!actual.has(id)) reject(issues, 'CHAPTER_WRITING_SECTION_MISSING', 'The manifest omits a writable confirmed section.', MANIFEST)

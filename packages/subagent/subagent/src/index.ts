@@ -156,6 +156,20 @@ declare module '@deepseek-ai/cordis' {
      */
     'subagent/start'(this: Scoped<SubagentRuntime>, info: SubagentRunInfo): void
     /**
+     * 在 in-process one-shot Child 发布前安装本次调用的私有能力；异常回滚创建。
+     * 监听器只组合 child.ctx，不启动 Child；注册由 Child scope 释放。
+     * @param payload.parent 发起本次创建的 Agent，也是事件作用域。
+     * Scope-filtered dispatch 使用发起父 Agent，监听器只接收自身创建请求。
+     * @param payload.childContext 尚未发布的 Child 作用域。
+     * @param payload.request 当前已解析的创建请求。
+     * @mode serial
+     */
+    'subagent/child-setup'(this: Scoped<Agent>, payload: {
+      parent: Agent
+      childContext: Context
+      request: ResolvedSubagentStartRequest
+    }): Promise<void> | void
+    /**
      * A published child settled. Scope-filtered dispatch uses the same delegating
      * parent carrier as `subagent/start`, so the lifecycle pair reaches the
      * same scoped audience.
