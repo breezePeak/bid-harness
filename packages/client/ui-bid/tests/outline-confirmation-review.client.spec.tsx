@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyOutlineEdits, type OutlineArtifact } from '@deepseek-ai/dsh-bid/control-plane'
 import { OutlineConfirmationReview } from '../src/client/OutlineConfirmationReview.tsx'
@@ -8,7 +8,6 @@ import { compareOutlines, outlineDropOperation } from '../src/client/outline-rev
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
-Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: vi.fn(), configurable: true })
 
 const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
   let value = zh[key] ?? key
@@ -240,7 +239,7 @@ describe('目录拖拽与差异', () => {
   it('显示四类差异，基线只读且联动选中', () => {
     const outline = { ...testOutline, sections: [testOutline.sections[0]!, { ...testOutline.sections[1]!, title: '修改后的架构', order: 2 }, { ...testOutline.sections[2]!, id: 'SEC-NEW' }] }
     const changes = compareOutlines(testOutline, outline)
-    expect(changes.get('SEC-002')).toMatchObject({ modified: true, moved: true })
+    expect(changes.get('SEC-002')).toMatchObject({ modified: true, moved: false })
     expect(changes.get('SEC-003')?.deleted).toBe(true)
     expect(changes.get('SEC-NEW')?.added).toBe(true)
     render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping"
@@ -270,5 +269,113 @@ describe('目录拖拽与差异', () => {
     fireEvent.drop(screen.getByLabelText('SEC-003 after'), { dataTransfer })
     expect(onStructure).toHaveBeenCalledWith({ type: 'move_section', section_id: 'SEC-001', parent_id: null, order: 2 })
     expect(screen.getByLabelText('当前章节详情').querySelector('[draggable="true"]')).toBeNull()
+  })
+})
+
+function renderComparison(outline: OutlineArtifact, baseline = testOutline) {
+  return render(<OutlineConfirmationReview outline={outline} stage="evidence_mapping"
+    reviewContext={{ baseline, requirements: { schema_version: 1, requirements: [] },
+      scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
+    onUpdateSection={vi.fn()} onStructureOperation={vi.fn()} onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
+}
+
+describe('S4 稳定章节对应与业务差异', () => {
+  it('一致目录和对象属性、集合关联 ID 排列不产生差异', () => {
+    const current = structuredClone(testOutline)
+    current.sections.reverse()
+    current.sections[1]!.requirement_ids.reverse()
+    current.sections[1]!.scoring_response_points = [{ response_point: '微服务架构成熟度', scoring_id: 'SCORE-01' }]
+    expect([...compareOutlines(testOutline, current).values()].every(change => !change.modified && !change.moved)).toBe(true)
+    renderComparison(current)
+    expect(screen.getByText('目录与章节信息一致')).toBeTruthy()
+    expect(screen.getByLabelText('S3 已确认目录').textContent).not.toContain('更新')
+  })
+
+  it('新增或删除前序章节只改变编号，稳定节点不误报移动', () => {
+    const inserted = applyOutlineEdits(testOutline, [{ type: 'add_section', parent_id: null, order: 1, title: '前言', purpose: '说明', writable: true, must_answer: ['说明'] }])
+    const changes = compareOutlines(testOutline, inserted)
+    for (const section of testOutline.sections) expect(changes.get(section.id)).toMatchObject({ moved: false, modified: false })
+    expect([...compareOutlines(inserted, testOutline).values()].filter(change => change.moved)).toHaveLength(0)
+  })
+
+  it('跨父移动子树只标记根节点，层级顺延不标记后代', () => {
+    const moved = structuredClone(testOutline)
+    moved.sections[0]!.parent_id = 'SEC-003'
+    moved.sections[0]!.level = 2
+    moved.sections[1]!.level = 3
+    moved.sections[2]!.writable = false
+    moved.sections[2]!.must_answer = []
+    expect(compareOutlines(testOutline, moved).get('SEC-001')?.moved).toBe(true)
+    expect(compareOutlines(testOutline, moved).get('SEC-002')).toMatchObject({ moved: false, modified: false })
+  })
+
+  it('双向点击展开对方祖先，标题变化与同名章节仍按 ID 对应', () => {
+    const current = structuredClone(testOutline)
+    current.sections[1]!.title = current.sections[2]!.title
+    renderComparison(current)
+    const left = within(screen.getByLabelText('S3 已确认目录'))
+    const right = within(screen.getByLabelText('技术标目录'))
+    fireEvent.click(left.getByRole('button', { name: '折叠 总体技术方案' }))
+    expect(left.queryByRole('button', { name: '系统微服务架构设计' })).toBeNull()
+    fireEvent.focus(right.getByLabelText('SEC-002 标题'))
+    expect(left.getByRole('button', { name: '系统微服务架构设计' }).closest('[aria-current]')?.getAttribute('data-section-id')).toBe('SEC-002')
+    fireEvent.click(right.getByRole('button', { name: '折叠 总体技术方案' }))
+    expect(right.queryByLabelText('SEC-002 标题')).toBeNull()
+    fireEvent.click(left.getByRole('button', { name: '系统微服务架构设计' }))
+    expect(right.getByLabelText('SEC-002 标题').closest('[aria-current]')?.getAttribute('data-section-id')).toBe('SEC-002')
+    expect(screen.getByLabelText('本章变化').textContent).toContain('修改前：系统微服务架构设计')
+    expect(screen.getByLabelText('本章变化').textContent).toContain('修改后：实施与交付计划')
+  })
+
+  it('删除节点展示 S3 原文且禁用编辑，新增节点不选中任何 S3 章节', () => {
+    const current = { ...testOutline, sections: [testOutline.sections[0]!, testOutline.sections[1]!, { ...testOutline.sections[2]!, id: 'NEW' }] }
+    renderComparison(current)
+    fireEvent.click(within(screen.getByLabelText('S3 已确认目录')).getByRole('button', { name: '实施与交付计划' }))
+    expect(screen.getByLabelText('技术标目录').querySelector('[aria-current]')).toBeNull()
+    expect(screen.getByText('S4 中无对应章节 · 已删除，以下为 S3 原内容')).toBeTruthy()
+    expect((screen.getByLabelText('SEC-003 目的')).readOnly).toBe(true)
+    expect(within(screen.getByLabelText('当前章节详情')).queryByRole('button', { name: '删除', exact: true })).toBeNull()
+    fireEvent.focus(screen.getByLabelText('NEW 标题'))
+    expect(screen.getByText('S3 中无对应章节')).toBeTruthy()
+    expect(screen.getByLabelText('S3 已确认目录').querySelector('[aria-current]')).toBeNull()
+  })
+
+  it('编写与关联具体增减在映射前显示，父节点仅标记子项有变化', () => {
+    const current = structuredClone(testOutline)
+    current.sections[1]!.must_answer = ['服务拆分原则', '数据安全保障']
+    current.sections[1]!.requirement_ids = ['REQ-02', 'REQ-NEW']
+    renderComparison(current)
+    expect(screen.getByText('目录结构未变，章节信息已更新')).toBeTruthy()
+    fireEvent.focus(screen.getByLabelText('SEC-002 标题'))
+    const details = screen.getByLabelText('本章变化')
+    expect(details.textContent).toContain('服务治理策略')
+    expect(details.textContent).toContain('数据安全保障')
+    expect(details.textContent).toContain('REQ-01')
+    expect(details.textContent).toContain('REQ-NEW')
+    expect(compareOutlines(testOutline, current).get('SEC-001')).toMatchObject({ children: true, modified: false })
+    fireEvent.click(screen.getByRole('checkbox', { name: '仅看变化' }))
+    expect(screen.queryByLabelText('SEC-003 标题')).toBeNull()
+    expect(screen.getByLabelText('SEC-001 标题')).toBeTruthy()
+  })
+
+  it('变化筛选保留移动节点两侧的祖先上下文', () => {
+    const current = structuredClone(testOutline)
+    current.sections[1]!.parent_id = 'SEC-003'
+    renderComparison(current)
+    fireEvent.click(screen.getByRole('checkbox', { name: '仅看变化' }))
+    fireEvent.click(within(screen.getByLabelText('S3 已确认目录')).getByRole('button', { name: '系统微服务架构设计' }))
+    expect(screen.getByLabelText('SEC-003 标题')).toBeTruthy()
+    expect(screen.getByLabelText('本章变化').textContent).toContain('1.1 总体技术方案 / 系统微服务架构设计 → 2.1 实施与交付计划 / 系统微服务架构设计')
+  })
+
+  it('切换变化筛选保留用户刚选择的未变化章节，避免联动静默丢失', () => {
+    const current = structuredClone(testOutline)
+    current.sections[1]!.purpose = '补充接口范围'
+    renderComparison(current)
+    fireEvent.focus(screen.getByLabelText('SEC-003 标题'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '仅看变化' }))
+    for (const label of ['S3 已确认目录', '技术标目录']) {
+      expect(screen.getByLabelText(label).querySelector('[aria-current]')?.getAttribute('data-section-id')).toBe('SEC-003')
+    }
   })
 })

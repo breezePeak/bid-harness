@@ -72,6 +72,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
       sections: [
         { ...section('A', '技术方案', null, 1), writable: false, must_answer: [], summary: '说明架构与实施安排。' },
         section('A1', '系统架构', 'A', 1), section('A2', '实施安排', 'A', 2), section('B', '交付验收', null, 2),
+        section('REMOVED', '原附录', null, 3),
       ],
     }
     const scoring = { schema_version: 1 as const, scoring_items: [] }
@@ -105,7 +106,8 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     const confirmed = (await scaffold.ctx.bid.getOutlineDraft(agent.session)).outline
     await writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(confirmed))
     await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify({
-      ...confirmed, sections: [...confirmed.sections, section('NEW', '运维保障', null, 3)],
+      ...confirmed, sections: [...confirmed.sections.filter(item => item.id !== 'REMOVED'), section('NEW', '运维保障', null, 3),
+        ...Array.from({ length: 20 }, (_, index) => section(`EXTRA-${index}`, `补充章节 ${index + 1}`, null, index + 4))],
     }))
     await publish({ stage: 'evidence_mapping', status: 'running' })
     await page.getByRole('tab', { name: '目录详情', exact: true }).click()
@@ -120,6 +122,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     await scaffold.ctx.bid.getOutlineDraft(agent.session)
     await page.getByText('S4 · 深化目录与材料审核', { exact: true }).waitFor()
     await page.getByText('S3 已确认目录 · 只读', { exact: true }).waitFor()
+    await page.getByLabel('EXTRA-19 标题', { exact: true }).waitFor()
     await dragSection(page, '交付验收', 'A inside')
     await expect.poll(async () => (JSON.parse(await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')) as { outline: OutlineArtifact }).outline.sections.find(item => item.id === 'B')?.parent_id).toBe('A')
     await page.getByLabel('B 标题', { exact: true }).locator('..').click()
@@ -127,6 +130,51 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     expect(await page.getByLabel('S3 已确认目录').locator('[draggable="true"]').count()).toBe(0)
     expect(await page.getByLabel('S3 已确认目录').locator('[aria-current="true"]').textContent()).toContain('交付验收')
     expect(await page.getByLabel('A 标题', { exact: true }).count()).toBe(1)
+    const left = page.getByLabel('S3 已确认目录', { exact: true })
+    const right = page.getByLabel('技术标目录', { exact: true })
+    const outerScroll = page.locator('[data-conversation-scroll]')
+    const outerTop = await outerScroll.evaluate(element => element.scrollTop)
+    await right.getByRole('button', { name: '折叠 技术方案', exact: true }).click()
+    expect(await right.getByLabel('B 标题', { exact: true }).count()).toBe(0)
+    await left.getByRole('button', { name: '交付验收', exact: true }).click()
+    await right.getByLabel('B 标题', { exact: true }).waitFor()
+    expect(await right.locator('[aria-current="true"]').getAttribute('data-section-id')).toBe('B')
+    const selectedRow = right.locator('[aria-current="true"]')
+    const selectedBorder = await selectedRow.evaluate(element => getComputedStyle(element).borderLeftColor)
+    expect(await left.locator('[aria-current="true"]').evaluate(element => getComputedStyle(element).borderLeftColor)).toBe(selectedBorder)
+    await selectedRow.hover()
+    expect(await selectedRow.evaluate(element => getComputedStyle(element).borderLeftColor)).toBe(selectedBorder)
+    expect(await selectedRow.evaluate(element => getComputedStyle(element).borderLeftWidth)).toBe('2px')
+    await page.getByRole('heading', { name: 'S4 当前目录', exact: true }).hover()
+    expect(await selectedRow.evaluate(element => getComputedStyle(element).borderLeftColor)).toBe(selectedBorder)
+    await right.getByLabel('B 标题', { exact: true }).focus()
+    await right.getByRole('button', { name: '编辑 交付验收', exact: true }).focus()
+    expect(await selectedRow.evaluate(element => getComputedStyle(element).borderLeftColor)).toBe(selectedBorder)
+    await left.getByRole('button', { name: '原附录', exact: true }).click()
+    expect(await right.locator('[aria-current="true"]').count()).toBe(0)
+    expect(await page.getByLabel('REMOVED 目的', { exact: true }).evaluate(element => (element as HTMLTextAreaElement).readOnly)).toBe(true)
+    await right.getByLabel('EXTRA-19 标题', { exact: true }).locator('..').click()
+    expect(await left.locator('[aria-current="true"]').count()).toBe(0)
+    await page.getByText('S3 中无对应章节', { exact: true }).waitFor()
+    await left.getByRole('button', { name: '交付验收', exact: true }).click()
+    const linkedBounds = await right.locator('[data-section-id="B"]').evaluate((element) => {
+      const row = element.getBoundingClientRect()
+      const container = element.parentElement!.getBoundingClientRect()
+      return { top: row.top, bottom: row.bottom, containerTop: container.top, containerBottom: container.bottom }
+    })
+    expect(linkedBounds.top).toBeGreaterThanOrEqual(linkedBounds.containerTop)
+    expect(linkedBounds.bottom).toBeLessThanOrEqual(linkedBounds.containerBottom)
+    expect(linkedBounds.containerBottom).toBeLessThanOrEqual((await dock.boundingBox())!.y)
+    expect(await outerScroll.evaluate(element => element.scrollTop)).toBe(outerTop)
+    const linkedScrollTop = await right.locator('[data-section-id="B"]').evaluate(element => element.parentElement!.scrollTop)
+    await left.getByRole('button', { name: '交付验收', exact: true }).click()
+    expect(await right.locator('[data-section-id="B"]').evaluate(element => element.parentElement!.scrollTop)).toBe(linkedScrollTop)
+    expect(await page.getByLabel('本章变化').innerText()).toMatchInlineSnapshot(`
+      "本章变化
+      ↕ 结构调整
+
+      1 交付验收 → 1.1 技术方案 / 交付验收"
+    `)
     await saveFailureShot(page, 'bid-outline-review-s4')
     await page.reload()
     await page.getByText('S3 已确认目录 · 只读', { exact: true }).waitFor()

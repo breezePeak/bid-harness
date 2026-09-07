@@ -605,7 +605,7 @@ export function BidStagePanel({
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
         {(canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
-          <div style={{ minHeight: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ ...(canConfirm ? { height: '100%', minHeight: 0 } : { minHeight: '100%' }), width: '100%', display: 'flex', flexDirection: 'column' }}>
             {((canConfirm && previewOutline === null) || (canConfirmAnalysis && tenderAnalysis === null)) && <div role="status">
               {errorNotice ?? '正在读取审核内容…'}
             </div>}
