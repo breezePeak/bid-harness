@@ -8,9 +8,9 @@ S2 的 Requirement、Scoring item 和 Compliance item 需要把冗长招标条�
 
 ## Decision
 
-S2 Validator 只校验 `source_refs` 的来源真实性和引用合法性：`file_id` 必须对应成功解析的 tender 文件，chunk 必须由该文件的索引拥有，行号必须位于 chunk 内，所有路径必须位于 Session Workspace 且通过链接路径检查。Validator 不比较 `raw_text` 与引用正文，也不引入相似度或额外模型判断。
+S2 提交工具先根据模型提供的 `file_ref`、chunk ID 和唯一 quote 生成 `source_refs`：`file_id` 必须对应成功解析的 tender 文件，chunk 必须由该文件的索引拥有，行号由 Host 在真实 chunk 中计算，所有路径必须位于 Session Workspace 且通过链接路径检查。最终 Validator 重新检查这些确定性字段，但不比较 `raw_text` 与引用正文，也不引入相似度或额外模型判断。
 
-生成、Coverage Audit 和 Repair 提示词允许 Agent 在引用原文含义内提取、压缩、去冗余和原子化 `raw_text`，同时禁止改变关键数字、单位、强制语义或新增要求。Agent 写入前重新读取引用范围并核对来源；归纳和进一步拆解仍分别写入 `normalized_requirement`、`normalized_rule`、`criterion` 或 `response_points`。
+生成与 staged Repair 提示词允许 Agent 在引用原文含义内提取、压缩、去冗余和原子化 `raw_text`，同时禁止改变关键数字、单位、强制语义或新增要求。Agent 提交 quote 前读取真实 chunk；归纳分别写入 `normalized_requirement`、`normalized_rule` 或 `criterion`，评分响应点仍由 S3 生成。
 
 ## Alternatives considered
 

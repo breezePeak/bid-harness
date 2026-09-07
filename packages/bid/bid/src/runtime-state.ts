@@ -31,8 +31,8 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
     validator: 'file-intake-validator', userGate: 'none', nextStage: 'tender_analysis',
   },
   tender_analysis: {
-    stage: 'tender_analysis', executor: 'agent', requiredInputs: ['manifest.json'], allowedTools: ['grep', 'read', 'write'],
-    forbiddenTools: ['bash', 'web_search'], requiredArtifacts: [
+    stage: 'tender_analysis', executor: 'agent', requiredInputs: ['manifest.json'], allowedTools: ['grep', 'read'],
+    forbiddenTools: ['write', 'bash', 'web_search', 'web_fetch', 'subagent'], requiredArtifacts: [
       'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
     ], validator: 'tender-analysis-validator', userGate: 'after_validation', nextStage: 'outline_generation',
   },

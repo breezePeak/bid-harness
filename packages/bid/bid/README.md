@@ -33,13 +33,13 @@ The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-
 
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
-S2 writes only Project, Requirements, Scoring, and Compliance; scoring text stays whole and contains no response-point field. S3 independently reviews semantically derived response points, lets the Host assign stable `RP-*` identities, adapts optional framework trees, stores exact framework heading references, generates an initial outline, and owns its first user confirmation. One response point may belong to multiple writable Sections. S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
+S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
 In S5, the Host schedules independent Writers from the confirmed outline and makes each valid body available before its Reviewer starts. The Host binds the durable must-answer and scoring coverage indexes from that confirmed outline; the Reviewer separately verifies that the body actually covers them. A review repair receives at most one new Writer attempt. If the second review still reports problems, the durable review remains `needs_attention` and does not block on-demand export.
 
 After S5 completes, `exportDocx` validates the confirmed outline and complete chapter set, combines the bodies in outline order, and writes a fresh timestamped Markdown and DOCX pair under `outputDirectory`. Repeated exports do not change the completed S5 runtime or hide its review state. Existing projects already checkpointed at `docx_export/completed` retain the same review and export actions.
 
-## Model Experience
+## Bid Agent behavior
 
 ### 等待确认时的阶段交互
 
@@ -51,9 +51,9 @@ S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度�
 
 修改成功更新 Draft revision，发布 `running → waiting_user`，客户端刷新并提示“已更新，请重新确认”。最终确认比较 Draft 与研究目录，只复核写作目标、必答问题、业务关联、写作要求或祖先语义变化影响的叶子；单纯排序不触发模型。复核同步 Writing Brief、父节点摘要与 Evidence，完整校验后发布确认产物；失败恢复正式产物并保留 Draft。聊天文字不代表确认，只有正式确认动作可以推进阶段。决定依据见[章节研究记录](../../../.agents/notes/implemented/feature/2026-09-03-bid-section-research-blueprint.md)。
 
-## S2–S5 quality control
+### S2–S5 quality control
 
-After initial extraction, S2 requires the same live Agent to perform a Coverage Audit. The Validator separately reports missing Artifacts, JSON syntax failures, and strict Schema failures, retaining exact field paths for Schema issues. The Executor uses the latest Issues for a configurable number of Repair rounds, allows only `grep`, `read`, and `write`, and permits overwriting only the four formal S2 Artifacts. The Orchestrator advances to `tender_analysis/waiting_user` only after the final Validator passes.
+S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、技术评分项和影响技术方案的合规规则。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性；`finish_tender_analysis` 根据 staged Map 返回可修正缺项，或由 Host 补齐 schema version、空值、完整 tender 覆盖与正式 ID 后原子写入四个 Artifact。Agent 停止但未成功调用 finish 时，Executor 在配置预算内要求继续使用 staged 工具，不开放 `write`。最终 Validator 仍独立验证 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
 
 S3 performs independent semantic response-point review and outline quality review. Validators check strict files, stable catalog ownership, tree structure, known IDs, coverage, and exact framework references; they do not replace semantic review with string splitting, title heuristics, or global response-point uniqueness.
 
@@ -88,6 +88,8 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 S5 uses `outline/confirmed-outline.json` as its only structure source. Each Writer receives its Section, related S2 records, stable response points, Section evidence, exact framework draft chunks referenced by that Section, and bounded dependency handoffs. Framework bodies are writing input for preservation, adaptation, or rewriting, never factual Evidence. The Reviewer receives only Host-injected data and structured output. Missing enterprise facts remain unresolved and cannot be replaced by Web sources.
 
 阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；用户通过 UI 的“开始本阶段”或 `/bid-start` 明确确认后，才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
+
+## Model Experience
 
 ### Inventory text
 

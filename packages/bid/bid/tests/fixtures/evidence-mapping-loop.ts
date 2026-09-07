@@ -11,7 +11,9 @@ import type {} from '@deepseek-ai/dsh-fs'
 import {
   BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
-  outlineArtifactSha256, parseOutlineArtifact, CHAPTER_EXECUTION_SCHEMA_VERSION, EVIDENCE_MAPPING_SCHEMA_VERSION,
+  executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
+  parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
+  parseTenderScoringArtifact, CHAPTER_EXECUTION_SCHEMA_VERSION, EVIDENCE_MAPPING_SCHEMA_VERSION,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -128,6 +130,80 @@ function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string
     },
     execute: async args => ({ url: args.url, statusCode: 200, body: { kind: 'text' as const, content: '官方标准要求访问控制与安全审计。' }, truncated: false }),
   })))
+}
+
+/**
+ * 通过真实 Agent loop 和五个 staged 工具执行 S2 Host 提交协议。
+ * @param ctx - Loader 组装的 Agent、工具和文件服务。
+ * @param root - 本用例的隔离工作区。
+ * @returns 模型工具调用、正式 Artifact 摘要和最终校验结果。
+ */
+export async function runTenderAnalysisLoop(ctx: Context, root: string) {
+  const workspace = new BidWorkspace(root)
+  const tenderText = [
+    '# 智慧审计平台建设项目',
+    '系统必须支持统一身份认证和审计日志。',
+    '技术评分：总体技术方案完整合理得 10 分。',
+    '技术方案必须提供数据安全措施。',
+  ].join('\n')
+  const [tender] = await workspace.import([
+    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
+  ])
+  if (tender === undefined || tender.chunkIndexPath === null) throw new Error('S2 integration corpus missing')
+  const index = JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as {
+    chunks: Array<{ id: string }>
+  }
+  const chunk = index.chunks[0]?.id
+  if (chunk === undefined) throw new Error('S2 integration chunk missing')
+  const source = (quote: string) => ({ file_ref: 'T1', chunk, quote })
+  const sessionId = SessionId('s2-real-loop')
+  const parentScript = [
+    toolCall('submit-project', 'submit_project_fact', {
+      field: 'project_name', value: '智慧审计平台建设项目', sources: [source('智慧审计平台建设项目')],
+    }),
+    toolCall('submit-requirement', 'submit_requirement', {
+      category: '功能要求', raw_text: '系统必须支持统一身份认证和审计日志。',
+      normalized_requirement: '系统必须支持统一身份认证和审计日志。', mandatory: true,
+      sources: [source('系统必须支持统一身份认证和审计日志。')],
+    }),
+    toolCall('submit-scoring', 'submit_scoring_item', {
+      parent_ref: null, group: '技术评分', title: '总体技术方案',
+      raw_text: '技术评分：总体技术方案完整合理得 10 分。', criterion: '总体技术方案完整合理得 10 分。',
+      score: 10, score_range: null, must_answer: true,
+      sources: [source('技术评分：总体技术方案完整合理得 10 分。')],
+    }),
+    toolCall('submit-compliance', 'submit_compliance_item', {
+      type: '强制要求', raw_text: '技术方案必须提供数据安全措施。',
+      normalized_rule: '技术方案必须提供数据安全措施。', severity: 'mandatory',
+      sources: [source('技术方案必须提供数据安全措施。')],
+    }),
+    toolCall('finish-analysis', 'finish_tender_analysis', {}),
+    finalText('S2 staged submission completed.'),
+  ]
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, parentScript, [])))
+  registerIntegrationTools(ctx, root, [])
+  const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
+  const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 0 })
+  const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
+  const [project, requirements, scoring, compliance] = await Promise.all([
+    readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8').then(JSON.parse).then(parseTenderProjectArtifact),
+    readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse).then(parseTenderRequirementsArtifact),
+    readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
+    readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
+  ])
+  return {
+    calls: agent.session.events.flatMap(event => event.type === 'tool/call' ? [event.data.name] : []),
+    validation,
+    artifacts: artifacts.map(artifact => artifact.path),
+    project: {
+      name: project.project_name,
+      tender_files: project.analyzed_tender_files.length,
+      source_lines: project.source_refs.map(ref => [ref.line_start, ref.line_end]),
+    },
+    requirements: requirements.requirements.map(item => ({ id: item.id, mandatory: item.mandatory })),
+    scoring: scoring.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score })),
+    compliance: compliance.compliance_items.map(item => ({ id: item.id, severity: item.severity })),
+  }
 }
 
 async function prepareS2(workspace: BidWorkspace): Promise<{

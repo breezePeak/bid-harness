@@ -1,5 +1,5 @@
 import { mkdir, rm } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { join, relative } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
@@ -11,7 +11,11 @@ import {
   type ModelStageExecutionOptions,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
-import { validateTenderAnalysis } from './tender-analysis-validator.ts'
+import {
+  attachTenderAnalysisSubmissionRuntime,
+  TENDER_ANALYSIS_SUBMISSION_TOOLS,
+  type TenderLocator,
+} from './tender-analysis-submission.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
@@ -21,81 +25,63 @@ const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/compliance.json': 'tender_compliance',
 }
 
-const RAW_TEXT_SOURCE_RULES = [
-  'requirements.json、scoring.json、compliance.json 中每一项 raw_text 都必须以 source_refs 指向的招标原文为依据；允许提取、压缩、去冗余和原子化，不要求逐字复制。',
-  'raw_text 不得改变原文的关键数字、单位以及“应、须、必须、不得”等强制语义，不得新增原文没有的要求。归纳或解释分别写入 normalized_requirement、normalized_rule 或 criterion；评分响应点留给 S3 分析。',
-  'source_refs 必须真实、合法且可追溯：写 Artifact 前重新 read 对应 chunk，逐项确认原文能够支持 raw_text，并核对 file_id、chunk 归属、文件解析状态以及 line_start、line_end。',
-  '内容跨 chunk 或被截断时，必须读取相邻 chunk 后再决定如何提取和原子化；不得凭上下文记忆补充要求。',
-] as const
-
 const TECHNICAL_SCORING_ANCHORS = '技术评分、技术评审、技术评价、评分标准、评分表、评审因素、分值、满分'
+
+function renderLocators(locators: readonly TenderLocator[]): string[] {
+  return locators.flatMap(locator => [
+    `${locator.file_ref}:`,
+    `  name: ${locator.name}`,
+    `  chunks_path: ${locator.chunks_path}`,
+    `  chunk_index_path: ${locator.chunk_index_path}`,
+  ])
+}
 
 /**
  * Render the complete dynamic S2 assignment injected into the Bid Agent.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
+ * @param locators Host-issued short references for successful tender files.
  * @returns Dynamic assignment text for the Agent follow-up.
  */
-export function renderTenderAnalysisTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
+export function renderTenderAnalysisTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: BidStageTask,
+  locators: readonly TenderLocator[] = [],
+): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
-  const manifestPath = `${workspacePath}/manifest.json`
-  const artifactPaths = task.requiredArtifacts.map(path => `${workspacePath}/${path}`)
   return [
     `当前阶段：${task.stage}`,
     `目标：${task.objective}`,
     `Bid Session：${agent.id}`,
     `Project Workspace：${workspacePath}`,
-    `首先读取：${manifestPath}`,
-    '只把 manifest 中 role=tender 且 parseStatus=success 的文件作为本阶段权威来源；reference 资料不得产生招标要求、评分项或合规规则。',
-    `本阶段只允许调用：${task.allowedTools.join(', ')}。`,
-    '当前只分析技术标。正式 Artifact 只保留会影响技术方案编写、技术评分响应或技术实施约束的内容：项目背景、建设目标和范围；技术、功能、性能、接口、参数和架构要求；实施、进度、质量、测试、验收、培训、运维和技术服务要求；数据、网络和信息安全；技术评分项；以及影响技术方案的强制要求或否决条件。',
-    '不得把投标报价、价格评分、报价计算、付款、保证金、财务、纳税、营业执照、法定代表人、授权委托、资格审查、注册资本、纯商务信誉、纯商务评分或纯商务合同条款写入 requirements.json、scoring.json 或 compliance.json。人员、案例、服务和承诺是否保留，按其是否用于技术方案或技术评分响应判断，不得按关键词机械过滤。',
+    `首先读取：${workspacePath}/manifest.json，并确认下列全部成功 tender locator：`,
+    ...renderLocators(locators),
+    '只把 locator 对应的 role=tender 且 parseStatus=success 文件作为权威来源；reference、reference_bid 和 outline_framework 不得产生招标要求、评分项或合规规则。',
+    `本阶段可用普通工具仅为：${task.allowedTools.join(', ')}。另有 S2 私有工具：${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')}。不得调用 write、bash、web_search、web_fetch 或 subagent。`,
+    '当前只分析技术标。保留项目背景、建设目标和范围；技术、功能、性能、接口、参数和架构要求；实施、进度、质量、测试、验收、培训、运维和技术服务要求；数据、网络和信息安全；技术评分项；以及影响技术方案的强制要求或否决条件。',
+    '排除投标报价、价格评分、报价计算、付款、保证金、财务、纳税、营业执照、法定代表人、授权委托、资格审查、注册资本、纯商务信誉、纯商务评分和纯商务合同条款。人员、案例、服务和承诺按是否直接影响技术方案编写或技术评分响应判断，不得按关键词机械过滤。',
     '使用 grep 定位候选 chunk，再用 read 阅读原文；语义被截断时读取 chunks/index.json 后继续读相邻 chunk。不得一次读取完整 document.md。',
-    '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。grep 只用于定位，不得为每一个评分项重复全局搜索。命中后先 read 该文件 chunks/index.json，利用 order、prev_chunk、next_chunk 和 heading_path 从命中 chunk 的小窗口开始连续阅读相邻 chunk；评分表在边界处截断时才沿 prev_chunk 或 next_chunk 扩展，直到技术评分结束或进入商务、价格、资格或明显无关章节。完成该区域后仅再 grep 一次，检查是否有远离当前区域的技术评分锚点；只有发现新的远距离区域时，才读取该位置附近的连续 chunk 并补充评分项。',
-    '完成前写入以下四个 UTF-8 JSON 文件：',
-    ...artifactPaths.map(path => `- ${path}`),
-    '四个文件共同使用 schema_version=1。source_refs 必须是非空数组，元素严格包含 file_id、chunk、line_start、line_end；chunk 使用 Project Workspace 相对路径并且必须属于该 tender 文件。',
-    'project.json 严格包含 schema_version, project_name, tender_name, purchaser, owner, project_background, project_objectives, project_scope, technical_scope, delivery_scope, implementation_constraints, key_technical_points, source_refs, analyzed_tender_files。project_background 说明建设背景，project_objectives 说明建设目标，implementation_constraints 只记录影响技术方案的实施约束，key_technical_points 根据本项目招标文件概括技术标必须重点说明的内容。未知单值写 null，未知数组写 []，不得补全或套用通用模板；analyzed_tender_files 列出全部成功解析 tender 文件的 manifest id。',
-    'requirements.json 严格包含 schema_version, requirements；每项严格包含 id, category, raw_text, normalized_requirement, mandatory, source_refs，并按可独立响应的语义原子化。',
-    'scoring.json 严格包含 schema_version, scoring_items；只收录技术评分及其技术子项，排除资格、商务和价格评分。每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, source_refs。must_answer 必须是 boolean：该项必须在技术标响应时为 true，否则为 false；不得把评分响应点或字符串数组写入该字段。raw_text 忠实保留完整评分原文，criterion 只做评分规则规范化；不得拆解评分响应点。score_range 为 null 或 {min,max}。',
-    'compliance.json 严格包含 schema_version, compliance_items；每项严格包含 id, type, raw_text, normalized_rule, severity, source_refs；severity 只能是 fatal、mandatory、warning。',
-    ...RAW_TEXT_SOURCE_RULES,
+    '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
+    '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
+    '每个可独立响应的原子技术要求调用 submit_requirement。每个技术评分项调用 submit_scoring_item，只保留完整技术评分原文与规范化 criterion，不拆评分响应点；子项使用工具返回的 scoring_ref 作为 parent_ref。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
+    '引用只提交 sources=[{file_ref,chunk,quote}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id，quote 必须是该 chunk 正文中唯一出现的真实原文。跨 chunk 内容提交多个 source。不得填写 file_id、source_refs、line_start 或 line_end。',
+    '不得填写 schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。raw_text 可以基于一个或多个 quote 忠实提取、压缩、去冗余和原子化，但不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
+    '工具返回 INVALID_ARGS 或引用错误时只修正当前条目。已记录条目需要修改时，用其 runtime ref 作为 replace_ref；覆盖不会改变正式 ID。',
+    '所有区域分析完成后调用 finish_tender_analysis。finish 返回 completed=false 时，只按 issues 补充或覆盖对应记录后再次调用；返回 completed=true 后停止。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
-    '写完四个文件后停止。回复文字不会完成阶段；Host 会在 Agent idle 后独立校验文件与引用。',
   ].join('\n')
 }
 
-function repairArtifacts(task: BidStageTask, issues: readonly StageValidationIssue[]): string[] {
-  const affected = new Set(issues.flatMap(issue => (
-    issue.artifact !== undefined && task.requiredArtifacts.includes(issue.artifact) ? [issue.artifact] : []
-  )))
-  return affected.size === 0 ? task.requiredArtifacts : task.requiredArtifacts.filter(path => affected.has(path))
-}
-
-function repairArtifactRules(paths: readonly string[]): string[] {
-  return paths.flatMap((path) => {
-    if (path === 'analysis/project.json') return ['project.json 严格包含 schema_version, project_name, tender_name, purchaser, owner, project_background, project_objectives, project_scope, technical_scope, delivery_scope, implementation_constraints, key_technical_points, source_refs, analyzed_tender_files；未知单值写 null，未知数组写 []。']
-    if (path === 'analysis/requirements.json') return ['requirements.json 每项严格包含 id, category, raw_text, normalized_requirement, mandatory, source_refs。']
-    if (path === 'analysis/scoring.json') return ['scoring.json 每项严格包含 id, parent, group, title, raw_text, criterion, score, score_range, must_answer, source_refs；parent 和 group 必须存在且可为 null，score 为 number 或 null，score_range 为 {min,max} 或 null，must_answer 必须为 true 或 false，不能是评分响应点数组。']
-    return ['compliance.json 每项严格包含 id, type, raw_text, normalized_rule, severity, source_refs；severity 只能是 fatal、mandatory 或 warning。']
-  })
-}
-
-function requestedWritePath(argumentsValue: unknown): string | undefined {
-  if (typeof argumentsValue !== 'object' || argumentsValue === null) return undefined
-  const value = (argumentsValue as Record<string, unknown>).file_path
-  return typeof value === 'string' ? value : undefined
-}
-
 /**
- * Render the sole S2 repair assignment from Host-produced validation issues.
+ * Render a bounded continuation for an S2 turn that stopped before successful finish.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
- * @param issues Browser-safe issues produced by the S2 Validator.
- * @returns Dynamic repair assignment for one Agent follow-up.
+ * @param issues Recoverable issues last returned by finish, or a missing-finish issue.
+ * @returns Dynamic continuation that preserves the current staged submissions.
  */
 export function renderTenderAnalysisRepairTask(
   agent: Agent,
@@ -105,38 +91,24 @@ export function renderTenderAnalysisRepairTask(
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
-  const paths = repairArtifacts(task, issues)
-  const artifactPaths = paths.map(path => `${workspacePath}/${path}`)
   return [
-    `当前阶段：${task.stage} / Artifact Repair`,
+    `当前阶段：${task.stage} / Staged Submission Repair`,
     `Bid Session：${agent.id}`,
     `Project Workspace：${workspacePath}`,
-    '预校验未通过。依据下列 Host Validator 问题修改原正式 Artifact：',
-    ...issues.map(issue => [
-      `- code: ${issue.code}`,
-      `  artifact: ${issue.artifact ?? '未指定'}`,
-      `  path: ${issue.path ?? '未指定'}`,
-      `  message: ${issue.message}`,
-    ].join('\n')),
-    '本次只允许修改以下正式 Artifact：',
-    ...artifactPaths.map(path => `- ${path}`),
-    `修复时只允许调用：${task.allowedTools.join(', ')}。`,
-    '只读写上述文件中 Validator 指出的字段；不得重新分析未列出的 Artifact、不得全局重扫招标文件、不得创建 final、fixed、new 或 v2 文件，也不得推进下一阶段。',
-    ...repairArtifactRules(paths),
-    'source_refs 必须是非空数组，元素严格包含 file_id, chunk, line_start, line_end。需要核对原文或行号时，可以重新 read 对应 chunk。',
-    ...RAW_TEXT_SOURCE_RULES,
-    '修复 source_refs 问题时只重新 read 被指出的真实 chunk，根据真实来源修正 file_id、chunk、line_start 或 line_end；不得伪造引用。raw_text 可以在原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。',
-    '必须实际写入修复结果；只回复“已修复”不会改变 Artifact。完成后停止，Host 将执行最终校验。',
+    'S2 尚未完成；当前 staged 记录仍然保留。只处理以下问题：',
+    ...issues.map(issue => `- ${issue.code} | ${issue.path ?? '未指定字段'} | ${issue.message}`),
+    `普通工具仍只允许：${task.allowedTools.join(', ')}；使用 ${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')} 补充、replace 或再次 finish。`,
+    '不得 write analysis/*.json、重新提交整套 Artifact 或推进 S3。只有 finish_tender_analysis 返回 completed=true 才能停止。',
   ].join('\n')
 }
 
 /**
- * Execute S2 through the live Harness Agent and return expected Artifact references after quiescence.
+ * Execute S2 through staged private tools and return Host-authored Artifact references.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
- * @param options Host-owned repair-turn limit for this execution.
- * @returns Expected Artifact references for Validator inspection.
+ * @param options Host-owned continuation limit for this execution.
+ * @returns Expected Artifact references for final Validator inspection.
  */
 export async function executeTenderAnalysis(
   agent: Agent,
@@ -158,45 +130,43 @@ export async function executeTenderAnalysis(
     const target = await fs.resolve(artifactPath)
     agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
   }))
-  const allowed = new Set(task.allowedTools)
-  let writablePaths = new Set(task.requiredArtifacts.map(path => resolve(workspace.projectRoot, path)))
-  const liftRestriction = tools.restrict({ allow: task.allowedTools })
-  const liftGuard = tools.guard((exec) => {
-    if (!allowed.has(exec.name)) return `Bid stage ${task.stage} allows only ${task.allowedTools.join(', ')}`
-    if (exec.name !== 'write') return undefined
-    const requestedPath = requestedWritePath(exec.arguments)
-    if (requestedPath === undefined || !writablePaths.has(resolve(workspace.root, requestedPath))) {
-      return `Bid stage ${task.stage} may write only its current Artifact paths`
-    }
-    return undefined
-  })
+  const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest())
+  const allowedTools = [...task.allowedTools, ...TENDER_ANALYSIS_SUBMISSION_TOOLS]
+  const allowed = new Set(allowedTools)
+  let liftRestriction: (() => void) | undefined
+  let liftGuard: (() => void) | undefined
+  const artifacts = task.requiredArtifacts.map(path => ({
+    stage: 'tender_analysis' as const,
+    type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
+    path,
+  }))
   try {
+    liftRestriction = tools.restrict({ allow: task.allowedTools })
+    liftGuard = tools.guard(exec => allowed.has(exec.name)
+      ? undefined
+      : `Bid stage ${task.stage} allows only ${allowedTools.join(', ')}`)
     options.signal?.throwIfAborted()
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: renderTenderAnalysisTask(agent, workspace, task) }],
+      content: [{ type: 'text', text: renderTenderAnalysisTask(agent, workspace, task, runtime.locators) }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
     await waitForModelStageIdle(agent, options.signal)
-    options.signal?.throwIfAborted()
-    const artifacts = task.requiredArtifacts.map(path => ({
-      stage: 'tender_analysis' as const,
-      type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
-      path,
-    }))
-    let prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
-    for (let attempt = 1; !prevalidation.ok && attempt <= options.maxRepairAttempts; attempt++) {
+    for (let attempt = 1; !runtime.completed && attempt <= options.maxRepairAttempts; attempt++) {
       options.signal?.throwIfAborted()
-      writablePaths = new Set(repairArtifacts(task, prevalidation.issues).map(path => resolve(workspace.projectRoot, path)))
+      const issues = runtime.lastIssues.length > 0 ? runtime.lastIssues : [{
+        code: 'TENDER_ANALYSIS_FINISH_REQUIRED',
+        message: '必须调用 finish_tender_analysis 并处理其返回问题；普通回复不能完成 S2。',
+      }]
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, prevalidation.issues) }],
+        content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, issues) }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
       }))
       await waitForModelStageIdle(agent, options.signal)
-      prevalidation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
     }
     return artifacts
   } finally {
-    liftGuard()
-    liftRestriction()
+    liftGuard?.()
+    liftRestriction?.()
+    runtime.dispose()
   }
 }

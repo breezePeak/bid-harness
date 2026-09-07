@@ -27,6 +27,9 @@ type ParsedArtifacts = {
   compliance: TenderComplianceArtifact
 }
 
+/** In-memory S2 Artifacts assembled by the Host before persistence. */
+export type TenderAnalysisArtifacts = ParsedArtifacts
+
 const SUBSTANTIVE_TENDER_TEXT_MINIMUM_CHARACTERS = 80
 const MULTIPLE_TECHNICAL_CONSTRAINT_SIGNALS = 2
 const TECHNICAL_CONSTRAINT_SIGNALS: readonly RegExp[] = [
@@ -269,6 +272,24 @@ function validateTechnicalScoring(scoring: TenderScoringArtifact, issues: StageV
   }
 }
 
+/**
+ * Run corpus-dependent S2 checks against Host-assembled values before persistence.
+ * @param workspace Workspace 级 Bid 项目.
+ * @param manifest Manifest that supplied the staged tender locators.
+ * @param artifacts Strictly parsed in-memory S2 Artifacts.
+ * @returns Recoverable semantic completeness and scoring-classification issues.
+ */
+export async function validateTenderAnalysisDraft(
+  workspace: BidWorkspace,
+  manifest: BidManifest,
+  artifacts: TenderAnalysisArtifacts,
+): Promise<StageValidationIssue[]> {
+  const issues: StageValidationIssue[] = []
+  await validateCompleteness(workspace, manifest, artifacts, issues)
+  validateTechnicalScoring(artifacts.scoring, issues)
+  return issues
+}
+
 async function validateSourceRef(
   workspace: BidWorkspace,
   manifest: BidManifest,
@@ -396,8 +417,7 @@ export async function validateTenderAnalysis(
     compliance: compliance as TenderComplianceArtifact,
   }
   validateCoverage(parsed.project, manifest, issues)
-  await validateCompleteness(workspace, manifest, parsed, issues)
-  validateTechnicalScoring(parsed.scoring, issues)
+  issues.push(...await validateTenderAnalysisDraft(workspace, manifest, parsed))
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
     ['analysis/scoring.json', parsed.scoring.scoring_items],
