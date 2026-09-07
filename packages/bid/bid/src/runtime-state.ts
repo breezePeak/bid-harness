@@ -181,8 +181,9 @@ export function getBidClientProjection(
   if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
   if (runtime.status === 'completed') return {
     runtime: { ...runtime },
-    allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export' ? ['export_docx'] : [],
-    composer: { enabled: false, reason: 'bid.completed' },
+    allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export' ? ['export_docx', 'revise_chapter'] : [],
+    composer: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
+      ? { enabled: true } : { enabled: false, reason: 'bid.completed' },
     ...fileView,
   }
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }

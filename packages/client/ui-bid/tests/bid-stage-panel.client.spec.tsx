@@ -647,7 +647,7 @@ describe('ui-bid browser plugin', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
     }), BidStagePanel)
-    const registration = register.mock.calls[0]
+    const registration = register.mock.calls.find(([definition]) => (definition as { name: string }).name === 'conversation.input.dock')
     if (registration === undefined) throw new Error('Bid dock registration is unavailable')
     const options = registration[0] as {
       inject: (sessionId: string) => {

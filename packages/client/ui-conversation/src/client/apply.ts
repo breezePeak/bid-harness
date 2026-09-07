@@ -311,6 +311,7 @@ export function apply(ctx: Context): void {
     // register.
     children: {
       'conversation.input.attachments': { kind: 'single', scope: 'session-maybe' },
+      'conversation.input.context': { kind: 'list', scope: 'session' },
       'conversation.input.plan': { kind: 'single', scope: 'session' },
       'conversation.input.model': { kind: 'single', scope: 'session' },
     },

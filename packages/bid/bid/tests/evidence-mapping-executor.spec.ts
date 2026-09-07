@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SandboxedFileSystem from '../../../fs/fs-sandbox/src/index.ts'
 import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
+import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
@@ -108,8 +109,8 @@ async function writeInputs(workspace: BidWorkspace) {
   const [tender, reference, framework, referenceBid] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('可复用的统一技术资料。') },
-    { name: 'framework.md', role: 'outline_framework', bytes: new TextEncoder().encode('# 人工目录\n\n框架正文。') },
-    { name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 旧标书\n\n成熟方案。') },
+    { name: 'framework.md', role: 'outline_framework', bytes: new TextEncoder().encode('# 智慧园区方案\n\n框架正文。\n\n## 设备接入\n\n### 协议适配\n\n### 点位映射\n\n## 能耗分析\n\n### 用量统计\n\n### 用能诊断\n') },
+    { name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 云平台建设方案\n\n成熟方案。\n\n## 数据服务\n\n### 数据接入\n\n### 数据治理\n\n#### 元数据目录\n\n#### 数据血缘\n\n## 平台运维\n\n### 监控告警\n') },
   ])
   if (tender === undefined || reference === undefined || framework === undefined || referenceBid === undefined
     || tender.absoluteChunkIndexPath === null || tender.chunksPath === null
@@ -353,7 +354,7 @@ function mappingFixture(
           if ((await invokeSubmissionTool(child, apply, { operation })).isError) break
         }
         const lock = tools.get('lock_branch_outline')
-        if (lock !== undefined) await invokeSubmissionTool(child, lock, {})
+        if (lock !== undefined) await invokeSubmissionTool(child, lock, { comparison: '已对照旧标层级和整本职责；现有叶子各自响应独立技术主题，无需增加层级。' })
         preparedChildren.add(String(child.id))
       }
       for (const candidate of candidates) {
@@ -673,7 +674,12 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const childId = start.request.childId!
-    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', {})
+    for (const args of [{}, { comparison: '' }, { comparison: ' \n\t' }]) {
+      await expect(fixture.invokeSubmissionTool(childId, 'lock_branch_outline', args)).resolves.toMatchObject({ isError: true })
+    }
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '未锁定草稿')))
+      .resolves.toMatchObject({ isError: true })
+    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', { comparison: '已比较旧标层级，三个现有叶子分别承接实施任务，范围独立，无需新增标题。' })
     expect(lock).toMatchObject({ isError: false, value: { locked: true, writable_sections: [
       { section_id: 'SEC-1' }, { section_id: 'SEC-2' }, { section_id: 'SEC-3' },
     ] } })
@@ -769,7 +775,7 @@ describe('evidence-mapping Agent executor', () => {
     const createdIds = split.isError ? [] : (split.value as { created_section_ids: string[] }).created_section_ids
     expect(createdIds).toHaveLength(2)
     expect(createdIds.every(id => id.startsWith('NEW-'))).toBe(true)
-    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', {})
+    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', { comparison: '原章节包含两个独立子任务，已按旧标任务层次拆为两个可写叶子。' })
     expect(lock).toMatchObject({ isError: false, value: { writable_sections: createdIds.map(section_id => ({ section_id })) } })
     const brief = (sectionId: string) => ({
       section_id: sectionId,
@@ -1184,7 +1190,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
   })
 
-  it('Host 按顶层业务分支生成任务，Main Agent 仅执行一次目录深化与复核', async () => {
+  it('Host 按顶层业务分支生成任务，并完整注入输入中的云平台目录分类与层级', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
@@ -1202,6 +1208,31 @@ describe('evidence-mapping Agent executor', () => {
       failed: 0,
     })
     expect(promptText(fixture.starts[0]!.request.request)).toContain('当前 Section Blueprints：[{"id":"SEC-1"')
+    const initialPrompt = promptText(fixture.starts[0]!.request.request)
+    const originalFrameworks = JSON.parse(initialPrompt.split('\n').find(line => line.startsWith('用户原始目录框架：'))!.slice('用户原始目录框架：'.length)) as Array<{ name: string; headings: unknown[] }>
+    expect(originalFrameworks).toEqual([{ name: 'framework.md', headings: [
+      { title: '智慧园区方案', level: 1, order: 1 },
+      { title: '设备接入', level: 2, order: 2 },
+      { title: '协议适配', level: 3, order: 3 },
+      { title: '点位映射', level: 3, order: 4 },
+      { title: '能耗分析', level: 2, order: 5 },
+      { title: '用量统计', level: 3, order: 6 },
+      { title: '用能诊断', level: 3, order: 7 },
+    ] }])
+    const globalOutline = JSON.parse(initialPrompt.split('\n').find(line => line.startsWith('当前整本目录与章节职责：'))!.slice('当前整本目录与章节职责：'.length)) as Array<Record<string, unknown>>
+    expect(globalOutline).toEqual([1, 2].map(value => ({
+      id: `SEC-${value}`, parent_id: null, order: value, level: 1, title: `章节${value}`,
+      writable: true, purpose: `响应主题${value}`, must_answer: [`响应主题${value}`],
+    })))
+    const referenceOutlines = JSON.parse(initialPrompt.split('\n').find(line => line.startsWith('参考旧标书完整目录：'))!.slice('参考旧标书完整目录：'.length)) as Array<{ headings: unknown[] }>
+    expect(referenceOutlines).toHaveLength(1)
+    expect(referenceOutlines[0]!.headings).toHaveLength(8)
+    expect(referenceOutlines[0]!.headings[5]).toEqual({
+      title: '数据血缘', level: 4, order: 6,
+    })
+    expect(initialPrompt).toContain('不得只塞入 writing_dimensions、must_answer 或 writing_notes')
+    expect(initialPrompt).toContain('依据当前招标要求、用户原始框架、当前候选及全部参考目录')
+    expect(initialPrompt).toContain('不预设标题、固定层级或节点数量')
     expect(promptText(fixture.starts[0]!.request.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain('"id":"R-2"')
     expect(promptText(fixture.starts[0]!.request.request)).toContain('不得脱离当前 Section 做全局资料搜集')
@@ -1296,7 +1327,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(attempts[1]).toMatchObject({ accepted: true, issues: [], warnings: [] })
   })
 
-  it('失败后重跑只调度未完成分支，已接受分支从 checkpoint 复用', async () => {
+  it.each([1, 2])('重跑时只复用完成结构对照的 v2 checkpoint，当前版本为 %s', async (version) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-resume-')))
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material)
@@ -1309,8 +1340,17 @@ describe('evidence-mapping Agent executor', () => {
     first.starts[1]!.resolve()
     await rejection
 
+    const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { schema_version: number }
+    expect(checkpoint.schema_version).toBe(2)
+    if (version === 1) await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: 1 }))
     const resumed = mappingFixture(workspace, material)
     const completedRun = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0, maxConcurrency: 2 })
+    if (version === 1) {
+      await expect(completedRun).rejects.toThrow('EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED')
+      expect(resumed.starts).toHaveLength(0)
+      return
+    }
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
     expect(promptText(resumed.starts[0]!.request.request)).toContain('"task_id":"MAP-INIT-SEC-2"')
     resumed.starts[0]!.resolve()
@@ -1486,6 +1526,54 @@ describe('evidence-mapping Agent executor', () => {
 })
 
 describe('S4 Host 准入与最终确认', () => {
+  it('旧标 Markdown 目录保留 Setext 和嵌套格式标题，排除代码块中的伪标题', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-reference-markdown-headings-')))
+    await workspace.import([{
+      name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode([
+        '项目理解', '========', '', '**项目**背景', '--------', '',
+        '```markdown', '# 代码示例不是目录', '```', '',
+        '### 业务*需求*与[任务](https://example.test)', '',
+        '## 实施方案', '', '### 内业判定', '', '# ',
+      ].join('\n')),
+    }])
+    const locations = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
+    expect(locations[0]?.outline).toEqual([
+      { title: '项目理解', level: 1, order: 1, heading_path: ['项目理解'] },
+      { title: '项目背景', level: 2, order: 2, heading_path: ['项目理解', '项目背景'] },
+      { title: '业务需求与任务', level: 3, order: 3, heading_path: ['项目理解', '项目背景', '业务需求与任务'] },
+      { title: '实施方案', level: 2, order: 4, heading_path: ['项目理解', '实施方案'] },
+      { title: '内业判定', level: 3, order: 5, heading_path: ['项目理解', '实施方案', '内业判定'] },
+    ])
+  })
+
+  it('完整读取旧标结构文件，拒绝跨文件定位、缺失 Corpus 和损坏结构', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-reference-outline-')))
+    await writeInputs(workspace)
+    const manifest = await workspace.readManifest()
+    const referenceBid = manifest.files.find(file => file.role === 'reference_bid')!
+    const reference = manifest.files.find(file => file.role === 'reference')!
+    referenceBid.structurePath = `${referenceBid.corpusPath}/structure.json`
+    const headings = [
+      { title: '项目理解', level: 1, order: 1, heading_path: ['项目理解'] },
+      { title: '项目背景', level: 2, order: 2, heading_path: ['项目理解', '项目背景'] },
+      { title: '业务需求', level: 2, order: 3, heading_path: ['项目理解', '业务需求'] },
+    ]
+    const structure = join(workspace.projectRoot, referenceBid.structurePath)
+    await writeFile(structure, JSON.stringify({ sections: headings }))
+    expect((await resolveMappingCorpusLocations(workspace, manifest)).find(location => location.role === 'reference_bid')?.outline).toEqual(headings)
+    const otherStructurePath = `${reference.corpusPath}/structure.json`
+    await writeFile(join(workspace.projectRoot, otherStructurePath), JSON.stringify({ sections: headings }))
+    await expect(resolveMappingCorpusLocations(workspace, {
+      ...manifest, files: manifest.files.map(file => file === referenceBid ? { ...file, structurePath: otherStructurePath } : file),
+    })).rejects.toThrow('EVIDENCE_MAPPING_CORPUS_INVALID')
+    await expect(readDocumentOutlineHeadings(workspace, { ...referenceBid, structurePath: null, documentPath: reference.documentPath }))
+      .rejects.toThrow('document-outline-source-mismatch')
+    await expect(readDocumentOutlineHeadings(workspace, { ...referenceBid, corpusPath: null }))
+      .rejects.toThrow('document-outline-corpus-missing')
+    await writeFile(structure, JSON.stringify({ sections: [{ title: '缺少层级和顺序' }] }))
+    await expect(resolveMappingCorpusLocations(workspace, manifest)).rejects.toThrow('EVIDENCE_MAPPING_CORPUS_INVALID')
+  })
+
   it('Prompt locator 在真实 Child cwd 下可直接使用，grep 与 read 权限独立', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-locators-')))
     const material = await writeInputs(workspace)
@@ -1608,7 +1696,7 @@ describe('S4 Host 准入与最终确认', () => {
       compliance: parseTenderComplianceArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8'))),
       evidence: map,
       responsePointCatalog: parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).points,
-      globalComplianceIds: [],
+      outline,
     })
     expect(context.referenceBidMaterials).toHaveLength(1)
     expect(context.relatedMaterials).toEqual([])

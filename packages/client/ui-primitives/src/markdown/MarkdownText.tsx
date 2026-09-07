@@ -30,6 +30,7 @@ function renderSettled(
   text: string,
   codeLabels: MarkdownCodeLabels | undefined,
   fileMentions: MarkdownFileMentions | undefined,
+  paragraphSourceOffset: number | undefined,
 ): ReactNode[] {
   const root = parseGfmWithMath(text)
   const targets = createReferenceTargets()
@@ -41,6 +42,7 @@ function renderSettled(
     targets,
     footnoteOrder: [],
     footnoteCounts: new Map(),
+    paragraphSourceOffset,
   }
   const blocks = wrapBlockChildren(
     renderBlocks(root.children.map((node, index) => ({ node, key: index })), context),
@@ -153,24 +155,26 @@ class StreamingRenderer {
  * relative links, and unsafe protocols are disabled, while absolute HTTP(S)
  * images render directly.
  */
-export const MarkdownText = memo(function MarkdownText({ text, streaming = false, codeLabels, fileMentions }: {
+export const MarkdownText = memo(function MarkdownText({ text, streaming = false, codeLabels, fileMentions, paragraphSourceOffset }: {
   text: string
   streaming?: boolean
   codeLabels?: MarkdownCodeLabels | undefined
   fileMentions?: MarkdownFileMentions | undefined
+  /** Annotate settled top-level paragraphs with UTF-16 source offsets, including this omitted source prefix. */
+  paragraphSourceOffset?: number | undefined
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
   const streamLabelsRef = useRef<MarkdownCodeLabels | undefined>(codeLabels)
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
-      return renderSettled(text, codeLabels, fileMentions)
+      return renderSettled(text, codeLabels, fileMentions, paragraphSourceOffset)
     }
     if (streamRef.current === null || streamLabelsRef.current !== codeLabels) {
       streamRef.current = new StreamingRenderer(codeLabels)
       streamLabelsRef.current = codeLabels
     }
     return streamRef.current.render(text)
-  }, [text, streaming, codeLabels, fileMentions])
+  }, [text, streaming, codeLabels, fileMentions, paragraphSourceOffset])
   return <div className={css.markdown}>{children}</div>
 })

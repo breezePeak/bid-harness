@@ -33,6 +33,10 @@ export function outlineFixture() {
 export function emptyChapterContext(section: ReturnType<typeof outlineFixture>['sections'][number]): ChapterContext {
   return {
     section,
+    headingPath: ['实施方案', section.title],
+    outlineSections: outlineFixture().sections.map(({ id, parent_id, title, purpose, must_answer }) => (
+      { id, parent_id, title, purpose, must_answer }
+    )),
     contentPath: 'chapters/sections/0001.md',
     metadataPath: 'chapters/meta/0001.json',
     project: parseTenderProjectArtifact({

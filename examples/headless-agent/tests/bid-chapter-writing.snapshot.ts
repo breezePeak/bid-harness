@@ -12,7 +12,7 @@ const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', imp
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-writing-driver.ts', import.meta.url))
 
-it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4 map', async () => {
+it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保留 S4 map', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 当前章节本地补搜', tempDirPrefix: 'dsh-s5-local-snapshot-', binScript, configPath, mode: 'src',
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
@@ -28,7 +28,13 @@ it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter'])
+      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter'])
+      expect(writerLog).toContain('不能新增目录标题“补充服务方案”')
+      expect(writerLog).toContain('Current Chapter Path：')
+      expect(writerLog).toContain('Confirmed Outline Responsibilities：')
+      const reviewerLog = childLogs.find(log => log.includes('Evidence Pack：'))!
+      expect(reviewerLog).toContain('Confirmed Outline Responsibilities：')
+      expect(reviewerLog).toContain('清单已覆盖不能抵消放错章节的问题')
       expect(writerLog).toContain('Mapped Materials：[]')
       expect(writerLog).toContain('F999')
       expect(writerLog).toContain('不可用')
@@ -53,10 +59,12 @@ it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)
       const markdown = await readFile(join(projectRoot, manifest.chapters[0]!.content_path), 'utf8')
+      expect(markdown).not.toContain('补充服务方案')
+      expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
       const expected = {
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
-        'reviewer.expected.jsonl': normalizeSessionSnapshot(childLogs.find(log => log.includes('Evidence Pack：'))!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'artifacts.expected.json': JSON.stringify({ map, metadata, markdown }, null, 2) + '\n',
       }
@@ -70,7 +78,7 @@ it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4
   expect(JSON.parse(result.stdout)).toEqual({
     evidence_unchanged: true,
     runtime: { stage: 'chapter_writing', status: 'completed' },
-    allowed_actions: ['export_docx'],
+    allowed_actions: ['export_docx', 'revise_chapter'],
     artifacts: [
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },

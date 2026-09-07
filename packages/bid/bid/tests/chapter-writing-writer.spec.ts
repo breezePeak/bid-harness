@@ -46,12 +46,24 @@ async function fixture() {
   await writeFile(join(workspace.projectRoot, web.source.snapshot_path), web.content)
   await ledger(workspace, [web])
   await appendChapterWebReferences(workspace, refs, [web.source])
-  const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(workspace, manifest, context, refs, { markdown: '# 当前章节\n\n完整正文与具体技术方案。', metadata }, snapshots)
+  const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(workspace, manifest, context, refs, { markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`, metadata }, snapshots)
   return { workspace, manifest, context, refs, web, bind }
 }
 
 describe('S5 Writer 短引用与语义输入', () => {
   afterEach(() => vi.mocked(readFile).mockReset())
+
+  it('共同提交路径拒绝新增 ATX 和 Setext 标题，允许修正为叶节正文', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    for (const heading of ['## 馆际互借', '馆际互借\n---']) {
+      await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+        markdown: `# ${context.section.title}\n\n${heading}\n\n借阅方式。`, metadata: {},
+      }, [])).rejects.toThrow('不能新增目录标题“馆际互借”')
+    }
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n本节根据项目需求说明适用范围。\n\n- 核实任务目标。`, metadata: {},
+    }, [])).resolves.toMatchObject({ section_id: context.section.id })
+  })
 
   it('候选池隔离缺失、Hash 和不安全路径，不给坏来源新 W，并显示中文原因', async () => {
     const { workspace, refs, context, web } = await fixture()

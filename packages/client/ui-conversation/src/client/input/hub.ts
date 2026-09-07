@@ -5,8 +5,8 @@
  * creation trigger) and torn down by the scope disposer (instance-and-scope
  * share one lifecycle). The hub registers the three scoped input-mutation
  * listeners on each session's actx (the sole consumer side of the ui-input-trigger
- * bail events) and owns the default-sink choreography: every session is a
- * real host entity, so the sink is one unconditional prompt path.
+ * bail events) and delegates serialized submissions to the conversation service,
+ * which selects the registered business handler or ordinary prompt path.
  */
 import type { ClientContext, ISessions, SessionBinding, SessionFace, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InputTriggerController, SubmitImageAttachment, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'

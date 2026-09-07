@@ -51,14 +51,15 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
-  it('按确认目录顺序导出完整正文并保留结构标题层级', async () => {
+  it('按确认目录顺序导出完整正文，保留旧正文标题且不增子编号', async () => {
     const { workspace } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
     expect(artifacts).toEqual([{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }])
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
     expect(markdown).toContain('## 1 实施方案\n\n### 1.1 部署安排\n\n#### 1.1.1 资源配置')
-    expect(markdown).toContain('##### 1.1.1.1 内部措施')
+    expect(markdown).toContain('##### 内部措施')
+    expect(markdown).not.toContain('1.1.1.1')
     expect(markdown).toContain('```txt\n# 原样井号\n```')
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'bid.docx')) })
     expect(html).toContain('<h4>1.1.1 资源配置</h4>')

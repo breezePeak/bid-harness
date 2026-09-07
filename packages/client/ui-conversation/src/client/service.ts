@@ -18,7 +18,7 @@ import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attach
 import type { ComposerAttachment } from './contract/slots.ts'
 import type { QueueAction, QueueItemId } from './contract/queue.ts'
 import type { ComposerBlocks } from './input/blocks.ts'
-import type { DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
+import type { ComposerSubmitHandler, ComposerSubmitHandlers, DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
 import type { InputSubmitMode } from './contract/composer-submission.ts'
 import type { EmbeddedSurface, EmbeddedSurfaceKind } from './embedded-surface.ts'
 
@@ -35,6 +35,8 @@ export interface IConversation {
    * cannot import makes a session's input inert with its own reason.
    */
   readonly blocks: ComposerBlocks
+  /** 为有业务引用的输入注册专用提交动作。 */
+  readonly submitHandlers: ComposerSubmitHandlers
   /**
    * Send a prompt into the caller scope's session (queued turn).
    * @param text - prompt text, sent verbatim as one text block.
@@ -103,6 +105,17 @@ export class ConversationController extends Service implements IConversation {
   readonly input: SessionInputResolver
   /** The per-session composer-block registry. */
   readonly blocks: ComposerBlocks
+  private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
+  /** @inheritdoc */
+  readonly submitHandlers: ComposerSubmitHandlers = {
+    register: (sessionId, handler) => {
+      if (this.submissions.has(sessionId)) throw new Error('该会话已注册业务提交处理器。')
+      this.submissions.set(sessionId, handler)
+      return () => {
+        if (this.submissions.get(sessionId) === handler) this.submissions.delete(sessionId)
+      }
+    },
+  }
   private readonly draftAttachments = new Map<DraftAttachmentId, ComposerAttachment>()
   private readonly imageUrls = new Map<string, ImageUrlEntry>()
   private readonly imageGenerations = new Map<SessionId, number>()
@@ -134,6 +147,7 @@ export class ConversationController extends Service implements IConversation {
       this.draftAttachments.clear()
       this.imageUrls.clear()
       this.imageGenerations.clear()
+      this.submissions.clear()
     }, 'conversation attachment URL cache')
   }
 
@@ -165,6 +179,8 @@ export class ConversationController extends Service implements IConversation {
     mode: InputSubmitMode,
     signal?: AbortSignal,
   ): Promise<SubmitOutcome> {
+    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal)
+    if (submitted !== undefined) return submitted
     const attachments = this.draftImages(imageIds)
     if (attachments.length !== imageIds.length) {
       throw new Error('conversation.sendSession: one or more draft images are no longer available')

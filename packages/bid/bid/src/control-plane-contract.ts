@@ -61,6 +61,7 @@ export const BID_CLIENT_ACTIONS = [
   'start_stage',
   'retry_stage',
   'export_docx',
+  'revise_chapter',
   'confirm_tender_analysis',
   'confirm_outline',
   'regenerate_outline',
@@ -372,12 +373,37 @@ export interface BidReviewChapterView {
   readonly heading_path: readonly string[]
   readonly writable: boolean
   readonly markdown: string | null
+  /** 完整 markdown 的 SHA-256；正文尚未生成时为 null。 */
+  readonly content_sha256: string | null
   readonly requirement_ids: readonly string[]
   readonly scoring_response_point_ids: readonly string[]
   readonly evidence_status: 'available' | 'missing' | 'not_applicable'
   readonly materials?: readonly BidReviewMaterialView[]
   readonly review: { readonly status: BidChapterReviewStatus; readonly issues: readonly BidReviewIssueView[] }
 }
+
+/** 对话框中与编写意见分开的章节或连续段落引用。 */
+export type BidChapterRevisionReference = {
+  readonly section_id: string
+  readonly content_sha256: string
+} & ({ readonly scope: 'chapter' } | {
+  readonly scope: 'paragraphs'
+  /** 完整 markdown 中的 UTF-16 起止偏移，end 不包含在选区内。 */
+  readonly start: number
+  readonly end: number
+  readonly text: string
+})
+
+/** 一次仅交给指定章节原 Writer 的编写意见。 */
+export interface BidChapterRevisionRequest {
+  readonly instruction: string
+  readonly reference: BidChapterRevisionReference
+}
+
+/** 修订成功返回新正文；失败保留原文并允许用户重新加载或修改意见。 */
+export type BidChapterRevisionResult =
+  | { readonly ok: true; readonly value: BidReviewChapterView }
+  | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } }
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =

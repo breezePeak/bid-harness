@@ -58,17 +58,18 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
  * @param maxContinuations 缺少提交时同轮补充提示的上限。
  * @param validate 验证候选引用；可纠正错误由工具返回给原 Writer。
  * @param signal 章节所属阶段的取消信号。
+ * @param existingId 已完成章节的原 Writer 身份；只恢复原会话，不能创建替代会话。
  * @returns 由调用方 finally 释放的章节 Writer。
  */
 export function createChapterWriterChild(
   parent: Agent, label: string, maxContinuations: number,
-  validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal,
+  validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
-  const id = SessionId(randomUUID())
+  const id = existingId ?? SessionId(randomUUID())
   let child: Agent | undefined
-  let started = false
+  let started = existingId !== undefined
   let runtime: ChapterProtocol<unknown> | undefined
   let eventStart = 0
   const install = (agent: Agent) => {
@@ -93,6 +94,8 @@ export function createChapterWriterChild(
     install(agent)
     return () => { runtime?.dispose() }
   })
+  const resident = parent.ctx.agents.get(id)
+  if (resident !== undefined) install(resident)
   return {
     id,
     async run(prompt) {

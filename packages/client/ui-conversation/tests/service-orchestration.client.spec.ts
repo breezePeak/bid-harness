@@ -38,6 +38,56 @@ async function bench(readAttachment?: SessionFace['readAttachment']) {
 }
 
 describe('ConversationController', () => {
+  it('业务引用提交失败保留草稿且不转发普通消息，释放后恢复普通发送', async () => {
+    const b = await bench()
+    const sessionId = b.runtime.sessions.behavior('s1').sessionId
+    const pending = Promise.withResolvers<{ kind: 'success' }>()
+    const handler = vi.fn(() => pending.promise)
+    const dispose = b.root.submitHandlers.register(sessionId, handler)
+    expect(() => b.root.submitHandlers.register(sessionId, handler)).toThrow('已注册')
+    b.shell.setDraft('仅修改引用段落')
+    b.shell.submit()
+    await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
+    expect(b.prompt).not.toHaveBeenCalled()
+    pending.reject(new Error('正文已更新，请重新选择。'))
+    await vi.waitFor(() => {
+      expect(b.shell.notices.getSnapshot()?.text).toContain('正文已更新')
+    })
+    expect(b.shell.snapshot.draft).toBe('仅修改引用段落')
+    expect(b.prompt).not.toHaveBeenCalled()
+    dispose()
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '仅修改引用段落' }], 'queue', expect.any(AbortSignal))
+    await b.runtime.dispose()
+  })
+
+  it('业务处理器按会话隔离并在未接管时发送普通消息', async () => {
+    const b = await bench()
+    const sessionId = b.runtime.sessions.behavior('s1').sessionId
+    const otherPrompt = vi.fn(() => Promise.resolve({ ok: true as const, value: { accepted: true as const } }))
+    await b.runtime.sessions.add({ id: 's2', session: { prompt: otherPrompt } })
+    const handler = vi.fn(() => Promise.resolve({ kind: 'success' as const }))
+    const dispose = b.root.submitHandlers.register(sessionId, handler)
+    b.shell.setDraft('重写章节')
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.shell.snapshot.draft).toBe('') })
+    expect(handler).toHaveBeenCalledOnce()
+    expect(b.prompt).not.toHaveBeenCalled()
+    const otherShell = b.hub.shellFor(b.runtime.sessions.binding('s2')!)
+    otherShell.setDraft('其他会话消息')
+    otherShell.submit()
+    await vi.waitFor(() => { expect(otherPrompt).toHaveBeenCalledOnce() })
+    expect(handler).toHaveBeenCalledOnce()
+    dispose()
+    b.root.submitHandlers.register(sessionId, () => undefined)
+    dispose()
+    b.shell.setDraft('无引用消息')
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+    await b.runtime.dispose()
+  })
+
   it('routes operations through the public Session binding', async () => {
     const b = await bench()
     await b.scoped.send('hello')

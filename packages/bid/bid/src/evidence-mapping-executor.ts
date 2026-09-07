@@ -40,7 +40,7 @@ import {
   type OutlineQualityReport,
 } from './outline-generation-artifacts.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperation } from './outline-confirmation-edits.ts'
-import { validateOutlineFrameworkRefs } from './outline-framework.ts'
+import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import {
@@ -191,12 +191,13 @@ interface EvidenceMappingInputs {
   responsePoints: ReturnType<typeof parseScoringResponsePointCatalog>
   compliance: ReturnType<typeof parseTenderComplianceArtifact>
   outline: OutlineArtifact
+  frameworks: readonly OutlineFrameworkStructure[]
 }
 
 type EvidenceMappingExecutionLog = z.infer<typeof evidenceMappingExecutionLogSchema>
 
 const evidenceMappingCheckpointSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   tasks: z.array(z.object({
     task_id: z.string().min(1),
     result: evidenceMappingPartialResultSchema,
@@ -537,10 +538,18 @@ function attachMappingSubmissionRuntime(
         })
       },
     })
+    const lockSchema = closedObject({ comparison: {
+      type: 'string',
+      description: '对照用户原始框架、当前整本目录职责与参考旧标层级，说明本分支采用、拆分或排除的主题；没有结构调整时说明现有叶子为何已足够独立。',
+    } })
     register({
-      name: 'lock_branch_outline', description: '锁定当前分支目录，并返回后续逐章提交必须覆盖的权威可写 Section。',
-      parameters: closedObject({}) as unknown as Record<string, unknown>, output,
-      execute(): Promise<unknown> {
+      name: 'lock_branch_outline', description: '提交目录结构对照结论并锁定当前分支，返回逐章提交必须覆盖的可写 Section。',
+      parameters: lockSchema as unknown as Record<string, unknown>, output,
+      execute(args: unknown): Promise<unknown> {
+        const violations = validateJsonSchemaValue(lockSchema, args)
+        if (violations.length > 0) throw new ToolArgsError(violations)
+        const comparison = record(args)?.comparison
+        if (typeof comparison !== 'string' || comparison.trim().length === 0) throw new ToolArgsError(['comparison: 目录结构对照结论不能为空；没有结构调整时须说明现有叶子为何足够独立。'])
         state.locked = true
         return Promise.resolve({ locked: true, writable_sections: mappingTaskSections(state.stagedOutline, task).map(section => ({
           section_id: section.id, title: section.title, parent_id: section.parent_id,
@@ -806,13 +815,24 @@ export function renderEvidenceMappingSubagentTask(
     '当前阶段：evidence_mapping / Mapping Subagent',
     `Mapping Task：${JSON.stringify({ task_id: task.task_id, phase: task.phase, section_ids: task.section_ids, title: task.title, heading_path: task.heading_path })}`,
     `当前 Section Blueprints：${JSON.stringify(sections.map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path })))}`,
-    ...(taskOwnsBranchRefinement(task) ? [`当前业务分支完整目录：${JSON.stringify(branch)}`] : []),
+    ...(taskOwnsBranchRefinement(task) ? [
+      `用户原始目录框架：${JSON.stringify(inputs.frameworks.map(({ name, headings }) => ({ name, headings: headings.map(({ title, level, order }) => ({ title, level, order })) })))}`,
+      `当前整本目录与章节职责：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, order, level, title, writable, purpose, must_answer }) => ({ id, parent_id, order, level, title, writable, purpose, must_answer })))}`,
+      `参考旧标书完整目录：${JSON.stringify(locations.flatMap((location, index) => location.role === 'reference_bid' ? [{
+        file_ref: `F${index + 1}`, name: location.name,
+        headings: location.outline?.map(({ title, level, order }) => ({ title, level, order })),
+      }] : []))}`,
+      `当前业务分支完整目录：${JSON.stringify(branch)}`,
+      '先完整阅读用户原始目录框架、当前整本目录职责与每份参考旧标目录，比较同类业务分支的主题、父子层级和顺序，再检索正文支撑本分支。以当前招标要求和用户原始框架为约束，旧标目录用于结构参照；不得机械照抄任意目录树，也不得把旧项目事实带入本项目。',
+      '本阶段必须完成目录深化判断：依据当前招标要求、用户原始框架、当前候选及全部参考目录，判断同级主题分类、父子主题粒度及各章节职责。需独立编写的主题应通过目录操作落为相应分支的独立叶子，不得只塞入 writing_dimensions、must_answer 或 writing_notes，留到 S5 正文临时起小标题。',
+      '目录深化遵循输入文件的主题和组织方式，不预设标题、固定层级或节点数量。已有叶子足够聚焦时保留；资料命中其他章节的内容时，按整本目录职责判断适用范围，不因检索命中扩大本章任务。',
+    ] : []),
     `Project 摘要：${JSON.stringify(subagentTaskContext(inputs.project))}`,
     `相关 Requirements：${JSON.stringify(subagentTaskContext(requirements))}`,
     `相关 Scoring：${JSON.stringify(subagentTaskContext(scoring))}`,
     `相关 Response Points：${JSON.stringify(subagentTaskContext(responsePoints))}`,
     `相关 Compliance：${JSON.stringify(subagentTaskContext(compliance))}`,
-    `可用 Corpus 定位：${JSON.stringify(locations.map(({ chunks: _chunks, file_id: _fileId, ...locator }, index) => ({ file_ref: `F${index + 1}`, ...locator })))}`,
+    `可用 Corpus 定位：${JSON.stringify(locations.map(({ chunks: _chunks, file_id: _fileId, outline: _outline, ...locator }, index) => ({ file_ref: `F${index + 1}`, ...locator })))}`,
     '从当前 Section 的 title、heading_path、purpose、must_answer、writing_notes、suggested_tables、suggested_figures 和关联业务记录出发判断“写好这个章节需要什么资料”。不得脱离当前 Section 做全局资料搜集。招标文件和人工目录框架都不是 Evidence，不得读取其分块或写入 local_materials。',
     `只允许调用：${[...MAPPING_AGENT_TOOLS, ...phaseTools].join(', ')}。只处理当前任务，不读取 S2 Artifact、其他 Child 结果或完整 document.md。`,
     '本地检索必须 grep 定位候选，再 read 候选 chunk 理解上下文；语义截断时读取同一 chunks/index.json 后按相邻 id 继续。grep 命中不能直接作为 Evidence。',
@@ -823,8 +843,8 @@ export function renderEvidenceMappingSubagentTask(
     '不得填写 task_id、完整 section_mappings 数组、真实 file_id、source_kind、Web source_id 或 snapshot_path。Host 根据当前任务、工具状态和成功 fetch 生成这些确定性字段。不得写文件，普通文字回复不作为结果。',
     '逐章形成可直接交给 S5 的 writing_brief。purpose 不能重复标题，must_answer 必须把抽象评分转为具体写作任务；writing_dimensions 或 writing_notes 至少一项能指导展开。工具报字段错误时只修正该次调用。',
     ...(taskOwnsBranchRefinement(task) ? [
-      '如需调整目录，逐次调用 apply_branch_outline_edit；每次只提交一个现有目录操作，不复制完整子树，不得编辑或移动其他分支。新增 ID 由 Host 在结果中返回，禁止自行预测 NEW-* ID。',
-      '目录判断完成后必须调用 lock_branch_outline；没有结构调整也必须调用。之后以它返回的 writable_sections 为准，逐章调用 submit_section_mapping，并按 remaining_section_ids 继续。',
+      '需要独立成节的主题必须逐次调用 apply_branch_outline_edit 落入目录；每次只提交一个现有目录操作，不复制完整子树，不得编辑或移动其他分支。新增 ID 由 Host 在结果中返回，禁止自行预测 NEW-* ID。',
+      '目录判断完成后必须调用 lock_branch_outline(comparison)，说明与用户原始框架、当前整本目录职责、旧标层级的对照及采用、拆分或排除理由；没有结构调整时，明确说明已有叶子为何足够独立。之后以它返回的 writable_sections 为准，逐章调用 submit_section_mapping，并按 remaining_section_ids 继续。',
       '现有 Section 未提供 coverage_override 时继承当前目录关联；NEW-* Section 必须一次提供三类 coverage_override，且只能引用当前任务可见 ID。需要全局关注的风险逐条调用 add_mapping_suggestion。',
       '所有章节完成后调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的章节，直到 completed=true。',
       '拆分可写叶子时，先用 update_section 为将成为结构节点的原章节补充 summary，再执行 split_section。',
@@ -1488,8 +1508,9 @@ async function executeEvidenceMappingRun(
     readJson(workspace, 'analysis/project.json'), readJson(workspace, 'analysis/requirements.json'),
     readJson(workspace, 'analysis/scoring.json'), readJson(workspace, 'analysis/scoring-response-points.json'),
     readJson(workspace, 'analysis/compliance.json'), finalCheck?.outline ?? readJson(workspace, !localRun ? 'outline/initial-confirmed-outline.json' : OUTLINE_PATH),
+    loadOutlineFrameworkStructures(workspace),
   ])
-  const [projectRaw, requirementsRaw, scoringRaw, responsePointsRaw, complianceRaw, outlineRaw] = rawInputs
+  const [projectRaw, requirementsRaw, scoringRaw, responsePointsRaw, complianceRaw, outlineRaw, frameworks] = rawInputs
   const inputs: EvidenceMappingInputs = {
     project: parseTenderProjectArtifact(projectRaw),
     requirements: parseTenderRequirementsArtifact(requirementsRaw),
@@ -1497,6 +1518,7 @@ async function executeEvidenceMappingRun(
     responsePoints: parseScoringResponsePointCatalog(responsePointsRaw),
     compliance: parseTenderComplianceArtifact(complianceRaw),
     outline: parseOutlineArtifact(outlineRaw),
+    frameworks,
   }
   if (!catalogMatchesScoring(inputs.responsePoints, inputs.scoring)) throw new Error('evidence-mapping-response-point-catalog-mismatch')
   const manifest = await workspace.readManifest()
@@ -1514,7 +1536,7 @@ async function executeEvidenceMappingRun(
   }
   let previous: EvidenceMapArtifact | undefined
   let previousWeb: WebEvidenceSourcesArtifact | undefined
-  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 1, tasks: [] }
+  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 2, tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
   if (!localRun) {
@@ -1527,7 +1549,13 @@ async function executeEvidenceMappingRun(
         const savedInitial = savedPlan.tasks.filter(item => item.phase === 'initial').map(({ task_id, section_ids }) => ({ task_id, section_ids }))
         if (JSON.stringify(savedInitial) !== JSON.stringify(expectedInitial)) throw new Error('evidence-mapping-resume-plan-mismatch')
         const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
-        if (rawCheckpoint !== undefined) checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
+        if (rawCheckpoint !== undefined) {
+          if (record(rawCheckpoint)?.schema_version !== 2) throw new BidStageExecutionError([{
+            code: 'EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED',
+            message: 'S4 检查点不包含当前目录结构对照流程，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
+          }])
+          checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
+        }
         const checkpointIds = new Set(checkpoint.tasks.map(item => item.task_id))
         for (const item of savedLog.tasks) {
           if (item.status === 'completed' && !checkpointIds.has(item.task_id)) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
@@ -1608,7 +1636,7 @@ async function executeEvidenceMappingRun(
         result,
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
       })
-      checkpoint = { schema_version: 1, tasks: plan.tasks.flatMap((item) => {
+      checkpoint = { schema_version: 2, tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }

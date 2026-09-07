@@ -137,10 +137,10 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'chapter_writing', status: 'completed' })).toEqual({
       runtime: { stage: 'chapter_writing', status: 'completed' },
-      allowedActions: ['export_docx'],
-      composer: { enabled: false, reason: 'bid.completed' },
+      allowedActions: ['export_docx', 'revise_chapter'],
+      composer: { enabled: true },
     })
-    expect(getBidClientProjection({ stage: 'docx_export', status: 'completed' }).allowedActions).toEqual(['export_docx'])
+    expect(getBidClientProjection({ stage: 'docx_export', status: 'completed' }).allowedActions).toEqual(['export_docx', 'revise_chapter'])
   })
 
   it('registers bid.runtime as a whole-value DSH session projection', async () => {

@@ -5,7 +5,7 @@
  * conversation wiring layer alone sees the full SessionInput. InputMachine
  * (machine.ts) is package-private and never exported.
  */
-import type { ClientContext, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionId, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type {
   ArbitrateKey, ArbitrateOutcome, CommandClaim, ConsumeTokenRequest, PickOutcome,
@@ -16,6 +16,27 @@ import type { InputSubmitMode } from '../contract/composer-submission.ts'
 
 /** Browser-runtime identity of one unsent image draft. */
 export type DraftAttachmentId = Branded<'DraftAttachmentId'>
+
+/** 业务提交的结果；失败时输入框保留草稿。 */
+export type ComposerSubmitOutcome = SubmitOutcome
+
+/** 返回 undefined 时使用普通消息路径；返回 Promise 后完全由业务处理，不因失败回退。 */
+export type ComposerSubmitHandler = (
+  text: string,
+  imageIds: readonly DraftAttachmentId[],
+  signal: AbortSignal | undefined,
+) => Promise<ComposerSubmitOutcome> | undefined
+
+/** 每个会话最多一个业务提交处理器，由注册方释放。 */
+export interface ComposerSubmitHandlers {
+  /**
+   * 为指定会话接管带有业务引用的提交；重复注册报错。
+   * @param sessionId - 输入框所属会话。
+   * @param handler - 同步判断是否接管本次提交的处理器。
+   * @returns 移除当前处理器的 disposer。
+   */
+  register(sessionId: SessionId, handler: ComposerSubmitHandler): () => void
+}
 
 /**
  * The scoped-event application verbs: the hub's bail listeners call these,

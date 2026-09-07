@@ -120,6 +120,8 @@ export interface MarkdownFileMentions {
  * numbering accumulated in document order while references render.
  */
 export interface MarkdownRenderContext {
+  /** UTF-16 prefix added to selectable top-level paragraph positions in settled documents. */
+  readonly paragraphSourceOffset?: number | undefined
   /** Streaming arm: fences render plain and TeX stays literal. */
   readonly streaming: boolean
   /** Localized fence copy-button labels. */
@@ -151,7 +153,18 @@ export function renderBlocks(
   context: MarkdownRenderContext,
 ): ReactNode[] {
   return blocks
-    .map(block => renderNode(block.node, block.key, context))
+    .map(({ node, key }) => {
+      if (node.type === 'paragraph' && context.paragraphSourceOffset !== undefined) {
+        const start = node.position?.start.offset
+        const end = node.position?.end.offset
+        return <p key={key}
+          data-markdown-paragraph=""
+          data-source-start={start === undefined ? undefined : start + context.paragraphSourceOffset}
+          data-source-end={end === undefined ? undefined : end + context.paragraphSourceOffset}
+        >{renderChildren(node.children, context)}</p>
+      }
+      return renderNode(node, key, context)
+    })
     .filter(element => element !== null)
 }
 

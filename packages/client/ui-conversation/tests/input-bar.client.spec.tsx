@@ -1478,7 +1478,7 @@ describe('command launcher chrome and control seats', () => {
     expect(view.queryByLabelText(/^访问模式/)).toBeNull()
     // Every seat dispatched, nothing rendered.
     expect(slotCalls.map(c => c.key)).toEqual([
-      'conversation.input.attachments', 'conversation.input.plan', 'conversation.input.model',
+      'conversation.input.context', 'conversation.input.attachments', 'conversation.input.plan', 'conversation.input.model',
     ])
     expect(view.queryByLabelText('Plan mode')).toBeNull()
     expect(view.queryByLabelText('Model')).toBeNull()
@@ -1641,12 +1641,12 @@ describe('command launcher chrome and control seats', () => {
     expect(view.getByTestId('plan-entry')).toBeTruthy()
     expect(view.getByTestId('model-entry')).toBeTruthy()
     // The bar hands its chrome disable state to the filling entry.
-    const controls = slotCalls.filter(call => call.key !== 'conversation.input.attachments')
+    const controls = slotCalls.filter(call => call.key === 'conversation.input.plan' || call.key === 'conversation.input.model')
     expect(controls.every(c => (c.owner as { locked: boolean }).locked)).toBe(true)
     expect(attachmentOwner(slotCalls).canAcceptDrop).toBe(false)
     cleanup()
     const live = bench({ running: true })
-    const liveControls = live.slotCalls.filter(call => call.key !== 'conversation.input.attachments')
+    const liveControls = live.slotCalls.filter(call => call.key === 'conversation.input.plan' || call.key === 'conversation.input.model')
     expect(liveControls.every(c => !(c.owner as { locked: boolean }).locked)).toBe(true)
     expect(attachmentOwner(live.slotCalls).canAcceptDrop).toBe(true)
   })

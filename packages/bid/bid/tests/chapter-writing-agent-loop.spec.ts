@@ -150,7 +150,7 @@ describe('S5 真实 DSH Child 接入', () => {
         const request = await next()
         const prompt = child.session.deriveMessages().flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
         if (damagedWriter === undefined && ctx.tools.schemas(child).some(tool => tool.name === 'submit_chapter')
-          && prompt.includes('"id":"SEC-2"')) {
+          && prompt.split('\n').some(line => line.startsWith('Current Chapter Blueprint：') && line.includes('"id":"SEC-2"'))) {
           const verified = prompt.split('\n').find(line => line.startsWith('Verified Web Snapshots：'))!
           expect(JSON.parse(verified.slice('Verified Web Snapshots：'.length))).toEqual([
             expect.objectContaining({ web_ref: 'W1', url: sources[2]!.final_url }),

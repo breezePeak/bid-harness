@@ -16,6 +16,8 @@ import { BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewChapterView, type BidReviewWorkbenchView } from './BidReviewWorkbench.tsx'
+import { BidComposerContext } from './BidComposerContext.tsx'
+import { createBidRevisionStore } from './revision-reference.ts'
 import { en, zh, type BidKey } from './locales.ts'
 
 export type { BidKey } from './locales.ts'
@@ -109,12 +111,33 @@ function actionFailure(error: {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  const revisionStore = createBidRevisionStore()
+  const getChapter = async (sessionId: SessionId, sectionId: string): Promise<BidReviewChapterView> => {
+    const result = await ctx.remote.bid.getReviewChapter(sessionId, sectionId)
+    if (!result.ok) throw actionFailure(result.error)
+    return result.value
+  }
   const getDetails = async (sessionId: SessionId): Promise<BidDetailsView> => {
     const result = await ctx.remote.bid.getDetails(sessionId)
     if (!result.ok) throw actionFailure(result.error)
     return result.value
   }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-bid: dictionaries')
+  ctx.slots.inject('conversation.input.context', () => ctx.slots.register({
+    name: 'conversation.input.context',
+    id: 'bid-revision',
+    store: revisionStore,
+    inject: (sessionId: SessionId) => ({
+      getChapter: (sectionId: string) => getChapter(sessionId, sectionId),
+      reviseChapter: async (request: import('@deepseek-ai/dsh-bid/control-plane').BidChapterRevisionRequest) => {
+        const result = await ctx.remote.bid.reviseChapter(sessionId, request)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
+        ctx.conversation.submitHandlers.register(sessionId, handler),
+    }),
+  }, BidComposerContext))
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
     id: 'bid',
@@ -243,6 +266,7 @@ export function apply(ctx: ClientContext): void {
     order: 10,
     label: () => '正文详情',
     embeddedChat: false,
+    store: revisionStore,
     inject: (sessionId: SessionId) => {
       const remote = ctx.remote.bid as unknown as {
         getReviewWorkbench(id: SessionId): Promise<{

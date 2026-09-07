@@ -5,6 +5,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
+import { readDocumentOutlineHeadings, type DocumentOutlineHeading } from './outline-framework.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 /** 已预检、可从 Child 任意 cwd 直接调用的绝对路径。 */
@@ -15,6 +16,8 @@ export interface MappingCorpusLocation {
   chunks_path: string
   chunk_index_path: string
   chunks: Array<{ id: string; path: string }>
+  /** 参考旧标书的完整目录，由 Host 注入章节研究任务。 */
+  outline?: readonly DocumentOutlineHeading[]
 }
 
 /**
@@ -50,7 +53,9 @@ export async function resolveMappingCorpusLocations(workspace: BidWorkspace, man
         if (!(await lstat(path)).isFile()) throw new Error(`Chunk 不是文件：${entry.path}`)
         entries.push({ id: entry.id, path: path.split(sep).join('/') })
       }
-      locations.push({ file_id: String(file.id), role: file.role, name: file.originalName, chunks_path: chunks.split(sep).join('/'), chunk_index_path: indexPath.split(sep).join('/'), chunks: entries })
+      locations.push({ file_id: String(file.id), role: file.role, name: file.originalName, chunks_path: chunks.split(sep).join('/'), chunk_index_path: indexPath.split(sep).join('/'), chunks: entries,
+        ...(file.role === 'reference_bid' ? { outline: await readDocumentOutlineHeadings(workspace, file) } : {}),
+      })
     } catch (error) {
       throw new BidStageExecutionError([{ code: 'EVIDENCE_MAPPING_CORPUS_INVALID', message: `${file.id} / ${file.originalName}：${error instanceof Error ? error.message : String(error)}` }])
     }

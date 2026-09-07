@@ -1,4 +1,4 @@
-/** Writer 的语义输入与章节内资料短引用；持久化身份全部由 Host 解析。 */
+/** Writer 的叶节正文校验与资料短引用；持久化身份全部由 Host 解析。 */
 import { readFile } from 'node:fs/promises'
 import { ToolArgsError, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
@@ -8,6 +8,7 @@ import { parseChapterCandidate, type ChapterCandidate, type AcceptedChapterCandi
 import { localEvidenceMaterialSchema, transientWebEvidenceMaterialSchema, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs } from './chapter-writing-protocol.ts'
+import { validateChapterHeadings } from './chapter-headings.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
@@ -213,7 +214,7 @@ export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial
 }
 
 /**
- * 校验 Writer 短引用并注入章节身份与 Blueprint 索引；实际 W 引用重读账本和正文，账本读取或解析失败传播，不写文件。
+ * 拒绝正文新增目录，校验 Writer 短引用并注入章节身份与 Blueprint 索引；实际 W 引用重读账本和正文，账本读取或解析失败传播，不写文件。
  * @param workspace 资料工作区。
  * @param manifest 当前资料身份。
  * @param context 固定章节输入。
@@ -227,6 +228,8 @@ export async function bindChapterWriterInput(
   value: unknown, snapshots: readonly WebEvidenceSnapshot[],
 ): Promise<ChapterCandidate> {
   const input = chapterToolArgs(writerInput, value)
+  const headingIssues = validateChapterHeadings(input.markdown, context.section.title, context.section.id)
+  if (headingIssues.length > 0) throw new ToolArgsError(headingIssues.map(issue => `markdown: ${issue}`))
   const local: LocalEvidenceMaterial[] = []
   for (const [index, material] of (input.metadata.local_materials_used ?? []).entries()) {
     const path = `metadata.local_materials_used.${index}`

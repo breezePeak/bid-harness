@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
+import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 
 afterEach(cleanup)
 
@@ -17,13 +18,16 @@ const workbench = {
 
 const chapter = {
   section_id: 'SEC-1', title: '实施方案', number: '1.1', heading_path: ['技术方案', '实施方案'], writable: true,
-  markdown: '章节正文', requirement_ids: ['REQ-1'], scoring_response_point_ids: ['RP-000001'], evidence_status: 'available' as const,
+  markdown: '章节正文', content_sha256: 'a'.repeat(64), requirement_ids: ['REQ-1'], scoring_response_point_ids: ['RP-000001'], evidence_status: 'available' as const,
   materials: [{ source_kind: 'reference_bid' as const, source_label: '参考旧标', file_id: 'ref-01.docx', usage: 'adapt', summary: '历史同类实施方案' }],
   review: { status: 'reviewing' as const, issues: [] },
 }
 
 function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbenchProps {
+  const store = createBidRevisionStore().create()
   return {
+    useStore: selector => selector(store.getSnapshot()),
+    actions: store.actions,
     sessionId: 'bid' as SessionId,
     useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'running' } }),

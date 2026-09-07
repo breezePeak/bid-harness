@@ -38,6 +38,21 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('SEARCH_INVALID_PATTERN')
       expect(childLog).toContain('SEARCH_RAW_OUTPUT_OVERFLOW')
       expect(childLog).toContain('lock_branch_outline')
+      expect(childLog).toContain('lock-without-comparison')
+      expect(childLog).toContain('lock-blank-comparison')
+      for (const callId of ['lock-without-comparison', 'lock-blank-comparison']) {
+        expect(events.find(event => event.type === 'tool/result'
+          && event.data.message.source.kind === 'tool' && event.data.message.source.callId === callId))
+          .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
+      }
+      expect(childLog).toContain('当前整本目录与章节职责：')
+      expect(childLog).toContain('用户原始目录框架：')
+      expect(childLog).toContain('资产发现')
+      expect(childLog).toContain('资产核验')
+      expect(childLog).toContain('read-forbidden-framework')
+      expect(childLog).not.toContain('框架内部编写说明。')
+      expect(childLog).toContain('参考旧标书完整目录：')
+      expect(childLog).toContain('输入旧标按身份治理与安全运维组织')
       expect(childLog).toContain('submit_section_mapping')
       expect(childLog).toContain('finish_mapping_task')
       expect(childLog).not.toContain('submit_evidence_mapping')

@@ -1,0 +1,39 @@
+{
+  "markdown": "# 1 访问控制与安全审计\n\n本章按访问控制、权限复核和安全审计组织实施，统一使用已确认的访问控制术语。\n\n权限管理由授权审批开始，按角色分配访问范围；授权人员登记审批依据，复核人员确认权限与岗位职责一致。\n\n安全审计记录访问时间、操作对象和处理结果；发现异常访问后登记责任人、整改措施与复核结论。\n\n最终交付权限台账与审计记录，原定交付内容保持不变。\n",
+  "metadata": {
+    "section_id": "SEC-SECURITY",
+    "covered_must_answer": [
+      "说明访问控制与安全审计措施。"
+    ],
+    "covered_scoring_response_point_ids": [
+      "RP-000001"
+    ],
+    "covered_scoring_response_points": [
+      {
+        "scoring_id": "SCORE-1",
+        "response_point": "说明访问控制"
+      }
+    ],
+    "local_materials_used": [
+      {
+        "source_kind": "reference",
+        "file_id": "4bd88a6a65cc5585238663025fdb442c52aa7be376b34822456a2294c80d699f",
+        "chunk": "chunk_0001",
+        "usage": "reference",
+        "summary": "支撑本章实施流程的组织与步骤安排。"
+      }
+    ],
+    "web_materials_used": [],
+    "unresolved_topics": [],
+    "handoff": {
+      "section_id": "SEC-SECURITY",
+      "decisions": [],
+      "terminology": [],
+      "numbers_and_parameters": [],
+      "interfaces": [],
+      "deployment_constraints": [],
+      "cross_reference_targets": [],
+      "unresolved_topics": []
+    }
+  }
+}

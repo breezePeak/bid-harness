@@ -61,17 +61,17 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 逐次提交现有 `outlineEditOperationSchema` 操作，Host 校验分支范围、立即应用并返回临时新章 ID；目录锁定后，Child 按 Host 返回的可写章节逐章提交 Evidence、writing_dimensions 和 writing_brief。Host 合并分支、分配稳定 Section ID 并将 brief 写入 Outline。正式 Evidence Map schema v10 保持不变。
 
-S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告文件身份与原因。Prompt 使用 `F1` 等运行内短引用和绝对 Corpus 路径，Host 按定位表精确回填正式 file_id/source_kind。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；Final Check 还可读取已登记 Web 正文。tender、outline_framework、完整 document.md 与项目外路径不被授权。本地 Evidence 验证文件角色、分块归属和路径安全，不要求 Child read 日志证明。
+S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告文件身份与原因。Host 从 structure.json 读取旧标及用户原始框架的完整标题树；没有结构文件的文本资料从标准化 Markdown 提取完整标题，不依赖分块索引的首标题。原始框架、当前候选目录职责和旧标结构一并注入研究任务，Child 按本次要求与框架对照章节组织，再按标题语境检索正文。框架标题仅作结构输入，不进入事实 Evidence。Prompt 使用 `F1` 等运行内短引用和绝对 Corpus 路径，Host 按定位表精确回填正式 file_id/source_kind。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；Final Check 还可读取已登记 Web 正文。tender、outline_framework、完整 document.md 与项目外路径不被授权。本地 Evidence 验证文件角色、分块归属和路径安全，不要求 Child read 日志证明。
 
 每个 S4 Child 使用仅在当前 Child 生效的增量工具。Initial 注册 `apply_branch_outline_edit`、`lock_branch_outline`、`submit_section_mapping`、`add_mapping_suggestion` 和 `finish_mapping_task`；Remap 只注册后两类章节提交与完成工具。章节工具不接收 task_id、全量 Mapping 数组、真实文件身份或 Web 快照字段；Host 以 Map upsert 章节，省略的数组补空，既有 coverage 从锁定目录继承，新章 coverage 必须在当前 Task 范围内完整覆盖。参数错误以 ToolArgsError 返回模型，在当前回合内修正；普通文字回复不作为结果。
 
-Section、file_ref、分块归属、usage 和 Web 正文存在性在单次工具调用内校验；重复 Section 直接覆盖，finish 根据 Host 状态返回缺失章节或具体 Writing Brief/coverage 问题。只有完成后仍存在的语义问题或未调用完成工具才最多在同一 Child 修复一次，并保留已检索上下文。执行日志 schema v3 以 `issues` 记录本次拒绝原因，以 `warnings` 记录不阻塞接收的本次检索错误；接受的 attempt 不得保留 issues。missing_topics 只表示检索并语义判断后仍存在的真实缺口。已接受分支及其目录操作写入 `analysis/evidence-mapping-checkpoint.json`，重试只调度未完成任务；checkpoint 与 Web Evidence 使用关键写入队列，执行日志的独立尽力队列失败只记录 Host warning。用户取消、关键持久化或权限机制故障仍可中止阶段。
+Section、file_ref、分块归属、usage 和 Web 正文存在性在单次工具调用内校验；重复 Section 直接覆盖，finish 根据 Host 状态返回缺失章节或具体 Writing Brief/coverage 问题。只有完成后仍存在的语义问题或未调用完成工具才最多在同一 Child 修复一次，并保留已检索上下文。执行日志 schema v3 以 `issues` 记录本次拒绝原因，以 `warnings` 记录不阻塞接收的本次检索错误；接受的 attempt 不得保留 issues。missing_topics 只表示检索并语义判断后仍存在的真实缺口。已接受分支及其目录操作写入 `analysis/evidence-mapping-checkpoint.json`（schema v2），重试只调度未完成任务；v1 检查点缺少结构对照保证，须重置 S4 后重新研究，不能直接复用。checkpoint 与 Web Evidence 使用关键写入队列，执行日志的独立尽力队列失败只记录 Host warning。用户取消、关键持久化或权限机制故障仍可中止阶段。
 
-目录深化与各分支资料研究在同一 Child 内完成；每次目录工具只接收一个新增、拆分、合并、移动或字段调整操作，无需复制完整子树。Host 合并并校验各分支结果后，启动一个无工具、不可继续派生的全新目录复核 Child；该 Child 只接收合并后的目录候选并以结构化结果返回质量报告，不继承主 Session 历史，也不读取 Evidence、Web 正文或 S2 Artifact。后续 Final Check 只注册 `replace_section_mapping`、`submit_branch_summary` 和 `finish_final_check`；未替换章节保留 Host baseline，缺少 baseline 或摘要时由 finish 返回明确 ID。Host 恢复完整结果后仍写出 evidence-map v10。
+目录深化与各分支资料研究在同一 Child 内完成；需要独立成节的主题通过目录操作落成节点，不能只增加 must_answer 或 writing_dimensions。每次目录工具只接收一个新增、拆分、合并、移动或字段调整操作，无需复制完整子树；`lock_branch_outline` 必须收到非空结构对照结论，保留原结构也须说明叶节为何已可独立写作。Host 合并并校验各分支结果后，启动一个无工具、不可继续派生的全新目录复核 Child；该 Child 只接收合并后的目录候选并以结构化结果返回质量报告，不继承主 Session 历史，也不读取 Evidence、Web 正文或 S2 Artifact。后续 Final Check 只注册 `replace_section_mapping`、`submit_branch_summary` 和 `finish_final_check`；未替换章节保留 Host baseline，缺少 baseline 或摘要时由 finish 返回明确 ID。Host 恢复完整结果后仍写出 evidence-map v10。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 
-S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文，不重新规划章节目标或拆章。Writer 优先使用 S4 Evidence，遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 及登记 Web Snapshot 中有限 grep/read；相邻分块按索引读取，tender 始终禁止。补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map；framework 保持草稿身份，不作事实 Evidence。
+S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文。Writer 与 Reviewer 同时获得完整目录职责及当前祖先路径，依据父子关系、同级节点分工和本节任务检查正文归属，不根据固定章名或行业词指定内容位置。叶节使用段落、列表和表格，提交及恢复检查拒绝根标题以外的 Markdown 标题；Host 只按确认目录生成根标题编号。已有正文的预览和导出保留其子标题原文，不生成新的节内编号。Writer 优先使用 S4 Evidence，遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 及登记 Web Snapshot 中有限 grep/read；相邻分块按索引读取，tender 始终禁止。补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map；framework 保持草稿身份，不作事实 Evidence。
 
 S5 以 `outline/confirmed-outline.json` 为唯一章节结构。Main Agent 只通过 `add_global_consistency_note`、`set_chapter_relations` 和 `finish_chapter_plan` 判断关系，不使用文件工具。Host 按目录遍历预置全部可写章节，补齐身份、版本和 Hash；至少一项真实全局说明及无环强依赖校验通过后原子写入 `execution-plan.json`。仅有合法 plan、尚无 execution-log 时也复用计划。
 
@@ -98,15 +98,17 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 ## Model Experience
 
+章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer，会话恢复失败时拒绝修订。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；Host 校验连续顶层段落，在提交工具和落盘处拒绝选区外变动。用户意见及当前正文进入原 Writer 的会话日志；修订期间父 Agent 不执行模型步骤。失败恢复章节正文、metadata、审查与执行记录；其他章节不重写。
+
 ### Inventory text
 
 #### What the model sees
 
-The caller persists `messageInventory()` as a user message containing each file's name, workspace-relative source, parsed-document and structure paths, and parse status. Document bytes and absolute host paths never enter this text. The paths let the model use the existing `grep` and `read` tools.
+调用方将 `messageInventory()` 持久化为用户消息，包含文件名、工作区相对源路径、解析正文与结构路径以及解析状态；文件字节和宿主绝对路径不进入这条清单。S4 研究任务另行携带旧标完整标题列表和本次目录职责，S5 Writer 与 Reviewer 同时获得确认目录职责和当前章节路径；这些任务输入均进入相应会话记录。
 
 #### Token effect
 
-The bounded inventory adds one fixed set of lines per imported file. Extracted document text enters context only when the model reads it.
+文件清单按每份导入文档增加固定字段；S4 目录上下文随旧标标题数和本次目录规模增长，S5 目录上下文随确认目录规模增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；正文仍按需读取分块，不随目录整份注入。
 
 #### KV Cache effect
 

@@ -204,6 +204,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * both are point-in-time snapshots re-rendered for you, never subscribe.
      */
     'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: InputZone }
+    /** Business references shown inside the composer card, separately from the text draft. */
+    'conversation.input.context': { kind: 'list'; scope: 'session'; owner: { readonly disabled: boolean } }
     /**
      * The band under the composer card, inside the bar's width column — the
      * seat for an ambient readout about the conversation (the shipped stats
@@ -622,7 +624,7 @@ export interface InputControlOwnerProps {
 export type ComposerBarProps =
   PropsRuntime<'conversation.composer.bar'>
   & PropsRenderSlots<
-    'conversation.input.attachments' | 'conversation.input.plan' | 'conversation.input.model'
+    'conversation.input.attachments' | 'conversation.input.context' | 'conversation.input.plan' | 'conversation.input.model'
   >
   & InjectFace<ComposerBarInjected>
   & PropsLocale<'conversation'>

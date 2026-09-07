@@ -5,6 +5,7 @@ import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-wri
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
+import { validateChapterHeadings } from './chapter-headings.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
@@ -216,6 +217,9 @@ export async function validateChapterWriting(
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
       if (!(await lstat(body)).isFile() || markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim())) throw new Error('empty')
+      for (const message of validateChapterHeadings(markdown, section.title, section.id)) {
+        reject(issues, 'CHAPTER_WRITING_OUTLINE_HEADING_INVALID', message, chapter.content_path)
+      }
       const reviewRaw = await readJson(workspace, chapter.review_path, issues)
       if (reviewRaw === undefined) throw new Error('review-missing')
       const review = parseChapterReviewArtifact(reviewRaw)

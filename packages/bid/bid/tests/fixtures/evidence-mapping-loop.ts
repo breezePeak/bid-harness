@@ -289,6 +289,16 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = await prepareS2(workspace)
+  await workspace.import([{
+    name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode([
+      '# 安全平台技术标', '## 身份治理', '### 账户生命周期', '### 权限审批', '## 安全运维', '### 访问控制与安全审计',
+    ].join('\n\n')),
+  }, {
+    name: 'user-framework.md', role: 'outline_framework', bytes: new TextEncoder().encode([
+      '# 安全平台方案', '## 访问控制与安全审计', '## 资产盘点', '### 资产发现', '### 资产核验',
+      '', '框架内部编写说明。',
+    ].join('\n\n')),
+  }])
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
@@ -296,17 +306,25 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
   const tender = manifest.files.find(file => file.role === 'tender')!
-  if (corpus === undefined || tender.chunksPath === null) throw new Error('missing mapping corpus')
+  const framework = manifest.files.find(file => file.role === 'outline_framework')!
+  if (corpus === undefined || tender.chunksPath === null || framework.chunksPath === null) throw new Error('missing mapping corpus')
   const parsedQuality = JSON.parse(quality) as Record<string, unknown>
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
+    toolCall('read-forbidden-framework', 'read', { file_path: `${workspacePath}/${framework.chunksPath}/chunk_0001.md` }),
     ...(repair ? [
       toolCall('grep-invalid', 'grep', { pattern: '[', path: corpus.chunks_path }),
       toolCall('grep-overflow', 'grep', { pattern: '.*', path: corpus.chunks_path }),
     ] : []),
     toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
-    toolCall('lock-initial-outline', 'lock_branch_outline', {}),
+    ...(repair ? [
+      toolCall('lock-without-comparison', 'lock_branch_outline', {}),
+      toolCall('lock-blank-comparison', 'lock_branch_outline', { comparison: '  ' }),
+    ] : []),
+    toolCall('lock-initial-outline', 'lock_branch_outline', {
+      comparison: '用户原框架包含访问控制与安全审计、资产盘点及其子项；当前招标范围为访问控制与安全审计。输入旧标按身份治理与安全运维组织，本分支对应其中的访问控制与安全审计，保留已聚焦的候选叶子，不引入其他主题。',
+    }),
     toolCall('submit-invalid-usage', 'submit_section_mapping', {
       ...sectionSubmission(sourceUrl),
       local_materials: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference_bid', summary: '非法枚举回放。' }],
@@ -420,6 +438,8 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
     toolCall('reject-bad-reference', 'submit_chapter', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
     toolCall('reject-bad-web-reference', 'submit_chapter', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
+    toolCall('reject-new-atx-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n## 补充服务方案\n\n不属于确认目录的目录层级。` }),
+    toolCall('reject-new-setext-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n补充服务方案\n---\n\n不属于确认目录的目录层级。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
@@ -432,7 +452,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
-  return { agent, artifacts, workspace, requests: adapter.requests }
+  return { agent, artifacts, workspace, requests: adapter.requests, childScript }
 }
 
 /**

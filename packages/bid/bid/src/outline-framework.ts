@@ -1,13 +1,17 @@
+/** 导入文档目录读取、人工框架引用校验及框架正文定位。 */
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidWorkspace, ManifestFile } from './index.ts'
 import type { OutlineArtifact, OutlineFrameworkRef } from './outline-generation-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
-/** One Host-parsed heading from an imported outline framework. */
-export interface OutlineFrameworkHeading {
+/** 导入文档中的完整标题、层级路径和原始顺序。 */
+export interface DocumentOutlineHeading {
   readonly title: string
   readonly level: number
   readonly heading_path: readonly string[]
@@ -18,10 +22,10 @@ export interface OutlineFrameworkHeading {
 export interface OutlineFrameworkStructure {
   readonly file_id: string
   readonly name: string
-  readonly headings: readonly OutlineFrameworkHeading[]
+  readonly headings: readonly DocumentOutlineHeading[]
 }
 
-function parseFrameworkStructure(value: unknown): OutlineFrameworkHeading[] {
+function parseFrameworkStructure(value: unknown): DocumentOutlineHeading[] {
   if (typeof value !== 'object' || value === null || !('sections' in value) || !Array.isArray(value.sections)) {
     throw new Error('outline-framework-structure-invalid')
   }
@@ -44,27 +48,44 @@ function parseFrameworkStructure(value: unknown): OutlineFrameworkHeading[] {
   })
 }
 
-async function readFrameworkHeadings(workspace: BidWorkspace, file: ManifestFile): Promise<OutlineFrameworkHeading[]> {
-  if (file.structurePath !== null) {
-    const path = within(workspace.projectRoot, file.structurePath)
-    await assertNoLinkedPath(workspace.root, path)
-    return parseFrameworkStructure(JSON.parse(await readFile(path, 'utf8')))
-  }
-  if (file.chunkIndexPath === null) throw new Error('outline-framework-chunk-index-missing')
-  const path = within(workspace.projectRoot, file.chunkIndexPath)
+type MarkdownHeading = Extract<ReturnType<typeof fromMarkdown>['children'][number], { type: 'heading' }>
+
+function headingText(node: MarkdownHeading | MarkdownHeading['children'][number]): string {
+  if ('value' in node) return node.value
+  return 'children' in node ? node.children.map(headingText).join('') : ''
+}
+
+/**
+ * 读取完整文档目录；没有结构文件时按 Markdown 语法提取顶层标题。
+ * @param workspace 文档所属工作区。
+ * @param file 已解析文档及其结构、标准化正文定位。
+ * @returns 保留标题、层级和顺序的目录，不返回正文内容。
+ * @throws Corpus 缺失，或结构、正文定位不属于该文件的 Corpus。
+ */
+export async function readDocumentOutlineHeadings(workspace: BidWorkspace, file: ManifestFile): Promise<DocumentOutlineHeading[]> {
+  if (file.corpusPath === null) throw new Error('document-outline-corpus-missing')
+  const source = file.structurePath ?? file.documentPath
+  if (source === null) throw new Error('document-outline-document-missing')
+  const corpus = within(workspace.projectRoot, file.corpusPath)
+  const path = within(workspace.projectRoot, source)
+  if (relative(join(corpus, file.structurePath === null ? 'document.md' : 'structure.json'), path) !== '') throw new Error('document-outline-source-mismatch')
   await assertNoLinkedPath(workspace.root, path)
-  const index = parseDocumentChunkIndex(JSON.parse(await readFile(path, 'utf8')))
-  const headings = new Map<string, OutlineFrameworkHeading>()
-  for (const chunk of index.chunks) {
-    for (let level = 1; level <= chunk.heading_path.length; level++) {
-      const headingPath = chunk.heading_path.slice(0, level)
-      const key = headingPath.join('\u0000')
-      if (!headings.has(key)) headings.set(key, {
-        title: headingPath.at(-1) ?? '', level, heading_path: headingPath, order: headings.size + 1,
-      })
+  const content = await readFile(path, 'utf8')
+  if (file.structurePath !== null) return parseFrameworkStructure(JSON.parse(content))
+  const headings: DocumentOutlineHeading[] = []
+  const ancestors: DocumentOutlineHeading[] = []
+  for (const node of fromMarkdown(content, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }).children) {
+    if (node.type !== 'heading') continue
+    const title = headingText(node).trim()
+    if (title.length === 0) continue
+    while ((ancestors.at(-1)?.level ?? 0) >= node.depth) ancestors.pop()
+    const heading = {
+      title, level: node.depth, heading_path: [...ancestors.map(parent => parent.title), title], order: headings.length + 1,
     }
+    headings.push(heading)
+    ancestors.push(heading)
   }
-  return [...headings.values()]
+  return headings
 }
 
 /**
@@ -79,7 +100,7 @@ export async function loadOutlineFrameworkStructures(workspace: BidWorkspace): P
     .map(async file => ({
       file_id: String(file.id),
       name: file.originalName,
-      headings: await readFrameworkHeadings(workspace, file),
+      headings: await readDocumentOutlineHeadings(workspace, file),
     })))
 }
 

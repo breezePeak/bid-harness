@@ -15,6 +15,7 @@ import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai
 import { pickChapterContext, renderChapterExecutionPlanTask, validateChapterCandidate } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
 import type { ChapterReview } from '../src/chapter-writing-review-artifacts.ts'
+import { chapterCandidateSha256 } from '../src/chapter-writing-review-artifacts.ts'
 import { validateChapterWriting } from '../src/chapter-writing-validator.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
@@ -634,7 +635,7 @@ describe('chapter-writing executor', () => {
     const evidenceText = await readFile(evidencePath, 'utf8')
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
       stopReason: 'completed', output: [], structured: {
-        ...candidateFrom(request), markdown: '# 当前实施章节\n\n采用本地资料中经过核实的技术依据组织实施，明确责任与交付成果。',
+        ...candidateFrom(request), markdown: '采用本地资料中经过核实的技术依据组织实施，明确责任与交付成果。',
         metadata: { local_materials_used: [{ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '本地依据' }] },
       },
     }))
@@ -655,7 +656,7 @@ describe('chapter-writing executor', () => {
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
       stopReason: 'completed', output: [], structured: {
-        ...candidateFrom(request), markdown: '# 实施方案\n\n正文内容\n\n按项目技术要求组织实施、执行质量复核并交付完整成果。',
+        ...candidateFrom(request), markdown: '正文内容\n\n按项目技术要求组织实施、执行质量复核并交付完整成果。',
       },
     }))
     fixture.reviewerResult.mockImplementation((request) => {
@@ -846,7 +847,7 @@ describe('chapter-writing executor', () => {
         }],
       }),
       responsePointCatalog: createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '回答评分1' }] }).points,
-      globalComplianceIds: ['GLOBAL-1'],
+      outline: { ...outlineFixture(), global_compliance_ids: ['GLOBAL-1'] },
     })
 
     expect(context.relatedMaterials.map(material => material.file_id)).toEqual(['REFERENCE'])
@@ -854,6 +855,43 @@ describe('chapter-writing executor', () => {
     expect(context.webMaterials.map(material => material.source_id)).toEqual(['WEB-aaaaaaaaaaaaaaaa'])
     expect(context.writingDimensions).toEqual(['需求维度', '评分维度'])
     expect(context.compliance.map(item => item.id)).toEqual(['GLOBAL-1'])
+    expect(context.headingPath).toEqual(['实施方案', '章节1'])
+    expect(context.outlineSections).toEqual(outlineFixture().sections.map(({ id, parent_id, title, purpose, must_answer }) => (
+      { id, parent_id, title, purpose, must_answer }
+    )))
+  })
+
+  it.each([
+    { title: '馆藏流通', topics: ['借阅与归还', '逾期处理', '馆际互借'] },
+    { title: '会展运营', topics: ['参展接待', '展位搭建', '散场撤展'] },
+  ])('$title 下同名叶节向 Writer 和 Reviewer 提供各自的父级与同级职责', async ({ title, topics }) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-outline-context-')))
+    const outline = await writeInputs(workspace)
+    outline.sections[0]!.title = title
+    outline.sections[0]!.purpose = `统筹${title}`
+    for (const [index, section] of outline.sections.slice(1).entries()) {
+      section.title = index === 0 ? '服务安排' : topics[index]!
+      section.purpose = `说明${topics[index]}`
+      section.must_answer = [`${topics[index]}的服务对象与执行方式`]
+    }
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
+    const outlineSha256 = outlineArtifactSha256(outline)
+    await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 }))
+    const fixture = fixtureAgent(workspace, outline)
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
+    const responsibilities = outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (
+      { id, parent_id, title, purpose, must_answer }
+    ))
+    const writerRequests = fixture.starts.map(({ request }) => request)
+    const reviewerRequests = fixture.reviewerResult.mock.calls.map(([request]) => request)
+    expect(writerRequests).toHaveLength(3)
+    expect(reviewerRequests).toHaveLength(3)
+    for (const request of [...writerRequests, ...reviewerRequests]) {
+      const lines = promptText(request).split('\n')
+      const blueprint = JSON.parse(lines.find(line => line.startsWith('Current Chapter Blueprint：'))!.slice('Current Chapter Blueprint：'.length)) as { title: string }
+      expect(lines).toContain(`Current Chapter Path：${JSON.stringify([title, blueprint.title])}`)
+      expect(lines).toContain(`Confirmed Outline Responsibilities：${JSON.stringify(responsibilities)}`)
+    }
   })
 
   it('allows reference and framework draft chunks plus ledger Web snapshots', async () => {
@@ -880,7 +918,7 @@ describe('chapter-writing executor', () => {
       maxConcurrency: 1,
     })
 
-    const firstWriter = fixture.starts.find(call => promptText(call.request).includes('"id":"SEC-1"'))
+    const firstWriter = fixture.starts.find(call => promptText(call.request).split('\n').some(line => line.startsWith('Current Chapter Blueprint：') && line.includes('"id":"SEC-1"')))
     expect(firstWriter).toBeDefined()
     const prompt = promptText(firstWriter!.request)
     expect(prompt).toContain('corpus/reference/chunks/chunk_0001.md')
@@ -943,7 +981,7 @@ describe('chapter-writing executor', () => {
       expect(allowed('read', chunkPath)).toBeUndefined()
       const text = (await readFile(chunkPath, 'utf8')).trim()
       return { stopReason: 'completed', output: [], structured: {
-        ...candidate, markdown: `# 当前章节\n\n结合 ${text}，说明本项目实施流程与质量控制要求。`,
+        ...candidate, markdown: `结合 ${text}，说明本项目实施流程与质量控制要求。`,
         metadata: { ...candidate.metadata, local_materials_used: [{
           file_ref: file.file_ref, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。',
         }] },
@@ -980,7 +1018,7 @@ describe('chapter-writing executor', () => {
     const section = outlineFixture().sections[1]!
     const candidate: ChapterCandidate = {
       section_id: section.id,
-      markdown: '# 章节\n\n正文内容',
+      markdown: `# ${section.title}\n\n正文内容`,
       metadata: {
         section_id: section.id,
         covered_must_answer: section.must_answer,
@@ -1317,10 +1355,42 @@ describe('chapter-writing executor', () => {
     expect(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')).toBe(retained)
   })
 
+  it('已审正文新增目录即使重新绑定 Hash 仍被制品校验拒绝，恢复只重写违规章节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-heading-checkpoint-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: { ...candidateFrom(request), markdown: '本章按确认职责说明任务要求、适用范围及成果之间的关系。' },
+    }))
+    const artifacts = await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
+    const contentPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const markdown = `${await readFile(contentPath, 'utf8')}\n## 展位搭建\n\n详细搭建步骤。\n`
+    const hash = chapterCandidateSha256(markdown)
+    const reviewPath = join(workspace.projectRoot, 'chapters/reviews/0001.json')
+    const review = parseChapterReviewArtifact(JSON.parse(await readFile(reviewPath, 'utf8')))
+    const manifestPath = join(workspace.projectRoot, 'chapters/manifest.json')
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(manifestPath, 'utf8')))
+    manifest.chapters[0]!.review_sha256 = hash
+    await writeFile(contentPath, markdown)
+    await writeFile(reviewPath, JSON.stringify({ ...review, candidate_sha256: hash }))
+    await writeFile(manifestPath, JSON.stringify(manifest))
+    const result = await validateChapterWriting(workspace, 'chapter_writing', artifacts)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('新增目录标题未被拒绝')
+    expect(result.issues).toHaveLength(1)
+    expect(result.issues[0]).toMatchObject({ code: 'CHAPTER_WRITING_OUTLINE_HEADING_INVALID', artifact: 'chapters/sections/0001.md' })
+    expect(result.issues[0]?.message).toContain('展位搭建')
+    const resumed = fixtureAgent(workspace, outline)
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
+    expect(resumed.followup).not.toHaveBeenCalled()
+    expect(resumed.starts).toHaveLength(1)
+    expect(resumed.starts[0]?.request.label).toContain('章节1')
+    expect(await readFile(contentPath, 'utf8')).not.toContain('展位搭建')
+  })
+
   it('最终读取拒绝报告自身矛盾、缺 coverage 或伪造 claim 引句，合法 repair 仍可完成', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-review-integrity-')))
     const outline = await writeInputs(workspace)
-    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({ stopReason: 'completed', output: [], structured: { ...candidateFrom(request), markdown: '# 本章方案\n\n本章按已确认技术要求描述实际措施、责任安排及成果核验方法。' } }))
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({ stopReason: 'completed', output: [], structured: { ...candidateFrom(request), markdown: '本章按已确认技术要求描述实际措施、责任安排及成果核验方法。' } }))
     const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
     const path = join(workspace.projectRoot, 'chapters/reviews/0001.json')
     const original = parseChapterReviewArtifact(JSON.parse(await readFile(path, 'utf8')))
@@ -1350,7 +1420,7 @@ describe('chapter-writing executor', () => {
     }
     const candidate: ChapterCandidate = {
       section_id: section.id,
-      markdown: '# 章节',
+      markdown: `# ${section.title}`,
       metadata: {
         section_id: section.id,
         covered_must_answer: section.must_answer,

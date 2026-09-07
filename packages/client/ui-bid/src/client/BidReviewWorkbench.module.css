@@ -367,6 +367,30 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.selectionMenu {
+  position: fixed;
+  z-index: 100;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-alias-shadow-l2);
+}
+
+.selectionMenu button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.selectionMenu button:hover, .selectionMenu button:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 /* 空状态 */
 .emptyState {
   display: flex;

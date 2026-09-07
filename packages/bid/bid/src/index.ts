@@ -15,6 +15,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -22,7 +23,6 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
-import { normalizeChapterHeadings } from './chapter-headings.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
@@ -57,6 +57,7 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { executeDocxExport, validateDocxExport } from './docx-export.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
@@ -69,6 +70,8 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
   BidDetailsView,
+  BidChapterRevisionRequest,
+  BidChapterRevisionResult,
   BidEvidenceMappingProgress,
   BidDocxExportErrorCode,
   BidDocxExportResult,
@@ -100,6 +103,9 @@ export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex }
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole } from './control-plane-contract.ts'
 export type {
+  BidChapterRevisionReference,
+  BidChapterRevisionRequest,
+  BidChapterRevisionResult,
   BidClientAction,
   BidDocumentRole,
   BidEvidenceMappingProgress,
@@ -569,7 +575,7 @@ interface ActiveBidOperation {
 type BidProjectKey = string & { readonly __bidProjectKey: unique symbol }
 
 /** 同一目录的符号链接及 Windows 大小写别名共用一把项目锁。 */
-function projectKey(session: Session): BidProjectKey {
+function projectKey(session: Pick<Session, 'header'>): BidProjectKey {
   if (session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
   const path = realpathSync(session.header.cwd)
   return (process.platform === 'win32' ? path.toLowerCase() : path) as BidProjectKey
@@ -1299,6 +1305,73 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
+  /**
+   * 将用户意见交给目标章节原 Writer；整个操作互斥，失败保留正文。
+   * @param session 发起修订的 Bid 会话。
+   * @param request 章节或完整连续段落引用与编写意见。
+   * @returns 新正文，或可重新选择原文后重试的业务错误。
+   */
+  @Remote('reviseChapter')
+  async reviseChapter(session: Session, request: BidChapterRevisionRequest): Promise<BidChapterRevisionResult> {
+    const reject = (code: string, message: string): BidChapterRevisionResult => ({ ok: false, error: { code, message } })
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return reject('BID_SESSION_REQUIRED', '章节修订需要标书项目会话。')
+    }
+    if (this.inFlight.has(projectKey(session))) return reject('BID_OPERATION_IN_PROGRESS', '当前项目仍有操作正在执行。')
+    const parsed = chapterRevisionRequestSchema.safeParse(request)
+    if (!parsed.success) return reject('BID_CHAPTER_REVISION_INVALID', '请选择章节或完整相邻段落，并填写编写意见。')
+    const operation = this.beginOperation(session)
+    let resumedParent: AgentHandle | undefined
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
+        return reject('BID_CHAPTER_REVISION_NOT_ALLOWED', '正文编写完成后才能提交修订意见。')
+      }
+      const logPath = within(operation.workspace.projectRoot, 'chapters/execution-log.json')
+      await assertNoLinkedPath(operation.workspace.root, logPath)
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+      const writerId = log.sections.find(section => section.section_id === parsed.data.reference.section_id)?.final_writer_child_session_id
+      if (writerId == null) return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '该章节缺少原编写会话，无法保留上下文继续修订。')
+      const persistence = this.ctx.get('sessionPersistence')
+      if (persistence === undefined) return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '原编写会话的持久化存储不可用。')
+      const writer = await persistence.inspect(SessionId(writerId), operation.controller.signal)
+      const parentId = writer.meta.parentSession
+      if (parentId === undefined || writer.meta.cwd === undefined
+        || projectKey({ header: writer.meta }) !== projectKey(session)) {
+        return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '原编写会话不属于当前标书项目。')
+      }
+      let parent = this.ctx.agents.get(parentId)
+      if (parent === undefined) {
+        resumedParent = await this.ctx.agents.resume({
+          resumeSessionId: parentId, signal: operation.controller.signal,
+          setup(parentContext) {
+            parentContext.on('agent/pre-step', () => Promise.resolve({ kind: 'reject' }))
+          },
+        })
+        parent = resumedParent.agent
+      }
+      if (parent.session.header.cwd === undefined || projectKey(parent.session) !== projectKey(session)) {
+        return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '原编写会话的父会话不属于当前标书项目。')
+      }
+      await executeChapterWriting(parent, operation.workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: this.config.modelStageRepairAttempts,
+        maxConcurrency: this.config.chapterWritingMaxConcurrency,
+        signal: operation.controller.signal,
+        revision: parsed.data,
+      })
+      return { ok: true, value: await this.getReviewChapter(session, parsed.data.reference.section_id) }
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : ''
+      if (reason.includes('BID_CHAPTER_REVISION_CONFLICT')) return reject('BID_CHAPTER_REVISION_CONFLICT', '章节正文已变化，请重新选择章节或段落。')
+      if (reason.includes('BID_CHAPTER_REVISION_SELECTION_INVALID')) return reject('BID_CHAPTER_REVISION_SELECTION_INVALID', '请选择同一章节中的一个或相邻多个完整段落。')
+      if (reason.includes('BID_CHAPTER_REVISION_NOT_WRITABLE')) return reject('BID_CHAPTER_REVISION_NOT_WRITABLE', '目录分组标题不能编写，请选择有正文的章节。')
+      if (reason.includes('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')) return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '章节原编写会话或已完成产物不可恢复，未创建替代 Writer。')
+      return reject('BID_CHAPTER_REVISION_FAILED', '原章节 Writer 未完成修订，正文已保留，请重试。')
+    } finally {
+      try { await resumedParent?.dispose() } finally { await this.finishOperation(session, operation, false) }
+    }
+  }
+
   /** Read the live S5 writing and per-chapter review state without disclosing workspace paths. */
   @Remote('getReviewWorkbench')
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
@@ -1365,13 +1438,12 @@ export class BidHostRuntime extends TypertRemoteService {
     const section = outline.sections.find(item => item.id === sectionId)
     if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const chain = reviewHeadingPath(outline, section.id)
-    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
+    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: null, content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const serial = String(index + 1).padStart(4, '0')
     let markdown: string | null = null
     try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
-    if (markdown !== null) markdown = normalizeChapterHeadings(markdown, section.title, section.id, chain.numbers.join('.'))
     let review: BidReviewChapterView['review'] = { status: markdown === null ? 'not_started' : 'reviewing', issues: [] }
     try {
       const artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
@@ -1407,7 +1479,7 @@ export class BidHostRuntime extends TypertRemoteService {
         ]
       }
     } catch { evidenceStatus = 'missing' }
-    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
+    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
   }
 
   /** Admit the S5 workbench while writing is running or after its last result. */

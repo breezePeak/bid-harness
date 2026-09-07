@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-client-ui-conversation
 
+`conversation.input.context` 提供输入框引用标签区域；业务插件通过 `submitHandlers.register(sessionId, handler)` 为同一会话注册一个可释放的提交处理器。处理器返回 `undefined` 才委托普通发送；返回业务结果或拒绝时不回退主 Agent。失败保留草稿，成功沿用输入框既有清理流程。
+
 English | [中文](README.zh.md)
 
 Conversation domain: skeleton (header/tabs/composer/empty state), chat view (grouped step-summary flow, streaming tail isolation, and turn status), composer dock (session stats sticky with the input), input dock (queue rows plus the todo plan strip), details shell, and scope-addressed ConversationController. Tool presentation belongs to [`ui-tool`](../ui-tool/README.md).

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import { CHAPTER_DRAG_TYPE, selectedParagraphReference, type createBidRevisionStore, type BidRevisionReference } from './revision-reference.ts'
 import {
   Button,
   IconChevronRightOutline14,
@@ -25,7 +27,7 @@ export interface BidReviewWorkbenchInjected {
   retryStage?: () => Promise<void>
 }
 
-export type BidReviewWorkbenchProps = ConvViewProps & BidReviewWorkbenchInjected
+export type BidReviewWorkbenchProps = ConvViewProps & BidReviewWorkbenchInjected & PropsStore<ReturnType<typeof createBidRevisionStore>>
 
 
 const MATERIAL_USAGE_LABEL: Record<string, string> = {
@@ -43,10 +45,11 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
+  const revision = useStore(state => state.revision)
   const [workbench, setWorkbench] = useState<BidReviewWorkbenchView | null>(null)
   const [chapter, setChapter] = useState<BidReviewChapterView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -55,8 +58,30 @@ export function BidReviewWorkbench({
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
   const requestVersion = useRef(0)
+  const articleBody = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; reference: BidRevisionReference } | null>(null)
   const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
   const exportReady = ready && projection.runtime.status === 'completed'
+
+  useEffect(() => { setSelectionMenu(null) }, [chapter, sessionId])
+  useEffect(() => {
+    if (selectionMenu === null) return
+    menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+    const dismiss = (event: Event): void => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      setSelectionMenu(null)
+    }
+    const escape = (event: globalThis.KeyboardEvent): void => { if (event.key === 'Escape') setSelectionMenu(null) }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('scroll', dismiss, true)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('scroll', dismiss, true)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [selectionMenu])
 
   const refresh = useCallback((): Promise<void> => {
     if (!ready) return Promise.resolve()
@@ -95,7 +120,7 @@ export function BidReviewWorkbench({
       if (timer !== undefined) window.clearTimeout(timer)
       requestVersion.current++
     }
-  }, [projection?.runtime.status, ready, refresh])
+  }, [projection?.runtime.status, ready, refresh, revision])
 
   const rows = useMemo(() => {
     const items = workbench?.outline ?? []
@@ -220,6 +245,11 @@ export function BidReviewWorkbench({
                     className={css.sectionBtn}
                     disabled={!section.content_available}
                     title={title}
+                    draggable={section.content_available && section.writable}
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData(CHAPTER_DRAG_TYPE, JSON.stringify({ sessionId, sectionId: section.section_id }))
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
                     onClick={() => { select(section.section_id) }}
                   >
                     <span className={css.sectionTitle}>{title}</span>
@@ -253,8 +283,21 @@ export function BidReviewWorkbench({
                   <h1 className={css.articleTitle}>{chapter.title}</h1>
                 </div>
               </header>
-              <div className={css.articleBody}>
-                <MarkdownText text={chapter.markdown.replace(/^# [^\n]*(?:\n|$)\s*/u, '')} />
+              <div className={css.articleBody} ref={articleBody}
+                onContextMenu={(event) => {
+                  const reference = selectedParagraphReference(event.currentTarget, window.getSelection(), chapter)
+                  if (reference === null || !chapter.writable) return
+                  event.preventDefault()
+                  setSelectionMenu({
+                    x: Math.min(event.clientX, window.innerWidth - 200),
+                    y: Math.min(event.clientY, window.innerHeight - 80), reference,
+                  })
+                }}
+              >
+                <MarkdownText
+                  text={chapter.markdown.replace(/^# [^\n]*(?:\n|$)\s*/u, '')}
+                  paragraphSourceOffset={chapter.markdown.match(/^# [^\n]*(?:\n|$)\s*/u)?.[0].length ?? 0}
+                />
               </div>
             </article>
           )}
@@ -339,6 +382,16 @@ export function BidReviewWorkbench({
           )}
         </div>
       </div>
+      {selectionMenu !== null && <div
+        ref={menuRef} role="menu" aria-label="选中段落操作" className={css.selectionMenu}
+        style={{ left: Math.max(0, selectionMenu.x), top: Math.max(0, selectionMenu.y) }}
+      >
+        <button type="button" role="menuitem" onClick={() => {
+          actions.setReference(selectionMenu.reference)
+          setSelectionMenu(null)
+          window.getSelection()?.removeAllRanges()
+        }}>添加到对话框</button>
+      </div>}
     </section>
   )
 }

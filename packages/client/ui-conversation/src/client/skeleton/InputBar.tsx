@@ -710,6 +710,7 @@ export function InputBar({
       >
         {overlay !== undefined && <div className={css.overlayAnchor}>{overlay}</div>}
         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
+        {sessionId !== undefined && renderSlot('conversation.input.context', { disabled: locked || machineBusy })}
         {renderSlot('conversation.input.attachments', {
           attachments,
           canAcceptDrop,
