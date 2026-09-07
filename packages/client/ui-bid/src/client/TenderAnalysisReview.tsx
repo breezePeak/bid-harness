@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type {
   TenderAnalysisConfirmationView,
   TenderAnalysisEditOperation,
-  TenderProjectArtifact,
 } from '@deepseek-ai/dsh-bid/control-plane'
-import { Button, Input, Textarea, IconEditOutline16, IconChevronRightOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { BidKey } from './locales.ts'
 import css from './TenderAnalysisReview.module.css'
 
@@ -20,11 +19,20 @@ type ProjectArrayKey =
   | 'key_technical_points'
 type ProjectTextKey = 'project_name' | 'tender_name' | 'purchaser' | 'owner'
 const TEXT_FIELDS: readonly ProjectTextKey[] = ['project_name', 'tender_name', 'purchaser', 'owner']
-const ARRAY_FIELDS: readonly ProjectArrayKey[] = ['project_background', 'project_objectives', 'project_scope', 'technical_scope', 'delivery_scope', 'implementation_constraints', 'key_technical_points']
+const ARRAY_FIELDS: readonly ProjectArrayKey[] = [
+  'project_background',
+  'project_objectives',
+  'project_scope',
+  'technical_scope',
+  'delivery_scope',
+  'implementation_constraints',
+  'key_technical_points',
+]
 
 function lines(value: string): string[] {
   return value.split('\n').map(item => item.trim()).filter(Boolean)
 }
+
 function buildOperations(source: TenderAnalysisConfirmationView, value: TenderAnalysisConfirmationView): TenderAnalysisEditOperation[] {
   const operations: TenderAnalysisEditOperation[] = []
   const fields: Extract<TenderAnalysisEditOperation, { type: 'update_project' }>['fields'] = {}
@@ -65,165 +73,30 @@ function buildOperations(source: TenderAnalysisConfirmationView, value: TenderAn
   return operations
 }
 
-interface EditableCellProps {
-  label: string
-  value: string
-  multiline?: boolean | undefined
-  disabled?: boolean | undefined
-  testLabel?: string | undefined
-  onChange: (next: string) => void
+type SectionCategory = 'all' | 'project' | 'requirements' | 'scoring' | 'compliance'
+
+interface ReviewItem {
+  key: string
+  category: 'project' | 'requirements' | 'scoring' | 'compliance'
+  categoryLabel: string
+  id: string
+  title: string
+  subTitle?: string
+  mandatory?: boolean
+  score?: number | null
+  rawText?: string
+  severity?: string
 }
 
-/** 表格单元格双击编辑组件：默认直观展示，双击激活编辑 */
-function EditableCell({
-  label,
+/** S2 招标解析审核全屏工作台组件（对齐目录详情专业工作台风格） */
+export function TenderAnalysisReview({
   value,
-  multiline = false,
-  disabled = false,
-  testLabel,
-  onChange,
-}: EditableCellProps) {
-  const [isEditing, setIsEditing] = useState(false)
-  const [editValue, setEditValue] = useState(value)
-
-  useEffect(() => {
-    setEditValue(value)
-  }, [value])
-
-  const handleDoubleClick = () => {
-    if (disabled) return
-    setIsEditing(true)
-  }
-
-  const handleSave = () => {
-    setIsEditing(false)
-    if (editValue !== value) {
-      onChange(editValue)
-    }
-  }
-
-  const handleCancel = () => {
-    setEditValue(value)
-    setIsEditing(false)
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      handleCancel()
-    } else if (e.key === 'Enter' && !multiline) {
-      handleSave()
-    }
-  }
-
-  const renderContent = () => {
-    if (!value || value.trim() === '') {
-      return <span className={css.cellValueEmpty}>（未填写，双击编辑）</span>
-    }
-    if (multiline) {
-      const items = value.split('\n').filter(Boolean)
-      if (items.length <= 1) {
-        return <div className={css.cellValue}>{value}</div>
-      }
-      return (
-        <ul className={css.valueList}>
-          {items.map((lineText, idx) => (
-            <li key={idx} className={css.valueListItem}>{lineText}</li>
-          ))}
-        </ul>
-      )
-    }
-    return <div className={css.cellValue}>{value}</div>
-  }
-
-  if (disabled) return <div className={css.cellValue}>{renderContent()}</div>
-  if (isEditing) {
-    return (
-      <div className={css.cellEditing} onClick={(e) => { e.stopPropagation() }}>
-        {multiline ? (
-          <Textarea
-            autoFocus
-            aria-label={testLabel ?? label}
-            disabled={disabled}
-            value={editValue}
-            onChange={(e) => {
-              setEditValue(e.target.value)
-              onChange(e.target.value)
-            }}
-            onBlur={handleSave}
-            onKeyDown={handleKeyDown}
-          />
-        ) : (
-          <Input
-            autoFocus
-            aria-label={testLabel ?? label}
-            disabled={disabled}
-            value={editValue}
-            onChange={(e) => {
-              setEditValue(e.target.value)
-              onChange(e.target.value)
-            }}
-            onBlur={handleSave}
-            onKeyDown={handleKeyDown}
-          />
-        )}
-        <div className={css.editActions}>
-          <Button size="sm" variant="ghost" onClick={handleCancel}>取消</Button>
-          <Button size="sm" variant="primary" onClick={handleSave}>完成</Button>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div
-      className={css.cellEditable}
-      onDoubleClick={handleDoubleClick}
-      title="双击可就地编辑内容"
-    >
-      <div className={css.hiddenInput}>
-        {multiline ? (
-          <Textarea
-            aria-label={testLabel ?? label}
-            disabled={disabled}
-            value={value}
-            onChange={(e) => {
-              setEditValue(e.target.value)
-              onChange(e.target.value)
-            }}
-          />
-        ) : (
-          <Input
-            aria-label={testLabel ?? label}
-            disabled={disabled}
-            value={value}
-            onChange={(e) => {
-              setEditValue(e.target.value)
-              onChange(e.target.value)
-            }}
-          />
-        )}
-      </div>
-      <div className={css.cellHeader}>
-        {renderContent()}
-        <span className={css.hintText}>双击编辑</span>
-        <button
-          type="button"
-          className={css.editIconBtn}
-          title="编辑"
-          aria-label={`编辑 ${label}`}
-          onClick={(e) => {
-            e.stopPropagation()
-            handleDoubleClick()
-          }}
-        >
-          <IconEditOutline16 />
-        </button>
-      </div>
-    </div>
-  )
-}
-/** S2 标书分析审核全屏工作台组件 */
-export function TenderAnalysisReview({ value, pending, onConfirm, t, readOnly = false, notice }: {
+  pending,
+  onConfirm,
+  t,
+  readOnly = false,
+  notice,
+}: {
   value: TenderAnalysisConfirmationView
   pending: boolean
   readOnly?: boolean
@@ -232,33 +105,174 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t, readOnly = 
   t: TranslateBid
 }) {
   const [draft, setDraft] = useState<TenderAnalysisConfirmationView>(() => structuredClone(value))
-  // 4 个板块折叠状态管理（打开后默认折叠为 4 行，用户点击后展开对应板块）
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['project', 'requirements', 'scoring', 'compliance']))
-
-  const toggleSection = (sectionKey: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(sectionKey)) {
-        next.delete(sectionKey)
-      } else {
-        next.add(sectionKey)
-      }
-      return next
-    })
-  }
-
-  const updateProject = <K extends keyof TenderProjectArtifact>(key: K, next: TenderProjectArtifact[K]): void => {
-    setDraft(current => ({ ...current, project: { ...current.project, [key]: next } }))
-  }
+  const [selectedKey, setSelectedKey] = useState<string>('PROJ-project_name')
+  const [activeCategory, setActiveCategory] = useState<SectionCategory>('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [onlyMandatory, setOnlyMandatory] = useState(false)
 
   const mandatoryCount = draft.requirements.requirements.filter(r => r.mandatory).length
   const totalScore = draft.scoring.scoring_items.reduce((sum, item) => sum + (item.score ?? 0), 0)
   const modifiedOperations = buildOperations(value, draft)
   const docTitle = draft.project.tender_name || draft.project.project_name || t('analysis.title')
 
+  // 构建扁平化的审查条目清单
+  const allItems = useMemo<ReviewItem[]>(() => {
+    const list: ReviewItem[] = []
+
+    // 1. 项目基本要素
+    for (const key of TEXT_FIELDS) {
+      list.push({
+        key: `PROJ-${key}`,
+        category: 'project',
+        categoryLabel: '基本概况',
+        id: key,
+        title: t(`analysis.project.${key}`),
+        subTitle: draft.project[key] || '未填写',
+      })
+    }
+    for (const key of ARRAY_FIELDS) {
+      list.push({
+        key: `PROJ-${key}`,
+        category: 'project',
+        categoryLabel: '建设要求',
+        id: key,
+        title: t(`analysis.project.${key}`),
+        subTitle: draft.project[key].length > 0 ? `${draft.project[key].length} 项要点` : '未填写',
+      })
+    }
+
+    // 2. 技术要求条款
+    for (const req of draft.requirements.requirements) {
+      list.push({
+        key: `REQ-${req.id}`,
+        category: 'requirements',
+        categoryLabel: '技术要求',
+        id: req.id,
+        title: req.normalized_requirement || '未命名要求',
+        subTitle: req.category,
+        mandatory: req.mandatory,
+        rawText: req.raw_text,
+      })
+    }
+
+    // 3. 评分标准项
+    for (const sc of draft.scoring.scoring_items) {
+      list.push({
+        key: `SCOR-${sc.id}`,
+        category: 'scoring',
+        categoryLabel: '评分标准',
+        id: sc.id,
+        title: sc.title || sc.criterion || '评分项',
+        subTitle: sc.criterion,
+        mandatory: sc.must_answer,
+        score: sc.score,
+        rawText: sc.raw_text,
+      })
+    }
+
+    // 4. 合规要求
+    for (const comp of draft.compliance.compliance_items) {
+      list.push({
+        key: `COMP-${comp.id}`,
+        category: 'compliance',
+        categoryLabel: '合规要求',
+        id: comp.id,
+        title: comp.normalized_rule || comp.id,
+        subTitle: comp.type,
+        mandatory: comp.severity === 'mandatory' || comp.severity === 'fatal',
+        severity: comp.severity,
+        rawText: comp.raw_text,
+      })
+    }
+
+    return list
+  }, [draft, t])
+
+  // 列表过滤与搜索
+  const filteredItems = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return allItems.filter((item) => {
+      if (activeCategory !== 'all' && item.category !== activeCategory) return false
+      if (onlyMandatory && !item.mandatory) return false
+      if (!q) return true
+      return (
+        item.id.toLowerCase().includes(q) ||
+        item.title.toLowerCase().includes(q) ||
+        (item.subTitle && item.subTitle.toLowerCase().includes(q)) ||
+        (item.rawText && item.rawText.toLowerCase().includes(q))
+      )
+    })
+  }, [allItems, activeCategory, onlyMandatory, searchQuery])
+
+  // 当前选中项，若过滤后丢失则自动定位至第一项
+  const activeItem = useMemo(() => {
+    const found = filteredItems.find(it => it.key === selectedKey)
+    if (found) return found
+    return filteredItems[0] ?? null
+  }, [filteredItems, selectedKey])
+
+  // 导航上一条 / 下一条
+  const currentIndex = filteredItems.findIndex(it => it.key === activeItem?.key)
+  const hasPrev = currentIndex > 0
+  const hasNext = currentIndex >= 0 && currentIndex < filteredItems.length - 1
+
+  const handlePrev = () => {
+    const previous = filteredItems[currentIndex - 1]
+    if (hasPrev && previous) setSelectedKey(previous.key)
+  }
+  const handleNext = () => {
+    const next = filteredItems[currentIndex + 1]
+    if (hasNext && next) setSelectedKey(next.key)
+  }
+
+  // 状态更新方法
+  const updateProjectField = (key: ProjectTextKey, val: string) => {
+    setDraft(current => ({
+      ...current,
+      project: { ...current.project, [key]: val || null },
+    }))
+  }
+
+  const updateProjectArrayField = (key: ProjectArrayKey, val: string) => {
+    setDraft(current => ({
+      ...current,
+      project: { ...current.project, [key]: lines(val) },
+    }))
+  }
+
+  const updateRequirement = (id: string, partial: Partial<TenderAnalysisConfirmationView['requirements']['requirements'][number]>) => {
+    setDraft(current => ({
+      ...current,
+      requirements: {
+        ...current.requirements,
+        requirements: current.requirements.requirements.map(item => (item.id === id ? { ...item, ...partial } : item)),
+      },
+    }))
+  }
+
+  const updateScoring = (id: string, partial: Partial<TenderAnalysisConfirmationView['scoring']['scoring_items'][number]>) => {
+    setDraft(current => ({
+      ...current,
+      scoring: {
+        ...current.scoring,
+        scoring_items: current.scoring.scoring_items.map(item => (item.id === id ? { ...item, ...partial } : item)),
+      },
+    }))
+  }
+
+  const updateCompliance = (id: string, partial: Partial<TenderAnalysisConfirmationView['compliance']['compliance_items'][number]>) => {
+    setDraft(current => ({
+      ...current,
+      compliance: {
+        ...current.compliance,
+        compliance_items: current.compliance.compliance_items.map(item => (item.id === id ? { ...item, ...partial } : item)),
+      },
+    }))
+  }
+
   return (
     <div className={css.root} aria-label={t('analysis.title')}>
-      {/* 顶部 Header：概览卡片 + 右侧操作区（对应用户红框位置） */}
+      {/* 顶部 Header：吸顶概览卡片 + 工具栏（完全对标目录详情） */}
       <header className={css.header}>
         <div className={css.titleRow}>
           <div className={css.titleArea}>
@@ -300,344 +314,386 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t, readOnly = 
             </div>
           </div>
 
-          {/* 右侧红框位置：确认操作按钮卡片 */}
-          {!readOnly && <div className={css.actionCard}>
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={pending || readOnly}
-              onClick={() => { onConfirm(modifiedOperations) }}
-            >
-              {pending ? t('analysis.confirming') : t('analysis.confirm')}
-            </Button>
-            <span className={css.actionHint}>
-              {modifiedOperations.length > 0 ? `已调整 ${modifiedOperations.length} 项修改` : '审查完毕请确认结果'}
-            </span>
-          </div>}
+          {!readOnly && (
+            <div className={css.actionCard}>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={pending || readOnly}
+                onClick={() => { onConfirm(modifiedOperations) }}
+              >
+                {pending ? t('analysis.confirming') : t('analysis.confirm')}
+              </Button>
+              <span className={css.actionHint}>
+                {modifiedOperations.length > 0 ? `已调整 ${modifiedOperations.length} 项修改` : '审查完毕请确认结果'}
+              </span>
+            </div>
+          )}
         </div>
         {notice}
+
+        {/* 交互控制栏（Toolbar，对齐目录详情） */}
+        <div className={css.toolbar}>
+          <div className={css.toolbarLeft}>
+            <input
+              className={css.searchInput}
+              type="search"
+              placeholder="搜索条款、评分或要素..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+            <div className={css.filterTabs} aria-label="模块筛选">
+              {(
+                [
+                  ['all', '全部', allItems.length],
+                  ['project', '项目整体情况', TEXT_FIELDS.length + ARRAY_FIELDS.length],
+                  ['requirements', '技术要求', draft.requirements.requirements.length],
+                  ['scoring', '技术评分要点', draft.scoring.scoring_items.length],
+                  ['compliance', '合规要求条款', draft.compliance.compliance_items.length],
+                ] as const
+              ).map(([cat, label, count]) => (
+                <button
+                  key={cat}
+                  type="button"
+                  aria-pressed={activeCategory === cat}
+                  className={`${css.filterTab} ${activeCategory === cat ? css.filterTabActive : ''}`}
+                  onClick={() => {
+                    setActiveCategory(cat)
+                    const first = (cat === 'all' ? allItems : allItems.filter(i => i.category === cat))[0]
+                    if (first) setSelectedKey(first.key)
+                  }}
+                >
+                  <span>{label}</span>
+                  <span className={css.tabCount}>{count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className={css.toolbarRight}>
+            <label className={css.toggleOption}>
+              <input
+                type="checkbox"
+                checked={onlyMandatory}
+                onChange={e => setOnlyMandatory(e.target.checked)}
+              />
+              <span>仅看强制/必答项</span>
+            </label>
+          </div>
+        </div>
       </header>
 
-      {/* 主体滚动区：四大业务板块，支持折叠成 4 行与展开表格展示 */}
-      <div className={css.body}>
-        {/* 板块 1: 项目整体情况 */}
-        <section className={css.accordionSection}>
-          <button
-            type="button"
-            className={css.accordionHeader}
-            onClick={() => { toggleSection('project') }}
-            aria-expanded={!collapsed.has('project')}
-          >
-            <span className={css.accordionTitle}>
-              <span className={`${css.chevronIcon} ${!collapsed.has('project') ? css.chevronExpanded : ''}`}>
-                <IconChevronRightOutline14 />
-              </span>
-              <span>{t('analysis.project')}</span>
-              <span className={css.badge}>{TEXT_FIELDS.length + ARRAY_FIELDS.length} 项属性</span>
-            </span>
-            <span className={css.accordionSummary}>
-              {collapsed.has('project') ? '点击展开表格' : '点击折叠'}
-            </span>
-          </button>
-          {!collapsed.has('project') && (
-            <div className={css.accordionContent}>
-              <table className={css.reviewTable}>
-                <thead>
-                  <tr>
-                    <th style={{ width: '60px', textAlign: 'center' }}>序号</th>
-                    <th style={{ width: '120px' }}>要素分类</th>
-                    <th style={{ width: '160px' }}>要素名称</th>
-                    <th>要素内容（双击单元格可就地编辑）</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {TEXT_FIELDS.map((key, index) => (
-                    <tr key={key}>
-                      <td style={{ textAlign: 'center' }}>{index + 1}</td>
-                      <td>基本信息</td>
-                      <td style={{ fontWeight: 500 }}>{t(`analysis.project.${key}`)}</td>
-                      <td>
-                        <EditableCell
-                          label={t(`analysis.project.${key}`)}
-                          value={draft.project[key] ?? ''}
-                          disabled={pending || readOnly}
-                          onChange={(next) => { updateProject(key, next || null) }}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                  {ARRAY_FIELDS.map((key, index) => (
-                    <tr key={key}>
-                      <td style={{ textAlign: 'center' }}>{TEXT_FIELDS.length + index + 1}</td>
-                      <td>建设范围与要求</td>
-                      <td style={{ fontWeight: 500 }}>{t(`analysis.project.${key}`)}</td>
-                      <td>
-                        <EditableCell
-                          label={t(`analysis.project.${key}`)}
-                          value={draft.project[key].join('\n')}
-                          multiline
-                          disabled={pending || readOnly}
-                          onChange={(next) => { updateProject(key, lines(next)) }}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-
-        {/* 板块 2: 技术要求 */}
-        <section className={css.accordionSection}>
-          <button
-            type="button"
-            className={css.accordionHeader}
-            onClick={() => { toggleSection('requirements') }}
-            aria-expanded={!collapsed.has('requirements')}
-          >
-            <span className={css.accordionTitle}>
-              <span className={`${css.chevronIcon} ${!collapsed.has('requirements') ? css.chevronExpanded : ''}`}>
-                <IconChevronRightOutline14 />
-              </span>
-              <span>技术要求</span>
-              <span className={css.badge}>{draft.requirements.requirements.length} 项要求</span>
-              <span className={css.badgeMandatory}>{mandatoryCount} 强制</span>
-            </span>
-            <span className={css.accordionSummary}>
-              {collapsed.has('requirements') ? '点击展开表格' : '点击折叠'}
-            </span>
-          </button>
-          {!collapsed.has('requirements') && (
-            <div className={css.accordionContent}>
-              <table className={css.reviewTable}>
-                <thead>
-                  <tr>
-                    <th style={{ width: '100px' }}>需求编号</th>
-                    <th style={{ width: '120px' }}>技术分类</th>
-                    <th style={{ width: '90px' }}>性质</th>
-                    <th>规范化技术要求（双击单元格可就地编辑）</th>
-                    <th style={{ width: '30%' }}>招标原文依据</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {draft.requirements.requirements.map(item => (
-                    <tr key={item.id}>
-                      <td style={{ fontWeight: 600 }}>{item.id}</td>
-                      <td>
-                        <span className={css.badgeCategory}>{item.category}</span>
-                      </td>
-                      <td>
-                        {item.mandatory ? (
-                          <span className={css.badgeMandatory}>强制</span>
-                        ) : (
-                          <span className={css.badgeNormal}>一般</span>
-                        )}
-                      </td>
-                      <td>
-                        <EditableCell
-                          label={item.id}
-                          value={item.normalized_requirement}
-                          multiline
-                          disabled={pending || readOnly}
-                          onChange={(next) => {
-                            setDraft(current => ({
-                              ...current,
-                              requirements: {
-                                ...current.requirements,
-                                requirements: current.requirements.requirements.map(candidate => candidate.id === item.id
-                                  ? { ...candidate, normalized_requirement: next }
-                                  : candidate),
-                              },
-                            }))
-                          }}
-                        />
-                      </td>
-                      <td className={css.rawText}>{item.raw_text}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-
-        {/* 板块 3: 评分标准 */}
-        <section className={css.accordionSection}>
-          <button
-            type="button"
-            className={css.accordionHeader}
-            onClick={() => { toggleSection('scoring') }}
-            aria-expanded={!collapsed.has('scoring')}
-          >
-            <span className={css.accordionTitle}>
-              <span className={`${css.chevronIcon} ${!collapsed.has('scoring') ? css.chevronExpanded : ''}`}>
-                <IconChevronRightOutline14 />
-              </span>
-              <span>{t('analysis.scoring')}</span>
-              <span className={css.badge}>{draft.scoring.scoring_items.length} 条款</span>
-              {totalScore > 0 && <span className={css.badgeScore}>总分 {totalScore} 分</span>}
-            </span>
-            <span className={css.accordionSummary}>
-              {collapsed.has('scoring') ? '点击展开表格' : '点击折叠'}
-            </span>
-          </button>
-          {!collapsed.has('scoring') && (
-            <div className={css.accordionContent}>
-              <table className={css.reviewTable}>
-                <thead>
-                  <tr>
-                    <th style={{ width: '90px' }}>条款编号</th>
-                    <th style={{ width: '200px' }}>评分项名称（双击编辑）</th>
-                    <th style={{ width: '80px', textAlign: 'center' }}>分值</th>
-                    <th style={{ width: '80px', textAlign: 'center' }}>必答</th>
-                    <th>评分目标理解与细则（双击单元格可就地编辑）</th>
-                    <th style={{ width: '28%' }}>招标评分条款原文</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {draft.scoring.scoring_items.map(item => (
-                    <tr key={item.id}>
-                      <td style={{ fontWeight: 600 }}>{item.id}</td>
-                      <td>
-                        <EditableCell
-                          label={`${item.id} · ${t('analysis.scoring.title')}`}
-                          testLabel={t('analysis.scoring.title')}
-                          value={item.title}
-                          disabled={pending || readOnly}
-                          onChange={(next) => {
-                            setDraft(current => ({
-                              ...current,
-                              scoring: {
-                                ...current.scoring,
-                                scoring_items: current.scoring.scoring_items.map(candidate => candidate.id === item.id
-                                  ? { ...candidate, title: next }
-                                  : candidate),
-                              },
-                            }))
-                          }}
-                        />
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        {item.score !== null && item.score !== undefined ? (
+      {/* 主体工作台：双栏专业工作台风格（左侧条目索引 + 右侧详情卡片） */}
+      <div className={css.workbench}>
+        {/* 左侧：条目列表面板 */}
+        <aside className={css.listColumn} aria-label="条款要素导航">
+          <div className={css.listHeader}>
+            <span>解析条目清单</span>
+            <span className={css.tabCount}>共 {filteredItems.length} 项</span>
+          </div>
+          <div className={css.listBody}>
+            {filteredItems.length === 0 ? (
+              <div className={css.emptyList}>
+                {searchQuery ? `未找到匹配 "${searchQuery}" 的条目` : '暂无条目'}
+              </div>
+            ) : (
+              filteredItems.map((item) => {
+                const isSelected = activeItem?.key === item.key
+                return (
+                  <div
+                    key={item.key}
+                    className={`${css.itemRow} ${isSelected ? css.selected : ''}`}
+                    onClick={() => setSelectedKey(item.key)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') setSelectedKey(item.key)
+                    }}
+                  >
+                    <div className={css.itemMain}>
+                      <div className={css.itemIdRow}>
+                        <span className={css.itemId}>{item.id}</span>
+                        <span className={css.badgeCategory}>{item.categoryLabel}</span>
+                        {item.mandatory && <span className={css.badgeMandatory}>强制</span>}
+                        {item.score !== null && item.score !== undefined && (
                           <span className={css.badgeScore}>{item.score}分</span>
-                        ) : '-'}
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        {item.must_answer ? (
-                          <span className={css.badgeMandatory}>必答</span>
-                        ) : (
-                          <span className={css.badgeNormal}>选答</span>
                         )}
-                      </td>
-                      <td>
-                        <EditableCell
-                          label={`${item.id} · ${t('analysis.scoring.criterion')}`}
-                          testLabel={t('analysis.scoring.criterion')}
-                          value={item.criterion}
-                          multiline
-                          disabled={pending || readOnly}
-                          onChange={(next) => {
-                            setDraft(current => ({
-                              ...current,
-                              scoring: {
-                                ...current.scoring,
-                                scoring_items: current.scoring.scoring_items.map(candidate => candidate.id === item.id
-                                  ? { ...candidate, criterion: next }
-                                  : candidate),
-                              },
-                            }))
-                          }}
-                        />
-                      </td>
-                      <td className={css.rawText}>{item.raw_text}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
+                        {item.severity && item.severity !== 'mandatory' && (
+                          <span className={css.badgeNormal}>{item.severity}</span>
+                        )}
+                      </div>
+                      <div className={css.itemTitle} title={item.title}>
+                        {item.title}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </aside>
 
-        {/* 板块 4: 合规要求 */}
-        <section className={css.accordionSection}>
-          <button
-            type="button"
-            className={css.accordionHeader}
-            onClick={() => { toggleSection('compliance') }}
-            aria-expanded={!collapsed.has('compliance')}
-          >
-            <span className={css.accordionTitle}>
-              <span className={`${css.chevronIcon} ${!collapsed.has('compliance') ? css.chevronExpanded : ''}`}>
-                <IconChevronRightOutline14 />
-              </span>
-              <span>合规要求</span>
-              <span className={css.badge}>{draft.compliance.compliance_items.length} 项合规条款</span>
-            </span>
-            <span className={css.accordionSummary}>
-              {collapsed.has('compliance') ? '点击展开表格' : '点击折叠'}
-            </span>
-          </button>
-          {!collapsed.has('compliance') && (
-            <div className={css.accordionContent}>
-              <table className={css.reviewTable}>
-                <thead>
-                  <tr>
-                    <th style={{ width: '100px' }}>合规编号</th>
-                    <th style={{ width: '120px' }}>合规类型</th>
-                    <th style={{ width: '100px' }}>严重级别</th>
-                    <th>规范化合规规则（双击单元格可就地编辑）</th>
-                    <th style={{ width: '30%' }}>招标原文依据</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {draft.compliance.compliance_items.map(item => (
-                    <tr key={item.id}>
-                      <td style={{ fontWeight: 600 }}>{item.id}</td>
-                      <td>
-                        <span className={css.badgeCategory}>{item.type}</span>
-                      </td>
-                      <td>
-                        <span className={item.severity === 'mandatory' ? css.badgeMandatory : css.badgeNormal}>
-                          {item.severity}
-                        </span>
-                      </td>
-                      <td>
-                        <EditableCell
-                          label={item.id}
-                          value={item.normalized_rule}
-                          multiline
+        {/* 右侧：当前选中项详情与就地编辑工作区 */}
+        <main className={css.detailColumn} aria-label="条款详情与编辑">
+          {activeItem === null ? (
+            <div className={css.emptyList}>请在左侧选择要查看或编辑的条目</div>
+          ) : (
+            <div className={css.cardDetails}>
+              {/* 详情标题头 */}
+              <div className={css.detailHeader}>
+                <div className={css.detailHeaderTitle}>
+                  <div className={css.detailId}>
+                    <span>{activeItem.id}</span>
+                    <span className={css.badgeCategory}>{activeItem.categoryLabel}</span>
+                    {activeItem.mandatory && <span className={css.badgeMandatory}>强制/必答</span>}
+                    {activeItem.score !== null && activeItem.score !== undefined && (
+                      <span className={css.badgeScore}>{activeItem.score}分</span>
+                    )}
+                  </div>
+                  <div className={css.detailCategoryTag}>{activeItem.title}</div>
+                </div>
+                <div className={css.detailNavButtons}>
+                  <Button size="sm" variant="ghost" disabled={!hasPrev} onClick={handlePrev}>
+                    上一项
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={!hasNext} onClick={handleNext}>
+                    下一项
+                  </Button>
+                </div>
+              </div>
+
+              {/* 1. 项目概况编辑表单 */}
+              {activeItem.category === 'project' && (
+                <div className={css.detailSection}>
+                  <div className={css.detailSectionTitle}>
+                    <span>要素内容设置</span>
+                  </div>
+                  {TEXT_FIELDS.includes(activeItem.id as ProjectTextKey) ? (
+                    <div className={css.detailField}>
+                      <label className={css.detailLabel}>属性内容</label>
+                      <input
+                        className={css.detailInput}
+                        disabled={pending || readOnly}
+                        aria-label={activeItem.title}
+                        value={draft.project[activeItem.id as ProjectTextKey] ?? ''}
+                        onChange={e => updateProjectField(activeItem.id as ProjectTextKey, e.target.value)}
+                        placeholder="请输入属性内容..."
+                      />
+                    </div>
+                  ) : (
+                    <div className={css.detailField}>
+                      <label className={css.detailLabel}>要点清单（每行一项）</label>
+                      <textarea
+                        className={css.detailTextarea}
+                        rows={6}
+                        disabled={pending || readOnly}
+                        aria-label={activeItem.title}
+                        value={draft.project[activeItem.id as ProjectArrayKey].join('\n')}
+                        onChange={e => updateProjectArrayField(activeItem.id as ProjectArrayKey, e.target.value)}
+                        placeholder="请输入要点清单，每行一条..."
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 2. 技术要求编辑表单 */}
+              {activeItem.category === 'requirements' && (() => {
+                const req = draft.requirements.requirements.find(r => r.id === activeItem.id)
+                if (!req) return null
+                return (
+                  <>
+                    <div className={css.detailSection}>
+                      <div className={css.detailSectionTitle}>
+                        <span>技术要求内容</span>
+                      </div>
+                      <div className={css.detailField}>
+                        <label className={css.detailLabel}>规范化技术要求条款描述（就地直接修改）</label>
+                        <textarea
+                          className={css.detailTextarea}
+                          rows={4}
                           disabled={pending || readOnly}
-                          onChange={(next) => {
-                            setDraft(current => ({
-                              ...current,
-                              compliance: {
-                                ...current.compliance,
-                                compliance_items: current.compliance.compliance_items.map(candidate => candidate.id === item.id
-                                  ? { ...candidate, normalized_rule: next }
-                                  : candidate),
-                              },
-                            }))
-                          }}
+                          aria-label="规范化技术要求"
+                          value={req.normalized_requirement}
+                          onChange={e => updateRequirement(req.id, { normalized_requirement: e.target.value })}
                         />
-                      </td>
-                      <td className={css.rawText}>{item.raw_text}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      </div>
+                      <div className={css.detailRow}>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>条款性质：</label>
+                          <label className={css.toggleOption}>
+                            <input
+                              type="checkbox"
+                              disabled={pending || readOnly}
+                              checked={req.mandatory}
+                              onChange={e => updateRequirement(req.id, { mandatory: e.target.checked })}
+                            />
+                            <span style={{ fontWeight: req.mandatory ? 600 : 'normal' }}>
+                              {req.mandatory ? '强制条款（必须响应）' : '一般技术条款'}
+                            </span>
+                          </label>
+                        </div>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>技术分类：</label>
+                          <input
+                            className={css.detailInput}
+                            style={{ width: '160px', height: '28px' }}
+                            disabled={pending || readOnly}
+                            value={req.category}
+                            onChange={e => updateRequirement(req.id, { category: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {req.raw_text && (
+                      <div className={css.rawTextCard}>
+                        <div className={css.rawTextLabel}>
+                          <span>招标原文依据 · Raw Text</span>
+                        </div>
+                        <div className={css.rawTextContent}>{req.raw_text}</div>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
+
+              {/* 3. 评分标准编辑表单 */}
+              {activeItem.category === 'scoring' && (() => {
+                const sc = draft.scoring.scoring_items.find(s => s.id === activeItem.id)
+                if (!sc) return null
+                return (
+                  <>
+                    <div className={css.detailSection}>
+                      <div className={css.detailSectionTitle}>
+                        <span>评分项设置</span>
+                      </div>
+                      <div className={css.detailField}>
+                        <label className={css.detailLabel}>评分项名称</label>
+                        <input
+                          className={css.detailInput}
+                          disabled={pending || readOnly}
+                          aria-label="评分项名称"
+                          value={sc.title}
+                          onChange={e => updateScoring(sc.id, { title: e.target.value })}
+                        />
+                      </div>
+                      <div className={css.detailField}>
+                        <label className={css.detailLabel}>评分标准细则与判定准则</label>
+                        <textarea
+                          className={css.detailTextarea}
+                          rows={4}
+                          disabled={pending || readOnly}
+                          aria-label="评分目标理解"
+                          value={sc.criterion}
+                          onChange={e => updateScoring(sc.id, { criterion: e.target.value })}
+                        />
+                      </div>
+                      <div className={css.detailRow}>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>响应要求：</label>
+                          <label className={css.toggleOption}>
+                            <input
+                              type="checkbox"
+                              disabled={pending || readOnly}
+                              checked={sc.must_answer}
+                              onChange={e => updateScoring(sc.id, { must_answer: e.target.checked })}
+                            />
+                            <span>{sc.must_answer ? '必答评分点' : '选答/普通评分'}</span>
+                          </label>
+                        </div>
+                        {sc.score !== null && sc.score !== undefined && (
+                          <div className={css.inlineField}>
+                            <span className={css.detailLabel}>分值权重：</span>
+                            <span className={css.badgeScore}>{sc.score} 分</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {sc.raw_text && (
+                      <div className={css.rawTextCard}>
+                        <div className={css.rawTextLabel}>
+                          <span>招标原文依据 · Raw Text</span>
+                        </div>
+                        <div className={css.rawTextContent}>{sc.raw_text}</div>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
+
+              {/* 4. 合规要求编辑表单 */}
+              {activeItem.category === 'compliance' && (() => {
+                const comp = draft.compliance.compliance_items.find(c => c.id === activeItem.id)
+                if (!comp) return null
+                return (
+                  <>
+                    <div className={css.detailSection}>
+                      <div className={css.detailSectionTitle}>
+                        <span>合规规则设置</span>
+                      </div>
+                      <div className={css.detailField}>
+                        <label className={css.detailLabel}>规范化合规规则（双击单元格模式升级为直接编辑）</label>
+                        <textarea
+                          className={css.detailTextarea}
+                          rows={4}
+                          disabled={pending || readOnly}
+                          aria-label="规范化合规规则"
+                          value={comp.normalized_rule}
+                          onChange={e => updateCompliance(comp.id, { normalized_rule: e.target.value })}
+                        />
+                      </div>
+                      <div className={css.detailRow}>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>合规类型：</label>
+                          <input
+                            className={css.detailInput}
+                            style={{ width: '160px', height: '28px' }}
+                            disabled={pending || readOnly}
+                            value={comp.type}
+                            onChange={e => updateCompliance(comp.id, { type: e.target.value })}
+                          />
+                        </div>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>严重级别：</label>
+                          <span
+                            className={
+                              comp.severity === 'mandatory' || comp.severity === 'fatal'
+                                ? css.badgeMandatory
+                                : css.badgeNormal
+                            }
+                          >
+                            {comp.severity}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {comp.raw_text && (
+                      <div className={css.rawTextCard}>
+                        <div className={css.rawTextLabel}>
+                          <span>招标原文依据 · Raw Text</span>
+                        </div>
+                        <div className={css.rawTextContent}>{comp.raw_text}</div>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
             </div>
           )}
-        </section>
+        </main>
       </div>
 
-      {/* 底部保留轻量提示底栏 */}
+      {/* 底部轻量提示底栏 */}
       <footer className={css.footer}>
         <div className={css.footerHint}>
           {modifiedOperations.length > 0 ? (
-            <span>已调整 <strong>{modifiedOperations.length}</strong> 个修改项，请点击右上角确认按钮完成确认</span>
+            <span>
+              已调整 <strong>{modifiedOperations.length}</strong> 个修改项，请点击右上角确认按钮完成确认
+            </span>
           ) : (
-            <span>支持双击单元格就地编辑 · 各板块可点击标题折叠成四行/展开 · 审查完毕请点击右上角确认进入下一步</span>
+            <span>支持左侧条目快速检索与分类切换 · 右侧就地编辑条目与核对原文依据 · 审查完毕请点击右上角确认进入下一步</span>
           )}
         </div>
       </footer>
