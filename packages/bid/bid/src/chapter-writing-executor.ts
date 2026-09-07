@@ -420,19 +420,12 @@ async function resolveChapterReadLocations(
     chunk_path: relative(workspace.root, material.chunk_path).replaceAll('\\', '/'),
     chunk_index_path: relative(workspace.root, material.chunk_index_path).replaceAll('\\', '/'),
   }))
-  for (const material of context.webMaterials) {
-    const source = webSources.find(candidate => candidate.source_id === material.source_id
-      && candidate.snapshot_path === material.snapshot_path)
-    if (source === undefined) throw new Error(`chapter-writing-web-source-invalid:${material.source_id}`)
-  }
-  context.webReadLocations = await Promise.all(webSources.map(async (source) => {
-    const absolute = join(workspace.projectRoot, ...source.snapshot_path.split('/'))
-    await assertNoLinkedPath(workspace.root, absolute)
-    return {
-      source_id: source.source_id,
-      snapshot_path: source.snapshot_path,
-      read_path: relative(workspace.root, absolute).replaceAll('\\', '/'),
-    }
+  const references = createChapterWriterReferences(context)
+  await appendChapterWebReferences(workspace, references, webSources)
+  context.webReadLocations = [...references.web.values()].map(source => ({
+    source_id: source.source_id,
+    snapshot_path: source.snapshot_path,
+    read_path: relative(workspace.root, source.read_path).replaceAll('\\', '/'),
   }))
 }
 
@@ -807,11 +800,29 @@ async function loadChapterCheckpoint(
           candidate,
           entry: entryFor(context, outline, candidate, reviewPath, candidateSha256),
         })
-      } catch { /* 当前章节产物损坏或不一致时重跑该章，其他合法已完成章节仍可复用。 */
+      } catch { /* 无法恢复的章节及其强依赖下游需要重跑，历史尝试仍保留。 */
         log.status = 'pending'
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
       }
+    }
+    const downstream = new Map<string, string[]>()
+    for (const section of plan.sections) {
+      for (const dependency of section.depends_on) {
+        const dependents = downstream.get(dependency.section_id) ?? []
+        dependents.push(section.section_id)
+        downstream.set(dependency.section_id, dependents)
+      }
+    }
+    const invalid = new Set(worklist.filter(section => !completed.has(section.id)).map(section => section.id))
+    // Set 迭代包含新加入的节点，依赖闭包不受目录显示顺序影响。
+    for (const sectionId of invalid) for (const dependent of downstream.get(sectionId) ?? []) invalid.add(dependent)
+    for (const log of executionLog.sections) {
+      if (!invalid.has(log.section_id)) continue
+      completed.delete(log.section_id)
+      log.status = 'pending'
+      log.final_writer_child_session_id = null
+      log.final_reviewer_child_session_id = null
     }
     executionLog.max_concurrency = maxConcurrency
     return { plan, executionLog, completed }
@@ -875,8 +886,8 @@ async function loadValidPlan(
 }
 
 /**
- * Execute S5 as Main-Agent relation planning followed by Host-scheduled spawn Subagents.
- * The Host validates each structured result before atomically publishing chapter files.
+ * 执行 S5 关系规划与 Host 调度的独立章节写作；execution-log 原子替换成功才表示章节完成。
+ * 最终文件写入及完成日志排队期间允许取消，已开始的最小完成提交允许收敛。
  * @param agent - live parent Bid Agent used only for relation planning and Child lineage.
  * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued S5 assignment.
@@ -966,6 +977,7 @@ export async function executeChapterWriting(
   await Promise.all([...contexts.values()].map(context => resolveChapterReadLocations(
     workspace, manifest, webSources.sources, context,
   )))
+  options.signal?.throwIfAborted()
   const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
   const executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
     schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION,
@@ -990,7 +1002,7 @@ export async function executeChapterWriting(
   }
   await persistLog()
   const durableWebSources = new Map(webSources.sources.map(source => [source.source_id, source]))
-  const readableWebPaths = new Set(webSources.sources.map(source => source.snapshot_path))
+  const readableWebPaths = new Set([...contexts.values()].flatMap(context => context.webReadLocations.map(source => source.snapshot_path)))
   let webWrites: Promise<void> = Promise.resolve()
   const persistWebSnapshots = (
     sectionId: string, childSessionId: string, writerAttempt: number, snapshots: readonly WebEvidenceSnapshot[],
@@ -1078,17 +1090,30 @@ export async function executeChapterWriting(
         const reviewPath = `chapters/reviews/${serial}.json`
         const candidateSha256 = chapterCandidateSha256(candidate.markdown)
         await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
+        signal.throwIfAborted()
         await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
+        signal.throwIfAborted()
         await writeJson(join(workspace.projectRoot, reviewPath), {
           ...review,
           candidate_sha256: candidateSha256,
           writer_child_session_id: writerChildSessionId,
           reviewer_child_session_id: reviewerChildSessionId,
         })
-        log.status = 'completed'
-        log.final_writer_child_session_id = writerChildSessionId
-        log.final_reviewer_child_session_id = reviewerChildSessionId
-        await persistLog()
+        signal.throwIfAborted()
+        logWrites = logWrites.then(async () => {
+          signal.throwIfAborted()
+          const committed = {
+            ...log, status: 'completed' as const,
+            final_writer_child_session_id: writerChildSessionId,
+            final_reviewer_child_session_id: reviewerChildSessionId,
+          }
+          // 本次原子日志替换是最小完成提交；开始后允许收敛，成功后才发布共享状态。
+          await writeJson(join(workspace.projectRoot, LOG_PATH), {
+            ...executionLog, sections: executionLog.sections.map(section => section === log ? committed : section),
+          })
+          Object.assign(log, committed)
+        })
+        await logWrites
         return { candidate, entry: entryFor(context, outline, candidate, reviewPath, candidateSha256) }
       }
       let rejectedCandidate: unknown
@@ -1248,16 +1273,17 @@ export async function executeChapterWriting(
                   accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues),
                 })
                 await persistLog()
-                if (reviewAccepted && review !== undefined && review.verdict !== 'pass') {
+                if (reviewAccepted && review !== undefined) {
                   reviewedFallback = {
                     candidate,
                     review,
                     writerChildSessionId: String(run.id),
                     reviewerChildSessionId: String(reviewer.id),
                   }
-                }
-                if (reviewAccepted && review !== undefined && (review.verdict === 'pass' || attempt === maxWriterAttempts - 1)) {
-                  return await finishChapter(candidate, review, String(run.id), String(reviewer.id))
+                  if (review.verdict === 'pass' || attempt === maxWriterAttempts - 1) {
+                    stopAfterReview = true
+                    break
+                  }
                 }
                 latestIssues = reviewIssues
               } finally {

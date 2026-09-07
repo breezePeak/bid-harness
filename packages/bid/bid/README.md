@@ -83,7 +83,11 @@ Host 从记录确定 verdict：任一 coverage=missing、quality=false、unsuppo
 
 Writer 或 Reviewer 异常结束时，执行日志和阶段失败消息保留 Provider 提供的安全诊断，便于区分模型服务故障与产物校验问题。
 
-S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证原计划、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份，保留包括合法 repair 在内的 completed 章节，重排未完成或产物损坏的章节。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。
+S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证原计划、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份；未完成或损坏章节及其全部强依赖下游重置为 pending，保留历史尝试和文件。弱关联不传播失效，无关的合法 completed（包括 repair）继续复用。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。
+
+候选 Web 来源缺失、Hash 错误或路径不安全时，预检及 W 引用表向 Writer 标明不可用，不影响无关章节，也不删掉对应写作要求；实际引用仍在当前提交工具中校验账本身份与正文。已发 W 在同章修复中保留编号，不因过滤或追加来源重编号。整体账本错误和 Host 写盘失败仍会使执行失败。
+
+正文、metadata 和 review 的最终写入之间允许取消，完成日志排队期间也允许取消。串行队列实际开始一次原子完成日志替换后允许提交收敛；磁盘写入成功才发布共享 completed 状态。提交前取消的候选不视为完成，提交后的章节可恢复；全书 manifest 开始写入前再次检查取消。理由与取舍见[检查点与故障隔离](../../../.agents/notes/implemented/bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)。
 
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 

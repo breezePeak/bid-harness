@@ -12,7 +12,7 @@ const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', imp
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-writing-driver.ts', import.meta.url))
 
-it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
+it('S5 通过真实 Loader 隔离坏 Web 来源、补搜本地资料并保留 S4 map', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 当前章节本地补搜', tempDirPrefix: 'dsh-s5-local-snapshot-', binScript, configPath, mode: 'src',
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
@@ -28,9 +28,14 @@ it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'structured_output', 'structured_output'])
+      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'structured_output', 'structured_output', 'structured_output'])
       expect(writerLog).toContain('Mapped Materials：[]')
       expect(writerLog).toContain('F999')
+      expect(writerLog).toContain('不可用')
+      expect(writerLog).toContain('ENOENT')
+      expect(writerLog).toContain('Hash')
+      expect(writerLog).toContain('S4 已映射的公开审计资料。')
+      expect(writerLog).toContain('未知 W1')
       expect(writerLog).toContain('S5 Chapter Child 不可读取 tender 或未入库资料。')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })
       expect(writerLog).not.toContain('需要访问控制与安全审计方案。')
@@ -43,6 +48,7 @@ it('S5 通过真实 Loader 补搜未映射资料并保留 S4 map', async () => {
       expect(metadata.local_materials_used).toEqual([{
         source_kind: 'reference', file_id: metadata.local_materials_used[0]?.file_id, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。',
       }])
+      expect(metadata.web_materials_used).toEqual([])
       const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(projectRoot, 'chapters/manifest.json'), 'utf8')))
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)

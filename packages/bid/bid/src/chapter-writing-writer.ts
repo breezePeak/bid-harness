@@ -1,6 +1,5 @@
 /** Writer 的语义输入与章节内资料短引用；持久化身份全部由 Host 解析。 */
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { ToolArgsError, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { BidManifest, BidWorkspace } from './index.ts'
@@ -9,8 +8,8 @@ import { parseChapterCandidate, type ChapterCandidate, type AcceptedChapterCandi
 import { localEvidenceMaterialSchema, transientWebEvidenceMaterialSchema, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs } from './chapter-writing-protocol.ts'
-import { assertNoLinkedPath } from './workspace-path.ts'
-import { normalizeWebEvidenceUrl, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
+import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 
 const text = z.string().trim().min(1)
@@ -59,11 +58,13 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
   }, required: ['markdown', 'metadata'], additionalProperties: false,
 }
 
-/** 同一章节各次 Writer 尝试共享稳定编号；仅追加已经验证的 Web Snapshot。 */
+/** 同一章节各次 Writer 尝试共享稳定编号；已发 Web 身份永久保留，不可重用编号。 */
 export interface ChapterWriterReferences {
   readonly materials: ReadonlyMap<string, LocalEvidenceMaterial>
   readonly files: ReadonlyMap<string, ChapterContext['availableLocalCorpus'][number]>
   readonly web: Map<string, WebEvidenceSource & { read_path: string }>
+  /** source_id 对应的当前不可用原因；包含尚未获发 W 的坏来源。 */
+  readonly unavailable: Map<string, string>
 }
 
 /**
@@ -76,39 +77,78 @@ export function createChapterWriterReferences(context: ChapterContext): ChapterW
     materials: new Map([...context.relatedMaterials, ...context.referenceBidMaterials].map((value, index) => [`M${index + 1}`, value])),
     files: new Map(context.availableLocalCorpus.filter(file => file.role !== 'outline_framework').map((value, index) => [`F${index + 1}`, value])),
     web: new Map(),
+    unavailable: new Map(),
   }
 }
 
 /**
- * 读取已登记 Web 正文并拒绝内容 Hash 不匹配的快照。
+ * 读取工作区内无链接的 Web 正文；单来源路径、读取或 Hash 错误以 ToolArgsError 拒绝，其他错误传播。
  * @param workspace 资料工作区。
  * @param source 已登记来源。
  * @returns Hash 验证通过的实际 Web 正文。
  */
 export async function readChapterWebSource(workspace: BidWorkspace, source: WebEvidenceSource): Promise<string> {
-  const path = join(workspace.projectRoot, source.snapshot_path)
-  await assertNoLinkedPath(workspace.root, path)
-  const content = await readFile(path, 'utf8')
+  let content: string
+  try {
+    content = await readWebSnapshot(workspace, source.snapshot_path)
+  } catch (error: unknown) {
+    const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+      ? error.code : undefined
+    const reason = error instanceof Error ? error.message : ''
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG'].includes(code ?? '')
+      || ['bid-absolute-path', 'bid-path-traversal', 'bid-workspace-path-outside-root', 'bid-workspace-symbolic-link'].includes(reason)) {
+      throw new ChapterWebSourceUnavailable([`web_ref: 网页快照不可用：${source.snapshot_path}（${code ?? reason}）`])
+    }
+    throw error
+  }
   if (content.trim().length === 0 || webEvidenceContentSha256(content) !== source.content_sha256) {
-    throw new ToolArgsError([`web_ref: Snapshot Hash 或正文无效：${source.snapshot_path}`])
+    throw new ChapterWebSourceUnavailable([`web_ref: Snapshot Hash 或正文无效：${source.snapshot_path}`])
   }
   return content
 }
 
+class ChapterWebSourceUnavailable extends ToolArgsError {}
+
+async function readWebSnapshot(workspace: BidWorkspace, snapshotPath: string): Promise<string> {
+  const path = within(workspace.projectRoot, snapshotPath)
+  await assertNoLinkedPath(workspace.root, path)
+  return readFile(path, 'utf8')
+}
+
 /**
- * 验证新增来源并追加 W 编号，保留已发放的引用。
+ * 复验完整候选集合，隔离单来源错误并追加有效来源；移除或损坏的已发 W 保留身份，恢复后沿用编号。
  * @param workspace 当前工作区。
  * @param refs 当前章节稳定引用表。
- * @param sources 当前允许暴露的账本来源。
+ * @param sources 当前允许暴露的完整账本来源，不能只传新增来源。
  */
 export async function appendChapterWebReferences(
   workspace: BidWorkspace, refs: ChapterWriterReferences, sources: readonly WebEvidenceSource[],
 ): Promise<void> {
-  for (const source of sources) {
-    if ([...refs.web.values()].some(value => value.source_id === source.source_id)) continue
-    await readChapterWebSource(workspace, source)
-    refs.web.set(`W${refs.web.size + 1}`, { ...source, read_path: join(workspace.projectRoot, source.snapshot_path).replaceAll('\\', '/') })
+  const currentIds = new Set(sources.map(source => source.source_id))
+  refs.unavailable.clear()
+  for (const source of refs.web.values()) {
+    if (!currentIds.has(source.source_id)) refs.unavailable.set(source.source_id, '来源已从当前账本移除。')
   }
+  for (const source of sources) {
+    try {
+      await readChapterWebSource(workspace, source)
+    } catch (error: unknown) {
+      if (!(error instanceof ChapterWebSourceUnavailable)) throw error
+      refs.unavailable.set(source.source_id, error.message)
+      continue
+    }
+    const existing = [...refs.web].find(([, value]) => value.source_id === source.source_id)
+    if (existing !== undefined) {
+      if (!sameWebIdentity(existing[1], source)) refs.unavailable.set(source.source_id, '当前账本与已发 W 的来源身份不匹配。')
+      continue
+    }
+    refs.web.set(`W${refs.web.size + 1}`, { ...source, read_path: within(workspace.projectRoot, source.snapshot_path).replaceAll('\\', '/') })
+  }
+}
+
+function sameWebIdentity(left: WebEvidenceSource, right: WebEvidenceSource): boolean {
+  return left.source_id === right.source_id && left.snapshot_path === right.snapshot_path
+    && left.content_sha256 === right.content_sha256 && left.final_url === right.final_url
 }
 
 /**
@@ -119,6 +159,13 @@ export async function appendChapterWebReferences(
  */
 export function renderChapterWriterReferences(context: ChapterContext, refs: ChapterWriterReferences): string {
   const usage = (role: string) => role === 'reference_bid' ? ['reuse', 'adapt', 'reference', 'background'] : ['reference', 'background']
+  const unavailable = new Map(refs.unavailable)
+  for (const material of context.webMaterials) {
+    const source = [...refs.web.values()].find(value => value.source_id === material.source_id)
+    if (unavailable.has(material.source_id)) continue
+    if (source === undefined) unavailable.set(material.source_id, '已映射来源不在当前账本中。')
+    else if (source.snapshot_path !== material.snapshot_path) unavailable.set(material.source_id, '已映射来源与账本的身份不匹配。')
+  }
   return [
     '资料提交用下列 M/F/W 短引用；grep/read 必须使用表中真实路径，短引用不是路径。',
     `Mapped Materials：${JSON.stringify([...refs.materials].map(([material_ref, material]) => ({
@@ -127,11 +174,18 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
       ...context.localReadLocations.find(value => value.file_id === material.file_id && value.chunk === material.chunk),
     })))}`,
     `Available Evidence Files：${JSON.stringify([...refs.files].map(([file_ref, file]) => ({ file_ref, name: file.name, role: file.role, chunks_path: file.chunks_path, chunk_index_path: file.chunk_index_path, allowed_usage: usage(file.role) })))}`,
-    `Verified Web Snapshots：${JSON.stringify([...refs.web].map(([web_ref, source]) => ({
+    `Verified Web Snapshots：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).map(([web_ref, source]) => ({
       web_ref, url: source.final_url, read_path: source.read_path,
       allowed_usage: ['reference', 'background'], truncated: source.truncated,
       summary: context.webMaterials.find(value => value.source_id === source.source_id)?.summary,
     })))}`,
+    `不可用 Web 来源：${JSON.stringify([...unavailable].map(([source_id, reason]) => ({
+      source_id, web_ref: [...refs.web].find(([, source]) => source.source_id === source_id)?.[0], reason,
+      mapped_materials: context.webMaterials.filter(material => material.source_id === source_id).map(material => ({
+        usage: material.usage, summary: material.summary, supports: material.supports,
+      })),
+    })))}`,
+    '不可用来源不能作为证据引用；对应写作要求仍须回应，请补充有效来源，无法证实时明确记录未解决事项。',
     '本地条目只提交 {material_ref, usage, summary} 或 {file_ref, chunk, usage, summary}，两者不可并用；已登记网页只提交 {web_ref, usage, summary, supports}。新网页提交 {url, usage, summary, supports}，必须有当前 Writer 成功 fetch 的正文。',
   ].join('\n')
 }
@@ -159,7 +213,7 @@ export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial
 }
 
 /**
- * 校验 Writer 短引用并注入当前章节身份和 Blueprint 索引；不写入文件。
+ * 校验 Writer 短引用并注入章节身份与 Blueprint 索引；实际 W 引用重读账本和正文，账本读取或解析失败传播，不写文件。
  * @param workspace 资料工作区。
  * @param manifest 当前资料身份。
  * @param context 固定章节输入。
@@ -197,10 +251,21 @@ export async function bindChapterWriterInput(
     }
   }
   const web: WebEvidenceMaterial[] = []
-  for (const [index, material] of (input.metadata.web_materials_used ?? []).entries()) {
+  const webMaterials = input.metadata.web_materials_used ?? []
+  let currentSources: readonly WebEvidenceSource[] = []
+  if (webMaterials.length > 0) {
+    const ledgerPath = within(workspace.projectRoot, 'analysis/web-evidence-sources.json')
+    await assertNoLinkedPath(workspace.root, ledgerPath)
+    currentSources = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(ledgerPath, 'utf8'))).sources
+  }
+  for (const [index, material] of webMaterials.entries()) {
     const source = refs.web.get(material.web_ref)
     if (source === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: 未知 ${material.web_ref}。`])
-    await readChapterWebSource(workspace, source)
+    const current = currentSources.find(value => value.source_id === source.source_id)
+    if (current === undefined || !sameWebIdentity(current, source)) {
+      throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 的来源已从账本移除或身份不匹配。`])
+    }
+    await readChapterWebSource(workspace, current)
     web.push({
       source_id: source.source_id, snapshot_path: source.snapshot_path,
       usage: material.usage, summary: material.summary, supports: material.supports })

@@ -4,7 +4,15 @@
     "section_mappings": [
       {
         "local_materials": [],
-        "web_materials": [],
+        "web_materials": [
+          {
+            "source_id": "WEB-2f34a2c0c4f78b65",
+            "snapshot_path": "analysis/web-sources/WEB-2f34a2c0c4f78b65.md",
+            "usage": "reference",
+            "summary": "S4 已映射的公开审计资料。",
+            "supports": "安全审计要求"
+          }
+        ],
         "missing_topics": [
           "缺少实施流程参考资料。"
         ],

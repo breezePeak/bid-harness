@@ -13,7 +13,7 @@ import {
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
-  parseTenderScoringArtifact, EVIDENCE_MAPPING_SCHEMA_VERSION,
+  parseTenderScoringArtifact, EVIDENCE_MAPPING_SCHEMA_VERSION, webEvidenceContentSha256, webEvidenceSourceId,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -360,8 +360,19 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   Object.assign(section, partialResult('https://official.example/standard').section_mappings[0]!.writing_brief)
   const outlineHash = outlineArtifactSha256(outline)
   const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+  const unavailableSources = ['missing', 'hash'].map((kind) => {
+    const url = `https://official.example/${kind}`
+    const hash = webEvidenceContentSha256('公开技术资料原文')
+    const id = webEvidenceSourceId(url, hash)
+    return { source_id: id, requested_url: url, final_url: url, content_sha256: hash,
+      snapshot_path: `analysis/web-sources/${id}.md`, status_code: 200, truncated: false, fetched_at: '2026-09-01T00:00:00.000Z' }
+  })
+  const missing = unavailableSources[0]!
+  await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, unavailableSources[1]!.snapshot_path), '与账本 Hash 不符的正文')
   const evidenceBefore = JSON.stringify({ schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION, section_mappings: [{
-    section_id: section.id, local_materials: [], web_materials: [],
+    section_id: section.id, local_materials: [], web_materials: [{ source_id: missing.source_id, snapshot_path: missing.snapshot_path,
+      usage: 'reference', summary: 'S4 已映射的公开审计资料。', supports: '安全审计要求' }],
     missing_topics: ['缺少实施流程参考资料。'], writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
   }] })
   await Promise.all([
@@ -371,7 +382,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
     })),
     writeFile(evidencePath, evidenceBefore),
-    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [] })),
+    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: unavailableSources })),
   ])
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
@@ -401,6 +412,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('grep-supplement', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
     toolCall('reject-bad-reference', 'structured_output', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
+    toolCall('reject-bad-web-reference', 'structured_output', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
     toolCall('submit-chapter', 'structured_output', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),

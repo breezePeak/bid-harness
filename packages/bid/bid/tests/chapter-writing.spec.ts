@@ -1,8 +1,9 @@
 import { writeInputs, outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, unlink, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import * as atomicWrite from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
@@ -320,6 +321,270 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
+  it.each(['损坏', '未完成'])('恢复按强依赖传递失效，%s 前置章节时保留弱关联章节', async (damage) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-dependent-resume-')))
+    const outline = await writeInputs(workspace)
+    outline.sections.push({ ...outline.sections[3]!, id: 'SEC-4', title: '章节4', order: 4 })
+    // C/B/A 的显示顺序与依赖方向相反，D 仅弱关联 A。
+    outline.sections[1]!.order = 3
+    outline.sections[3]!.order = 1
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
+    const hash = outlineArtifactSha256(outline)
+    await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+    evidence.section_mappings.push({ ...evidence.section_mappings[2]!, section_id: 'SEC-4' })
+    await writeFile(evidencePath, JSON.stringify(evidence))
+    const first = fixtureAgent(workspace, outline, { 'SEC-2': ['SEC-1'], 'SEC-3': ['SEC-2'] })
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'))
+    const planPath = join(workspace.projectRoot, 'chapters/execution-plan.json')
+    const plan = parseChapterExecutionPlan(JSON.parse(await readFile(planPath, 'utf8')))
+    plan.sections.find(s => s.section_id === 'SEC-4')!.related_sections = [{ section_id: 'SEC-1', reason: '术语关联', strength: 'weak' }]
+    await writeFile(planPath, JSON.stringify(plan))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const prior = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    prior.sections.find(s => s.section_id === 'SEC-4')!.related_sections = ['SEC-1']
+    if (damage === '未完成') prior.sections.find(s => s.section_id === 'SEC-1')!.status = 'running'
+    else await writeFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), '损坏正文')
+    await writeFile(logPath, JSON.stringify(prior))
+    const retained = await Promise.all(['sections/0004.md', 'meta/0004.json', 'reviews/0004.json'].map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))
+    const resumed = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: { ...candidateFrom(request), metadata: { handoff: { decisions: [`${request.label} 本轮新决策`] } } },
+    }))
+    const start = resumed.subagents.start.getMockImplementation()!
+    let firstWriter = true
+    resumed.subagents.start.mockImplementation(async (provider, request) => {
+      if (firstWriter) {
+        firstWriter = false
+        const checkpoint = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+        for (const id of ['SEC-1', 'SEC-2', 'SEC-3']) {
+          const section = checkpoint.sections.find(section => section.section_id === id)!
+          expect(section.status).toBe(id === 'SEC-1' ? 'running' : 'pending')
+          expect(section.final_writer_child_session_id).toBeNull()
+          expect(section.final_reviewer_child_session_id).toBeNull()
+          expect(section.attempts).toEqual(prior.sections.find(section => section.section_id === id)!.attempts)
+        }
+      }
+      return start(provider, request)
+    })
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'))
+    expect(resumed.followup).not.toHaveBeenCalled()
+    expect(resumed.starts.map(start => start.request.label?.slice(-3))).toEqual(['章节1', '章节2', '章节3'])
+    for (const [index, start] of resumed.starts.slice(1).entries()) {
+      const line = promptText(start.request).split('\n').find(line => line.startsWith('Dependency Chapter Context：'))!
+      expect(JSON.parse(line.slice('Dependency Chapter Context：'.length))).toMatchObject([
+        { section_id: `SEC-${index + 1}`, handoff: { decisions: [expect.stringContaining(`章节${index + 1} 本轮新决策`)] } },
+      ])
+    }
+    const final = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    expect(final.sections.find(s => s.section_id === 'SEC-4')).toEqual(prior.sections.find(s => s.section_id === 'SEC-4'))
+    for (const section of final.sections.filter(s => s.section_id !== 'SEC-4')) expect(section.attempts.length).toBe(prior.sections.find(s => s.section_id === section.section_id)!.attempts.length + 2)
+    expect(await Promise.all(['sections/0004.md', 'meta/0004.json', 'reviews/0004.json'].map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))).toEqual(retained)
+  })
+
+  it.each(['正文写入中', 'metadata 写入后', 'review 写入后', '提交成功后'])('最终落盘取消：%s', async (point) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-final-abort-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    const controller = new AbortController()
+    const original = atomicWrite.writeFileAtomic
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    let bodies = 0
+    let metadata = 0
+    const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
+      const name = path.replaceAll('\\', '/')
+      const target = point === '正文写入中' ? name.endsWith('sections/0001.md') && ++bodies === 2
+        : point === 'metadata 写入后' ? name.endsWith('meta/0001.json') && ++metadata === 2
+          : point === 'review 写入后' ? name.endsWith('reviews/0001.json')
+            : name.endsWith('execution-log.json') && content.includes('"status": "completed"')
+      if (target && point === '正文写入中') { entered.resolve(undefined); await release.promise }
+      await original(path, content, options)
+      if (target && point !== '正文写入中') { entered.resolve(undefined); await release.promise }
+    })
+    try {
+      const result = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1, signal: controller.signal })
+      const rejection = expect(result).rejects.toThrow()
+      await entered.promise
+      controller.abort()
+      release.resolve(undefined)
+      await rejection
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections[0]!.status === 'completed').toBe(point === '提交成功后')
+      expect(fixture.disposed).toHaveLength(fixture.subagents.start.mock.calls.length)
+      await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      spy.mockRestore()
+      const resumed = fixtureAgent(workspace, outline)
+      await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'))
+      expect(resumed.starts.some(start => start.request.label?.endsWith('章节1'))).toBe(point !== '提交成功后')
+    } finally { release.resolve(undefined); spy.mockRestore() }
+  })
+
+  it('完成日志排队期间取消，不让前面的普通日志发布共享 completed 状态', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-queued-commit-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, false)
+    const controller = new AbortController()
+    const started = Promise.withResolvers<undefined>()
+    const reviewWritten = Promise.withResolvers<undefined>()
+    const returnReview = Promise.withResolvers<undefined>()
+    const queueEntered = Promise.withResolvers<undefined>()
+    const releaseQueue = Promise.withResolvers<undefined>()
+    const start = fixture.subagents.start.getMockImplementation()!
+    fixture.subagents.start.mockImplementation(async (name, request) => {
+      const run = await start(name, request)
+      if (fixture.starts.length === 3) started.resolve(undefined)
+      return run
+    })
+    const original = atomicWrite.writeFileAtomic
+    const published: ReturnType<typeof parseChapterExecutionLog>[] = []
+    let blockNextLog = false
+    const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
+      const name = path.replaceAll('\\', '/')
+      if (name.endsWith('execution-log.json')) {
+        if (blockNextLog) { blockNextLog = false; queueEntered.resolve(undefined); await releaseQueue.promise }
+        published.push(parseChapterExecutionLog(JSON.parse(content)))
+      }
+      await original(path, content, options)
+      if (name.endsWith('reviews/0001.json')) { reviewWritten.resolve(undefined); await returnReview.promise }
+    })
+    try {
+      const result = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3, signal: controller.signal })
+      const rejection = expect(result).rejects.toThrow()
+      await started.promise
+      fixture.starts[0]!.resolve()
+      await reviewWritten.promise
+      blockNextLog = true
+      fixture.starts[1]!.resolve()
+      await queueEntered.promise
+      fixture.starts[2]!.resolve()
+      // 磁盘读取让已兑现 Writer 的微任务排入日志队列；队列仍由可控 Promise 阻塞。
+      await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'))
+      returnReview.resolve(undefined)
+      await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'))
+      controller.abort()
+      releaseQueue.resolve(undefined)
+      await rejection
+      expect(published.every(log => log.sections.every(section => section.status !== 'completed'))).toBe(true)
+      const disk = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(disk.sections.every(section => section.status !== 'completed')).toBe(true)
+      await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(fixture.disposed).toHaveLength(fixture.subagents.start.mock.calls.length)
+    } finally { returnReview.resolve(undefined); releaseQueue.resolve(undefined); spy.mockRestore() }
+  })
+
+  it('完成日志原子写入失败时不发布完成或 manifest', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-commit-failure-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    const original = atomicWrite.writeFileAtomic
+    const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
+      if (path.endsWith('execution-log.json') && content.includes('"status": "completed"')) throw new Error('测试磁盘失败')
+      await original(path, content, options)
+    })
+    try {
+      await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })).rejects.toThrow('测试磁盘失败')
+      const disk = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(disk.sections.every(section => section.status !== 'completed')).toBe(true)
+      await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(fixture.disposed).toHaveLength(fixture.subagents.start.mock.calls.length)
+    } finally { spy.mockRestore() }
+  })
+
+  it('取消合法 repair 的最终落盘时保留此前章节与旧 manifest，不通过 fallback 完成', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-abort-retained-')))
+    const outline = await writeInputs(workspace)
+    await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const prior = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    prior.sections[1]!.status = 'pending'
+    await writeFile(logPath, JSON.stringify(prior))
+    const retainedPaths = ['manifest.json', 'sections/0001.md', 'meta/0001.json', 'reviews/0001.json', 'sections/0003.md', 'meta/0003.json', 'reviews/0003.json']
+    const retained = await Promise.all(retainedPaths.map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))
+    const fixture = fixtureAgent(workspace, outline)
+    fixture.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), verdict: 'repair', blocking_issues: ['真实待核实内容'] }))
+    const controller = new AbortController()
+    const original = atomicWrite.writeFileAtomic
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
+      await original(path, content, options)
+      if (path.replaceAll('\\', '/').endsWith('reviews/0002.json')) { entered.resolve(undefined); await release.promise }
+    })
+    try {
+      const result = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3, signal: controller.signal })
+      const rejection = expect(result).rejects.toThrow()
+      await entered.promise
+      controller.abort()
+      release.resolve(undefined)
+      await rejection
+      const disk = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+      expect(disk.sections[1]!.status).not.toBe('completed')
+      expect(disk.sections[0]).toEqual(prior.sections[0])
+      expect(disk.sections[2]).toEqual(prior.sections[2])
+      expect(await Promise.all(retainedPaths.map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))).toEqual(retained)
+      expect(spy.mock.calls.some(([path]) => path.replaceAll('\\', '/').endsWith('chapters/manifest.json'))).toBe(false)
+      expect(fixture.starts).toHaveLength(1)
+    } finally { release.resolve(undefined); spy.mockRestore() }
+  })
+
+  it.each(['sections/0001.md', 'meta/0001.json', 'reviews/0001.json'])('最终 %s 写盘失败不当作 Child 传输重试或 fallback', async (suffix) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-final-write-failure-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    const original = atomicWrite.writeFileAtomic
+    let writes = 0
+    const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
+      if (path.replaceAll('\\', '/').endsWith(suffix) && ++writes === (suffix.startsWith('reviews') ? 1 : 2)) throw new Error('最终文件写入失败')
+      await original(path, content, options)
+    })
+    try {
+      await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 3 })).rejects.toThrow('SEC-1')
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections[0]!.status).toBe('failed')
+      expect(log.sections[0]!.attempts).toHaveLength(2)
+      expect(log.sections.slice(1).every(section => section.status === 'completed')).toBe(true)
+      expect(fixture.starts).toHaveLength(3)
+      await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { spy.mockRestore() }
+  })
+
+  it.each(['丢失', 'Hash', '链接路径'])('完整 S5 入口隔离候选 Web 来源%s，保留本地写作与映射要求', async (damage) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-web-isolation-')))
+    const outline = await writeInputs(workspace)
+    await seedReadableMaterials(workspace)
+    const ledgerPath = join(workspace.projectRoot, 'analysis/web-evidence-sources.json')
+    const ledgerText = await readFile(ledgerPath, 'utf8')
+    const source = parseWebEvidenceSourcesArtifact(JSON.parse(ledgerText)).sources[0]!
+    const snapshotPath = join(workspace.projectRoot, source.snapshot_path)
+    if (damage === 'Hash') await writeFile(snapshotPath, '已篡改')
+    else {
+      await unlink(snapshotPath)
+      if (damage === '链接路径') await symlink(await mkdtemp(join(tmpdir(), 'dsh-s5-linked-source-')), snapshotPath, 'junction')
+    }
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+    evidence.section_mappings[1]!.web_materials = [{ source_id: source.source_id, snapshot_path: source.snapshot_path, usage: 'reference', summary: '已映射的技术要求', supports: '技术方案' }]
+    await writeFile(evidencePath, JSON.stringify(evidence))
+    const evidenceText = await readFile(evidencePath, 'utf8')
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: {
+        ...candidateFrom(request), markdown: '# 当前实施章节\n\n采用本地资料中经过核实的技术依据组织实施，明确责任与交付成果。',
+        metadata: { local_materials_used: [{ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '本地依据' }] },
+      },
+    }))
+    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'))
+    expect(fixture.starts).toHaveLength(3)
+    const mappedPrompt = promptText(fixture.starts.find(start => start.request.label?.endsWith('章节2'))!.request)
+    expect(mappedPrompt).toContain('不可用')
+    expect(mappedPrompt).toContain('已映射的技术要求')
+    expect(mappedPrompt).toContain('回答2')
+    expect(mappedPrompt).not.toContain('"web_ref":"W1"')
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    expect(await readFile(ledgerPath, 'utf8')).toBe(ledgerText)
+    expect(await readFile(evidencePath, 'utf8')).toBe(evidenceText)
+  })
+
   it('审查错误宣称通过时仍按实际内容缺口修订，保留问题并继续其他章节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-review-verdict-')))
     const outline = await writeInputs(workspace)
