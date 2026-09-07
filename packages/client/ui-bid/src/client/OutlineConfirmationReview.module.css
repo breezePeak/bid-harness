@@ -1,23 +1,25 @@
 .root {
   display: flex;
+  min-height: 100%;
+  width: 100%;
   flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-xs-13);
 }
 
-/* 顶部概览仪表板 */
+/* 顶部概览仪表板（吸顶固定，保持随时可以点击确认） */
 .header {
-  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px 20px;
   background: var(--dsw-alias-bg-layer-1);
   border-bottom: 1px solid var(--dsw-alias-border-l1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
 }
 
 .titleRow {
@@ -115,13 +117,10 @@
 
 /* 交互控制栏 */
 .toolbar {
-  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 20px;
-  background: var(--dsw-alias-bg-layer-1);
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  padding-top: 4px;
   gap: 12px;
   flex-wrap: wrap;
 }
@@ -413,13 +412,14 @@
   background: color-mix(in srgb, var(--dsw-alias-accent-primary, #1677ff) 12%, transparent);
 }
 .muted { opacity: 0.55; }
-.diffSummary, .diffBadges {
+.diffBadges {
   display: flex;
-  gap: 2px;
+  gap: 4px;
   flex-wrap: wrap;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  flex: none;
 }
-.diffSummary { padding: 8px 20px; }
-.diffBadges { color: var(--dsw-alias-label-secondary); font-size: 11px; flex: none; gap: 4px; }
 .rowActions { display: flex; visibility: hidden; }
 .treeRow:hover .rowActions, .treeRow:focus-within .rowActions { visibility: visible; }
 .rowIcon {

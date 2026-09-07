@@ -548,15 +548,13 @@ describe('BidStagePanel', () => {
     })
   })
 
-  it('目录确认与重新生成仅在审核页面显示', async () => {
-    const regenerateOutline = vi.fn(async () => {})
+  it('目录确认仅在审核页面显示，不显示修改目录输入框', async () => {
     const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     }), {
       confirmOutline: vi.fn(async () => {}),
-      regenerateOutline,
       getOutlineDraft: async () => draft,
     })} />)
 
@@ -564,13 +562,8 @@ describe('BidStagePanel', () => {
     const dock = within(screen.getByRole('region', { name: '技术标生成' }))
     expect(dock.queryByRole('button', { name: '使用该目录' })).toBeNull()
     expect(dock.queryByLabelText('修改目录')).toBeNull()
-    const feedback = screen.getByLabelText('修改目录')
-    const regenerate = screen.getByRole('button', { name: '重新生成目录' })
-    expect(regenerate).toHaveProperty('disabled', true)
-    fireEvent.change(feedback, { target: { value: '  标书目录颗粒度太粗了  ' } })
-    expect(regenerate).toHaveProperty('disabled', false)
-    fireEvent.click(regenerate)
-    await waitFor(() => { expect(regenerateOutline).toHaveBeenCalledWith({ feedback: '标书目录颗粒度太粗了', expected_revision: 1, expected_draft_sha256: 'b'.repeat(64) }) })
+    expect(screen.queryByLabelText('修改目录')).toBeNull()
+    expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy()
   })
 
   it('immediately previews hierarchy, order, and derived section numbers', async () => {

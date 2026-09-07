@@ -237,7 +237,7 @@ describe('目录拖拽与差异', () => {
     expect(outlineDropOperation(outline, 'SEC-001', 'SEC-001', 'inside')).toBeNull()
   })
 
-  it('显示四类差异，过滤保留祖先，基线只读且联动选中', () => {
+  it('显示四类差异，基线只读且联动选中', () => {
     const outline = { ...testOutline, sections: [testOutline.sections[0]!, { ...testOutline.sections[1]!, title: '修改后的架构', order: 2 }, { ...testOutline.sections[2]!, id: 'SEC-NEW' }] }
     const changes = compareOutlines(testOutline, outline)
     expect(changes.get('SEC-002')).toMatchObject({ modified: true, moved: true })
@@ -247,7 +247,6 @@ describe('目录拖拽与差异', () => {
       reviewContext={{ baseline: testOutline, requirements: { schema_version: 1, requirements: [] },
         scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
       onUpdateSection={vi.fn()} onStructureOperation={vi.fn()} onIndentSection={vi.fn()} onOutdentSection={vi.fn()} t={t as never} />)
-    fireEvent.click(screen.getByLabelText('只看变化'))
     expect(screen.getByLabelText('SEC-001 标题')).toBeTruthy()
     fireEvent.focus(screen.getByLabelText('SEC-002 标题'))
     const baseline = screen.getByLabelText('S3 已确认目录')

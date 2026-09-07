@@ -49,7 +49,6 @@ export function OutlineConfirmationReview({
   outline,
   readOnly = false,
   confirmation,
-  feedback,
   notice,
   reviewContext,
   stage,
@@ -68,22 +67,9 @@ export function OutlineConfirmationReview({
   const dragFrame = useRef<number>()
   const [activeDrop, setActiveDrop] = useState<string | null>(null)
   const [draggedId, setDraggedId] = useState<string | null>(null)
-  const [onlyChanges, setOnlyChanges] = useState(false)
   const baselineRows = useRef(new Map<string, HTMLDivElement>())
   const baseline = reviewContext?.baseline
   const diff = useMemo(() => baseline == null ? null : compareOutlines(baseline, outline), [baseline, outline])
-  const changed = (id: string): boolean => Object.values(diff?.get(id) ?? {}).some(Boolean)
-  const visibleIds = (sections: OutlineArtifact['sections']): Set<string> => {
-    const ids = new Set(sections.filter(section => changed(section.id)).map(section => section.id))
-    const byId = new Map(sections.map(section => [section.id, section]))
-    for (const id of ids) {
-      const parent = byId.get(id)?.parent_id
-      if (parent != null) ids.add(parent)
-    }
-    return ids
-  }
-  const currentVisible = diff === null ? null : visibleIds(outline.sections)
-  const baselineVisible = baseline == null ? null : visibleIds(baseline.sections)
   const selected = outline.sections.find(section => section.id === selectedId) ?? outline.sections[0]
   useEffect(() => {
     if (selected !== undefined) baselineRows.current.get(selected.id)?.scrollIntoView({ block: 'nearest' })
@@ -236,68 +222,57 @@ export function OutlineConfirmationReview({
           </div>
           {confirmation != null && <div className={reviewCss.actionCard}>{confirmation}</div>}
         </div>
-        {feedback}
         {notice}
-      </header>
-
-      {stage === 'evidence_mapping' && <div className={css.diffSummary}>
-        {diff === null ? <span role="status">S3 基线尚未加载</span> : <>
-          <span>S3 章节数量 {baseline?.sections.length}</span><span>S4 章节数量 {outline.sections.length}</span>
-          {([['added', '新增'], ['modified', '修改'], ['deleted', '删除'], ['moved', '移动']] as const).map(([key, label]) =>
-            <span key={key}>{label}数量 {[...diff.values()].filter(change => change[key]).length}</span>)}
-          <label><input type="checkbox" checked={onlyChanges} onChange={(event) => { setOnlyChanges(event.target.checked); setCollapsedBranchIds(new Set()) }} />只看变化</label>
-        </>}
-      </div>}
-      <div className={css.toolbar}>
-        <div className={css.toolbarLeft}>
-          <input
-            className={css.searchInput}
-            type="search"
-            placeholder="搜索章节标题或编号..."
-            value={searchQuery}
-            onChange={(e) => { setSearchQuery(e.target.value) }}
-          />
-          <Button size="sm" variant="ghost" onClick={expandAll}>
-            全部展开
-          </Button>
-          <Button size="sm" variant="ghost" onClick={collapseAll}>
-            全部折叠
-          </Button>
+        <div className={css.toolbar}>
+          <div className={css.toolbarLeft}>
+            <input
+              className={css.searchInput}
+              type="search"
+              placeholder="搜索章节标题或编号..."
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value) }}
+            />
+            <Button size="sm" variant="ghost" onClick={expandAll}>
+              全部展开
+            </Button>
+            <Button size="sm" variant="ghost" onClick={collapseAll}>
+              全部折叠
+            </Button>
+          </div>
+          {!readOnly && <div className={css.toolbarRight}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const rootSections = outline.sections.filter(s => s.parent_id === null)
+                const nextOrder = rootSections.reduce((max, s) => Math.max(max, s.order), 0) + 1
+                onStructureOperation({
+                  type: 'add_section',
+                  parent_id: null,
+                  order: nextOrder,
+                  writable: true,
+                  title: '新增章节',
+                  purpose: '补充响应',
+                  must_answer: ['待补充'],
+                })
+              }}
+            >
+              + 新增一级大章
+            </Button>
+          </div>}
         </div>
-        {!readOnly && <div className={css.toolbarRight}>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              const rootSections = outline.sections.filter(s => s.parent_id === null)
-              const nextOrder = rootSections.reduce((max, s) => Math.max(max, s.order), 0) + 1
-              onStructureOperation({
-                type: 'add_section',
-                parent_id: null,
-                order: nextOrder,
-                writable: true,
-                title: '新增章节',
-                purpose: '补充响应',
-                must_answer: ['待补充'],
-              })
-            }}
-          >
-            + 新增一级大章
-          </Button>
-        </div>}
-      </div>
+      </header>
 
       <div className={`${css.workbench} ${stage === 'evidence_mapping' ? css.threeColumns : ''}`}>
         {stage === 'evidence_mapping' && <aside className={css.sidePanel} aria-label="S3 已确认目录">
           <h3>S3 已确认目录 · 只读</h3>
           {baseline != null && buildOutlineView(baseline.sections)
-            .filter(({ section }) => !onlyChanges || baselineVisible?.has(section.id))
             .map(({ section, number, depth }) =>
               <div key={section.id} ref={(element) => {
                 if (element) baselineRows.current.set(section.id, element)
                 else baselineRows.current.delete(section.id)
               }}
-              className={`${css.baselineRow} ${selected?.id === section.id ? css.selected : ''} ${onlyChanges && !changed(section.id) ? css.muted : ''}`}
+              className={`${css.baselineRow} ${selected?.id === section.id ? css.selected : ''}`}
               aria-current={selected?.id === section.id ? 'true' : undefined} style={{ paddingLeft: (depth - 1) * 16 }}>
                 {number} {section.title} {badges(section.id)}
               </div>)}
@@ -309,7 +284,7 @@ export function OutlineConfirmationReview({
             </div>
           )}
 
-          {displayedSections.filter(({ section }) => !onlyChanges || currentVisible?.has(section.id)).map(({ section, number, depth }) => {
+          {displayedSections.map(({ section, number, depth }) => {
             const hasChildren = hasChildrenMap.get(section.id) ?? false
             const isBranchCollapsed = collapsedBranchIds.has(section.id)
             const indentPx = Math.max(0, depth - 1) * 20
@@ -317,7 +292,7 @@ export function OutlineConfirmationReview({
             return (
               <article
                 key={section.id}
-                className={`${css.treeRow} ${selected?.id === section.id ? css.selected : ''} ${onlyChanges && !changed(section.id) ? css.muted : ''}`}
+                className={`${css.treeRow} ${selected?.id === section.id ? css.selected : ''}`}
                 onFocus={() => { setSelectedId(section.id) }}
                 onClick={() => { setSelectedId(section.id) }}
                 draggable={!readOnly && editingId !== section.id}
