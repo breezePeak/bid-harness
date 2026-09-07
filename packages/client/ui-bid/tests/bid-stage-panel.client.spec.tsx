@@ -156,17 +156,17 @@ describe('BidStagePanel', () => {
 
   it('shows file selection only when upload_files is admitted', async () => {
     const view = render(<BidStagePanel {...props(projection())} />)
-    expect(screen.queryByRole('button', { name: '上传招标文件' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '招标文件' })).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
     }), { uploadFiles: vi.fn(async () => []) })} />)
-    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传人工框架 / 半成品标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传参考旧标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传其他技术资料' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传人工框架' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '参考旧标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '其他资料' })).toBeTruthy()
     const inputs = view.container.querySelectorAll('input[type="file"]')
     expect(inputs).toHaveLength(4)
     fireEvent.change(inputs[0]!, {
@@ -789,5 +789,47 @@ describe('ui-bid browser plugin', () => {
         { type: 'update_project', fields: { project_name: '双击修改后的新项目名称' } },
       ]))
     })
+  })
+
+  it('renders uploaded files with card format, metadata, badges and omits inline help prose', () => {
+    const intake = projection({
+      runtime: { stage: 'file_intake', status: 'pending' },
+      allowedActions: ['upload_files'],
+      composer: { enabled: false, reason: 'bid.upload_required' },
+    })
+    const { container } = render(<BidStagePanel {...props(intake)} />)
+
+    // 1. 验证移除了红框中的三行说明文字
+    expect(screen.queryByText('已有目录或已写一部分正文，系统将优先继承并补充。')).toBeNull()
+    expect(screen.queryByText('与当前项目相似，系统可复用结构和技术内容，但会按当前项目改写。')).toBeNull()
+    expect(screen.queryByText('产品、平台、案例、公司能力和通用技术资料。')).toBeNull()
+
+    // 2. 模拟用户选择了文件
+    const fileInputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]')
+    expect(fileInputs.length).toBe(4)
+    const tenderInput = fileInputs[0]!
+    const frameworkInput = fileInputs[1]!
+
+    const file1 = new File(['content-1'.repeat(200)], '招标文件-2026年项目.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    const file2 = new File(['framework-content'.repeat(500)], '人工框架-CW.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+
+    fireEvent.change(tenderInput, { target: { files: [file1] } })
+    fireEvent.change(frameworkInput, { target: { files: [file2] } })
+
+    // 3. 验证卡片展示：文件名、角色胶囊、文件大小
+    expect(screen.getByText('招标文件-2026年项目.docx')).toBeTruthy()
+    expect(screen.getByText('人工框架-CW.docx')).toBeTruthy()
+    expect(screen.getByText('招标文件')).toBeTruthy()
+    expect(screen.getByText('人工框架')).toBeTruthy()
+    expect(screen.getByText('1.8 KB')).toBeTruthy()
+    expect(screen.getByText('8.3 KB')).toBeTruthy()
+
+    // 4. 验证删除功能
+    const removeButtons = screen.getAllByLabelText(/移除文件/)
+    expect(removeButtons).toHaveLength(2)
+    fireEvent.click(removeButtons[0]!)
+
+    expect(screen.queryByText('招标文件-2026年项目.docx')).toBeNull()
+    expect(screen.getByText('人工框架-CW.docx')).toBeTruthy()
   })
 })

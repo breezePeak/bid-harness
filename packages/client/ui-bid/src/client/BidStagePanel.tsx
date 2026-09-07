@@ -5,6 +5,7 @@ import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, 
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
+  IconBrowseOutline16,
   IconCheckOutline14,
   IconChecklistOutline14,
   IconCloseOutline16,
@@ -35,6 +36,13 @@ type SelectedFile = BidSelectedFile & {
   progress: number
   status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
   error: string | undefined
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes <= 0 || Number.isNaN(bytes)) return ''
+  if (bytes < 1024) return `${String(bytes)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function stageKey(stage: BidStage): BidKey {
@@ -638,32 +646,52 @@ export function BidStagePanel({
 
         {projection.runtime.stage === 'file_intake' && selectedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
-            {selectedFiles.map(({ file, role, id, progress, status, error }, index) => (
-              <li key={id} className={css.fileRow}>
-                <IconPaperclipOutline16 className={css.fileIcon} />
-                <span
-                  className={css.fileName}
-                  title={error === undefined ? file.name : `${file.name}: ${error}`}
+            {selectedFiles.map(({ file, role, id, progress, status, error }, index) => {
+              const sizeText = formatFileSize(file.size)
+              return (
+                <li
+                  key={id}
+                  className={css.fileRow}
                   style={{ '--bid-file-progress': `${String(progress)}%` } as CSSProperties}
                 >
-                  <span>{file.name}</span>
-                  {status === 'failed' && error !== undefined && <span className={css.fileError}>{error}</span>}
-                </span>
-                <span>{t(`file.role.${role}`)}</span>
-                <button
-                  type="button"
-                  className={css.removeFile}
-                  aria-label={`${t('file.remove')}: ${file.name}`}
-                  disabled={requestPending !== null}
-                  onClick={() => {
-                    updateSelectedFiles(files => files.filter((_, itemIndex) => itemIndex !== index))
-                    setRequestError(null)
-                  }}
-                >
-                  <IconCloseOutline16 />
-                </button>
-              </li>
-            ))}
+                  <div className={css.fileIconBox}>
+                    <IconBrowseOutline16 className={css.fileIcon} />
+                  </div>
+                  <div className={css.fileInfo}>
+                    <div
+                      className={css.fileNameText}
+                      title={error === undefined ? file.name : `${file.name}: ${error}`}
+                    >
+                      {file.name}
+                    </div>
+                    <div className={css.fileMeta}>
+                      {sizeText !== '' && <span className={css.fileSize}>{sizeText}</span>}
+                      {status === 'failed' && error !== undefined && (
+                        <span className={css.fileError}>{error}</span>
+                      )}
+                    </div>
+                  </div>
+                  <span className={`${css.roleBadge} ${css[`role_${role}`]}`}>
+                    {t(`file.role.${role}`)}
+                  </span>
+                  <button
+                    type="button"
+                    className={css.removeFile}
+                    aria-label={`${t('file.remove')}: ${file.name}`}
+                    disabled={requestPending !== null}
+                    onClick={() => {
+                      updateSelectedFiles(files => files.filter((_, itemIndex) => itemIndex !== index))
+                      setRequestError(null)
+                    }}
+                  >
+                    <IconCloseOutline16 />
+                  </button>
+                  {status === 'uploading' && progress > 0 && progress < 100 && (
+                    <div className={css.fileProgressBar} />
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
 
@@ -749,11 +777,6 @@ export function BidStagePanel({
               >
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
               </Button>
-              <div className={css.uploadHelp}>
-                <span>{t('file.help.outline_framework')}</span>
-                <span>{t('file.help.reference_bid')}</span>
-                <span>{t('file.help.reference')}</span>
-              </div>
             </>
           )}
           {canRetry && (

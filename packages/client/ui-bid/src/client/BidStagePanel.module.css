@@ -50,7 +50,7 @@
 .runtimeStatus,
 .rules,
 .error,
-.fileName {
+.fileNameText {
   font: var(--dsw-font-xs-13);
 }
 
@@ -115,46 +115,78 @@
 
 .fileList {
   display: flex;
-  max-height: 144px;
+  max-height: 200px;
   flex-direction: column;
   overflow-y: auto;
   margin: 0;
-  padding: 0;
+  padding: 2px 0;
   list-style: none;
+  gap: 6px;
 }
 
 .fileRow {
+  position: relative;
   display: flex;
   min-width: 0;
-  height: 36px;
+  height: 44px;
+  box-sizing: border-box;
   align-items: center;
   gap: 10px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.fileRow + .fileRow {
-  box-shadow: inset 0 1px 0 var(--dsw-alias-border-l1);
+.fileRow:hover {
+  border-color: var(--dsw-alias-border-l2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.fileIconBox {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .fileIcon {
   flex: none;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-label-secondary);
 }
 
-.fileName {
+.fileInfo {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.fileNameText {
   overflow: hidden;
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: linear-gradient(
-    90deg,
-    var(--dsw-alias-interactive-bg-hover) var(--bid-file-progress, 0%),
-    transparent var(--bid-file-progress, 0%)
-  );
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  font-weight: 500;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.fileSize {
+  color: var(--dsw-alias-label-tertiary);
   white-space: nowrap;
 }
 
@@ -165,22 +197,58 @@
   white-space: nowrap;
 }
 
+.roleBadge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.role_tender {
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.role_outline_framework {
+  background: var(--dsw-alias-state-success-tertiary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.role_reference_bid {
+  background: var(--dsw-alias-state-warn-tertiary);
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.role_reference {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
 .removeFile {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   flex: none;
   padding: 0;
   place-items: center;
   border: 0;
-  border-radius: 999px;
+  border-radius: 50%;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .removeFile:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover);
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .removeFile:disabled {
@@ -193,19 +261,21 @@
   outline-offset: -2px;
 }
 
+.fileProgressBar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: var(--bid-file-progress, 0%);
+  background: var(--dsw-alias-state-business-primary);
+  transition: width 0.2s ease;
+}
+
 .actions {
   display: flex;
   width: 100%;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.uploadHelp {
-  display: grid;
-  width: 100%;
-  gap: 2px;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xs-13);
 }
 
 .decisionRow {
