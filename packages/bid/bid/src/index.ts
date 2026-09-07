@@ -67,6 +67,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
+  BidDetailsView,
   BidEvidenceMappingProgress,
   BidDocxExportErrorCode,
   BidDocxExportResult,
@@ -1428,12 +1429,35 @@ export class BidHostRuntime extends TypertRemoteService {
     return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)))
   }
 
-  /** Read the editable S2 conclusions only while tender analysis waits for confirmation. */
+  /**
+   * @param session 持有已恢复项目状态的 Bid 会话。
+   * @returns 已发布的招标信息、目录和正文入口；S4 等待确认时使用已生成目录，执行中保留 S3 确认目录。
+   */
+  @Remote('getDetails')
+  async getDetails(session: Session): Promise<BidDetailsView> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const body = runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
+    const finalOutline = body || (runtime.stage === 'evidence_mapping' && runtime.status === 'completed')
+    const reviewingOutline = runtime.stage === 'evidence_mapping' && runtime.status === 'waiting_user'
+    const initialOutline = runtime.stage === 'evidence_mapping' || (runtime.stage === 'outline_generation' && runtime.status === 'completed')
+    const tenderReady = runtime.stage !== 'file_intake' && (runtime.stage !== 'tender_analysis' || runtime.status === 'waiting_user' || runtime.status === 'completed')
+    const [tender, outline] = await Promise.all([
+      tenderReady ? this.getTenderAnalysisForConfirmation(session) : null,
+      finalOutline || initialOutline
+        ? readStageJson(workspace, finalOutline ? 'outline/confirmed-outline.json' : reviewingOutline ? 'outline/outline.json' : 'outline/initial-confirmed-outline.json').then(parseOutlineArtifact)
+        : null,
+    ])
+    return { tender, outline, body }
+  }
+
+  /** 读取 S2 待确认或已确认结论；编辑准入仍由 confirmTenderAnalysis 校验。 */
   @Remote('getTenderAnalysisForConfirmation')
   async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-    if (runtime.stage !== 'tender_analysis' || runtime.status !== 'waiting_user') throw new Error('Tender-analysis confirmation is not allowed in the current Bid stage state.')
+    if (runtime.stage === 'file_intake' || (runtime.stage === 'tender_analysis' && runtime.status !== 'waiting_user' && runtime.status !== 'completed')) throw new Error('Tender-analysis details are not available in the current Bid stage state.')
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
     const projectPath = within(workspace.projectRoot, 'analysis/project.json')
     const requirementsPath = within(workspace.projectRoot, 'analysis/requirements.json')

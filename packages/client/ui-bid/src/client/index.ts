@@ -13,6 +13,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BidStagePanel } from './BidStagePanel.tsx'
+import { BidDetails } from './BidDetails.tsx'
+import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewChapterView, type BidReviewWorkbenchView } from './BidReviewWorkbench.tsx'
 import { en, zh, type BidKey } from './locales.ts'
 
@@ -35,10 +37,13 @@ export const OUTLINE_CONFIRMATION_REPAIR_ACTIONS = Object.fromEntries(
 
 /** Callbacks supplied to the Bid panel without exposing client services. */
 export interface BidStagePanelInjected {
+  /** 读取已发布详情并恢复各标签的可见性。 */
+  getDetails: () => Promise<BidDetailsView>
+  setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean) => void
   /** Mirror the Host composer capability into the existing session block. */
   setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
   /** Switch the current Session to the registered review-items view. */
-  selectReviewView: () => void
+  selectReviewView: (viewId?: string) => void
   /** Limit the review-items view to a pending user confirmation. */
   setReviewViewAvailable: (available: boolean) => void
   /** Reactive portal destination supplied by the review-items view. */
@@ -104,6 +109,11 @@ function actionFailure(error: {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  const getDetails = async (sessionId: SessionId): Promise<BidDetailsView> => {
+    const result = await ctx.remote.bid.getDetails(sessionId)
+    if (!result.ok) throw actionFailure(result.error)
+    return result.value
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-bid: dictionaries')
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
@@ -111,16 +121,23 @@ export function apply(ctx: ClientContext): void {
     order: -10,
     locale: NS,
     inject: (sessionId: SessionId): BidStagePanelInjected => ({
+      getDetails: () => getDetails(sessionId),
+      setDetailsAvailable: (details, confirmingOutline = false) => {
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        conversation?.setViewAvailable('bid-tender', details?.tender != null)
+        conversation?.setViewAvailable('bid-outline', details?.outline != null)
+        conversation?.setViewAvailable('bid-confirmation', confirmingOutline)
+      },
       setComposerBlock: (reason, embedded) => {
         ctx.conversation.blocks.set(
           sessionId,
           reason === undefined && embedded !== true ? undefined : { reason: reason ?? '', ...(embedded === true ? { embedded: true } : {}) },
         )
       },
-      selectReviewView: () => {
+      selectReviewView: (viewId = 'bid-review') => {
         const scoped = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)
         const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
-        conversation?.selectView?.('bid-review')
+        conversation?.selectView?.(viewId)
       },
       setReviewViewAvailable: (available) => {
         const scoped = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)
@@ -224,7 +241,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.view',
     id: 'bid-review',
     order: 10,
-    label: () => '审核项',
+    label: () => '正文详情',
     embeddedChat: false,
     inject: (sessionId: SessionId) => {
       const remote = ctx.remote.bid as unknown as {
@@ -245,9 +262,6 @@ export function apply(ctx: ClientContext): void {
         }>
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
-      const conversation = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)?.get('conversation') as {
-        setEmbeddedSurface?: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
-      } | undefined
       return {
         getWorkbench: async () => {
           const result = await remote.getReviewWorkbench(sessionId)
@@ -272,8 +286,23 @@ export function apply(ctx: ClientContext): void {
           if (!result.ok) throw new Error('BID_RETRY_FAILED')
           if (!result.value.ok) throw new Error(result.value.error?.message ?? 'BID_RETRY_FAILED')
         },
-        setEmbeddedSurface: (kind, element) => { conversation?.setEmbeddedSurface?.(kind, element) },
       }
     },
   }, BidReviewWorkbench)
+  for (const [kind, label] of [['tender', '招标详情'], ['outline', '目录详情'], ['confirmation', '审核项']] as const) {
+    ctx.slots.register({
+      name: 'conversation.view',
+      id: `bid-${kind}`,
+      order: kind === 'tender' ? 8 : 9,
+      label: () => label,
+      embeddedChat: false,
+      inject: (sessionId: SessionId) => ({
+        kind,
+        getDetails: () => getDetails(sessionId),
+        setReviewSurface: (element: HTMLElement | null) => {
+          ctx.sessions.scope(sessionId)?.get('conversation')?.setEmbeddedSurface('review', element)
+        },
+      }),
+    }, BidDetails)
+  }
 }

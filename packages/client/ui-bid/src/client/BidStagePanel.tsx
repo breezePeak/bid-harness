@@ -125,6 +125,8 @@ export function BidStagePanel({
   selectReviewView,
   setReviewViewAvailable,
   reviewSurface,
+  getDetails,
+  setDetailsAvailable,
   uploadFiles,
   startStage,
   retryStage,
@@ -202,9 +204,11 @@ export function BidStagePanel({
   const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
   const embedConversation = false
-  const reviewViewAvailable = canConfirm || canConfirmAnalysis
-    || projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
-  const reviewStateKey = reviewViewAvailable && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
+  const reviewViewAvailable = hasProjection && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
+  const outlineReviewReady = canConfirm && projection?.runtime.stage === 'evidence_mapping'
+  const reviewViewId = canConfirmAnalysis ? 'bid-tender'
+    : canConfirm ? outlineReviewReady ? 'bid-outline' : 'bid-confirmation' : 'bid-review'
+  const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   useEffect(() => {
     if (!hasProjection) return
@@ -217,14 +221,40 @@ export function BidStagePanel({
   }, [reviewViewAvailable, setReviewViewAvailable])
 
   useEffect(() => {
+    let active = true
+    if (hasProjection) {
+      void getDetails().then((details) => {
+        if (!active) return
+        setDetailsAvailable(details, canConfirm && !outlineReviewReady)
+        if (reviewStateKey !== null && reviewReady.current !== reviewStateKey) {
+          reviewReady.current = reviewStateKey
+          selectReviewView(reviewViewId)
+        }
+      }, (reason: unknown) => {
+        if (active) setRequestError({ message: reason instanceof Error ? reason.message : String(reason), issues: [] })
+      })
+    } else setDetailsAvailable(null)
+    return () => { active = false }
+  }, [
+    hasProjection, sessionId, projection?.runtime.stage, projection?.runtime.status,
+    getDetails, setDetailsAvailable, reviewStateKey, reviewViewId, canConfirm, outlineReviewReady, selectReviewView,
+  ])
+
+  useEffect(() => {
+    setDetailsAvailable(null)
+    reviewReady.current = null
+    return () => { setDetailsAvailable(null) }
+  }, [sessionId, setDetailsAvailable])
+
+  useEffect(() => {
     if (reviewStateKey === null) {
       reviewReady.current = null
       return
     }
-    if (reviewReady.current === reviewStateKey) return
+    if (!reviewViewAvailable || reviewReady.current === reviewStateKey) return
     reviewReady.current = reviewStateKey
-    selectReviewView()
-  }, [reviewStateKey, selectReviewView])
+    selectReviewView(reviewViewId)
+  }, [reviewStateKey, reviewViewAvailable, selectReviewView, reviewViewId])
 
   useEffect(() => {
     if (projection?.runtime.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
@@ -460,6 +490,67 @@ export function BidStagePanel({
     }
   }
 
+  const errorNotice = requestError === null ? null : (<div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map((issue, index) => <p key={`${String(index)}:${issue.code}:${issue.message}`}>{issue.artifact === undefined && issue.path === undefined ? `${issue.code}: ${issue.message}` : [issue.artifact, issue.path, issue.message].filter(Boolean).join(' · ')}</p>)}</div>)
+  const outlineConfirmation = canConfirm ? (
+    <>
+      <Button
+        size="sm"
+        variant="primary"
+        icon={<IconCheckOutline14 />}
+        disabled={requestPending !== null || confirmOutline === undefined}
+        title={confirmOutline === undefined ? t('action.unavailable') : undefined}
+        onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : async () => {
+          await draftQueue.current
+          const current = draftRef.current
+          if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
+          await confirmOutline({ expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256 })
+        }) }}
+      >
+        {requestPending === 'confirm' ? t('outline.accept.pending') : t('outline.accept.action')}
+      </Button>
+      <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
+    </>
+  ) : null
+  const outlineRevision = canRegenerate ? (
+    <div className={css.decisionRow}>
+      <div className={css.revisionField}>
+        <label className={css.decisionLabel} htmlFor={`bid-outline-feedback-${sessionId}`}>{t('outline.revise.label')}</label>
+        <span className={css.decisionHint}>{t('outline.revise.hint')}</span>
+        <textarea
+          id={`bid-outline-feedback-${sessionId}`}
+          className={css.revisionTextarea}
+          value={outlineFeedback}
+          placeholder={t('outline.revise.placeholder')}
+          disabled={requestPending !== null}
+          onChange={(event) => { setOutlineFeedback(event.target.value) }}
+        />
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        icon={<IconRefreshOutline16 />}
+        disabled={requestPending !== null || regenerateOutline === undefined || outlineFeedback.trim().length === 0}
+        title={regenerateOutline === undefined ? t('action.unavailable') : undefined}
+        onClick={() => {
+          const feedback = outlineFeedback.trim()
+          invoke('revise', regenerateOutline === undefined ? undefined : async () => {
+            await draftQueue.current
+            const current = draftRef.current
+            if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
+            await regenerateOutline({
+              feedback,
+              expected_revision: current.revision,
+              expected_draft_sha256: current.draft_outline_sha256,
+            })
+            if (alive.current) setOutlineFeedback('')
+          })
+        }}
+      >
+        {requestPending === 'revise' ? t('outline.revise.pending') : t('outline.revise.action')}
+      </Button>
+    </div>
+  ) : null
+
   return (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
@@ -484,8 +575,6 @@ export function BidStagePanel({
           <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
         </div>
 
-        {canConfirm && updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}
-
         {hostFailureReason !== undefined && (
           <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
         )}
@@ -507,11 +596,17 @@ export function BidStagePanel({
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 
-        {reviewHost !== null && (canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
+        {(canConfirm || canConfirmAnalysis) && <Portal container={reviewHost}>
           <div style={{ minHeight: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+            {((canConfirm && previewOutline === null) || (canConfirmAnalysis && tenderAnalysis === null)) && <div role="status">
+              {errorNotice ?? '正在读取审核内容…'}
+            </div>}
             {canConfirm && previewOutline !== null && (
               <OutlineConfirmationReview
                 outline={previewOutline}
+                confirmation={outlineConfirmation}
+                feedback={outlineRevision}
+                notice={<>{updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}{errorNotice}</>}
                 reviewContext={reviewContext}
                 stage={projection.runtime.stage}
                 draftSaveState={draftSaveState}
@@ -527,6 +622,7 @@ export function BidStagePanel({
             {canConfirmAnalysis && tenderAnalysis !== null && (
               <TenderAnalysisReview
                 value={tenderAnalysis}
+                notice={errorNotice}
                 pending={requestPending === 'confirm_analysis'}
                 t={t}
                 onConfirm={(operations) => {
@@ -684,74 +780,9 @@ export function BidStagePanel({
               {requestPending === 'start' ? t('action.starting') : t('action.start_stage')}
             </Button>
           )}
-          {(canConfirm || canRegenerate) && (
-            <div className={css.outlineDecision}>
-              <div className={css.decisionRow}>
-                <div className={css.decisionCopy}>
-                  <span className={css.decisionLabel}>{t('outline.accept.label')}</span>
-                  <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
-                  {draft !== null && <span className={css.decisionHint}>{t('outline.draft.status', { revision: draft.revision, status: t(`outline.draft.${draftSaveState}`) })}</span>}
-                </div>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  icon={<IconCheckOutline14 />}
-                  disabled={requestPending !== null || confirmOutline === undefined}
-                  title={confirmOutline === undefined ? t('action.unavailable') : undefined}
-                  onClick={() => { invoke('confirm', confirmOutline === undefined ? undefined : async () => {
-                    await draftQueue.current
-                    const current = draftRef.current
-                    if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
-                    await confirmOutline({ expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256 })
-                  }) }}
-                >
-                  {requestPending === 'confirm' ? t('outline.accept.pending') : t('outline.accept.action')}
-                </Button>
-              </div>
-              <div className={css.decisionRow}>
-                <div className={css.revisionField}>
-                  <label className={css.decisionLabel} htmlFor={`bid-outline-feedback-${sessionId}`}>{t('outline.revise.label')}</label>
-                  <span className={css.decisionHint}>{t('outline.revise.hint')}</span>
-                  <textarea
-                    id={`bid-outline-feedback-${sessionId}`}
-                    className={css.revisionTextarea}
-                    value={outlineFeedback}
-                    placeholder={t('outline.revise.placeholder')}
-                    disabled={requestPending !== null}
-                    onChange={(event) => { setOutlineFeedback(event.target.value) }}
-                  />
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  icon={<IconRefreshOutline16 />}
-                  disabled={requestPending !== null || regenerateOutline === undefined || outlineFeedback.trim().length === 0}
-                  title={regenerateOutline === undefined ? t('action.unavailable') : undefined}
-                  onClick={() => {
-                    const feedback = outlineFeedback.trim()
-                    invoke('revise', regenerateOutline === undefined ? undefined : async () => {
-                      await draftQueue.current
-                      const current = draftRef.current
-                      if (current === null) throw new Error('BID_OUTLINE_DRAFT_INVALID')
-                      await regenerateOutline({
-                        feedback,
-                        expected_revision: current.revision,
-                        expected_draft_sha256: current.draft_outline_sha256,
-                      })
-                      if (alive.current) setOutlineFeedback('')
-                    })
-                  }}
-                >
-                  {requestPending === 'revise' ? t('outline.revise.pending') : t('outline.revise.action')}
-                </Button>
-              </div>
-            </div>
-          )}
         </div>
 
-        {requestError !== null && (
-          <div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map((issue, index) => <p key={`${String(index)}:${issue.code}:${issue.message}`}>{issue.artifact === undefined && issue.path === undefined ? `${issue.code}: ${issue.message}` : [issue.artifact, issue.path, issue.message].filter(Boolean).join(' · ')}</p>)}</div>
-        )}
+        {!canConfirm && !canConfirmAnalysis && errorNotice}
       </div>
     </section>
   )

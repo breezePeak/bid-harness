@@ -164,6 +164,13 @@ export interface BidClientProjection {
   maxTotalBytes?: number | undefined
 }
 
+/** 已发布阶段详情；S4 执行期间的目录保持为 S3 确认版本。 */
+export interface BidDetailsView {
+  tender: import('./tender-analysis-confirmation.ts').TenderAnalysisConfirmationView | null
+  outline: import('./outline-generation-artifacts.ts').OutlineArtifact | null
+  body: boolean
+}
+
 /** One browser-selected file encoded for the dedicated Bid Host action. */
 export interface BidUploadFile {
   readonly name: string

@@ -30,12 +30,15 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
     renderSlot: (name: string) => <div data-slot={name} />,
     getWorkbench: async () => workbench,
     getChapter: async () => chapter,
-    setEmbeddedSurface: () => {},
     ...patch,
   } as BidReviewWorkbenchProps
 }
 
 describe('BidReviewWorkbench', () => {
+  it.each(['pending', 'failed', 'completed'] as const)('S5 %s 仍保留已有正文', async (status) => {
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'chapter_writing', status } }) })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+  })
   it('成功刷新后清除之前的请求错误', async () => {
     const getWorkbench = vi.fn(async () => workbench).mockRejectedValueOnce(new Error('BID_REVIEW_NOT_ALLOWED'))
     render(<BidReviewWorkbench {...props({ getWorkbench })} />)

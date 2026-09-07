@@ -208,12 +208,6 @@
   font: var(--dsw-font-xs-13);
 }
 
-.outlineDecision {
-  display: grid;
-  width: 100%;
-  gap: 8px;
-}
-
 .decisionRow {
   display: flex;
   min-height: 44px;
@@ -225,7 +219,6 @@
   background: var(--dsw-alias-bg-l1);
 }
 
-.decisionCopy,
 .revisionField {
   display: grid;
   min-width: 0;

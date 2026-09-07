@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -43,6 +43,8 @@ function props(
     useSessions,
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
+    getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false })),
+    setDetailsAvailable: vi.fn(),
     selectReviewView: vi.fn(),
     reviewSurface: { host: () => document.body, subscribe: () => () => {} },
     t,
@@ -546,7 +548,7 @@ describe('BidStagePanel', () => {
     })
   })
 
-  it('shows separate outline acceptance and feedback-regeneration rows', async () => {
+  it('目录确认与重新生成仅在审核页面显示', async () => {
     const regenerateOutline = vi.fn(async () => {})
     const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
     render(<BidStagePanel {...props(projection({
@@ -558,7 +560,10 @@ describe('BidStagePanel', () => {
       getOutlineDraft: async () => draft,
     })} />)
 
-    expect(screen.getByText('确认后将按当前目录开始章节编写')).toBeTruthy()
+    expect(await screen.findByText('确认后将按当前目录开始章节编写')).toBeTruthy()
+    const dock = within(screen.getByRole('region', { name: '技术标生成' }))
+    expect(dock.queryByRole('button', { name: '使用该目录' })).toBeNull()
+    expect(dock.queryByLabelText('修改目录')).toBeNull()
     const feedback = screen.getByLabelText('修改目录')
     const regenerate = screen.getByRole('button', { name: '重新生成目录' })
     expect(regenerate).toHaveProperty('disabled', true)

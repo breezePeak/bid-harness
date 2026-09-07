@@ -35,6 +35,7 @@ try {
   await ctx.sessions.flush(a)
   const b = await createFresh('project-session-b')
   const outline = await ctx.bid.getOutlineForConfirmation(b)
+  const details = await ctx.bid.getDetails(b)
   const exportRoot = join(process.cwd(), 'export-project')
   await mkdir(exportRoot)
   const exportWorkspace = new BidWorkspace(exportRoot)
@@ -44,14 +45,22 @@ try {
   const docx = await readFile(join(exportWorkspace.outputRoot, 'bid.docx'))
   const exportedState = await readFile(exportWorkspace.projectStatePath, 'utf8')
   const completed = await createFresh('export-session-b', exportRoot)
+  const completedDetails = await ctx.bid.getDetails(completed)
   process.stdout.write(`${JSON.stringify({
     runtime: b.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
     messages: b.deriveMessages(), nodes: b.surface.nodes,
     parentSession: b.header.parentSession ?? null, seedLength: b.header.seedLength ?? null,
     outlineTitles: outline.sections.map(section => section.title),
+    details: {
+      tender: details.tender?.project.project_name, outline: details.outline?.sections.map(section => section.title), body: details.body,
+    },
     fileCount: (await workspace.readManifest()).files.length,
     previousMessageCount: a.deriveMessages().length,
     export: {
+      details: {
+        tender: completedDetails.tender?.project.project_name,
+        outline: completedDetails.outline?.sections.map(section => section.title), body: completedDetails.body,
+      },
       runtime: exporting.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
       nextRuntime: completed.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
       messages: completed.deriveMessages(),

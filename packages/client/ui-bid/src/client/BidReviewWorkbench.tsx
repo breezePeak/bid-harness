@@ -22,7 +22,6 @@ export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
   exportDocx?: () => Promise<{ path: string }>
-  setEmbeddedSurface: (kind: 'chat' | 'composer' | 'review', element: HTMLElement | null) => void
   retryStage?: () => Promise<void>
 }
 
@@ -44,7 +43,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage, setEmbeddedSurface,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
@@ -56,11 +55,8 @@ export function BidReviewWorkbench({
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
   const requestVersion = useRef(0)
-  const reviewSurfaceRef = useCallback((element: HTMLDivElement | null) => { setEmbeddedSurface('review', element) }, [setEmbeddedSurface])
-  const confirmationReady = projection?.runtime.status === 'waiting_user'
-    && (projection.runtime.stage === 'tender_analysis' || projection.runtime.stage === 'outline_generation' || projection.runtime.stage === 'evidence_mapping')
   const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
-  const exportReady = ready && projection?.runtime.status === 'completed'
+  const exportReady = ready && projection.runtime.status === 'completed'
 
   const refresh = useCallback((): Promise<void> => {
     if (!ready) return Promise.resolve()
@@ -90,7 +86,7 @@ export function BidReviewWorkbench({
     let timer: number | undefined
     const poll = (): void => {
       void refresh().then(() => {
-        if (!disposed && ready && projection?.runtime.status === 'running') timer = window.setTimeout(poll, 1000)
+        if (!disposed && ready && projection.runtime.status === 'running') timer = window.setTimeout(poll, 1000)
       })
     }
     poll()
@@ -120,21 +116,7 @@ export function BidReviewWorkbench({
   }, [collapsed, workbench])
 
   if (!isBid || projection === undefined) return null
-  if (confirmationReady) {
-    return (
-      <section className={css.confirmationContainer} aria-label="审核项">
-        <div ref={reviewSurfaceRef} className={css.reviewSurfaceHost} />
-      </section>
-    )
-  }
   if (!ready) return null
-  if (projection.runtime.status === 'pending') return <section className={css.loading}>等待开始章节写作。</section>
-  if (projection.runtime.status === 'failed') return (
-    <section className={css.loading}>
-      <p>章节写作失败：{projection.runtime.failureReason ?? '未知错误'}</p>
-      <Button variant="primary" disabled={retryStage === undefined} onClick={() => { void retryStage?.() }}>重试</Button>
-    </section>
-  )
 
   const select = (sectionId: string): void => {
     const version = ++requestVersion.current
@@ -192,6 +174,11 @@ export function BidReviewWorkbench({
       </header>
 
       {error !== null && <div className={css.error}>{error}</div>}
+      {projection.runtime.status === 'pending' && <p>等待开始章节写作。</p>}
+      {projection.runtime.status === 'failed' && <div role="alert" className={css.error}>
+        <p>章节写作失败：{projection.runtime.failureReason ?? '未知错误'}</p>
+        <Button variant="primary" disabled={retryStage === undefined} onClick={() => { void retryStage?.() }}>重试</Button>
+      </div>}
 
       <div className={css.columns}>
         <div className={css.left}>

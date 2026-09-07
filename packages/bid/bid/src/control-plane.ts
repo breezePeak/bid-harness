@@ -15,6 +15,7 @@ export {
   STAGE_RUN_STATUSES,
 } from './control-plane-contract.ts'
 export type {
+  BidDetailsView,
   BidClientAction,
   BidChapterReviewStatus,
   BidChapterWritingStatus,

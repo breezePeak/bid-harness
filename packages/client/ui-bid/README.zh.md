@@ -6,7 +6,9 @@
 
 `projection.allowedActions` 控制上传、重试、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件为生成的 `bid/uploadFiles` Remote 编码这些字节，重试控件只调用生成的 `bid/retryStage` Remote；两者都不调用 `session.prompt()`，只有刷新的 Host Projection 才会报告阶段成功或失败。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
 
-“审核项”标签在 S2–S4 等待确认时显示，并从 S5 开始常驻。S5 运行中实时展示正文和 Reviewer 状态；S5 完成后仍保留全部章节状态，并在工作台顶部提供可重复执行的“导出 Word”。旧项目保存为 `docx_export/completed` 时也按完成的 S5 展示，不切换到单独的导出页面。
+“招标详情”在 S2 结果可确认时出现，确认后只读并常驻。“目录详情”从 S3 确认后出现，S4 执行期间读取 S3 确认目录；S4 生成结束等待确认时展示深化目录及原有编辑操作，确认后读取最终目录。“正文详情”从进入 S5 开始常驻，轮询已生成正文和 Reviewer 状态，等待、失败及完成状态均保留已有章节。进入 S6 或刷新、重新进入会话时，三个详情入口从 Host 已发布产物恢复。
+
+S3 确认前使用临时“审核项”入口，确认后由“目录详情”接替。S2–S4 的确认按钮统一位于审核页面顶部右侧；目录修改意见、重新生成和确认错误也留在审核页面，输入框上方只保留阶段状态。S5 完成后，“正文详情”顶部提供可重复执行的“导出 Word”；旧项目的 `docx_export/completed` 同样保留正文和导出操作。
 
 面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S5 审核项使用三栏工作台展示目录、正文、资料和 Reviewer 状态，通过专用 Remote 读取审核报告与章节；完成后的 Word 导出通过 `bid/exportDocx` 生成独立文件，不改变 S5 Projection。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 

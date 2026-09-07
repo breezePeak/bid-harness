@@ -55,6 +55,8 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getTenderAnalysisForConfirmation` 返回 S2 的四个 Artifact；`bid/confirmTenderAnalysis` 只允许编辑规范化项目、要求、评分与合规字段。原文、分值、ID、`source_refs` 与招标文件覆盖集合不在操作协议中。Host 原子替换四个原路径文件并再次执行完整 S2 Validator；无效输入返回问题并保持 `waiting_user`，通过后才完成 S2 并启动 S3。
 
+`bid/getDetails` 只读已发布详情：S2 确认后继续返回最终招标信息；S3 确认后读取 `outline/initial-confirmed-outline.json`，S4 执行期间保持该版本，等待确认时读取已生成目录，S4 确认后读取 `outline/confirmed-outline.json`。详情读取依赖恢复后的项目状态和原有产物，不新增工作流事件或磁盘格式，也不改变确认接口的编辑准入。
+
 ## Model Experience
 ## S2–S5 质量控制
 

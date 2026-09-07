@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -66,6 +66,38 @@ async function fixture() {
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    for (const [path, title] of [
+      ['initial-confirmed-outline.json', 'S3 已确认目录'],
+      ['outline.json', 'S4 已生成目录'],
+      ['confirmed-outline.json', 'S4 最终确认目录'],
+    ]) {
+      await writeFile(join(workspace.projectRoot, 'outline', path!), JSON.stringify({ ...outline, sections: outline.sections.map(section => ({ ...section, title })) }))
+    }
+    const cases = [
+      ['file_intake', 'pending', false, null, false],
+      ['tender_analysis', 'waiting_user', true, null, false],
+      ['outline_generation', 'pending', true, null, false],
+      ['outline_generation', 'waiting_user', true, null, false],
+      ['evidence_mapping', 'pending', true, 'S3 已确认目录', false],
+      ['evidence_mapping', 'failed', true, 'S3 已确认目录', false],
+      ['evidence_mapping', 'waiting_user', true, 'S4 已生成目录', false],
+      ['chapter_writing', 'pending', true, 'S4 最终确认目录', true],
+      ['chapter_writing', 'failed', true, 'S4 最终确认目录', true],
+      ['chapter_writing', 'completed', true, 'S4 最终确认目录', true],
+      ['docx_export', 'completed', true, 'S4 最终确认目录', true],
+    ] as const
+    for (const [index, [stage, status, tender, title, body]] of cases.entries()) {
+      await checkpointBidProjectState(workspace, { stage, status })
+      const agent = await fresh(`details-${String(index)}`)
+      const details = await ctx.bid.getDetails(agent.session)
+      expect(details.tender !== null).toBe(tender)
+      expect(details.outline?.sections[0]?.title ?? null).toBe(title)
+      expect(details.body).toBe(body)
+    }
+  })
   it('fresh Session 保留 S4 项目，聊天、推理、工具和 conversation nodes 均为空', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
@@ -107,6 +139,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
     const c = await fresh('session-c')
     expect(runtime(c.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect((await ctx.bid.getDetails(c.session)).tender?.project.project_name).toBe('项目 B')
   })
 
   it('S5 失败后新 Session 继续读取已有正文和执行日志，并从 S5 retry', async () => {

@@ -60,8 +60,22 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
   })
   expect(JSON.parse(result.stdout)).toMatchInlineSnapshot(`
     {
+      "details": {
+        "body": false,
+        "outline": [
+          "技术方案",
+        ],
+        "tender": "项目 A",
+      },
       "export": {
         "checkpointUnchanged": true,
+        "details": {
+          "body": true,
+          "outline": [
+            "技术方案",
+          ],
+          "tender": "项目 A",
+        },
         "docxAvailable": true,
         "executions": 1,
         "messages": [],

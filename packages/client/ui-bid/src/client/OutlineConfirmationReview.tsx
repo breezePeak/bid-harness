@@ -1,4 +1,5 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
+import type { ReactNode } from 'react'
 import {
   buildOutlineView,
   type BidStage,
@@ -16,11 +17,18 @@ import {
 import { compareOutlines, outlineDropOperation } from './outline-review.ts'
 import type { BidKey } from './locales.ts'
 import css from './OutlineConfirmationReview.module.css'
+import reviewCss from './TenderAnalysisReview.module.css'
 
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 
 export interface OutlineConfirmationReviewProps {
   outline: OutlineArtifact
+  /** 已发布详情禁止编辑，保留目录导航和关联内容。 */
+  readOnly?: boolean
+  /** 与 S2 共用顶部右侧确认位置。 */
+  confirmation?: ReactNode
+  feedback?: ReactNode
+  notice?: ReactNode
   reviewContext?: OutlineReviewContext | null | undefined
   stage?: BidStage | undefined
   draftSaveState?: 'saved' | 'saving' | 'failed' | 'conflict' | undefined
@@ -39,6 +47,10 @@ export interface OutlineConfirmationReviewProps {
  */
 export function OutlineConfirmationReview({
   outline,
+  readOnly = false,
+  confirmation,
+  feedback,
+  notice,
   reviewContext,
   stage,
   draftSaveState = 'saved',
@@ -181,46 +193,51 @@ export function OutlineConfirmationReview({
             <span className={css.docTitle} title={outline.document_title}>
               {outline.document_title || '技术标文件'}
             </span>
-            <span className={css.stagePill}>{stageLabel}</span>
+            <span className={css.stagePill}>{readOnly ? '目录详情' : stageLabel}</span>
           </div>
-          <div className={css.saveStatus}>
+          {!readOnly && <div className={css.saveStatus}>
             <span className={`${css.saveDot} ${draftSaveState === 'saving' ? css.saveDotSaving : draftSaveState === 'conflict' || draftSaveState === 'failed' ? css.saveDotConflict : ''}`} />
             <span>
               {t(`outline.draft.${draftSaveState}`)}
               {revision !== undefined ? ` (Rev ${String(revision)})` : ''}
             </span>
-          </div>
+          </div>}
         </div>
-        <div className={css.statsGrid}>
-          <div className={css.statCard}>
-            <span className={css.statLabel}>章节总数</span>
-            <span className={css.statValue}>
-              {stats.total}
-              <span className={css.statSub}>{stats.rootCount} 个一级大章</span>
-            </span>
+        <div className={reviewCss.statsRow}>
+          <div className={reviewCss.statsGrid}>
+            <div className={css.statCard}>
+              <span className={css.statLabel}>章节总数</span>
+              <span className={css.statValue}>
+                {stats.total}
+                <span className={css.statSub}>{stats.rootCount} 个一级大章</span>
+              </span>
+            </div>
+            <div className={css.statCard}>
+              <span className={css.statLabel}>正文编写章节</span>
+              <span className={css.statValue}>
+                {stats.writableCount}
+                <span className={css.statSub}>{stats.structuralCount} 个分类结构</span>
+              </span>
+            </div>
+            <div className={css.statCard}>
+              <span className={css.statLabel}>覆盖招标要求</span>
+              <span className={css.statValue}>
+                {stats.reqCount}
+                <span className={css.statSub}>项 REQ 已分配</span>
+              </span>
+            </div>
+            <div className={css.statCard}>
+              <span className={css.statLabel}>覆盖评分响应点</span>
+              <span className={css.statValue}>
+                {stats.rpCount > 0 ? stats.rpCount : stats.scoringCount}
+                <span className={css.statSub}>项评分点应答</span>
+              </span>
+            </div>
           </div>
-          <div className={css.statCard}>
-            <span className={css.statLabel}>正文编写章节</span>
-            <span className={css.statValue}>
-              {stats.writableCount}
-              <span className={css.statSub}>{stats.structuralCount} 个分类结构</span>
-            </span>
-          </div>
-          <div className={css.statCard}>
-            <span className={css.statLabel}>覆盖招标要求</span>
-            <span className={css.statValue}>
-              {stats.reqCount}
-              <span className={css.statSub}>项 REQ 已分配</span>
-            </span>
-          </div>
-          <div className={css.statCard}>
-            <span className={css.statLabel}>覆盖评分响应点</span>
-            <span className={css.statValue}>
-              {stats.rpCount > 0 ? stats.rpCount : stats.scoringCount}
-              <span className={css.statSub}>项评分点应答</span>
-            </span>
-          </div>
+          {confirmation != null && <div className={reviewCss.actionCard}>{confirmation}</div>}
         </div>
+        {feedback}
+        {notice}
       </header>
 
       {stage === 'evidence_mapping' && <div className={css.diffSummary}>
@@ -247,7 +264,7 @@ export function OutlineConfirmationReview({
             全部折叠
           </Button>
         </div>
-        <div className={css.toolbarRight}>
+        {!readOnly && <div className={css.toolbarRight}>
           <Button
             size="sm"
             variant="outline"
@@ -267,7 +284,7 @@ export function OutlineConfirmationReview({
           >
             + 新增一级大章
           </Button>
-        </div>
+        </div>}
       </div>
 
       <div className={`${css.workbench} ${stage === 'evidence_mapping' ? css.threeColumns : ''}`}>
@@ -303,7 +320,7 @@ export function OutlineConfirmationReview({
                 className={`${css.treeRow} ${selected?.id === section.id ? css.selected : ''} ${onlyChanges && !changed(section.id) ? css.muted : ''}`}
                 onFocus={() => { setSelectedId(section.id) }}
                 onClick={() => { setSelectedId(section.id) }}
-                draggable={editingId !== section.id}
+                draggable={!readOnly && editingId !== section.id}
                 // Let the browser capture the drag image before adding drop targets.
                 onDragStart={(event) => {
                   event.dataTransfer.setData('application/x-bid-outline-section', section.id)
@@ -357,9 +374,9 @@ export function OutlineConfirmationReview({
                     <span className={css.collapsePlaceholder} />
                   )}
 
-                  <button type="button" aria-label={`拖动 ${section.title}`} className={css.dragHandle}
+                  {!readOnly && <button type="button" aria-label={`拖动 ${section.title}`} className={css.dragHandle}
                     onClick={() => { setSelectedId(section.id) }}
-                  >⠿</button>
+                  >⠿</button>}
                   <span className={css.sectionNumber} aria-label={`${section.id} 章节编号`}>
                     {number}
                   </span>
@@ -372,7 +389,7 @@ export function OutlineConfirmationReview({
                         else titleInputs.current.delete(section.id)
                       }}
                       aria-label={`${section.id} 标题`}
-                      readOnly={editingId !== section.id}
+                      readOnly={readOnly || editingId !== section.id}
                       value={editingId === section.id ? editingTitle : section.title}
                       onChange={(event) => { setEditingTitle(event.target.value) }}
                       onBlur={() => {
@@ -383,7 +400,7 @@ export function OutlineConfirmationReview({
                     />
                   </div>
                   {badges(section.id)}
-                  <span className={css.rowActions}>
+                  {!readOnly && <span className={css.rowActions}>
                     <button type="button" className={css.rowIcon} aria-label={`编辑 ${section.title}`}
                       onClick={() => {
                         setEditingId(section.id)
@@ -397,7 +414,7 @@ export function OutlineConfirmationReview({
                       onClick={() => { onStructureOperation({ type: 'delete_section', section_id: section.id }) }}>
                       <IconTrashOutline16 />
                     </button>
-                  </span>
+                  </span>}
                 </div>
 
 
@@ -431,7 +448,7 @@ export function OutlineConfirmationReview({
                   </span>
                 )}
               </div>
-              <div className={css.cardActions}>
+              {!readOnly && <div className={css.cardActions}>
                 <button
                   type="button"
                   className={css.actionButton}
@@ -521,7 +538,7 @@ export function OutlineConfirmationReview({
                 >
                   删除
                 </button>
-              </div>
+              </div>}
               {section.summary && <p>{section.summary}</p>}
               {(
                 <div className={css.cardDetails}>
@@ -530,6 +547,7 @@ export function OutlineConfirmationReview({
                     <textarea
                       className={css.detailTextarea}
                       aria-label={`${section.id} 目的`}
+                      readOnly={readOnly}
                       value={section.purpose}
                       onChange={(event) => {
                         onUpdateSection(section.id, { purpose: event.target.value })
@@ -543,6 +561,7 @@ export function OutlineConfirmationReview({
                       <textarea
                         className={css.detailTextarea}
                         aria-label={`${section.id} 必答内容`}
+                        readOnly={readOnly}
                         value={section.must_answer.join('\n')}
                         onChange={(event) => {
                           onUpdateSection(section.id, {

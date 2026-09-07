@@ -81,12 +81,6 @@
 }
 
 /* 核心指标统计卡片组 */
-.statsGrid {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
 .statCard {
   flex: 1 1 120px;
   display: flex;

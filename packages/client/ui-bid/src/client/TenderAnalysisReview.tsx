@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import type { ReactNode } from 'react'
 import type {
   TenderAnalysisConfirmationView,
   TenderAnalysisEditOperation,
@@ -134,9 +135,10 @@ function EditableCell({
     return <div className={css.cellValue}>{value}</div>
   }
 
+  if (disabled) return <div className={css.cellValue}>{renderContent()}</div>
   if (isEditing) {
     return (
-      <div className={css.cellEditing} onClick={e => e.stopPropagation()}>
+      <div className={css.cellEditing} onClick={(e) => { e.stopPropagation() }}>
         {multiline ? (
           <Textarea
             autoFocus
@@ -221,9 +223,11 @@ function EditableCell({
   )
 }
 /** S2 标书分析审核全屏工作台组件 */
-export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
+export function TenderAnalysisReview({ value, pending, onConfirm, t, readOnly = false, notice }: {
   value: TenderAnalysisConfirmationView
   pending: boolean
+  readOnly?: boolean
+  notice?: ReactNode
   onConfirm: (operations: readonly TenderAnalysisEditOperation[]) => void
   t: TranslateBid
 }) {
@@ -261,7 +265,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
             <span className={css.docTitle} title={docTitle}>
               {docTitle}
             </span>
-            <span className={css.stagePill}>S2 · 招标解析确认</span>
+            <span className={css.stagePill}>{readOnly ? '招标详情' : 'S2 · 招标解析确认'}</span>
           </div>
         </div>
         <div className={css.statsRow}>
@@ -297,11 +301,11 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
           </div>
 
           {/* 右侧红框位置：确认操作按钮卡片 */}
-          <div className={css.actionCard}>
+          {!readOnly && <div className={css.actionCard}>
             <Button
               size="sm"
               variant="primary"
-              disabled={pending}
+              disabled={pending || readOnly}
               onClick={() => { onConfirm(modifiedOperations) }}
             >
               {pending ? t('analysis.confirming') : t('analysis.confirm')}
@@ -309,8 +313,9 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
             <span className={css.actionHint}>
               {modifiedOperations.length > 0 ? `已调整 ${modifiedOperations.length} 项修改` : '审查完毕请确认结果'}
             </span>
-          </div>
+          </div>}
         </div>
+        {notice}
       </header>
 
       {/* 主体滚动区：四大业务板块，支持折叠成 4 行与展开表格展示 */}
@@ -320,7 +325,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
           <button
             type="button"
             className={css.accordionHeader}
-            onClick={() => toggleSection('project')}
+            onClick={() => { toggleSection('project') }}
             aria-expanded={!collapsed.has('project')}
           >
             <span className={css.accordionTitle}>
@@ -355,7 +360,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                         <EditableCell
                           label={t(`analysis.project.${key}`)}
                           value={draft.project[key] ?? ''}
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => { updateProject(key, next || null) }}
                         />
                       </td>
@@ -371,7 +376,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                           label={t(`analysis.project.${key}`)}
                           value={draft.project[key].join('\n')}
                           multiline
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => { updateProject(key, lines(next)) }}
                         />
                       </td>
@@ -388,7 +393,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
           <button
             type="button"
             className={css.accordionHeader}
-            onClick={() => toggleSection('requirements')}
+            onClick={() => { toggleSection('requirements') }}
             aria-expanded={!collapsed.has('requirements')}
           >
             <span className={css.accordionTitle}>
@@ -434,7 +439,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                           label={item.id}
                           value={item.normalized_requirement}
                           multiline
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => {
                             setDraft(current => ({
                               ...current,
@@ -462,7 +467,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
           <button
             type="button"
             className={css.accordionHeader}
-            onClick={() => toggleSection('scoring')}
+            onClick={() => { toggleSection('scoring') }}
             aria-expanded={!collapsed.has('scoring')}
           >
             <span className={css.accordionTitle}>
@@ -499,7 +504,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                           label={`${item.id} · ${t('analysis.scoring.title')}`}
                           testLabel={t('analysis.scoring.title')}
                           value={item.title}
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => {
                             setDraft(current => ({
                               ...current,
@@ -531,7 +536,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                           testLabel={t('analysis.scoring.criterion')}
                           value={item.criterion}
                           multiline
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => {
                             setDraft(current => ({
                               ...current,
@@ -559,7 +564,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
           <button
             type="button"
             className={css.accordionHeader}
-            onClick={() => toggleSection('compliance')}
+            onClick={() => { toggleSection('compliance') }}
             aria-expanded={!collapsed.has('compliance')}
           >
             <span className={css.accordionTitle}>
@@ -602,7 +607,7 @@ export function TenderAnalysisReview({ value, pending, onConfirm, t }: {
                           label={item.id}
                           value={item.normalized_rule}
                           multiline
-                          disabled={pending}
+                          disabled={pending || readOnly}
                           onChange={(next) => {
                             setDraft(current => ({
                               ...current,
