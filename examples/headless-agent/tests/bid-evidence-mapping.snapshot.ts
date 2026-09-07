@@ -12,7 +12,7 @@ const fixtureDir = fileURLToPath(new URL('./bid-evidence-mapping-snapshots/', im
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-evidence-mapping-driver.ts', import.meta.url))
 
-it('repairs S4 Web evidence across Child turns through the headless Loader', async () => {
+it('corrects S4 tool arguments in one Child turn through the headless Loader', async () => {
   const result = await runLoaderSmoke({
     label: 'S4 同 Child Web 证据修复',
     tempDirPrefix: 'dsh-s4-web-snapshot-',
@@ -33,11 +33,14 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
         .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
-      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 2]])
-      expect(childLog).toContain('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
+      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 1]])
+      expect(childLog).toContain('web_materials.0.url')
       expect(childLog).toContain('SEARCH_INVALID_PATTERN')
       expect(childLog).toContain('SEARCH_RAW_OUTPUT_OVERFLOW')
-      expect(childLog).toContain('submit_evidence_mapping')
+      expect(childLog).toContain('lock_branch_outline')
+      expect(childLog).toContain('submit_section_mapping')
+      expect(childLog).toContain('finish_mapping_task')
+      expect(childLog).not.toContain('submit_evidence_mapping')
       expect(childLog).toContain('reference_bid')
       expect(childLog).toContain('INVALID_ARGS')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })
@@ -50,7 +53,7 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       const [finalHeaderLine, ...finalEventLines] = finalCheckLog.trimEnd().split('\n')
       const finalHeader = JSON.parse(finalHeaderLine!) as SessionHeader
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
-      expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['submit_evidence_mapping'])
+      expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['finish_final_check'])
       expect(finalCheckLog).toContain('https://official.example/standard')
       const refinementLogs = childLogs.filter(log => !log.includes('MAP-INIT-') && !log.includes('MAP-FINAL-CHECK'))
       expect(refinementLogs).toHaveLength(2)
@@ -98,5 +101,8 @@ it('repairs S4 Web evidence across Child turns through the headless Loader', asy
       for (const [name, content] of Object.entries(expected)) expect(content).toBe(await readFile(join(fixtureDir, name), 'utf8'))
     },
   })
-  expect(JSON.parse(result.stdout)).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
+  expect(JSON.parse(result.stdout)).toEqual({
+    stage: 'evidence_mapping', status: 'waiting_user',
+    state_files: ['evidence-mapping-checkpoint.json', 'evidence-mapping-plan.json'],
+  })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

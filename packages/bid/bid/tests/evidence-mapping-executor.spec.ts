@@ -1,7 +1,10 @@
+import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import SandboxedFileSystem from '../../../fs/fs-sandbox/src/index.ts'
+import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
@@ -23,6 +26,7 @@ import {
   applyOutlineEdits,
   createScoringResponsePointCatalog,
   executeEvidenceMapping,
+  executeEvidenceMappingFinalCheck,
   parseWebEvidenceSourcesArtifact,
   parseEvidenceMapArtifact,
   parseScoringResponsePointCatalog,
@@ -43,6 +47,29 @@ import {
   type LocalEvidenceMaterial,
   type SectionEvidenceMapping,
 } from '@deepseek-ai/dsh-bid'
+
+const atomicWriteFailure = vi.hoisted(() => ({ suffix: '', remaining: 0 }))
+
+vi.mock('@deepseek-ai/dsh-atomic-write', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-atomic-write')>()
+  return {
+    ...actual,
+    writeFileAtomic: async (...args: Parameters<typeof actual.writeFileAtomic>) => {
+      if (atomicWriteFailure.remaining > 0 && args[0].endsWith(atomicWriteFailure.suffix)) {
+        atomicWriteFailure.remaining--
+        throw Object.assign(new Error('injected atomic publication failure'), { code: 'EPERM' })
+      }
+      return actual.writeFileAtomic(...args)
+    },
+  }
+})
+
+const filesystemContexts: Context[] = []
+afterEach(async () => {
+  atomicWriteFailure.suffix = ''
+  atomicWriteFailure.remaining = 0
+  await Promise.all(filesystemContexts.splice(0).map(ctx => ctx.fiber.dispose()))
+})
 
 interface EvidenceMappingWebObservation {
   callId: string
@@ -134,13 +161,14 @@ function mappingFixture(
   material: { chunk: string; fileId: string },
   repairFirst = false,
   outlineOperations: Readonly<Record<string, readonly OutlineEditOperation[]>> = {},
+  autoFinal = true,
 ) {
   let pendingMain = ''
   let active = 0
   let maxActive = 0
   let sequence = 0
-  const starts: Array<{ request: ContinuableStartSpec; resolve(): void }> = []
-  const finalStarts: Array<{ request: ContinuableStartSpec; resolve(): void }> = []
+  const starts: Array<{ request: ContinuableStartSpec; resolve(): void; complete(): void }> = []
+  const finalStarts: Array<{ request: ContinuableStartSpec; resolve(): void; complete(): void }> = []
   const taskAttempts = new Map<string, number>()
   const disposed: string[] = []
   const serializeReply = vi.fn((value: EvidenceMappingPartialResult) => JSON.stringify(value))
@@ -163,7 +191,8 @@ function mappingFixture(
   let webObserver: ((exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void) | undefined
   let continuableSetup: ((childCtx: Context) => () => void) | undefined
   const setupDisposers = new Map<string, () => void>()
-  const submissionTools = new Map<string, ToolDefinition>()
+  const submissionTools = new Map<string, Map<string, ToolDefinition>>()
+  const preparedChildren = new Set<string>()
   const resultObservers = new Map<string, Array<(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void>>()
   const emitWeb = (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]) => {
     for (const outcome of outcomes) {
@@ -240,19 +269,18 @@ function mappingFixture(
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
     const result = value as Record<string, unknown>
     if (!Array.isArray(result.section_mappings)) return value
+    const sectionMappings = result.section_mappings as unknown[]
     return {
       ...result,
       ...(typeof result.task_id === 'string' && result.task_id.startsWith('MAP-INIT-') && result.outline_operations === undefined
         ? { outline_operations: outlineOperations[result.task_id] ?? [] }
         : {}),
-      ...(result.task_id === 'MAP-FINAL-CHECK' && result.unchanged_section_ids === undefined
-        ? { unchanged_section_ids: [] }
-        : {}),
-      section_mappings: result.section_mappings.map((candidate) => {
+      section_mappings: sectionMappings.map((candidate) => {
         if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return candidate
         const mapping = candidate as Record<string, unknown>
         if (!Array.isArray(mapping.local_materials)) return candidate
-        return { ...mapping, local_materials: mapping.local_materials.map((entry) => {
+        const localMaterials = mapping.local_materials as unknown[]
+        return { ...mapping, local_materials: localMaterials.map((entry) => {
           if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry
           const materialEntry = entry as Record<string, unknown>
           const fileRef = [...fileRefs].find(([, identity]) => identity.file_id === materialEntry.file_id)?.[0]
@@ -267,6 +295,47 @@ function mappingFixture(
     }
   }
   let submissionSequence = 0
+  const invokeSubmissionTool = async (
+    child: Agent,
+    tool: ToolDefinition,
+    args: unknown,
+  ): Promise<Readonly<ToolExecutionResult>> => {
+    const token = {} as ToolExecution['token']
+    const exec = {
+      agent: child,
+      callId: `submit-${++submissionSequence}`,
+      rootCallId: `submit-${submissionSequence}`,
+      token,
+      name: tool.name,
+      arguments: args,
+      signal: new AbortController().signal,
+      deferContext: vi.fn(),
+      concludeTurn: vi.fn(),
+    } as unknown as ToolRunContext
+    let result: Readonly<ToolExecutionResult>
+    try {
+      const returned = await tool.execute(args, exec)
+      result = { isError: false, value: returned as never, content: [{ type: 'text', text: 'recorded' }] }
+    } catch (error: unknown) {
+      result = {
+        isError: true,
+        error: { message: error instanceof Error ? error.message : String(error) },
+        content: [{ type: 'text', text: 'invalid' }],
+      }
+    }
+    submissionResults.push(result)
+    for (const observer of resultObservers.get(String(child.id)) ?? []) observer(exec, result)
+    return result
+  }
+  const mappingToolArgs = (mapping: Record<string, unknown>): Record<string, unknown> => {
+    const brief = mapping.writing_brief as Record<string, unknown>
+    const { requirement_ids, scoring_ids, scoring_response_point_ids, ...writingBrief } = brief
+    return {
+      ...mapping,
+      writing_brief: writingBrief,
+      coverage_override: { requirement_ids, scoring_ids, scoring_response_point_ids },
+    }
+  }
   const submitReply = async (request: ContinuableStartSpec, child: Agent): Promise<void> => {
     let parsed: unknown
     try {
@@ -274,35 +343,50 @@ function mappingFixture(
     } catch {
       parsed = undefined
     }
-    const tool = submissionTools.get(String(child.id))
-    if (parsed !== undefined && tool !== undefined) {
-      for (const candidate of submissionCandidates(submissionArgs(parsed))) {
-        const token = {} as ToolExecution['token']
-        const exec = {
-          agent: child,
-          callId: `submit-${++submissionSequence}`,
-          rootCallId: `submit-${submissionSequence}`,
-          token,
-          name: tool.name,
-          arguments: candidate,
-          signal: new AbortController().signal,
-          deferContext: vi.fn(),
-          concludeTurn: vi.fn(),
-        } as unknown as ToolRunContext
-        let result: Readonly<ToolExecutionResult>
-        try {
-          const returned = await tool.execute(candidate, exec)
-          result = { isError: false, value: returned as never, content: [{ type: 'text', text: 'recorded' }] }
-        } catch (error: unknown) {
-          result = {
-            isError: true,
-            error: { message: error instanceof Error ? error.message : String(error) },
-            content: [{ type: 'text', text: 'invalid' }],
+    const tools = submissionTools.get(String(child.id))
+    if (parsed !== undefined && tools !== undefined) {
+      const candidates = submissionCandidates(submissionArgs(parsed))
+      const first = candidates[0] as Record<string, unknown> | undefined
+      if (!preparedChildren.has(String(child.id)) && first !== undefined) {
+        const apply = tools.get('apply_branch_outline_edit')
+        if (apply !== undefined) for (const operation of first.outline_operations as unknown[] ?? []) {
+          if ((await invokeSubmissionTool(child, apply, { operation })).isError) break
+        }
+        const lock = tools.get('lock_branch_outline')
+        if (lock !== undefined) await invokeSubmissionTool(child, lock, {})
+        preparedChildren.add(String(child.id))
+      }
+      for (const candidate of candidates) {
+        if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue
+        const record = candidate as Record<string, unknown>
+        const mappings = Array.isArray(record.section_mappings) ? record.section_mappings : []
+        const mappingTool = tools.get(record.task_id === 'MAP-FINAL-CHECK' ? 'replace_section_mapping' : 'submit_section_mapping')
+        let rejected = mappingTool === undefined
+        for (const mapping of mappings) {
+          if (mappingTool === undefined || typeof mapping !== 'object' || mapping === null || Array.isArray(mapping)) {
+            rejected = true
+            break
+          }
+          if ((await invokeSubmissionTool(child, mappingTool, mappingToolArgs(mapping as Record<string, unknown>))).isError) {
+            rejected = true
+            break
           }
         }
-        submissionResults.push(result)
-        for (const observer of resultObservers.get(String(child.id)) ?? []) observer(exec, result)
-        if (!result.isError) break
+        if (rejected) continue
+        if (record.task_id === 'MAP-FINAL-CHECK') {
+          const summaryTool = tools.get('submit_branch_summary')
+          for (const summary of record.branch_summaries as unknown[] ?? []) {
+            if (summaryTool === undefined || (await invokeSubmissionTool(child, summaryTool, summary)).isError) {
+              rejected = true
+              break
+            }
+          }
+        }
+        if (rejected) continue
+        const finish = tools.get(record.task_id === 'MAP-FINAL-CHECK' ? 'finish_final_check' : 'finish_mapping_task')
+        if (finish === undefined) continue
+        const finishResult = await invokeSubmissionTool(child, finish, {})
+        if (!finishResult.isError && (finishResult.value as { completed?: boolean }).completed) break
       }
     }
     ;(child.session.events as unknown[]).push({
@@ -371,10 +455,10 @@ function mappingFixture(
       const childTools = {
         register: vi.fn((definition: ToolDefinition) => {
           definitions.set(definition.name, definition)
-          if (definition.name === 'submit_evidence_mapping') submissionTools.set(String(id), definition)
+          submissionTools.set(String(id), definitions)
           return () => {
             definitions.delete(definition.name)
-            if (submissionTools.get(String(id)) === definition) submissionTools.delete(String(id))
+            if (definitions.size === 0) submissionTools.delete(String(id))
           }
         }),
         guard: vi.fn((guard: ToolGuard) => {
@@ -401,8 +485,8 @@ function mappingFixture(
         { type: 'tool/call', seq: 0, data: { name: 'read', callId: 'read-local', arguments: JSON.stringify({ file_path: readPath }) } },
         { type: 'tool/result', seq: 1, data: { message: { source: { callId: 'read-local' }, content: [{ isError: false }] } } },
       )
-      const settle = () => {
-        void submitReply(request, localAgent).finally(() => {
+      const settle = (submit: boolean) => {
+        void (submit ? submitReply(request, localAgent) : Promise.resolve()).finally(() => {
           active--
           settleIdle()
         })
@@ -410,8 +494,12 @@ function mappingFixture(
       children.set(String(id), localAgent)
       childRequests.set(String(id), request)
       const final = promptText(request.request).includes('"phase":"final_check"')
-      ;(final ? finalStarts : starts).push({ request, resolve: settle })
-      if (repairFirst || final) queueMicrotask(settle)
+      ;(final ? finalStarts : starts).push({
+        request,
+        resolve: () => { settle(true) },
+        complete: () => { settle(false) },
+      })
+      if (repairFirst || (final && autoFinal)) queueMicrotask(() => { settle(true) })
       return { childId: id, messageId: `message-${id}` as never }
     }),
     followup: vi.fn(async (_parent: Agent, childId: SessionId, _content: Array<{ type: string; text: string }>) => {
@@ -463,12 +551,23 @@ function mappingFixture(
     webObserver = observer as NonNullable<typeof webObserver>
     return () => { webObserver = undefined }
   })
-  const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, get: (name: string) => ({ fs: { resolve: async (path: string) => path }, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
+  const filesystemContext = new Context()
+  filesystemContexts.push(filesystemContext)
+  const sandboxPolicy = new SandboxPolicyService(filesystemContext, { mode: 'workspace-write' })
+  const filesystem = new SandboxedFileSystem(filesystemContext, { cwd: workspace.root, diffBasisMaxBytes: 10 * 1024 * 1024 })
+  const logger = { warn: vi.fn() }
+  const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
   return {
-    agent, starts, finalStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
-    childGuards, disposed, maxActive: () => maxActive, taskAttempts, onReply, onFinalReply, serializeReply, submissionCandidates,
-    submissionResults,
+    agent, filesystem, starts, finalStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
+    childGuards, disposed, maxActive: () => maxActive, taskAttempts, on, onReply, onFinalReply, serializeReply, submissionCandidates,
+    submissionResults, logger,
     serializeQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
+    invokeSubmissionTool: async (childId: SessionId, name: string, args: unknown) => {
+      const definition = submissionTools.get(String(childId))?.get(name)
+      const child = children.get(String(childId))
+      if (definition === undefined || child === undefined) throw new Error(`missing submission tool ${name}`)
+      return invokeSubmissionTool(child, definition, args)
+    },
     emitToolResult: (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => webObserver?.(exec, result),
   }
 }
@@ -477,6 +576,14 @@ const webUrl = 'https://official.example/a'
 
 function webMaterial(url = webUrl) {
   return { url, usage: 'reference' as const, summary: '官方技术依据。', supports: '支持技术响应。' }
+}
+
+function sectionToolArgs(sectionId: string, purpose: string, extra: Record<string, unknown> = {}) {
+  return {
+    section_id: sectionId,
+    writing_brief: { purpose, must_answer: [`${sectionId} 必须回答的事项。`] },
+    ...extra,
+  }
 }
 
 function webResearch(taskId: string) {
@@ -493,6 +600,203 @@ function webResearch(taskId: string) {
 }
 
 describe('evidence-mapping Agent executor', () => {
+  it('关键 checkpoint 写入失败会终止 Stage 并保留原始错误', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-state-write-failure-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const writes = vi.spyOn(fixture.filesystem, 'writeText')
+    let checkpointFailures = 0
+    fixture.filesystem.internals.inspectTemp = async ({ tempPath }) => {
+      if (!tempPath.endsWith('evidence-mapping-checkpoint.json.tmp') || checkpointFailures++ > 0) return
+      throw Object.assign(new Error('injected checkpoint publication failure'), { code: 'EPERM' })
+    }
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await expect(execution).rejects.toThrow('injected checkpoint publication failure')
+    expect(checkpointFailures).toBe(1)
+    expect(writes.mock.calls.map(call => call[4])).toEqual(writes.mock.calls.map(() => ({ mode: 'workspace-write', workspaceRoot: realpathSync.native(workspace.root), sessionId: 'session' })))
+    const failed = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      failure: Array<{ code: string; message: string }>
+      tasks: Array<{ status: string }>
+    }
+    expect(failed.failure).toEqual([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: 'injected checkpoint publication failure' }])
+    expect(failed.tasks.every((task: { status: string }) => task.status === 'failed')).toBe(true)
+  })
+
+  it('一次 progress log 写入失败不会污染后续关键 checkpoint', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-state-write-blocked-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    atomicWriteFailure.suffix = 'evidence-mapping-log.json'
+    atomicWriteFailure.remaining = 1
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 2,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string }>
+    }
+    expect(checkpoint.tasks).toHaveLength(3)
+    expect(fixture.logger.warn).toHaveBeenCalledWith(expect.stringContaining('S4 资料映射进度日志写入失败'))
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({ completed: 3, failed: 0 })
+  })
+
+  it('小工具以 Host 状态完成 missing、upsert、即时引用校验和 Final baseline/summary 聚合', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-incremental-mapping-tools-')))
+    const material = await writeInputs(workspace)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const third = {
+      ...structuredClone(outline.sections[1]!), id: 'SEC-3', order: 3, title: '章节3',
+      requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
+    }
+    const branch = {
+      ...structuredClone(outline.sections[0]!), id: 'BRANCH', parent_id: null, order: 1, level: 1, title: '实施分支',
+      writable: false, must_answer: [], scoring_response_point_ids: [], scoring_response_points: [],
+      summary: '汇总实施分支的三个写作任务。',
+    }
+    for (const section of [...outline.sections, third]) {
+      section.parent_id = 'BRANCH'
+      section.level = 2
+    }
+    outline.sections = [branch, ...outline.sections, third]
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const fixture = mappingFixture(workspace, material, false, {}, false)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const start = fixture.starts[0]!
+    const childId = start.request.childId!
+    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', {})
+    expect(lock).toMatchObject({ isError: false, value: { locked: true, writable_sections: [
+      { section_id: 'SEC-1' }, { section_id: 'SEC-2' }, { section_id: 'SEC-3' },
+    ] } })
+    await expect(fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+      operation: { type: 'update_section', section_id: 'SEC-1', title: '锁后修改' },
+    })).resolves.toMatchObject({ isError: true })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-UNKNOWN', '未知章节')))
+      .resolves.toMatchObject({ isError: true })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '错误文件', {
+      local_materials: [{ file_ref: 'F999', chunk: material.chunk, usage: 'reference', summary: '错误引用。' }],
+    }))).resolves.toMatchObject({ isError: true })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '错误分块', {
+      local_materials: [{ file_ref: 'F1', chunk: 'chunk_9999', usage: 'reference', summary: '错误分块。' }],
+    }))).resolves.toMatchObject({ isError: true })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '错误用途', {
+      local_materials: [{ file_ref: 'F1', chunk: material.chunk, usage: 'reuse', summary: '非法复用。' }],
+    }))).resolves.toMatchObject({ isError: true })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '第一次草稿')))
+      .resolves.toMatchObject({ isError: false, value: { remaining_section_ids: ['SEC-2', 'SEC-3'] } })
+    await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-1', '覆盖后的最终草稿'))
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-2', '允许旧标书适配', {
+      local_materials: [{ file_ref: 'F2', chunk: 'chunk_0001', usage: 'adapt', summary: '适配成熟方案。' }],
+    }))).resolves.toMatchObject({ isError: false })
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_mapping_task', {})).resolves.toMatchObject({
+      isError: false, value: { completed: false, missing_section_ids: ['SEC-3'] },
+    })
+    await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', sectionToolArgs('SEC-3', '第三章草稿'))
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_mapping_task', {})).resolves.toMatchObject({
+      isError: false, value: { completed: false, missing_section_ids: [], issues: [
+        { code: 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE' },
+        { code: 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE' },
+        { code: 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE' },
+      ] },
+    })
+    const withNotes = (sectionId: string, purpose: string, extra: Record<string, unknown> = {}) => sectionToolArgs(sectionId, purpose, {
+      writing_brief: { purpose, must_answer: [`${sectionId} 必须回答的事项。`], writing_notes: ['说明实施方法。'] },
+      ...extra,
+    })
+    await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', withNotes('SEC-1', '覆盖后的最终草稿'))
+    await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', withNotes('SEC-2', '允许旧标书适配', {
+      local_materials: [{ file_ref: 'F2', chunk: 'chunk_0001', usage: 'adapt', summary: '适配成熟方案。' }],
+    }))
+    await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', withNotes('SEC-3', '第三章草稿'))
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_mapping_task', {})).resolves.toMatchObject({
+      isError: false, value: { completed: true },
+    })
+    start.complete()
+
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    const final = fixture.finalStarts[0]!
+    const finalId = final.request.childId!
+    await expect(fixture.invokeSubmissionTool(finalId, 'finish_final_check', {})).resolves.toMatchObject({
+      isError: false, value: { completed: false, missing_summary_section_ids: ['BRANCH'] },
+    })
+    await fixture.invokeSubmissionTool(finalId, 'submit_branch_summary', { section_id: 'BRANCH', summary: '第一次摘要。' })
+    await fixture.invokeSubmissionTool(finalId, 'submit_branch_summary', { section_id: 'BRANCH', summary: '覆盖后的最终摘要。' })
+    await expect(fixture.invokeSubmissionTool(finalId, 'finish_final_check', {})).resolves.toMatchObject({
+      isError: false, value: { completed: true },
+    })
+    final.complete()
+    await execution
+
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(map.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1', 'SEC-2', 'SEC-3'])
+    expect(map.section_mappings.find(mapping => mapping.section_id === 'SEC-1')).toMatchObject({
+      local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: [],
+    })
+    const finalOutline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    expect(finalOutline.sections.find(section => section.id === 'SEC-1')?.purpose).toBe('覆盖后的最终草稿')
+    expect(finalOutline.sections.find(section => section.id === 'BRANCH')?.summary).toBe('覆盖后的最终摘要。')
+  })
+
+  it('目录工具返回 Host 分配的新 ID，并要求 NEW Section 提交完整 coverage override', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-incremental-new-sections-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const start = fixture.starts[0]!
+    const childId = start.request.childId!
+    await expect(fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+      operation: { type: 'update_section', section_id: 'SEC-1', summary: '分别说明两个子任务。' },
+    })).resolves.toMatchObject({ isError: false, value: { created_section_ids: [] } })
+    const split = await fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+      operation: { type: 'split_section', section_id: 'SEC-1', children: [
+        { title: '子任务甲', purpose: '说明子任务甲的实施方法。', must_answer: ['如何实施子任务甲？'] },
+        { title: '子任务乙', purpose: '说明子任务乙的实施方法。', must_answer: ['如何实施子任务乙？'] },
+      ] },
+    })
+    expect(split).toMatchObject({ isError: false })
+    const createdIds = split.isError ? [] : (split.value as { created_section_ids: string[] }).created_section_ids
+    expect(createdIds).toHaveLength(2)
+    expect(createdIds.every(id => id.startsWith('NEW-'))).toBe(true)
+    const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', {})
+    expect(lock).toMatchObject({ isError: false, value: { writable_sections: createdIds.map(section_id => ({ section_id })) } })
+    const brief = (sectionId: string) => ({
+      section_id: sectionId,
+      writing_brief: { purpose: `完成 ${sectionId} 的响应说明。`, must_answer: [`如何完成 ${sectionId}？`], writing_notes: ['说明方法与验证。'] },
+    })
+    const withoutCoverage = await fixture.invokeSubmissionTool(childId, 'submit_section_mapping', brief(createdIds[0]!))
+    expect(withoutCoverage).toMatchObject({ isError: true })
+    if (withoutCoverage.isError) expect(withoutCoverage.error.message).toContain('coverage_override')
+    for (const sectionId of createdIds) await expect(fixture.invokeSubmissionTool(childId, 'submit_section_mapping', {
+      ...brief(sectionId),
+      coverage_override: {
+        requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'],
+      },
+    })).resolves.toMatchObject({ isError: false })
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_mapping_task', {})).resolves.toMatchObject({
+      isError: false, value: { completed: true },
+    })
+    start.complete()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    await execution
+
+    const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+    expect(new Set(map.section_mappings.map(mapping => mapping.section_id)).size).toBe(3)
+    expect(map.section_mappings).toHaveLength(3)
+  })
+
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-reuse-')))
     const material = await writeInputs(workspace)
@@ -517,7 +821,7 @@ describe('evidence-mapping Agent executor', () => {
     })) }))
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     expect(map.section_mappings[1]).toMatchObject({ missing_topics: [], local_materials: [{ file_id: material.fileId, source_kind: 'reference', chunk: material.chunk }] })
@@ -550,7 +854,7 @@ describe('evidence-mapping Agent executor', () => {
     })
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     expect(map.section_mappings).toHaveLength(1)
@@ -576,7 +880,7 @@ describe('evidence-mapping Agent executor', () => {
     }))
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as { tasks: Array<{ phase: string; attempts: Array<{ issues: Array<{ code: string }> }> }> }
     const final = log.tasks.find(task => task.phase === 'final_check')!
@@ -656,7 +960,7 @@ describe('evidence-mapping Agent executor', () => {
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await initial
     const paths = ['analysis/evidence-map.json', 'outline/outline.json'].map(path => join(workspace.projectRoot, path))
     const before = await Promise.all(paths.map(path => readFile(path, 'utf8')))
@@ -684,7 +988,7 @@ describe('evidence-mapping Agent executor', () => {
     })
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await initial
     const mapPath = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const before = parseEvidenceMapArtifact(JSON.parse(await readFile(mapPath, 'utf8')))
@@ -743,7 +1047,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.taskAttempts.get('MAP-INIT-SEC-1')).toBe(2)
     expect(fixture.taskAttempts.get('MAP-INIT-SEC-2')).toBe(1)
     expect(fixture.subagents.followup.mock.calls[0]![2][0]!.text).toContain(
-      completedBeforeRepair ? 'EVIDENCE_MAPPING_PARTIAL_MISSING' : 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID',
+      completedBeforeRepair ? 'EVIDENCE_MAPPING_PARTIAL_MISSING' : 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING',
     )
     const child = fixture.children.get(String(fixture.starts[0]!.request.childId))!
     expect(child.session.events.filter(event => event.type === 'tool/call' && event.data.name === 'web_search')).toHaveLength(1)
@@ -824,7 +1128,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(map.section_mappings[1]!.web_materials).toHaveLength(1)
   })
 
-  it('reports each normalized invalid URL once across sections', async () => {
+  it('未 fetch 的 URL 在逐章提交时立即拒绝且不写入 staged mapping', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-dedup-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     fixture.onReply.mockImplementation((_child, result) => {
@@ -837,11 +1141,9 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach((start) => { start.resolve() })
     await rejection
-    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
-      tasks: Array<{ attempts: Array<{ issues: Array<{ code: string }> }> }>
-    }
-    expect(log.tasks[0]!.attempts[0]!.issues).toHaveLength(2)
-    expect(log.tasks[0]!.attempts[0]!.issues.every(issue => issue.code === 'EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')).toBe(true)
+    const failures = fixture.submissionResults.filter(result => result.isError)
+    expect(failures).toHaveLength(2)
+    expect(failures.every(result => result.isError && result.error.message.includes('web_materials.0.url'))).toBe(true)
   })
 
   it.each(['schema', 'unknown-file'] as const)('提交工具拒绝同批某章节的 %s material 后允许同轮修正', async (scenario) => {
@@ -860,8 +1162,8 @@ describe('evidence-mapping Agent executor', () => {
       const mapping = result.section_mappings.find(item => item.section_id === 'SEC-1')
       if (mapping === undefined) return
       mapping.local_materials[0] = { ...mapping.local_materials[0]! }
-      if (scenario === 'schema') (mapping.local_materials[0] as unknown as { usage: string }).usage = 'invalid'
-      else mapping.local_materials[0]!.file_id = 'unknown'
+      if (scenario === 'schema') Object.assign(mapping.local_materials[0], { usage: 'invalid' })
+      else mapping.local_materials[0].file_id = 'unknown'
     })
     fixture.submissionCandidates.mockImplementationOnce((value) => {
       const corrected = structuredClone(value) as {
@@ -874,7 +1176,7 @@ describe('evidence-mapping Agent executor', () => {
     })
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 3 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     expect(map.section_mappings.find(item => item.section_id === 'SEC-1')!.local_materials).toHaveLength(1)
@@ -903,7 +1205,8 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain('"id":"R-2"')
     expect(promptText(fixture.starts[0]!.request.request)).toContain('不得脱离当前 Section 做全局资料搜集')
-    expect(promptText(fixture.starts[0]!.request.request)).toContain('提交前逐项检查')
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('逐章调用 submit_section_mapping')
+    expect(promptText(fixture.starts[0]!.request.request)).not.toContain('submit_evidence_mapping')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.fileId)
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.tender.path)
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.fileId)
@@ -914,7 +1217,7 @@ describe('evidence-mapping Agent executor', () => {
     }
     const childReadGuard = fixture.childGuards.get(String(fixture.starts[0]!.request.childId))?.at(-1)
     expect(childReadGuard).toBeDefined()
-    expect(fixture.agent.ctx.on).toHaveBeenCalledWith('agent/created', expect.any(Function), { global: true })
+    expect(fixture.on).toHaveBeenCalledWith('agent/created', expect.any(Function), { global: true })
     expect(childReadGuard?.({
       name: 'read', arguments: { file_path: join(workspace.projectRoot, material.tender.path) },
       agent: { session: { header: { origin: 'subagent', parentSession: 'session', cwd: workspace.root } } },
@@ -1021,24 +1324,65 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-2')?.attempts).toHaveLength(2)
   })
 
-  it('Final Check 只提交变更项与未变更 ID，Host 恢复完整 v10 映射', async () => {
+  it('Final Check 不提交未变更章节，Host 自动恢复完整 baseline 映射', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-final-delta-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     fixture.onFinalReply.mockImplementation((_child, result) => {
-      const unchanged = result.section_mappings.map(mapping => mapping.section_id)
       result.section_mappings = []
-      ;(result as unknown as { unchanged_section_ids: string[] }).unchanged_section_ids = unchanged
     })
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
 
     const prompt = promptText(fixture.finalStarts[0]!.request.request)
-    expect(prompt).toContain('unchanged_section_ids')
+    expect(prompt).not.toContain('unchanged_section_ids')
     const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1', 'SEC-2'])
     expect(evidence.section_mappings.every(mapping => mapping.local_materials.length === 1)).toBe(true)
+  })
+
+  it('Final Check 对无 baseline 的新增章节返回 missing，replacement 后完成', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-check-new-section-')))
+    const material = await writeInputs(workspace)
+    const initialFixture = mappingFixture(workspace, material)
+    const initial = executeEvidenceMapping(initialFixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initialFixture.starts).toHaveLength(2) })
+    initialFixture.starts.forEach((start) => { start.resolve() })
+    await initial
+
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    outline.sections.push({
+      ...structuredClone(outline.sections[0]!), id: 'SEC-NEW', order: 3, title: '用户新增章节',
+      purpose: '说明用户新增但尚未研究的章节。', must_answer: ['如何响应新增章节？'],
+      requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
+      writing_notes: [], suggested_tables: [], suggested_figures: [],
+    })
+    const fixture = mappingFixture(workspace, material, false, {}, false)
+    const checking = executeEvidenceMappingFinalCheck(fixture.agent, workspace, outline, ['SEC-NEW'], {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    const final = fixture.finalStarts[0]!
+    const childId = final.request.childId!
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_final_check', {})).resolves.toMatchObject({
+      isError: false,
+      value: { completed: false, missing_mapping_section_ids: ['SEC-NEW'], missing_summary_section_ids: [] },
+    })
+    await expect(fixture.invokeSubmissionTool(childId, 'replace_section_mapping', {
+      section_id: 'SEC-NEW',
+      writing_brief: {
+        purpose: '给出用户新增章节的实施响应。', must_answer: ['如何响应新增章节？'], writing_notes: ['说明方法和验收。'],
+      },
+    })).resolves.toMatchObject({ isError: false, value: { remaining_section_ids: [] } })
+    await expect(fixture.invokeSubmissionTool(childId, 'finish_final_check', {})).resolves.toMatchObject({
+      isError: false, value: { completed: true },
+    })
+    final.complete()
+    const result = await checking
+    expect(result.evidence.section_mappings.find(mapping => mapping.section_id === 'SEC-NEW')).toMatchObject({
+      section_id: 'SEC-NEW', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: [],
+    })
   })
 
   it('研究驱动拆分的每个叶子具有完整 Brief，Final Check 重新选资料并更新分支摘要', async () => {
@@ -1224,18 +1568,22 @@ describe('S4 Host 准入与最终确认', () => {
     fixture.onFinalReply.mockImplementation(adapt)
     fixture.submissionCandidates.mockImplementationOnce((value) => {
       const valid = value as { task_id: string; section_mappings: Array<{ section_id: string; local_materials: Array<{ usage: string }> }> }
-      const wrongTask = { ...structuredClone(valid), task_id: 'MAP-WRONG' }
       const wrongSection = structuredClone(valid)
       wrongSection.section_mappings[0]!.section_id = 'SEC-WRONG'
-      const extraField = { ...structuredClone(valid), legacy_mapping: true }
+      const extraField = structuredClone(valid) as typeof valid & { section_mappings: Array<Record<string, unknown>> }
+      extraField.section_mappings[0]!.legacy_mapping = true
       const invalidUsage = structuredClone(valid)
       invalidUsage.section_mappings[0]!.local_materials[0]!.usage = 'reference_bid'
-      return [wrongTask, wrongSection, extraField, invalidUsage, value]
+      const invalidCoverage = structuredClone(valid) as typeof valid & {
+        section_mappings: Array<{ writing_brief: { requirement_ids: string[] } }>
+      }
+      invalidCoverage.section_mappings[0]!.writing_brief.requirement_ids = ['R-WRONG']
+      return [wrongSection, extraField, invalidUsage, invalidCoverage, value]
     })
 
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
 
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
@@ -1277,7 +1625,7 @@ describe('S4 Host 准入与最终确认', () => {
     fixture.emitToolResult(exec, { isError: true, error: { message: '请调整搜索条件', ...(code === undefined ? {} : { info: { name: 'SearchError', code } }) }, content: [{ type: 'text', text: '请调整搜索条件' }] })
     expect(fixture.starts.every(start => !start.request.signal?.aborted)).toBe(true)
     fixture.emitToolResult({ ...exec, callId: 'grep-corrected' as ToolExecution['callId'], arguments: { path: location!.chunks_path, pattern: '技术' } }, { isError: false, value: { matches: [] }, content: [{ type: 'text', text: 'No matches found' }] })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     expect([...fixture.taskAttempts.values()]).toEqual([1, 1, 1])
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
@@ -1292,7 +1640,7 @@ describe('S4 Host 准入与最终确认', () => {
     fixture.serializeQuality.mockReturnValueOnce(kind === 'json' ? '{' : '{}')
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     const repairs = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('上一份质量报告未通过校验'))
     expect(repairs).toHaveLength(1)
@@ -1310,7 +1658,7 @@ describe('S4 Host 准入与最终确认', () => {
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 2 })
     const rejection = expect(execution).rejects.toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURED_MISSING', artifact: 'outline/quality-report.json' }] })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await rejection
     expect(fixture.outlineReviewPrompts.filter(prompt => prompt.includes('上一份质量报告未通过校验'))).toHaveLength(2)
     expect([...fixture.taskAttempts.values()]).toEqual([1, 1])

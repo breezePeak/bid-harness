@@ -1,7 +1,8 @@
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -57,15 +58,7 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 /** 回放文件工具与 Host 使用同一个实际磁盘工作区。 */
-export default class IntegrationFileSystem extends Service {
-  constructor(ctx: Context) {
-    super(ctx, 'fs')
-  }
-
-  resolve(path: string): Promise<{ targetKey: string; displayPath: string }> {
-    return Promise.resolve({ targetKey: path, displayPath: path })
-  }
-}
+export default LocalFileSystem
 
 function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[]): void {
   const urls = typeof sourceUrls === 'string' ? [sourceUrls] : [...sourceUrls]
@@ -172,10 +165,10 @@ function transientWebMaterial(url: string) {
   }
 }
 
-function partialResult(url: string, taskId = 'MAP-INIT-SEC-SECURITY') {
+function partialResult(url: string) {
   const web = transientWebMaterial(url)
   return {
-    task_id: taskId,
+    task_id: 'MAP-INIT-SEC-SECURITY',
     section_mappings: [{
       section_id: 'SEC-SECURITY', local_materials: [], web_materials: [web], missing_topics: [], writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
       writing_brief: {
@@ -187,8 +180,16 @@ function partialResult(url: string, taskId = 'MAP-INIT-SEC-SECURITY') {
       },
     }],
     refinement_suggestions: [],
-    ...(taskId.startsWith('MAP-INIT-') ? { outline_operations: [] } : {}),
-    ...(taskId === 'MAP-FINAL-CHECK' ? { branch_summaries: [], unchanged_section_ids: [] } : {}),
+  }
+}
+
+function sectionSubmission(url: string) {
+  const mapping = partialResult(url).section_mappings[0]!
+  const { requirement_ids, scoring_ids, scoring_response_point_ids, ...writingBrief } = mapping.writing_brief
+  return {
+    ...mapping,
+    writing_brief: writingBrief,
+    coverage_override: { requirement_ids, scoring_ids, scoring_response_point_ids },
   }
 }
 
@@ -211,6 +212,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
   const tender = manifest.files.find(file => file.role === 'tender')!
   if (corpus === undefined || tender.chunksPath === null) throw new Error('missing mapping corpus')
+  const parsedQuality = JSON.parse(quality) as Record<string, unknown>
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     ...(repair ? [
@@ -219,27 +221,26 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
-    toolCall('submit-invalid-usage', 'submit_evidence_mapping', {
-      ...partialResult(sourceUrl),
-      section_mappings: [{
-        ...partialResult(sourceUrl).section_mappings[0]!,
-        local_materials: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference_bid', summary: '非法枚举回放。' }],
-        web_materials: [],
-      }],
+    toolCall('lock-initial-outline', 'lock_branch_outline', {}),
+    toolCall('submit-invalid-usage', 'submit_section_mapping', {
+      ...sectionSubmission(sourceUrl),
+      local_materials: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference_bid', summary: '非法枚举回放。' }],
+      web_materials: [],
     }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
-    ...(repair ? [toolCall('submit-before-fetch', 'submit_evidence_mapping', partialResult(sourceUrl))] : []),
+    ...(repair ? [toolCall('submit-before-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl))] : []),
     toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
     ...(!repair ? [
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
     ] : []),
-    toolCall('submit-after-fetch', 'submit_evidence_mapping', partialResult(sourceUrl)),
+    toolCall('submit-after-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl)),
+    toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
     ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
-      ...JSON.parse(quality), reviewed_section_ids: [],
+      ...parsedQuality, reviewed_section_ids: [],
     })] : []),
-    toolCall('submit-refinement-quality', 'structured_output', JSON.parse(quality)),
-    toolCall('submit-final-check', 'submit_evidence_mapping', partialResult(sourceUrl, 'MAP-FINAL-CHECK')),
+    toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
+    toolCall('finish-final-check', 'finish_final_check', {}),
   ]
   const parentScript: StreamChunk[][] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)

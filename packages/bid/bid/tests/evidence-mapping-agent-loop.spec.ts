@@ -111,9 +111,8 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         }>
       }
       const attempts = log.tasks[0]!.attempts
-      expect(attempts.map(attempt => attempt.accepted)).toEqual(repair ? [false, true] : [true])
+      expect(attempts.map(attempt => attempt.accepted)).toEqual([true])
       expect(new Set(attempts.map(attempt => attempt.child_session_id)).size).toBe(1)
-      if (repair) expect(attempts[0]!.issues[0]!.code).toBe('EVIDENCE_MAPPING_PARTIAL_WEB_EVIDENCE_INVALID')
       expect(log.tasks[1]).toMatchObject({ task_id: 'MAP-FINAL-CHECK', phase: 'final_check', attempts: [{ accepted: true }] })
     } finally {
       await ctx.fiber.dispose()

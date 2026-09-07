@@ -4,12 +4,18 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { withFileLock, writeFileAtomic } from '../src/index.ts'
 
-const state = vi.hoisted(() => ({ failLockCreateWithEPERM: false }))
+const state = vi.hoisted(() => ({ failLockCreateWithEPERM: false, renameErrors: [] as Error[], renameCalls: 0 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      state.renameCalls++
+      const error = state.renameErrors.shift()
+      if (error !== undefined) throw error
+      return actual.rename(...args)
+    },
     writeFile: (async (path: unknown, ...rest: never[]) => {
       if (state.failLockCreateWithEPERM && String(path).endsWith('.lock')) {
         state.failLockCreateWithEPERM = false
@@ -22,7 +28,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 afterEach(() => {
   state.failLockCreateWithEPERM = false
+  state.renameErrors = []
+  state.renameCalls = 0
 })
+
+function renameError(code: string): Error {
+  return Object.assign(new Error(`${code}: injected rename failure`), { code })
+}
 
 async function scratch(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'dsh-atomic-write-'))
@@ -58,12 +70,20 @@ describe('writeFileAtomic', () => {
     if (process.platform !== 'win32') expect((await stat(target)).mode & 0o777).toBe(0o600)
   })
 
-  it('replaces a symlinked target itself without writing through to the referent', async () => {
+  it('replaces a symlinked target itself without writing through to the referent', async (ctx) => {
     const dir = await scratch()
     const victim = join(dir, 'victim')
     await writeFile(victim, 'victim-content')
     const target = join(dir, 'doc.yaml')
-    await symlink(victim, target)
+    try {
+      await symlink(victim, target)
+    } catch (error: unknown) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        ctx.skip()
+        return
+      }
+      throw error
+    }
     await writeFileAtomic(target, 'replaced', { mode: 0o600 })
     expect((await lstat(target)).isSymbolicLink()).toBe(false)
     expect(await readFile(target, 'utf8')).toBe('replaced')
@@ -75,6 +95,45 @@ describe('writeFileAtomic', () => {
     const target = join(dir, 'occupied')
     await mkdir(target)
     await expect(writeFileAtomic(target, 'content', { mode: 0o600 })).rejects.toThrow()
+    expect((await readdir(dir)).filter(entry => entry.includes('.tmp'))).toEqual([])
+  })
+
+  it.each([
+    ['EPERM'],
+    ['EACCES', 'EBUSY'],
+  ])('retries transient rename failures and keeps the atomic replacement (%j)', async (...codes) => {
+    const dir = await scratch()
+    const target = join(dir, 'doc.yaml')
+    await writeFile(target, 'old')
+    state.renameErrors = codes.map(renameError)
+
+    await writeFileAtomic(target, 'new', { mode: 0o600 })
+
+    expect(await readFile(target, 'utf8')).toBe('new')
+    expect(state.renameCalls).toBe(codes.length + 1)
+    expect((await readdir(dir)).filter(entry => entry.includes('.tmp'))).toEqual([])
+  })
+
+  it('rethrows the first transient rename error after the bounded retries and removes the temp file', async () => {
+    const dir = await scratch()
+    const target = join(dir, 'doc.yaml')
+    const first = renameError('EPERM')
+    state.renameErrors = [first, ...Array.from({ length: 6 }, () => renameError('EBUSY'))]
+
+    await expect(writeFileAtomic(target, 'new', { mode: 0o600 })).rejects.toBe(first)
+
+    expect(state.renameCalls).toBe(7)
+    expect((await readdir(dir)).filter(entry => entry.includes('.tmp'))).toEqual([])
+  })
+
+  it('does not retry a non-transient rename error', async () => {
+    const dir = await scratch()
+    const target = join(dir, 'doc.yaml')
+    state.renameErrors = [renameError('EINVAL')]
+
+    await expect(writeFileAtomic(target, 'new', { mode: 0o600 })).rejects.toMatchObject({ code: 'EINVAL' })
+
+    expect(state.renameCalls).toBe(1)
     expect((await readdir(dir)).filter(entry => entry.includes('.tmp'))).toEqual([])
   })
 })

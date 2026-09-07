@@ -14,6 +14,27 @@ import { randomBytes } from 'node:crypto'
 import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
+const RENAME_RETRY_DELAYS_MS = [20, 50, 100, 200, 400, 800] as const
+
+function isTransientRenameError(error: unknown): boolean {
+  return ['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException | null)?.code ?? '')
+}
+
+async function renameWithRetry(temp: string, filename: string): Promise<void> {
+  let firstError: unknown
+  for (const delay of [0, ...RENAME_RETRY_DELAYS_MS]) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+    try {
+      await rename(temp, filename)
+      return
+    } catch (error: unknown) {
+      if (!isTransientRenameError(error)) throw error
+      firstError ??= error
+    }
+  }
+  throw firstError
+}
+
 /**
  * Filesystem options for {@link writeFileAtomic}; `mode` is required so the
  * permission decision stays visible at every call site.
@@ -40,8 +61,9 @@ export interface WriteFileAtomicOptions {
  * rename, so replacing a wider-permission file narrows it without a chmod
  * race. The rename also replaces a symlinked target itself instead of writing
  * through to its referent, and the same-directory sibling keeps the rename on
- * one filesystem. On any failure the temp file is removed and the failure
- * rethrown. Crash durability (fsync) is out of scope.
+ * one filesystem. Transient EPERM, EACCES, and EBUSY rename failures use a
+ * bounded retry cadence before the original failure is rethrown. On any
+ * failure the temp file is removed. Crash durability (fsync) is out of scope.
  * @param filename - final path receiving the content.
  * @param content - complete next file content.
  * @param options - permission bits for the replacement inode.
@@ -56,7 +78,7 @@ export async function writeFileAtomic(filename: string, content: string, options
   const temp = `${filename}.${randomBytes(6).toString('hex')}.tmp`
   try {
     await writeFile(temp, content, { mode: options.mode, flag: 'wx' })
-    await rename(temp, filename)
+    await renameWithRetry(temp, filename)
   } catch (error) {
     await rm(temp, { force: true })
     throw error
