@@ -50,7 +50,7 @@ it('章节拖入和段落右键引用使用专用修订接口，失败不发送�
     agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
     await scaffold.ctx.sessions.flush(agent.session)
     const reader = page.getByRole('main', { name: '正文阅读' })
-    await reader.getByText('选中第一段。', { exact: true }).waitFor({ timeout: 10_000 }).catch(async (error) => {
+    await reader.getByText('选中第一段。', { exact: true }).waitFor({ timeout: 10_000 }).catch(async (error: unknown) => {
       throw new Error(await page.locator('body').innerText(), { cause: error })
     })
     const composer = page.locator('[data-composer-card]')
