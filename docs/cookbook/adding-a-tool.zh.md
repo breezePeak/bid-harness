@@ -90,7 +90,3 @@ producer 提供同步的 `cancel`、在资源清理后 settle 且不 reject 的 
 - **`defineTool` 对展示路径做软校验。** 格式错误或旧版日志中的参数会使包装器返回 `undefined`（通用回退）而非抛异常——展示绝不能导致回放崩溃。
 
 中性词汇定义在 `dsh-tools` 中；工具绝不导入 UI 或传输类型。host/client 运行时将每个 `card` 映射到各自的视图。设计与原因见[渲染意图联合体 Agent Note](../../.agents/notes/implemented/architecture/2026-07-02-tool-render-intent-union.zh.md)；`dsh-tool-fs`（generic/diff）和 `dsh-tool-bash`（terminal）是参考实现。
-
-## 验证
-
-遵循[仓库测试策略](../testing.zh.md)和所属包的测试文档。已交付且面向模型或 UI 的变更必须提供其中规定的组装覆盖。
