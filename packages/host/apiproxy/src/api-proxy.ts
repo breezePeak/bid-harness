@@ -3451,12 +3451,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           committedWorkspaces.map(workspace => String(workspace.id)),
         )
         let committedWorkspaceOrder = committedWorkspaces.map(workspace => workspace.id)
+        // A live Session emits `session/disposed` before its persistence
+        // deletion emits `session/deleted`. The client needs one removal frame
+        // for that lifecycle, while cold persisted Sessions only emit the
+        // latter event.
+        const removedSessionIds = new Set<SessionId>()
         // Frame-dedup baseline, same posture as committedWorkspaceIds: the
         // stream opens against the current set; workspace.list re-baselines
         // reconnecting clients, so only later changes need frames.
         let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
         const disposers = [
           ctx.on('session/created', (session: Session) => {
+            removedSessionIds.delete(session.id)
             queue.push(frame({
               type: 'host/session-added',
               sessionId: session.id,
@@ -3468,7 +3474,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
+            removedSessionIds.add(session.id)
             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+          }),
+          ctx.on('session/deleted', (sessionId: SessionId) => {
+            if (removedSessionIds.has(sessionId)) return
+            removedSessionIds.add(sessionId)
+            queue.push(frame({ type: 'host/session-removed', sessionId }))
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
             queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))

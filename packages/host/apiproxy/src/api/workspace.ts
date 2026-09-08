@@ -66,9 +66,9 @@ export interface WorkspaceApi {
   Promise<RpcResponse<{ workspace: WorkspaceView }>>
 
   /**
-   * Removes one Workspace registration. The directory, every user file, and
-   * every session log remain untouched; those Sessions consequently become
-   * ungrouped. An unknown id fails with `workspace-not-found`.
+   * Removes one Workspace registration and every Session it owns. The
+   * directory and every user file remain untouched. An unknown id fails with
+   * `workspace-not-found`.
    */
   delete(request: RpcRequest<{ workspaceId: WorkspaceId }>):
   Promise<RpcResponse<{ deleted: true }>>

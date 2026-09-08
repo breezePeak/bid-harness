@@ -211,6 +211,8 @@ export interface AgentFactory {
    * @returns the owned handle after setup, both announcements, and loop start complete.
    */
   resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>
+  /** Stop and remove one live lifecycle created by this factory. */
+  disposeAgent?(id: SessionId): Promise<boolean>
 }
 
 /** Thrown when create/resume is called before an agent factory is registered. */
@@ -427,6 +429,18 @@ export class AgentRegistry extends Service {
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
     return Reflect.apply(target.resume, receiver, [ownerCtx, options])
+  }
+
+  /**
+   * Stop and remove a live Agent together with its Session.
+   * @param id - Shared Agent and Session identity.
+   * @returns whether a live lifecycle was removed.
+   */
+  async dispose(id: SessionId): Promise<boolean> {
+    const { target } = this.requireFactory()
+    if (target.disposeAgent === undefined) return false
+    const receiver = getTraceable(this.ctx, target)
+    return await Reflect.apply(target.disposeAgent, receiver, [id])
   }
 
   /**

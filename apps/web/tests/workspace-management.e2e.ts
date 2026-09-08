@@ -179,7 +179,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     expect(tripwire.pageErrors).toEqual([])
   }, 90_000)
 
-  it('deletes only the Workspace registration and keeps its current Session, folder, and log', async () => {
+  it('deletes every Session in the current Workspace without affecting another Workspace', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-ws-delete'))
     const slotConsoleErrors: string[] = []
     const transientSlotErrors: string[] = []
@@ -211,6 +211,9 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     const workspace = await scaffold.ctx.workspaceRegistry.resolveByPath(scaffold.workspaceCwd)
     if (workspace === undefined) throw new Error('GUI did not register the existing project directory')
     await workspace.attachSession(SessionId(SEED_ID))
+    const secondSessionId = 'workspace-delete-second-session'
+    await seedSession(scaffold, await readFile(SEED, 'utf8'), secondSessionId)
+    await workspace.attachSession(SessionId(secondSessionId))
     const header = (await scaffold.ctx.sessionPersistence.list())
       .find(candidate => candidate.id === SEED_ID)
     if (header === undefined) throw new Error('seeded Session log disappeared before deletion')
@@ -219,8 +222,16 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
     await stat(logLocation.path)
 
-    // Open the seeded (first/accounted) Session so deletion must preserve the
-    // current selection while it moves into Ungrouped.
+    await addNewFolderWorkspace(scaffold.workspaceCwd, 'workspace-delete-other')
+    const otherWorkspace = scaffold.ctx.workspaceRegistry.list()
+      .find(candidate => candidate.title === 'workspace-delete-other')
+    if (otherWorkspace === undefined || otherWorkspace.sessionIds[0] === undefined) {
+      throw new Error('other Workspace did not receive its Session')
+    }
+    const otherSessionId = otherWorkspace.sessionIds[0]
+
+    // Open the seeded Session so the destructive path must clear the current
+    // selection instead of preserving a removed conversation in the shell.
     const groupRow = page.locator('[role="treeitem"]').filter({ hasText: workspace.title }).first()
     await groupRow.waitFor({ timeout: 10_000 })
     // The header row is wrapped by its HoverCard anchor span, so the section
@@ -243,9 +254,8 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     const dialog = page.getByRole('dialog', { name: 'Delete workspace' })
     await dialog.waitFor({ timeout: 10_000 })
     const copy = await dialog.textContent()
-    expect(copy).toContain('workspace list')
-    expect(copy).toContain('folder and session logs will be kept')
-    expect(copy).toContain('sessions will appear under Ungrouped')
+    expect(copy).toContain('deletes all of its conversations')
+    expect(copy).toContain('does not delete the local project directory or project files')
     await dialog.getByRole('button', { name: 'Delete workspace' }).click()
     await expect.poll(() => dialog.count(), { timeout: 10_000 }).toBe(0)
 
@@ -254,62 +264,40 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
       () => page.getByRole('button', { name: `Workspace actions for ${workspace.title}` }).count(),
       { timeout: 10_000 },
     ).toBe(0)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 })
-      .toBeGreaterThanOrEqual(1)
     await expect.poll(
       () => page.locator('[role="treeitem"][aria-selected="true"]').count(),
       { timeout: 10_000 },
-    ).toBe(1)
-    expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
-    await stat(logLocation.path)
-    expect((await scaffold.ctx.sessionPersistence.inspect(SessionId(SEED_ID))).events.length).toBeGreaterThan(0)
-
-    // Re-registering the exact deleted path immediately, without a reload, is
-    // a supported reversible flow. It creates a fresh Workspace id and does
-    // NOT re-adopt the retained (non-blank) Session; the New Session flow
-    // mints a fresh blank session and attaches it to the new registration
-    // (no cwd-based blank reuse exists, so the account is never empty).
-    await adoptDirectory(scaffold.workspaceCwd)
-    await expect.poll(
-      () => scaffold.ctx.workspaceRegistry.resolveByPath(scaffold.workspaceCwd),
-      { timeout: 10_000 },
-    ).not.toBeUndefined()
-    const reregistered = await scaffold.ctx.workspaceRegistry.resolveByPath(scaffold.workspaceCwd)
-    expect(reregistered?.id).toBeDefined()
-    expect(reregistered?.id).not.toBe(workspace.id)
-    await expect.poll(
-      () => reregistered?.sessionIds ?? [],
-      { timeout: 10_000 },
-    ).not.toEqual([])
-    expect(reregistered?.sessionIds).not.toContain(SEED_ID)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 })
-      .toBeGreaterThanOrEqual(1)
-    expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
-    await stat(logLocation.path)
-
-    // Restore the deleted-registry state so reload still verifies deletion
-    // persistence independently of the successful re-registration above.
-    if (reregistered === undefined) throw new Error('same-path re-registration did not materialize')
-    await scaffold.ctx.workspaceRegistry.delete(reregistered.id)
-    await expect.poll(
-      () => page.getByRole('button', { name: `Workspace actions for ${reregistered.title}` }).count(),
-      { timeout: 10_000 },
     ).toBe(0)
+    expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
+    await expect(scaffold.ctx.sessionPersistence.inspect(SessionId(SEED_ID))).rejects.toThrow()
+    await expect(scaffold.ctx.sessionPersistence.inspect(SessionId(secondSessionId))).rejects.toThrow()
+    await expect(stat(logLocation.path)).rejects.toThrow()
+    expect((await scaffold.ctx.sessionPersistence.list()).map(item => item.id))
+      .not.toContain(SessionId(SEED_ID))
+    expect((await scaffold.ctx.sessionPersistence.list()).map(item => item.id))
+      .not.toContain(SessionId(secondSessionId))
+    expect(otherWorkspace.sessionIds).toContain(otherSessionId)
+    expect(scaffold.ctx.agents.get(otherSessionId)).toBeDefined()
+    expect(await page.getByText('Ungrouped', { exact: true }).count()).toBe(0)
+    expect(await page.getByText(/Unnamed|未命名/).count()).toBe(0)
 
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 15_000 })
-      .toBeGreaterThanOrEqual(1)
     await expect.poll(
       () => page.locator('[role="treeitem"][aria-selected="true"]').count(),
       { timeout: 15_000 },
-    ).toBe(1)
+    ).toBe(0)
     expect(scaffold.ctx.workspaceRegistry.get(workspace.id)).toBeUndefined()
     expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
-    await stat(logLocation.path)
-    expect((await scaffold.ctx.sessionPersistence.inspect(SessionId(SEED_ID))).events.length).toBeGreaterThan(0)
+    expect((await scaffold.ctx.sessionPersistence.list()).map(item => item.id))
+      .not.toContain(SessionId(SEED_ID))
+    expect((await scaffold.ctx.sessionPersistence.list()).map(item => item.id))
+      .not.toContain(SessionId(secondSessionId))
+    expect(scaffold.ctx.workspaceRegistry.get(otherWorkspace.id)?.sessionIds).toContain(otherSessionId)
+    expect(await page.getByText('Ungrouped', { exact: true }).count()).toBe(0)
+    expect(await page.getByText(/Unnamed|未命名/).count()).toBe(0)
 
     expect(transientSlotErrors).toEqual([])
     expect(slotConsoleErrors).toEqual([])

@@ -228,6 +228,12 @@ export class SessionProjectionCache extends Service {
       this.dirty.delete(session)
     })
 
+    // Durable deletion is distinct from a normal detach: discard this
+    // derived record rather than preserving it for a later cold reopen.
+    this.ctx.on('session/deleted', (id: SessionId) => {
+      void this.requireTable().delete(id)
+    })
+
     // Clear pending timers with the plugin (their sessions outlive the cache).
     this.ctx.effect(() => () => {
       for (const state of this.dirty.values()) {

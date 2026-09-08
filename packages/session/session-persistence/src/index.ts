@@ -61,6 +61,16 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionPersistence: SessionPersistence
   }
+
+  interface Events {
+    /**
+     * A Session's durable log was permanently removed after its live lifecycle
+     * stopped. Consumers discard per-session derived state for this identity.
+     * @param id - Deleted Session identity.
+     * @mode emit
+     */
+    'session/deleted'(id: SessionId): void
+  }
 }
 
 /**
@@ -141,6 +151,16 @@ export abstract class SessionPersistence extends Service {
    * @param events - the contiguous batch to persist, in seq order.
    */
   abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
+
+  /**
+   * Permanently remove one detached Session's durable log and coordinator
+   * state. A live Session must be stopped before this operation begins.
+   * @param id - Session identity to remove.
+   * @returns whether durable state existed and was removed.
+   */
+  delete(_id: SessionId): Promise<boolean> {
+    return Promise.reject(new Error('this session persistence backend does not support deletion'))
+  }
 
   /**
    * Prepare the exact unpublished Session used by resume. Implementations may

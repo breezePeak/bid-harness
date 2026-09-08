@@ -192,6 +192,9 @@ export interface PersistenceBackend<TornMarker = unknown> {
    */
   commitRepair(meta: SessionHeader, tornMarker: TornMarker | undefined, closers: readonly SessionEvent[]): Promise<void>
 
+  /** Permanently remove one materialized session artifact. */
+  deleteStored(id: SessionId): Promise<boolean>
+
   /**
    * List all stored (materialized) sessions' metadata.
    * @param signal - optional cancellation for backend listing work.
@@ -677,6 +680,24 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new TypeError('session event batch is not losslessly JSON-serializable because it contains non-JSON-serializable data')
     }
     return this.serialize(id, () => this.appendCore(id, batch))
+  }
+
+  /** Remove a detached session after its final retirement drain has settled. */
+  async delete(id: SessionId): Promise<boolean> {
+    await this.waitForRetirement(id)
+    if (this.ctx.sessions.get(id) !== undefined) {
+      throw new Error(`cannot delete session "${id}" while it is live`)
+    }
+    return await this.serialize(id, async () => {
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot delete session "${id}" while it is live`)
+      }
+      this.preparations.invalidate(id)
+      this.states.delete(id)
+      const deleted = await this.backend.deleteStored(id)
+      if (deleted) this.ctx.emit('session/deleted', id)
+      return deleted
+    })
   }
 
   private async appendCore(id: SessionId, events: readonly SessionEvent[]): Promise<void> {

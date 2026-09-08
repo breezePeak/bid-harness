@@ -315,6 +315,7 @@ export class AgentLoop extends Service implements AgentFactory {
   private readonly ownership: FactoryOwnership
   /** Plain holder prevents Cordis from re-tracing the factory's dependency context through a caller shadow. */
   private readonly runtime: { ctx: Context }
+  private readonly liveDisposers = new Map<SessionId, () => Promise<void>>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'agentLoop')
@@ -513,6 +514,7 @@ export class AgentLoop extends Service implements AgentFactory {
           detachAgent?.()
           detachSession?.()
         } finally {
+          if (this.liveDisposers.get(id) === dispose) this.liveDisposers.delete(id)
           untrack()
           if (!ownerTriggered) await unfollowOwner()
         }
@@ -566,6 +568,7 @@ export class AgentLoop extends Service implements AgentFactory {
           // session-start extension point), so only the liveness recheck is owed.
           emitAgentEvent(loopCtx, agent, 'agent/session-start', { source })
           assertLive()
+          this.liveDisposers.set(id, dispose)
           return { agent, dispose }
         },
         dispose,
@@ -656,6 +659,14 @@ export class AgentLoop extends Service implements AgentFactory {
       throw new Error('cannot resume: session persistence is not configured (load a dsh-session-persistence backend)')
     }
     return this.resumeWith(ownerCtx, persistence, options)
+  }
+
+  /** Stop one factory-owned live Agent by its shared Session identity. */
+  async disposeAgent(id: SessionId): Promise<boolean> {
+    const dispose = this.liveDisposers.get(id)
+    if (dispose === undefined) return false
+    await dispose()
+    return true
   }
 
   /** Resume through an explicit persistence handle used by the deferred config path. */

@@ -75,27 +75,46 @@ async function harness(
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.provide('storageDomain', storageDomain)
-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+  ctx.provide('sessionPersistence', {
+    list: () => Promise.resolve([]),
+    delete: async () => false,
+  } as never)
   await ctx.plugin(WorkspaceRegistry)
 
+  const disposers = new Map<SessionId, () => void>()
   const factory: AgentFactory = {
     async createAgent(_ownerCtx, options) {
-      const session = ctx.sessions.create(
+      const session = ctx.sessions.prepare(
         options.sessionId,
         options.meta === undefined ? {} : { meta: options.meta },
       )
       const agent = stubAgent(session)
-      const unregister = ctx.agents.register(agent)
+      const detachSession = ctx.sessions.enter(session)
+      const detachAgent = ctx.agents.enter(agent, undefined)
+      ctx.sessions.announce(session)
+      ctx.agents.announce(agent)
+      const dispose = () => {
+        detachAgent()
+        detachSession()
+        disposers.delete(options.sessionId)
+      }
+      disposers.set(options.sessionId, dispose)
       return {
         agent,
         dispose: () => {
-          unregister()
+          dispose()
           return Promise.resolve()
         },
       }
     },
     async resume() {
       throw new Error('test harness has no persisted sessions')
+    },
+    async disposeAgent(id) {
+      const dispose = disposers.get(id)
+      if (dispose === undefined) return false
+      dispose()
+      return true
     },
   }
   ctx.agents.setFactory(factory)
@@ -496,23 +515,33 @@ describe('Host Workspace increments', () => {
     expect(await next).toMatchObject({ done: true })
   })
 
-  it('deletes the registration, keeps its session and folder, and streams one removal', async () => {
+  it('deletes every Workspace session, retains its folder, and leaves another Workspace intact', async () => {
     const { api, ctx, root } = await harness()
     const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-me') }))).workspace
-    const sessionId = SessionId('session-kept-after-workspace-delete')
-    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
+    const sessionIds = [SessionId('session-deleted-with-workspace-one'), SessionId('session-deleted-with-workspace-two')]
+    for (const sessionId of sessionIds) {
+      expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
+    }
+    const other = expectOk(await api.workspace.create(request({ path: stageDir(root, 'keep-me') }))).workspace
+    const retainedSessionId = SessionId('session-kept-in-other-workspace')
+    expectOk(await api.sessions.create(request({ workspaceId: other.workspaceId, sessionId: retainedSessionId })))
 
     const abort = new AbortController()
     const stream: AsyncIterator<RpcRequest<HostFrame>> =
       api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
-    const removed = nextHostFrame(stream)
     expectOk(await api.workspace.delete(request({ workspaceId: workspace.workspaceId })))
-    expect(await removed).toMatchObject({
-      payload: { type: 'host/workspace-removed', workspaceId: workspace.workspaceId },
-    })
-    expect(expectOk(await api.workspace.list(request({}))).items).toEqual([])
-    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId)).toContain(sessionId)
-    expect(ctx.agents.get(sessionId)).toBeDefined()
+    const frames = await Promise.all([nextHostFrame(stream), nextHostFrame(stream), nextHostFrame(stream)])
+    expect(frames.map(frame => frame.payload)).toEqual(expect.arrayContaining([
+      { type: 'host/session-removed', sessionId: sessionIds[0] },
+      { type: 'host/session-removed', sessionId: sessionIds[1] },
+      { type: 'host/workspace-removed', workspaceId: workspace.workspaceId },
+    ]))
+    expect(expectOk(await api.workspace.list(request({}))).items.map(item => item.workspaceId)).toEqual([other.workspaceId])
+    const remaining = expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId)
+    expect(remaining).not.toEqual(expect.arrayContaining(sessionIds))
+    expect(remaining).toContain(retainedSessionId)
+    for (const sessionId of sessionIds) expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(ctx.agents.get(retainedSessionId)).toBeDefined()
     expect(existsSync(workspace.path)).toBe(true)
 
     const missing = await api.workspace.delete(request({ workspaceId: workspace.workspaceId }))
@@ -525,7 +554,8 @@ describe('Host Workspace increments', () => {
     expect(reregistered.workspaceId).not.toBe(workspace.workspaceId)
     expect(reregistered.path).toBe(workspace.path)
     expect(reregistered.sessionIds).toEqual([])
-    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId)).toContain(sessionId)
+    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .not.toEqual(expect.arrayContaining(sessionIds))
     abort.abort()
   })
 

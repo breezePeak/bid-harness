@@ -99,6 +99,25 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
       }
     })
 
+    it('permanently deletes a materialized session without affecting another log', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const removed = meta('delete-me', '/work')
+        const retained = meta('keep-me', '/other-work')
+        await persistence.create(removed)
+        await persistence.append(removed.id, oneTurnLog())
+        await persistence.create(retained)
+        await persistence.append(retained.id, oneTurnLog())
+
+        await expect(persistence.delete(removed.id)).resolves.toBe(true)
+        expect((await persistence.list()).map(item => item.id)).not.toContain(removed.id)
+        expect((await persistence.list()).map(item => item.id)).toContain(retained.id)
+        await expect(persistence.delete(removed.id)).resolves.toBe(false)
+      } finally {
+        await dispose()
+      }
+    })
+
     it('rejects a fractional creation timestamp without reserving its session id', async () => {
       const { persistence, dispose } = await make()
       try {

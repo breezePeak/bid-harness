@@ -189,10 +189,11 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Delete one workspace registration while retaining its directory and every
-   * session log. The durable order is updated before the table deletion; a
-   * failed table write restores the prior order and keeps the entity
-   * published. Unknown ids are an idempotent no-op for domain callers.
+   * Delete one workspace registration and every Session it owns. Project
+   * directories are not part of this operation. The durable order is updated
+   * before the table deletion; a failed table write restores the prior order
+   * and keeps the entity published. Unknown ids are an idempotent no-op for
+   * domain callers.
    * @param id - Workspace registration to remove.
    * @returns `true` when a record was deleted, `false` when it was unknown.
    */
@@ -358,11 +359,20 @@ export class WorkspaceRegistry extends Service {
   private async deleteKnown(id: WorkspaceId): Promise<boolean> {
     const entity = this.entities.get(id)
     if (entity === undefined) return false
+    const sessionIds = [...entity.sessionIds]
+    for (const sessionId of sessionIds) {
+      const agents = this.ctx.get('agents') as { dispose?(id: SessionId): Promise<boolean> } | undefined
+      await agents?.dispose?.(sessionId)
+      await this.ctx.sessionPersistence.delete(sessionId)
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
+    }
     const state = this.requireState()
     const nextState = {
       initialized: true,
       workspaceIds: state.workspaceIds.filter(workspaceId => workspaceId !== id),
-      archivedSessionIds: state.archivedSessionIds,
+      archivedSessionIds: state.archivedSessionIds.filter(sessionId => !sessionIds.includes(sessionId)),
     }
     await this.setState({
       ...nextState,

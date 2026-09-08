@@ -4,6 +4,8 @@ Status: implemented
 
 [English](2026-07-27-workspace-registration-deletion.md) | 中文
 
+当前删除边界由[删除 Workspace 级联 Session](2026-09-08-workspace-deletion-cascades-sessions.zh.md)取代；本记录保留当时将会话保留在 Ungrouped 的决定及其上下文。
+
 ## 问题
 
 Workspace 注册已有代码目录，使 GUI 能够为目录命名，并对其会话排序。该记录没有说 Harness 创建或拥有该目录，会话日志也是独立的持久化对象。若将行内 Delete 操作视为递归删除源码或删除会话，就会破坏该记录所有权边界之外的数据。

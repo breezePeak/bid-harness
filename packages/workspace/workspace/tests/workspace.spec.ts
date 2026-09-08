@@ -48,7 +48,14 @@ async function harness(options: HarnessOptions = {}) {
   const list = vi.fn(async () => listed)
   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
-  ctx.provide('sessionPersistence', { list, load, inspect } as never)
+  const remove = vi.fn(async (id: SessionId) => {
+    const found = listed.some(header => header.id === id)
+    listed = listed.filter(header => header.id !== id)
+    return found
+  })
+  const dispose = vi.fn(async () => false)
+  ctx.provide('agents', { dispose } as never)
+  ctx.provide('sessionPersistence', { list, load, inspect, delete: remove } as never)
 
   if (options.sessionStore === true) {
     await ctx.plugin(SessionStore)
@@ -75,6 +82,8 @@ async function harness(options: HarnessOptions = {}) {
     list,
     load,
     inspect,
+    remove,
+    dispose,
     setSessions: (headers: SessionHeader[]) => { listed = headers },
   }
 }
@@ -476,7 +485,7 @@ describe('WorkspaceRegistry create and lookup', () => {
     })
   })
 
-  it('deletes only the registration and leaves its directory and session headers untouched', async () => {
+  it('deletes the registration and every accounted session without touching its directory', async () => {
     const dir = await makeDir('delete-registration')
     const result = await harness({ sessions: [header('kept-session', dir)] })
     const workspace = await result.registry.create(dir)
@@ -492,6 +501,8 @@ describe('WorkspaceRegistry create and lookup', () => {
     expect(result.list).toHaveBeenCalledTimes(1)
     expect(result.load).not.toHaveBeenCalled()
     expect(result.inspect).not.toHaveBeenCalled()
+    expect(result.dispose).toHaveBeenCalledWith(SessionId('kept-session'))
+    expect(result.remove).toHaveBeenCalledWith(SessionId('kept-session'))
 
     const reregistered = await result.registry.create(dir)
     expect(reregistered.id).not.toBe(workspace.id)
