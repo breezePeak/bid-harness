@@ -101,13 +101,48 @@
   width: 336px;
   max-width: min(400px, calc(100vw - 32px));
   max-height: min(560px, calc(100vh - 140px));
-  padding: 4px;
-  overflow: auto;
+  padding: 0;
+  overflow: hidden;
   border-radius: 12px;
   background: var(--dsw-specific-menu);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   box-shadow: var(--dsw-shadow-lv3);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.runningSection {
+  flex: 0 1 224px;
+}
+
+.historySection {
+  flex: 1 1 160px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.emptySection {
+  flex: none;
+}
+
+.sectionTitle {
+  flex: none;
+  margin: 0;
+  padding: 9px 12px 5px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.sectionBody {
+  min-height: 0;
+  padding: 0 4px 4px;
+  overflow: auto;
 }
 
 .node {
@@ -174,6 +209,15 @@
   cursor: default;
 }
 
+.loadingState {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-caption);
+}
+
 .disclosure,
 .disclosureSpace {
   flex: none;
@@ -206,6 +250,24 @@
   flex: 1;
   flex-direction: column;
   min-width: 0;
+}
+
+.activity {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.runningActivity {
+  background: var(--dsw-alias-state-success-tertiary);
+  color: var(--dsw-alias-state-success-primary);
 }
 
 .label,

@@ -18,6 +18,7 @@ import css from './SubagentHeaderLineage.module.css'
 
 type CatalogEntry = SubagentCatalogSnapshot['entries'][number]
 type Catalogs = SessionListState['subagentsByParent']
+type ChildCatalogEntry = Extract<CatalogEntry, { kind: 'child' }>
 
 /** Business actions supplied by the slot registration. */
 export interface SubagentCatalogInjected {
@@ -30,10 +31,18 @@ export interface SubagentCatalogInjected {
 export type SubagentHeaderLineageProps =
   PropsRuntime<'conversation.session.header.lineage'> & SubagentCatalogInjected & PropsLocale<typeof NS>
 
-interface CatalogRowsProps {
+interface CatalogTreeNode {
+  entry: ChildCatalogEntry
   parentSessionId: SessionId
+  /** Ancestor labels retained when a row crosses a status-section boundary. */
+  path: readonly string[]
+  children: CatalogTreeNode[]
+}
+
+interface CatalogRowProps {
+  node: CatalogTreeNode
+  reserveDisclosure: boolean
   currentSessionId: SessionId | undefined
-  catalog: SubagentCatalogSnapshot
   catalogs: Catalogs
   summaries: Readonly<Record<SessionId, SessionSummary>>
   expanded: ReadonlySet<SessionId>
@@ -43,6 +52,51 @@ interface CatalogRowsProps {
   refresh: (parentSessionId: SessionId) => void
   toggleBranch: (childSessionId: SessionId) => void
   closeCatalog: () => void
+}
+
+/** Build one status-specific forest from the loaded catalog graph. */
+function catalogSectionNodes(
+  rootSessionId: SessionId,
+  catalogs: Catalogs,
+  activity: ChildCatalogEntry['activity'],
+): readonly CatalogTreeNode[] {
+  const roots: CatalogTreeNode[] = []
+  const seen = new Set<SessionId>()
+  const visit = (
+    parentSessionId: SessionId,
+    path: readonly string[],
+    parent: CatalogTreeNode | undefined,
+    visiting: ReadonlySet<SessionId>,
+  ): void => {
+    if (visiting.has(parentSessionId)) return
+    const catalog = catalogs[parentSessionId]
+    if (catalog === undefined) return
+    const nextVisiting = new Set(visiting).add(parentSessionId)
+    for (const entry of catalog.entries) {
+      if (entry.kind !== 'child' || seen.has(entry.id)) continue
+      seen.add(entry.id)
+      const nextPath = [...path, entry.label ?? entry.id]
+      if (entry.activity !== activity) {
+        visit(entry.id, nextPath, undefined, nextVisiting)
+        continue
+      }
+      const node: CatalogTreeNode = {
+        entry,
+        parentSessionId,
+        path,
+        children: [],
+      }
+      if (parent === undefined) roots.push(node)
+      else parent.children.push(node)
+      visit(entry.id, nextPath, node, nextVisiting)
+    }
+  }
+  visit(rootSessionId, [], undefined, new Set())
+  return roots
+}
+
+function catalogNodeCount(nodes: readonly CatalogTreeNode[]): number {
+  return nodes.reduce((count, node) => count + 1 + catalogNodeCount(node.children), 0)
 }
 
 function diagnosticReason(
@@ -224,7 +278,7 @@ function CatalogLoadingRows({
         className={`${css.row} ${css.disabled} ${css.loadingRow}`}
       >
         <span className={css.disclosureSpace} />
-        <StateDot state={summary.running ? 'ongoing' : 'done'} />
+        <span className={css.loadingState} />
         <span className={css.content}>
           <span className={css.label}>{t('loading.label')}</span>
         </span>
@@ -233,15 +287,18 @@ function CatalogLoadingRows({
   ))
 }
 
-/** Render one catalog level and recurse only through explicitly expanded rows. */
-function CatalogRows({
-  parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level, now,
-  openChild, refresh, toggleBranch, closeCatalog, t,
-}: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
+/** Render loading, failure, and diagnostic entries outside the two task groups. */
+function CatalogFeedback({
+  parentSessionId, catalog, summaries, level, refresh, t,
+}: {
+  parentSessionId: SessionId
+  catalog: SubagentCatalogSnapshot
+  summaries: Readonly<Record<SessionId, SessionSummary>>
+  level: number
+  refresh: (parentSessionId: SessionId) => void
+  t: TranslateNS<typeof NS>
+}) {
   const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
-  const reserveDisclosure = catalog.entries.some(
-    entry => entry.kind === 'child' && entry.hasChildren,
-  )
   return (
     <>
       {emptyLoading && (
@@ -255,182 +312,197 @@ function CatalogRows({
       {catalog.state === 'error' && (
         <div className={css.error}>
           <span>{catalog.error?.message ?? t('load.error')}</span>
-          <button
-            type="button"
-            className={css.refresh}
-            onClick={() => { refresh(parentSessionId) }}
-          >
+          <button type="button" className={css.refresh} onClick={() => { refresh(parentSessionId) }}>
             <IconRefreshOutline14 />
             {t('retry')}
           </button>
         </div>
       )}
       {catalog.entries.map((entry) => {
-        if (entry.kind === 'diagnostic') {
-          const reason = diagnosticReason(entry, t)
-          return (
-            <div key={entry.id} className={css.node}>
-              <div
-                role="treeitem"
-                aria-disabled="true"
-                aria-level={level}
-                aria-label={`${entry.id} ${reason}`}
-                className={`${css.row} ${css.disabled}`}
-                title={reason}
-              >
-                {reserveDisclosure && <span className={css.disclosureSpace} />}
-                <StateDot state="error" />
-                <span className={css.content}>
-                  <span className={css.label}>{entry.id}</span>
-                  <span className={css.summary}>{reason}</span>
-                </span>
-              </div>
-            </div>
-          )
-        }
-
-        const childCatalog = catalogs[entry.id]
-        const isCurrent = entry.id === currentSessionId
-        const isExpanded = expanded.has(entry.id)
-        const knownLeaf = !entry.hasChildren
-        const childLoading = childCatalog === undefined
-          || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
-        const summary = summaries[entry.id]
-        const label = entry.label ?? entry.id
-        const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-        const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-        const secondary = [summary?.title, mode, activity]
-          .filter(value => value !== undefined)
-          .join(' · ')
-        const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
-        const durationMs = activityDuration(
-          summary,
-          entry.activity,
-          now,
-        )
-        const tokenMetric = totalTokens === undefined
-          ? undefined
-          : `${formatTokens(totalTokens)} tok`
-        const durationMetric = durationMs === undefined
-          ? undefined
-          : {
-            compact: formatDuration(durationMs, t),
-            exact: formatExactDuration(durationMs, t),
-          }
-        const metrics = [tokenMetric, durationMetric?.exact]
-          .filter(value => value !== undefined)
-          .join(' · ')
-
-        const open = (): void => {
-          openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
-          closeCatalog()
-        }
-        const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            event.stopPropagation()
-            open()
-          } else if (
-            (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
-            || (event.key === 'ArrowLeft' && isExpanded)
-          ) {
-            event.preventDefault()
-            event.stopPropagation()
-            toggleBranch(entry.id)
-          }
-        }
-        const toggle = (event: MouseEvent<HTMLButtonElement>): void => {
-          event.preventDefault()
-          event.stopPropagation()
-          toggleBranch(entry.id)
-        }
-
+        if (entry.kind !== 'diagnostic') return null
+        const reason = diagnosticReason(entry, t)
         return (
           <div key={entry.id} className={css.node}>
             <div
               role="treeitem"
-              tabIndex={0}
+              aria-disabled="true"
               aria-level={level}
-              aria-current={isCurrent || undefined}
-              aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
-              {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
-              className={css.row}
-              onClick={open}
-              onKeyDown={handleKey}
+              aria-label={`${entry.id} ${reason}`}
+              className={`${css.row} ${css.disabled}`}
+              title={reason}
             >
-              {knownLeaf
-                ? reserveDisclosure && <span className={css.disclosureSpace} />
-                : (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
-                    aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
-                    onClick={toggle}
-                  >
-                    <IconChevronRightOutline14 />
-                  </button>
-                )}
-              <div className={css.clickarea}>
-                <StateDot state={entry.activity === 'running' ? 'ongoing' : 'done'} />
-                <span className={css.content}>
-                  <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
-                  <span className={css.summary}>{secondary}</span>
-                </span>
-                {metrics !== '' && (
-                  <span className={css.metrics}>
-                    {tokenMetric !== undefined && <span className={css.metricToken}>{tokenMetric}</span>}
-                    {durationMetric !== undefined && (
-                      <span
-                        className={css.metricDuration}
-                        title={t('duration.exactTitle', { duration: durationMetric.exact })}
-                      >
-                        {durationMetric.compact}
-                      </span>
-                    )}
-                  </span>
-                )}
-              </div>
+              <StateDot state="error" />
+              <span className={css.content}>
+                <span className={css.label}>{entry.id}</span>
+                <span className={css.summary}>{reason}</span>
+              </span>
             </div>
-            {isExpanded && !knownLeaf && (
-              <div
-                role="group"
-                className={css.children}
-                aria-busy={childLoading || undefined}
-              >
-                {childCatalog === undefined
-                  ? (
-                    <CatalogLoadingRows
-                      parentSessionId={entry.id}
-                      summaries={summaries}
-                      level={level + 1}
-                      t={t}
-                    />
-                  )
-                  : (
-                    <CatalogRows
-                      parentSessionId={entry.id}
-                      currentSessionId={currentSessionId}
-                      catalog={childCatalog}
-                      catalogs={catalogs}
-                      summaries={summaries}
-                      expanded={expanded}
-                      level={level + 1}
-                      now={now}
-                      openChild={openChild}
-                      refresh={refresh}
-                      toggleBranch={toggleBranch}
-                      closeCatalog={closeCatalog}
-                      t={t}
-                    />
-                  )}
-              </div>
-            )}
           </div>
         )
       })}
     </>
   )
+}
+
+/** One status-grouped catalog row, reused by both sections. */
+function CatalogRow({
+  node, reserveDisclosure, currentSessionId, catalogs, summaries, expanded, level, now,
+  openChild, refresh, toggleBranch, closeCatalog, t,
+}: CatalogRowProps & { t: TranslateNS<typeof NS> }) {
+  const { entry, parentSessionId, path, children } = node
+  const childCatalog = catalogs[entry.id]
+  const isCurrent = entry.id === currentSessionId
+  const isExpanded = expanded.has(entry.id)
+  const knownLeaf = !entry.hasChildren
+  const childLoading = childCatalog === undefined
+    || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
+  const summary = summaries[entry.id]
+  const label = entry.label ?? entry.id
+  const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
+  const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
+  const secondary = [...path, summary?.title, mode]
+    .filter((value): value is string => value !== undefined)
+    .join(' · ')
+  const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
+  const durationMs = activityDuration(summary, entry.activity, now)
+  const tokenMetric = totalTokens === undefined ? undefined : `${formatTokens(totalTokens)} tok`
+  const durationMetric = durationMs === undefined
+    ? undefined
+    : { compact: formatDuration(durationMs, t), exact: formatExactDuration(durationMs, t) }
+  const metrics = [tokenMetric, durationMetric?.exact].filter(value => value !== undefined).join(' · ')
+  const open = (): void => {
+    openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
+    closeCatalog()
+  }
+  const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      event.stopPropagation()
+      open()
+    } else if (
+      (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
+      || (event.key === 'ArrowLeft' && isExpanded)
+    ) {
+      event.preventDefault()
+      event.stopPropagation()
+      toggleBranch(entry.id)
+    }
+  }
+  const toggle = (event: MouseEvent<HTMLButtonElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    toggleBranch(entry.id)
+  }
+  return (
+    <div className={css.node}>
+      <div
+        role="treeitem"
+        tabIndex={0}
+        aria-level={level}
+        aria-current={isCurrent || undefined}
+        aria-label={[label, secondary, activity, metrics].filter(value => value !== '').join(' ')}
+        {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
+        className={css.row}
+        onClick={open}
+        onKeyDown={handleKey}
+      >
+        {knownLeaf
+          ? reserveDisclosure && <span className={css.disclosureSpace} />
+          : (
+            <button
+              type="button"
+              tabIndex={-1}
+              className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
+              aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
+              onClick={toggle}
+            >
+              <IconChevronRightOutline14 />
+            </button>
+          )}
+        <div className={css.clickarea}>
+          <StateDot state={entry.activity === 'running' ? 'ongoing' : 'done'} />
+          <span className={css.content}>
+            <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
+            {secondary !== '' && <span className={css.summary}>{secondary}</span>}
+          </span>
+          <span className={`${css.activity} ${entry.activity === 'running' ? css.runningActivity : ''}`}>
+            {activity}
+          </span>
+          {metrics !== '' && (
+            <span className={css.metrics}>
+              {tokenMetric !== undefined && <span className={css.metricToken}>{tokenMetric}</span>}
+              {durationMetric !== undefined && (
+                <span className={css.metricDuration} title={t('duration.exactTitle', { duration: durationMetric.exact })}>
+                  {durationMetric.compact}
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      </div>
+      {isExpanded && !knownLeaf && (
+        <div role="group" className={css.children} aria-busy={childLoading || undefined}>
+          {children.map(child => (
+            <CatalogRow
+              key={child.entry.id}
+              node={child}
+              reserveDisclosure={children.some(next => next.entry.hasChildren)}
+              currentSessionId={currentSessionId}
+              catalogs={catalogs}
+              summaries={summaries}
+              expanded={expanded}
+              level={level + 1}
+              now={now}
+              openChild={openChild}
+              refresh={refresh}
+              toggleBranch={toggleBranch}
+              closeCatalog={closeCatalog}
+              t={t}
+            />
+          ))}
+          {childCatalog !== undefined && (
+            <CatalogFeedback
+              parentSessionId={entry.id}
+              catalog={childCatalog}
+              summaries={summaries}
+              level={level + 1}
+              refresh={refresh}
+              t={t}
+            />
+          )}
+          {childCatalog === undefined && (
+            <CatalogLoadingRows parentSessionId={entry.id} summaries={summaries} level={level + 1} t={t} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Render one status section without duplicating catalog rows. */
+function CatalogSectionRows({
+  nodes, currentSessionId, catalogs, summaries, expanded, now,
+  openChild, refresh, toggleBranch, closeCatalog, t,
+}: Omit<CatalogRowProps, 'node' | 'level' | 'reserveDisclosure'> & { nodes: readonly CatalogTreeNode[]; t: TranslateNS<typeof NS> }) {
+  const reserveDisclosure = nodes.some(node => node.entry.hasChildren)
+  return nodes.map(node => (
+    <CatalogRow
+      key={node.entry.id}
+      node={node}
+      reserveDisclosure={reserveDisclosure}
+      currentSessionId={currentSessionId}
+      catalogs={catalogs}
+      summaries={summaries}
+      expanded={expanded}
+      level={1}
+      now={now}
+      openChild={openChild}
+      refresh={refresh}
+      toggleBranch={toggleBranch}
+      closeCatalog={closeCatalog}
+      t={t}
+    />
+  ))
 }
 
 interface CatalogDropdownSharedProps extends SubagentCatalogInjected {
@@ -527,6 +599,16 @@ function CatalogDropdown({
       error: null,
     }
     : catalog
+  const runningNodes = useMemo(
+    () => catalogSectionNodes(rootSessionId, catalogs, 'running'),
+    [catalogs, rootSessionId],
+  )
+  const historyNodes = useMemo(
+    () => catalogSectionNodes(rootSessionId, catalogs, 'inactive'),
+    [catalogs, rootSessionId],
+  )
+  const runningCount = catalogNodeCount(runningNodes)
+  const historyCount = catalogNodeCount(historyNodes)
 
   useEffect(() => {
     if (
@@ -659,10 +741,10 @@ function CatalogDropdown({
   }, [open])
 
   useEffect(() => {
-    if (!open || descendants.runningCount === 0) return
+    if (!open || runningCount === 0) return
     const timer = setInterval(() => { setNow(Date.now()) }, 1_000)
     return () => { clearInterval(timer) }
-  }, [open, descendants.runningCount])
+  }, [open, runningCount])
 
   useEffect(() => () => {
     cancelHoverOpen()
@@ -783,21 +865,55 @@ function CatalogDropdown({
           onMouseEnter={cancelHoverClose}
           onMouseLeave={scheduleHoverClose}
         >
-          <CatalogRows
-            parentSessionId={rootSessionId}
-            currentSessionId={currentSessionId}
-            catalog={presentedCatalog}
-            catalogs={catalogs}
-            summaries={summaries}
-            expanded={expanded}
-            level={1}
-            now={now}
-            openChild={openChild}
-            refresh={refresh}
-            toggleBranch={toggleBranch}
-            closeCatalog={() => { changeOpen(false) }}
-            t={t}
-          />
+          <section className={`${css.section} ${css.runningSection} ${runningCount === 0 ? css.emptySection : ''}`}>
+            <h2 className={css.sectionTitle}>{t('section.running', { count: runningCount })}</h2>
+            <div className={css.sectionBody}>
+              {runningCount === 0
+                ? <div className={css.notice}>{t('section.running.empty')}</div>
+                : (
+                  <CatalogSectionRows
+                    nodes={runningNodes}
+                    currentSessionId={currentSessionId}
+                    catalogs={catalogs}
+                    summaries={summaries}
+                    expanded={expanded}
+                    now={now}
+                    openChild={openChild}
+                    refresh={refresh}
+                    toggleBranch={toggleBranch}
+                    closeCatalog={() => { changeOpen(false) }}
+                    t={t}
+                  />
+                )}
+            </div>
+          </section>
+          <section className={`${css.section} ${css.historySection}`}>
+            <h2 className={css.sectionTitle}>{t('section.history', { count: historyCount })}</h2>
+            <div className={css.sectionBody}>
+              {historyCount === 0 && <div className={css.notice}>{t('section.history.empty')}</div>}
+              <CatalogSectionRows
+                nodes={historyNodes}
+                currentSessionId={currentSessionId}
+                catalogs={catalogs}
+                summaries={summaries}
+                expanded={expanded}
+                now={now}
+                openChild={openChild}
+                refresh={refresh}
+                toggleBranch={toggleBranch}
+                closeCatalog={() => { changeOpen(false) }}
+                t={t}
+              />
+              <CatalogFeedback
+                parentSessionId={rootSessionId}
+                catalog={presentedCatalog}
+                summaries={summaries}
+                level={1}
+                refresh={refresh}
+                t={t}
+              />
+            </div>
+          </section>
         </div>
       ), document.body)}
     </div>

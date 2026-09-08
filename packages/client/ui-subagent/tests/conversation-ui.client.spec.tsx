@@ -154,19 +154,135 @@ describe('SubagentHeaderLineage', () => {
 
     expect(input.setCatalogOpen).toHaveBeenCalledWith(PARENT, true)
     expect(screen.getAllByRole('treeitem')).toHaveLength(3)
-    expect(screen.getByText('正在扫描项目文件 · 可继续 · 正在运行')).toBeTruthy()
-    expect(screen.getByText('一次性 · 当前未运行')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+    expect(screen.getByText('正在扫描项目文件 · 可继续')).toBeTruthy()
+    expect(screen.getByText('一次性')).toBeTruthy()
+    expect(screen.getByText('正在运行')).toBeTruthy()
+    expect(screen.getByText('当前未运行')).toBeTruthy()
     const diagnostic = screen.getByRole('treeitem', { name: /会话记录损坏/ })
     expect(diagnostic.getAttribute('aria-disabled')).toBe('true')
     expect(screen.getByRole('button', { name: '展开 worker 的下级子代理' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: '展开 reviewer 的下级子代理' })).toBeNull()
-    expect(screen.getByRole('treeitem', { name: /reviewer/ }).children).toHaveLength(2)
+    expect(screen.getByRole('treeitem', { name: /reviewer/ }).children).toHaveLength(1)
 
     fireEvent.click(screen.getByRole('treeitem', { name: /worker/ }))
     expect(input.openChild).toHaveBeenCalledWith({
       parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable',
     })
     expect(input.setCatalogOpen).toHaveBeenLastCalledWith(PARENT, false)
+  })
+
+  it('separates catalog activity into counted running and history sections with empty states', () => {
+    const input = props(catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+      activity: 'inactive', hasChildren: false,
+    }] }))
+    render(<SubagentHeaderLineage {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
+
+    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
+    expect(screen.getByText('当前没有正在运行的子代理')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+  })
+
+  it('moves a single catalog row between sections as activity changes without duplicates', () => {
+    const active = catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+      activity: 'running', hasChildren: false,
+    }] })
+    const view = render(<SubagentHeaderLineage {...props(active)} />)
+    hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+
+    const inactive = catalog({ entries: [{ ...active.entries[0]!, activity: 'inactive' }] })
+    view.rerender(<SubagentHeaderLineage {...props(inactive)} />)
+    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+    expect(screen.getAllByRole('treeitem', { name: /worker/ })).toHaveLength(1)
+
+    view.rerender(<SubagentHeaderLineage {...props(active)} />)
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（0）' })).toBeTruthy()
+    expect(screen.getAllByRole('treeitem', { name: /worker/ })).toHaveLength(1)
+  })
+
+  it('keeps an inactive catalog row in history when a completed reminder is cleared', () => {
+    const inactive = catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'one-shot', label: 'worker',
+      activity: 'inactive', hasChildren: false,
+    }] })
+    const reminded = {
+      [CHILD]: { ...summary(CHILD, 1), completed: true },
+    } as unknown as Readonly<Record<SessionId, SessionSummary>>
+    const view = render(<SubagentHeaderLineage {...props(inactive, {}, reminded)} />)
+    hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
+
+    view.rerender(<SubagentHeaderLineage {...props(inactive, {}, {
+      [CHILD]: summary(CHILD, 1),
+    })} />)
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+  })
+
+  it('keeps a running descendant visible when its inactive parent is in history', () => {
+    const input = props(catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+      activity: 'inactive', hasChildren: true,
+    }] }), {
+      [CHILD]: catalog({ entries: [{
+        kind: 'child', id: GRANDCHILD, mode: 'continuable', label: 'indexer',
+        activity: 'running', hasChildren: false,
+      }] }),
+    })
+    render(<SubagentHeaderLineage {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
+
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+    const runningDescendant = screen.getByRole('treeitem', { name: /indexer.*worker.*正在运行/ })
+    expect(runningDescendant.getAttribute('aria-level')).toBe('1')
+    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+  })
+
+  it('derives activity again when an open catalog is reopened after a reconnect snapshot', () => {
+    const active = catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+      activity: 'running', hasChildren: false,
+    }] })
+    const view = render(<SubagentHeaderLineage {...props(active)} />)
+    const trigger = screen.getByRole('button', { name: /1 个子代理/ })
+    hoverCatalog(trigger)
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+    fireEvent.pointerDown(document.body)
+
+    view.rerender(<SubagentHeaderLineage {...props(catalog({ entries: [{
+      ...active.entries[0]!, activity: 'inactive',
+    }] }))} />)
+    hoverCatalog(trigger)
+    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+  })
+
+  it('keeps the running section ahead of a long history list', () => {
+    const historicalEntries = Array.from({ length: 24 }, (_, index) => ({
+      kind: 'child' as const,
+      id: `history-${index}` as SessionId,
+      mode: 'one-shot' as const,
+      label: `history-${index}`,
+      activity: 'inactive' as const,
+      hasChildren: false,
+    }))
+    render(<SubagentHeaderLineage {...props(catalog({ entries: [{
+      kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+      activity: 'running', hasChildren: false,
+    }, ...historicalEntries] }))} />)
+    hoverCatalog(screen.getByRole('button', { name: /25 个子代理/ }))
+
+    const sections = screen.getByRole('tree').querySelectorAll('section')
+    expect(within(sections[0]!).getByRole('treeitem', { name: /worker/ })).toBeTruthy()
+    expect(within(sections[1]!).getAllByRole('treeitem', { name: /history-/ })).toHaveLength(24)
   })
 
   it('selects singular count keys for one descendant', () => {
@@ -411,7 +527,7 @@ describe('SubagentHeaderLineage', () => {
       entries: [
         {
           kind: 'child', id: GRANDCHILD, mode: 'continuable',
-          label: 'indexer', activity: 'inactive', hasChildren: false,
+          label: 'indexer', activity: 'running', hasChildren: false,
         },
       ],
     })
@@ -457,7 +573,7 @@ describe('SubagentHeaderLineage', () => {
     const loadingRows = screen.getAllByRole('treeitem', { name: '正在加载子代理' })
     expect(loadingRows).toHaveLength(2)
     expect(loadingRows.every(row => row.getAttribute('aria-level') === '2')).toBe(true)
-    expect(loadingRows[1]?.querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(loadingRows[1]?.querySelector('[data-state]')).toBeNull()
 
     const loading = props(catalog(), {
       [CHILD]: catalog({ entries: [], state: 'loading' }),
