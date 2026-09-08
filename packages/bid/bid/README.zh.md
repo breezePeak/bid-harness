@@ -25,7 +25,7 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 ## 控制面类型
 
-本包导出固定的 `BidStage` 与 `StageRunStatus` 值，以及 `BidRuntimeState`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 `BidClientProjection`、`BidUploadFile` 请求、`BidFileIntakeResult` 响应、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。`BID_STAGES` 与 `STAGE_RUN_STATUSES` 是供 validator 和 client 使用的运行时枚举；从它们派生的联合类型阻止出现第二套阶段或状态名称。
+本包导出固定的 `BidStage` 与 `StageRunStatus` 值，以及 `BidRuntimeState`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 S1 与 DOCX 模板二进制端点常量、`BidFileIntakeResult`、`DocxTemplateUploadResult`、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。`BID_STAGES` 与 `STAGE_RUN_STATUSES` 是供 validator 和 client 使用的运行时枚举；从它们派生的联合类型阻止出现第二套阶段或状态名称。
 
 七类 `bid.*` 记录通过声明合并接入现有 `@deepseek-ai/dsh-session` `SessionEventMap`。`bid.project.resumed` 只把项目 runtime 和 revision 写入当前 Session，用于初始化或同步 `bid.runtime` Projection；其他事件记录阶段转换、工作区产物引用、失败摘要、浏览器安全的校验问题和用户确认，不保存文档、Artifact 原文、绝对路径或调用栈。`StageValidationIssue` 使用稳定 `code`、项目相对 `artifact`、Schema `path` 和安全 `message`；`failureIssues` 通过事件、Reducer 和 Projection 保留这些字段。
 
@@ -44,6 +44,8 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 `bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令和 `/bid-start` 确认命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset`，并停在 `waiting_start`。UI 和命令会明确告知“已重置完毕”；只有用户点击“开始本阶段”或执行 `/bid-start` 后，Host 才从阶段入口执行。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的 Validator 导向修复轮数；最终仍未通过时，Orchestrator 记录当前阶段失败，用户可通过 `bid/retryStage` 重试。S5 从严格校验的章节检查点继续，其他阶段按各自执行器规则重跑。
+
+DOCX 模板通过独立同源二进制请求上传，请求头只携带 Session、文件名、长度和配置 revision。`docxTemplateMaxBytes` 默认 300 MiB，浏览器按 `DocxFormatView.templateMaxBytes` 预检，Host 按相同值和声明长度限制请求体；模板解析需要 ZIP 随机访问，因此 Host 只在准入后把原始二进制体缓冲一次，不生成 base64 字符串。配置编辑 Remote 不接受文件字节。
 
 S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题回到同一 Writer 会话，按 `modelStageRepairAttempts` 自动修复（默认 3 次，含初稿共最多 4 轮），最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
 
@@ -94,6 +96,6 @@ S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章�
 - PDF 提取不执行 OCR 或完整表格重建；无法安全恢复列时，带位置信息的行仍保持分行。
 - DOC 提取保留文本、自然段、列表标记和制表符分隔的表格单元格，但不能保留全部二进制 Word 样式。
 - DOCX 与 DOC 页码字段保持 `null`，因为其源结构不提供可靠分页。
-- DOCX 导出支持标题、自然段、列表和表格，但不会套用公司 Word 模板。
+- DOCX 模板只提取支持的页面、段落、表格与编号样式，不复制旧正文、封面、图片、浮动对象、批注或页眉页脚文字。
 
-文件接入按文件返回结果：名称、格式、大小、base64 编码或解析失败会附带文件名、角色、稳定错误码和错误消息，不阻断同批次的其他有效文件；至少一个成功解析的招标文件才能推进阶段。
+文件接入按文件返回结果：名称、格式、大小、二进制长度或解析失败会附带文件名、角色、稳定错误码和错误消息，不阻断同批次的其他有效文件；至少一个成功解析的招标文件才能推进阶段。

@@ -1,6 +1,7 @@
 /** Word 格式编辑页；保存、解析、预览和生成都由明确的用户操作触发。 */
 import { useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { DOCX_TEMPLATE_MAX_BYTES } from '@deepseek-ai/dsh-bid/control-plane'
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, FormatValues } from '@deepseek-ai/dsh-bid/control-plane'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
@@ -13,6 +14,7 @@ const OPTION_LABELS: Record<string, string> = {
 export interface BidWordExportInjected {
   getFormat: () => Promise<DocxFormatView>
   saveFormat: (request: DocxFormatRequest) => Promise<DocxFormatView>
+  uploadTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   preview: () => Promise<DocxFormatView>
   generate: () => Promise<{
     path: string
@@ -26,6 +28,7 @@ export function BidWordExport({ sessionId,
   useProjection,
   getFormat,
   saveFormat,
+  uploadTemplate,
   preview,
   generate,
   download,
@@ -89,7 +92,9 @@ export function BidWordExport({ sessionId,
   const groups = [...new Set(view?.fields.map(field => field.group))]
   const stale = dirty || (view?.state.lastExport !== undefined && view.fingerprint !== view.state.lastExport.fingerprint)
   const previewStale = dirty || (previewView !== null && previewView.fingerprint !== view?.fingerprint)
-  return <section className={css.root} data-conversation-composer-overlay="">
+  const templateMaxBytes = view?.templateMaxBytes ?? DOCX_TEMPLATE_MAX_BYTES
+  const templateMaxMiB = Math.floor(templateMaxBytes / 1024 / 1024)
+  return <section className={css.root} aria-label="导出 Word" data-conversation-composer-overlay="">
     <header className={css.toolbar}><strong>导出 Word</strong><span role="status">{busy || status}</span></header>
     {error && <p role="alert" className={css.notice}>{error}</p>}
     <div className={css.columns}>
@@ -103,19 +108,21 @@ export function BidWordExport({ sessionId,
             setDirty(true)
           }}><option value="default">默认样式</option><option value="template" disabled={!view?.state.template}>已上传模板</option></select></label>
           <Button onClick={() => { perform('读取已保存配置…', async () => { load(await getFormat()); setStatus('已恢复保存配置') }) }}>使用已保存配置</Button>
-          <label>上传 DOCX 模板（最多 10 MiB）<input aria-label="上传 DOCX 模板" type="file" accept=".docx" onChange={(event) => {
+          <label>上传 DOCX 模板（最多 {templateMaxMiB} MiB）<input aria-label="上传 DOCX 模板" type="file" accept=".docx" onChange={(event) => {
             const file = event.target.files?.[0]
             event.target.value = ''
             if (!file || !draft)
               return
             perform('正在解析模板…', async () => {
-              if (file.size > 10 * 1024 * 1024)
-                throw new Error('模板文件不能超过 10 MiB。')
-              const bytes = new Uint8Array(await file.arrayBuffer())
-              let binary = ''
-              for (let offset = 0; offset < bytes.length; offset += 8192)
-                binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
-              load(await saveFormat({ ...draft, template: { name: file.name, data: btoa(binary) } }))
+              if (file.size > templateMaxBytes)
+                throw new Error(`模板文件不能超过 ${String(templateMaxMiB)} MiB。`)
+              let revision = draft.revision
+              if (dirty) {
+                const saved = await saveFormat(draft)
+                load(saved)
+                revision = saved.state.revision
+              }
+              load(await uploadTemplate(file, revision))
               setStatus('模板已解析；请检查来源、候选和默认补充项')
             })
           }}/></label>

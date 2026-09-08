@@ -1,5 +1,6 @@
 /** Word 样式字段与合并；DOCX 和浏览器预览读取同一组生效值。 */
 import { z } from 'zod'
+import { DOCX_TEMPLATE_MAX_BYTES } from './docx-format-contract.ts'
 import type { DocxFormatState, DocxFormatView, FormatField, FormatValues, FormatSource } from './docx-format-contract.ts'
 /** 当前标书内容可映射的独立格式角色。 */
 export const FORMAT_ROLES = ['title',
@@ -153,9 +154,10 @@ export function validateFormatValues(values: unknown, fields: FormatField[]): Fo
  * 合并默认、模板映射和用户覆盖，保留每个字段的来源。
  * @param state 保存的项目配置。
  * @param fields 可用字段。
+ * @param templateMaxBytes 当前部署允许的模板原始字节数。
  * @returns 生效值、来源和支持范围提示。
  */
-export function resolveFormat(state: DocxFormatState, fields: FormatField[]): DocxFormatView {
+export function resolveFormat(state: DocxFormatState, fields: FormatField[], templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES): DocxFormatView {
   const values = Object.fromEntries(fields.map(field => [field.key, field.value]))
   const sources: Record<string, FormatSource> = Object.fromEntries(fields.map(field => [field.key, '默认补充']))
   const apply = (next: FormatValues, source: FormatSource): void => {
@@ -187,5 +189,5 @@ export function resolveFormat(state: DocxFormatState, fields: FormatField[]): Do
   const pageWidth = values['page.orientation'] === 'landscape' ? longEdge : shortEdge
   if (Number(values['page.left']) + Number(values['page.right']) >= pageWidth)
     throw new Error('左右页边距过大，请缩小边距。')
-  return { state, fields, values, sources, warnings }
+  return { state, templateMaxBytes, fields, values, sources, warnings }
 }

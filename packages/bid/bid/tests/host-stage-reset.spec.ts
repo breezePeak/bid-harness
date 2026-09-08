@@ -81,6 +81,7 @@ describe('Bid Host stage reset', () => {
       ctx: { sessions: { flush, list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
+        docxTemplateMaxBytes: 300 * 1024 * 1024,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
         chapterWritingMaxConcurrency: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,
@@ -146,6 +147,7 @@ describe('Bid Host stage reset', () => {
       ctx: { sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
+        docxTemplateMaxBytes: 300 * 1024 * 1024,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
         chapterWritingMaxConcurrency: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,

@@ -53,8 +53,15 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
-import { readDocxFormat, saveDocxFormat, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
-import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion } from './docx-format-contract.ts'
+import { readDocxFormat, saveDocxFormat, saveDocxTemplate, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
+import {
+  DOCX_TEMPLATE_MAX_BYTES,
+  DOCX_TEMPLATE_NAME_HEADER,
+  DOCX_TEMPLATE_REVISION_HEADER,
+  DOCX_TEMPLATE_SIZE_HEADER,
+  DOCX_TEMPLATE_UPLOAD_PATH,
+} from './docx-format-contract.ts'
+import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateUploadResult } from './docx-format-contract.ts'
 import { executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -231,6 +238,7 @@ export interface BidConfig {
   maxFileBytes: number
   maxFiles: number
   maxTotalBytes: number
+  docxTemplateMaxBytes: number
   projectDirectory: string
   outputDirectory: string
   enableDocxExport: boolean
@@ -246,6 +254,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   maxFileBytes: 200 * 1024 * 1024,
   maxFiles: 20,
   maxTotalBytes: 500 * 1024 * 1024,
+  docxTemplateMaxBytes: DOCX_TEMPLATE_MAX_BYTES,
   projectDirectory: '.bid-harness',
   outputDirectory: 'output',
   enableDocxExport: true,
@@ -265,6 +274,8 @@ export interface Config {
   maxFileBytes: number
   /** Maximum decoded bytes admitted across one upload batch. */
   maxTotalBytes: number
+  /** Maximum original bytes admitted for one DOCX format template. */
+  docxTemplateMaxBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
   /** Maximum Mapping Subagents running at the same time during S4. */
@@ -284,6 +295,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   maxFiles: DEFAULT_BID_CONFIG.maxFiles,
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
   maxTotalBytes: DEFAULT_BID_CONFIG.maxTotalBytes,
+  docxTemplateMaxBytes: DEFAULT_BID_CONFIG.docxTemplateMaxBytes,
   modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   evidenceMappingMaxConcurrency: DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
@@ -298,6 +310,7 @@ export const Config: z<Config> = z.object({
   maxFiles: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFiles),
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
+  docxTemplateMaxBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.docxTemplateMaxBytes),
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
   evidenceMappingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.evidenceMappingMaxConcurrency),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
@@ -321,6 +334,7 @@ function workspaceConfig(config: Config): BidConfig {
     maxFiles: config.maxFiles,
     maxFileBytes: config.maxFileBytes,
     maxTotalBytes: config.maxTotalBytes,
+    docxTemplateMaxBytes: config.docxTemplateMaxBytes,
   }
 }
 
@@ -534,16 +548,7 @@ async function readBinaryUpload(req: IncomingMessage, files: readonly BidBinaryU
     const extension = extname(safeFileName(file.name)).toLocaleLowerCase('en-US')
     if (!config.allowedExtensions.includes(extension)) throw new Error('bid-unsupported-file-type')
   }
-  const chunks: Buffer[] = []
-  let received = 0
-  for await (const chunk of req) {
-    const bytes = Buffer.from(chunk as Uint8Array)
-    received += bytes.byteLength
-    if (received > expected) throw new Error('bid-invalid-file-data')
-    chunks.push(bytes)
-  }
-  if (received !== expected) throw new Error('bid-invalid-file-data')
-  const body = Buffer.concat(chunks, expected)
+  const body = await readExactRequestBody(req, expected, 'bid-invalid-file-data')
   let offset = 0
   return files.map((file): IncomingFile => {
     const bytes = body.subarray(offset, offset + file.size)
@@ -555,6 +560,30 @@ async function readBinaryUpload(req: IncomingMessage, files: readonly BidBinaryU
       bytes,
     }
   })
+}
+
+/** Buffer one streamed request body only up to its admitted exact byte length. */
+async function readExactRequestBody(req: IncomingMessage, expected: number, mismatchMessage: string): Promise<Buffer> {
+  const body = Buffer.allocUnsafe(expected)
+  let received = 0
+  for await (const chunk of req) {
+    const bytes = Buffer.from(chunk as Uint8Array)
+    if (received + bytes.byteLength > expected) throw new Error(mismatchMessage)
+    bytes.copy(body, received)
+    received += bytes.byteLength
+  }
+  if (received !== expected) throw new Error(mismatchMessage)
+  return body
+}
+
+function docxTemplateUploadFailure(error: unknown): DocxTemplateUploadResult {
+  return {
+    ok: false,
+    error: {
+      code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED',
+      message: error instanceof Error ? error.message : 'Word 模板上传失败，请重试。',
+    },
+  }
 }
 
 /** Translate an expected admission rejection into the public business vocabulary. */
@@ -753,6 +782,11 @@ export class BidHostRuntime extends TypertRemoteService {
         path: BID_BINARY_UPLOAD_PATH,
         handler: (req, res) => this.handleBinaryUpload(req, res),
       }), 'bid: binary file intake route')
+      webCtx.effect(() => webServer.register({
+        kind: 'exact',
+        path: DOCX_TEMPLATE_UPLOAD_PATH,
+        handler: (req, res) => this.handleDocxTemplateUpload(req, res),
+      }), 'bid: DOCX template upload route')
     })
   }
 
@@ -1221,6 +1255,55 @@ export class BidHostRuntime extends TypertRemoteService {
     res.end(JSON.stringify(result))
   }
 
+  /** Receive one bounded DOCX template as a same-origin binary request. */
+  private async handleDocxTemplateUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isTrustedBidUploadRequest(req, this.config.trustedHosts)) {
+      res.writeHead(403)
+      res.end('forbidden')
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    let result: DocxTemplateUploadResult
+    try {
+      const sessionHeader = req.headers[BID_UPLOAD_SESSION_HEADER]
+      const nameHeader = req.headers[DOCX_TEMPLATE_NAME_HEADER]
+      const sizeHeader = req.headers[DOCX_TEMPLATE_SIZE_HEADER]
+      const revisionHeader = req.headers[DOCX_TEMPLATE_REVISION_HEADER]
+      if (typeof sessionHeader !== 'string' || typeof nameHeader !== 'string'
+        || typeof sizeHeader !== 'string' || typeof revisionHeader !== 'string'
+        || !/^[1-9]\d*$/u.test(sizeHeader) || !/^\d+$/u.test(revisionHeader)) {
+        throw new Error('Word 模板上传请求无效。')
+      }
+      const size = Number(sizeHeader)
+      const revision = Number(revisionHeader)
+      if (!Number.isSafeInteger(size) || size > this.config.docxTemplateMaxBytes) {
+        throw new Error(`模板文件不能超过 ${String(Math.floor(this.config.docxTemplateMaxBytes / 1024 / 1024))} MiB。`)
+      }
+      if (!Number.isSafeInteger(revision)) throw new Error('Word 模板上传请求无效。')
+      const session = this.ctx.sessions.get(SessionId(sessionHeader))
+      if (session === undefined || resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+        throw new Error('Word 模板需要标书项目会话。')
+      }
+      const bytes = await readExactRequestBody(req, size, 'DOCX 模板内容与声明大小不一致。')
+      const operation = this.beginOperation(session)
+      try {
+        result = { ok: true, value: await saveDocxTemplate(operation.workspace, {
+          revision,
+          name: decodeURIComponent(nameHeader),
+          bytes,
+        }) }
+      } finally { await this.finishOperation(session, operation, false) }
+    } catch (error) {
+      result = docxTemplateUploadFailure(error)
+    }
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(JSON.stringify(result))
+  }
+
   /** Record an S1 failure when a selected binary upload cannot be fully reconstructed. */
   private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return intakeError(error)
@@ -1313,7 +1396,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 保存项目格式，独立于 S1—S5 的资料与阶段状态。
    * @param session 当前标书会话。
-   * @param request 包含版本、模板及用户配置的请求。
+   * @param request 包含版本及用户配置的请求；模板字节使用独立二进制端点。
    * @returns 保存后的格式。
    */
   @Remote('saveDocxFormat')
@@ -2161,7 +2244,7 @@ export { within } from './workspace-path.ts'
 
 function validateConfig(config: BidConfig): void {
   if (!config.projectDirectory || !config.outputDirectory || config.maxFileBytes <= 0
-    || config.maxFiles <= 0 || config.maxTotalBytes <= 0
+    || config.maxFiles <= 0 || config.maxTotalBytes <= 0 || config.docxTemplateMaxBytes <= 0
     || !Number.isInteger(config.documentChunk.minChars) || !Number.isInteger(config.documentChunk.targetChars)
     || !Number.isInteger(config.documentChunk.maxChars) || config.documentChunk.minChars <= 0
     || config.documentChunk.minChars > config.documentChunk.targetChars

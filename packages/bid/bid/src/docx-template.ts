@@ -3,6 +3,7 @@ import JSZip from 'jszip'
 import { xml2js } from 'xml-js'
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
+import { DOCX_TEMPLATE_MAX_BYTES } from './docx-format-contract.ts'
 import type { DocxFormatState, FormatCandidate, FormatValues } from './docx-format-contract.ts'
 interface XmlNode {
   type?: string
@@ -24,12 +25,13 @@ function descendants(node: XmlNode,
 function text(node: XmlNode): string { return node.type === 'text' ? node.text ?? '' : (node.elements ?? []).map(text).join('') }
 /**
  * 读取有界 DOCX XML，不解压到磁盘、不访问外部关系。
- * @param bytes 原始 ZIP 字节，最多 10 MiB。
+ * @param bytes 原始 ZIP 字节。
+ * @param maxBytes 当前部署允许的原始字节数。
  * @returns XML 部件；无效 ZIP、活动内容及解压超限均拒绝。
  */
-export async function readDocxXml(bytes: Uint8Array): Promise<Record<string, XmlNode>> {
-  if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024)
-    throw new Error('DOCX 文件必须小于 10 MiB 且不能为空。')
+export async function readDocxXml(bytes: Uint8Array, maxBytes = DOCX_TEMPLATE_MAX_BYTES): Promise<Record<string, XmlNode>> {
+  if (bytes.length === 0 || bytes.length > maxBytes)
+    throw new Error(`DOCX 文件必须不超过 ${String(Math.floor(maxBytes / 1024 / 1024))} MiB 且不能为空。`)
   let zip: JSZip
   try {
     zip = await JSZip.loadAsync(bytes)
@@ -132,10 +134,11 @@ function paragraphFormat(node: XmlNode): FormatValues {
  * 从继承样式与直接格式生成候选；同角色多个变体必须由用户映射。
  * @param bytes 原始 DOCX。
  * @param name 浏览器显示名称，不参与路径选择。
+ * @param maxBytes 当前部署允许的原始字节数。
  * @returns 可保存的模板解析结果。
  */
-export async function parseDocxTemplate(bytes: Uint8Array, name: string): Promise<NonNullable<DocxFormatState['template']>> {
-  const files = await readDocxXml(bytes)
+export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxBytes = DOCX_TEMPLATE_MAX_BYTES): Promise<NonNullable<DocxFormatState['template']>> {
+  const files = await readDocxXml(bytes, maxBytes)
   const styles = files['word/styles.xml'] ?? {}
   const doc = files['word/document.xml'] as XmlNode
   const defaults = descendants(styles, 'docDefaults')[0] ?? {}

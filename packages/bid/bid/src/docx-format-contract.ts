@@ -1,4 +1,16 @@
 /** 项目级 Word 格式、模板候选及预览的数据；不包含文件系统或模型调用。 */
+/** DOCX 模板上传及解析的默认原始字节上限。 */
+export const DOCX_TEMPLATE_MAX_BYTES = 300 * 1024 * 1024
+
+/** 同源 DOCX 模板二进制上传端点。 */
+export const DOCX_TEMPLATE_UPLOAD_PATH = '/api/bid-docx-template' as const
+/** DOCX 模板上传请求中的显示文件名。 */
+export const DOCX_TEMPLATE_NAME_HEADER = 'x-dsh-bid-docx-name' as const
+/** DOCX 模板上传请求中的原始字节数。 */
+export const DOCX_TEMPLATE_SIZE_HEADER = 'x-dsh-bid-docx-size' as const
+/** DOCX 模板上传请求读取到的配置版本。 */
+export const DOCX_TEMPLATE_REVISION_HEADER = 'x-dsh-bid-docx-revision' as const
+
 export type FormatValue = string | number | boolean
 /** 字段键到实际值的配置覆盖。 */
 export type FormatValues = Record<string, FormatValue>
@@ -50,6 +62,8 @@ export interface DocxFormatState {
 /** 所有生效字段及其来源；浏览器不另算模板格式。 */
 export interface DocxFormatView {
   state: DocxFormatState
+  /** 当前部署允许的 DOCX 模板原始字节数。 */
+  templateMaxBytes: number
   fields: FormatField[]
   values: FormatValues
   sources: Record<string, FormatSource>
@@ -57,18 +71,18 @@ export interface DocxFormatView {
   fingerprint?: string
   previewHtml?: string
 }
-/** 修改配置必须携带读取时的版本；上传文件只允许 DOCX 的 base64 字节。 */
+/** 修改配置必须携带读取时的版本；模板文件通过独立二进制端点上传。 */
 export interface DocxFormatRequest {
   revision: number
   source: 'default' | 'template'
   overrides: FormatValues
   mapping: Record<string, string>
   description: string
-  template?: {
-    name: string
-    data: string
-  }
 }
+/** DOCX 模板二进制上传的业务结果。 */
+export type DocxTemplateUploadResult =
+  | { ok: true; value: DocxFormatView }
+  | { ok: false; error: { code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED'; message: string } }
 /** 模型建议尚未生效，前端展示差异后由用户应用。 */
 export interface DocxFormatSuggestion {
   overrides: FormatValues

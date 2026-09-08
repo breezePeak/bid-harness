@@ -1,11 +1,13 @@
 // Web e2e scenario: the dedicated Bid action carries a real browser-selected
 // document through Host admission, workspace intake, stage events, projection,
 // persistence, and reload without routing file bytes through session.prompt.
+import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
+import { strToU8, zipSync } from 'fflate'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type {} from '@deepseek-ai/dsh-bid'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -13,7 +15,11 @@ import type { GenerateOptions, StreamChunk, ToolCallBlock } from '@deepseek-ai/d
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   acknowledgeReloadConnectionLoss,
+  assertFixtureInventory,
+  captureStableAria,
+  compareOrRefreshGolden,
   launchWebScaffold,
+  webSnapshotMode,
   watchConsole,
   type WebScaffold,
 } from './scaffold.ts'
@@ -30,6 +36,9 @@ const INTAKE_FIXTURE = fileURLToPath(new URL(
   import.meta.url,
 ))
 const INTAKE_FILE_NAME = 'tender-notice.md'
+const SNAPSHOT_DIR = fileURLToPath(new URL('./snapshots/bid-session', import.meta.url))
+const WORD_TEMPLATE_EXPECTED = join(SNAPSHOT_DIR, 'word-template.expected.md')
+const MODE = webSnapshotMode()
 
 interface AnalysisManifestFile {
   id: string
@@ -193,6 +202,14 @@ function bidStageLifecycle(events: readonly SessionEvent[]): Array<{
   })
 }
 
+function docxTemplateBytes(): Uint8Array {
+  return zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    'word/document.xml': strToU8('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>旧模板正文</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>'),
+    'word/styles.xml': strToU8('<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>'),
+  })
+}
+
 describe('web e2e: Bid file intake', () => {
   let scaffold: WebScaffold
   let browser: Browser
@@ -223,6 +240,7 @@ describe('web e2e: Bid file intake', () => {
   afterAll(async () => {
     await browser?.close()
     await scaffold?.close()
+    await assertFixtureInventory(SNAPSHOT_DIR, ['panel.expected.md', 'word-template.expected.md'])
   })
 
   it('uploads a Markdown tender through the Host and restores the advanced stage', async () => {
@@ -262,7 +280,7 @@ describe('web e2e: Bid file intake', () => {
       if (request.method() !== 'POST') return
       const path = new URL(request.url()).pathname
       if (path === '/api/session.prompt') promptPosts += 1
-      if (path === '/api/bid/uploadFiles') uploadPosts += 1
+      if (path === '/api/bid-upload') uploadPosts += 1
     })
 
     const chooserReady = page.waitForEvent('filechooser')
@@ -276,7 +294,7 @@ describe('web e2e: Bid file intake', () => {
 
     const uploadResponse = page.waitForResponse(response => (
       response.request().method() === 'POST'
-      && new URL(response.url()).pathname === '/api/bid/uploadFiles'
+      && new URL(response.url()).pathname === '/api/bid-upload'
     ))
     await page.getByRole('button', { name: '上传并解析' }).click()
     await page.getByText('正在上传并解析文件', { exact: true }).waitFor({ timeout: 15_000 })
@@ -382,6 +400,110 @@ describe('web e2e: Bid file intake', () => {
     expect(tripwire.warnings).toEqual([])
   }, 120_000)
 
+  it('uploads a DOCX format template as bounded binary bytes', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-docx-template'))
+    let sessions = await listedSessions(scaffold.baseUrl)
+    if (sessions.length === 0) {
+      await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
+      sessions = await listedSessions(scaffold.baseUrl)
+    }
+    let bid = sessions.find(session => session.agentPreset === 'bid')
+    if (bid === undefined) {
+      await page.getByRole('button', { name: '标准模式' }).click()
+      await page.getByRole('menuitem', { name: /标书模式/ }).click()
+      await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
+        .find(session => session.agentPreset === 'bid'), { timeout: 15_000 }).toBeDefined()
+      bid = (await listedSessions(scaffold.baseUrl)).find(session => session.agentPreset === 'bid')
+    }
+    if (bid === undefined) throw new Error('Bid Session is unavailable')
+    const agent = scaffold.ctx.agents.get(SessionId(bid.sessionId))
+    if (agent === undefined) throw new Error('Bid Session has no live Agent')
+    const cwd = agent.session.header.cwd
+    if (cwd === undefined) throw new Error('Bid Session has no workspace cwd')
+    if (!agent.session.events.some(event => event.type === 'bid.stage.completed'
+      && event.data.stage === 'tender_analysis')) {
+      analysisAdapter.setSession(cwd, bid.sessionId)
+      const tenderBytes = await readFile(INTAKE_FIXTURE)
+      const intake = await fetch(`${scaffold.baseUrl}/api/bid-upload`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/vnd.dsh.bid-upload',
+          'x-dsh-bid-session-id': bid.sessionId,
+          'x-dsh-bid-files': encodeURIComponent(JSON.stringify([{
+            name: INTAKE_FILE_NAME,
+            role: 'tender',
+            mediaType: 'text/markdown',
+            size: tenderBytes.byteLength,
+          }])),
+        },
+        body: new Blob([Uint8Array.from(tenderBytes).buffer]),
+      })
+      expect(intake.status).toBe(200)
+      expect(await intake.json()).toMatchObject({ ok: true })
+    }
+    const bytes = docxTemplateBytes()
+    const response = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/vnd.dsh.bid-docx-template',
+        'x-dsh-bid-session-id': bid.sessionId,
+        'x-dsh-bid-docx-name': encodeURIComponent('公司 模板.docx'),
+        'x-dsh-bid-docx-size': String(bytes.byteLength),
+        'x-dsh-bid-docx-revision': '0',
+      },
+      body: new Blob([bytes.buffer as ArrayBuffer]),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 1, source: 'template', template: { name: '公司 模板.docx' } } },
+    })
+    const hash = createHash('sha256').update(bytes).digest('hex')
+    expect(await readFile(join(cwd, '.bid-harness', `word-export/templates/${hash}.docx`))).toEqual(Buffer.from(bytes))
+
+    const warningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    acknowledgeReloadConnectionLoss(tripwire, warningStart)
+    await page.getByRole('tab', { name: '导出 Word' }).click()
+    await page.getByRole('region', { name: '导出 Word' }).waitFor()
+    const snapshot = await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(WORD_TEMPLATE_EXPECTED, snapshot, MODE)
+    expect(snapshot).toContain('上传 DOCX 模板（最多 300 MiB）')
+
+    const mismatched = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/vnd.dsh.bid-docx-template',
+        'x-dsh-bid-session-id': bid.sessionId,
+        'x-dsh-bid-docx-name': 'mismatched.docx',
+        'x-dsh-bid-docx-size': '1',
+        'x-dsh-bid-docx-revision': '1',
+      },
+      body: new Blob([Uint8Array.of(1, 2).buffer]),
+    })
+    expect(await mismatched.json()).toEqual({
+      ok: false,
+      error: { code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED', message: 'DOCX 模板内容与声明大小不一致。' },
+    })
+
+    const oversized = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/vnd.dsh.bid-docx-template',
+        'x-dsh-bid-session-id': bid.sessionId,
+        'x-dsh-bid-docx-name': 'oversized.docx',
+        'x-dsh-bid-docx-size': String(300 * 1024 * 1024 + 1),
+        'x-dsh-bid-docx-revision': '1',
+      },
+      body: new Blob([Uint8Array.of(1).buffer]),
+    })
+    expect(await oversized.json()).toEqual({
+      ok: false,
+      error: { code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED', message: '模板文件不能超过 300 MiB。' },
+    })
+  }, 60_000)
+
   it('shows an S2 failure and retries it through the Host without starting S3', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session-retry'))
     await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
@@ -417,7 +539,7 @@ describe('web e2e: Bid file intake', () => {
     await chooser.setFiles(INTAKE_FIXTURE)
     const uploadResponse = page.waitForResponse(response => (
       response.request().method() === 'POST'
-      && new URL(response.url()).pathname === '/api/bid/uploadFiles'
+      && new URL(response.url()).pathname === '/api/bid-upload'
     ))
     await page.getByRole('button', { name: '上传并解析' }).click()
     expect((await uploadResponse).status()).toBe(200)

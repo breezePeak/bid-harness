@@ -1,11 +1,12 @@
 /**
  * Bid Session browser plugin. It renders the Host-computed `bid.runtime` projection
  * in `conversation.input.dock`, mirrors `projection.composer` into the existing
- * per-session composer block registry, and carries selected files through the
- * generated Bid Remote. It folds no Bid events and owns no Bid business state.
+ * per-session composer block registry, and carries selected files through
+ * dedicated same-origin binary endpoints. It folds no Bid events and owns no
+ * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -273,6 +274,21 @@ export function apply(ctx: ClientContext): void {
     return {
       getFormat: async () => unwrap(await remote.getDocxFormat(sessionId)),
       saveFormat: async request => unwrap(await remote.saveDocxFormat(sessionId, request)),
+      uploadTemplate: async (file, revision) => {
+        const response = await fetch(new URL(DOCX_TEMPLATE_UPLOAD_PATH, window.location.href), {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/vnd.dsh.bid-docx-template',
+            [BID_UPLOAD_SESSION_HEADER]: sessionId,
+            [DOCX_TEMPLATE_NAME_HEADER]: encodeURIComponent(file.name),
+            [DOCX_TEMPLATE_SIZE_HEADER]: String(file.size),
+            [DOCX_TEMPLATE_REVISION_HEADER]: String(revision),
+          },
+          body: file,
+        })
+        if (!response.ok) throw new Error(`BID_DOCX_TEMPLATE_UPLOAD_HTTP_${String(response.status)}`)
+        return unwrap(await response.json() as DocxTemplateUploadResult)
+      },
       preview: async () => unwrap(await remote.previewDocx(sessionId)),
       generate: async () => unwrap(unwrap(await remote.exportDocx(sessionId))),
       suggest: async () => unwrap(await remote.suggestDocxFormat(sessionId)),

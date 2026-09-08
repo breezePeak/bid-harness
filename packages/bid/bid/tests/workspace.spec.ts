@@ -177,7 +177,7 @@ describe('BidWorkspace', () => {
   it('validates workspace configuration and every import limit', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
     for (const patch of [
-      { projectDirectory: '' }, { outputDirectory: '' }, { maxFileBytes: 0 }, { maxFiles: 0 }, { maxTotalBytes: 0 },
+      { projectDirectory: '' }, { outputDirectory: '' }, { maxFileBytes: 0 }, { maxFiles: 0 }, { maxTotalBytes: 0 }, { docxTemplateMaxBytes: 0 },
       { documentChunk: { minChars: 10, targetChars: 5, maxChars: 20 } },
     ]) expect(() => new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, ...patch })).toThrow('bid-invalid-config')
 

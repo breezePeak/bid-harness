@@ -6,7 +6,8 @@ import { Document, Packer, Paragraph, TextRun } from 'docx'
 import { describe, expect, it } from 'vitest'
 import type { BidWorkspace } from '../src/index.ts'
 import { formatFields, resolveFormat, validateFormatValues } from '../src/docx-format.ts'
-import { readDocxFormat, saveDocxFormat } from '../src/docx-format-store.ts'
+import { readDocxFormat, saveDocxFormat, saveDocxTemplate } from '../src/docx-format-store.ts'
+import { DOCX_TEMPLATE_MAX_BYTES } from '../src/docx-format-contract.ts'
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
 import { validateFormatSuggestion } from '../src/docx-format-suggestions.ts'
@@ -65,14 +66,8 @@ describe('项目 Word 格式链路', () => {
     expect(parsed.values).toMatchObject({ 'page.paper': 'A4', 'page.left': 25.4, 'page.header': 12.7 })
     const project = await workspace()
     const initial = await readDocxFormat(project)
-    const saved = await saveDocxFormat(project,
-      { revision: 0,
-        source: 'template',
-        mapping: {},
-        overrides: {},
-        description: '',
-        template: { name: '模板.docx',
-          data: (await template()).toString('base64') } })
+    const saved = await saveDocxTemplate(project,
+      { revision: 0, name: '模板.docx', bytes: await template() })
     expect(initial.state.opened).toBe(false)
     expect(saved.sources['heading1.size']).toBe('待确认')
     expect(saved.state.mapping.body).toBe('Normal')
@@ -135,6 +130,7 @@ describe('项目 Word 格式链路', () => {
     await expect(renderDocx(project, '![远程](https://example.com/a.png)', view.values)).rejects.toThrow('不自动访问外部资源')
   })
   it('拒绝无效 DOCX、DTD、活动内容、循环样式和路径逃逸', async () => {
+    await expect(readDocxXml({ length: DOCX_TEMPLATE_MAX_BYTES + 1 } as Uint8Array)).rejects.toThrow('不超过 300 MiB')
     await expect(readDocxXml(Buffer.from('not zip'))).rejects.toThrow('有效的 DOCX')
     const bytes = await template()
     for (const [path, content, message] of [
