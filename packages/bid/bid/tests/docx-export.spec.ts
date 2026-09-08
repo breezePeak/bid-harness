@@ -20,6 +20,7 @@ async function exportFixture() {
     writable: boolean,
   ): OutlineSection => ({
     id, parent_id, order, level, title, writable, purpose: title, must_answer: writable ? [title] : [],
+    ...(!writable ? { summary: id === 'root' ? '本章介绍部署安排与交付要求，说明项目实施的主要内容。' : '本节概述部署所需的资源配置。' } : {}),
     requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated', scoring_response_point_ids: [],
     scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
   })
@@ -51,18 +52,19 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
-  it('按确认目录顺序导出完整正文，保留旧正文标题且不增子编号', async () => {
+  it('按确认目录顺序导出各级父节点概述和叶节正文，保留正文标题', async () => {
     const { workspace } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
     expect(artifacts).toEqual([{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }])
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
-    expect(markdown).toContain('## 1 实施方案\n\n### 1.1 部署安排\n\n#### 1.1.1 资源配置')
+    expect(markdown).toContain('## 1 实施方案\n\n本章介绍部署安排与交付要求，说明项目实施的主要内容。\n\n### 1.1 部署安排\n\n本节概述部署所需的资源配置。\n\n#### 1.1.1 资源配置')
     expect(markdown).toContain('##### 内部措施')
     expect(markdown).not.toContain('1.1.1.1')
     expect(markdown).toContain('```txt\n# 原样井号\n```')
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'bid.docx')) })
     expect(html).toContain('<h4>1.1.1 资源配置</h4>')
+    expect(html).toContain('<h2>1 实施方案</h2><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h3>1.1 部署安排</h3><p>本节概述部署所需的资源配置。</p>')
     expect(html.indexOf('资源配置正文')).toBeLessThan(html.indexOf('交付正文'))
     expect(html).toContain('<h3>1.2 交付</h3>')
   })

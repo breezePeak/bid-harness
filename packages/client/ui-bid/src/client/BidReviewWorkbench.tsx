@@ -90,6 +90,7 @@ export function BidReviewWorkbench({
       if (version !== requestVersion.current) return
       setWorkbench(value)
       const selected = value.outline.find(item => item.section_id === selectedSectionId.current && item.content_available)
+        ?? value.outline.find(item => item.writable && item.content_available)
         ?? value.outline.find(item => item.content_available)
       if (selected !== undefined) {
         const next = await getChapter(selected.section_id)
@@ -216,7 +217,7 @@ export function BidReviewWorkbench({
               const title = `${number} ${section.title}`
               const isSelected = chapter?.section_id === section.section_id
               const isCollapsed = collapsed.has(section.section_id)
-              const dotInfo = getChapterDotInfo(section.writing_status, section.review_status)
+              const dotInfo = getChapterDotInfo(section)
 
               return (
                 <div
@@ -317,6 +318,10 @@ export function BidReviewWorkbench({
             <div className={css.emptyState}>
               <p className={css.emptyStateTitle}>请选择章节查看对应的参考资料与依据。</p>
             </div>
+          ) : !chapter.writable ? (
+            <div className={css.card}>
+              <p className={css.fieldLabel}>本章概述下属章节的主要内容。请选择子章节查看具体方案、参考资料与依据。</p>
+            </div>
           ) : (
             <>
               <section className={css.reviewSection}>
@@ -401,9 +406,13 @@ function titleRowClass(_num?: string): string {
 }
 
 function getChapterDotInfo(
-  writingStatus: string,
-  reviewStatus: string,
+  section: BidReviewWorkbenchView['outline'][number],
 ): { className: string; title: string } {
+  if (!section.writable) return {
+    className: classes(css.statusDot, section.content_available ? css.statusDotBlue : css.statusDotGray),
+    title: section.content_available ? '章节概述' : '概述待补充',
+  }
+  const { writing_status: writingStatus, review_status: reviewStatus } = section
   // 1. 异常：显示红色
   if (writingStatus === 'failed' || reviewStatus === 'failed' || reviewStatus === 'needs_attention') {
     return {

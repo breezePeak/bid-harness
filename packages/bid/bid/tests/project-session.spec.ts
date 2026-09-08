@@ -193,6 +193,42 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
   })
 
+  it('各级父节点从确认目录读取概述，不计入叶节写作和审查进度', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    const leaf = outline.sections[0]!
+    outline.sections = [
+      { ...leaf, id: 'ROOT', title: '项目实施', writable: false, must_answer: [], summary: '本章介绍实施安排及具体技术方案。' },
+      { ...leaf, id: 'BRANCH', parent_id: 'ROOT', level: 2, title: '实施安排', writable: false, must_answer: [], summary: '本节概括技术方案的主要内容。' },
+      { ...leaf, parent_id: 'BRANCH', level: 3 },
+    ]
+    const outlinePath = join(workspace.projectRoot, 'outline/confirmed-outline.json')
+    await writeFile(outlinePath, JSON.stringify(outline))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('branch-summary')
+    expect(await ctx.bid.getReviewWorkbench(agent.session)).toMatchObject({
+      outline: [
+        { section_id: 'ROOT', content_available: true },
+        { section_id: 'BRANCH', content_available: true },
+        { section_id: 'SEC-1', content_available: true },
+      ],
+      summary: { chapter_count: 1, content_count: 1, reviewed_count: 0 },
+    })
+    for (const [sectionId, number, summary] of [
+      ['ROOT', '1', '本章介绍实施安排及具体技术方案。'],
+      ['BRANCH', '1.1', '本节概括技术方案的主要内容。'],
+    ] as const) {
+      expect(await ctx.bid.getReviewChapter(agent.session, sectionId)).toMatchObject({
+        number, writable: false, markdown: summary, content_sha256: null, evidence_status: 'not_applicable',
+      })
+    }
+    expect(await ctx.bid.getReviewChapter(agent.session, leaf.id)).toMatchObject({ number: '1.1.1', writable: true, markdown: '# 技术方案\n\n已有正文。\n' })
+    delete outline.sections[0]!.summary
+    await writeFile(outlinePath, JSON.stringify(outline))
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.content_available).toBe(false)
+    expect((await ctx.bid.getReviewChapter(agent.session, 'ROOT')).markdown).toBeNull()
+  })
+
   it('旧 S6 已完成项目仍保留审核工作台和按需导出动作', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)

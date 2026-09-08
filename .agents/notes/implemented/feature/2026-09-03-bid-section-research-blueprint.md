@@ -16,6 +16,8 @@ Draft 保持 CAS 与结构、覆盖校验。保存操作不覆盖最近研究完
 
 S5 使用已确认的任务定义组织正文，不重新规划拆章或章节目标。Writer 获得全部允许语料的 locator，优先使用 S4 Evidence，遇到具体缺口时有限 grep/read；补搜实际使用的资料只写当前章节 Metadata。tender 不开放，outline_framework 仍只作草稿，不证明项目事实。
 
+各级父节点的 `summary` 由 S4 用 1～3 句概括下属章节任务。S5 阅读接口直接返回确认目录中的概述，工作台允许选择父节点；Word 导出把同一概述放在父标题与子章节之间。概述的依据是已确认的章节任务，不承载叶节正文的具体承诺，也不进入叶节写作、审查计数或原 Writer 修订。
+
 S4、S5 的 Corpus 读取 Guard 由各 Child 的工具作用域持有，随 Child 释放。Fresh-context Child 不继承父 Agent 的 Guard，父会话上的注册无法限制它的文件读取。
 
 ## Alternatives considered
@@ -26,6 +28,8 @@ S4、S5 的 Corpus 读取 Guard 由各 Child 的工具作用域持有，随 Chil
 
 **逐章节独立 Agent、持久知识库或复杂拆分来源图。** 当前分支调度、内存候选集合与既有 Corpus 已足够支持复用；新增持久索引和来源状态会扩大一致性维护范围。
 
+**另派 S5 Writer 编写父节点概述。** S4 已有经过确认的摘要；再次生成会增加模型调用和第二份正文状态，使目录、工作台与导出内容可能不一致。
+
 **把错误引用编码为业务缺口。** 技术修复与资料是否存在是不同结论；日志记录错误，missing_topics 由研究判断。
 
 ## Consequences
@@ -34,4 +38,4 @@ S4 增加一次轻量语义闭环，最终确认的耗时取决于实际受影�
 
 本记录部分替代[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)的自动继承、技术错误缺口和免复核确认规则，以及[等待态交互](2026-09-03-bid-waiting-user-stage-interaction.md)的编辑发布时机。这两份记录关于业务分支调度、来源证明、受控工具与生命周期的取舍仍有独立价值，保留并互相链接；更早的[章节证据新鲜度](../architecture/2026-09-03-bid-section-evidence-freshness.md)和[六阶段角色分离](../architecture/2026-09-02-bid-role-separated-evidence-flow.md)继续保留其 Corpus 权限与阶段职责依据。
 
-定向验证覆盖跨分支复用、拆分与合并后的完整任务、技术错误隔离、排序免复核、确认失败恢复及 S5 未映射资料补检索；源码 Loader 回放固定 S4 研究与无工具 Final Check，以及 S5 拒读 tender 后使用未映射资料的真实会话和最终产物。前端仅运行受影响组件测试，不执行 build。
+定向验证覆盖跨分支复用、拆分与合并后的完整任务、技术错误隔离、排序免复核、确认失败恢复及 S5 未映射资料补检索；源码 Loader 回放固定 S4 研究与无工具 Final Check，以及 S5 拒读 tender 后使用未映射资料的真实会话和最终产物。父节点概述由接口、组件及 Word 导出测试覆盖，真实 Web 应用回放固定多层父节点阅读、刷新保持选择及切换叶节正文与依据。

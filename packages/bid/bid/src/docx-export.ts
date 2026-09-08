@@ -38,7 +38,7 @@ function chapterBody(markdown: string, title: string, sectionId: string, number:
 }
 
 /**
- * 仅导出与当前确认目录匹配且覆盖全部可写章节的项目正文。
+ * 按确认目录导出父节点概述及完整叶节正文；章节记录必须匹配当前目录。
  * @param workspace 已由 Host 锁定的项目。
  * @param signal 本次阶段操作的取消信号。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
@@ -66,6 +66,7 @@ export async function executeDocxExport(
     signal?.throwIfAborted()
     const headingDepth = Math.min(6, depth + 1)
     parts.push(`${'#'.repeat(headingDepth)} ${number} ${section.title}`)
+    if (!section.writable && section.summary !== undefined) parts.push(section.summary)
     const chapter = chapters.get(section.id)
     if (chapter === undefined) continue
     const markdown = await readProjectFile(workspace, chapter.content_path)

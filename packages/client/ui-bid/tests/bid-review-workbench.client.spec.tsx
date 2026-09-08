@@ -10,7 +10,7 @@ afterEach(cleanup)
 const workbench = {
   schema_version: 1 as const,
   outline: [
-    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: false },
+    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
   ],
   summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0 },
@@ -110,11 +110,70 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByText('Evidence：available')).toBeTruthy()
   })
 
-  it('disables sections whose content is not available', async () => {
-    render(<BidReviewWorkbench {...props()} />)
-    const root = await screen.findByRole('button', { name: /技术方案/ })
-    expect(root).toHaveProperty('disabled', true)
-    expect(screen.queryByText('说明项目实施流程、人员分工与质量控制措施。')).toBeNull()
+  it('默认优先叶节正文，父节点和嵌套父节点可阅读概述且刷新保留选择', async () => {
+    const root = workbench.outline[0]!
+    const branch = { ...root, section_id: 'BRANCH', parent_id: 'ROOT', title: '工作安排', summary: '介绍进场准备与现场实施的工作安排。' }
+    const parentChapters = [root, branch].map((section, index) => ({
+      ...chapter, section_id: section.section_id, title: section.title, number: index === 0 ? '1' : '1.1',
+      heading_path: index === 0 ? ['技术方案'] : ['技术方案', '工作安排'], writable: false,
+      markdown: section.summary!, content_sha256: null, requirement_ids: [], scoring_response_point_ids: [],
+      evidence_status: 'not_applicable' as const, materials: [], review: { status: 'not_started' as const, issues: [] },
+    }))
+    const getChapter = vi.fn(async (sectionId: string) => parentChapters.find(item => item.section_id === sectionId) ?? chapter)
+    const store = createBidRevisionStore().create()
+    render(<BidReviewWorkbench {...props({
+      actions: store.actions, getChapter,
+      getWorkbench: async () => ({ ...workbench, outline: [root, branch, { ...workbench.outline[1]!, parent_id: 'BRANCH' }] }),
+      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    expect(getChapter).toHaveBeenNthCalledWith(1, 'SEC-1')
+    for (const [index, section] of [root, branch].entries()) {
+      const button = screen.getByRole('button', { name: `${index === 0 ? '1' : '1.1'} ${section.title}` })
+      expect(button).toHaveProperty('disabled', false)
+      expect(button).toHaveProperty('draggable', false)
+      fireEvent.click(button)
+      const paragraph = await screen.findByText(section.summary!)
+      expect(screen.getByTitle(`${index === 0 ? '1' : '1.1'} ${section.title}：章节概述`)).toBeTruthy()
+      expect(screen.getByText('本章概述下属章节的主要内容。请选择子章节查看具体方案、参考资料与依据。')).toBeTruthy()
+      expect(screen.queryByText('本章节暂无特定引用资料，按通用技术规范与招标文件要求编写。')).toBeNull()
+      const range = document.createRange()
+      range.selectNodeContents(paragraph)
+      window.getSelection()!.removeAllRanges()
+      window.getSelection()!.addRange(range)
+      fireEvent.contextMenu(paragraph)
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(store.getSnapshot().reference).toBeNull()
+      window.getSelection()!.removeAllRanges()
+      getChapter.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+      await waitFor(() => { expect(getChapter).toHaveBeenCalledWith(section.section_id) })
+      expect(screen.getByText(section.summary!)).toBeTruthy()
+    }
+  })
+
+  it('叶节正文未生成时默认阅读父节点概述，缺正文的叶节仍禁用', async () => {
+    const root = workbench.outline[0]!
+    const getChapter = vi.fn(async () => ({
+      ...chapter, section_id: root.section_id, title: root.title, writable: false, markdown: root.summary!,
+    }))
+    render(<BidReviewWorkbench {...props({
+      getChapter,
+      getWorkbench: async () => ({ ...workbench, outline: [root, { ...workbench.outline[1]!, content_available: false }] }),
+    })} />)
+    expect(await screen.findByText(root.summary!)).toBeTruthy()
+    expect(getChapter).toHaveBeenCalledWith('ROOT')
+    expect(screen.getByRole('button', { name: '1.1 实施方案' })).toHaveProperty('disabled', true)
+  })
+
+  it('缺少概述的父节点保持禁用并提示概述待补充', async () => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench, outline: workbench.outline.map(section => section.writable
+        ? section : { ...section, summary: undefined, content_available: false }),
+    }) })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '1 技术方案' })).toHaveProperty('disabled', true)
+    expect(screen.getByTitle('1 技术方案：概述待补充')).toBeTruthy()
   })
 
   it('polls the live S5 state and supports an explicit refresh', async () => {

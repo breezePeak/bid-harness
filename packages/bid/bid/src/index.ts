@@ -1388,7 +1388,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const index = worklist.findIndex(item => item.id === section.id)
       const serial = String(index + 1).padStart(4, '0')
       const execution = log?.sections.find(item => item.section_id === section.id)
-      let contentAvailable = false
+      let contentAvailable = !section.writable && section.summary !== undefined
       let reviewStatus: BidReviewWorkbenchView['outline'][number]['review_status'] = 'not_started'
       if (section.writable && index >= 0) {
         try { contentAvailable = (await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')).trim().length > 0 } catch { contentAvailable = false }
@@ -1427,7 +1427,7 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  /** Read one S5 section body and its latest independent review. */
+  /** 读取 S5 叶节正文及审查结果，或父节点在确认目录中保存的概述。 */
   @Remote('getReviewChapter')
   async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView> {
     const workspace = this.requireReviewWorkspace(session)
@@ -1438,7 +1438,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const section = outline.sections.find(item => item.id === sectionId)
     if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const chain = reviewHeadingPath(outline, section.id)
-    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: null, content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
+    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const serial = String(index + 1).padStart(4, '0')
