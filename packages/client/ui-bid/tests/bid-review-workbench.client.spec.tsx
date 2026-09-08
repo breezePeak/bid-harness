@@ -169,7 +169,10 @@ describe('BidReviewWorkbench', () => {
   it('缺少概述的父节点保持禁用并提示概述待补充', async () => {
     render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
       ...workbench, outline: workbench.outline.map(section => section.writable
-        ? section : { ...section, summary: undefined, content_available: false }),
+        ? section : (() => {
+          const { summary: _summary, ...withoutSummary } = section
+          return { ...withoutSummary, content_available: false }
+        })()),
     }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     expect(screen.getByRole('button', { name: '1 技术方案' })).toHaveProperty('disabled', true)
