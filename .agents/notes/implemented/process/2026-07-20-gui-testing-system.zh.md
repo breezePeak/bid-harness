@@ -6,7 +6,7 @@ Status: implemented
 
 [English](2026-07-20-gui-testing-system.md) | 中文
 
-> 分工线：本篇只讲 GUI（`packages/{client,host}/*` + `apps/web`）特有的测试结构；全仓测试政策（分层原则、with-key 政策、真实实现优先、REAL-composition）见 [docs/testing.md](../../../../docs/testing.zh.md)，不在此复述。
+> 分工线：本篇只讲 GUI（`packages/{client,host}/*` + `apps/web`）特有的测试结构；全仓测试政策（分层原则、with-key 政策、真实实现优先、REAL-composition）见 [docs/testing.md](../../../../docs/testing.md)，不在此复述。
 
 ## Problem
 

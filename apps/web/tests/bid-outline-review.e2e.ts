@@ -34,15 +34,13 @@ async function dragSection(page: Page, title: string, target: string): Promise<v
 
 it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
   const scaffold = await launchWebScaffold({
-    agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'standard' },
+    agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'bid' },
   })
   const browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
   try {
     await page.goto(scaffold.baseUrl)
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('button', { name: '标准模式' }).click()
-    await page.getByRole('menuitem', { name: /标书模式/ }).click()
     await page.getByRole('region', { name: '技术标生成' }).waitFor()
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
@@ -233,15 +231,13 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
 
 it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复三列及关联内容', async () => {
   const scaffold = await launchWebScaffold({
-    agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'standard' },
+    agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'bid' },
   })
   const browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
   try {
     await page.goto(scaffold.baseUrl)
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('button', { name: '标准模式' }).click()
-    await page.getByRole('menuitem', { name: /标书模式/ }).click()
     await page.getByRole('region', { name: '技术标生成' }).waitFor()
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')

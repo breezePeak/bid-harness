@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-const DEFAULT_CLIENT_TITLE = 'DSH Local Build'
+const DEFAULT_CLIENT_TITLE = '北京四维数码空间科技有限公司'
 
 /** Props for the browser title projection. */
 export interface DocumentTitleProps {

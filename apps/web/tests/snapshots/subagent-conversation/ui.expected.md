@@ -6,8 +6,6 @@
     - button "1 subagent":
       - text: 1 subagent
       - img
-  - img
-  - text: Standard mode
   - button "Session log":
     - text: Session log
     - img

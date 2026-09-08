@@ -1,8 +1,6 @@
 - banner:
   - navigation "Session hierarchy":
     - button "Use web_search once with queries" [disabled]
-  - img
-  - text: Standard mode
   - button "Session log":
     - text: Session log
     - img

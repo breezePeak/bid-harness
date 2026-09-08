@@ -153,9 +153,6 @@ importers:
       '@deepseek-ai/dsh-base':
         specifier: workspace:^
         version: link:../../packages/bundle/base
-      '@deepseek-ai/dsh-client-ui-agent-preset':
-        specifier: workspace:^
-        version: link:../../packages/client/ui-agent-preset
       '@deepseek-ai/dsh-client-ui-cordis':
         specifier: workspace:^
         version: link:../../packages/extensions/ui-cordis
@@ -1426,9 +1423,6 @@ importers:
       '@deepseek-ai/dsh-client-runtime':
         specifier: workspace:^
         version: link:../../client/runtime
-      '@deepseek-ai/dsh-client-ui-agent-preset':
-        specifier: workspace:^
-        version: link:../../client/ui-agent-preset
       '@deepseek-ai/dsh-client-ui-attachment':
         specifier: workspace:^
         version: link:../../client/ui-attachment

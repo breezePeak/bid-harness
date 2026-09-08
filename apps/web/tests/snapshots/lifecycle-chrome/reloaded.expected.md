@@ -1,8 +1,6 @@
 - banner:
   - navigation "Session hierarchy":
     - button "Reply with the single word" [disabled]
-  - img
-  - text: Standard mode
   - button "Session log":
     - text: Session log
     - img

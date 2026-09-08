@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-Web GUI 以一条真实组装链交付——chromium 页面 → client 插件 bundle → HTTP 单次 RPC + 两条 SSE（Server-Sent Events）流 → `toFetchHandler`/apiproxy → host 端的 agent loop（智能体循环）、工具与 JSONL 持久化——却没有任何测试无密钥且确定性地检验这条链。[GUI 测试体系](../process/2026-07-20-gui-testing-system.zh.md)覆盖第 1 层（Node 中的协议同构）、第 2 层（对象层状态机）与第 3 层冒烟测试，但无密钥冒烟驱动的是 `FixtureApiClient`——没有 host、没有 wire、没有 agent loop——而全链路冒烟需要 `DEEPSEEK_API_KEY` 和真实模型，因此不确定、在无密钥 CI 中自行跳过。[docs/testing.md](../../../../docs/testing.zh.md) 的快照哲学——带密钥录制一次、永久无密钥回放、格式变动时刷新——已覆盖 ACP（Agent Client Protocol）、headless `stream-json` 与 TUI 三个 transcript（文本记录）表面；web 表面是唯一没有这层保障的组装形态。而缺口恰恰是两起已实证 GUI P0 藏身之处：fixture（测试前置数据）客户端短路掉的 wire 承载链。
+Web GUI 以一条真实组装链交付——chromium 页面 → client 插件 bundle → HTTP 单次 RPC + 两条 SSE（Server-Sent Events）流 → `toFetchHandler`/apiproxy → host 端的 agent loop（智能体循环）、工具与 JSONL 持久化——却没有任何测试无密钥且确定性地检验这条链。[GUI 测试体系](../process/2026-07-20-gui-testing-system.zh.md)覆盖第 1 层（Node 中的协议同构）、第 2 层（对象层状态机）与第 3 层冒烟测试，但无密钥冒烟驱动的是 `FixtureApiClient`——没有 host、没有 wire、没有 agent loop——而全链路冒烟需要 `DEEPSEEK_API_KEY` 和真实模型，因此不确定、在无密钥 CI 中自行跳过。[docs/testing.md](../../../../docs/testing.md) 的快照哲学——带密钥录制一次、永久无密钥回放、格式变动时刷新——已覆盖 ACP（Agent Client Protocol）、headless `stream-json` 与 TUI 三个 transcript（文本记录）表面；web 表面是唯一没有这层保障的组装形态。而缺口恰恰是两起已实证 GUI P0 藏身之处：fixture（测试前置数据）客户端短路掉的 wire 承载链。
 
 ## 决策
 
@@ -14,7 +14,7 @@ Web GUI 以一条真实组装链交付——chromium 页面 → client 插件 bu
 
 ### Scaffold：`apps/web/tests/scaffold.ts`
 
-一个普通的共享 fixture 模块（[测试政策认可的形态](../../../../docs/testing.zh.md)），不是包：值得门禁把守的逻辑——回放推导、会话解析、日志脱敏、持久化——都在已受门禁的包 `dsh-llm-replay`、`dsh-acp-snapshot`、`dsh-session-persistence-jsonl` 中；剩下的只是启动接线和浏览器胶水，而驱动 chromium 的源码在无浏览器的覆盖率 runner 上无法诚实保持逐文件 100% 覆盖率。
+一个普通的共享 fixture 模块（[测试政策认可的形态](../../../../docs/testing.md)），不是包：值得门禁把守的逻辑——回放推导、会话解析、日志脱敏、持久化——都在已受门禁的包 `dsh-llm-replay`、`dsh-acp-snapshot`、`dsh-session-persistence-jsonl` 中；剩下的只是启动接线和浏览器胶水，而驱动 chromium 的源码在无浏览器的覆盖率 runner 上无法诚实保持逐文件 100% 覆盖率。
 
 `launchWebScaffold()` 通过 vendored Loader 的 include 机制，从交付的 `apps/cli/config/base.cordis.yml` 与 `apps/cli/config/web.cordis.yml` 启动真实 web 组合——与 `AppCLIEntry` 为 `dsh web` 驱动的是同一棵树、同一套机制。差异全部经 include patch 覆盖在这棵树上，即 ACP `cordis.snapshot.yml` 模式的进程内表达：临时 `persistenceRoot`；每个主机级 `skill-filesystem` 根目录（`dshHome`、`agentsHome` 和 `bundledSkillDir`）都钉在临时工作区下并禁用监听，因为环境 skill（技能）目录是模型可见输入；禁用 `agent-instructions`（录制的 fixture 不得嵌入本仓库的 AGENTS.md）；禁用 `session-title-llm`（其发后不管的标题调用会与循环争抢会话的回放游标）；webserver 行钉到端口 0，并使用已构建的 dist；无密钥模式下禁用 `llm-deepseek`。patch 的 id 一旦不再匹配任何行，boot 扫描会大声失败而不是漂移。boot 在临时工作区 `chdir` 下运行，使 api-gateway 的 `process.cwd()` 会话默认值、工具 cwd 与 fixture 一致；`dsh web` bin 自身的胶水（argv、profile json、AppCLIEntry）仍由 `smoke-real.e2e.ts` 中的无密钥 CLI（命令行界面）冒烟把守。初始化回滚和正常关闭都会先对 Cordis 树执行 dispose（资源释放），再删除 scaffold 持有的两个临时根目录；每项清理都会独立尝试，并会报告清理失败而不掩盖初始化失败。
 

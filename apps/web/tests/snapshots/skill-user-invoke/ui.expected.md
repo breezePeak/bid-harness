@@ -1,8 +1,6 @@
 - banner:
   - navigation "Session hierarchy":
     - button "/user-invoke-demo and confirm the fixtur" [disabled]
-  - img
-  - text: Standard mode
   - button "Session log":
     - text: Session log
     - img

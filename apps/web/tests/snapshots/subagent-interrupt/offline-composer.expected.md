@@ -3,8 +3,6 @@
     - button "Ask a research subagent to"
     - text: /
     - 'button "Switch subagent: event-sourcing researcher"': event-sourcing researcher
-  - img
-  - text: Standard mode
   - button "Session log":
     - text: Session log
     - img

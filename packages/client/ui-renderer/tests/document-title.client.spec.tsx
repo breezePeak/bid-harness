@@ -29,8 +29,8 @@ describe('DocumentTitle', () => {
     vi.stubEnv('DSH_CLIENT_TITLE', '')
     delete process.env.DSH_CLIENT_TITLE
     const mounted = render(<DocumentTitle title="First title" />)
-    expect(document.title).toBe('First title — DSH Local Build')
+    expect(document.title).toBe('First title — 北京四维数码空间科技有限公司')
     mounted.unmount()
-    expect(document.title).toBe('DSH Local Build')
+    expect(document.title).toBe('北京四维数码空间科技有限公司')
   })
 })

@@ -14,7 +14,7 @@ it('章节拖入和段落右键引用使用专用修订接口，失败不发送�
   const scaffold = await launchWebScaffold({
     agentPresets: {
       roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }],
-      default: 'standard',
+      default: 'bid',
     },
   })
   const browser = await chromium.launch()
@@ -32,8 +32,6 @@ it('章节拖入和段落右键引用使用专用修订接口，失败不发送�
     })
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('button', { name: '标准模式' }).click()
-    await page.getByRole('menuitem', { name: /标书模式/ }).click()
     await page.getByRole('region', { name: '技术标生成' }).waitFor()
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent === undefined) throw new Error('缺少标书会话')

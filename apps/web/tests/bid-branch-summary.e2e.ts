@@ -16,7 +16,7 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
   const scaffold = await launchWebScaffold({
     agentPresets: {
       roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }],
-      default: 'standard',
+      default: 'bid',
     },
   })
   const browser = await chromium.launch()
@@ -25,8 +25,6 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
     const errors = watchConsole(page)
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('button', { name: '标准模式' }).click()
-    await page.getByRole('menuitem', { name: /标书模式/ }).click()
     await page.getByRole('region', { name: '技术标生成' }).waitFor()
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent === undefined) throw new Error('缺少标书会话')
