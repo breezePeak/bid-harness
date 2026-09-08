@@ -158,7 +158,8 @@ export abstract class SessionPersistence extends Service {
    * @param id - Session identity to remove.
    * @returns whether durable state existed and was removed.
    */
-  delete(_id: SessionId): Promise<boolean> {
+  delete(id: SessionId): Promise<boolean> {
+    void id
     return Promise.reject(new Error('this session persistence backend does not support deletion'))
   }
 

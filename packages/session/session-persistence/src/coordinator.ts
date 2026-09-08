@@ -682,7 +682,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     return this.serialize(id, () => this.appendCore(id, batch))
   }
 
-  /** Remove a detached session after its final retirement drain has settled. */
+  /**
+   * Remove a detached session after its final retirement drain has settled.
+   * @param id - Session identity to remove.
+   * @returns whether durable state existed and was removed.
+   */
   async delete(id: SessionId): Promise<boolean> {
     await this.waitForRetirement(id)
     if (this.ctx.sessions.get(id) !== undefined) {
