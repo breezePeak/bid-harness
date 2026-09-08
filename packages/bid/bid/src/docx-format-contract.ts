@@ -1,6 +1,8 @@
 /** 项目级 Word 格式、模板候选及预览的数据；不包含文件系统或模型调用。 */
 /** DOCX 模板上传及解析的默认原始字节上限。 */
 export const DOCX_TEMPLATE_MAX_BYTES = 300 * 1024 * 1024
+/** 模板提取规则版本；更换规则后重新上传会丢弃旧解析缓存。 */
+export const DOCX_TEMPLATE_PARSER_VERSION = 3
 
 /** 同源 DOCX 模板二进制上传端点。 */
 export const DOCX_TEMPLATE_UPLOAD_PATH = '/api/bid-docx-template' as const
@@ -40,6 +42,7 @@ export interface DocxFormatState {
   revision: number
   opened: boolean
   template?: {
+    parserVersion?: number | undefined
     hash: string
     name: string
     candidates: FormatCandidate[]

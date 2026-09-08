@@ -1,9 +1,25 @@
 /** 跨 Session 回归与源码 Loader 共用的真实项目文件和独立聊天。 */
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import JSZip from 'jszip'
 import { CallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { createScoringResponsePointCatalog, outlineArtifactSha256, type BidWorkspace, type ChapterWritingManifest, type OutlineArtifact } from '@deepseek-ai/dsh-bid'
+
+/**
+ * 读取应用真实导出文件中的标题编号关联，供源码 Loader 快照核对。
+ * @param bytes 完整 DOCX。
+ * @returns 段落编号数量、列表实例数量及关联的标题样式。
+ */
+export async function summarizeDocxHeadingNumbering(bytes: Buffer): Promise<{ paragraphs: number; lists: number; styles: string[] }> {
+  const zip = await JSZip.loadAsync(bytes)
+  const document = await zip.file('word/document.xml')!.async('string')
+  const numbering = await zip.file('word/numbering.xml')!.async('string')
+  return { paragraphs: [...document.matchAll(/<w:numPr>/gu)].length,
+    lists: new Set([...document.matchAll(/<w:numId w:val="(\d+)"\/>/gu)].map(match => match[1])).size,
+    styles: [...numbering.matchAll(/<w:pStyle w:val="(Heading[1-6])"\/>/gu)].map(match => match[1]!),
+  }
+}
 
 /** @param session 原聊天。该内容不得出现在新 Session 中。 */
 export function seedConversation(session: Session): void {

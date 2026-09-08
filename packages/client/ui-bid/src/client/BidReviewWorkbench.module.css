@@ -218,6 +218,16 @@
   flex: none;
 }
 
+.pageEstimate {
+  flex: 0 0 72px;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-12);
+}
+
 .statusDot {
   width: 7px;
   height: 7px;

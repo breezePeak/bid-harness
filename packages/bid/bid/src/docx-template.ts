@@ -3,7 +3,7 @@ import JSZip from 'jszip'
 import { xml2js } from 'xml-js'
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { DOCX_TEMPLATE_MAX_BYTES } from './docx-format-contract.ts'
+import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from './docx-format-contract.ts'
 import type { DocxFormatState, FormatCandidate, FormatValues } from './docx-format-contract.ts'
 interface XmlNode {
   type?: string
@@ -18,6 +18,7 @@ const child = (node: XmlNode, name: string): XmlNode => children(node, name)[0] 
 const attr = (node: XmlNode,
   name: string): string | undefined => Object.entries(node.attributes ?? {}).find(([key]) => local(key) === name)?.[1]
 const val = (node: XmlNode, name: string): string | undefined => attr(child(node, name), 'val')
+const isFormatXmlPart = (name: string): boolean => name === '[Content_Types].xml' || /^word\/(?:document|styles|numbering|header\d+|footer\d+)\.xml$/u.test(name)
 function descendants(node: XmlNode,
   name: string): XmlNode[] { return (node.elements ?? []).flatMap(item => [...(local(item.name) === name ? [item] : []),
   ...descendants(item,
@@ -27,7 +28,7 @@ function text(node: XmlNode): string { return node.type === 'text' ? node.text ?
  * 读取有界 DOCX XML，不解压到磁盘、不访问外部关系。
  * @param bytes 原始 ZIP 字节。
  * @param maxBytes 当前部署允许的原始字节数。
- * @returns XML 部件；无效 ZIP、活动内容及解压超限均拒绝。
+ * @returns 格式解析所需 XML 部件；宏、控件、嵌入对象和图片不执行或解压，无效 ZIP、不安全路径及格式 XML 解压超限均拒绝。
  */
 export async function readDocxXml(bytes: Uint8Array, maxBytes = DOCX_TEMPLATE_MAX_BYTES): Promise<Record<string, XmlNode>> {
   if (bytes.length === 0 || bytes.length > maxBytes)
@@ -50,19 +51,16 @@ export async function readDocxXml(bytes: Uint8Array, maxBytes = DOCX_TEMPLATE_MA
     if (entry.unsafeOriginalName !== undefined && entry.unsafeOriginalName !== entry.name
             || entry.name.includes('\\') || entry.name.startsWith('/') || entry.name.split('/').includes('..'))
       throw new Error('DOCX 包含不安全路径。')
-    if (/vbaProject|activeX|embeddings\//iu.test(entry.name))
-      throw new Error('不支持包含宏、活动控件或嵌入文件的模板。')
+    if (!isFormatXmlPart(entry.name))
+      continue
     const chunks: Buffer[] = []
     for await (const chunk of new Readable().wrap(entry.nodeStream('nodebuffer'))) {
       const buffer = Buffer.from(chunk as Uint8Array)
       total += buffer.length
       if (total > 32 * 1024 * 1024)
-        throw new Error('DOCX 解压后超过 32 MiB 限制。')
-      if (/\.(xml|rels)$/u.test(entry.name))
-        chunks.push(buffer)
+        throw new Error('DOCX 格式 XML 解压后超过 32 MiB 限制。')
+      chunks.push(buffer)
     }
-    if (!/\.(xml|rels)$/u.test(entry.name))
-      continue
     const xml = Buffer.concat(chunks).toString('utf8')
     if (/<!DOCTYPE|<!ENTITY/iu.test(xml))
       throw new Error('DOCX XML 不允许 DTD 或实体声明。')
@@ -99,11 +97,17 @@ function paragraphFormat(node: XmlNode): FormatValues {
   if (ascii)
     values.latinFont = ascii
   number('size', val(r, 'sz'), 2)
+  const color = val(r, 'color')
+  if (color === 'auto') values.color = '000000'
+  else if (color && /^[\da-f]{6}$/iu.test(color)) values.color = color
   for (const [key,
     owner,
     tag] of [['bold',
       r,
       'b'],
+    ['italics',
+      r,
+      'i'],
     ['pageBreak',
       p,
       'pageBreakBefore'],
@@ -119,7 +123,11 @@ function paragraphFormat(node: XmlNode): FormatValues {
   const alignment = val(p, 'jc')
   if (alignment && ['left', 'center', 'right', 'both'].includes(alignment))
     values.alignment = alignment
-  number('firstLine', attr(child(p, 'ind'), 'firstLine'), 1440 / 25.4)
+  const indent = child(p, 'ind')
+  const firstLineChars = attr(indent, 'firstLineChars')
+  number('firstLine', firstLineChars ?? attr(indent, 'firstLine'), firstLineChars === undefined ? 1440 / 25.4 : 100)
+  if (values.firstLine !== undefined)
+    values.firstLineUnit = firstLineChars === undefined ? 'mm' : 'chars'
   const spacing = child(p, 'spacing')
   const rule = attr(spacing, 'lineRule') ?? 'auto'
   if (attr(spacing, 'line')) {
@@ -135,14 +143,19 @@ function paragraphFormat(node: XmlNode): FormatValues {
  * @param bytes 原始 DOCX。
  * @param name 浏览器显示名称，不参与路径选择。
  * @param maxBytes 当前部署允许的原始字节数。
- * @returns 可保存的模板解析结果。
+ * @returns 可保存的完整格式候选；输入受文件与格式 XML 字节上限约束，不按候选数量截断。
  */
 export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxBytes = DOCX_TEMPLATE_MAX_BYTES): Promise<NonNullable<DocxFormatState['template']>> {
   const files = await readDocxXml(bytes, maxBytes)
   const styles = files['word/styles.xml'] ?? {}
   const doc = files['word/document.xml'] as XmlNode
+  const paragraphs = descendants(doc, 'p')
+  const tables = descendants(doc, 'tbl')
+  const tableParagraphs = new Set(tables.flatMap(table => descendants(table, 'p')))
+  const bodyParagraphs = paragraphs.filter(p => !tableParagraphs.has(p))
   const defaults = descendants(styles, 'docDefaults')[0] ?? {}
-  const defaultFormat = paragraphFormat({ elements: [...descendants(defaults, 'pPr'), ...descendants(defaults, 'rPr')] })
+  const defaultFormat: FormatValues = { before: 0, after: 0, bold: false, italics: false, color: '000000',
+    ...paragraphFormat({ elements: [...descendants(defaults, 'pPr'), ...descendants(defaults, 'rPr')] }) }
   const styleNodes = new Map(descendants(styles, 'style').map(node => [attr(node, 'styleId') ?? '', node]))
   const resolved = new Map<string, FormatValues>()
   const resolveStyle = (id: string, visiting = new Set<string>()): FormatValues => {
@@ -162,6 +175,20 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
     return value
   }
   const candidates: FormatCandidate[] = []
+  const candidateById = new Map<string, FormatCandidate>()
+  const candidateFormats = new Map<string, FormatCandidate>()
+  const formatKey = (values: FormatValues, role?: string): string => JSON.stringify([
+    role, Object.entries(values).sort(([a], [b]) => a.localeCompare(b)),
+  ])
+  const addCandidate = (candidate: FormatCandidate): void => {
+    if (candidateById.has(candidate.id))
+      return
+    candidates.push(candidate)
+    candidateById.set(candidate.id, candidate)
+    const key = formatKey(candidate.values, candidate.role)
+    if (!candidateFormats.has(key))
+      candidateFormats.set(key, candidate)
+  }
   const roleOf = (id: string, visiting = new Set<string>()): string | undefined => {
     if (visiting.has(id))
       return undefined
@@ -182,22 +209,33 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
     const inheritedRole = base ? roleOf(base, visiting) : undefined
     return inheritedRole?.startsWith('heading') ? inheritedRole : undefined
   }
+  const defaultStyle = [...styleNodes].find(([, node]) => attr(node, 'type') === 'paragraph' && attr(node, 'default') === '1')?.[0]
+  const usedStyles = new Set(bodyParagraphs.map(p => val(child(p, 'pPr'), 'pStyle') ?? defaultStyle))
   for (const [id, node] of styleNodes) {
-    if (attr(node, 'type') !== 'paragraph')
+    if (attr(node, 'type') !== 'paragraph' || !usedStyles.has(id))
       continue
-    candidates.push({ id,
+    addCandidate({ id,
       name: val(node,
         'name') ?? id,
       sample: '',
       values: resolveStyle(id),
       ...(roleOf(id) ? { role: roleOf(id) } : {}) })
   }
-  const defaultStyle = [...styleNodes].find(([, node]) => attr(node, 'type') === 'paragraph' && attr(node, 'default') === '1')?.[0]
-  for (const p of descendants(doc, 'p')) {
+  for (const p of bodyParagraphs) {
     const id = val(child(p, 'pPr'), 'pStyle') ?? defaultStyle
+    const styleRole = id ? roleOf(id) : undefined
+    const outlineLevel = val(child(p, 'pPr'), 'outlineLvl')
+    const role = outlineLevel === undefined ? styleRole
+      : /^[0-5]$/u.test(outlineLevel) ? `heading${Number(outlineLevel) + 1}` : undefined
+    const named = id === undefined ? undefined : candidateById.get(id)
+    if (named && !named.sample) named.sample = text(p).slice(0, 160)
+    // 已声明的标题或正文样式决定模板角色；局部加粗、字号不生成新的标题级别。
+    if (named && styleRole && role === styleRole)
+      continue
     const base = id ? resolveStyle(id) : defaultFormat
     const runs = children(p, 'r')
-    const variants = runs.map((run) => {
+    const firstRun = runs.find(run => text(run).trim()) ?? runs[0]
+    const variants = (firstRun ? [firstRun] : []).map((run) => {
       const characterStyle = val(child(run, 'rPr'), 'rStyle')
       return { ...base, ...(characterStyle ? resolveStyle(characterStyle) : {}), ...paragraphFormat(p), ...paragraphFormat(run) }
     })
@@ -205,23 +243,20 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
       variants.push({ ...base, ...paragraphFormat(p) })
     for (const values of variants) {
       const signature = JSON.stringify(values)
-      const found = candidates.find(item => JSON.stringify(item.values) === signature && item.role === (id ? roleOf(id) : undefined))
+      const found = candidateFormats.get(formatKey(values, role))
       if (found) {
         if (!found.sample)
           found.sample = text(p).slice(0, 160)
         continue
       }
       const candidateId = `direct-${createHash('sha256').update(`${id ?? ''}:${signature}`).digest('hex').slice(0, 16)}`
-      if (!candidates.some(item => item.id === candidateId))
-        candidates.push({ id: candidateId,
-          name: `${id ?? '手动排版'}（直接格式）`,
-          sample: text(p).slice(0,
-            160),
-          values,
-          ...(id && roleOf(id) ? { role: roleOf(id) } : {}) })
+      addCandidate({ id: candidateId,
+        name: `${id ?? '手动排版'}（直接格式）`,
+        sample: text(p).slice(0,
+          160),
+        values,
+        ...(role ? { role } : {}) })
     }
-    if (candidates.length > 200)
-      throw new Error('模板格式变体超过 200 个，请使用精简样式模板。')
   }
   const values: FormatValues = {}
   const warnings: string[] = []
@@ -251,8 +286,7 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
       const firstRun = children(p, 'r')[0] ?? {}
       const actual = { ...(id ? resolveStyle(id) : defaultFormat), ...paragraphFormat(p), ...paragraphFormat(firstRun) }
       const candidateId = `${role}-${createHash('sha256').update(JSON.stringify(actual)).digest('hex').slice(0, 16)}`
-      if (!candidates.some(item => item.id === candidateId))
-        candidates.push({ id: candidateId, name: label, sample: text(p).slice(0, 160), values: actual, role })
+      addCandidate({ id: candidateId, name: label, sample: text(p).slice(0, 160), values: actual, role })
     }
   }
   for (const [path, part] of Object.entries(files)) {
@@ -274,12 +308,11 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
       '')) ? 'figureCaption' : /^(?:tablecaption|表题|表格题注)$/iu.test(name.replaceAll(' ',
         '')) ? 'tableCaption' : undefined
     if (role) {
-      const candidate = candidates.find(item => item.id === id)
+      const candidate = candidateById.get(id)
       if (candidate)
         candidate.role = role
     }
   }
-  const tables = descendants(doc, 'tbl')
   const tableFormats: FormatValues[] = []
   for (const table of tables) {
     const styleId = val(child(table, 'tblPr'), 'tblStyle')
@@ -338,8 +371,7 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
             ...paragraphFormat(children(p,
               'r')[0] ?? {}) }
           const candidateId = `${role}-${createHash('sha256').update(JSON.stringify(actual)).digest('hex').slice(0, 16)}`
-          if (!candidates.some(item => item.id === candidateId))
-            candidates.push({ id: candidateId, name: isHeader ? '表头文字' : '单元格文字', role, sample: text(p).slice(0, 160), values: actual })
+          addCandidate({ id: candidateId, name: isHeader ? '表头文字' : '单元格文字', role, sample: text(p).slice(0, 160), values: actual })
         }
       }
     }
@@ -352,21 +384,35 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
   const numbering = files['word/numbering.xml'] ?? {}
   const abstractNums = descendants(numbering, 'abstractNum')
   const nums = descendants(numbering, 'num')
+  const abstractByNum = new Map<string | undefined, string | undefined>()
+  for (const num of nums) {
+    const id = attr(num, 'numId')
+    if (!abstractByNum.has(id)) abstractByNum.set(id, val(num, 'abstractNumId'))
+  }
+  const numberingKey = (node: XmlNode): string | undefined => {
+    const numPr = child(child(node, 'pPr'), 'numPr')
+    const numId = val(numPr, 'numId')
+    if (!abstractByNum.has(numId)) return undefined
+    return JSON.stringify([abstractByNum.get(numId), Number(val(numPr, 'ilvl') ?? 0)])
+  }
+  const numberedParagraphs = new Map<string, XmlNode>()
+  for (const p of paragraphs) {
+    const key = numberingKey(p)
+    if (key !== undefined && !numberedParagraphs.has(key)) numberedParagraphs.set(key, p)
+  }
+  const numberedStyles = new Map<string, string>()
+  for (const [id, node] of styleNodes) {
+    const key = numberingKey(node)
+    if (key !== undefined && !numberedStyles.has(key)) numberedStyles.set(key, id)
+  }
   for (const abstract of abstractNums) {
     for (const level of children(abstract, 'lvl')) {
       const styleId = val(level, 'pStyle')
       const levelIndex = Number(attr(level, 'ilvl'))
-      const actualParagraph = descendants(doc, 'p').find((p) => {
-        const numPr = child(child(p, 'pPr'), 'numPr')
-        const num = nums.find(item => attr(item, 'numId') === val(numPr, 'numId'))
-        return num && val(num, 'abstractNumId') === attr(abstract, 'abstractNumId') && Number(val(numPr, 'ilvl') ?? 0) === levelIndex
-      })
+      const key = JSON.stringify([attr(abstract, 'abstractNumId'), levelIndex])
+      const actualParagraph = numberedParagraphs.get(key)
       const paragraphStyle = actualParagraph ? val(child(actualParagraph, 'pPr'), 'pStyle') : undefined
-      const linkedStyle = [...styleNodes].find(([, node]) => {
-        const numPr = child(child(node, 'pPr'), 'numPr')
-        const num = nums.find(item => attr(item, 'numId') === val(numPr, 'numId'))
-        return num && val(num, 'abstractNumId') === attr(abstract, 'abstractNumId') && Number(val(numPr, 'ilvl') ?? 0) === levelIndex
-      })?.[0]
+      const linkedStyle = numberedStyles.get(key)
       const role = styleId ? roleOf(styleId) : paragraphStyle ? roleOf(paragraphStyle) : linkedStyle ? roleOf(linkedStyle) : undefined
       if (!role?.startsWith('heading'))
         continue
@@ -402,9 +448,7 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
     if (descendants(doc, tag).length)
       warnings.push(`检测到 ${tag} 对象：模板封面、Logo、浮动对象和图片不复制到输出。`)
   if (files['word/numbering.xml'])
-    warnings.push('编号只在导出层显示一次，按确认目录顺序生成；未关联标题用途的编号不自动映射。')
-  if (candidates.length > 200)
-    throw new Error('模板格式变体超过 200 个，请使用精简样式模板。')
+    warnings.push('标题使用 Word 原生多级编号，按标题层级自动计数；未关联标题用途的模板编号不自动映射。')
   warnings.push('仅套用格式；旧正文、目录、批注和页眉页脚文字均不复制。')
-  return { hash: createHash('sha256').update(bytes).digest('hex'), name, candidates, values, warnings }
+  return { parserVersion: DOCX_TEMPLATE_PARSER_VERSION, hash: createHash('sha256').update(bytes).digest('hex'), name, candidates, values, warnings }
 }

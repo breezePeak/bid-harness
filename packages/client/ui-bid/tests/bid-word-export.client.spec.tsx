@@ -52,6 +52,27 @@ function fixture() {
   return { props, actions }
 }
 describe('Word 配置页面', () => {
+  it('只列出对应标题样式，未确认项明确选用默认后才允许生成', async () => {
+    const { props, actions } = fixture()
+    const view = await actions.getFormat()
+    view.state.source = 'template'
+    view.state.template = { hash: 'a'.repeat(64), name: '模板.docx', values: {}, warnings: [], candidates: [
+      { id: 'h1', name: '一级标题样式', role: 'heading1', sample: '第一章', values: {} },
+      { id: 'h4', name: '四级标题样式', role: 'heading4', sample: '第四级', values: {} },
+    ] }
+    view.sources['body.size'] = '待确认'
+    render(<BidWordExport {...props}/>)
+    await screen.findByText('配置已读取')
+    const heading = screen.getByLabelText('heading1模板映射') as HTMLSelectElement
+    expect([...heading.options].map(option => option.value)).toEqual(['', '__default__', 'h1'])
+    expect(screen.getByRole('button', { name: '生成 Word' })).toHaveProperty('disabled', true)
+    fireEvent.click(screen.getByRole('button', { name: '未确认项使用默认方案' }))
+    expect(screen.getByRole('button', { name: '生成 Word' })).toHaveProperty('disabled', false)
+    fireEvent.click(screen.getByRole('button', { name: '生成 Word' }))
+    await screen.findByText('Word 生成成功')
+    expect(actions.saveFormat).toHaveBeenCalledWith(expect.objectContaining({ mapping: { body: '__default__' } }))
+    expect(actions.generate).toHaveBeenCalledOnce()
+  })
   it('模板文件通过独立二进制请求发送，不进入 Remote JSON', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const ctx = {
@@ -131,6 +152,26 @@ describe('Word 配置页面', () => {
     fireEvent.change(screen.getByLabelText('上传 DOCX 模板'), { target: { files: [oversized] } })
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '模板文件不能超过 300 MiB。')
     expect(actions.uploadTemplate).toHaveBeenCalledTimes(2)
+  })
+  it('上传期间保留已选文件并显示文件名', async () => {
+    const { props, actions } = fixture()
+    const next = await actions.getFormat()
+    let finishUpload: (view: DocxFormatView) => void = () => {}
+    vi.mocked(actions.uploadTemplate).mockImplementationOnce(async () => new Promise<DocxFormatView>((resolve) => {
+      finishUpload = resolve
+    }))
+    render(<BidWordExport {...props}/>)
+    await screen.findByText('配置已读取')
+    const input = screen.getByLabelText('上传 DOCX 模板') as HTMLInputElement
+    Object.defineProperty(input, 'value', { configurable: true, writable: true, value: 'C:\\fakepath\\大模板.docx' })
+    const file = new File([Uint8Array.of(1, 2, 3)], '大模板.docx')
+    fireEvent.change(input, { target: { files: [file] } })
+    await screen.findByText('正在上传并解析模板：大模板.docx')
+    expect(input.value).toContain('大模板.docx')
+    finishUpload(next)
+    await screen.findByText('模板已解析；请检查来源、候选和默认补充项')
+    fireEvent.click(input)
+    expect(input.value).toBe('')
   })
   it('编辑后显式保存和预览，只有点击生成才产生下载文件', async () => {
     const { props, actions } = fixture()

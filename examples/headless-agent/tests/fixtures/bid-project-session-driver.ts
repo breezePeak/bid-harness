@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { BID_INITIAL_RUNTIME_STATE, BidWorkspace, checkpointBidProjectState, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { seedConversation, seedProjectArtifacts } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
+import { seedConversation, seedProjectArtifacts, summarizeDocxHeadingNumbering } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
 
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少项目接管回放配置')
@@ -75,6 +75,7 @@ try {
       messages: completed.deriveMessages(),
       executions: [...exporting.events, ...completed.events].filter(event => event.type === 'bid.stage.started' && event.data.stage === 'docx_export').length,
       docxAvailable: docx.length > 0 && docx.subarray(0, 2).toString() === 'PK',
+      headingNumbering: await summarizeDocxHeadingNumbering(docx),
       unchanged: docx.equals(await readFile(join(exportWorkspace.projectRoot, generated.value.path))),
       checkpointUnchanged: await readFile(exportWorkspace.projectStatePath, 'utf8') === exportedState,
     },

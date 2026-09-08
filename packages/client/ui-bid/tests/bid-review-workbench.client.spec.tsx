@@ -10,10 +10,10 @@ afterEach(cleanup)
 const workbench = {
   schema_version: 1 as const,
   outline: [
-    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true },
+    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
   ],
-  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0 },
+  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 } },
 }
 
 const chapter = {
@@ -39,6 +39,33 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('仅为完整目录中的非叶节显示页数，折叠不改变叶节状态点', async () => {
+    const branch = { ...workbench.outline[0]!, section_id: 'BRANCH', parent_id: 'ROOT', order: 1, title: '实施安排', page_estimate: { status: 'empty' as const } }
+    const leaf = { ...workbench.outline[1]!, parent_id: 'BRANCH', order: 1 }
+    render(
+      <BidReviewWorkbench
+        {...props({ getWorkbench: async () => ({ ...workbench, outline: [workbench.outline[0]!, branch, leaf] }) })}
+      />,
+    )
+    expect(await screen.findByText('约 2 页')).toBeTruthy()
+    expect(screen.getByText('—').getAttribute('title')).toContain('正文尚未生成')
+    const leafButton = screen.getByRole('button', { name: '1.1.1 实施方案' })
+    expect(leafButton.querySelector('[class*="statusDot"]')).toBeTruthy()
+    fireEvent.click(screen.getAllByRole('button', { name: '折叠' })[0]!)
+    expect(screen.queryByRole('button', { name: '1.1.1 实施方案' })).toBeNull()
+    expect(screen.getByText('约 2 页')).toBeTruthy()
+  })
+
+  it('展示部分、完成、空和不可用的页数状态', async () => {
+    const { rerender } = render(<BidReviewWorkbench {...props()} />)
+    expect(await screen.findByText('正文共约 3 页')).toBeTruthy()
+    rerender(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench, summary: { ...workbench.summary, content_count: 0, page_estimate: { status: 'empty' as const } },
+      outline: workbench.outline.map(section => section.section_id === 'ROOT' ? { ...section, page_estimate: { status: 'unavailable' as const } } : section),
+    }) })} />)
+    expect(await screen.findByText('正文尚未生成')).toBeTruthy()
+    expect(screen.getByText('暂不可用')).toBeTruthy()
+  })
   it('章节支持拖入，正文右键将相邻完整段落添加为引用', async () => {
     const store = createBidRevisionStore().create()
     const markdown = '# 1.1 实施方案\n\n保留首段。\n\n修改第一段。\n\n修改第二段。\n\n保留末段。\n'
@@ -134,7 +161,7 @@ describe('BidReviewWorkbench', () => {
       expect(button).toHaveProperty('draggable', false)
       fireEvent.click(button)
       const paragraph = await screen.findByText(section.summary!)
-      expect(screen.getByTitle(`${index === 0 ? '1' : '1.1'} ${section.title}：章节概述`)).toBeTruthy()
+      expect(screen.getByTitle(`${index === 0 ? '1' : '1.1'} ${section.title}`)).toBeTruthy()
       expect(screen.getByText('本章概述下属章节的主要内容。请选择子章节查看具体方案、参考资料与依据。')).toBeTruthy()
       expect(screen.queryByText('本章节暂无特定引用资料，按通用技术规范与招标文件要求编写。')).toBeNull()
       const range = document.createRange()
@@ -171,12 +198,12 @@ describe('BidReviewWorkbench', () => {
       ...workbench, outline: workbench.outline.map(section => section.writable
         ? section : (() => {
           const { summary: _summary, ...withoutSummary } = section
-          return { ...withoutSummary, content_available: false }
+          return { ...withoutSummary, content_available: false, page_estimate: { status: 'empty' as const } }
         })()),
     }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     expect(screen.getByRole('button', { name: '1 技术方案' })).toHaveProperty('disabled', true)
-    expect(screen.getByTitle('1 技术方案：概述待补充')).toBeTruthy()
+    expect(screen.getByText('—').getAttribute('title')).toContain('正文尚未生成')
   })
 
   it('polls the live S5 state and supports an explicit refresh', async () => {

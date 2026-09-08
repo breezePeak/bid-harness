@@ -82,6 +82,18 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         "docxAvailable": true,
         "executions": 1,
         "formatRestored": true,
+        "headingNumbering": {
+          "lists": 1,
+          "paragraphs": 1,
+          "styles": [
+            "Heading1",
+            "Heading2",
+            "Heading3",
+            "Heading4",
+            "Heading5",
+            "Heading6",
+          ],
+        },
         "messages": [],
         "nextRuntime": {
           "stage": "docx_export",

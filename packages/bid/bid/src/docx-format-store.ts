@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { BidWorkspace } from './index.ts'
 import type { DocxFormatRequest, DocxFormatState, DocxFormatView } from './docx-format-contract.ts'
+import { DOCX_TEMPLATE_PARSER_VERSION } from './docx-format-contract.ts'
 import { formatFields, FORMAT_ROLES, resolveFormat, validateFormatValues } from './docx-format.ts'
 import { parseDocxTemplate } from './docx-template.ts'
 import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
@@ -21,6 +22,7 @@ const templateUploadSchema = z.strictObject({ revision: z.number().int().nonnega
   name: z.string().max(200).regex(/\.docx$/iu),
   bytes: z.instanceof(Uint8Array) })
 const templateSchema = z.strictObject({ hash: z.string().regex(/^[a-f\d]{64}$/u),
+  parserVersion: z.number().int().nonnegative().optional(),
   name: z.string().max(200),
   values: valuesSchema,
   warnings: z.array(z.string().max(1000)).max(100),
@@ -28,7 +30,7 @@ const templateSchema = z.strictObject({ hash: z.string().regex(/^[a-f\d]{64}$/u)
     name: z.string().max(200),
     sample: z.string().max(160),
     values: valuesSchema,
-    role: z.string().optional() })).max(200) })
+    role: z.string().optional() })) })
 const stateSchema = requestSchema.extend({ version: z.literal(1),
   opened: z.boolean(),
   template: templateSchema.optional(),
@@ -134,9 +136,9 @@ async function saveValidatedDocxFormat(
   if (template) {
     const bytes = template.bytes
     const hash = createHash('sha256').update(bytes).digest('hex')
-    if (current.state.template?.hash !== hash) {
+    if (current.state.template?.hash !== hash || current.state.template.parserVersion !== DOCX_TEMPLATE_PARSER_VERSION) {
       state.previous = { name: current.state.template?.name ?? '默认配置', values: current.values }
-      const cache = within(workspace.projectRoot, `word-export/templates/${hash}.json`)
+      const cache = within(workspace.projectRoot, `word-export/templates/${hash}.format-${DOCX_TEMPLATE_PARSER_VERSION}.json`)
       await assertNoLinkedPath(workspace.root, cache)
       let cached: string | undefined
       try {
@@ -151,6 +153,8 @@ async function saveValidatedDocxFormat(
         : templateSchema.parse(JSON.parse(cached))
       if (state.template.hash !== hash)
         throw new Error('模板解析缓存的文件标识不一致。')
+      if (state.template.parserVersion !== DOCX_TEMPLATE_PARSER_VERSION)
+        throw new Error('模板解析缓存版本不一致，请重新上传模板。')
       state.mapping = {}
       for (const role of FORMAT_ROLES) {
         const candidates = state.template.candidates.filter(item => item.role === role)
@@ -162,6 +166,8 @@ async function saveValidatedDocxFormat(
       await atomicBytes(workspace.root, path, bytes)
       await writeFileAtomic(cache, `${JSON.stringify(state.template)}\n`, { mode: 0o600, dirMode: 0o700 })
     }
+    if (state.template)
+      state.template = { ...state.template, name: template.name }
     state.source = 'template'
   }
   if (state.source === 'template' && !state.template)

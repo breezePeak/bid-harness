@@ -21,6 +21,7 @@ export {
   BID_UPLOAD_FILES_HEADER,
   BID_UPLOAD_SESSION_HEADER,
   STAGE_RUN_STATUSES,
+  parseBidReviewWorkbenchView,
 } from './control-plane-contract.ts'
 export type {
   BidDetailsView,
@@ -50,6 +51,7 @@ export type {
   BidStageStartErrorCode,
   BidStageStartResult,
   BidReviewChapterView,
+  BidPageEstimate,
   BidReviewIssueView,
   BidReviewMaterialView,
   BidReviewWorkbenchView,

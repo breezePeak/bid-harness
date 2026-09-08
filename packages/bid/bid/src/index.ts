@@ -62,7 +62,9 @@ import {
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateUploadResult } from './docx-format-contract.ts'
-import { executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
+import { executeDocxExport, validateDocxExport, collectDocxChapterBody, collectDocxMarkdown } from './docx-export.ts'
+import { estimateReviewPages, type PageEstimateSection } from './page-estimate.ts'
+import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -109,7 +111,7 @@ export { extractDocument } from './document-extract.ts'
 export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDocumentInput, ExtractDocumentResult } from './document-extract.ts'
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
-export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole } from './control-plane-contract.ts'
+export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole, parseBidReviewWorkbenchView } from './control-plane-contract.ts'
 export type {
   BidChapterRevisionReference,
   BidChapterRevisionRequest,
@@ -135,6 +137,7 @@ export type {
   BidStageStartErrorCode,
   BidStageStartResult,
   BidReviewWorkbenchView,
+  BidPageEstimate,
   BidReviewChapterView,
   BidReviewMaterialView,
 
@@ -1573,14 +1576,18 @@ export class BidHostRuntime extends TypertRemoteService {
     let log: ReturnType<typeof parseChapterExecutionLog> | undefined
     try { log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))) } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
-    const rows = await Promise.all(outline.sections.map(async (section) => {
+    const rowContents = await Promise.all(outline.sections.map(async (section) => {
       const index = worklist.findIndex(item => item.id === section.id)
       const serial = String(index + 1).padStart(4, '0')
       const execution = log?.sections.find(item => item.section_id === section.id)
       let contentAvailable = !section.writable && section.summary !== undefined
+      let markdown = !section.writable ? section.summary ?? '' : ''
       let reviewStatus: BidReviewWorkbenchView['outline'][number]['review_status'] = 'not_started'
       if (section.writable && index >= 0) {
-        try { contentAvailable = (await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')).trim().length > 0 } catch { contentAvailable = false }
+        try {
+          markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+          contentAvailable = markdown.trim().length > 0
+        } catch { markdown = ''; contentAvailable = false }
         try {
           const review = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
           reviewStatus = review.verdict === 'pass' ? 'pass' : 'needs_attention'
@@ -1591,7 +1598,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const writingStatus: BidReviewWorkbenchView['outline'][number]['writing_status'] = !section.writable || execution === undefined || execution.status === 'pending'
         ? 'not_started'
         : execution.status === 'running' ? contentAvailable ? 'content_ready' : 'writing' : execution.status
-      return {
+      return { markdown, row: {
         section_id: section.id,
         parent_id: section.parent_id,
         order: section.order,
@@ -1601,8 +1608,42 @@ export class BidHostRuntime extends TypertRemoteService {
         writing_status: writingStatus,
         review_status: reviewStatus,
         content_available: contentAvailable,
-      }
+      } }
     }))
+    let rows = rowContents.map(item => item.row)
+    let pageEstimate: BidReviewWorkbenchView['summary']['page_estimate'] = { status: 'unavailable' }
+    try {
+      const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
+      const estimateSections: PageEstimateSection[] = outline.sections.map((section, index) => {
+        const position = positions.get(section.id)
+        if (position === undefined) throw new Error('目录章节缺少导出位置。')
+        const source = rowContents[index]?.markdown ?? ''
+        return {
+          section_id: section.id, parent_id: section.parent_id, number: position.number, depth: position.depth, title: section.title,
+          writable: section.writable,
+          markdown: section.writable && source.trim() !== ''
+            ? collectDocxChapterBody(source, section.title, section.id, position.number, Math.min(6, position.depth))
+            : source,
+        }
+      })
+      const estimate = await estimateReviewPages(
+        workspace,
+        outline.document_title,
+        estimateSections,
+        (await readDocxFormat(workspace)).values,
+      )
+      pageEstimate = estimate.total > 0 ? { status: 'available', pages: Math.ceil(estimate.total) } : { status: 'empty' }
+      const children = new Set(outline.sections.flatMap(section => section.parent_id === null ? [] : [section.parent_id]))
+      rows = rows.map((row) => {
+        if (!children.has(row.section_id)) return row
+        const section = estimate.sections.get(row.section_id)
+        if (section === undefined || !section.hasContent) return { ...row, page_estimate: { status: 'empty' as const } }
+        return { ...row, page_estimate: { status: 'available' as const, pages: Math.ceil(section.pages), ...(section.incomplete ? { incomplete: true } : {}) } }
+      })
+    } catch { rows = rows.map(row => ({
+      ...row,
+      ...(outline.sections.some(section => section.parent_id === row.section_id) ? { page_estimate: { status: 'unavailable' as const } } : {}),
+    })) }
     const writable = rows.filter(row => row.writable)
     return {
       schema_version: 1,
@@ -1612,6 +1653,7 @@ export class BidHostRuntime extends TypertRemoteService {
         content_count: writable.filter(row => row.content_available).length,
         reviewed_count: writable.filter(row => row.review_status === 'pass' || row.review_status === 'needs_attention').length,
         needs_attention_count: writable.filter(row => row.review_status === 'needs_attention').length,
+        page_estimate: pageEstimate,
       },
     }
   }

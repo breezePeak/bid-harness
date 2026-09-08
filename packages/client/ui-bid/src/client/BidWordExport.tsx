@@ -6,6 +6,7 @@ import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, FormatVal
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
 const OPTION_LABELS: Record<string, string> = {
+  mm: '毫米', chars: '字符',
   portrait: '纵向', landscape: '横向', left: '左对齐', center: '居中', right: '右对齐', both: '两端对齐',
   auto: '倍数行距', exact: '固定值', atLeast: '最小值', decimal: '十进制', template: '自定义 / 模板编号', none: '无',
   upperRoman: '大写罗马数字', lowerRoman: '小写罗马数字', upperLetter: '大写字母', lowerLetter: '小写字母', chineseCounting: '中文数字',
@@ -94,9 +95,12 @@ export function BidWordExport({ sessionId,
   const previewStale = dirty || (previewView !== null && previewView.fingerprint !== view?.fingerprint)
   const templateMaxBytes = view?.templateMaxBytes ?? DOCX_TEMPLATE_MAX_BYTES
   const templateMaxMiB = Math.floor(templateMaxBytes / 1024 / 1024)
+  const unresolvedRoles = draft?.source === 'template' ? [...new Set(Object.entries(view?.sources ?? {})
+    .filter(([key, source]) => source === '待确认' && draft.overrides[key] === undefined && !draft.mapping[key.slice(0, key.indexOf('.'))])
+    .map(([key]) => key.slice(0, key.indexOf('.'))))] : []
+  const roleLabel = (role: string): string => view?.fields.find(field => field.key === `${role}.font`)?.label.replace('中文字体', '') ?? role
   return <section className={css.root} aria-label="导出 Word" data-conversation-composer-overlay="">
-    <header className={css.toolbar}><strong>导出 Word</strong><span role="status">{busy || status}</span></header>
-    {error && <p role="alert" className={css.notice}>{error}</p>}
+    <header className={css.toolbar}><strong>导出 Word</strong></header>
     <div className={css.columns}>
       <div className={css.config}>
         <fieldset disabled={Boolean(busy) || !draft}>
@@ -108,12 +112,11 @@ export function BidWordExport({ sessionId,
             setDirty(true)
           }}><option value="default">默认样式</option><option value="template" disabled={!view?.state.template}>已上传模板</option></select></label>
           <Button onClick={() => { perform('读取已保存配置…', async () => { load(await getFormat()); setStatus('已恢复保存配置') }) }}>使用已保存配置</Button>
-          <label>上传 DOCX 模板（最多 {templateMaxMiB} MiB）<input aria-label="上传 DOCX 模板" type="file" accept=".docx" onChange={(event) => {
+          <label>上传 DOCX 模板（最多 {templateMaxMiB} MiB）<input aria-label="上传 DOCX 模板" type="file" accept=".docx" onClick={(event) => { event.currentTarget.value = '' }} onChange={(event) => {
             const file = event.target.files?.[0]
-            event.target.value = ''
             if (!file || !draft)
               return
-            perform('正在解析模板…', async () => {
+            perform(`正在上传并解析模板：${file.name}`, async () => {
               if (file.size > templateMaxBytes)
                 throw new Error(`模板文件不能超过 ${String(templateMaxMiB)} MiB。`)
               let revision = draft.revision
@@ -172,6 +175,8 @@ export function BidWordExport({ sessionId,
             'header',
             'footer'].map((role) => {
             const candidate = (view.state.template?.candidates ?? []).find(item => item.id === draft.mapping[role])
+            const candidates = view.state.template?.candidates ?? []
+            const hasRole = candidates.some(item => item.role === role)
             const label = view.fields.find(field => field.key === `${role}.font`)?.label.replace('中文字体', '') ?? role
             return <div key={role}><label>{label}<select aria-label={`${label}模板映射`} disabled={Boolean(busy)} value={draft.mapping[role] ?? ''} onChange={(event) => {
               const mapping = Object.fromEntries(Object.entries(draft.mapping).filter(([key]) => key !== role))
@@ -179,7 +184,7 @@ export function BidWordExport({ sessionId,
                 mapping[role] = event.target.value
               setDraft({ ...draft, mapping })
               setDirty(true)
-            }}><option value="">未映射（请检查默认补充或待确认项）</option><option value="__default__">明确使用默认方案</option>{(view.state.template?.candidates ?? []).map(item => <option key={item.id} value={item.id}>{item.name} — {item.sample || '未使用的样式'}</option>)}</select></label>
+            }}><option value="">未映射（请检查默认补充或待确认项）</option><option value="__default__">明确使用默认方案</option>{candidates.filter(item => item.role === role || item.id === draft.mapping[role] || !hasRole && !item.role).map(item => <option key={item.id} value={item.id}>{item.name} — {item.sample || '未使用的样式'}</option>)}</select></label>
             {candidate ? <small>{Object.entries(candidate.values).map(([key,
               value]) => `${key}=${String(value)}`).join('；')}</small> : <small>{draft.mapping[role] === '__default__' ? '已选择默认方案。' : '未映射；请核对下方字段来源。'}</small>}
             </div>
@@ -212,11 +217,21 @@ export function BidWordExport({ sessionId,
         <div className={css.toolbar}>
           <Button disabled={!draft || Boolean(busy)} onClick={() => { perform('正在更新预览…', async () => { if (dirty)
             await save(); const next = await preview(); load(next); setPreviewView(next); setStatus('预览已更新，可生成') }) }}>更新预览</Button>
-          <Button variant="primary" disabled={!ready || !draft || Boolean(busy)} onClick={() => { perform('正在生成 Word…',
+          <Button variant="primary" disabled={!ready || !draft || Boolean(busy) || unresolvedRoles.length > 0} onClick={() => { perform('正在生成 Word…',
             async () => { if (dirty)
               await save(); await generate(); load(await getFormat()); setStatus('Word 生成成功') }) }}>生成 Word</Button>
           {view?.state.lastExport && <Button disabled={Boolean(busy)} onClick={() => { perform('正在下载…', download) }}>下载文件</Button>}
         </div>
+        <p role="status">{busy || status}</p>
+        {error && <p role="alert" className={css.notice}>{error}</p>}
+        {unresolvedRoles.length > 0 && <div>
+          <p>生成前请确认以下样式：{unresolvedRoles.map(roleLabel).join('、')}。可在左侧选择模板样式，或使用默认方案。</p>
+          <Button disabled={Boolean(busy)} onClick={() => { if (draft) {
+            setDraft({ ...draft, mapping: { ...draft.mapping, ...Object.fromEntries(unresolvedRoles.map(role => [role, '__default__'])) } })
+            setDirty(true)
+            setStatus('未确认项已选择默认方案，生成时保存配置')
+          } }}>未确认项使用默认方案</Button>
+        </div>}
         <p>样式预览，分页以 Word 为准。{stale && view?.state.lastExport ? '已有文件可能过期，请重新生成。' : ''}</p>
         {previewStale && <p>旧预览需要更新。</p>}
         {!ready && <p>正文编写完成后才能生成 Word。</p>}

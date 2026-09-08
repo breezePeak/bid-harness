@@ -6,7 +6,7 @@
  * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -17,7 +17,7 @@ import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
 import { BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
-import { BidReviewWorkbench, type BidReviewChapterView, type BidReviewWorkbenchView } from './BidReviewWorkbench.tsx'
+import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbench.tsx'
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -326,7 +326,7 @@ export function apply(ctx: ClientContext): void {
         getWorkbench: async () => {
           const result = await remote.getReviewWorkbench(sessionId)
           if (!result.ok) throw actionFailure(result.error)
-          return result.value as BidReviewWorkbenchView
+          return parseBidReviewWorkbenchView(result.value)
         },
         getChapter: async (sectionId: string) => {
           const result = await remote.getReviewChapter(sessionId, sectionId)

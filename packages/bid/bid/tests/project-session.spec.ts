@@ -206,7 +206,8 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(outlinePath, JSON.stringify(outline))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('branch-summary')
-    expect(await ctx.bid.getReviewWorkbench(agent.session)).toMatchObject({
+    const workbench = await ctx.bid.getReviewWorkbench(agent.session)
+    expect(workbench).toMatchObject({
       outline: [
         { section_id: 'ROOT', content_available: true },
         { section_id: 'BRANCH', content_available: true },
@@ -214,6 +215,8 @@ describe('Workspace 项目与独立 Session', () => {
       ],
       summary: { chapter_count: 1, content_count: 1, reviewed_count: 0 },
     })
+    expect(workbench.summary.page_estimate).toMatchObject({ status: 'available', pages: expect.any(Number) })
+    expect(workbench.outline.find(section => section.section_id === 'ROOT')?.page_estimate).toMatchObject({ status: 'available', pages: expect.any(Number) })
     for (const [sectionId, number, summary] of [
       ['ROOT', '1', '本章介绍实施安排及具体技术方案。'],
       ['BRANCH', '1.1', '本节概括技术方案的主要内容。'],
@@ -227,6 +230,17 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(outlinePath, JSON.stringify(outline))
     expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.content_available).toBe(false)
     expect((await ctx.bid.getReviewChapter(agent.session, 'ROOT')).markdown).toBeNull()
+  })
+
+  it('页数估算失败不阻塞正文工作台读取', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '![远程图](https://example.com/image.png)')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('page-estimate-failure')
+    const workbench = await ctx.bid.getReviewWorkbench(agent.session)
+    expect(workbench.summary.page_estimate).toEqual({ status: 'unavailable' })
+    expect(await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).toMatchObject({ markdown: '![远程图](https://example.com/image.png)' })
   })
 
   it('旧 S6 已完成项目仍保留审核工作台和按需导出动作', async () => {

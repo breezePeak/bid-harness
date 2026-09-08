@@ -159,6 +159,10 @@ export function BidReviewWorkbench({
   }
 
   const needsAttention = workbench?.summary.needs_attention_count ?? 0
+  const documentPages = getDocumentPageInfo(
+    workbench?.summary.page_estimate,
+    (workbench?.summary.content_count ?? 0) >= (workbench?.summary.chapter_count ?? 1),
+  )
 
   const exportWord = (): void => {
     if (!exportReady || exporting || openWordExport === undefined) return
@@ -184,6 +188,9 @@ export function BidReviewWorkbench({
             </Pill>
             <Pill className={classes(css.statPill, needsAttention > 0 && css.statPillWarning)}>
               需关注 {needsAttention}
+            </Pill>
+            <Pill className={css.statPill} title={documentPages.title}>
+              {documentPages.label}
             </Pill>
           </div>
         </div>
@@ -252,9 +259,12 @@ export function BidReviewWorkbench({
                     onClick={() => { select(section.section_id) }}
                   >
                     <span className={css.sectionTitle}>{title}</span>
-                    <span className={css.statusDotContainer} title={`${title}：${dotInfo.title}`}>
+                    {hasChildren ? (() => {
+                      const page = getSectionPageInfo(section.page_estimate)
+                      return <span className={css.pageEstimate} title={page.title} aria-hidden="true">{page.label}</span>
+                    })() : <span className={css.statusDotContainer} title={`${title}：${dotInfo.title}`}>
                       <span className={dotInfo.className} />
-                    </span>
+                    </span>}
                   </button>
                 </div>
               )
@@ -440,4 +450,26 @@ function getChapterDotInfo(
     className: classes(css.statusDot, css.statusDotGray),
     title: '未编写',
   }
+}
+
+const PAGE_ESTIMATE_BASIS = '按当前 Word 导出格式估算，实际分页以 Word 为准'
+
+function getSectionPageInfo(estimate: BidReviewWorkbenchView['outline'][number]['page_estimate']): { label: string; title: string } {
+  if (estimate?.status === 'available') return {
+    label: `约 ${estimate.pages} 页`,
+    title: `${PAGE_ESTIMATE_BASIS}${estimate.incomplete ? '；仅统计已生成内容' : ''}`,
+  }
+  if (estimate?.status === 'empty') return { label: '—', title: `${PAGE_ESTIMATE_BASIS}；正文尚未生成` }
+  return { label: '暂不可用', title: PAGE_ESTIMATE_BASIS }
+}
+
+function getDocumentPageInfo(
+  estimate: BidReviewWorkbenchView['summary']['page_estimate'] | undefined,
+  complete: boolean,
+): { label: string; title: string } {
+  if (estimate?.status === 'available') return {
+    label: `${complete ? '正文共' : '已生成正文'}约 ${estimate.pages} 页`, title: PAGE_ESTIMATE_BASIS,
+  }
+  if (estimate?.status === 'empty') return { label: '正文尚未生成', title: `${PAGE_ESTIMATE_BASIS}；正文尚未生成` }
+  return { label: '页数暂不可用', title: PAGE_ESTIMATE_BASIS }
 }

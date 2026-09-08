@@ -202,11 +202,14 @@ function bidStageLifecycle(events: readonly SessionEvent[]): Array<{
   })
 }
 
-function docxTemplateBytes(): Uint8Array {
+function docxTemplateBytes(variants = 0): Uint8Array {
+  const paragraphs = Array.from({ length: variants }, (_, index) =>
+    `<w:p><w:pPr><w:spacing w:before="${index + 1}"/></w:pPr><w:r><w:t>格式样本${index}</w:t></w:r></w:p>`,
+  ).join('')
   return zipSync({
     '[Content_Types].xml': strToU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
-    'word/document.xml': strToU8('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>旧模板正文</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>'),
-    'word/styles.xml': strToU8('<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>'),
+    'word/document.xml': strToU8(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs}<w:p><w:r><w:t>旧模板正文</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`),
+    'word/styles.xml': strToU8(`<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="${variants ? 'Manual' : 'Normal'}"/></w:style></w:styles>`),
   })
 }
 
@@ -454,6 +457,16 @@ describe('web e2e: Bid file intake', () => {
     await compareOrRefreshGolden(WORD_TEMPLATE_EXPECTED, snapshot, MODE)
     expect(snapshot).toContain('上传 DOCX 模板（最多 300 MiB）')
 
+    const templateInput = page.getByLabel('上传 DOCX 模板')
+    await templateInput.setInputFiles({
+      name: '界面模板.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: Buffer.from(bytes),
+    })
+    await page.getByRole('status').getByText('模板已解析；请检查来源、候选和默认补充项').waitFor()
+    await page.getByText('当前模板：界面模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
+    expect(await templateInput.inputValue()).toContain('界面模板.docx')
+
     const mismatched = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
       method: 'POST',
       headers: {
@@ -461,7 +474,7 @@ describe('web e2e: Bid file intake', () => {
         'x-dsh-bid-session-id': bid.sessionId,
         'x-dsh-bid-docx-name': 'mismatched.docx',
         'x-dsh-bid-docx-size': '1',
-        'x-dsh-bid-docx-revision': '1',
+        'x-dsh-bid-docx-revision': '2',
       },
       body: new Blob([Uint8Array.of(1, 2).buffer]),
     })
@@ -477,7 +490,7 @@ describe('web e2e: Bid file intake', () => {
         'x-dsh-bid-session-id': bid.sessionId,
         'x-dsh-bid-docx-name': 'oversized.docx',
         'x-dsh-bid-docx-size': String(300 * 1024 * 1024 + 1),
-        'x-dsh-bid-docx-revision': '1',
+        'x-dsh-bid-docx-revision': '2',
       },
       body: new Blob([Uint8Array.of(1).buffer]),
     })
@@ -485,6 +498,23 @@ describe('web e2e: Bid file intake', () => {
       ok: false,
       error: { code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED', message: '模板文件不能超过 300 MiB。' },
     })
+    await templateInput.setInputFiles({
+      name: '复杂模板.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: Buffer.from(docxTemplateBytes(240)),
+    })
+    await page.getByText('当前模板：复杂模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
+    const config = JSON.parse(await readFile(join(cwd, '.bid-harness/word-export/config.json'), 'utf8')) as {
+      template: { candidates: unknown[] }
+    }
+    expect(config.template.candidates).toHaveLength(241)
+    const reloadWarningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    acknowledgeReloadConnectionLoss(tripwire, reloadWarningStart)
+    await page.getByRole('tab', { name: '导出 Word' }).click()
+    await page.getByText('当前模板：复杂模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
+    expect(await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)).toContain('格式样本239')
   }, 60_000)
 
   it('shows an S2 failure and retries it through the Host without starting S3', async () => {

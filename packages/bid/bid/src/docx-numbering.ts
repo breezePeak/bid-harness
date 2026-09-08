@@ -1,5 +1,46 @@
-/** 仅在导出层按确认目录顺序生成编号文字，避免源标题与 Word 编号叠加。 */
+/** Word 原生多级标题编号及浏览器预览计数，共用生效编号规则。 */
+import JSZip from 'jszip'
+import type { ILevelsOptions } from 'docx'
 import type { FormatValues } from './docx-format-contract.ts'
+/**
+ * 解析六级标题的原生编号定义；十进制模式固定从 1 开始逐级编号。
+ * @param values 生效编号配置。
+ * @returns 关联 Word 标题样式的各级定义；无编号模式返回空数组。
+ */
+export function resolveHeadingNumbering(values: FormatValues): (ILevelsOptions & { restart: boolean })[] {
+  if (values['numbering.mode'] === 'none') return []
+  const template = values['numbering.mode'] === 'template'
+  return Array.from({ length: 6 }, (_, level) => ({
+    level,
+    format: template ? String(values[`numbering.${level + 1}.format`]) as NonNullable<ILevelsOptions['format']> : 'decimal',
+    text: template ? String(values[`numbering.${level + 1}.text`]) : Array.from({ length: level + 1 }, (_, index) => `%${index + 1}`).join('.'),
+    start: template ? Number(values[`numbering.${level + 1}.start`]) : 1,
+    restart: !template || Boolean(values[`numbering.${level + 1}.restart`]),
+    suffix: 'space',
+    alignment: 'left',
+    style: { style: `Heading${level + 1}` },
+  }))
+}
+/**
+ * 为原生编号补入跨父级连续计数规则；docx 的级别配置未暴露 lvlRestart。
+ * @param bytes 生成器已经打包的 DOCX。
+ * @param values 生效编号配置。
+ * @returns 保留所有部件并补齐标题重新编号规则的 DOCX。
+ */
+export async function applyHeadingRestartRules(bytes: Buffer, values: FormatValues): Promise<Buffer> {
+  const levels = resolveHeadingNumbering(values)
+  if (!levels.some(level => !level.restart)) return bytes
+  const zip = await JSZip.loadAsync(bytes)
+  const part = zip.file('word/numbering.xml')
+  if (!part) throw new Error('生成的 Word 缺少编号定义。')
+  const xml = await part.async('string')
+  zip.file('word/numbering.xml', xml.replace(/<w:lvl\b[^>]*>[\s\S]*?<\/w:lvl>/gu, (level) => {
+    const heading = /<w:pStyle w:val="Heading([1-6])"\s*\/>/u.exec(level)
+    if (!heading || levels[Number(heading[1]) - 1]?.restart !== false) return level
+    return level.replace(/(<w:numFmt\b[^>]*\/>)/u, '$1<w:lvlRestart w:val="0"/>')
+  }))
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}
 function numeral(value: number, format: string): string {
   if (format === 'decimal')
     return String(value)
@@ -66,27 +107,27 @@ function numeral(value: number, format: string): string {
   return result.replace(/^一十/u, '十')
 }
 /**
- * 创建当前导出独占的计数器；调用顺序必须等于确认目录顺序。
+ * 创建浏览器预览独占的计数器；Word 文件由原生编号自行计数。
  * @param values 生效编号格式。
- * @returns 接受确认目录序号并返回显示文字的函数。
+ * @returns 接受标题级别并返回显示文字的函数。
  */
-export function createHeadingNumberer(values: FormatValues): (source: string) => string {
+export function createHeadingNumberer(values: FormatValues): (level: number) => string {
   const counts = [0, 0, 0, 0, 0, 0]
-  return (source) => {
-    if (values['numbering.mode'] === 'none')
+  const levels = resolveHeadingNumbering(values)
+  return (level) => {
+    if (!levels.length)
       return ''
-    if (values['numbering.mode'] === 'decimal')
-      return source
-    const level = source.split('.').length
     if (level > 6)
       throw new Error('标题编号最多支持六级。')
-    counts[level - 1] = (counts[level - 1] as number) ? (counts[level - 1] as number) + 1 : Number(values[`numbering.${level}.start`])
+    for (let parent = 0; parent < level - 1; parent++)
+      if (!counts[parent]) counts[parent] = levels[parent]?.start ?? 1
+    counts[level - 1] = (counts[level - 1] as number) ? (counts[level - 1] as number) + 1 : levels[level - 1]?.start ?? 1
     for (let child = level + 1; child <= 6; child++)
-      if (values[`numbering.${child}.restart`])
+      if (levels[child - 1]?.restart)
         counts[child - 1] = 0
-    return String(values[`numbering.${level}.text`]).replace(/%([1-6])/gu,
+    return String(levels[level - 1]?.text).replace(/%([1-6])/gu,
       (_,
         digit: string) => numeral((counts[Number(digit) - 1] as number),
-        String(values[`numbering.${digit}.format`])))
+        String(levels[Number(digit) - 1]?.format)))
   }
 }

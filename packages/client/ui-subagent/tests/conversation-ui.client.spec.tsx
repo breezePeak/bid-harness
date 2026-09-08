@@ -21,6 +21,7 @@ const PARENT = 'parent' as SessionId
 const CHILD = 'child' as SessionId
 const GRANDCHILD = 'grandchild' as SessionId
 const t: SubagentHeaderLineageProps['t'] = makeTranslate(zh)
+type ChildEntry = Extract<SubagentCatalogSnapshot['entries'][number], { kind: 'child' }>
 
 function catalog(over: Partial<SubagentCatalogSnapshot> = {}): SubagentCatalogSnapshot {
   return {
@@ -188,15 +189,16 @@ describe('SubagentHeaderLineage', () => {
   })
 
   it('moves a single catalog row between sections as activity changes without duplicates', () => {
-    const active = catalog({ entries: [{
+    const activeEntry: ChildEntry = {
       kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
       activity: 'running', hasChildren: false,
-    }] })
+    }
+    const active = catalog({ entries: [activeEntry] })
     const view = render(<SubagentHeaderLineage {...props(active)} />)
     hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
     expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
 
-    const inactive = catalog({ entries: [{ ...active.entries[0]!, activity: 'inactive' }] })
+    const inactive = catalog({ entries: [{ ...activeEntry, activity: 'inactive' }] })
     view.rerender(<SubagentHeaderLineage {...props(inactive)} />)
     expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
@@ -247,10 +249,11 @@ describe('SubagentHeaderLineage', () => {
   })
 
   it('derives activity again when an open catalog is reopened after a reconnect snapshot', () => {
-    const active = catalog({ entries: [{
+    const activeEntry: ChildEntry = {
       kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
       activity: 'running', hasChildren: false,
-    }] })
+    }
+    const active = catalog({ entries: [activeEntry] })
     const view = render(<SubagentHeaderLineage {...props(active)} />)
     const trigger = screen.getByRole('button', { name: /1 个子代理/ })
     hoverCatalog(trigger)
@@ -258,7 +261,7 @@ describe('SubagentHeaderLineage', () => {
     fireEvent.pointerDown(document.body)
 
     view.rerender(<SubagentHeaderLineage {...props(catalog({ entries: [{
-      ...active.entries[0]!, activity: 'inactive',
+      ...activeEntry, activity: 'inactive',
     }] }))} />)
     hoverCatalog(trigger)
     expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()

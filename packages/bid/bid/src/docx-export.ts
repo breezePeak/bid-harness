@@ -20,7 +20,16 @@ async function readProjectFile(workspace: BidWorkspace, path: string): Promise<s
 }
 
 /** Markdown 标题只在当前章节内分级，代码块中的井号保持原文。 */
-function chapterBody(markdown: string, title: string, sectionId: string, number: string, depth: number): string {
+/**
+ * 将叶节正文整理为导出标题之后的内容；页面估算与正式导出共用此口径。
+ * @param markdown 已保存的叶节正文。
+ * @param title 确认目录标题。
+ * @param sectionId 叶节稳定身份。
+ * @param number 确认目录编号。
+ * @param depth 该节导出标题深度。
+ * @returns 不重复当前章节标题的 Markdown 正文。
+ */
+export function collectDocxChapterBody(markdown: string, title: string, sectionId: string, number: string, depth: number): string {
   markdown = normalizeChapterHeadings(markdown, title, sectionId, number)
   const nodes = fromMarkdown(markdown).children
   for (const node of [...nodes].reverse()) {
@@ -89,7 +98,7 @@ export async function collectDocxMarkdown(workspace: BidWorkspace, signal?: Abor
     if (chapter === undefined) continue
     const markdown = await readProjectFile(workspace, chapter.content_path)
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
-    parts.push(chapterBody(markdown, section.title, section.id, number, headingDepth))
+    parts.push(collectDocxChapterBody(markdown, section.title, section.id, number, headingDepth))
   }
   return `${parts.join('\n\n')}\n`
 }

@@ -23,7 +23,7 @@ import { Document,
 import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
-import { createHeadingNumberer } from './docx-numbering.ts'
+import { applyHeadingRestartRules, createHeadingNumberer, resolveHeadingNumbering } from './docx-numbering.ts'
 type Node = {
   type: string
   value?: string | undefined
@@ -49,6 +49,43 @@ const escape = (value: string): string => value.replaceAll('&',
   '&#39;')
 const content = (node: Node): string => node.value ?? (node.children ?? []).map(content).join('')
 const mm = (value: number): number => Math.round(value * 1440 / 25.4)
+function withoutHeadingNumber(nodes: Node[]): Node[] {
+  let remaining = /^\d+(?:\.\d+)*\s+/u.exec(nodes.map(content).join(''))?.[0].length ?? 0
+  const visit = (items: Node[]): Node[] => items.map((node) => {
+    if (!remaining) return node
+    if (node.value !== undefined) {
+      const length = Math.min(remaining, node.value.length)
+      remaining -= length
+      return { ...node, value: node.value.slice(length) }
+    }
+    return { ...node, children: visit(node.children ?? []) }
+  })
+  return visit(nodes)
+}
+
+/**
+ * 读取导出支持的图片像素尺寸；正文渲染和页数估算使用同一缩放依据。
+ * @param data 已验证的项目内图片字节。
+ * @returns 图片格式及原始像素尺寸。
+ */
+export function docxImageDimensions(data: Buffer): { type: 'png' | 'jpg'; width: number; height: number } {
+  if (data.length >= 24 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    return { type: 'png', width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
+  }
+  if (data[0] !== 255 || data[1] !== 216) throw new Error('仅支持有效 PNG 或 JPEG。')
+  let offset = 2
+  while (offset + 9 < data.length) {
+    const marker = data.readUInt8(offset + 1), length = data.readUInt16BE(offset + 2)
+    if ([192, 193, 194].includes(marker)) {
+      const height = data.readUInt16BE(offset + 5), width = data.readUInt16BE(offset + 7)
+      if (width && height) return { type: 'jpg', width, height }
+      break
+    }
+    if (length < 2) break
+    offset += length + 2
+  }
+  throw new Error('无法读取图片尺寸。')
+}
 async function readAssets(workspace: BidWorkspace, root: Node): Promise<Map<string, Buffer>> {
   const definitions = new Map((root.children ?? []).filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const assets = new Map<string, Buffer>()
@@ -112,6 +149,9 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
   const assets = await readAssets(workspace, root)
   const numberHeading = createHeadingNumberer(values)
+  const headingLevels = resolveHeadingNumbering(values)
+  const headingReference = 'dsh-headings'
+  const headingNumbering = (level: number): NonNullable<IParagraphOptions['numbering']> => ({ reference: headingReference, level })
   const definitions = new Map(root.children.filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const num = (key: string): number => Number(values[key])
   const str = (key: string): string => String(values[key])
@@ -119,10 +159,14 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     ascii: str(`${role}.latinFont`),
     hAnsi: str(`${role}.latinFont`) },
   size: num(`${role}.size`) * 2,
+  color: str(`${role}.color`),
+  italics: Boolean(values[`${role}.italics`]),
   bold: Boolean(values[`${role}.bold`]) })
   const paragraph = (role: string): IParagraphOptions => ({
     alignment: str(`${role}.alignment`) as 'left' | 'center' | 'right' | 'both',
-    indent: { firstLine: mm(num(`${role}.firstLine`)) },
+    indent: values[`${role}.firstLineUnit`] === 'chars'
+      ? { firstLineChars: Math.round(num(`${role}.firstLine`) * 100) }
+      : { firstLine: mm(num(`${role}.firstLine`)) },
     spacing: { before: num(`${role}.before`) * 20,
       after: num(`${role}.after`) * 20,
       line: num(`${role}.line`) * (values[`${role}.lineRule`] === 'auto' ? 240 : 20),
@@ -131,7 +175,7 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     keepNext: Boolean(values[`${role}.keepNext`]),
     keepLines: Boolean(values[`${role}.keepLines`]),
   })
-  const style = (role: string): string => escape(`font-family:"${str(`${role}.latinFont`).replaceAll('"', '')}","${str(`${role}.font`).replaceAll('"', '')}";font-size:${num(`${role}.size`)}pt;font-weight:${values[`${role}.bold`] ? 'bold' : 'normal'};text-align:${values[`${role}.alignment`] === 'both' ? 'justify' : str(`${role}.alignment`)};text-indent:${num(`${role}.firstLine`)}mm;line-height:${num(`${role}.line`)}${values[`${role}.lineRule`] === 'auto' ? '' : 'pt'};margin-top:${num(`${role}.before`)}pt;margin-bottom:${num(`${role}.after`)}pt;break-before:${values[`${role}.pageBreak`] ? 'page' : 'auto'};break-after:${values[`${role}.keepNext`] ? 'avoid' : 'auto'};break-inside:${values[`${role}.keepLines`] ? 'avoid' : 'auto'}`)
+  const style = (role: string): string => escape(`font-family:"${str(`${role}.latinFont`).replaceAll('"', '')}","${str(`${role}.font`).replaceAll('"', '')}";font-size:${num(`${role}.size`)}pt;font-weight:${values[`${role}.bold`] ? 'bold' : 'normal'};font-style:${values[`${role}.italics`] ? 'italic' : 'normal'};color:#${str(`${role}.color`)};text-align:${values[`${role}.alignment`] === 'both' ? 'justify' : str(`${role}.alignment`)};text-indent:${num(`${role}.firstLine`)}${values[`${role}.firstLineUnit`] === 'chars' ? 'em' : 'mm'};line-height:${num(`${role}.line`)}${values[`${role}.lineRule`] === 'auto' ? '' : 'pt'};margin-top:${num(`${role}.before`)}pt;margin-bottom:${num(`${role}.after`)}pt;break-before:${values[`${role}.pageBreak`] ? 'page' : 'auto'};break-after:${values[`${role}.keepNext`] ? 'avoid' : 'auto'};break-inside:${values[`${role}.keepLines`] ? 'avoid' : 'auto'}`)
   const unsupported = (node: Node): never => { throw new Error(`正文第 ${node.position?.start.line ?? '?'} 行不支持 ${node.type}，请调整内容后重新生成。`) }
   async function inline(nodes: Node[], role: string, options: IRunOptions = {}): Promise<{
     runs: ParagraphChild[]
@@ -171,32 +215,12 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
       if (node.type === 'image' || node.type === 'imageReference') {
         const url = node.url ?? definitions.get(node.identifier ?? '') ?? ''
         const data = assets.get(url) as Buffer
-        const type = data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? 'png' : 'jpg'
-        let width: number, height: number
-        if (type === 'png' && data.length >= 24 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
-          width = data.readUInt32BE(16)
-          height = data.readUInt32BE(20)
-        }
-        else if (data[0] === 255 && data[1] === 216) {
-          let offset = 2
-          width = 0
-          height = 0
-          while (offset + 9 < data.length) {
-            const marker = data.readUInt8(offset + 1), length = data.readUInt16BE(offset + 2)
-            if ([192, 193, 194].includes(marker)) {
-              height = data.readUInt16BE(offset + 5)
-              width = data.readUInt16BE(offset + 7)
-              break
-            }
-            if (length < 2)
-              break
-            offset += length + 2
-          }
-        }
-        else
-          throw new Error(`图片 ${url} 仅支持有效 PNG 或 JPEG。`)
-        if (!width || !height)
+        let image: { type: 'png' | 'jpg'; width: number; height: number }
+        try { image = docxImageDimensions(data) } catch (error) {
+          if (error instanceof Error && error.message === '仅支持有效 PNG 或 JPEG。') throw new Error(`图片 ${url} 仅支持有效 PNG 或 JPEG。`)
           throw new Error(`无法读取图片尺寸：${url}`)
+        }
+        const { type, width, height } = image
         const ratio = Math.min(1, 500 / width, 700 / height)
         runs.push(new ImageRun({ data,
           type,
@@ -223,22 +247,21 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
         const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}` : /^图\s*\d/u.test(content(node)) ? 'figureCaption' : /^表\s*\d/u.test(content(node)) ? 'tableCaption' : 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
-        if (node.type === 'heading' && role !== 'title')
-          contents = contents.map((item,
-            i) => i === 0 && item.type === 'text' ? { ...item,
-            value: item.value?.replace(/^(\d+(?:\.\d+)*)\s+/u,
-              (_,
-                source: string) => { const prefix = numberHeading(source); return prefix ? `${prefix} ` : '' }) } : item)
+        const numberedHeading = node.type === 'heading' && role !== 'title'
+        if (numberedHeading)
+          contents = withoutHeadingNumber(contents)
         const rendered = await inline(contents, role)
         const prefix = index === 0 ? listPrefix : ''
         doc.push(new Paragraph({ ...paragraph(role),
           ...(level > 0 ? { indent: { left: mm(level * 6) } } : {}),
           ...(node.type === 'heading' ? { heading: role === 'title' ? 'Title' : `Heading${role.slice(7)}` as 'Heading1' } : {}),
+          ...(numberedHeading && headingLevels.length ? { numbering: headingNumbering((node.depth ?? 1) - 1) } : {}),
           children: [...(prefix ? [new TextRun({ ...run(role),
             text: prefix })] : []),
           ...rendered.runs] }))
         const tag = role === 'title' ? 'h1' : node.type === 'heading' ? `h${Math.min(6, Number(role.slice(7)) + 1)}` : node.type === 'code' ? 'pre' : 'p'
-        html.push(`<${tag} style="${style(role)}">${escape(prefix)}${rendered.html}</${tag}>`)
+        const headingPrefix = numberedHeading ? numberHeading(node.depth ?? 1) : ''
+        html.push(`<${tag} style="${style(role)}">${escape(prefix)}${headingPrefix ? `${escape(headingPrefix)} ` : ''}${rendered.html}</${tag}>`)
         continue
       }
       if (node.type === 'list') {
@@ -324,7 +347,19 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const headerText = str('header.text') || title, footerText = str('footer.text')
   const pageNumber = str('footer.pageNumber')
   const page = values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
-  const document = new Document({ sections: [{
+  const document = new Document({ numbering: { config: headingLevels.length ? [{ reference: headingReference,
+    levels: headingLevels.map(level => ({ ...level, style: { ...level.style, run: run(`heading${level.level + 1}`) } })),
+  }] : [] }, styles: { default: {
+    document: { run: run('body') },
+    ...Object.fromEntries(['title', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6']
+      .map(role => [role, { basedOn: 'DshHeadingBase', run: run(role), paragraph: { ...paragraph(role),
+        ...(role === 'title' ? {} : { outlineLevel: Number(role.slice(7)) - 1,
+          ...(headingLevels.length ? { numbering: headingNumbering(Number(role.slice(7)) - 1) } : {}) }),
+      } }])),
+  }, paragraphStyles: [
+    { id: 'Normal', name: 'Normal', run: run('body'), paragraph: paragraph('body') },
+    { id: 'DshHeadingBase', name: '标题基准', run: run('body') },
+  ] }, sections: [{
     properties: { page: { size: { width: mm(page[0] as number),
       height: mm(page[1] as number),
       orientation: str('page.orientation') as 'portrait' | 'landscape' },
@@ -349,7 +384,7 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
           ' 页'] })])] })] }) },
     children: body.doc,
   }] })
-  return { bytes: await Packer.toBuffer(document),
+  return { bytes: await applyHeadingRestartRules(await Packer.toBuffer(document), values),
     assetHash: hashAssets(assets),
     html: `<!doctype html><html lang="zh"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><body style="margin:0;padding:${num('page.top')}mm ${num('page.right')}mm ${num('page.bottom')}mm ${num('page.left')}mm;background:white;color:black"><header style="${style('header')}">${escape(headerText)}</header>${body.html}<footer style="${style('footer')}">${escape(footerText)}${pageNumber === 'none' ? '' : ' 第 1 页（示例页码）'}</footer></body></html>` }
 }

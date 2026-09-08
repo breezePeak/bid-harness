@@ -21,7 +21,7 @@ const roleLabels = ['文档标题', '一级标题', '二级标题', '三级标�
 /**
  * 建立导出支持的字段与默认值。
  * @param defaults 项目原有字体及半磅字号配置。
- * @returns 可编辑字段，字号使用磅，距离使用毫米。
+ * @returns 可编辑字段，字号使用磅，首行缩进可选择字符或毫米，其他距离使用毫米。
  */
 export function formatFields(defaults: {
   font: string
@@ -69,6 +69,8 @@ export function formatFields(defaults: {
     add(`${role}.latinFont`, group, `${label}西文字体`, 'Times New Roman')
     add(`${role}.size`, group, `${label}字号（磅）`, (title ? defaults.headingSize : defaults.bodySize) / 2, undefined, 5, 96)
     add(`${role}.bold`, group, `${label}加粗`, title || role === 'tableHeader')
+    add(`${role}.italics`, group, `${label}斜体`, false)
+    add(`${role}.color`, group, `${label}文字颜色（十六进制）`, '000000')
     add(`${role}.alignment`,
       group,
       `${label}对齐`,
@@ -77,7 +79,8 @@ export function formatFields(defaults: {
         'center',
         'right',
         'both'])
-    add(`${role}.firstLine`, group, `${label}首行缩进（毫米）`, 0, undefined, 0, 100)
+    add(`${role}.firstLineUnit`, group, `${label}首行缩进单位`, 'mm', ['mm', 'chars'])
+    add(`${role}.firstLine`, group, `${label}首行缩进`, 0, undefined, 0, 100)
     add(`${role}.lineRule`, group, `${label}行距类型`, 'auto', ['auto', 'exact', 'atLeast'])
     add(`${role}.line`, group, `${label}行距（倍数或磅）`, 1.5, undefined, 0.5, 100)
     add(`${role}.before`, group, `${label}段前（磅）`, 0, undefined, 0, 100)
@@ -138,6 +141,8 @@ export function validateFormatValues(values: unknown, fields: FormatField[]): Fo
   for (const [key, value] of Object.entries(result))
     if (/\.(?:font|latinFont)$/u.test(key) && !/^[^<>;"{}\\\r\n]{1,100}$/u.test(String(value)))
       throw new Error('字体名称不能为空或包含控制字符、样式语句。')
+    else if (key.endsWith('.color') && !/^[\da-f]{6}$/iu.test(String(value)))
+      throw new Error('文字颜色必须为六位十六进制颜色。')
   if (result['table.fill'] !== undefined && !/^[\da-f]{6}$/iu.test(String(result['table.fill'])))
     throw new Error('表头底色必须为六位十六进制颜色。')
   for (let level = 1; level <= 6; level++) {

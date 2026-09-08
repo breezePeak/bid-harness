@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 /** The ordered Bid Harness stages owned by the control plane. */
 export const BID_STAGES = [
   'file_intake',
@@ -322,6 +324,12 @@ export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready
 /** Per-section review state exposed by the S5 workbench. */
 export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_attention' | 'failed'
 
+/** Page-estimate state that never turns an unavailable calculation into a zero-page result. */
+export type BidPageEstimate =
+  | { readonly status: 'available'; readonly pages: number }
+  | { readonly status: 'empty' }
+  | { readonly status: 'unavailable' }
+
 /** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
   readonly schema_version: 1
@@ -335,13 +343,46 @@ export interface BidReviewWorkbenchView {
     readonly writing_status: BidChapterWritingStatus
     readonly review_status: BidChapterReviewStatus
     readonly content_available: boolean
+    /** Non-leaf section estimate; omitted for a leaf whose status dot remains interactive. */
+    readonly page_estimate?: (BidPageEstimate & { readonly incomplete?: boolean }) | undefined
   }[]
   readonly summary: {
     readonly chapter_count: number
     readonly content_count: number
     readonly reviewed_count: number
     readonly needs_attention_count: number
+    readonly page_estimate: BidPageEstimate
   }
+}
+
+const pageEstimateSchema = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive() }),
+  z.strictObject({ status: z.literal('empty') }),
+  z.strictObject({ status: z.literal('unavailable') }),
+])
+const chapterPageEstimateSchema = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive(), incomplete: z.boolean().optional() }),
+  z.strictObject({ status: z.literal('empty') }),
+  z.strictObject({ status: z.literal('unavailable') }),
+])
+const reviewWorkbenchSchema = z.strictObject({
+  schema_version: z.literal(1),
+  outline: z.array(z.strictObject({
+    section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
+    summary: z.string().optional(), writable: z.boolean(),
+    writing_status: z.enum(['not_started', 'writing', 'content_ready', 'completed', 'failed']),
+    review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_attention', 'failed']), content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
+  })),
+  summary: z.strictObject({
+    chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),
+    reviewed_count: z.number().int().nonnegative(),
+    needs_attention_count: z.number().int().nonnegative(), page_estimate: pageEstimateSchema,
+  }),
+})
+
+/** Validate the untrusted RPC body before the browser renders workbench state. */
+export function parseBidReviewWorkbenchView(value: unknown): BidReviewWorkbenchView {
+  return reviewWorkbenchSchema.parse(value) as BidReviewWorkbenchView
 }
 
 /** Browser-safe generic review finding reserved for later detailed-review rules. */
