@@ -20,7 +20,7 @@ export const outlineSectionSchema = z.object({
   level: z.number().int().positive(),
   title: z.string().min(1),
   purpose: z.string().min(1),
-  /** 叶子章节内容概述；S4 发布时要求所有非 writable 节点填写。 */
+  /** 可直接用于标书正文的父节点总述，依据最终子章节任务与已确认信息；S4 发布前生成并复核。 */
   summary: z.string().trim().min(1).optional(),
   writable: z.boolean(),
   must_answer: z.array(z.string().min(1)),

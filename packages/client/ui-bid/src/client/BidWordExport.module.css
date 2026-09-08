@@ -1,0 +1,17 @@
+.root { height: 100%; display: flex; flex-direction: column; overflow: auto; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); font: var(--dsw-font-xs-13); }
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.columns { display: grid; grid-template-columns: minmax(320px, 42%) minmax(300px, 1fr); min-height: 0; flex: 1; }
+.config, .preview { padding: 16px; overflow: auto; }
+.config { border-right: 1px solid var(--dsw-alias-border-l1); }
+.preview { display: flex; flex-direction: column; }
+.config fieldset { border: 0; margin: 0; padding: 8px 0; min-width: 0; }
+.config label { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.config input, .config select, .config textarea { min-width: 0; max-width: 100%; padding: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 4px; }
+.config textarea { min-height: 70px; resize: vertical; }
+.config details { border-bottom: 1px solid var(--dsw-alias-border-l1); padding: 10px 0; }
+.config summary { cursor: pointer; font-weight: 600; }
+.config .field { display: grid; grid-template-columns: 1fr 130px; align-items: center; }
+.config small { display: block; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.notice { color: var(--dsw-alias-label-secondary); padding: 4px 12px; }
+.frame { width: 100%; flex: 1; min-height: 500px; border: 1px solid var(--dsw-alias-border-l1); }
+@media (max-width: 850px) { .columns { display: block; } .config, .preview { overflow: visible; } }

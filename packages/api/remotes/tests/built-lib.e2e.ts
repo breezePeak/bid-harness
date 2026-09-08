@@ -158,6 +158,10 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       const agentContext = client.extend({ builtAgentId: scopedAgent.id })
       const scopedResult = await agentContext.remote.goals.create({ objective: 'scoped goal', maxGoalRounds: 3 })
       const result = {
+        wordMethods: Object.fromEntries([
+          'getDocxFormat', 'saveDocxFormat', 'previewDocx',
+          'suggestDocxFormat', 'exportDocx', 'downloadDocx',
+        ].map(method => [method, typeof client.remote.bid[method]])),
         invalidRejected,
         rootResult: rootResult.value,
         rootEdit: rootEdit.value,
@@ -180,6 +184,7 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
     const result = await runPlainNode(script)
     expect(result.exitCode, `stderr:\n${result.stderr}`).toBe(0)
     const output = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}') as {
+      wordMethods: Record<string, string>
       invalidRejected: boolean
       rootResult: { ref: { id: string; revision: number } }
       rootEdit: { objective: string; revision: number }
@@ -190,6 +195,10 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       scopedEvents: number
     }
     expect(output).toMatchObject({
+      wordMethods: {
+        getDocxFormat: 'function', saveDocxFormat: 'function', previewDocx: 'function',
+        suggestDocxFormat: 'function', exportDocx: 'function', downloadDocx: 'function',
+      },
       invalidRejected: true,
       rootResult: { ref: { revision: 1 } },
       rootEdit: { objective: 'edited root goal', revision: 2 },

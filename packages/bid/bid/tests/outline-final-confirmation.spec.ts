@@ -63,7 +63,8 @@ async function fixture() {
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
     ctx: { agents: { get: () => agent, list: () => [agent] }, sessions: { flush: async () => {}, list: () => [session] } },
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096,
-      modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, trustedHosts: [] } satisfies Config,
+      modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1,
+      wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [] } satisfies Config,
     inFlight: new Map(),
     automaticOrchestrator: () => new BidOrchestrator(session, { canExecute: () => false, execute: async () => [] },
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }),

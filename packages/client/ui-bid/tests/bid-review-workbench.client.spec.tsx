@@ -30,7 +30,7 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
     actions: store.actions,
     sessionId: 'bid' as SessionId,
     useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
-    useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'running' } }),
+    useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'running' } }),
     renderSlot: (name: string) => <div data-slot={name} />,
     getWorkbench: async () => workbench,
     getChapter: async () => chapter,
@@ -44,7 +44,7 @@ describe('BidReviewWorkbench', () => {
     const markdown = '# 1.1 实施方案\n\n保留首段。\n\n修改第一段。\n\n修改第二段。\n\n保留末段。\n'
     render(<BidReviewWorkbench {...props({
       actions: store.actions, getChapter: async () => ({ ...chapter, markdown }),
-      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('修改第一段。')
     const second = screen.getByText('修改第二段。')
@@ -77,7 +77,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it.each(['pending', 'failed', 'completed'] as const)('S5 %s 仍保留已有正文', async (status) => {
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'chapter_writing', status } }) })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status } }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
   })
   it('成功刷新后清除之前的请求错误', async () => {
@@ -124,7 +124,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       actions: store.actions, getChapter,
       getWorkbench: async () => ({ ...workbench, outline: [root, branch, { ...workbench.outline[1]!, parent_id: 'BRANCH' }] }),
-      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     expect(getChapter).toHaveBeenNthCalledWith(1, 'SEC-1')
@@ -192,33 +192,33 @@ describe('BidReviewWorkbench', () => {
 
   it('offers retry when S5 fails', async () => {
     const retryStage = vi.fn(async () => {})
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }), retryStage })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }), retryStage })} />)
     expect(screen.getByText('章节写作失败：writer failed')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
     await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
   })
 
-  it('keeps the review workbench mounted and exports Word repeatedly after S5 completes', async () => {
-    const exportDocx = vi.fn()
-      .mockResolvedValueOnce({ path: 'output/bid-1.docx' })
-      .mockResolvedValueOnce({ path: 'output/bid-2.docx' })
+  it('S5 完成后入口仅打开导出页，正文仍可查看', async () => {
+    const openWordExport = vi.fn()
+      .mockResolvedValue(undefined)
     render(<BidReviewWorkbench {...props({
-      useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' }, allowedActions: ['export_docx'] }),
-      exportDocx,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      openWordExport,
     })} />)
 
     expect(await screen.findByText('章节正文')).toBeTruthy()
     const button = screen.getByRole('button', { name: '导出 Word' })
     fireEvent.click(button)
-    await waitFor(() => { expect(exportDocx).toHaveBeenCalledTimes(1) })
-    expect(await screen.findByText('Word 已导出：output/bid-1.docx')).toHaveProperty('title', 'output/bid-1.docx')
+    await waitFor(() => { expect(openWordExport).toHaveBeenCalledTimes(1) })
+    expect(screen.queryByText(/Word 已导出/)).toBeNull()
+    await waitFor(() => { expect(button).toHaveProperty('disabled', false) })
     fireEvent.click(button)
-    await waitFor(() => { expect(exportDocx).toHaveBeenCalledTimes(2) })
-    expect(screen.getByText('Word 已导出：output/bid-2.docx')).toHaveProperty('title', 'output/bid-2.docx')
+    await waitFor(() => { expect(openWordExport).toHaveBeenCalledTimes(2) })
+    expect(screen.getByText('章节正文')).toBeTruthy()
   })
 
   it('keeps legacy completed S6 projects in the S5 review workbench', async () => {
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ runtime: { stage: 'docx_export', status: 'completed' } }) })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'docx_export', status: 'completed' } }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
   })
 

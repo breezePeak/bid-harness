@@ -56,6 +56,8 @@
     "@deepseek-ai/schemastery": "workspace:^",
     "docx": "^9.5.1",
     "mammoth": "^1.10.0",
+    "jszip": "^3.10.1",
+    "xml-js": "^1.6.8",
     "mdast-util-from-markdown": "^2.0.3",
     "mdast-util-gfm": "^3.1.0",
     "micromark-extension-gfm": "^3.0.0",

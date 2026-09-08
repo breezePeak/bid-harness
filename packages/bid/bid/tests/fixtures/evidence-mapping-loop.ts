@@ -35,13 +35,33 @@ function finalText(text: string): StreamChunk[] {
   ]
 }
 
+type ScriptStep = StreamChunk[] | ((options: GenerateOptions) => StreamChunk[])
+
+/** @param options 模型实际可见的工具结果。 @returns 针对当前待审引用的固定复核回复。 */
+export function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
+  for (const message of [...options.messages].reverse()) {
+    for (const block of message.content) {
+      if (block.type !== 'tool-result') continue
+      for (const content of block.content) {
+        if (content.type !== 'text') continue
+        const result = JSON.parse(content.text) as { pending_items?: Array<{ review_ref: string }> }
+        if (result.pending_items === undefined) continue
+        return toolCall('review-current-items', 'review_items', { items: result.pending_items.map(item => ({
+          review_ref: item.review_ref, decision: 'keep', reason: '已对照招标安全要求和当前章节职责；任务及资料用途限于访问控制与审计，总述没有新增项目承诺。',
+        })) })
+      }
+    }
+  }
+  throw new Error('模型上下文缺少待审项结果')
+}
+
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
   readonly requests: GenerateOptions[] = []
   constructor(
     private readonly parentId: SessionId,
     private readonly parentScript: StreamChunk[][],
-    private readonly childScript: StreamChunk[][],
+    private readonly childScript: ScriptStep[],
   ) {
     super()
   }
@@ -58,7 +78,7 @@ class ScriptedAdapter extends LlmAdapter {
     }
     const response = (options.sessionId === this.parentId ? this.parentScript : this.childScript).shift()
     if (response === undefined) throw new Error('Bid scripted adapter exhausted')
-    yield* response
+    yield* typeof response === 'function' ? response(options) : response
   }
 }
 
@@ -118,7 +138,9 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
       } },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    execute: async () => ({ sources: [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false }),
+    execute: async () => ({
+      sources: urls.length === 0 ? [] : [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false,
+    }),
   })))
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'web_fetch', description: 'Fetch one public technical source.', parameters: { url: { type: 'string', required: true } },
@@ -137,7 +159,10 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
         return { url: value.url, statusCode: value.statusCode, truncated: value.truncated }
       },
     },
-    execute: async args => ({ url: args.url, statusCode: 200, body: { kind: 'text' as const, content: '官方标准要求访问控制与安全审计。' }, truncated: false }),
+    execute: async (args) => {
+      if (!urls.includes(args.url)) throw new Error('固定场景未提供该外部来源正文。')
+      return { url: args.url, statusCode: 200, body: { kind: 'text' as const, content: '官方标准要求访问控制与安全审计。' }, truncated: false }
+    },
   })))
 }
 
@@ -270,11 +295,10 @@ function partialResult(url: string) {
 
 function sectionSubmission(url: string) {
   const mapping = partialResult(url).section_mappings[0]!
-  const { requirement_ids, scoring_ids, scoring_response_point_ids, ...writingBrief } = mapping.writing_brief
   return {
-    ...mapping,
-    writing_brief: writingBrief,
-    coverage_override: { requirement_ids, scoring_ids, scoring_response_point_ids },
+    section_id: mapping.section_id,
+    local_materials: [{ material_ref: 'M1:chunk_0001', usage: 'reference', summary: '支持本章实施组织任务，仅参考流程组织思路，不据此新增具体技术步骤或项目承诺。' }],
+    web_materials: mapping.web_materials,
   }
 }
 
@@ -302,22 +326,23 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
-  const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })
+  const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [], blocking_issues: [] })
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
   const tender = manifest.files.find(file => file.role === 'tender')!
   const framework = manifest.files.find(file => file.role === 'outline_framework')!
   if (corpus === undefined || tender.chunksPath === null || framework.chunksPath === null) throw new Error('missing mapping corpus')
   const parsedQuality = JSON.parse(quality) as Record<string, unknown>
-  const childScript = [
+  const childScript: ScriptStep[] = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('read-forbidden-framework', 'read', { file_path: `${workspacePath}/${framework.chunksPath}/chunk_0001.md` }),
     ...(repair ? [
-      toolCall('grep-invalid', 'grep', { pattern: '[', path: corpus.chunks_path }),
-      toolCall('grep-overflow', 'grep', { pattern: '.*', path: corpus.chunks_path }),
+      toolCall('search-unknown-scope', 'search_sources', { scope_ref: 'F999', keywords: ['实施'] }),
+      toolCall('read-forged-path', 'read_source', { source_ref: 'F1', file_path: corpus.chunks[0]!.path }),
     ] : []),
-    toolCall('grep-local', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
-    toolCall('read-chunk', 'read', { file_path: corpus.chunks[0]!.path }),
+    toolCall('read-heading', 'read_source', { source_ref: 'F2:H1:full' }),
+    toolCall('search-local', 'search_sources', { scope_ref: 'F1', keywords: ['实施流程'] }),
+    toolCall('read-chunk', 'read_source', { source_ref: 'M1:chunk_0001' }),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_branch_outline', {}),
       toolCall('lock-blank-comparison', 'lock_branch_outline', { comparison: '  ' }),
@@ -327,7 +352,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     }),
     toolCall('submit-invalid-usage', 'submit_section_mapping', {
       ...sectionSubmission(sourceUrl),
-      local_materials: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference_bid', summary: '非法枚举回放。' }],
+      local_materials: [{ material_ref: 'M1:chunk_0001', usage: 'reference_bid', summary: '非法枚举回放。' }],
       web_materials: [],
     }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
@@ -338,11 +363,21 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
     ] : []),
     toolCall('submit-after-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl)),
+    toolCall('update-task', 'update_section_task', {
+      section_id: 'SEC-SECURITY', basis: { kind: 'tender_requirement', explanation: '招标要求访问控制方案与安全审计，明确已有安全任务的组织方式。', requirement_ids: ['REQ-1'] },
+      writing_brief: (({ requirement_ids: _requirements, scoring_ids: _scores, scoring_response_point_ids: _points, ...brief }) => brief)(
+        partialResult(sourceUrl).section_mappings[0]!.writing_brief,
+      ),
+      writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
+    }),
     toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
     ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
-      ...parsedQuality, reviewed_section_ids: [],
+      ...parsedQuality, checked_requirement_ids: [],
     })] : []),
     toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
+    toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
+    toolCall('list-final-items', 'list_review_items', {}),
+    reviewPendingMappingItems,
     toolCall('finish-final-check', 'finish_final_check', {}),
   ]
   const parentScript: StreamChunk[][] = []

@@ -62,6 +62,7 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`fflate`](https://github.com/101arrowz/fflate) | MIT |
 | [`immer`](https://github.com/immerjs/immer) | MIT |
 | [`js-yaml`](https://github.com/nodeca/js-yaml) | MIT |
+| [`jszip`](https://github.com/Stuk/jszip) | (MIT OR GPL-3.0-or-later) |
 | [`katex`](https://github.com/KaTeX/KaTeX) | MIT |
 | [`koffi`](https://github.com/Koromix/koffi) | MIT |
 | [`mammoth`](https://github.com/mwilliamson/mammoth.js) | BSD-2-Clause |
@@ -94,6 +95,7 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`word-extractor`](https://github.com/morungos/node-word-extractor) | MIT |
 | [`ws`](https://github.com/websockets/ws) | MIT |
 | [`xlsx`](https://github.com/SheetJS/sheetjs) | Apache-2.0 |
+| [`xml-js`](https://github.com/nashwaan/xml-js) | MIT |
 | [`yaml`](https://github.com/eemeli/yaml) | ISC |
 | [`zod`](https://github.com/colinhacks/zod) | MIT |
 | [`zustand`](https://github.com/pmndrs/zustand) | MIT |

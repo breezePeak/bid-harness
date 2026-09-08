@@ -1,6 +1,7 @@
 /** Filesystem path checks shared by Bid workspace writes and validators. */
 
-import { lstat } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { lstat, mkdir, writeFile, rename, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 /** Resolve a relative workspace path only when it remains below its owning root. */
@@ -31,5 +32,24 @@ export async function assertNoLinkedPath(root: string, target: string): Promise<
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
     }
+  }
+}
+
+/** 安全地原子替换项目内二进制文件，失败保留旧文件。
+ * @param root 项目所属工作区。
+ * @param target 经过范围检查的绝对目标。
+ * @param bytes 原始文件字节。
+ */
+export async function atomicBytes(root: string, target: string, bytes: Uint8Array): Promise<void> {
+  await assertNoLinkedPath(root, target)
+  await mkdir(resolve(target, '..'), { recursive: true, mode: 0o700 })
+  await assertNoLinkedPath(root, target)
+  const temporary = `${target}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
+    await rename(temporary, target)
+  } catch (error) {
+    await rm(temporary, { force: true })
+    throw error
   }
 }

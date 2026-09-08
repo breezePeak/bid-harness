@@ -89,7 +89,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         summary: '要求访问控制与审计。',
         supports: '支持安全方案。',
       }])
-      expect(map.section_mappings[0]?.local_materials).toEqual([])
+      expect(map.section_mappings[0]?.local_materials).toMatchObject([{ usage: 'reference', summary: '支持本章实施组织任务，仅参考流程组织思路，不据此新增具体技术步骤或项目承诺。' }])
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
       expect(outline.sections[0]).toMatchObject({
         purpose: '为访问控制项目说明权限控制与安全审计措施，响应安全技术评分。',

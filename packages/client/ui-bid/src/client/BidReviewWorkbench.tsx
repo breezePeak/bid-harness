@@ -23,7 +23,7 @@ function classes(...parts: Array<string | undefined | false | null>): string {
 export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
-  exportDocx?: () => Promise<{ path: string }>
+  openWordExport?: () => Promise<void>
   retryStage?: () => Promise<void>
 }
 
@@ -45,7 +45,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, exportDocx, retryStage, actions, useStore,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, retryStage, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
@@ -54,7 +54,6 @@ export function BidReviewWorkbench({
   const [chapter, setChapter] = useState<BidReviewChapterView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
-  const [exportPath, setExportPath] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
   const requestVersion = useRef(0)
@@ -62,7 +61,7 @@ export function BidReviewWorkbench({
   const menuRef = useRef<HTMLDivElement>(null)
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; reference: BidRevisionReference } | null>(null)
   const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
-  const exportReady = ready && projection.runtime.status === 'completed'
+  const exportReady = ready && projection.allowedActions.includes('export_docx')
 
   useEffect(() => { setSelectionMenu(null) }, [chapter, sessionId])
   useEffect(() => {
@@ -162,11 +161,11 @@ export function BidReviewWorkbench({
   const needsAttention = workbench?.summary.needs_attention_count ?? 0
 
   const exportWord = (): void => {
-    if (!exportReady || exporting || exportDocx === undefined) return
+    if (!exportReady || exporting || openWordExport === undefined) return
     setExporting(true)
     setError(null)
-    void exportDocx().then(
-      (value) => { setExportPath(value.path) },
+    void openWordExport().then(
+      () => {},
       (reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) },
     ).finally(() => { setExporting(false) })
   }
@@ -189,9 +188,8 @@ export function BidReviewWorkbench({
           </div>
         </div>
         <div className={css.headerStats}>
-          {exportPath !== null && <Pill className={css.statPill}><span title={exportPath}>Word 已导出：{exportPath}</span></Pill>}
-          <Button variant="primary" size="sm" disabled={!exportReady || exporting || exportDocx === undefined} onClick={exportWord}>
-            {exporting ? '正在导出…' : '导出 Word'}
+          <Button variant="primary" size="sm" disabled={!exportReady || exporting || openWordExport === undefined} onClick={exportWord}>
+            {exporting ? '正在打开…' : '导出 Word'}
           </Button>
           <Button variant="ghost" size="sm" icon={<IconRefreshOutline14 />} onClick={() => { void refresh() }}>
             刷新

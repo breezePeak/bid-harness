@@ -1,6 +1,7 @@
 /** S6 按确认目录组合已完成章节；项目锁和阶段 checkpoint 由 Host 持有。 */
 import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
+import { readDocxXml } from './docx-template.ts'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { normalizeChapterHeadings } from './chapter-headings.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown'
@@ -49,6 +50,23 @@ export async function executeDocxExport(
   signal?: AbortSignal,
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
 ): Promise<StageArtifact[]> {
+  const markdown = await collectDocxMarkdown(workspace, signal)
+  if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
+  const source = destination.slice(0, -'.docx'.length) + '.md'
+  const absolute = within(workspace.projectRoot, source)
+  await assertNoLinkedPath(workspace.root, absolute)
+  signal?.throwIfAborted()
+  await writeFileAtomic(absolute, markdown, { mode: 0o600, dirMode: 0o700 })
+  await workspace.exportDocx(source, destination)
+  return [{ stage: 'docx_export', type: 'docx', path: destination }]
+}
+
+/** 读取确认目录和全部章节为固定 Markdown 快照；不修改源章节。
+ * @param workspace 当前项目。
+ * @param signal 取消信号。
+ * @returns 完整文档 Markdown。
+ */
+export async function collectDocxMarkdown(workspace: BidWorkspace, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted()
   const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
   const manifest = parseChapterWritingManifest(JSON.parse(await readProjectFile(workspace, 'chapters/manifest.json')))
@@ -64,7 +82,7 @@ export async function executeDocxExport(
   const parts = [`# ${outline.document_title}`]
   for (const { section, number, depth } of buildOutlineView(outline.sections)) {
     signal?.throwIfAborted()
-    const headingDepth = Math.min(6, depth + 1)
+    const headingDepth = Math.min(6, depth)
     parts.push(`${'#'.repeat(headingDepth)} ${number} ${section.title}`)
     if (!section.writable && section.summary !== undefined) parts.push(section.summary)
     const chapter = chapters.get(section.id)
@@ -73,14 +91,7 @@ export async function executeDocxExport(
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
     parts.push(chapterBody(markdown, section.title, section.id, number, headingDepth))
   }
-  if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
-  const source = destination.slice(0, -'.docx'.length) + '.md'
-  const absolute = within(workspace.projectRoot, source)
-  await assertNoLinkedPath(workspace.root, absolute)
-  signal?.throwIfAborted()
-  await writeFileAtomic(absolute, `${parts.join('\n\n')}\n`, { mode: 0o600, dirMode: 0o700 })
-  await workspace.exportDocx(source, destination)
-  return [{ stage: 'docx_export', type: 'docx', path: destination }]
+  return `${parts.join('\n\n')}\n`
 }
 
 /**
@@ -105,7 +116,7 @@ export async function validateDocxExport(
     if (!absolute.startsWith(`${workspace.outputRoot}${sep}`)) throw new Error('invalid-export-path')
     await assertNoLinkedPath(workspace.root, absolute)
     const bytes = await readFile(absolute)
-    if (bytes.length < 4 || bytes.readUInt32LE(0) !== 0x04034b50) throw new Error('invalid-docx-file')
+    await readDocxXml(bytes)
     return { ok: true }
   } catch {
     return { ok: false, issues: [{ code: 'DOCX_EXPORT_ARTIFACT_INVALID', message: '导出目录中缺少有效的 DOCX 产物。', artifact: path }] }

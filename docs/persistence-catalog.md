@@ -296,11 +296,11 @@ Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-ev
 
 ```ts persistence-catalog
 /**
- * A user command returned the current stage to its pending entry state.
+ * A user command cleared the current and later stages and now waits for an explicit start.
  * @param stage Current stage selected by the scoped reset command.
- * @param status Stable pending entry status.
+ * @param status Stable post-reset user gate.
  */
-'bid.stage.reset': { stage: BidStage; status: 'pending' }
+'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
 ```
 
 Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
@@ -350,6 +350,32 @@ Source: [`packages/bid/bid/src/bid-events.ts:52`](../packages/bid/bid/src/bid-ev
 ```
 
 Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.word-format.request/*`
+
+<a id="bidword-formatrequest--log-only"></a>
+
+#### `bid.word-format.request` — log-only
+
+```ts persistence-catalog
+/**
+     * 格式建议的完整模型输入；不进入正文对话上下文。
+     * @param system 模型指令。
+     * @param messages 仅含格式字段、用户要求和限长模板候选的数据。
+     * @param provider 实际调用的服务商。
+     * @param model 实际调用的模型。
+     * @param maxTokens 输出上限。
+     */
+'bid.word-format.request': {
+  system: string
+  messages: Message[]
+  provider: string
+  model: string
+  maxTokens: number
+}
+```
+
+Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/bid/src/docx-format-suggestions.ts)
 
 ### `command/*`
 

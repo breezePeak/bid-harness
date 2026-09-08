@@ -53,7 +53,6 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
           "访问控制与安全审计",
         ],
         "evidenceSectionIds": [
-          "SEC-SECURITY",
           "SEC-001",
         ],
         "requirementIds": [

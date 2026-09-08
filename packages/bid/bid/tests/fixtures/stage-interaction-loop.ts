@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
-import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
+import { reviewPendingMappingItems, runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 
 function call(name: string, args: object): StreamChunk[] {
@@ -93,7 +93,11 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   childScript.push(call('submit_section_mapping', {
-    section_id: target.id, local_materials: [], web_materials: [], missing_topics: ['缺少当前章节专用资料'], writing_dimensions: ['资源核查'],
+    section_id: target.id, local_materials: [], web_materials: [],
+  }))
+  childScript.push(call('update_section_task', {
+    section_id: target.id, basis: { kind: 'user_change', explanation: '用户将安全实施拆分为准备、过程与验收，当前节负责资源核查。', requirement_ids: [] },
+    missing_topics: ['缺少当前章节专用资料'], writing_dimensions: ['资源核查'],
     writing_brief: { purpose: '明确访问控制实施前的资源及权限配置核查', must_answer: ['实施前如何核对资源与访问权限配置'],
       writing_notes: ['列明核查责任人、资源清单和问题处理方式'], suggested_tables: ['资源与权限核查清单'], suggested_figures: [] },
     coverage_override: {
@@ -103,6 +107,8 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     },
   }))
   childScript.push(call('finish_mapping_task', {}))
+  childScript.push(call('submit_branch_summary', { section_id: sectionId, summary: '围绕访问控制与安全审计要求，统筹实施准备、过程执行及验收移交，明确资源与权限核查、实施组织和成果交接的衔接关系，为安全方案落地提供依据。' }))
+  childScript.push(call('list_review_items', {}), reviewPendingMappingItems, call('finish_final_check', {}))
   await send('这一节资料不对，重新找', [call('bid_evidence_remap', { ...await identity(), section_ids: [target.id], mode: 'replace', reason: '资料不对' }), answer('已更新，请重新确认。')])
   const finalDraft = await getOrCreateOutlineDraft(workspace)
   const reviewContext = await ctx.bid.getOutlineReviewContext(agent.session)

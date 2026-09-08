@@ -9,7 +9,7 @@ export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as 
 /** Allowed ways a later technical proposal may use public Web material. */
 export const WEB_MATERIAL_USAGES = ['reference', 'background'] as const
 
-/** Strict local-material reference shared by S4 and later evidence consumers. */
+/** S4 与后续写作共用的真实材料身份；summary 保存当前章节任务、可用内容及展开限度。 */
 export const localEvidenceMaterialSchema = z.object({
   source_kind: z.enum(['reference', 'reference_bid']),
   file_id: z.string().min(1),
@@ -40,7 +40,7 @@ export const transientWebEvidenceMaterialSchema = z.object({
   supports: z.string().trim().min(1),
 }).strict()
 
-/** Durable Web material bound to one Host-owned snapshot. */
+/** 绑定 Host 快照的联网资料；summary 保存当前章节的具体用途与展开限度。 */
 export const webEvidenceMaterialSchema = z.object({
   source_id: z.string().regex(/^WEB-[a-f0-9]{16}$/u),
   snapshot_path: z.string().regex(/^analysis\/web-sources\/WEB-[a-f0-9]{16}\.md$/u),
@@ -83,9 +83,12 @@ const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
   phase: z.enum(['initial', 'final_check']),
-  section_ids: z.array(z.string().min(1)).min(1),
+  section_ids: z.array(z.string().min(1)),
+  summary_section_ids: z.array(z.string().min(1)).optional(),
+  review_issues: z.array(z.string().min(1)).optional(),
   heading_path: z.array(z.string().min(1)).min(1),
-}).strict()
+}).strict().refine(task => task.section_ids.length > 0 || (task.phase === 'final_check' && (task.summary_section_ids?.length ?? 0) > 0),
+  { message: '映射任务必须包含可写章节或待复核的父节点总述。' })
 
 const evidenceMappingPlanSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),

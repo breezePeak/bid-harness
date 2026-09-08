@@ -4,8 +4,8 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
-import { parseEvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
-import { parseOutlineArtifact, parseOutlineQualityReport } from './outline-generation-artifacts.ts'
+import { parseEvidenceMapArtifact, type EvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import { parseOutlineArtifact, parseOutlineQualityReport, type OutlineArtifact, type OutlineQualityReport } from './outline-generation-artifacts.ts'
 import { validateOutlineFrameworkRefs } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
@@ -85,11 +85,24 @@ function validateWebMaterial(
   }
 }
 
-/** Validate the S4 section-to-evidence map and the final outline offered for confirmation. */
+/**
+ * 校验 S4 正式产物或尚未发布的候选，基础校验不替代模型的逐项语义复核。
+ * @param workspace 项目工作区，提供资料和招标要求。
+ * @param stage 只接受 evidence_mapping。
+ * @param artifacts 预期发布的正式产物清单。
+ * @param candidate 私有候选；提供时无需先覆盖正式目录和 Evidence Map。局部 Draft 研究只要求受影响节点完成研究，整本确认仍须全量通过。
+ * @returns 整体结构、覆盖和资料可用性校验结果。
+ */
 export async function validateEvidenceMapping(
   workspace: BidWorkspace,
   stage: BidStage,
   artifacts: readonly StageArtifact[],
+  candidate?: {
+    evidence: EvidenceMapArtifact
+    outline: OutlineArtifact
+    quality: OutlineQualityReport
+    draftReviewSectionIds?: readonly string[]
+  },
 ): Promise<StageValidationResult> {
   const issues: StageValidationIssue[] = []
   if (stage !== 'evidence_mapping') reject(issues, 'EVIDENCE_MAPPING_STAGE_INVALID', 'The evidence-mapping validator only accepts evidence_mapping.')
@@ -109,8 +122,8 @@ export async function validateEvidenceMapping(
     return { ok: false, issues }
   }
   const values = await Promise.all([
-    readJson(workspace, MAP_PATH, issues), readJson(workspace, WEB_PATH, issues),
-    readJson(workspace, OUTLINE_PATH, issues), readJson(workspace, QUALITY_PATH, issues),
+    candidate?.evidence ?? readJson(workspace, MAP_PATH, issues), readJson(workspace, WEB_PATH, issues),
+    candidate?.outline ?? readJson(workspace, OUTLINE_PATH, issues), candidate?.quality ?? readJson(workspace, QUALITY_PATH, issues),
     readJson(workspace, 'analysis/requirements.json', issues), readJson(workspace, 'analysis/scoring.json', issues),
     readJson(workspace, 'analysis/compliance.json', issues), readJson(workspace, 'analysis/scoring-response-points.json', issues),
   ])
@@ -129,12 +142,23 @@ export async function validateEvidenceMapping(
     validateOutlineSharedStructure(outline.sections, issues)
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)
     await validateOutlineFrameworkRefs(workspace, outline, issues)
-    validateOutlineGenerationQuality(outline, quality, requirements, scoring, catalog, issues)
-    issues.push(...validateSectionEvidenceCoverage(outline, map))
+    const scope = candidate?.draftReviewSectionIds
+    if (scope !== undefined && (scope.length === 0 || scope.some(id => !outline.sections.some(section => section.id === id)))) {
+      reject(issues, 'EVIDENCE_MAPPING_REVIEW_SCOPE_INVALID', '局部研究范围必须包含当前目录中的节点。', MAP_PATH)
+    }
+    const reviewedOutline = scope === undefined ? outline
+      : { ...outline, sections: outline.sections.filter(section => scope.includes(section.id)) }
+    const scopedQuality = scope === undefined ? quality
+      : { ...quality, reviewed_section_ids: quality.reviewed_section_ids.filter(id => scope.includes(id)) }
+    validateOutlineGenerationQuality(reviewedOutline, scopedQuality, requirements, scoring, catalog, issues)
+    // Draft 中尚未研究的其他新增叶节由确认前复核补齐；现存映射仍验证身份、重复和全部来源。
+    const coverageOutline = scope === undefined ? outline : { ...outline, sections: outline.sections.filter(section =>
+      scope.includes(section.id) || map.section_mappings.some(mapping => mapping.section_id === section.id)) }
+    issues.push(...validateSectionEvidenceCoverage(coverageOutline, map))
     const mappings = new Map(map.section_mappings.map(mapping => [mapping.section_id, mapping]))
-    for (const section of outline.sections) {
+    for (const section of reviewedOutline.sections) {
       if (!section.writable) {
-        if (section.summary === undefined) reject(issues, 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', `目录分支 ${section.id} 缺少叶子章节内容摘要。`, OUTLINE_PATH)
+        if (section.summary === undefined || section.summary.trim().length === 0) reject(issues, 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', `父节点 ${section.id} 缺少可用于标书正文的章节总述。`, OUTLINE_PATH)
         continue
       }
       if (section.purpose.trim().length === 0 || section.must_answer.some(answer => answer.trim().length === 0)

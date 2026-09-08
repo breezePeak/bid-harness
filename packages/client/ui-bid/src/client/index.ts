@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
 import { BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
@@ -150,6 +151,11 @@ export function apply(ctx: ClientContext): void {
         conversation?.setViewAvailable('bid-tender', details?.tender != null)
         conversation?.setViewAvailable('bid-outline', details?.outline != null)
         conversation?.setViewAvailable('bid-confirmation', confirmingOutline)
+        if (details) void wordRemote(sessionId).getFormat().then((view) => { conversation?.setViewAvailable('bid-word-export', view.state.opened) }).catch(() => {
+          // 配置损坏时仍保留入口，由 Word 页面展示读取错误。
+          conversation?.setViewAvailable('bid-word-export', true)
+        })
+        else conversation?.setViewAvailable('bid-word-export', false)
       },
       setComposerBlock: (reason, embedded) => {
         ctx.conversation.blocks.set(
@@ -260,6 +266,25 @@ export function apply(ctx: ClientContext): void {
       },
     }),
   }, BidStagePanel))
+  const wordRemote = (sessionId: SessionId): BidWordExportInjected => {
+    type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
+    const remote = ctx.remote.bid
+    const unwrap = <T>(result: Result<T>): T => { if (!result.ok) throw actionFailure(result.error); return result.value }
+    return {
+      getFormat: async () => unwrap(await remote.getDocxFormat(sessionId)),
+      saveFormat: async request => unwrap(await remote.saveDocxFormat(sessionId, request)),
+      preview: async () => unwrap(await remote.previewDocx(sessionId)),
+      generate: async () => unwrap(unwrap(await remote.exportDocx(sessionId))),
+      suggest: async () => unwrap(await remote.suggestDocxFormat(sessionId)),
+      download: async () => {
+        const file = unwrap(await remote.downloadDocx(sessionId))
+        const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(file.data), c => c.charCodeAt(0))], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }))
+        const link = document.createElement('a'); link.href = url; link.download = file.name; link.click()
+        window.setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
+      },
+    }
+  }
+  ctx.slots.register({ name: 'conversation.view', id: 'bid-word-export', order: 11, label: () => '导出 Word', embeddedChat: false, inject: wordRemote }, BidWordExport)
   ctx.slots.register({
     name: 'conversation.view',
     id: 'bid-review',
@@ -279,11 +304,6 @@ export function apply(ctx: ClientContext): void {
           value: unknown
           error: Parameters<typeof actionFailure>[0]
         }>
-        exportDocx(id: SessionId): Promise<{
-          ok: boolean
-          value: { ok: boolean; value?: { path: string }; error?: Parameters<typeof actionFailure>[0] }
-          error: Parameters<typeof actionFailure>[0]
-        }>
         retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
       return {
@@ -297,13 +317,16 @@ export function apply(ctx: ClientContext): void {
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
         },
-        exportDocx: async () => {
-          const result = await remote.exportDocx(sessionId)
-          if (!result.ok) throw actionFailure(result.error)
-          if (!result.value.ok || result.value.value === undefined) {
-            throw actionFailure(result.value.error ?? { code: 'BID_DOCX_EXPORT_FAILED', message: 'Word 导出失败。' })
-          }
-          return result.value.value
+        openWordExport: async () => {
+          const word = wordRemote(sessionId)
+          const view = await word.getFormat()
+          if (!view.state.opened) await word.saveFormat({
+            revision: view.state.revision, source: view.state.source, overrides: view.state.overrides,
+            mapping: view.state.mapping, description: view.state.description,
+          })
+          const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+          conversation?.setViewAvailable('bid-word-export', true)
+          conversation?.selectView('bid-word-export')
         },
         retryStage: async () => {
           const result = await remote.retryStage(sessionId)

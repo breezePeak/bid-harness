@@ -960,6 +960,9 @@ importers:
       docx:
         specifier: ^9.5.1
         version: 9.7.1
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
       mammoth:
         specifier: ^1.10.0
         version: 1.12.1
@@ -981,6 +984,9 @@ importers:
       xlsx:
         specifier: ^0.18.5
         version: 0.18.5
+      xml-js:
+        specifier: ^1.6.8
+        version: 1.6.11
       zod:
         specifier: ^4.4.3
         version: 4.4.3

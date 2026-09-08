@@ -47,7 +47,15 @@
     "schema_version": 10,
     "section_mappings": [
       {
-        "local_materials": [],
+        "local_materials": [
+          {
+            "source_kind": "reference",
+            "file_id": "4bd88a6a65cc5585238663025fdb442c52aa7be376b34822456a2294c80d699f",
+            "chunk": "chunk_0001",
+            "usage": "reference",
+            "summary": "支持本章实施组织任务，仅参考流程组织思路，不据此新增具体技术步骤或项目承诺。"
+          }
+        ],
         "web_materials": [
           {
             "source_id": "WEB-0e9a5edb153f120c",

@@ -5,6 +5,7 @@ import mammoth from 'mammoth'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
 import { executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
+import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
@@ -52,21 +53,31 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
+  it('正文图片缺失时保留上一次成功文件及下载记录', async () => {
+    const { workspace } = await exportFixture()
+    await executeDocxExport(workspace)
+    const previous = await readFile(join(workspace.outputRoot, 'bid.docx'))
+    const saved = await readDocxFormat(workspace)
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '![实施图](missing.png)')
+    await expect(executeDocxExport(workspace)).rejects.toThrow('图片不存在或无法读取')
+    expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)
+    expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
+  })
   it('按确认目录顺序导出各级父节点概述和叶节正文，保留正文标题', async () => {
     const { workspace } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
     expect(artifacts).toEqual([{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }])
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
-    expect(markdown).toContain('## 1 实施方案\n\n本章介绍部署安排与交付要求，说明项目实施的主要内容。\n\n### 1.1 部署安排\n\n本节概述部署所需的资源配置。\n\n#### 1.1.1 资源配置')
-    expect(markdown).toContain('##### 内部措施')
+    expect(markdown).toContain('# 1 实施方案\n\n本章介绍部署安排与交付要求，说明项目实施的主要内容。\n\n## 1.1 部署安排\n\n本节概述部署所需的资源配置。\n\n### 1.1.1 资源配置')
+    expect(markdown).toContain('#### 内部措施')
     expect(markdown).not.toContain('1.1.1.1')
     expect(markdown).toContain('```txt\n# 原样井号\n```')
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'bid.docx')) })
-    expect(html).toContain('<h4>1.1.1 资源配置</h4>')
-    expect(html).toContain('<h2>1 实施方案</h2><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h3>1.1 部署安排</h3><p>本节概述部署所需的资源配置。</p>')
+    expect(html).toContain('<h3><strong>1.1.1 资源配置</strong></h3>')
+    expect(html).toContain('<h1><strong>1 实施方案</strong></h1><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h2><strong>1.1 部署安排</strong></h2><p>本节概述部署所需的资源配置。</p>')
     expect(html.indexOf('资源配置正文')).toBeLessThan(html.indexOf('交付正文'))
-    expect(html).toContain('<h3>1.2 交付</h3>')
+    expect(html).toContain('<h2><strong>1.2 交付</strong></h2>')
   })
 
   it.each(['hash', 'missing', 'duplicate', 'unknown', 'path'] as const)('拒绝 %s 不匹配的章节记录', async (invalid) => {

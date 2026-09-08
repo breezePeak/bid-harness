@@ -19,6 +19,12 @@ PDF extraction uses text positions to retain physical lines and emits `<!-- page
 
 Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A parse failure retains the original file and records the stable extraction error in `manifest.json`. Reusing an extraction output directory atomically replaces the three complete corpus files through `dsh-atomic-write`. `exportDocx()` accepts only project-local Markdown and writes under the project output directory.
 
+## Word 导出
+
+S6 通过项目级 `word-export/config.json` 保存格式来源、候选映射和用户覆盖，原始模板及解析缓存放在 `word-export/templates/`，不进入资料库。DOCX XML 解析支持样式继承、直接格式变体、页面、六级标题、编号、正文、表格及页眉页脚；不明确的角色可手动映射，缺失字段标记默认补充。模板只提供格式，旧正文、目录和项目文字不复制。格式描述复用会话模型路由生成一次待确认建议；无可用模型时可以手动配置。
+
+预览与生成共用正文快照和生效格式，保留加粗、斜体、链接、嵌套列表、表格及项目内 PNG/JPEG 图片。图片路径相对于项目产物目录，外部资源不自动下载。浏览器只提供样式预览，分页与字体效果以 Word 为准。生成成功后保存下载记录和内容标识；修改正文、图片或格式会使旧文件需要更新。多分节、复杂封面、Logo、文本框、浮动对象和完整套版不复刻；标题编号为导出时的显示文字，不提供 Word 内自动重新编号。
+
 ## Control plane types
 
 The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, the `BidUploadFile` request and `BidFileIntakeResult` response, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
@@ -47,7 +53,7 @@ S2、S3、S4 的 `waiting_user` 开放普通消息，`running` 禁止发送。Ma
 
 所有修改使用 Host 的项目锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 保存 Draft；范围外节点及选中根位置不得改变。目录编辑不启动资料复核，也不覆盖最近完成研究的目录。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
 
-S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度、有限修复及 Web Snapshot。指定可写叶子只运行该叶子，指定结构节点展开其可写后代，不运行无关章节，也不再次深化整本目录。`replace` 替换目标 Evidence；`supplement` 去重合并材料和写作维度，以本轮研究结论更新真实缺口。重映射产生的 Writing Brief 保存到 Draft，最近完成整体验证的目录基线保留；最终确认按引用清理快照。
+S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度、有限修复及 Web Snapshot。指定可写叶子只研究该叶子，指定结构节点展开其可写后代；Final Check 复核最终合并的材料、任务和必要的祖先总述。`replace` 替换目标材料，`supplement` 去重合并材料；写作维度与缺口由独立任务操作确定，不从旧材料合并中恢复。Writing Brief 保存到 Draft，最近完成整体验证的目录基线保留。其他尚未研究的新叶节留待确认前复核，不能算作已审；最终确认运行整体验证并按引用清理快照。
 
 修改成功更新 Draft revision，发布 `running → waiting_user`，客户端刷新并提示“已更新，请重新确认”。最终确认比较 Draft 与研究目录，只复核写作目标、必答问题、业务关联、写作要求或祖先语义变化影响的叶子；单纯排序不触发模型。复核同步 Writing Brief、父节点摘要与 Evidence，完整校验后发布确认产物；失败恢复正式产物并保留 Draft。聊天文字不代表确认，只有正式确认动作可以推进阶段。决定依据见[章节研究记录](../../../.agents/notes/implemented/feature/2026-09-03-bid-section-research-blueprint.md)。
 
@@ -59,21 +65,23 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 逐次提交现有 `outlineEditOperationSchema` 操作，Host 校验分支范围、立即应用并返回临时新章 ID；目录锁定后，Child 按 Host 返回的可写章节逐章提交 Evidence、writing_dimensions 和 writing_brief。Host 合并分支、分配稳定 Section ID 并将 brief 写入 Outline。正式 Evidence Map schema v10 保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，提交招标要求、用户修改或章节职责方面的业务依据；Host 校验范围、应用操作并分配 ID。目录锁定后，材料提交与章节任务调整使用独立工具。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
 
-S4 启动 Child 前复检成功解析的 reference/reference_bid Corpus；损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告文件身份与原因。Host 从 structure.json 读取旧标及用户原始框架的完整标题树；没有结构文件的文本资料从标准化 Markdown 提取完整标题，不依赖分块索引的首标题。原始框架、当前候选目录职责和旧标结构一并注入研究任务，Child 按本次要求与框架对照章节组织，再按标题语境检索正文。框架标题仅作结构输入，不进入事实 Evidence。Prompt 使用 `F1` 等运行内短引用和绝对 Corpus 路径，Host 按定位表精确回填正式 file_id/source_kind。grep 可访问分块目录或登记分块，read 可访问索引或登记分块；Final Check 还可读取已登记 Web 正文。tender、outline_framework、完整 document.md 与项目外路径不被授权。本地 Evidence 验证文件角色、分块归属和路径安全，不要求 Child read 日志证明。
+S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
-每个 S4 Child 使用仅在当前 Child 生效的增量工具。Initial 注册 `apply_branch_outline_edit`、`lock_branch_outline`、`submit_section_mapping`、`add_mapping_suggestion` 和 `finish_mapping_task`；Remap 只注册后两类章节提交与完成工具。章节工具不接收 task_id、全量 Mapping 数组、真实文件身份或 Web 快照字段；Host 以 Map upsert 章节，省略的数组补空，既有 coverage 从锁定目录继承，新章 coverage 必须在当前 Task 范围内完整覆盖。参数错误以 ToolArgsError 返回模型，在当前回合内修正；普通文字回复不作为结果。
+初始研究、重映射及 Final Check 共用 `read_source` 和 `search_sources`。模型选择程序提供的目录、全文件、材料或搜索范围引用；可直接读取，也可扩大字面搜索范围。长结果返回后续引用，由模型决定是否继续。来源标题、位置与整块覆盖范围保持原样。通用本地 grep/read 不向 S4 开放，不能绕过引用读取；联网搜索、抓取及已授权快照仍可使用。
 
-Section、file_ref、分块归属、usage 和 Web 正文存在性在单次工具调用内校验；重复 Section 直接覆盖，finish 根据 Host 状态返回缺失章节或具体 Writing Brief/coverage 问题。只有完成后仍存在的语义问题或未调用完成工具才最多在同一 Child 修复一次，并保留已检索上下文。执行日志 schema v3 以 `issues` 记录本次拒绝原因，以 `warnings` 记录不阻塞接收的本次检索错误；接受的 attempt 不得保留 issues。missing_topics 只表示检索并语义判断后仍存在的真实缺口。已接受分支及其目录操作写入 `analysis/evidence-mapping-checkpoint.json`（schema v2），重试只调度未完成任务；v1 检查点缺少结构对照保证，须重置 S4 后重新研究，不能直接复用。checkpoint 与 Web Evidence 使用关键写入队列，执行日志的独立尽力队列失败只记录 Host warning。用户取消、关键持久化或权限机制故障仍可中止阶段。
+`submit_section_mapping`、`replace_section_mapping` 只处理材料。模型提交绑定唯一文件与分块的 `material_ref`、usage 及 summary；程序回填真实身份，真实工具入口拒绝未知引用、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。找到相关资料本身不构成扩展任务的理由。
 
-目录深化与各分支资料研究在同一 Child 内完成；需要独立成节的主题通过目录操作落成节点，不能只增加 must_answer 或 writing_dimensions。每次目录工具只接收一个新增、拆分、合并、移动或字段调整操作，无需复制完整子树；`lock_branch_outline` 必须收到非空结构对照结论，保留原结构也须说明叶节为何已可独立写作。Host 合并并校验各分支结果后，启动一个无工具、不可继续派生的全新目录复核 Child；该 Child 只接收合并后的目录候选并以结构化结果返回质量报告，不继承主 Session 历史，也不读取 Evidence、Web 正文或 S2 Artifact。后续 Final Check 只注册 `replace_section_mapping`、`submit_branch_summary` 和 `finish_final_check`；未替换章节保留 Host baseline，缺少 baseline 或摘要时由 finish 返回明确 ID。Host 恢复完整结果后仍写出 evidence-map v10。
+目录深化与分支研究在同一 Child 内完成，`lock_branch_outline` 要求非空结构对照结论。合并后沿用现有独立目录复核与 Final Check，不新增模型阶段。复核对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责，先判断任务调整，再判断资料用途。任务越界必须修正或阻断；Final Check 不增删、移动、拆合章节或修改标题。`list_review_items` 返回每个可写章节任务、每条材料用途关联和受影响父节点总述，空材料章节也必须审查。`review_items` 按当前引用批量保留、移除、修正或阻断；任务变化使本章材料和祖先总述结论失效，用途或来源变化使该关联重新待审。correct 的新版本仍须复核。
+
+无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v3 保存私有操作和复核记录，v1/v2 必须重置 S4，恢复不能复用旧 Final Check 结论。日志 schema v3 区分 issues 与检索 warnings，技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 
 S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文。Writer 与 Reviewer 同时获得完整目录职责及当前祖先路径，依据父子关系、同级节点分工和本节任务检查正文归属，不根据固定章名或行业词指定内容位置。叶节使用段落、列表和表格，提交及恢复检查拒绝根标题以外的 Markdown 标题；Host 只按确认目录生成根标题编号。已有正文的预览和导出保留其子标题原文，不生成新的节内编号。Writer 优先使用 S4 Evidence，遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 及登记 Web Snapshot 中有限 grep/read；相邻分块按索引读取，tender 始终禁止。补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map；framework 保持草稿身份，不作事实 Evidence。
 
-S5 以 `outline/confirmed-outline.json` 为唯一章节结构。各级父节点直接展示 S4 已确认的 `summary`，用 1～3 句概括下属章节内容；Word 导出在对应父标题下、子章节之前插入同一概述。父节点概述不进入叶节 Writer 调度、审查进度和正文修订。Main Agent 只通过 `add_global_consistency_note`、`set_chapter_relations` 和 `finish_chapter_plan` 判断关系，不使用文件工具。Host 按目录遍历预置全部可写章节，补齐身份、版本和 Hash；至少一项真实全局说明及无环强依赖校验通过后原子写入 `execution-plan.json`。仅有合法 plan、尚无 execution-log 时也复用计划。
+S5 以 `outline/confirmed-outline.json` 为唯一章节结构。各级父节点直接展示 S4 已确认的 `summary`；Word 导出在对应父标题下、子章节之前插入同一概述。S4 通过 `submit_branch_summary` 生成可直接用于技术标正文的自然总述：根据最终子章节任务与已确认信息概括业务内容和总体思路，不逐条解说目录、不展开操作步骤、不新增事实或承诺，也不声称核验尚未生成的正文。程序只校验节点身份、非空及复核完成状态，文体和适用性由模型判断。父节点不进入叶节 Writer 调度、审查进度和正文修订。Main Agent 只通过 `add_global_consistency_note`、`set_chapter_relations` 和 `finish_chapter_plan` 判断关系，不使用文件工具。Host 按目录遍历预置全部可写章节，补齐身份、版本和 Hash；至少一项真实全局说明及无环强依赖校验通过后原子写入 `execution-plan.json`。仅有合法 plan、尚无 execution-log 时也复用计划。
 
 Writer 只提交完整 `markdown` 与语义 `metadata`，空数组和 handoff 成员可省略。三个 `section_id` 与三个 `covered_*` 索引由 Host 按 Blueprint 绑定；覆盖索引不代表正文已经响应。资料使用本章稳定的 M（映射材料）、F（可补搜文件）和 W（已验证网页）引用，工具读取仍使用真实路径。相同资料经不同短引用提交时按真实身份去重，语义冲突可恢复地拒绝。框架只作为 preserve/adapt/rewrite 写作输入，不进入 M/F Evidence；新 URL 必须有当前 Writer 的成功 fetch 正文。引用、chunk、usage 和 Snapshot Hash 在 `structured_output` 完成前校验，允许当前 Writer 修正。
 

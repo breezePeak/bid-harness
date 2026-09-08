@@ -55,7 +55,8 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       expect(JSON.parse(await readFile(join(exported, 'project-state.json'), 'utf8'))).toMatchObject({
         runtime: { stage: 'docx_export', status: 'completed' },
       })
-      expect((await readFile(join(exported, 'output/bid.docx'))).subarray(0, 2).toString()).toBe('PK')
+      const format = JSON.parse(await readFile(join(exported, 'word-export/config.json'), 'utf8')) as { lastExport: { path: string } }
+      expect((await readFile(join(exported, format.lastExport.path))).subarray(0, 2).toString()).toBe('PK')
     },
   })
   expect(JSON.parse(result.stdout)).toMatchInlineSnapshot(`
@@ -68,6 +69,8 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         "tender": "项目 A",
       },
       "export": {
+        "automaticExport": false,
+        "beforeGenerate": false,
         "checkpointUnchanged": true,
         "details": {
           "body": true,
@@ -78,15 +81,18 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         },
         "docxAvailable": true,
         "executions": 1,
+        "formatRestored": true,
         "messages": [],
         "nextRuntime": {
           "stage": "docx_export",
           "status": "completed",
         },
+        "previewMatches": true,
         "runtime": {
           "stage": "docx_export",
           "status": "completed",
         },
+        "sampleVisible": true,
         "unchanged": true,
       },
       "fileCount": 1,

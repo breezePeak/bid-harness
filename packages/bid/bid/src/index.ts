@@ -8,7 +8,7 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -22,10 +22,6 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { Document, Footer, Header, Packer, PageNumber, Paragraph, Table, TableCell, TableRow, TextRun, AlignmentType } from 'docx'
-import { fromMarkdown } from 'mdast-util-from-markdown'
-import { gfmFromMarkdown } from 'mdast-util-gfm'
-import { gfm } from 'micromark-extension-gfm'
 import * as XLSX from 'xlsx'
 import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
@@ -54,7 +50,12 @@ import { validateOutlineDraftForConfirmation } from './outline-confirmation-vali
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import { buildChapterWorklist, DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY, executeChapterWriting } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
-import { executeDocxExport, validateDocxExport } from './docx-export.ts'
+import { suggestDocxFormat } from './docx-format-suggestions.ts'
+import { readDocxXml } from './docx-template.ts'
+import { renderDocx, docxAssetHash } from './docx-render.ts'
+import { readDocxFormat, saveDocxFormat, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
+import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion } from './docx-format-contract.ts'
+import { executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -65,7 +66,7 @@ import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
 import { checkpointBidProjectState, readBidProjectState, type BidProjectState } from './project-state.ts'
-import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import type {
@@ -272,6 +273,10 @@ export interface Config {
   chapterWritingMaxConcurrency: number
   /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
   trustedHosts: string[]
+  /** Word 自然语言格式建议的输出 token 上限。 */
+  wordFormatMaxTokens: number
+  /** Word 格式建议超时毫秒数。 */
+  wordFormatTimeoutMs: number
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -283,6 +288,8 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   evidenceMappingMaxConcurrency: DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   trustedHosts: [],
+  wordFormatMaxTokens: 8192,
+  wordFormatTimeoutMs: 120000,
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -295,6 +302,8 @@ export const Config: z<Config> = z.object({
   evidenceMappingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.evidenceMappingMaxConcurrency),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
   trustedHosts: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.trustedHosts),
+  wordFormatMaxTokens: z.natural().min(256).max(32768).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatMaxTokens),
+  wordFormatTimeoutMs: z.natural().min(1000).max(600000).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatTimeoutMs),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -768,7 +777,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (request.action === 'bid_stage_inspect') return await inspectBidStage(workspace, session)
       const base = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== base.revision || request.expected_draft_sha256 !== base.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: base } }
-      for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json', 'analysis/evidence-mapping-checkpoint.json'] : [])]) {
+      for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/evidence-map.candidate.json', 'analysis/evidence-mapping-quality.candidate.json', 'outline/refined-outline.candidate.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json', 'analysis/evidence-mapping-checkpoint.json'] : [])]) {
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         try { backup.set(absolute, await readFile(absolute, 'utf8')) } catch (error) {
@@ -798,11 +807,15 @@ export class BidHostRuntime extends TypertRemoteService {
         await assertNoLinkedPath(workspace.root, absolute)
         await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
       }
+      const previousOutline = parseOutlineArtifact(await readStageJson(workspace, 'outline/outline.json'))
       await persist('outline/outline.json', draft.outline)
       await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
         maxRepairAttempts: this.config.modelStageRepairAttempts, maxConcurrency: this.config.evidenceMappingMaxConcurrency, signal,
         remap: {
-          section_ids: request.section_ids, mode: request.mode, ...(request.reason === undefined ? {} : { reason: request.reason }),
+          section_ids: request.section_ids,
+          mode: request.mode,
+          previous_outline: previousOutline,
+          ...(request.reason === undefined ? {} : { reason: request.reason }),
         },
       })
       signal.throwIfAborted()
@@ -868,7 +881,7 @@ export class BidHostRuntime extends TypertRemoteService {
     return new BidOrchestrator(
       agent.session,
       {
-        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'docx_export',
+        canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: async (task) => {
           const operation = this.inFlight.get(projectKey(agent.session))
           if (operation !== undefined) await this.checkpoint(operation)
@@ -948,6 +961,8 @@ export class BidHostRuntime extends TypertRemoteService {
           'analysis/evidence-mapping-plan.json',
           'analysis/evidence-mapping-log.json',
           'analysis/evidence-mapping-checkpoint.json',
+          'analysis/evidence-map.candidate.json',
+          'analysis/evidence-mapping-quality.candidate.json',
           'analysis/evidence-map.json',
           'analysis/web-evidence-sources.json',
           'analysis/web-sources',
@@ -959,6 +974,9 @@ export class BidHostRuntime extends TypertRemoteService {
           'analysis/evidence-mapping-plan.json',
           'analysis/evidence-mapping-log.json',
           'analysis/evidence-mapping-checkpoint.json',
+          'analysis/evidence-map.candidate.json',
+          'analysis/evidence-mapping-quality.candidate.json',
+          'outline/refined-outline.candidate.json',
           'analysis/evidence-map.json',
           'analysis/web-evidence-sources.json',
           'analysis/web-sources',
@@ -1084,7 +1102,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const orchestrator = new BidOrchestrator(
         session,
         {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing' || stage === 'docx_export',
+          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
           execute: async (task) => {
             await this.checkpoint(operation)
             if (task.stage === 'file_intake') {
@@ -1273,11 +1291,94 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
+  /** 读取项目 Word 配置，不解析模板或生成文件。
+   * @param session 当前标书会话。
+   * @returns 已保存格式与来源。
+   */
+  @Remote('getDocxFormat')
+  async getDocxFormat(session: Session): Promise<DocxFormatView> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
+    const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
+    const view = await readDocxFormat(workspace)
+    const project = await readBidProjectState(workspace)
+    if (project?.runtime.stage === 'docx_export' && project.runtime.status !== 'running' || project?.runtime.stage === 'chapter_writing' && project.runtime.status === 'completed') {
+      return collectDocxMarkdown(workspace).then(async markdown => ({
+        ...view, fingerprint: docxFingerprint(markdown, view, await docxAssetHash(workspace, markdown)),
+      })).catch(() => ({
+        ...view, warnings: [...view.warnings, '当前正文或图片无法用于导出，请在更新预览时检查具体错误；已保存配置和旧文件仍可使用。'],
+      }))
+    }
+    return view
+  }
+
+  /** 保存项目格式，独立于 S1—S5 的资料与阶段状态。
+   * @param session 当前标书会话。
+   * @param request 包含版本、模板及用户配置的请求。
+   * @returns 保存后的格式。
+   */
+  @Remote('saveDocxFormat')
+  async saveDocxFormat(session: Session, request: DocxFormatRequest): Promise<DocxFormatView> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
+    const operation = this.beginOperation(session)
+    try { return await saveDocxFormat(operation.workspace, request) }
+    finally { await this.finishOperation(session, operation, false) }
+  }
+
+  /** 使用已保存配置和固定正文快照生成浏览器预览，不完成 S6。
+   * @param session 当前标书会话。
+   * @returns 带内容标识的样式预览。
+   */
+  @Remote('previewDocx')
+  async previewDocx(session: Session): Promise<DocxFormatView> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 预览需要标书项目会话。')
+    const operation = this.beginOperation(session)
+    try {
+      const view = await readDocxFormat(operation.workspace)
+      const markdown = await collectDocxMarkdown(operation.workspace)
+      const rendered = await renderDocx(operation.workspace, markdown, view.values, true)
+      return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
+    } finally { await this.finishOperation(session, operation, false) }
+  }
+
+  /** 生成待确认的格式建议，不修改模板、正文或生效配置。
+   * @param session 当前标书会话。
+   * @returns 带来源原文的建议。
+   */
+  @Remote('suggestDocxFormat')
+  async suggestDocxFormat(session: Session): Promise<DocxFormatSuggestion> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('格式建议需要标书项目会话。')
+    const operation = this.beginOperation(session)
+    try {
+      return await suggestDocxFormat(
+        this.ctx, session, await readDocxFormat(operation.workspace),
+        AbortSignal.any([operation.controller.signal, AbortSignal.timeout(this.config.wordFormatTimeoutMs)]),
+        this.config.wordFormatMaxTokens,
+      )
+    }
+    finally { await this.finishOperation(session, operation, false) }
+  }
+
+  /** 下载当前项目最近一次成功的 Word，不接受浏览器文件路径。
+   * @param session 当前标书会话。
+   * @returns 下载名称和文件字节。
+   */
+  @Remote('downloadDocx')
+  async downloadDocx(session: Session): Promise<{ data: string; name: string }> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('下载需要标书项目会话。')
+    const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
+    const view = await readDocxFormat(workspace)
+    if (!view.state.lastExport) throw new Error('请先生成 Word。')
+    const path = within(workspace.projectRoot, view.state.lastExport.path)
+    if (!path.startsWith(workspace.outputRoot + sep)) throw new Error('Word 文件不在输出目录中。')
+    await assertNoLinkedPath(workspace.root, path)
+    return { data: (await readFile(path)).toString('base64'), name: basename(path) }
+  }
+
   /** Generate a fresh Word file from completed S5 artifacts without leaving the review stage. */
   @Remote('exportDocx')
   async exportDocx(session: Session): Promise<BidDocxExportResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
-      return docxExportRejected('BID_SESSION_REQUIRED', 'DOCX export requires a Bid Session with a Host workspace.')
+      return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
     }
     if (this.inFlight.has(projectKey(session))) {
       return docxExportRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
@@ -1286,20 +1387,25 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('export_docx')) {
-        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', 'DOCX export is available after S5 completes.')
+        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '正文编写完成后才能生成 Word。')
       }
       const destination = `${operation.workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
       const artifacts = await executeDocxExport(operation.workspace, operation.controller.signal, destination)
       const validation = await validateDocxExport(operation.workspace, 'docx_export', artifacts)
       if (!validation.ok) {
-        return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The generated DOCX artifact is invalid.', validation.issues)
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
+      }
+      if (runtime.stage === 'docx_export' && runtime.status !== 'completed') {
+        session.append('bid.stage.started', { stage: 'docx_export', status: 'running' })
+        session.append('bid.stage.completed', { stage: 'docx_export', status: 'completed', artifacts })
+        await this.checkpoint(operation)
       }
       return { ok: true, value: { path: destination } }
     } catch (error: unknown) {
       if (error instanceof BidStageExecutionError) {
-        return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The completed chapters could not be exported.', error.issues)
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '已完成章节无法导出，请检查正文完整性。', error.issues)
       }
-      return docxExportRejected('BID_DOCX_EXPORT_FAILED', 'The Bid Host could not export the completed chapters.')
+      return docxExportRejected('BID_DOCX_EXPORT_FAILED', error instanceof Error ? error.message : 'Word 生成失败，请重试。')
     } finally {
       await this.finishOperation(session, operation, false)
     }
@@ -1748,12 +1854,15 @@ export class BidHostRuntime extends TypertRemoteService {
         if (runtime.stage === 'evidence_mapping') {
           const researched = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
           const affected = changedWritableSectionIds(researched, candidate)
+          const summarySectionIds = candidate.sections.filter(section => !section.writable
+            && researched.sections.find(previous => previous.id === section.id)?.summary !== section.summary).map(section => section.id)
           const evidencePath = within(workspace.projectRoot, 'analysis/evidence-map.json')
           let evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-          if (affected.length > 0) {
+          if (affected.length > 0 || summarySectionIds.length > 0) {
             const checked = await executeEvidenceMappingFinalCheck(agent, workspace, candidate, affected, {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+              summarySectionIds,
               signal: operation.controller.signal,
             })
             candidate = checked.outline
@@ -2061,19 +2170,6 @@ function validateConfig(config: BidConfig): void {
   }
 }
 
-async function atomicBytes(root: string, target: string, bytes: Uint8Array): Promise<void> {
-  await assertNoLinkedPath(root, target)
-  await mkdir(resolve(target, '..'), { recursive: true, mode: 0o700 })
-  await assertNoLinkedPath(root, target)
-  const temporary = `${target}.${randomBytes(6).toString('hex')}.tmp`
-  try {
-    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
-    await rename(temporary, target)
-  } catch (error) {
-    await rm(temporary, { force: true })
-    throw error
-  }
-}
 
 function uniqueName(name: string, used: Set<string>): string {
   const extension = extname(name)
@@ -2280,40 +2376,18 @@ export class BidWorkspace {
     if (!source.endsWith('.md')) throw new Error('bid-source-must-be-markdown')
     const destinationPath = within(this.projectRoot, destination)
     if (!destinationPath.startsWith(`${this.outputRoot}${sep}`)) throw new Error('bid-output-path-required')
+    await assertNoLinkedPath(this.root, sourcePath)
     const markdown = await readFile(sourcePath, 'utf8')
-    const body = markdownToDocx(markdown, this.config)
-    const document = new Document({ sections: [{ headers: { default: new Header({ children: [new Paragraph('技术标') ] }) },
-      footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER,
-        children: [new TextRun('第 '), new TextRun({ children: [PageNumber.CURRENT] }), new TextRun(' 页')],
-      })] }) }, children: body }] })
-    await atomicBytes(this.root, destinationPath, await Packer.toBuffer(document))
+    const view = await readDocxFormat(this)
+    if (Object.values(view.sources).includes('待确认')) throw new Error('模板存在待确认的格式变体，请选择样式或明确使用默认方案。')
+    const rendered = await renderDocx(this, markdown, view.values)
+    await readDocxXml(rendered.bytes)
+    await atomicBytes(this.root, destinationPath, rendered.bytes)
+    await writeDocxFormat(this, { ...view.state,
+      lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, rendered.assetHash) },
+    })
     return this.relative(destination)
   }
 
   private relative(path: string): string { return `${this.config.projectDirectory}/${path.replaceAll('\\', '/')}` }
-}
-
-function markdownToDocx(markdown: string, config: BidConfig): (Paragraph | Table)[] {
-  const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
-  const blocks: (Paragraph | Table)[] = []
-  for (const node of root.children) {
-    if (node.type === 'heading') blocks.push(new Paragraph({
-      heading: ({ 1: 'Heading1', 2: 'Heading2', 3: 'Heading3', 4: 'Heading4', 5: 'Heading5', 6: 'Heading6' } as const)[node.depth],
-      children: [new TextRun({ text: textOf(node), font: config.font, size: config.headingSize })],
-    }))
-    else if (node.type === 'paragraph') blocks.push(new Paragraph({ spacing: { after: 160, line: 360 }, children: [new TextRun({ text: textOf(node), font: config.font, size: config.bodySize })] }))
-    else if (node.type === 'list') for (const item of node.children) blocks.push(new Paragraph({
-      ...node.ordered ? { numbering: { reference: 'default-numbering', level: 0 } } : { bullet: { level: 0 } },
-      children: [new TextRun({ text: textOf(item), font: config.font, size: config.bodySize })],
-    }))
-    else if (node.type === 'table') blocks.push(new Table({ rows: node.children.map(row => new TableRow({ children: row.children.map(cell => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: textOf(cell), font: config.font, size: config.bodySize })] })] })) })) }))
-    /* v8 ignore next -- unsupported mdast block kinds are intentionally omitted from the DOCX subset. */
-  }
-  return blocks.length > 0 ? blocks : [new Paragraph('')]
-}
-
-function textOf(node: { children?: unknown[]; value?: string }): string {
-  if (typeof node.value === 'string') return node.value
-  /* v8 ignore next -- supported mdast containers always provide children. */
-  return (node.children ?? []).map(child => textOf(child as { children?: unknown[]; value?: string })).join('')
 }

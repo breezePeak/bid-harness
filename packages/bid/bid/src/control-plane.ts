@@ -3,6 +3,7 @@
  *
  * @module @deepseek-ai/dsh-bid/control-plane
  */
+export type { DocxFormatSuggestion, DocxFormatRequest, DocxFormatView, DocxFormatState, FormatField, FormatValues, FormatCandidate } from './docx-format-contract.ts'
 
 /** Browser-safe Bid control-plane constants and types. */
 export {

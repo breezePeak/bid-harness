@@ -1,5 +1,5 @@
 /** fresh Session 通过真实源码 Loader 接管已有项目，不复制聊天。 */
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -42,10 +42,18 @@ try {
   await seedProjectArtifacts(exportWorkspace)
   await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'pending' })
   const exporting = await createFresh('export-session-a', exportRoot)
-  const docx = await readFile(join(exportWorkspace.outputRoot, 'bid.docx'))
+  const automaticExport = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
+  const originalFormat = await ctx.bid.getDocxFormat(exporting)
+  await ctx.bid.saveDocxFormat(exporting, { revision: originalFormat.state.revision, source: 'default', mapping: {}, overrides: { 'body.size': 15, 'heading1.size': 22 }, description: '正文15磅' })
+  const preview = await ctx.bid.previewDocx(exporting)
+  const beforeGenerate = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
+  const generated = await ctx.bid.exportDocx(exporting)
+  if (!generated.ok) throw new Error(generated.error.message)
+  const docx = await readFile(join(exportWorkspace.projectRoot, generated.value.path))
   const exportedState = await readFile(exportWorkspace.projectStatePath, 'utf8')
   const completed = await createFresh('export-session-b', exportRoot)
   const completedDetails = await ctx.bid.getDetails(completed)
+  const restoredFormat = await ctx.bid.getDocxFormat(completed)
   process.stdout.write(`${JSON.stringify({
     runtime: b.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
     messages: b.deriveMessages(), nodes: b.surface.nodes,
@@ -57,6 +65,7 @@ try {
     fileCount: (await workspace.readManifest()).files.length,
     previousMessageCount: a.deriveMessages().length,
     export: {
+      automaticExport, beforeGenerate, formatRestored: restoredFormat.values['body.size'] === 15, previewMatches: preview.fingerprint === restoredFormat.state.lastExport?.fingerprint, sampleVisible: preview.previewHtml?.includes('非正文'),
       details: {
         tender: completedDetails.tender?.project.project_name,
         outline: completedDetails.outline?.sections.map(section => section.title), body: completedDetails.body,
@@ -66,7 +75,7 @@ try {
       messages: completed.deriveMessages(),
       executions: [...exporting.events, ...completed.events].filter(event => event.type === 'bid.stage.started' && event.data.stage === 'docx_export').length,
       docxAvailable: docx.length > 0 && docx.subarray(0, 2).toString() === 'PK',
-      unchanged: docx.equals(await readFile(join(exportWorkspace.outputRoot, 'bid.docx'))),
+      unchanged: docx.equals(await readFile(join(exportWorkspace.projectRoot, generated.value.path))),
       checkpointUnchanged: await readFile(exportWorkspace.projectStatePath, 'utf8') === exportedState,
     },
   })}\n`)

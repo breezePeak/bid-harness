@@ -176,6 +176,7 @@ export function getBidClientProjection(
 ): BidClientProjection {
   const fileView = fileLimits.allowedExtensions === undefined ? { ...fileLimits }
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
+  if (runtime.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { runtime: { ...runtime }, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
   if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
   if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
   if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }

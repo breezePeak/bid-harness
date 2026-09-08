@@ -82,7 +82,7 @@ describe('Bid Host stage reset', () => {
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
-        chapterWritingMaxConcurrency: 1, trustedHosts: [],
+        chapterWritingMaxConcurrency: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,
       inFlight: new Map([[key, operation]]),
       automaticOrchestrator: () => ({ drive }),
@@ -147,7 +147,7 @@ describe('Bid Host stage reset', () => {
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
-        chapterWritingMaxConcurrency: 1, trustedHosts: [],
+        chapterWritingMaxConcurrency: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,
       inFlight: new Map(),
       automaticOrchestrator: () => ({ drive }),
