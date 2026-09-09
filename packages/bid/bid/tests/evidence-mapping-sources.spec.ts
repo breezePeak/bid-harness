@@ -6,11 +6,16 @@ import { BidWorkspace } from '../src/index.ts'
 import { resolveMappingCorpusLocations } from '../src/evidence-mapping-corpus.ts'
 import { buildMappingSourceIndex } from '../src/evidence-mapping-sources.ts'
 import { createMappingSourceTools, mappingSourceCatalog } from '../src/evidence-mapping-source-tools.ts'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DocumentChunkEntry } from '../src/document-chunk.ts'
 
 function entry(id: string, start: number, end: number): DocumentChunkEntry {
   return { id, path: `${id}.md`, order: 1, heading_path: ['不作为范围依据'], page_start: null, page_end: null,
     source_line_start: start, source_line_end: end, char_count: 10, prev_chunk: null, next_chunk: null, oversized: false }
+}
+
+function toolExec(): ToolRunContext {
+  return { signal: new AbortController().signal } as ToolRunContext
 }
 
 describe('S4 真实资料位置与受控引用', () => {
@@ -52,27 +57,28 @@ describe('S4 真实资料位置与受控引用', () => {
     const locations = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
     const catalog = mappingSourceCatalog(locations)[0]!
     const [read, search] = createMappingSourceTools(locations, () => [])
-    const direct = await read!.execute({ source_ref: catalog.body_headings[0]!.direct_body.source_ref }) as {
+    const exec = toolExec()
+    const direct = await read!.execute({ source_ref: catalog.body_headings[0]!.direct_body.source_ref }, exec) as {
       body: string
       materials: Array<{ material_ref: string; actual_chunk_coverage: unknown }>
     }
     expect(direct.body).toContain('业务范围 a.*')
     expect(direct.body).not.toContain('步骤细节')
     expect(direct.materials[0]?.actual_chunk_coverage).toBeDefined()
-    const full = await read!.execute({ source_ref: catalog.body_headings[0]!.full_section.source_ref }) as { body: string }
+    const full = await read!.execute({ source_ref: catalog.body_headings[0]!.full_section.source_ref }, exec) as { body: string }
     expect(full.body).toContain('步骤细节')
     expect(full.body).not.toContain('相邻正文')
-    expect(await search!.execute({ scope_ref: catalog.body_headings[0]!.direct_body.source_ref, keywords: ['步骤'] })).toEqual({ hits: [] })
-    const expanded = await search!.execute({ scope_ref: catalog.scope_ref, keywords: ['步骤'] }) as { hits: Array<{ source_ref: string; line: number }> }
+    expect(await search!.execute({ scope_ref: catalog.body_headings[0]!.direct_body.source_ref, keywords: ['步骤'] }, exec)).toEqual({ hits: [] })
+    const expanded = await search!.execute({ scope_ref: catalog.scope_ref, keywords: ['步骤'] }, exec) as { hits: Array<{ source_ref: string; line: number }> }
     expect(expanded.hits).toHaveLength(1)
-    expect(await read!.execute({ source_ref: expanded.hits[0]!.source_ref })).toMatchObject({ body: '步骤细节' })
-    expect(await search!.execute({ scope_ref: 'ALL', keywords: ['a.+'] })).toEqual({ hits: [] })
-    expect(await search!.execute({ scope_ref: 'ALL', keywords: ['a.*'] })).toMatchObject({ hits: [{ excerpt: '业务范围 a.*' }] })
+    expect(await read!.execute({ source_ref: expanded.hits[0]!.source_ref }, exec)).toMatchObject({ body: '步骤细节' })
+    expect(await search!.execute({ scope_ref: 'ALL', keywords: ['a.+'] }, exec)).toEqual({ hits: [] })
+    expect(await search!.execute({ scope_ref: 'ALL', keywords: ['a.*'] }, exec)).toMatchObject({ hits: [{ excerpt: '业务范围 a.*' }] })
     for (const raw of [{ source_ref: 'F999' }, { source_ref: '../../document.md' }, { source_ref: catalog.source_ref, file_path: '/tmp/other' }, { source_ref: catalog.source_ref, file_id: 'forged' }]) {
-      await expect(read!.execute(raw)).rejects.toBeDefined()
+      await expect(read!.execute(raw, exec)).rejects.toBeDefined()
     }
-    await expect(search!.execute({ scope_ref: catalog.scope_ref, keywords: ['业务'], path: 'other' })).rejects.toBeDefined()
-    await expect(search!.execute({ scope_ref: 'unknown', keywords: ['业务'] })).rejects.toBeDefined()
+    await expect(search!.execute({ scope_ref: catalog.scope_ref, keywords: ['业务'], path: 'other' }, exec)).rejects.toBeDefined()
+    await expect(search!.execute({ scope_ref: 'unknown', keywords: ['业务'] }, exec)).rejects.toBeDefined()
   })
 
   it('程序分页不截丢正文，材料读取只返回真实分块，搜索后续引用无需模型计算位置', async () => {
@@ -81,11 +87,12 @@ describe('S4 真实资料位置与受控引用', () => {
     await workspace.import([{ name: '长资料.md', role: 'reference', bytes: new TextEncoder().encode(body) }])
     const locations = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
     const [read, search] = createMappingSourceTools(locations, () => [])
+    const exec = toolExec()
     let ref: string | undefined = mappingSourceCatalog(locations)[0]!.source_ref
     let text = ''
     let firstMaterial = ''
     while (ref !== undefined) {
-      const page = await read!.execute({ source_ref: ref }) as {
+      const page = await read!.execute({ source_ref: ref }, exec) as {
         body: string
         next_ref?: string
         materials: Array<{ material_ref: string }>
@@ -95,11 +102,11 @@ describe('S4 真实资料位置与受控引用', () => {
       ref = page.next_ref
     }
     expect(text).toBe(locations[0]!.source.lines.join('\n'))
-    expect(await read!.execute({ source_ref: firstMaterial })).toMatchObject({ body: locations[0]!.chunks[0]!.body })
-    let result = await search!.execute({ scope_ref: 'ALL', keywords: ['匹配'] }) as { hits: unknown[]; next_ref?: string }
+    expect(await read!.execute({ source_ref: firstMaterial }, exec)).toMatchObject({ body: locations[0]!.chunks[0]!.body })
+    let result = await search!.execute({ scope_ref: 'ALL', keywords: ['匹配'] }, exec) as { hits: unknown[]; next_ref?: string }
     const hits = [...result.hits]
     while (result.next_ref !== undefined) {
-      result = await read!.execute({ source_ref: result.next_ref }) as typeof result
+      result = await read!.execute({ source_ref: result.next_ref }, exec) as typeof result
       hits.push(...result.hits)
     }
     expect(hits).toHaveLength(43)
