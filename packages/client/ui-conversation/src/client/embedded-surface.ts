@@ -17,12 +17,22 @@ export class EmbeddedSurfaceRegistry {
   private readonly hosts = new Map<SessionId, Map<EmbeddedSurfaceKind, HTMLElement>>()
   private readonly listeners = new Map<SessionId, Set<() => void>>()
 
-  /** Read a registered portal destination. */
+  /**
+   * Read a registered portal destination.
+   * @param sessionId Session that owns the feature view.
+   * @param kind Resident conversation surface being projected.
+   * @returns Current portal destination, or null while its view is absent.
+   */
   host(sessionId: SessionId, kind: EmbeddedSurfaceKind): HTMLElement | null {
     return this.hosts.get(sessionId)?.get(kind) ?? null
   }
 
-  /** Subscribe to portal-destination changes for one Session. */
+  /**
+   * Subscribe to portal-destination changes for one Session.
+   * @param sessionId Session whose destination changes are observed.
+   * @param listener Callback invoked after a destination changes.
+   * @returns Disposer that removes the subscription.
+   */
   subscribe(sessionId: SessionId, listener: () => void): () => void {
     const listeners = this.listeners.get(sessionId) ?? new Set<() => void>()
     listeners.add(listener)
@@ -33,7 +43,12 @@ export class EmbeddedSurfaceRegistry {
     }
   }
 
-  /** Register or clear one portal destination. */
+  /**
+   * Register or clear one portal destination.
+   * @param sessionId Session that owns the feature view.
+   * @param kind Resident conversation surface being projected.
+   * @param element Portal host, or null to clear the current host.
+   */
   setHost(sessionId: SessionId, kind: EmbeddedSurfaceKind, element: HTMLElement | null): void {
     const current = this.hosts.get(sessionId)
     if (element === null) {

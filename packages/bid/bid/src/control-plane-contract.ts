@@ -219,7 +219,11 @@ export const BID_DOCUMENT_ROLES = [
 /** Business purpose assigned to one imported project material. */
 export type BidDocumentRole = typeof BID_DOCUMENT_ROLES[number]
 
-/** Whether an untrusted value names a supported Bid document purpose. */
+/**
+ * Whether an untrusted value names a supported Bid document purpose.
+ * @param value Untrusted document-purpose value.
+ * @returns Whether the value is a supported document role.
+ */
 export function isBidDocumentRole(value: unknown): value is BidDocumentRole {
   return typeof value === 'string' && (BID_DOCUMENT_ROLES as readonly string[]).includes(value)
 }
@@ -380,7 +384,11 @@ const reviewWorkbenchSchema = z.strictObject({
   }),
 })
 
-/** Validate the untrusted RPC body before the browser renders workbench state. */
+/**
+ * Validate the untrusted RPC body before the browser renders workbench state.
+ * @param value Untrusted workbench response body.
+ * @returns Validated review-workbench state.
+ */
 export function parseBidReviewWorkbenchView(value: unknown): BidReviewWorkbenchView {
   return reviewWorkbenchSchema.parse(value) as BidReviewWorkbenchView
 }

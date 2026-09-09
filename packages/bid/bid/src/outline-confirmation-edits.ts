@@ -18,7 +18,11 @@ export const outlineEditOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('move_section'), section_id: text, parent_id: z.string().min(1).nullable(), order: z.number().int().positive() }).strict(),
 ])
 
-/** Parse browser-provided edit operations before they can affect an outline Artifact. */
+/**
+ * Parse browser-provided edit operations before they can affect an outline Artifact.
+ * @param value Untrusted browser operation list.
+ * @returns Validated outline edit operations.
+ */
 export function parseOutlineEditOperations(value: unknown): OutlineEditOperation[] {
   return z.array(outlineEditOperationSchema).parse(value) as OutlineEditOperation[]
 }

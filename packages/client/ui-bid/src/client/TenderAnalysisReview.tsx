@@ -86,6 +86,7 @@ interface ReviewItem {
   score?: number | null
   rawText?: string
   severity?: string
+  selectedForResponse?: boolean
 }
 
 /** S2 招标解析审核全屏工作台组件（对齐目录详情专业工作台风格） */
@@ -96,11 +97,13 @@ export function TenderAnalysisReview({
   t,
   readOnly = false,
   notice,
+  onScoringSelectionChange,
 }: {
   value: TenderAnalysisConfirmationView
   pending: boolean
   readOnly?: boolean
   notice?: ReactNode
+  onScoringSelectionChange?: (scoringId: string, selected: boolean) => Promise<TenderAnalysisConfirmationView>
   onConfirm: (operations: readonly TenderAnalysisEditOperation[]) => void
   t: TranslateBid
 }) {
@@ -109,9 +112,11 @@ export function TenderAnalysisReview({
   const [activeCategory, setActiveCategory] = useState<SectionCategory>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [onlyMandatory, setOnlyMandatory] = useState(false)
+  const [selectionPending, setSelectionPending] = useState<string | null>(null)
 
   const mandatoryCount = draft.requirements.requirements.filter(r => r.mandatory).length
   const totalScore = draft.scoring.scoring_items.reduce((sum, item) => sum + (item.score ?? 0), 0)
+  const selectedScoringIds = new Set(draft.selected_scoring_ids)
   const modifiedOperations = buildOperations(value, draft)
   const docTitle = draft.project.tender_name || draft.project.project_name || t('analysis.title')
 
@@ -167,6 +172,7 @@ export function TenderAnalysisReview({
         mandatory: sc.must_answer,
         score: sc.score,
         rawText: sc.raw_text,
+        selectedForResponse: selectedScoringIds.has(sc.id),
       })
     }
 
@@ -260,6 +266,14 @@ export function TenderAnalysisReview({
     }))
   }
 
+  const updateScoringSelection = (id: string, selected: boolean) => {
+    if (onScoringSelectionChange === undefined || selectionPending !== null) return
+    setSelectionPending(id)
+    void onScoringSelectionChange(id, selected).then((next) => {
+      setDraft(current => ({ ...current, selected_scoring_ids: [...next.selected_scoring_ids] }))
+    }).catch(() => {}).finally(() => { setSelectionPending(null) })
+  }
+
   const updateCompliance = (id: string, partial: Partial<TenderAnalysisConfirmationView['compliance']['compliance_items'][number]>) => {
     setDraft(current => ({
       ...current,
@@ -302,7 +316,7 @@ export function TenderAnalysisReview({
               <span className={css.statLabel}>评分项标准</span>
               <span className={css.statValue}>
                 {draft.scoring.scoring_items.length}
-                <span className={css.statSub}>项（总分 {totalScore > 0 ? `${totalScore}分` : '待定'}）</span>
+                <span className={css.statSub}>项（{draft.selected_scoring_ids.length} 项纳入响应，总分 {totalScore > 0 ? `${totalScore}分` : '待定'}）</span>
               </span>
             </div>
             <div className={css.statCard}>
@@ -319,7 +333,7 @@ export function TenderAnalysisReview({
               <Button
                 size="sm"
                 variant="primary"
-                disabled={pending || readOnly}
+                disabled={pending || selectionPending !== null || readOnly}
                 onClick={() => { onConfirm(modifiedOperations) }}
               >
                 {pending ? t('analysis.confirming') : t('analysis.confirm')}
@@ -416,6 +430,9 @@ export function TenderAnalysisReview({
                         {item.mandatory && <span className={css.badgeMandatory}>强制</span>}
                         {item.score !== null && item.score !== undefined && (
                           <span className={css.badgeScore}>{item.score}分</span>
+                        )}
+                        {item.category === 'scoring' && item.selectedForResponse === false && (
+                          <span className={css.badgeNormal}>未纳入后续响应</span>
                         )}
                         {item.severity && item.severity !== 'mandatory' && (
                           <span className={css.badgeNormal}>{item.severity}</span>
@@ -589,6 +606,18 @@ export function TenderAnalysisReview({
                         />
                       </div>
                       <div className={css.detailRow}>
+                        <div className={css.inlineField}>
+                          <label className={css.detailLabel}>是否纳入后续响应：</label>
+                          <label className={css.toggleOption}>
+                            <input
+                              type="checkbox"
+                              disabled={pending || selectionPending !== null || readOnly || onScoringSelectionChange === undefined}
+                              checked={selectedScoringIds.has(sc.id)}
+                              onChange={(e) => { updateScoringSelection(sc.id, e.target.checked) }}
+                            />
+                            <span>{selectedScoringIds.has(sc.id) ? '已纳入后续响应' : '未纳入后续响应'}</span>
+                          </label>
+                        </div>
                         <div className={css.inlineField}>
                           <label className={css.detailLabel}>响应要求：</label>
                           <label className={css.toggleOption}>

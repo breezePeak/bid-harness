@@ -4,6 +4,19 @@ import { EVIDENCE_MAPPING_SCHEMA_VERSION, type EvidenceMapArtifact } from './evi
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
 
+interface SectionEvidenceContext {
+  readonly heading_path: string[]
+  readonly purpose: string
+  readonly must_answer: string[]
+  readonly requirement_ids: string[]
+  readonly scoring_ids: string[]
+  readonly scoring_response_point_ids: string[]
+  readonly compliance_ids: string[]
+  readonly writing_notes: string[]
+  readonly suggested_tables: string[]
+  readonly suggested_figures: string[]
+}
+
 /**
  * 按父子关系和 sibling order 遍历有效目录，只返回可写叶子。
  * @param outline - 当前目录。
@@ -37,7 +50,7 @@ export function buildWritableSectionWorklist(outline: OutlineArtifact): OutlineS
  * @param section - 该目录中的可写章节。
  * @returns 固定字段顺序的检索上下文，包括祖先标题与全局合规要求。
  */
-export function sectionEvidenceContext(outline: OutlineArtifact, section: OutlineSection) {
+export function sectionEvidenceContext(outline: OutlineArtifact, section: OutlineSection): SectionEvidenceContext {
   const byId = new Map(outline.sections.map(item => [item.id, item]))
   const headingPath: string[] = []
   const seen = new Set<string>()

@@ -31,14 +31,14 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
     let active = true
     setDetails(null)
     setError(null)
-    if (isBid && projection !== undefined && !confirming) {
+    if ((isBid || confirming) && projection !== undefined && !confirming) {
       void getDetails().then((value) => { if (active) setDetails(value) }, (reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason))
       })
     }
     return () => { active = false }
   }, [sessionId, isBid, projection?.runtime.stage, projection?.runtime.status, confirming, getDetails])
-  if (!isBid || projection === undefined) return null
+  if (projection === undefined || (!isBid && !confirming)) return null
   if (confirming) return (
     <section className={css.confirmationContainer} aria-label={label}>
       <div ref={surface} className={css.reviewSurfaceHost} />

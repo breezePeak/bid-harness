@@ -211,6 +211,7 @@ async function validateSuccessfulRecord(
  * @param batch - records returned by this exact import attempt.
  * @param stage - orchestrator stage requesting validation.
  * @param artifacts - project-relative artifacts returned by the executor.
+ * @param expectedBatch - authoritative request entries expected in this import attempt.
  * @returns explicit issues, or authorization for the stage to complete.
  */
 export async function validateFileIntake(

@@ -43,7 +43,7 @@ export const OUTLINE_CONFIRMATION_REPAIR_ACTIONS = Object.fromEntries(
 export interface BidStagePanelInjected {
   /** 读取已发布详情并恢复各标签的可见性。 */
   getDetails: () => Promise<BidDetailsView>
-  setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean) => void
+  setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean, confirmingTender?: boolean) => void
   /** Mirror the Host composer capability into the existing session block. */
   setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
   /** Switch the current Session to the registered review-items view. */
@@ -75,6 +75,8 @@ export interface BidStagePanelInjected {
   /** Host S4 progress and tender-analysis review actions, installed when the Bid action API is composed. */
   getEvidenceMappingProgress?: () => Promise<BidEvidenceMappingProgress | null>
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
+  /** Persist one S2 scoring item inclusion decision. */
+  setTenderScoringSelection?: (scoringId: string, selected: boolean) => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
 }
 
@@ -147,9 +149,9 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: (sessionId: SessionId): BidStagePanelInjected => ({
       getDetails: () => getDetails(sessionId),
-      setDetailsAvailable: (details, confirmingOutline = false) => {
+      setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
-        conversation?.setViewAvailable('bid-tender', details?.tender != null)
+        conversation?.setViewAvailable('bid-tender', confirmingTender || details?.tender != null)
         conversation?.setViewAvailable('bid-outline', details?.outline != null)
         conversation?.setViewAvailable('bid-confirmation', confirmingOutline)
         if (details) void wordRemote(sessionId).getFormat().then((view) => { conversation?.setViewAvailable('bid-word-export', view.state.opened) }).catch(() => {
@@ -230,6 +232,18 @@ export function apply(ctx: ClientContext): void {
       },
       getTenderAnalysisForConfirmation: async () => {
         const result = await ctx.remote.bid.getTenderAnalysisForConfirmation(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
+      setTenderScoringSelection: async (scoringId, selected) => {
+        const remote = ctx.remote.bid as unknown as {
+          setTenderScoringSelection(id: SessionId, itemId: string, included: boolean): Promise<{
+            ok: boolean
+            value: TenderAnalysisConfirmationView
+            error: Parameters<typeof actionFailure>[0]
+          }>
+        }
+        const result = await remote.setTenderScoringSelection(sessionId, scoringId, selected)
         if (!result.ok) throw actionFailure(result.error)
         return result.value
       },
@@ -352,7 +366,7 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, BidReviewWorkbench)
-  for (const [kind, label] of [['tender', '招标详情'], ['outline', '目录详情'], ['confirmation', '审核项']] as const) {
+  for (const [kind, label] of [['tender', '招标书分析'], ['outline', '目录详情'], ['confirmation', '审核项']] as const) {
     ctx.slots.register({
       name: 'conversation.view',
       id: `bid-${kind}`,

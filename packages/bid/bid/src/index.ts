@@ -32,7 +32,10 @@ import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import {
   applyTenderAnalysisEdits,
+  createConfirmedTenderScoring,
+  parseTenderScoringSelection,
   parseTenderAnalysisEditOperations,
+  setTenderScoringSelection,
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
@@ -341,6 +344,32 @@ function workspaceConfig(config: Config): BidConfig {
   }
 }
 
+async function readTenderAnalysisConfirmationView(workspace: BidWorkspace): Promise<TenderAnalysisConfirmationView> {
+  const paths = {
+    project: within(workspace.projectRoot, 'analysis/project.json'),
+    requirements: within(workspace.projectRoot, 'analysis/requirements.json'),
+    scoring: within(workspace.projectRoot, 'analysis/scoring-origin.json'),
+    selection: within(workspace.projectRoot, 'analysis/tender-analysis-selection.json'),
+    compliance: within(workspace.projectRoot, 'analysis/compliance.json'),
+  }
+  await Promise.all(Object.values(paths).map(path => assertNoLinkedPath(workspace.root, path)))
+  const [project, requirements, scoringRaw, selectionRaw, compliance] = await Promise.all([
+    readFile(paths.project, 'utf8'),
+    readFile(paths.requirements, 'utf8'),
+    readFile(paths.scoring, 'utf8'),
+    readFile(paths.selection, 'utf8'),
+    readFile(paths.compliance, 'utf8'),
+  ])
+  const scoring = parseTenderScoringArtifact(JSON.parse(scoringRaw))
+  return {
+    project: parseTenderProjectArtifact(JSON.parse(project)),
+    requirements: parseTenderRequirementsArtifact(JSON.parse(requirements)),
+    scoring,
+    selected_scoring_ids: parseTenderScoringSelection(JSON.parse(selectionRaw), scoring).selected_scoring_ids,
+    compliance: parseTenderComplianceArtifact(JSON.parse(compliance)),
+  }
+}
+
 /** Build one immutable success result. */
 function intakeSuccess(value: BidRuntimeState, files?: readonly BidFileIntakeFileResult[]): BidFileIntakeResult {
   return Object.freeze({
@@ -627,8 +656,13 @@ function projectKey(session: Pick<Session, 'header'>): BidProjectKey {
  * The durable log remains intact for replay and audit.
  * @param session Live Bid session whose model-visible history is reset.
  * @param stage First stage whose context is discarded.
+ * @param notice Model-visible replacement for the discarded context.
  */
-function clearStageContext(session: Session, stage: BidStage): void {
+function clearStageContext(
+  session: Session,
+  stage: BidStage,
+  notice = `阶段 ${stage} 已重置。此前该阶段及后续阶段的上下文已清除；仅依据当前工作区文件和后续阶段指令重新执行。`,
+): void {
   const stageIndex = BID_STAGES.indexOf(stage)
   const predecessor = stageIndex === 0 ? undefined : BID_STAGES[stageIndex - 1]
   const completedPredecessor = predecessor === undefined ? undefined : session.events.findLast(event => (
@@ -642,7 +676,7 @@ function clearStageContext(session: Session, stage: BidStage): void {
   const last = shadowed.at(-1)
   if (first === undefined || last === undefined) return
   session.append('user/message', createUserMessage({
-    content: [{ type: 'text', text: `阶段 ${stage} 已重置。此前该阶段及后续阶段的上下文已清除；仅依据当前工作区文件和后续阶段指令重新执行。` }],
+    content: [{ type: 'text', text: notice }],
     source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: `已清除 ${stage} 及后续阶段上下文。` },
   }), {
     surfaceOp: { op: 'replace', start: first, end: last },
@@ -650,6 +684,7 @@ function clearStageContext(session: Session, stage: BidStage): void {
   })
 }
 
+/** Host-owned Bid RPC runtime that serializes project mutations and publishes durable stage state. */
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
   static Config = Config
@@ -1460,7 +1495,11 @@ export class BidHostRuntime extends TypertRemoteService {
     return { data: (await readFile(path)).toString('base64'), name: basename(path) }
   }
 
-  /** Generate a fresh Word file from completed S5 artifacts without leaving the review stage. */
+  /**
+   * Generate a fresh Word file from completed S5 artifacts without leaving the review stage.
+   * @param session Bid Session whose completed chapter artifacts are exported.
+   * @returns Export result containing either the generated file metadata or a stable rejection.
+   */
   @Remote('exportDocx')
   async exportDocx(session: Session): Promise<BidDocxExportResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
@@ -1564,7 +1603,11 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  /** Read the live S5 writing and per-chapter review state without disclosing workspace paths. */
+  /**
+   * Read the live S5 writing and per-chapter review state without disclosing workspace paths.
+   * @param session Bid Session whose writing workbench is requested.
+   * @returns Browser-safe chapter workbench rows and aggregate progress.
+   */
   @Remote('getReviewWorkbench')
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
     const workspace = this.requireReviewWorkspace(session)
@@ -1658,7 +1701,12 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  /** 读取 S5 叶节正文及审查结果，或父节点在确认目录中保存的概述。 */
+  /**
+   * 读取 S5 叶节正文及审查结果，或父节点在确认目录中保存的概述。
+   * @param session 持有章节产物的 Bid 会话。
+   * @param sectionId 确认目录中的章节 ID。
+   * @returns 浏览器可展示的章节正文、证据和审查状态。
+   */
   @Remote('getReviewChapter')
   async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView> {
     const workspace = this.requireReviewWorkspace(session)
@@ -1735,6 +1783,7 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 组装 Bid 详情页可读取的已发布阶段产物。
    * @param session 持有已恢复项目状态的 Bid 会话。
    * @returns 已发布的招标信息、目录和正文入口；S4 等待确认时使用已生成目录，执行中保留 S3 确认目录。
    */
@@ -1771,30 +1820,55 @@ export class BidHostRuntime extends TypertRemoteService {
     return { tender, outline, body, outlinePresentation: outline === null ? null : { source, baseline, evidence, errors } }
   }
 
-  /** 读取 S2 待确认或已确认结论；编辑准入仍由 confirmTenderAnalysis 校验。 */
+  /**
+   * 读取 S2 待确认或已确认结论；编辑准入仍由 confirmTenderAnalysis 校验。
+   * @param session 持有招标分析产物的 Bid 会话。
+   * @returns 分析产物及评分响应项选择状态。
+   */
   @Remote('getTenderAnalysisForConfirmation')
   async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
     const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     if (runtime.stage === 'file_intake' || (runtime.stage === 'tender_analysis' && runtime.status !== 'waiting_user' && runtime.status !== 'completed')) throw new Error('Tender-analysis details are not available in the current Bid stage state.')
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
-    const projectPath = within(workspace.projectRoot, 'analysis/project.json')
-    const requirementsPath = within(workspace.projectRoot, 'analysis/requirements.json')
-    const scoringPath = within(workspace.projectRoot, 'analysis/scoring.json')
-    const compliancePath = within(workspace.projectRoot, 'analysis/compliance.json')
-    await Promise.all([projectPath, requirementsPath, scoringPath, compliancePath].map(path => assertNoLinkedPath(workspace.root, path)))
-    const [project, requirements, scoring, compliance] = await Promise.all([
-      readFile(projectPath, 'utf8'), readFile(requirementsPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(compliancePath, 'utf8'),
-    ])
-    return {
-      project: parseTenderProjectArtifact(JSON.parse(project)),
-      requirements: parseTenderRequirementsArtifact(JSON.parse(requirements)),
-      scoring: parseTenderScoringArtifact(JSON.parse(scoring)),
-      compliance: parseTenderComplianceArtifact(JSON.parse(compliance)),
-    }
+    return readTenderAnalysisConfirmationView(workspace)
   }
 
-  /** Apply controlled S2 edits, revalidate canonical artifacts, and continue only after explicit confirmation. */
+  /**
+   * Persist one S2 scoring-response decision before final confirmation.
+   * @param session Bid Session waiting at the S2 confirmation gate.
+   * @param scoringId Stable original scoring item id.
+   * @param selected Whether the item enters the downstream response workflow.
+   * @returns Updated S2 confirmation view.
+   */
+  @Remote('setTenderScoringSelection')
+  async setTenderScoringSelection(
+    session: Session,
+    scoringId: string,
+    selected: boolean,
+  ): Promise<TenderAnalysisConfirmationView> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    if (this.inFlight.has(projectKey(session))) throw new Error('BID_OPERATION_IN_PROGRESS')
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('confirm_tender_analysis')) throw new Error('BID_CONFIRM_NOT_ALLOWED')
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+      const current = await readTenderAnalysisConfirmationView(workspace)
+      const next = setTenderScoringSelection(current, scoringId, selected)
+      const selectionPath = within(workspace.projectRoot, 'analysis/tender-analysis-selection.json')
+      await assertNoLinkedPath(workspace.root, selectionPath)
+      await writeFileAtomic(selectionPath, `${JSON.stringify({ schema_version: 1, selected_scoring_ids: next.selected_scoring_ids }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      return next
+    } finally { await this.finishOperation(session, operation) }
+  }
+
+  /**
+   * Apply controlled S2 edits, revalidate canonical artifacts, and continue only after explicit confirmation.
+   * @param session Bid Session waiting at the S2 confirmation gate.
+   * @param operations Validated edits to canonical tender-analysis artifacts.
+   * @returns Confirmation result and resulting runtime state, or a stable rejection.
+   */
   @Remote('confirmTenderAnalysis')
   async confirmTenderAnalysis(
     session: Session,
@@ -1814,18 +1888,16 @@ export class BidHostRuntime extends TypertRemoteService {
       const scoringPath = within(workspace.projectRoot, 'analysis/scoring.json')
       const compliancePath = within(workspace.projectRoot, 'analysis/compliance.json')
       await Promise.all([projectPath, requirementsPath, scoringPath, compliancePath].map(path => assertNoLinkedPath(workspace.root, path)))
-      const [projectRaw, requirementsRaw, scoringRaw, complianceRaw] = await Promise.all([
-        readFile(projectPath, 'utf8'), readFile(requirementsPath, 'utf8'), readFile(scoringPath, 'utf8'), readFile(compliancePath, 'utf8'),
+      const [source, projectRaw, requirementsRaw, complianceRaw] = await Promise.all([
+        readTenderAnalysisConfirmationView(workspace),
+        readFile(projectPath, 'utf8'),
+        readFile(requirementsPath, 'utf8'),
+        readFile(compliancePath, 'utf8'),
       ])
       let candidate: TenderAnalysisConfirmationView
       try {
         candidate = applyTenderAnalysisEdits(
-          {
-            project: parseTenderProjectArtifact(JSON.parse(projectRaw)),
-            requirements: parseTenderRequirementsArtifact(JSON.parse(requirementsRaw)),
-            scoring: parseTenderScoringArtifact(JSON.parse(scoringRaw)),
-            compliance: parseTenderComplianceArtifact(JSON.parse(complianceRaw)),
-          },
+          source,
           parseTenderAnalysisEditOperations(operations),
         )
       } catch (error: unknown) {
@@ -1834,14 +1906,26 @@ export class BidHostRuntime extends TypertRemoteService {
       const restore = async (): Promise<void> => {
         await writeFileAtomic(projectPath, projectRaw, { mode: 0o600, dirMode: 0o700 })
         await writeFileAtomic(requirementsPath, requirementsRaw, { mode: 0o600, dirMode: 0o700 })
-        await writeFileAtomic(scoringPath, scoringRaw, { mode: 0o600, dirMode: 0o700 })
+        await rm(scoringPath, { force: true })
         await writeFileAtomic(compliancePath, complianceRaw, { mode: 0o600, dirMode: 0o700 })
       }
       try {
         await writeFileAtomic(projectPath, `${JSON.stringify(candidate.project, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         await writeFileAtomic(requirementsPath, `${JSON.stringify(candidate.requirements, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-        await writeFileAtomic(scoringPath, `${JSON.stringify(candidate.scoring, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await writeFileAtomic(scoringPath, `${JSON.stringify(createConfirmedTenderScoring(candidate), null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
         await writeFileAtomic(compliancePath, `${JSON.stringify(candidate.compliance, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await Promise.all([
+          'analysis/scoring-response-points.candidate.json',
+          'analysis/scoring-response-points.json',
+          'outline/generation-inputs.json',
+          'outline/outline.json',
+          'outline/quality-report.json',
+          'outline/initial-confirmed-outline.json',
+        ].map(async (relative) => {
+          const path = within(workspace.projectRoot, relative)
+          await assertNoLinkedPath(workspace.root, path)
+          await rm(path, { force: true })
+        }))
       } catch (error: unknown) {
         await restore()
         throw error
@@ -1849,9 +1933,19 @@ export class BidHostRuntime extends TypertRemoteService {
       const artifacts: StageArtifact[] = [
         { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
         { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
-        { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
+        { stage: 'tender_analysis', type: 'tender_scoring_origin', path: 'analysis/scoring-origin.json' },
         { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
       ]
+      const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
+      if (!validation.ok) {
+        await restore()
+        return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: validation.issues } }
+      }
+      clearStageContext(
+        session,
+        'tender_analysis',
+        `招标分析已确认。后续目录生成只能读取 analysis/scoring.json 中的正式评分：${JSON.stringify(createConfirmedTenderScoring(candidate).scoring_items.map(item => item.id))}。此前 S2 的原始评分、选择和对话均不得作为 S3 输入。`,
+      )
       const confirmation = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).confirmValidatedStage('tender_analysis', artifacts)
       if (!confirmation.ok) {
         await restore()
@@ -1864,13 +1958,21 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation) }
   }
 
-  /** Read the S4 draft only while its user-confirmation stage owns the session. */
+  /**
+   * Read the S4 draft only while its user-confirmation stage owns the session.
+   * @param session Bid Session waiting for outline confirmation.
+   * @returns Current editable outline artifact.
+   */
   @Remote('getOutlineForConfirmation')
   async getOutlineForConfirmation(session: Session): Promise<OutlineArtifact> {
     return (await this.getOutlineDraft(session)).outline
   }
 
-  /** 读取或初始化 S3/S4 等待用户确认的持久化 Draft。 */
+  /**
+   * 读取或初始化 S3/S4 等待用户确认的持久化 Draft。
+   * @param session 等待目录确认的 Bid 会话。
+   * @returns 当前 Draft 及用于 CAS 编辑的身份。
+   */
   @Remote('getOutlineDraft')
   async getOutlineDraft(session: Session): Promise<OutlineDraftView> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
@@ -1885,6 +1987,7 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 读取目录差异审阅所需的上游事实和基线。
    * @param session 等待目录确认的 Bid 会话。
    * @returns S3 确认基线及已有章节关联资料；不运行生成或映射。
    */
@@ -1908,7 +2011,12 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation, false) }
   }
 
-  /** 使用 CAS 保存目录编辑；仅校验结构和覆盖，S4 语义复核留到最终确认。 */
+  /**
+   * 使用 CAS 保存目录编辑；仅校验结构和覆盖，S4 语义复核留到最终确认。
+   * @param session 等待目录确认的 Bid 会话。
+   * @param request 携带 Draft 身份的结构编辑操作。
+   * @returns 更新后的 Draft，或冲突及校验问题。
+   */
   @Remote('applyOutlineDraftOperations')
   async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
@@ -1921,7 +2029,12 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation) }
   }
 
-  /** 确认 Draft 前仅复核语义变化的 S4 可写章节；校验失败恢复已发布产物并保留 Draft。 */
+  /**
+   * 确认 Draft 前仅复核语义变化的 S4 可写章节；校验失败恢复已发布产物并保留 Draft。
+   * @param session 等待目录确认的 Bid 会话。
+   * @param request 用于拒绝过期提交的 Draft 身份。
+   * @returns 确认后的运行状态，或稳定拒绝。
+   */
   @Remote('confirmOutline')
   async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
@@ -2065,7 +2178,12 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally { await this.finishOperation(session, operation) }
   }
 
-  /** Regenerate a temporary S4-quality candidate from the current persisted S5 draft. */
+  /**
+   * Regenerate a temporary S4-quality candidate from the current persisted S5 draft.
+   * @param session Bid Session waiting for outline confirmation.
+   * @param request Current draft identity and the user's regeneration feedback.
+   * @returns Updated draft candidate and change set, or a stable rejection.
+   */
   @Remote('regenerateOutline')
   async regenerateOutline(
     session: Session,

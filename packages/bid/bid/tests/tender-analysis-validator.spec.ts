@@ -17,7 +17,7 @@ import {
 const artifacts: StageArtifact[] = [
   { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
   { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
-  { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
+  { stage: 'tender_analysis', type: 'tender_scoring_origin', path: 'analysis/scoring-origin.json' },
   { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
 ]
 
@@ -79,7 +79,7 @@ function documents(tenderId: string, source: TenderSourceRef): Record<string, un
         mandatory: true, source_refs: [source],
       }],
     },
-    'scoring.json': {
+    'scoring-origin.json': {
       schema_version: 1,
       scoring_items: [{
         id: 'SCORE-1', parent: null, group: '技术', title: '技术方案', raw_text: '技术方案得 10 分',
@@ -115,7 +115,7 @@ describe('tender-analysis Artifact schemas', () => {
     const docs = documents('file', source)
     expect(parseTenderProjectArtifact(docs['project.json'])).toMatchObject({ schema_version: 1 })
     expect(parseTenderRequirementsArtifact(docs['requirements.json'])).toMatchObject({ schema_version: 1 })
-    expect(parseTenderScoringArtifact(docs['scoring.json'])).toMatchObject({ schema_version: 1 })
+    expect(parseTenderScoringArtifact(docs['scoring-origin.json'])).toMatchObject({ schema_version: 1 })
     expect(parseTenderComplianceArtifact(docs['compliance.json'])).toMatchObject({ schema_version: 1 })
   })
 })
@@ -154,7 +154,7 @@ describe('tender-analysis validator', () => {
     const compliance = docs['compliance.json'] as { compliance_items: unknown[] }
     requirements.requirements = []
     compliance.compliance_items = []
-    const scoring = docs['scoring.json'] as { scoring_items: Array<Record<string, unknown>> }
+    const scoring = docs['scoring-origin.json'] as { scoring_items: Array<Record<string, unknown>> }
     scoring.scoring_items = [
       { ...scoring.scoring_items[0], id: 'TECH-1', title: '系统总体技术方案', raw_text: citedText, criterion: '总体方案完整合理', score: 10 },
       { ...scoring.scoring_items[0], id: 'TECH-2', title: '项目实施方案', raw_text: citedText, criterion: '实施方案可行', score: 8 },
@@ -179,7 +179,7 @@ describe('tender-analysis validator', () => {
     ].join('\n\n'))
     const docs = documents(value.tenderId, value.source)
     ;(docs['requirements.json'] as { requirements: unknown[] }).requirements = []
-    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['scoring-origin.json'] as { scoring_items: unknown[] }).scoring_items = []
     ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
     await publish(value.workspace, docs)
 
@@ -203,7 +203,7 @@ describe('tender-analysis validator', () => {
     requirements.requirements[0]!.raw_text = sourceText
     requirements.requirements[0]!.normalized_requirement = '技术方案应完整响应评分标准'
     compliance.compliance_items[0]!.raw_text = sourceText
-    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['scoring-origin.json'] as { scoring_items: unknown[] }).scoring_items = []
     await publish(value.workspace, docs)
 
     expect(codes(await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)))
@@ -215,7 +215,7 @@ describe('tender-analysis validator', () => {
     const performanceRequirement = '性能要求：在峰值并发时保持稳定响应。'
     const value = await fixture(`# 技术要求\n\n${functionRequirement}\n\n${performanceRequirement}`)
     const docs = documents(value.tenderId, value.source)
-    const scoring = docs['scoring.json'] as { scoring_items: Array<{ raw_text: string }> }
+    const scoring = docs['scoring-origin.json'] as { scoring_items: Array<{ raw_text: string }> }
     const compliance = docs['compliance.json'] as { compliance_items: Array<{ raw_text: string }> }
     scoring.scoring_items[0]!.raw_text = functionRequirement
     compliance.compliance_items[0]!.raw_text = performanceRequirement
@@ -235,7 +235,7 @@ describe('tender-analysis validator', () => {
     }
     requirements.requirements[0]!.raw_text = sourceText
     requirements.requirements[0]!.normalized_requirement = '系统支持日志审计和权限控制'
-    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['scoring-origin.json'] as { scoring_items: unknown[] }).scoring_items = []
     ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
     await publish(value.workspace, docs)
 
@@ -257,7 +257,7 @@ describe('tender-analysis validator', () => {
     }
     requirements.requirements[0]!.raw_text = technicalRequirement
     requirements.requirements[0]!.normalized_requirement = '系统支持日志审计和权限控制'
-    ;(docs['scoring.json'] as { scoring_items: unknown[] }).scoring_items = []
+    ;(docs['scoring-origin.json'] as { scoring_items: unknown[] }).scoring_items = []
     ;(docs['compliance.json'] as { compliance_items: unknown[] }).compliance_items = []
     await publish(value.workspace, docs)
 
@@ -268,7 +268,7 @@ describe('tender-analysis validator', () => {
     const value = await fixture()
     const docs = documents(value.tenderId, value.source)
     const requirements = docs['requirements.json'] as { requirements: Array<{ raw_text: string }> }
-    const scoring = docs['scoring.json'] as { scoring_items: Array<{ raw_text: string }> }
+    const scoring = docs['scoring-origin.json'] as { scoring_items: Array<{ raw_text: string }> }
     const compliance = docs['compliance.json'] as { compliance_items: Array<{ raw_text: string }> }
     requirements.requirements[0]!.raw_text = '必须按期完成交付'
     scoring.scoring_items[0]!.raw_text = '技术方案：10 分'
@@ -302,13 +302,13 @@ describe('tender-analysis validator', () => {
     const value = await fixture()
     const docs = documents(value.tenderId, value.source)
     await publish(value.workspace, docs)
-    await writeFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), '{')
+    await writeFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), '{')
     await rm(join(value.workspace.projectRoot, 'analysis/compliance.json'))
     const result = await validateTenderAnalysis(value.workspace, 'tender_analysis', artifacts)
     expect(result).toMatchObject({ ok: false, issues: expect.arrayContaining([
       {
         code: 'TENDER_ANALYSIS_JSON_INVALID',
-        artifact: 'analysis/scoring.json',
+        artifact: 'analysis/scoring-origin.json',
         message: expect.stringContaining('JSON 语法无效'),
       },
       {
@@ -323,9 +323,9 @@ describe('tender-analysis validator', () => {
     ['project.json 缺少字段', 'project.json', (doc: Record<string, unknown>) => { delete doc.project_name }, 'project_name', '缺少必需字段。'],
     ['project.json 多出字段', 'project.json', (doc: Record<string, unknown>) => { doc.unknown_field = true }, 'unknown_field', '存在 Schema 未定义的字段。'],
     ['project.json 单值使用空字符串', 'project.json', (doc: Record<string, unknown>) => { doc.owner = '' }, 'owner', '未知值应使用 null，不能使用空字符串。'],
-    ['scoring.json 禁止 response_points', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points = [] }, 'scoring_items[0].response_points', '存在 Schema 未定义的字段。'],
-    ['scoring.json score 为字符串', 'scoring.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.score = '10' }, 'scoring_items[0].score', '必须为数字或 null。'],
-    ['scoring.json 缺少 parent', 'scoring.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.parent }, 'scoring_items[0].parent', '缺少必需字段。'],
+    ['scoring-origin.json 禁止 response_points', 'scoring-origin.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.response_points = [] }, 'scoring_items[0].response_points', '存在 Schema 未定义的字段。'],
+    ['scoring-origin.json score 为字符串', 'scoring-origin.json', (doc: Record<string, unknown>) => { (doc.scoring_items as Array<Record<string, unknown>>)[0]!.score = '10' }, 'scoring_items[0].score', '必须为数字或 null。'],
+    ['scoring-origin.json 缺少 parent', 'scoring-origin.json', (doc: Record<string, unknown>) => { delete (doc.scoring_items as Array<Record<string, unknown>>)[0]!.parent }, 'scoring_items[0].parent', '缺少必需字段。'],
     ['compliance.json severity 非法', 'compliance.json', (doc: Record<string, unknown>) => { (doc.compliance_items as Array<Record<string, unknown>>)[0]!.severity = 'critical' }, 'compliance_items[0].severity', '只能使用 fatal、mandatory 或 warning。'],
     ['source_refs 结构非法', 'requirements.json', (doc: Record<string, unknown>) => { delete ((doc.requirements as Array<Record<string, unknown>>)[0]!.source_refs as Array<Record<string, unknown>>)[0]!.line_end }, 'requirements[0].source_refs[0].line_end', '缺少必需字段。'],
   ] as const)('returns a browser-safe schema issue for %s', async (_name, artifactName, mutate, path, message) => {

@@ -106,6 +106,7 @@ export type TenderComplianceArtifact = z.infer<typeof complianceSchema>
 export const TENDER_ANALYSIS_ARTIFACTS = {
   'analysis/project.json': projectSchema,
   'analysis/requirements.json': requirementsSchema,
+  'analysis/scoring-origin.json': scoringSchema,
   'analysis/scoring.json': scoringSchema,
   'analysis/compliance.json': complianceSchema,
 } as const

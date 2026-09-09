@@ -56,7 +56,9 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
   const artifacts: Record<string, unknown> = {
     'analysis/project.json': { schema_version: 1, project_name: '项目 A', tender_name: null, purchaser: null, owner: null, project_background: ['技术建设'], project_objectives: ['交付技术方案'], project_scope: ['技术方案'], technical_scope: ['方案设计'], delivery_scope: ['按期交付'], implementation_constraints: ['按期交付'], key_technical_points: ['技术方案'], source_refs: [source], analyzed_tender_files: [tender.id] },
     'analysis/requirements.json': { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '必须按期交付', normalized_requirement: '按期交付', mandatory: true, source_refs: [source] }] },
+    'analysis/scoring-origin.json': scoring,
     'analysis/scoring.json': scoring,
+    'analysis/tender-analysis-selection.json': { schema_version: 1, selected_scoring_ids: ['SCORE-1'] },
     'analysis/scoring-response-points.json': createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明技术方案' }] }),
     'analysis/compliance.json': { schema_version: 1, compliance_items: [] },
     'analysis/evidence-map.json': { schema_version: 10, section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'] }] },

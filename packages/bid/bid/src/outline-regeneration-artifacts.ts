@@ -20,7 +20,11 @@ const changeSetSchema = z.object({
 /** Agent-declared changes from one persisted S5 draft to a regeneration candidate. */
 export type OutlineRegenerationChangeSet = z.infer<typeof changeSetSchema>
 
-/** @param value Decoded change-set JSON. @returns A strict regeneration change declaration. */
+/**
+ * Parse the Agent declaration for one outline regeneration.
+ * @param value Decoded change-set JSON.
+ * @returns A strict regeneration change declaration.
+ */
 export function parseOutlineRegenerationChangeSet(value: unknown): OutlineRegenerationChangeSet {
   return changeSetSchema.parse(value)
 }
@@ -30,7 +34,12 @@ function withoutPosition(section: OutlineSection): Omit<OutlineSection, 'parent_
   return rest
 }
 
-/** @param base Persisted draft Outline. @param candidate Agent candidate Outline. @returns Exact section-level changes. */
+/**
+ * Compute the deterministic section-level difference between a draft and candidate.
+ * @param base Persisted draft Outline.
+ * @param candidate Agent candidate Outline.
+ * @returns Exact section-level changes.
+ */
 export function outlineRegenerationChanges(base: OutlineArtifact, candidate: OutlineArtifact): Array<{ section_id: string; type: 'update' | 'add' | 'delete' | 'move' }> {
   const before = new Map(base.sections.map(section => [section.id, section]))
   const after = new Map(candidate.sections.map(section => [section.id, section]))
@@ -46,6 +55,7 @@ export function outlineRegenerationChanges(base: OutlineArtifact, candidate: Out
 }
 
 /**
+ * Check an Agent change declaration against the deterministic outline difference and draft identity.
  * @param changeSet Agent declaration.
  * @param base Persisted draft.
  * @param candidate Agent candidate.

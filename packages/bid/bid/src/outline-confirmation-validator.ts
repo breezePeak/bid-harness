@@ -10,7 +10,15 @@ function reject(issues: StageValidationIssue[], code: OutlineConfirmationIssueCo
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
 }
 
-/** Validate one S5 draft with shared structure and coverage rules only. */
+/**
+ * Validate one S5 draft with shared structure and coverage rules only.
+ * @param outlineRaw Untrusted outline candidate.
+ * @param requirementsRaw Untrusted confirmed requirement artifact.
+ * @param scoringRaw Untrusted confirmed scoring artifact.
+ * @param complianceRaw Untrusted confirmed compliance artifact.
+ * @param catalogRaw Untrusted scoring response-point catalog.
+ * @returns Validation authorization or the collected structural and coverage issues.
+ */
 export function validateOutlineDraftForConfirmation(
   outlineRaw: unknown,
   requirementsRaw: unknown,

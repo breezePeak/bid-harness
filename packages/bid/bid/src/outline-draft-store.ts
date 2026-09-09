@@ -39,6 +39,7 @@ async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise
 }
 
 /**
+ * Read the Host-owned outline draft or initialize it from the current published outline.
  * @param workspace Bid project workspace.
  * @param persist 是否持久化初始化或源目录刷新；只读 inspect 使用 false。
  * @returns Existing or initialized Host-owned draft.
@@ -69,6 +70,7 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, 
 }
 
 /**
+ * Apply one concurrency-checked edit batch to the persisted outline draft.
  * @param workspace Bid project workspace.
  * @param request CAS identity and edit batch.
  * @returns Persisted draft or a recoverable rejection.
@@ -118,6 +120,7 @@ export async function mutateOutlineDraft(
 }
 
 /**
+ * Replace the persisted outline draft with one validated regeneration candidate.
  * @param workspace Bid project workspace.
  * @param request Expected draft identity.
  * @param candidate S4-validated candidate.

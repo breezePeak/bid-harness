@@ -145,6 +145,7 @@ export function BidStagePanel({
   applyOutlineDraftOperations,
   confirmTenderAnalysis,
   getTenderAnalysisForConfirmation,
+  setTenderScoringSelection,
   getEvidenceMappingProgress,
   t,
 }: BidStagePanelProps) {
@@ -207,10 +208,10 @@ export function BidStagePanel({
     () => projection === undefined ? undefined : composerReason(projection, t),
     [projection, t],
   )
-  const hasProjection = isBidSession && projection !== undefined
   const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
   const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
   const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
+  const hasProjection = projection !== undefined && (isBidSession || canConfirm || canConfirmAnalysis)
   const embedConversation = false
   const reviewViewAvailable = hasProjection && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
   const outlineReviewReady = canConfirm && projection?.runtime.stage === 'evidence_mapping'
@@ -233,7 +234,7 @@ export function BidStagePanel({
     if (hasProjection) {
       void getDetails().then((details) => {
         if (!active) return
-        setDetailsAvailable(details, canConfirm && !outlineReviewReady)
+        setDetailsAvailable(details, canConfirm && !outlineReviewReady, canConfirmAnalysis)
         if (reviewStateKey !== null && reviewReady.current !== reviewStateKey) {
           reviewReady.current = reviewStateKey
           selectReviewView(reviewViewId)
@@ -249,10 +250,10 @@ export function BidStagePanel({
   ])
 
   useEffect(() => {
-    setDetailsAvailable(null)
+    setDetailsAvailable(null, false, canConfirmAnalysis)
     reviewReady.current = null
     return () => { setDetailsAvailable(null) }
-  }, [sessionId, setDetailsAvailable])
+  }, [sessionId, canConfirmAnalysis, setDetailsAvailable])
 
   useEffect(() => {
     if (reviewStateKey === null) {
@@ -315,12 +316,19 @@ export function BidStagePanel({
 
   useEffect(() => {
     if (!canConfirmAnalysis || getTenderAnalysisForConfirmation === undefined) return
-    void getTenderAnalysisForConfirmation().then((value) => { if (alive.current) setTenderAnalysis(value) }, (reason: unknown) => {
+    void getTenderAnalysisForConfirmation().then((value) => {
+      if (!alive.current) return
+      if (!Array.isArray((value as { selected_scoring_ids?: unknown }).selected_scoring_ids)) {
+        setRequestError({ message: t('error.action', { message: '确认数据缺少评分项选择状态，请重启服务后重试。' }), issues: [] })
+        return
+      }
+      setTenderAnalysis(value)
+    }, (reason: unknown) => {
       if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
     })
   }, [canConfirmAnalysis, getTenderAnalysisForConfirmation, t])
 
-  if (!isBidSession || projection === undefined) return null
+  if (!hasProjection) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const canStart = projection.allowedActions.includes('start_stage')
@@ -632,9 +640,9 @@ export function BidStagePanel({
                     {t('mapping.tasks.not_started', { count: mappingProgress.not_started })}
                   </span>
                 )}
-                {(mappingProgress.failed ?? 0) > 0 && (
+                {mappingProgress.failed > 0 && (
                   <span className={`${css.pill} ${css.pillFailed}`}>
-                    {t('mapping.tasks.failed', { count: mappingProgress.failed ?? 0 })}
+                    {t('mapping.tasks.failed', { count: mappingProgress.failed })}
                   </span>
                 )}
               </div>
@@ -699,6 +707,18 @@ export function BidStagePanel({
                 notice={errorNotice}
                 pending={requestPending === 'confirm_analysis'}
                 t={t}
+                onScoringSelectionChange={async (scoringId, selected) => {
+                  if (setTenderScoringSelection === undefined) throw new Error('评分项选择接口不可用。')
+                  setRequestError(null)
+                  try {
+                    const next = await setTenderScoringSelection(scoringId, selected)
+                    if (alive.current) setTenderAnalysis(next)
+                    return next
+                  } catch (reason: unknown) {
+                    if (alive.current) setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: [] })
+                    throw reason
+                  }
+                }}
                 onConfirm={(operations) => {
                   invoke(
                     'confirm_analysis',

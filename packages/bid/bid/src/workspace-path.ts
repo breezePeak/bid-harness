@@ -4,7 +4,12 @@ import { randomBytes } from 'node:crypto'
 import { lstat, mkdir, writeFile, rename, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
-/** Resolve a relative workspace path only when it remains below its owning root. */
+/**
+ * Resolve a relative workspace path only when it remains below its owning root.
+ * @param root Owning workspace root.
+ * @param candidate Untrusted project-relative path.
+ * @returns Absolute path contained strictly below the owning root.
+ */
 export function within(root: string, candidate: string): string {
   if (isAbsolute(candidate) || /^[a-z]:/iu.test(candidate) || /^\\\\/u.test(candidate)) throw new Error('bid-absolute-path')
   const target = resolve(root, candidate)

@@ -12,6 +12,7 @@ const details: BidDetailsView = {
     project: { schema_version: 1, project_name: '已确认项目', tender_name: null, purchaser: null, owner: null, project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [], implementation_constraints: [], key_technical_points: [], source_refs: [], analyzed_tender_files: [] },
     requirements: { schema_version: 1, requirements: [] },
     scoring: { schema_version: 1, scoring_items: [] },
+    selected_scoring_ids: [],
     compliance: { schema_version: 1, compliance_items: [] },
   },
   outline: { schema_version: 3, scope: 'technical_bid', document_title: '项目技术标', global_compliance_ids: [], sections: [{

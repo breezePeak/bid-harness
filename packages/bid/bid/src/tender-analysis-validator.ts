@@ -244,7 +244,7 @@ async function validateCompleteness(
       issues,
       'TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY',
       'Tender text contains technical-scoring signals but scoring_items is empty.',
-      'analysis/scoring.json',
+      'analysis/scoring-origin.json',
     )
   }
   const technicalConstraintSignals = TECHNICAL_CONSTRAINT_SIGNALS.filter(signal => signal.test(corpus)).length
@@ -258,7 +258,10 @@ async function validateCompleteness(
   }
 }
 
-function validateTechnicalScoring(scoring: TenderScoringArtifact, issues: StageValidationIssue[]): void {
+function validateTechnicalScoring(
+  scoring: TenderScoringArtifact,
+  issues: StageValidationIssue[],
+): void {
   for (const item of scoring.scoring_items) {
     const classification = `${item.group ?? ''} ${item.title}`
     if (EXCLUDED_SCORING_GROUP.test(classification) && !TECHNICAL_SCORING_CONTEXT.test(classification)) {
@@ -266,7 +269,7 @@ function validateTechnicalScoring(scoring: TenderScoringArtifact, issues: StageV
         issues,
         'TENDER_ANALYSIS_NON_TECHNICAL_SCORING',
         `Scoring item ${JSON.stringify(item.id)} is classified as non-technical scoring.`,
-        'analysis/scoring.json',
+        'analysis/scoring-origin.json',
       )
     }
   }
@@ -377,7 +380,12 @@ export async function validateTenderAnalysis(
   if (stage !== 'tender_analysis') {
     reject(issues, 'TENDER_ANALYSIS_STAGE_INVALID', 'The tender-analysis validator only accepts tender_analysis.')
   }
-  const expectedPaths = Object.keys(TENDER_ANALYSIS_ARTIFACTS)
+  const expectedPaths = [
+    'analysis/project.json',
+    'analysis/requirements.json',
+    'analysis/scoring-origin.json',
+    'analysis/compliance.json',
+  ]
   for (const path of expectedPaths) {
     const matches = artifacts.filter(artifact => artifact.stage === 'tender_analysis' && artifact.path === path)
     if (matches.length !== 1) {
@@ -404,7 +412,7 @@ export async function validateTenderAnalysis(
   const [project, requirements, scoring, compliance] = await Promise.all([
     parseArtifact(workspace, 'analysis/project.json', issues),
     parseArtifact(workspace, 'analysis/requirements.json', issues),
-    parseArtifact(workspace, 'analysis/scoring.json', issues),
+    parseArtifact(workspace, 'analysis/scoring-origin.json', issues),
     parseArtifact(workspace, 'analysis/compliance.json', issues),
   ])
   if (project === undefined || requirements === undefined || scoring === undefined || compliance === undefined) {
@@ -420,7 +428,7 @@ export async function validateTenderAnalysis(
   issues.push(...await validateTenderAnalysisDraft(workspace, manifest, parsed))
   for (const [path, values] of [
     ['analysis/requirements.json', parsed.requirements.requirements],
-    ['analysis/scoring.json', parsed.scoring.scoring_items],
+    ['analysis/scoring-origin.json', parsed.scoring.scoring_items],
     ['analysis/compliance.json', parsed.compliance.compliance_items],
   ] as const) {
     for (const id of duplicateIds(values)) {
@@ -435,7 +443,7 @@ export async function validateTenderAnalysis(
       validateSourceRef(workspace, manifest, ref, issues, 'analysis/requirements.json', `requirements[${itemIndex}].source_refs[${refIndex}]`)
     ))),
     ...parsed.scoring.scoring_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
-      validateSourceRef(workspace, manifest, ref, issues, 'analysis/scoring.json', `scoring_items[${itemIndex}].source_refs[${refIndex}]`)
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/scoring-origin.json', `scoring_items[${itemIndex}].source_refs[${refIndex}]`)
     ))),
     ...parsed.compliance.compliance_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
       validateSourceRef(workspace, manifest, ref, issues, 'analysis/compliance.json', `compliance_items[${itemIndex}].source_refs[${refIndex}]`)

@@ -17,6 +17,7 @@ import {
   parseTenderScoringArtifact,
   type TenderSourceRef,
 } from './tender-analysis-artifacts.ts'
+import { createTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { validateTenderAnalysis, validateTenderAnalysisDraft } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
@@ -270,7 +271,7 @@ function artifactsList() {
   return [
     { stage: 'tender_analysis' as const, type: 'tender_project', path: 'analysis/project.json' },
     { stage: 'tender_analysis' as const, type: 'tender_requirements', path: 'analysis/requirements.json' },
-    { stage: 'tender_analysis' as const, type: 'tender_scoring', path: 'analysis/scoring.json' },
+    { stage: 'tender_analysis' as const, type: 'tender_scoring_origin', path: 'analysis/scoring-origin.json' },
     { stage: 'tender_analysis' as const, type: 'tender_compliance', path: 'analysis/compliance.json' },
   ]
 }
@@ -503,7 +504,8 @@ export async function attachTenderAnalysisSubmissionRuntime(
       for (const [path, value] of [
         ['analysis/project.json', project],
         ['analysis/requirements.json', requirementsArtifact],
-        ['analysis/scoring.json', scoringArtifact],
+        ['analysis/scoring-origin.json', scoringArtifact],
+        ['analysis/tender-analysis-selection.json', createTenderScoringSelection(scoringArtifact)],
         ['analysis/compliance.json', complianceArtifact],
       ] as const) {
         const absolute = within(workspace.projectRoot, path)

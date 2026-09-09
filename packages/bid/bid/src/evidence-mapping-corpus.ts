@@ -75,7 +75,7 @@ export async function resolveMappingCorpusLocations(workspace: BidWorkspace, man
 
 /**
  * 对当前父 Session 的 Child 执行工具级文件授权。
- * @param locations - 本次执行已预检的 Corpus。
+ * @param _locations - 本次执行已预检的 Corpus；授权边界由专用工具实施。
  * @param parentId - 本次 S4 的父 Session ID。
  * @param exec - 待执行工具及实际 Child cwd。
  * @returns 拒绝原因；undefined 表示允许或不属于本次 Child。

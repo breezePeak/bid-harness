@@ -63,17 +63,29 @@ export type ChapterReview = z.infer<typeof chapterReviewSchema>
 /** Parsed durable review record. */
 export type ChapterReviewArtifact = z.infer<typeof chapterReviewArtifactSchema>
 
-/** @param value Untrusted structured reviewer output. @returns Strict review result. */
+/**
+ * Parse one review conclusion at the model-output boundary.
+ * @param value Untrusted structured reviewer output.
+ * @returns Strict review result.
+ */
 export function parseChapterReview(value: unknown): ChapterReview {
   return chapterReviewSchema.parse(value)
 }
 
-/** @param value Untrusted durable reviewer record. @returns Strict review artifact. */
+/**
+ * Parse one durable chapter-review record.
+ * @param value Untrusted durable reviewer record.
+ * @returns Strict review artifact.
+ */
 export function parseChapterReviewArtifact(value: unknown): ChapterReviewArtifact {
   return chapterReviewArtifactSchema.parse(value)
 }
 
-/** @param markdown Accepted chapter Markdown. @returns SHA-256 of its persisted bytes. */
+/**
+ * Compute the identity recorded for an accepted chapter candidate.
+ * @param markdown Accepted chapter Markdown.
+ * @returns SHA-256 of its persisted bytes.
+ */
 export function chapterCandidateSha256(markdown: string): string {
   return createHash('sha256').update(`${markdown.trim()}\n`).digest('hex')
 }

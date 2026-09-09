@@ -33,7 +33,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
   tender_analysis: {
     stage: 'tender_analysis', executor: 'agent', requiredInputs: ['manifest.json'], allowedTools: ['grep', 'read'],
     forbiddenTools: ['write', 'bash', 'web_search', 'web_fetch', 'subagent'], requiredArtifacts: [
-      'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
+      'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring-origin.json', 'analysis/compliance.json',
     ], validator: 'tender-analysis-validator', userGate: 'after_validation', nextStage: 'outline_generation',
   },
   outline_generation: {
@@ -105,7 +105,11 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
   docx_export: ['只使用最终确认目录和已写章节。', '输出必须位于项目 output 目录。'],
 }
 
-/** Return a detached fixed policy for one Bid stage. */
+/**
+ * Return a detached fixed policy for one Bid stage.
+ * @param stage Stage whose executor and transition policy is requested.
+ * @returns Detached stage policy safe for callers to inspect.
+ */
 export function getBidStagePolicy(stage: BidStage): BidStagePolicy {
   const policy = POLICIES[stage]
   return { ...policy, requiredInputs: [...policy.requiredInputs], allowedTools: [...policy.allowedTools],
@@ -113,14 +117,23 @@ export function getBidStagePolicy(stage: BidStage): BidStagePolicy {
     requiredArtifacts: [...policy.requiredArtifacts] }
 }
 
-/** Build the deterministic executor assignment for one stage policy. */
+/**
+ * Build the deterministic executor assignment for one stage policy.
+ * @param stage Stage to assign.
+ * @returns Executor-facing objective, inputs, artifacts, tools, and constraints.
+ */
 export function buildBidStageTask(stage: BidStage): BidStageTask {
   const policy = getBidStagePolicy(stage)
   return { stage, objective: OBJECTIVES[stage], inputs: [...policy.requiredInputs], requiredArtifacts: [...policy.requiredArtifacts],
     allowedTools: [...policy.allowedTools], constraints: [...CONSTRAINTS[stage]] }
 }
 
-/** Fold one committed session event into replayable Bid runtime state. */
+/**
+ * Fold one committed session event into replayable Bid runtime state.
+ * @param state Runtime state before the event.
+ * @param event Committed Session event being replayed.
+ * @returns Resulting runtime state, or the original state for an inapplicable event.
+ */
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   switch (event.type) {
     case 'bid.project.resumed': {
@@ -169,7 +182,12 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
   }
 }
 
-/** Project Host-owned Bid action and composer decisions for a client. */
+/**
+ * Project Host-owned Bid action and composer decisions for a client.
+ * @param runtime Current replayed Bid runtime state.
+ * @param fileLimits Optional Host-configured file intake limits.
+ * @returns Browser-safe runtime, admitted actions, composer decision, and file limits.
+ */
 export function getBidClientProjection(
   runtime: BidRuntimeState,
   fileLimits: Pick<BidClientProjection, 'allowedExtensions' | 'maxFiles' | 'maxFileBytes' | 'maxTotalBytes'> = {},

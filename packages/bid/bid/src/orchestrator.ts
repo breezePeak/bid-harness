@@ -214,7 +214,10 @@ export class BidOrchestrator {
     })
   }
 
-  /** Retry one failed automatic stage once and stop at its successor. */
+  /**
+   * Retry one failed automatic stage once and stop at its successor.
+   * @returns Runtime state after the retried stage settles.
+   */
   retryCurrentAutomaticStage(): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state

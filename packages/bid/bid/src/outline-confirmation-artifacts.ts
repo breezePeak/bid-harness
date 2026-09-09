@@ -45,22 +45,38 @@ export type OutlineConfirmationArtifact = z.infer<typeof outlineConfirmationSche
 /** Host-persisted S5 draft and optimistic-concurrency identity. */
 export type OutlineDraftView = z.infer<typeof outlineDraftSchema>
 
-/** Parse one strict Host outline draft. */
+/**
+ * Parse one strict Host outline draft.
+ * @param value Untrusted persisted draft value.
+ * @returns Validated outline draft and concurrency identity.
+ */
 export function parseOutlineDraft(value: unknown): OutlineDraftView {
   return outlineDraftSchema.parse(value)
 }
 
-/** Parse one strict S5 confirmation record. */
+/**
+ * Parse one strict S5 confirmation record.
+ * @param value Untrusted persisted confirmation value.
+ * @returns Validated outline confirmation record.
+ */
 export function parseOutlineConfirmationArtifact(value: unknown): OutlineConfirmationArtifact {
   return outlineConfirmationSchema.parse(value)
 }
 
-/** Return the SHA-256 of the canonical persisted JSON artifact bytes. */
+/**
+ * Return the SHA-256 of the canonical persisted JSON artifact bytes.
+ * @param outline Outline value serialized with the canonical artifact layout.
+ * @returns SHA-256 digest of the persisted bytes.
+ */
 export function outlineArtifactSha256(outline: unknown): string {
   return createHash('sha256').update(`${JSON.stringify(outline, null, 2)}\n`).digest('hex')
 }
 
-/** Parse a confirmed outline using the same schema as the S4 draft. */
+/**
+ * Parse a confirmed outline using the same schema as the S4 draft.
+ * @param value Untrusted confirmed-outline value.
+ * @returns Validated confirmed outline artifact.
+ */
 export function parseConfirmedOutlineArtifact(value: unknown): OutlineArtifact {
   return outlineArtifactSchema.parse(value)
 }

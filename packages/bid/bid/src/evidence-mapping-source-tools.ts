@@ -1,17 +1,21 @@
 /** S4 本地资料读取、字面搜索与分页；模型不接收可自行构造的文件路径。 */
-import { ToolArgsError } from '@deepseek-ai/dsh-tools'
+import { ToolArgsError, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { MappingCorpusLocation } from './evidence-mapping-corpus.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 
-/** @param fileIndex 当前资料目录中的文件序号。 @param chunkId 该文件的真实分块 ID。 @returns 运行内材料引用。 */
+/**
+ * 为当前资料目录中的真实分块生成运行内引用。
+ * @param fileIndex 当前资料目录中的文件序号。
+ * @param chunkId 该文件的真实分块 ID。
+ * @returns 运行内材料引用。
+ */
 export function mappingMaterialRef(fileIndex: number, chunkId: string): string {
   return `M${fileIndex + 1}:${chunkId}`
 }
 
-/** @param locations 已授权的资料目录。 @returns 完整结构目录、确定的正文范围引用与全文件搜索范围。 */
-export function mappingSourceCatalog(locations: readonly MappingCorpusLocation[]) {
-  return locations.map((location, fileIndex) => ({
+function sourceCatalogEntry(location: MappingCorpusLocation, fileIndex: number) {
+  return {
     name: location.name, file_ref: `F${fileIndex + 1}`, source_ref: `F${fileIndex + 1}`, scope_ref: `F${fileIndex + 1}`,
     directory: location.source.directory.map(({ heading_index, ...heading }) => ({ ...heading,
       ...(heading_index === null ? {} : { source_ref: `F${fileIndex + 1}:H${heading_index + 1}:direct`, scope_ref: `F${fileIndex + 1}:H${heading_index + 1}:full` }),
@@ -21,7 +25,16 @@ export function mappingSourceCatalog(locations: readonly MappingCorpusLocation[]
       direct_body: { start: heading.body_start, end: heading.end, source_ref: `F${fileIndex + 1}:H${index + 1}:direct` },
       full_section: { start: heading.start, end: heading.full_end, source_ref: `F${fileIndex + 1}:H${index + 1}:full` },
     })),
-  }))
+  }
+}
+
+/**
+ * 投影当前 Child 可使用的资料目录和受控引用。
+ * @param locations 已授权的资料目录。
+ * @returns 完整结构目录、确定的正文范围引用与全文件搜索范围。
+ */
+export function mappingSourceCatalog(locations: readonly MappingCorpusLocation[]): Array<ReturnType<typeof sourceCatalogEntry>> {
+  return locations.map(sourceCatalogEntry)
 }
 
 const readSchema = z.object({ source_ref: z.string().min(1) }).strict()
@@ -37,7 +50,9 @@ type Page = { kind: 'text'; source: TextSource; offset: number } | { kind: 'sear
  * @param snapshots 当前授权的联网快照，包含本 Child 新抓取的正文。
  * @returns 工具定义；所有接受入口直接拒绝未知引用及额外路径、来源字段。
  */
-export function createMappingSourceTools(locations: readonly MappingCorpusLocation[], snapshots: () => readonly WebEvidenceSnapshot[]) {
+export function createMappingSourceTools(
+  locations: readonly MappingCorpusLocation[], snapshots: () => readonly WebEvidenceSnapshot[],
+): ToolDefinition[] {
   const sources = new Map<string, TextSource>()
   const pages = new Map<string, Page>()
   const webPages = new Map<string, { snapshot: WebEvidenceSnapshot; offset: number }>()

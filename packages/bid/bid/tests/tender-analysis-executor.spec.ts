@@ -92,7 +92,7 @@ describe('tender-analysis Agent executor', () => {
       { id: 'session' } as Agent,
       workspace,
       buildBidStageTask('tender_analysis'),
-      [{ code: 'TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY', artifact: 'analysis/scoring.json', path: 'scoring_items', message: '缺少技术评分项。' }],
+      [{ code: 'TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY', artifact: 'analysis/scoring-origin.json', path: 'scoring_items', message: '缺少技术评分项。' }],
     )
     expect(rendered).toContain('scoring_items')
     expect(rendered).toContain('submit_scoring_item')
@@ -146,7 +146,7 @@ describe('tender-analysis Agent executor', () => {
     const review = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
     expect(review.content[0]?.text).toContain('Tender Analysis Quality Review')
     expect(review.content[0]?.text).toContain(`"revision":${String(reviewRevision)}`)
-    await expect(Promise.all(['project.json', 'requirements.json', 'scoring.json', 'compliance.json']
+    await expect(Promise.all(['project.json', 'requirements.json', 'scoring-origin.json', 'compliance.json']
       .map(name => readFile(join(workspace.projectRoot, 'analysis', name), 'utf8'))))
       .resolves.toHaveLength(4)
   })

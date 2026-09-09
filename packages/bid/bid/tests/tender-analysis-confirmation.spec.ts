@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyTenderAnalysisEdits,
+  createConfirmedTenderScoring,
+  createTenderScoringSelection,
   parseTenderAnalysisEditOperations,
+  parseTenderScoringSelection,
+  setTenderScoringSelection,
   type TenderAnalysisConfirmationView,
 } from '@deepseek-ai/dsh-bid'
 
@@ -24,6 +28,7 @@ const analysis: TenderAnalysisConfirmationView = {
       source_refs: [source],
     }],
   },
+  selected_scoring_ids: ['SCORE-1'],
   requirements: {
     schema_version: 1,
     requirements: [{ id: 'REQ-1', category: '技术', raw_text: '应具备总体架构。', normalized_requirement: '具备总体架构。', mandatory: true, source_refs: [source] }],
@@ -72,5 +77,31 @@ describe('tender-analysis confirmation edits', () => {
     expect(() => parseTenderAnalysisEditOperations([{
       type: 'update_compliance', compliance_id: 'COMP-1', fields: {},
     }])).toThrow()
+  })
+
+  it('persists selection separately and filters the downstream scoring Artifact', () => {
+    const scoring = {
+      ...analysis.scoring,
+      scoring_items: [
+        analysis.scoring.scoring_items[0]!,
+        { ...analysis.scoring.scoring_items[0]!, id: 'SCORE-2', title: '实施方案', score: 5 },
+      ],
+    }
+    const view = { ...analysis, scoring, selected_scoring_ids: createTenderScoringSelection(scoring).selected_scoring_ids }
+    const changed = setTenderScoringSelection(view, 'SCORE-1', false)
+
+    expect(changed.scoring).toEqual(scoring)
+    expect(changed.selected_scoring_ids).toEqual(['SCORE-2'])
+    expect(createConfirmedTenderScoring(changed).scoring_items.map(item => item.id)).toEqual(['SCORE-2'])
+    expect(changed.scoring.scoring_items[0]?.must_answer).toBe(true)
+    expect(parseTenderScoringSelection({ schema_version: 1, selected_scoring_ids: ['SCORE-2'] }, scoring))
+      .toEqual({ schema_version: 1, selected_scoring_ids: ['SCORE-2'] })
+  })
+
+  it('rejects stale or duplicate persisted scoring selections', () => {
+    expect(() => parseTenderScoringSelection({ schema_version: 1, selected_scoring_ids: ['SCORE-X'] }, analysis.scoring))
+      .toThrow('unknown tender scoring selection')
+    expect(() => parseTenderScoringSelection({ schema_version: 1, selected_scoring_ids: ['SCORE-1', 'SCORE-1'] }, analysis.scoring))
+      .toThrow('selected_scoring_ids must be unique')
   })
 })

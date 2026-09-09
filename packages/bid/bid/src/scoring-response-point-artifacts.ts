@@ -36,17 +36,29 @@ export type ScoringResponsePointCatalog = z.infer<typeof catalogSchema>
 /** S3 Agent analysis before the Host assigns stable response-point ids. */
 export type ScoringResponsePointCandidate = z.infer<typeof candidateSchema>
 
-/** @param value Decoded catalog JSON. @returns A strict scoring response-point catalog. */
+/**
+ * Parse the Host-owned stable scoring response-point catalog.
+ * @param value Decoded catalog JSON.
+ * @returns A strict scoring response-point catalog.
+ */
 export function parseScoringResponsePointCatalog(value: unknown): ScoringResponsePointCatalog {
   return catalogSchema.parse(value)
 }
 
-/** @param value Decoded S3 candidate JSON. @returns Strict response-point candidates. */
+/**
+ * Parse the S3 Agent's response-point candidate.
+ * @param value Decoded S3 candidate JSON.
+ * @returns Strict response-point candidates.
+ */
 export function parseScoringResponsePointCandidate(value: unknown): ScoringResponsePointCandidate {
   return candidateSchema.parse(value)
 }
 
-/** @param scoring Canonical scoring Artifact. @returns SHA-256 of its persisted JSON bytes. */
+/**
+ * Compute the identity binding a response-point catalog to canonical scoring facts.
+ * @param scoring Canonical scoring Artifact.
+ * @returns SHA-256 of its persisted JSON bytes.
+ */
 export function scoringArtifactSha256(scoring: TenderScoringArtifact): string {
   return createHash('sha256').update(`${JSON.stringify(scoring, null, 2)}\n`).digest('hex')
 }
@@ -105,7 +117,11 @@ export function catalogMatchesScoring(
   return catalog.next_sequence > maxSequence
 }
 
-/** @param catalog Current response-point catalog. @returns Its next monotonically increasing point id. */
+/**
+ * Allocate the next stable response-point identity from a catalog sequence.
+ * @param catalog Current response-point catalog.
+ * @returns Its next monotonically increasing point id.
+ */
 export function nextResponsePointId(catalog: ScoringResponsePointCatalog): string {
   return `RP-${String(catalog.next_sequence).padStart(6, '0')}`
 }

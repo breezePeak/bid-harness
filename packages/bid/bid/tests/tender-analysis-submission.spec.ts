@@ -228,11 +228,14 @@ describe('tender-analysis staged submission runtime', () => {
       must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await finishReviewed(value)
-    const artifact = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+    const artifact = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8')))
     expect(artifact.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score }))).toEqual([
       { id: 'SC-001', parent: null, score: 10 },
       { id: 'SC-004', parent: null, score: 5 },
     ])
+    expect(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8')))
+      .toEqual({ schema_version: 1, selected_scoring_ids: ['SC-001', 'SC-004'] })
+    await expect(readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(artifact.scoring_items[0]?.source_refs).toHaveLength(2)
     value.runtime.dispose()
   })
@@ -344,7 +347,7 @@ describe('tender-analysis staged submission runtime', () => {
       completed: true,
       revision: corrected.revision,
     })
-    const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+    const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8')))
     expect(scoring.scoring_items[0]?.title).toBe('总体技术方案（复核修正）')
     value.runtime.dispose()
   })
@@ -361,14 +364,14 @@ describe('tender-analysis staged submission runtime', () => {
     const [project, requirements, scoring, compliance] = await Promise.all([
       readFile(join(value.workspace.projectRoot, 'analysis/project.json'), 'utf8').then(JSON.parse).then(parseTenderProjectArtifact),
       readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse).then(parseTenderRequirementsArtifact),
-      readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
+      readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
       readFile(join(value.workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
     ])
     expect({ project, requirements, scoring, compliance }).toBeDefined()
     await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', [
       { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
       { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
-      { stage: 'tender_analysis', type: 'tender_scoring', path: 'analysis/scoring.json' },
+      { stage: 'tender_analysis', type: 'tender_scoring_origin', path: 'analysis/scoring-origin.json' },
       { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
     ])).resolves.toEqual({ ok: true })
     expect(value.runtime.completed).toBe(true)

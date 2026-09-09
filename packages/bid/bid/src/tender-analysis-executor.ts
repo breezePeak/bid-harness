@@ -21,7 +21,7 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/project.json': 'tender_project',
   'analysis/requirements.json': 'tender_requirements',
-  'analysis/scoring.json': 'tender_scoring',
+  'analysis/scoring-origin.json': 'tender_scoring_origin',
   'analysis/compliance.json': 'tender_compliance',
 }
 
@@ -155,7 +155,7 @@ export async function executeTenderAnalysis(
   const fs = agent.ctx.get('fs')
   const tools = agent.ctx.get('tools')
   if (fs === undefined || tools === undefined) throw new Error('Bid tender analysis requires fs and tools services')
-  await Promise.all(task.requiredArtifacts.map(async (path) => {
+  await Promise.all([...task.requiredArtifacts, 'analysis/scoring.json', 'analysis/tender-analysis-selection.json'].map(async (path) => {
     const artifactPath = join(workspace.projectRoot, path)
     await rm(artifactPath, { force: true })
     const target = await fs.resolve(artifactPath)

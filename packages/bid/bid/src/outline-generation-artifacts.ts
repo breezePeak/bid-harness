@@ -89,7 +89,11 @@ export type OutlineQualityIssue = z.infer<typeof outlineQualityIssueSchema>
 /** Parsed internal Blueprint Quality Review record. */
 export type OutlineQualityReport = z.infer<typeof outlineQualityReportSchema>
 
-/** Parse a technical-writing blueprint through the current strict schema. */
+/**
+ * Parse a technical-writing blueprint through the current strict schema.
+ * @param value Untrusted generated or persisted outline value.
+ * @returns Validated technical-writing blueprint.
+ */
 export function parseOutlineArtifact(value: unknown): OutlineArtifact {
   return outlineArtifactSchema.parse(value)
 }

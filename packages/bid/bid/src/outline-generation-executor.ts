@@ -144,7 +144,15 @@ export function renderResponsePointSemanticReviewTask(agent: Agent, workspace: B
   ].join('\n')
 }
 
-/** Render the dynamic S3 assignment for the live Bid Agent. */
+/**
+ * Render the dynamic S3 assignment for the live Bid Agent.
+ * @param agent Agent executing the outline-generation stage.
+ * @param workspace Bid project workspace exposed to that Agent.
+ * @param task Deterministic stage assignment.
+ * @param regeneration Optional constrained regeneration request.
+ * @param frameworks Imported outline frameworks available to the stage.
+ * @returns Complete model instruction for the current S3 execution.
+ */
 export function renderOutlineGenerationTask(
   agent: Agent,
   workspace: BidWorkspace,

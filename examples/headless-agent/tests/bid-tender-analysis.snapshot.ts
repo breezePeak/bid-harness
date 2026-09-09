@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import { expect, it } from 'vitest'
 
-it('S2 通过真实 staged 工具生成并校验四个正式 Artifact', async () => {
+it('S2 通过真实 staged 工具生成并校验完整原始评分 Artifact', async () => {
   const result = await runLoaderSmoke({
     label: 'S2 staged submission 源码装配', tempDirPrefix: 'dsh-bid-s2-submission-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-tender-analysis-driver.ts', import.meta.url)),
@@ -15,7 +15,7 @@ it('S2 通过真实 staged 工具生成并校验四个正式 Artifact', async ()
       "artifacts": [
         "analysis/project.json",
         "analysis/requirements.json",
-        "analysis/scoring.json",
+        "analysis/scoring-origin.json",
         "analysis/compliance.json",
       ],
       "calls": [
@@ -54,6 +54,9 @@ it('S2 通过真实 staged 工具生成并校验四个正式 Artifact', async ()
           "parent": null,
           "score": 10,
         },
+      ],
+      "selected_scoring_ids": [
+        "SC-001",
       ],
       "validation": {
         "ok": true,

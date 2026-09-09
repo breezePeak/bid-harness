@@ -46,7 +46,13 @@ async function parseJson(workspace: BidWorkspace, path: string, issues: StageVal
   }
 }
 
-/** Validate S3 with stable response points, shared outline coverage, and quality rules. */
+/**
+ * Validate S3 with stable response points, shared outline coverage, and quality rules.
+ * @param workspace Bid project workspace containing the generated artifacts.
+ * @param stage Stage associated with the executor result.
+ * @param artifacts Artifact declarations returned by the executor.
+ * @returns Validation authorization or the collected artifact and semantic issues.
+ */
 export async function validateOutlineGeneration(
   workspace: BidWorkspace,
   stage: BidStage,

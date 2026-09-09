@@ -59,7 +59,9 @@ S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度�
 
 ### S2–S5 quality control
 
-S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性并递增 staged revision；首次通过确定性校验的 `finish_tender_analysis({})` 不写文件，而是触发同一 Agent 的独立全量复核轮次。复核按 Host 提供的完整 staged snapshot 逐项重读来源，可用 runtime ref 原地修正；最终 finish 必须提交当前 `review_revision`，旧 revision 不能发布。Host 随后丢弃带 `parent_ref` 的误拆细则，按评分结构化内容去重并合并来源，补齐 schema version、空值、完整 tender 覆盖与正式 ID，再原子写入四个 Artifact。缺项续修使用配置预算，强制复核本身不消耗该预算，也不开放 `write`。最终 Validator 仍独立验证 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
+S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性并递增 staged revision；首次通过确定性校验的 `finish_tender_analysis({})` 不写文件，而是触发同一 Agent 的独立全量复核轮次。复核按 Host 提供的完整 staged snapshot 逐项重读来源，可用 runtime ref 原地修正；最终 finish 必须提交当前 `review_revision`，旧 revision 不能发布。Host 丢弃带 `parent_ref` 的误拆细则，按评分结构化内容去重并合并来源，补齐 schema version、空值、完整 tender 覆盖与正式 ID，把完整评分事实写入 `analysis/scoring-origin.json`，并初始化默认全选的 `analysis/tender-analysis-selection.json`。缺项续修使用配置预算，强制复核本身不消耗该预算，也不开放 `write`。最终 Validator 独立验证原始 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
+
+S2 审核页始终从 `scoring-origin.json` 展示完整评分事实，`must_answer` 与“是否纳入后续响应”分别编辑和显示；选择变更立即由 Host 写入确认草稿，刷新或换 Session 后仍可恢复。正式确认只把选中评分项及允许的规范化修改写入 `analysis/scoring.json`，未进行筛选时两份评分集合一致。S3、S4、S5 只读取 `scoring.json`；回退 S2 复用阶段重置清理 `analysis`、`outline`、`chapters` 和 `output`，不会保留依赖旧评分集合的下游产物。
 
 S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把正式路径和完整 RP 数据交给目录生成、质量复核及局部修复。模型选择 scoring_response_point_ids；Host 按正式清单重建 scoring_response_points 快照、合并所属 scoring_ids 并去重，保留合法独立评分关联。未知编号报错，每个 RP 必须至少由一个合适的可写叶子覆盖，允许多个章节共同响应。Blueprint Quality Review 只通过执行期私有工具提交结构化 advisory issues；Host 为当前未变化目录生成 v4 正式质量报告及完整 checked/reviewed 集合，模型不写质量候选文件。
 

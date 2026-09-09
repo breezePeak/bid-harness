@@ -22,7 +22,11 @@ export const chapterRevisionRequestSchema = z.object({
   ]),
 }).strict()
 
-/** @param markdown 视图返回的完整正文。 @returns 精确原文版本，包括空白和末尾换行。 */
+/**
+ * 计算章节正文的并发修订版本标识。
+ * @param markdown 视图返回的完整正文。
+ * @returns 精确原文版本，包括空白和末尾换行。
+ */
 export function chapterContentSha256(markdown: string): string {
   return createHash('sha256').update(markdown).digest('hex')
 }
@@ -59,7 +63,12 @@ export function assertChapterRevisionScope(request: BidChapterRevisionRequest, o
   }
 }
 
-/** @param request 用户指令和引用。 @param markdown 当前正文。 @returns 原 Writer 的修订提示。 */
+/**
+ * 将用户意见和受约束的正文范围组装为修订任务。
+ * @param request 用户指令和引用。
+ * @param markdown 当前正文。
+ * @returns 原 Writer 的修订提示。
+ */
 export function renderChapterRevisionTask(request: BidChapterRevisionRequest, markdown: string): string {
   return [
     '继续修改你在本会话编写的章节。以下用户编写意见决定修改幅度。',

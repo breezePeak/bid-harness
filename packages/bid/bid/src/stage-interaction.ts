@@ -14,6 +14,7 @@ import { parseEvidenceMapArtifact, parseEvidenceMappingPlan } from './evidence-m
 import { readEvidenceMappingLog, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -30,28 +31,40 @@ export const stageInteractionSchema = z.discriminatedUnion('action', [
 
 const names = ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'] as const
 
-/** @param session 当前会话。 @returns 仅 Bid Main Agent 可进入阶段交互。 */
+/**
+ * 判断会话是否拥有 Bid 阶段交互。
+ * @param session 当前会话。
+ * @returns 仅 Bid Main Agent 可进入阶段交互。
+ */
 export function isBidMainSession(session: Session): boolean {
   return session.header.origin !== 'subagent' && resolveSessionPreset(session) === 'bid' && session.header.cwd !== undefined
 }
 
-/** @param workspace 会话工作区。 @param path 会话内相对路径。 @returns 已拒绝链接路径的 JSON 数据。 */
+/**
+ * 从 Bid 项目内的非链接文件读取 JSON。
+ * @param workspace 会话工作区。
+ * @param path 会话内相对路径。
+ * @returns 已拒绝链接路径的 JSON 数据。
+ */
 export async function readStageJson(workspace: BidWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
-/** @param workspace 会话工作区。 @param session 读取状态的会话。 @returns 最新目录编号、CAS 与阶段资料，不从聊天历史推测。 */
-export async function inspectBidStage(workspace: BidWorkspace, session: Session) {
+async function inspectBidStageValue(workspace: BidWorkspace, session: Session) {
   const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+  const scoringPath = runtime.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
   const [project, requirements, scoring, compliance] = await Promise.all([
     readStageJson(workspace, 'analysis/project.json').then(parseTenderProjectArtifact),
     readStageJson(workspace, 'analysis/requirements.json').then(parseTenderRequirementsArtifact),
-    readStageJson(workspace, 'analysis/scoring.json').then(parseTenderScoringArtifact),
+    readStageJson(workspace, scoringPath).then(parseTenderScoringArtifact),
     readStageJson(workspace, 'analysis/compliance.json').then(parseTenderComplianceArtifact),
   ])
-  if (runtime.stage === 'tender_analysis') return { runtime, project, requirements, scoring, compliance }
+  if (runtime.stage === 'tender_analysis') {
+    const selection = parseTenderScoringSelection(await readStageJson(workspace, 'analysis/tender-analysis-selection.json'), scoring)
+    return { runtime, project, requirements, scoring, selected_scoring_ids: selection.selected_scoring_ids, compliance }
+  }
   const draft = await getOrCreateOutlineDraft(workspace, false)
   const response_points = parseScoringResponsePointCatalog(await readStageJson(workspace, 'analysis/scoring-response-points.json'))
   const evidence = runtime.stage === 'evidence_mapping' ? parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json')) : null
@@ -70,7 +83,23 @@ export async function inspectBidStage(workspace: BidWorkspace, session: Session)
   }
 }
 
-/** @param stage 当前阶段。 @returns 通过 user/message 入日志的交互规则。 */
+/**
+ * 从权威产物和会话日志组装当前 Bid 阶段交互快照。
+ * @param workspace 会话工作区。
+ * @param session 读取状态的会话。
+ * @returns 最新目录编号、CAS 与阶段资料，不从聊天历史推测。
+ */
+export function inspectBidStage(
+  workspace: BidWorkspace, session: Session,
+): ReturnType<typeof inspectBidStageValue> {
+  return inspectBidStageValue(workspace, session)
+}
+
+/**
+ * 渲染等待用户阶段的模型交互规则。
+ * @param stage 当前阶段。
+ * @returns 通过 user/message 入日志的交互规则。
+ */
 export function renderStageInteractionPrompt(stage: string): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：waiting_user。`,

@@ -24,7 +24,12 @@ export function missingOutlineResponsePoints(outline: OutlineArtifact, catalog: 
   return catalog.points.filter(point => !covered.has(point.id))
 }
 
-/** @param sections Outline tree nodes. @param issues Mutable issue sink. @returns Nothing. */
+/**
+ * Validate the shared tree and per-section invariants of an outline.
+ * @param sections Outline tree nodes.
+ * @param issues Mutable issue sink.
+ * @returns Nothing.
+ */
 export function validateOutlineSharedStructure(sections: readonly OutlineSection[], issues: StageValidationIssue[]): void {
   const byId = new Map<string, OutlineSection>()
   for (const section of sections) {
@@ -77,6 +82,7 @@ function validateCompleteIds(
 }
 
 /**
+ * Validate complete S2 fact and response-point coverage across one outline.
  * @param outline Candidate Outline.
  * @param requirements S2 requirements.
  * @param scoring S2 scoring.

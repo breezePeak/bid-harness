@@ -43,11 +43,24 @@ const operationSchema = z.discriminatedUnion('type', [
   }).strict().refine(value => Object.keys(value).length > 0, { message: 'update_compliance requires at least one field' }) }).strict(),
 ])
 
-/** Browser-safe view of the four S2 artifacts exposed for user confirmation. */
+const selectionSchema = z.object({
+  schema_version: z.literal(1),
+  selected_scoring_ids: z.array(text).refine(ids => new Set(ids).size === ids.length, {
+    message: 'selected_scoring_ids must be unique',
+  }),
+}).strict()
+
+/** Persistent S2 user decisions kept separate from tender scoring facts. */
+export type TenderScoringSelectionArtifact = z.infer<typeof selectionSchema>
+
+/** Browser-safe view of the S2 facts and persisted scoring selection. */
 export interface TenderAnalysisConfirmationView {
   readonly project: TenderProjectArtifact
   readonly requirements: TenderRequirementsArtifact
+  /** Complete scoring facts from analysis/scoring-origin.json. */
   readonly scoring: TenderScoringArtifact
+  /** Scoring ids currently selected for the downstream response workflow. */
+  readonly selected_scoring_ids: readonly string[]
   readonly compliance: TenderComplianceArtifact
 }
 
@@ -76,9 +89,80 @@ export type TenderAnalysisEditOperation =
     readonly fields: Partial<Pick<TenderComplianceArtifact['compliance_items'][number], 'type' | 'normalized_rule' | 'severity'>>
   }
 
-/** Parse untrusted browser operations before they can affect canonical S2 artifacts. */
+/**
+ * Parse untrusted browser operations before they can affect canonical S2 artifacts.
+ * @param value Untrusted browser operation list.
+ * @returns Validated tender-analysis edit operations.
+ */
 export function parseTenderAnalysisEditOperations(value: unknown): TenderAnalysisEditOperation[] {
   return z.array(operationSchema).parse(value) as TenderAnalysisEditOperation[]
+}
+
+/**
+ * Create the default all-selected S2 decision record.
+ * @param scoring Complete original scoring facts.
+ * @returns Persistent selection in original item order.
+ */
+export function createTenderScoringSelection(scoring: TenderScoringArtifact): TenderScoringSelectionArtifact {
+  return { schema_version: 1, selected_scoring_ids: scoring.scoring_items.map(item => item.id) }
+}
+
+/**
+ * Parse a persisted selection and reject ids absent from the original scoring facts.
+ * @param value Candidate persisted JSON value.
+ * @param scoring Complete original scoring facts.
+ * @returns Validated selection ordered like the original scoring items.
+ */
+export function parseTenderScoringSelection(
+  value: unknown,
+  scoring: TenderScoringArtifact,
+): TenderScoringSelectionArtifact {
+  const parsed = selectionSchema.parse(value)
+  const selected = new Set(parsed.selected_scoring_ids)
+  const known = new Set(scoring.scoring_items.map(item => item.id))
+  const unknown = parsed.selected_scoring_ids.find(id => !known.has(id))
+  if (unknown !== undefined) throw new Error(`unknown tender scoring selection ${JSON.stringify(unknown)}`)
+  return {
+    schema_version: 1,
+    selected_scoring_ids: scoring.scoring_items.filter(item => selected.has(item.id)).map(item => item.id),
+  }
+}
+
+/**
+ * Change one user selection without changing scoring facts or must_answer.
+ * @param source Current Host confirmation view.
+ * @param scoringId Stable scoring item id.
+ * @param selected Whether the item enters the downstream response workflow.
+ * @returns Updated view with a canonical selection order.
+ */
+export function setTenderScoringSelection(
+  source: TenderAnalysisConfirmationView,
+  scoringId: string,
+  selected: boolean,
+): TenderAnalysisConfirmationView {
+  if (!source.scoring.scoring_items.some(item => item.id === scoringId)) {
+    throw new Error(`unknown tender scoring item ${JSON.stringify(scoringId)}`)
+  }
+  const ids = new Set(source.selected_scoring_ids)
+  if (selected) ids.add(scoringId)
+  else ids.delete(scoringId)
+  return {
+    ...source,
+    selected_scoring_ids: source.scoring.scoring_items.filter(item => ids.has(item.id)).map(item => item.id),
+  }
+}
+
+/**
+ * Build the sole downstream scoring Artifact from the original facts and user selection.
+ * @param source Current Host confirmation view after allowed normalization edits.
+ * @returns Selected scoring items with stable ids and original order.
+ */
+export function createConfirmedTenderScoring(source: TenderAnalysisConfirmationView): TenderScoringArtifact {
+  const selected = new Set(source.selected_scoring_ids)
+  return parseTenderScoringArtifact({
+    ...source.scoring,
+    scoring_items: source.scoring.scoring_items.filter(item => selected.has(item.id)),
+  })
 }
 
 /**
@@ -125,5 +209,5 @@ export function applyTenderAnalysisEdits(
     items[index] = { ...current, ...operation.fields }
     compliance = parseTenderComplianceArtifact({ ...compliance, compliance_items: items })
   }
-  return { project, requirements, scoring, compliance }
+  return { project, requirements, scoring, selected_scoring_ids: [...source.selected_scoring_ids], compliance }
 }

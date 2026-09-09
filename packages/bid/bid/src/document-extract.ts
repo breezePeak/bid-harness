@@ -168,7 +168,12 @@ function isPdfTextItem(item: unknown): item is PdfTextItem {
     && typeof candidate.width === 'number' && typeof candidate.height === 'number'
 }
 
-/** @internal Convert PDF.js text items into physical lines. */
+/**
+ * Convert PDF.js text items into physical lines.
+ * @internal
+ * @param items Untrusted text items returned for one PDF page.
+ * @returns Extracted page text with physical line breaks.
+ */
 export function pdfPageText(items: readonly unknown[]): string {
   const lines: string[] = []
   let current = ''
@@ -242,7 +247,12 @@ function plainTextToMarkdown(value: string): string {
 
 function escapeCell(value: string): string { return value.replaceAll('|', '\\|').replaceAll('\n', '<br>') }
 
-/** @internal Build the heading index used by the corpus writer. */
+/**
+ * Build the heading index used by the corpus writer.
+ * @internal
+ * @param markdown Normalized extracted Markdown.
+ * @returns Heading sections with their observed page ranges.
+ */
 export function sectionsFromMarkdown(markdown: string): DocumentSection[] {
   const sections: DocumentSection[] = []
   const stack: DocumentSection[] = []

@@ -66,6 +66,37 @@ function outlineStore(initial: OutlineDraftView) {
 }
 
 describe('BidStagePanel', () => {
+  it('会话摘要尚未补齐 preset 时仍以 Bid 投影开放分析视图', async () => {
+    const setDetailsAvailable = vi.fn()
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'waiting_user' },
+      allowedActions: ['confirm_tender_analysis'],
+      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
+    }), {
+      useSessions: selector => selector({ ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined }),
+      setDetailsAvailable,
+    })} />)
+
+    expect(screen.getByText('请检查并确认技术标分析结果')).toBeTruthy()
+    await waitFor(() => { expect(setDetailsAvailable).toHaveBeenCalledWith(null, false, true) })
+  })
+
+  it('确认数据与当前客户端版本不一致时保留确认提示而不让面板崩溃', async () => {
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'waiting_user' },
+      allowedActions: ['confirm_tender_analysis'],
+      composer: { enabled: false, reason: 'bid.tender_analysis_confirmation_required' },
+    }), {
+      getTenderAnalysisForConfirmation: async () => ({
+        project: {}, requirements: { requirements: [] }, scoring: { scoring_items: [] }, compliance: { compliance_items: [] },
+      }) as never,
+    })} />)
+
+    expect(screen.getByText('请检查并确认技术标分析结果')).toBeTruthy()
+    expect((await screen.findByRole('alert')).textContent).toContain('确认数据缺少评分项选择状态，请重启服务后重试。')
+    expect(screen.queryByLabelText('技术标分析结果')).toBeNull()
+  })
+
   it('等待态开放 Composer，阶段修改完成自动读取新 revision 并重新提示确认', async () => {
     const setComposerBlock = vi.fn()
     let draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
@@ -170,10 +201,10 @@ describe('BidStagePanel', () => {
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
     }), { uploadFiles: vi.fn(async () => []) })} />)
-    expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传人工框架' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '参考旧标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '其他资料' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传人工框架 / 半成品标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传参考旧标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '上传其他技术资料' })).toBeTruthy()
     const inputs = view.container.querySelectorAll('input[type="file"]')
     expect(inputs).toHaveLength(4)
     fireEvent.change(inputs[0]!, {
@@ -491,18 +522,23 @@ describe('BidStagePanel', () => {
             source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }],
           })),
         },
+        selected_scoring_ids: ['SCORE-1', 'SCORE-2'],
         requirements: { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '满足安全要求', normalized_requirement: '满足安全要求', mandatory: true, source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }] }] },
         compliance: { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: '合规', raw_text: '不得偏离', normalized_rule: '不得偏离', severity: 'mandatory', source_refs: [{ file_id: 'tender', chunk: 'chunk.md', line_start: 1, line_end: 2 }] }] },
       }),
     })} />)
 
     expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
-    // 默认折叠状态下，点击展开板块查看表格和编辑项
+    // 双栏工作台在左侧保留全量索引，右侧只编辑当前选中项。
     fireEvent.click(screen.getByRole('button', { name: /项目整体情况/ }))
+    fireEvent.click(screen.getByText('项目技术重点'))
+    fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
     fireEvent.click(screen.getByRole('button', { name: /技术评分要点/ }))
     expect(screen.getByDisplayValue('总体方案')).toBeTruthy()
+    expect(screen.getByText('实施方案')).toBeTruthy()
+    fireEvent.click(screen.getByText('实施方案'))
     expect(screen.getByDisplayValue('实施方案')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
+    fireEvent.click(screen.getByText('总体方案'))
     expect(screen.getByText('总体方案完整合理得 10 分')).toBeTruthy()
     fireEvent.change(screen.getAllByLabelText('评分目标理解')[0]!, { target: { value: '总体方案完整、合理且可实施' } })
     fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
@@ -718,7 +754,7 @@ describe('ui-bid browser plugin', () => {
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
   })
 
-  it('supports double clicking content cards to activate editing and saving changes in S2 review', async () => {
+  it('supports direct editing of the selected S2 review item and submits the change', async () => {
     const confirmTenderAnalysis = vi.fn(async () => {})
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'tender_analysis', status: 'waiting_user' },
@@ -741,52 +777,24 @@ describe('ui-bid browser plugin', () => {
             source_refs: [],
           }],
         },
+        selected_scoring_ids: ['SCORE-1'],
         requirements: { schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '要求原文', normalized_requirement: '初始技术要求', mandatory: true, source_refs: [] }] },
         compliance: { schema_version: 1, compliance_items: [{ id: 'COMP-1', type: '合规', raw_text: '合规原文', normalized_rule: '初始合规规则', severity: 'mandatory', source_refs: [] }] },
       }),
     })} />)
 
     expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
-    // 打开页面后默认处于折叠状态，表格内容初始不可见
-    expect(screen.queryByText('原项目名称')).toBeNull()
-
-    // 测试折叠/展开功能：点击手风琴按钮展开“项目整体情况”板块
-    const projectHeaderBtn = screen.getByRole('button', { name: /项目整体情况/ })
-    fireEvent.click(projectHeaderBtn)
-    // 展开后表格内容正常可见
-    expect(screen.getByText('原项目名称')).toBeTruthy()
-    expect(screen.getByText('项目背景条目一')).toBeTruthy()
-    expect(screen.getByText('项目背景条目二')).toBeTruthy()
-
-    // 再次点击折叠
-    fireEvent.click(projectHeaderBtn)
-    expect(screen.queryByText('原项目名称')).toBeNull()
-
-    // 再次点击展开进行后续编辑操作验证
-    fireEvent.click(projectHeaderBtn)
-    expect(screen.getByText('原项目名称')).toBeTruthy()
-
-    // 双击“项目名称”单元格激活编辑
-    const projectNameCell = screen.getByText('原项目名称').closest('[class*="cellEditable"]')!
-    fireEvent.doubleClick(projectNameCell)
-
-    // 激活后出现编辑操作按钮“完成”和“取消”
-    const completeBtns = screen.getAllByRole('button', { name: '完成' })
-    expect(completeBtns.length).toBeGreaterThan(0)
-
-    // 修改输入框内容并点击“完成”
+    expect(screen.getByDisplayValue('原项目名称')).toBeTruthy()
+    expect(screen.getByText('项目背景')).toBeTruthy()
     const input = screen.getByDisplayValue('原项目名称')
-    fireEvent.change(input, { target: { value: '双击修改后的新项目名称' } })
-    fireEvent.click(completeBtns[0]!)
-
-    // 编辑态退出，直观文本展示新内容
-    expect(screen.getByText('双击修改后的新项目名称')).toBeTruthy()
+    fireEvent.change(input, { target: { value: '直接修改后的新项目名称' } })
+    expect(screen.getByDisplayValue('直接修改后的新项目名称')).toBeTruthy()
 
     // 顶部红框确认按钮提交
     fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
     await waitFor(() => {
       expect(confirmTenderAnalysis).toHaveBeenCalledWith(expect.arrayContaining([
-        { type: 'update_project', fields: { project_name: '双击修改后的新项目名称' } },
+        { type: 'update_project', fields: { project_name: '直接修改后的新项目名称' } },
       ]))
     })
   })

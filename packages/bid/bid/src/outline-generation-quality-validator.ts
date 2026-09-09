@@ -13,6 +13,7 @@ function validateExact(kind: string, expected: readonly string[], actual: readon
 }
 
 /**
+ * Validate that the mandatory quality review covers the exact S3 inputs and output sections.
  * @param outline Generated Outline.
  * @param report S4 quality report.
  * @param requirements S2 requirements.

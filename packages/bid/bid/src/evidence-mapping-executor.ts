@@ -967,7 +967,11 @@ export async function readEvidenceMappingLog(workspace: BidWorkspace): Promise<E
   return evidenceMappingExecutionLogSchema.parse(JSON.parse(raw))
 }
 
-/** @param workspace 会话工作区。 @returns 当前映射执行的状态计数，尚未执行时返回 null。 */
+/**
+ * 读取当前证据映射执行的任务进度。
+ * @param workspace 会话工作区。
+ * @returns 当前映射执行的状态计数，尚未执行时返回 null。
+ */
 export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
   const log = await readEvidenceMappingLog(workspace)
   if (log === null) return null

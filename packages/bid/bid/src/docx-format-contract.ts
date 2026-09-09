@@ -13,6 +13,7 @@ export const DOCX_TEMPLATE_SIZE_HEADER = 'x-dsh-bid-docx-size' as const
 /** DOCX 模板上传请求读取到的配置版本。 */
 export const DOCX_TEMPLATE_REVISION_HEADER = 'x-dsh-bid-docx-revision' as const
 
+/** DOCX 格式字段可保存的标量值。 */
 export type FormatValue = string | number | boolean
 /** 字段键到实际值的配置覆盖。 */
 export type FormatValues = Record<string, FormatValue>

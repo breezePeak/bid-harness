@@ -1,26 +1,31 @@
 /** 目录业务字段差异与现有移动操作的展示落点。 */
 import { applyOutlineEdits, type OutlineArtifact, type OutlineEditOperation, type OutlineSection, type OutlineReviewContext } from '@deepseek-ai/dsh-bid/control-plane'
 
+interface OutlineChange {
+  added: boolean
+  modified: boolean
+  deleted: boolean
+  moved: boolean
+  title: boolean
+  writing: boolean
+  links: boolean
+  children: boolean
+  details: Array<{ label: string; before: string[]; after: string[] }>
+}
+
 /**
+ * Compare S3 and S4 outlines by stable section identity and business fields.
  * @param baseline S3 已确认章节。
  * @param current S4 当前草稿。
  * @param evidence S4 已有关联资料；S3 确认基线尚未进行资料映射。
  * @returns 按稳定 ID 归属的字段增减和结构变化，忽略编号顺延及关联集合排列。
  */
-export function compareOutlines(baseline: OutlineArtifact, current: OutlineArtifact, evidence?: OutlineReviewContext['evidence']) {
+export function compareOutlines(
+  baseline: OutlineArtifact, current: OutlineArtifact, evidence?: OutlineReviewContext['evidence'],
+): Map<string, OutlineChange> {
   const before = new Map(baseline.sections.map(section => [section.id, section]))
   const after = new Map(current.sections.map(section => [section.id, section]))
-  const changes = new Map<string, {
-    added: boolean
-    modified: boolean
-    deleted: boolean
-    moved: boolean
-    title: boolean
-    writing: boolean
-    links: boolean
-    children: boolean
-    details: { label: string; before: string[]; after: string[] }[]
-  }>()
+  const changes = new Map<string, OutlineChange>()
   const writingFields = { purpose: '编写目的', summary: '章节概述', must_answer: '必答内容', writing_notes: '写作说明', suggested_tables: '建议表格', suggested_figures: '建议插图', writable: '正文编写' } as const
   const linkFields = { requirement_ids: 'Requirement', scoring_ids: 'Scoring', compliance_ids: 'Compliance', scoring_response_point_ids: '评分响应点 ID', scoring_response_points: '评分响应点', framework_refs: '人工框架' } as const
   const items = (value: unknown): string[] => value === undefined ? [] : (Array.isArray(value) ? value : [value]).map(formatValue)
@@ -88,6 +93,7 @@ function formatValue(value: unknown): string {
 }
 
 /**
+ * Convert one drag target into a structurally valid outline move.
  * @param outline Formal sections only.
  * @param sourceId Dragged subtree root.
  * @param targetId Target section.

@@ -73,7 +73,13 @@ function updateLevels(sections: readonly OutlineSection[]): void {
   visit(null, 1)
 }
 
-/** Apply browser operations without permitting browser edits to business references. */
+/**
+ * Apply browser operations without permitting browser edits to business references.
+ * @param source Current canonical outline.
+ * @param operations Ordered browser edit operations.
+ * @param allocateSectionId Optional allocator for newly inserted sections.
+ * @returns Edited outline with canonical business references preserved.
+ */
 export function applyOutlineEdits(
   source: OutlineArtifact,
   operations: readonly OutlineEditOperation[],

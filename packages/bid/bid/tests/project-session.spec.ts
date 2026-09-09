@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -13,7 +13,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
   BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   checkpointBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
-  readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
+  parseTenderScoringArtifact, readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
   type BidStageExecutorPort, type BidStageValidatorPort,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -162,13 +162,37 @@ describe('Workspace 项目与独立 Session', () => {
     const a = await fresh('session-a')
     expect(await readBidProjectState(workspace)).toMatchObject({ schema_version: 1, runtime: { stage: 'file_intake', status: 'pending' } })
     await seedProjectArtifacts(workspace)
+    const scoringOriginPath = join(workspace.projectRoot, 'analysis/scoring-origin.json')
+    const scoringOrigin = JSON.parse(await readFile(scoringOriginPath, 'utf8')) as { scoring_items: Array<Record<string, unknown>> }
+    scoringOrigin.scoring_items.push({ ...scoringOrigin.scoring_items[0], id: 'SCORE-2', title: '实施方案', score: 5 })
+    await writeFile(scoringOriginPath, `${JSON.stringify(scoringOrigin)}\n`)
+    await writeFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'), JSON.stringify({ schema_version: 1, selected_scoring_ids: ['SCORE-1', 'SCORE-2'] }))
     await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'waiting_user' })
     const b = await fresh('session-b')
     expect((await ctx.bid.getTenderAnalysisForConfirmation(b.session)).project.project_name).toBe('项目 A')
+    b.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'S2 原始评分含有已排除的 SC-009。' }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+    }), { surfaceOp: 'append' })
+    await ctx.bid.setTenderScoringSelection(b.session, 'SCORE-2', false)
+    const selection = await ctx.bid.getTenderAnalysisForConfirmation((await fresh('session-selection')).session)
+    expect(selection.selected_scoring_ids).toEqual(['SCORE-1'])
+    await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({
+      schema_version: 1, points: [{ scoring_id: 'SCORE-2', order: 1, text: '过期响应点' }],
+    }))
+    await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), '{}')
     const before = (await readBidProjectState(workspace))!.revision
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
     expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'pending' } })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
+    const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
+    const confirmedScoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+    expect(unchangedOrigin.scoring_items.map(item => item.id)).toEqual(['SCORE-1', 'SCORE-2'])
+    expect(confirmedScoring.scoring_items.map(item => item.id)).toEqual(['SCORE-1'])
+    await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.stringify(b.session.deriveMessages())).not.toContain('SC-009')
+    expect(JSON.stringify(b.session.deriveMessages())).toContain('analysis/scoring.json')
     expect((await readBidProjectState(workspace))!.revision).toBeGreaterThan(before)
     expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
     const c = await fresh('session-c')

@@ -27,7 +27,7 @@ export interface SourceRange {
  */
 export function buildMappingSourceIndex(
   markdown: string, chunks: readonly DocumentChunkEntry[], outline: readonly DocumentOutlineHeading[],
-) {
+): MappingSourceIndex {
   const lines = markdown.split('\n')
   const headings: Array<SourceRange & { title: string; level: number; body_start: number; full_end: number }> = []
   const stack: typeof headings = []
@@ -49,7 +49,7 @@ export function buildMappingSourceIndex(
   // 重复路径只有两边出现次数一致时才能按出现顺序建立一一对应；否则保留完整目录但不猜位置。
   const key = (heading: { level: number; heading_path: readonly string[] }) => JSON.stringify([heading.level, heading.heading_path])
   const occurrences = new Map<string, number>()
-  const directory = outline.map((heading) => {
+  const directory = outline.map<MappingSourceIndex['directory'][number]>((heading) => {
     const identity = key(heading)
     const occurrence = occurrences.get(identity) ?? 0
     occurrences.set(identity, occurrence + 1)
@@ -65,4 +65,9 @@ export function buildMappingSourceIndex(
 }
 
 /** 只在 S4 运行内持有，不写入正式分块索引。 */
-export type MappingSourceIndex = ReturnType<typeof buildMappingSourceIndex>
+export interface MappingSourceIndex {
+  lines: string[]
+  headings: Array<SourceRange & { title: string; level: number; body_start: number; full_end: number }>
+  directory: Array<DocumentOutlineHeading & { location: '定位未确定' | '已定位'; heading_index: number | null }>
+  chunks: Array<DocumentChunkEntry & { coverage: SourceRange[] }>
+}

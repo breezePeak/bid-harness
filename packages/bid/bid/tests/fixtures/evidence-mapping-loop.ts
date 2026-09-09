@@ -221,10 +221,11 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 0 })
   const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
-  const [project, requirements, scoring, compliance] = await Promise.all([
+  const [project, requirements, scoring, selection, compliance] = await Promise.all([
     readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8').then(JSON.parse).then(parseTenderProjectArtifact),
     readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse).then(parseTenderRequirementsArtifact),
-    readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
+    readFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
+    readFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8').then(JSON.parse),
     readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
   ])
   return {
@@ -238,6 +239,7 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
     },
     requirements: requirements.requirements.map(item => ({ id: item.id, mandatory: item.mandatory })),
     scoring: scoring.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score })),
+    selected_scoring_ids: selection.selected_scoring_ids,
     compliance: compliance.compliance_items.map(item => ({ id: item.id, severity: item.severity })),
   }
 }
