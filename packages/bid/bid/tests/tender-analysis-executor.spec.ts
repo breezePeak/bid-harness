@@ -75,6 +75,8 @@ describe('tender-analysis Agent executor', () => {
     expect(initial.content[0]?.text).toContain('submit_project_fact')
     expect(initial.content[0]?.text).toContain('不得填写 file_id、source_refs、line_start 或 line_end')
     expect(initial.content[0]?.text).toContain('评分响应点')
+    expect(initial.content[0]?.text).toContain('评分大项')
+    expect(initial.content[0]?.text).toContain('不得另建评分项或填写 parent_ref')
     expect(initial.content[0]?.text).toContain('远距离第二评分区域')
     expect(repair.content[0]?.text).toContain('TENDER_ANALYSIS_FINISH_REQUIRED')
     expect(result.map(value => value.path)).toEqual(task.requiredArtifacts)
@@ -115,15 +117,21 @@ describe('tender-analysis Agent executor', () => {
       fs: { resolve: vi.fn(async (path: string) => ({ targetKey: path, displayPath: path })) },
     }
     let idle = 0
+    let reviewRevision: number | undefined
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {
-      if (++idle !== 2) return
+      idle++
       const exec = { agent, signal: new AbortController().signal } as ToolRunContext
-      await definitions.get('submit_project_fact')?.execute({
-        field: 'project_name', value: '审计平台',
-        sources: [{ file_ref: 'T1', chunk: 'chunk_0001', quote: '项目名称：审计平台。' }],
-      }, exec)
-      await definitions.get('finish_tender_analysis')?.execute({}, exec)
+      if (idle === 2) {
+        await definitions.get('submit_project_fact')?.execute({
+          field: 'project_name', value: '审计平台',
+          sources: [{ file_ref: 'T1', chunk: 'chunk_0001', quote: '项目名称：审计平台。' }],
+        }, exec)
+        const staged = await definitions.get('finish_tender_analysis')?.execute({}, exec) as { revision?: number }
+        reviewRevision = staged.revision
+      } else if (idle === 3) {
+        await definitions.get('finish_tender_analysis')?.execute({ review_revision: reviewRevision }, exec)
+      }
     })
     const agent = {
       id: 'session',
@@ -134,7 +142,10 @@ describe('tender-analysis Agent executor', () => {
 
     await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
 
-    expect(followup).toHaveBeenCalledOnce()
+    expect(followup).toHaveBeenCalledTimes(2)
+    const review = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
+    expect(review.content[0]?.text).toContain('Tender Analysis Quality Review')
+    expect(review.content[0]?.text).toContain(`"revision":${String(reviewRevision)}`)
     await expect(Promise.all(['project.json', 'requirements.json', 'scoring.json', 'compliance.json']
       .map(name => readFile(join(workspace.projectRoot, 'analysis', name), 'utf8'))))
       .resolves.toHaveLength(4)

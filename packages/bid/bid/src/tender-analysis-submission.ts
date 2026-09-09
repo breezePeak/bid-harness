@@ -146,7 +146,9 @@ const complianceSchema = z.object({
   severity: z.enum(['fatal', 'mandatory', 'warning']),
   sources: sourcesSchema,
 }).strict()
-const finishSchema = z.object({}).strict()
+const finishSchema = z.object({
+  review_revision: z.number().int().nonnegative().optional(),
+}).strict()
 
 function schema(value: z.ZodType): Record<string, unknown> {
   return z.toJSONSchema(value, { target: 'draft-7' })
@@ -250,8 +252,16 @@ export async function buildTenderLocators(workspace: BidWorkspace, manifest: Bid
 /** Execution-local S2 submission state and tool registrations. */
 export interface TenderAnalysisSubmissionRuntime {
   readonly locators: readonly TenderLocator[]
+  /** Current staged-content revision. */
+  readonly revision: number
+  /** Current collection, review, or completion phase. */
+  readonly phase: 'collecting' | 'review_required' | 'reviewing' | 'completed'
   readonly completed: boolean
   readonly lastIssues: readonly StageValidationIssue[]
+  /** Return the current Host-rendered staged values for the mandatory semantic review. */
+  reviewSnapshot(): unknown
+  /** Admit the mandatory review turn after the initial model turn has ended. */
+  beginReview(): void
   /** Remove every execution-local tool registration. */
   dispose(): void
 }
@@ -287,7 +297,8 @@ export async function attachTenderAnalysisSubmissionRuntime(
   const scoring = new Map<string, ScoringDraft>()
   const compliance = new Map<string, ComplianceDraft>()
   const disposers: Array<() => void> = []
-  let completed = false
+  let phase: TenderAnalysisSubmissionRuntime['phase'] = 'collecting'
+  let revision = 0
   let lastIssues: StageValidationIssue[] = []
 
   const sources = async (values: readonly TenderQuoteSource[]): Promise<TenderSourceRef[]> => (
@@ -295,8 +306,9 @@ export async function attachTenderAnalysisSubmissionRuntime(
   )
   const ensureAgent = (exec: ToolRunContext): void => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
-    if (completed) throw new ToolArgsError(['value: tender analysis 已完成。'])
+    if (phase === 'completed') throw new ToolArgsError(['value: tender analysis 已完成。'])
   }
+  const accepted = (): number => ++revision
   const output = {
     schema: { type: 'object' as const },
     render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
@@ -326,7 +338,12 @@ export async function attachTenderAnalysisSubmissionRuntime(
         values.set(input.value, uniqueSourceRefs([...(values.get(input.value) ?? []), ...resolved]))
         lists.set(field, values)
       }
-      return { recorded: true, field: input.field, total_values: isSingleField(input.field) ? 1 : lists.get(input.field)?.size ?? 0 }
+      return {
+        recorded: true,
+        field: input.field,
+        total_values: isSingleField(input.field) ? 1 : lists.get(input.field)?.size ?? 0,
+        revision: accepted(),
+      }
     },
   })
 
@@ -349,13 +366,13 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: await sources(input.sources),
       })
       lastIssues = []
-      return { recorded: true, requirement_ref: ref, total_requirements: requirements.size }
+      return { recorded: true, requirement_ref: ref, total_requirements: requirements.size, revision: accepted() }
     },
   })
 
   register({
     name: 'submit_scoring_item',
-    description: '新增或按 scoring_ref 覆盖一个技术评分项；parent_ref 只引用本轮已接受的评分项。',
+    description: '新增或按 scoring_ref 覆盖一个原文评分大项；parent_ref 仅兼容标记误拆的内部细则，finish 不会将其写入正式评分项。',
     parameters: schema(scoringSchema),
     async execute(args, exec) {
       ensureAgent(exec)
@@ -379,7 +396,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: await sources(input.sources),
       })
       lastIssues = []
-      return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size }
+      return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size, revision: accepted() }
     },
   })
 
@@ -402,7 +419,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: await sources(input.sources),
       })
       lastIssues = []
-      return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size }
+      return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size, revision: accepted() }
     },
   })
 
@@ -412,7 +429,10 @@ export async function attachTenderAnalysisSubmissionRuntime(
     parameters: schema(finishSchema),
     async execute(args, exec) {
       ensureAgent(exec)
-      toolArgs(args, finishSchema)
+      const input = toolArgs(args, finishSchema)
+      if (phase === 'collecting' && input.review_revision !== undefined) {
+        throw new ToolArgsError(['review_revision: 初次 finish 不接受复核版本。'])
+      }
       const projectSources = uniqueSourceRefs([
         ...[...singles.values()].flatMap(value => value.source_refs),
         ...[...lists.values()].flatMap(values => [...values.values()].flat()),
@@ -437,13 +457,21 @@ export async function attachTenderAnalysisSubmissionRuntime(
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
         requirements: [...requirements.values()],
       })
-      const scoringIds = new Map([...scoring].map(([ref, value]) => [ref, value.id]))
+      const scoringItems = new Map<string, Omit<ScoringDraft, 'parent_ref'> & { parent: null }>()
+      for (const { parent_ref: parentRef, ...item } of scoring.values()) {
+        if (parentRef !== null) continue
+        const key = JSON.stringify([
+          item.group, item.title, item.raw_text, item.criterion, item.score, item.score_range, item.must_answer,
+        ])
+        const current = scoringItems.get(key)
+        scoringItems.set(key, current === undefined ? { ...item, parent: null } : {
+          ...current,
+          source_refs: uniqueSourceRefs([...current.source_refs, ...item.source_refs]),
+        })
+      }
       const scoringArtifact = parseTenderScoringArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
-        scoring_items: [...scoring.values()].map(({ parent_ref: parentRef, ...value }) => ({
-          ...value,
-          parent: parentRef === null ? null : scoringIds.get(parentRef),
-        })),
+        scoring_items: [...scoringItems.values()],
       })
       const complianceArtifact = parseTenderComplianceArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
@@ -451,7 +479,26 @@ export async function attachTenderAnalysisSubmissionRuntime(
       })
       const artifacts = { project, requirements: requirementsArtifact, scoring: scoringArtifact, compliance: complianceArtifact }
       lastIssues = await validateTenderAnalysisDraft(workspace, manifest, artifacts)
-      if (lastIssues.length > 0) return { completed: false, issues: lastIssues }
+      if (lastIssues.length > 0) return { completed: false, issues: lastIssues, revision }
+
+      if (phase === 'collecting') {
+        phase = 'review_required'
+        lastIssues = [{
+          code: 'TENDER_ANALYSIS_REVIEW_REQUIRED',
+          message: '当前 staged 分析已通过确定性校验，必须在独立复核轮次确认同一版本后才能发布。',
+        }]
+        return { completed: false, review_required: true, revision }
+      }
+      if (phase === 'review_required') {
+        return { completed: false, review_required: true, revision }
+      }
+      if (input.review_revision !== revision) {
+        lastIssues = [{
+          code: 'TENDER_ANALYSIS_REVIEW_REVISION_MISMATCH',
+          message: `复核版本必须是当前 staged revision ${String(revision)}。`,
+        }]
+        return { completed: false, issues: lastIssues, revision }
+      }
 
       for (const [path, value] of [
         ['analysis/project.json', project],
@@ -465,13 +512,14 @@ export async function attachTenderAnalysisSubmissionRuntime(
       }
       const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifactsList())
       if (!validation.ok) throw new Error(`tender-analysis-host-artifact-invalid:${validation.issues.map(issue => issue.code).join(',')}`)
-      completed = true
+      phase = 'completed'
       return {
         completed: true,
+        revision,
         summary: {
           tender_files: locators.length,
           requirements: requirements.size,
-          scoring_items: scoring.size,
+          scoring_items: scoringItems.size,
           compliance_items: compliance.size,
         },
       }
@@ -480,8 +528,27 @@ export async function attachTenderAnalysisSubmissionRuntime(
 
   return {
     locators,
-    get completed() { return completed },
+    get revision() { return revision },
+    get phase() { return phase },
+    get completed() { return phase === 'completed' },
     get lastIssues() { return lastIssues },
+    reviewSnapshot() {
+      return {
+        revision,
+        project_facts: [
+          ...[...singles].map(([field, value]) => ({ field, ...value })),
+          ...[...lists].flatMap(([field, values]) => [...values].map(([value, source_refs]) => ({ field, value, source_refs }))),
+        ],
+        requirements: [...requirements].map(([requirement_ref, { id: _id, ...value }]) => ({ requirement_ref, ...value })),
+        scoring: [...scoring].map(([scoring_ref, { id: _id, ...value }]) => ({ scoring_ref, ...value })),
+        compliance: [...compliance].map(([compliance_ref, { id: _id, ...value }]) => ({ compliance_ref, ...value })),
+      }
+    },
+    beginReview() {
+      if (phase !== 'review_required') throw new Error('tender-analysis-review-phase-invalid')
+      phase = 'reviewing'
+      lastIssues = []
+    },
     dispose() { for (const dispose of disposers.reverse()) dispose() },
   }
 }

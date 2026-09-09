@@ -147,7 +147,7 @@ async function writeInputs(workspace: BidWorkspace) {
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
     writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline)),
-    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })),
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })),
   ])
   return {
     chunk,
@@ -434,7 +434,7 @@ function mappingFixture(
         sections: Array<{ id: string; requirement_ids: string[]; scoring_ids: string[]; scoring_response_point_ids?: string[] }>
       }
       const serialized = serializeQuality(JSON.stringify({
-        schema_version: 3,
+        schema_version: 4,
         scope: 'technical_bid',
         checked_requirement_ids: [...new Set(candidate.sections.flatMap(item => item.requirement_ids))],
         checked_scoring_ids: [...new Set(candidate.sections.flatMap(item => item.scoring_ids))],
@@ -558,7 +558,7 @@ function mappingFixture(
       throw new Error('Main Agent 不得规划 Mapping Task')
     }
     if (pendingMain.includes('quality-report.json')) {
-      await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), serializeQuality(JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })))
+      await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), serializeQuality(JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })))
     }
     if (pendingMain) (agent.session.events as unknown[]).push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '目录产物已写入。' }] } } })
     pendingMain = ''

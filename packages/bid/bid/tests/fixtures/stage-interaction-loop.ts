@@ -32,7 +32,7 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
     call('write', { file_path: join(workspace.projectRoot, 'outline/outline.json'), content: JSON.stringify(candidate) }),
     call('write', { file_path: join(workspace.projectRoot, 'outline/regeneration/change-set.json'), content: JSON.stringify(changeSet) }),
     answer('目录已重生成。'),
-    call('write', { file_path: join(workspace.projectRoot, 'outline/quality-report.candidate.json'), content: quality }),
+    call('submit_outline_quality_review', { issues: (JSON.parse(quality) as { issues: unknown[] }).issues }),
     answer('目录已复核。'),
   )
   const start = agent.session.events.length

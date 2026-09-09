@@ -212,7 +212,9 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
       sources: [source('技术方案必须提供数据安全措施。')],
     }),
     toolCall('finish-analysis', 'finish_tender_analysis', {}),
-    finalText('S2 staged submission completed.'),
+    finalText('S2 staged submission ready for mandatory review.'),
+    toolCall('finish-analysis-review', 'finish_tender_analysis', { review_revision: 4 }),
+    finalText('S2 staged submission reviewed and completed.'),
   ]
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, parentScript, [])))
   registerIntegrationTools(ctx, root, [])
@@ -264,7 +266,7 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
     writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{ id: 'SEC-SECURITY', parent_id: null, order: 1, level: 1, title: '访问控制与安全审计', purpose: '响应安全技术要求。', writable: true, must_answer: ['说明访问控制与安全审计措施。'], requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [], origin: 'generated', scoring_response_point_ids: ['RP-000001'], scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明访问控制' }], suggested_tables: [], suggested_figures: [], writing_notes: [] }] })),
-    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })),
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-SECURITY'], issues: [] })),
   ])
   return { chunk, requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
 }
@@ -326,7 +328,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
-  const quality = JSON.stringify({ schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [], blocking_issues: [] })
+  const quality = JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [], blocking_issues: [] })
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
   const tender = manifest.files.find(file => file.role === 'tender')!
@@ -558,7 +560,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
       must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
     }]) }),
     finalText('已提交审计留存与追溯的局部修复。'),
-    toolCall('quality-review', 'write', { file_path: prefix + '/outline/quality-report.candidate.json', content: JSON.stringify({ schema_version: 3, scope: 'technical_bid', issues: [] }) }),
+    toolCall('quality-review', 'submit_outline_quality_review', { issues: [] }),
     finalText('逐项复核章节归属和写作指导已完成。'),
   )
   maxRepairAttempts = 3

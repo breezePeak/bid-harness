@@ -66,12 +66,43 @@ export function renderTenderAnalysisTask(
     '使用 grep 定位候选 chunk，再用 read 阅读原文；语义被截断时读取 chunks/index.json 后继续读相邻 chunk。不得一次读取完整 document.md。',
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
     '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
-    '每个可独立响应的原子技术要求调用 submit_requirement。每个技术评分项调用 submit_scoring_item，只保留完整技术评分原文与规范化 criterion，不拆评分响应点；子项使用工具返回的 scoring_ref 作为 parent_ref。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
+    '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 raw_text 和 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项或填写 parent_ref；重复看到同一评分区块时使用 replace_ref。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
     '引用只提交 sources=[{file_ref,chunk,quote}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id，quote 必须是该 chunk 正文中唯一出现的真实原文。跨 chunk 内容提交多个 source。不得填写 file_id、source_refs、line_start 或 line_end。',
     '不得填写 schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。raw_text 可以基于一个或多个 quote 忠实提取、压缩、去冗余和原子化，但不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
     '工具返回 INVALID_ARGS 或引用错误时只修正当前条目。已记录条目需要修改时，用其 runtime ref 作为 replace_ref；覆盖不会改变正式 ID。',
-    '所有区域分析完成后调用 finish_tender_analysis。finish 返回 completed=false 时，只按 issues 补充或覆盖对应记录后再次调用；返回 completed=true 后停止。普通文字回复不会完成 S2。',
+    '所有区域分析完成后调用 finish_tender_analysis({})。确定性校验通过后，Host 会在当前轮结束后强制发起一次全量语义复核；初次 finish 不会写入正式 Artifact。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
+  ].join('\n')
+}
+
+/**
+ * Render the mandatory same-Agent review over the complete current S2 staged revision.
+ * @param agent Live Agent that owns the staged runtime.
+ * @param workspace Workspace containing the tender corpus.
+ * @param task Orchestrator task for the tender-analysis stage.
+ * @param snapshot Host-rendered staged records and their current revision.
+ * @param locators Host-issued short references for successful tender files.
+ * @returns Dynamic full-review assignment for the Agent follow-up.
+ */
+export function renderTenderAnalysisQualityReviewTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: BidStageTask,
+  snapshot: unknown,
+  locators: readonly TenderLocator[],
+): string {
+  if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
+  const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
+  return [
+    '当前阶段：tender_analysis / Tender Analysis Quality Review',
+    `Bid Session：${agent.id}`,
+    `Project Workspace：${workspacePath}`,
+    '这是独立的强制复核轮次。重新读取每项 staged 记录对应的 tender chunk，逐项检查 Project、Requirement、Scoring 和 Compliance 的语义、记录边界及来源归属。特别检查相邻表格行之间是否发生 title、raw_text、criterion、分值或来源串配。',
+    '发现问题时使用对应 runtime ref 和 replace_ref 原地修正；不得按标题、分值、关键词或行位置推测并批量改写。没有问题时保持 staged 内容不变。',
+    'Tender locators：',
+    ...renderLocators(locators),
+    `当前 staged snapshot：${JSON.stringify(snapshot)}`,
+    '完成全部复核后调用 finish_tender_analysis，并将 review_revision 设置为当前最新 revision。任一提交工具返回的新 revision 都会使旧版本失效。只有 finish 返回 completed=true 才能停止。',
   ].join('\n')
 }
 
@@ -151,8 +182,20 @@ export async function executeTenderAnalysis(
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     }))
     await waitForModelStageIdle(agent, options.signal)
-    for (let attempt = 1; !runtime.completed && attempt <= options.maxRepairAttempts; attempt++) {
+    let attempts = 0
+    while (!runtime.completed) {
       options.signal?.throwIfAborted()
+      if (runtime.phase === 'review_required') {
+        const snapshot = runtime.reviewSnapshot()
+        runtime.beginReview()
+        agent.followup(createUserMessage({
+          content: [{ type: 'text', text: renderTenderAnalysisQualityReviewTask(agent, workspace, task, snapshot, runtime.locators) }],
+          source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+        }))
+        await waitForModelStageIdle(agent, options.signal)
+        continue
+      }
+      if (attempts++ >= options.maxRepairAttempts) break
       const issues = runtime.lastIssues.length > 0 ? runtime.lastIssues : [{
         code: 'TENDER_ANALYSIS_FINISH_REQUIRED',
         message: '必须调用 finish_tender_analysis 并处理其返回问题；普通回复不能完成 S2。',
@@ -163,6 +206,7 @@ export async function executeTenderAnalysis(
       }))
       await waitForModelStageIdle(agent, options.signal)
     }
+    await waitForModelStageIdle(agent, options.signal)
     return artifacts
   } finally {
     liftGuard?.()

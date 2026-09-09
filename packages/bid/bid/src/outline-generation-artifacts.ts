@@ -4,7 +4,7 @@ import { z } from 'zod'
 export const OUTLINE_GENERATION_SCHEMA_VERSION = 3 as const
 
 /** Version of the internal Blueprint Quality Review record. */
-export const OUTLINE_QUALITY_REPORT_SCHEMA_VERSION = 3 as const
+export const OUTLINE_QUALITY_REPORT_SCHEMA_VERSION = 4 as const
 
 /** Stable reference from one generated Section to an imported framework heading. */
 export const outlineFrameworkRefSchema = z.object({
@@ -60,7 +60,14 @@ export const outlineCandidateSchema = outlineArtifactSchema.extend({
   }).strict()).min(1),
 })
 
-/** Strict record of the mandatory quality review performed after S4 drafting. */
+/** Non-blocking semantic finding retained by the S3 Blueprint Quality Review. */
+export const outlineQualityIssueSchema = z.object({
+  code: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/u),
+  severity: z.literal('advisory'),
+  message: z.string().trim().min(1),
+}).strict()
+
+/** Strict record of the mandatory quality review performed after S3 drafting. */
 export const outlineQualityReportSchema = z.object({
   schema_version: z.literal(OUTLINE_QUALITY_REPORT_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
@@ -68,7 +75,7 @@ export const outlineQualityReportSchema = z.object({
   checked_scoring_ids: z.array(z.string().min(1)),
   checked_scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
   reviewed_section_ids: z.array(z.string().min(1)),
-  issues: z.array(z.string().min(1)),
+  issues: z.array(outlineQualityIssueSchema),
 }).strict()
 
 /** One independently writable or structural node in a technical bid outline. */
@@ -77,6 +84,8 @@ export type OutlineSection = z.infer<typeof outlineSectionSchema>
 export type OutlineFrameworkRef = z.infer<typeof outlineFrameworkRefSchema>
 /** Parsed technical-writing blueprint. */
 export type OutlineArtifact = z.infer<typeof outlineArtifactSchema>
+/** One non-blocking semantic finding from Blueprint Quality Review. */
+export type OutlineQualityIssue = z.infer<typeof outlineQualityIssueSchema>
 /** Parsed internal Blueprint Quality Review record. */
 export type OutlineQualityReport = z.infer<typeof outlineQualityReportSchema>
 
@@ -85,7 +94,7 @@ export function parseOutlineArtifact(value: unknown): OutlineArtifact {
   return outlineArtifactSchema.parse(value)
 }
 
-/** Parse the internal S4 quality-review record through its strict schema.
+/** Parse the internal S3 quality-review record through its strict schema.
  * @param value Untrusted JSON value read from `outline/quality-report.json`.
  * @returns Validated quality-review record.
  */

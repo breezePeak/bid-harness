@@ -93,6 +93,13 @@ async function submitComplete(value: Fixture): Promise<void> {
   })
 }
 
+async function finishReviewed(value: Fixture): Promise<unknown> {
+  const staged = await value.call('finish_tender_analysis', {}) as { review_required?: boolean; revision?: number }
+  expect(staged).toMatchObject({ completed: false, review_required: true, revision: value.runtime.revision })
+  value.runtime.beginReview()
+  return value.call('finish_tender_analysis', { review_revision: value.runtime.revision })
+}
+
 describe('tender-analysis staged submission runtime', () => {
   it('builds T1/T2 from successful tenders only and resolves a unique quote to exact lines', async () => {
     const value = await fixture()
@@ -144,7 +151,7 @@ describe('tender-analysis staged submission runtime', () => {
       parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
-    const result = await value.call('finish_tender_analysis', {})
+    const result = await finishReviewed(value)
     expect(result).toMatchObject({ completed: true })
     const project = parseTenderProjectArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/project.json'), 'utf8')))
     expect(project).toMatchObject({
@@ -183,14 +190,14 @@ describe('tender-analysis staged submission runtime', () => {
       parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
-    await value.call('finish_tender_analysis', {})
+    await finishReviewed(value)
     const artifact = parseTenderRequirementsArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
     expect(artifact.requirements).toEqual([expect.objectContaining({ id: 'REQ-001', normalized_requirement: '修正后的归纳' })])
     expect(artifact.requirements[0]?.source_refs[0]).not.toHaveProperty('file_ref')
     value.runtime.dispose()
   })
 
-  it('binds child scoring parent_ref to stable SC IDs and rejects an unknown parent', async () => {
+  it('keeps original scoring groups, drops nested details, and deduplicates identical groups structurally', async () => {
     const value = await fixture()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
@@ -203,18 +210,30 @@ describe('tender-analysis staged submission runtime', () => {
     })).rejects.toThrow('未知 Scoring 引用')
     const parent = await value.call('submit_scoring_item', {
       parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
-      criterion: '总项', score: null, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+      criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
+      must_answer: true, sources: [source(SCORING_QUOTE)],
     }) as { scoring_ref: string }
     await value.call('submit_scoring_item', {
       parent_ref: parent.scoring_ref, group: '技术方案', title: '完整性', raw_text: SCORING_QUOTE,
       criterion: '按完整性评分', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
-    await value.call('finish_tender_analysis', {})
+    await value.call('submit_scoring_item', {
+      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
+      must_answer: true, sources: [source('# 技术评分', 'chunk_0003'), source(SCORING_QUOTE)],
+    })
+    await value.call('submit_scoring_item', {
+      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      criterion: '另一独立评分区块的规则。', score: 5, score_range: null,
+      must_answer: true, sources: [source(SCORING_QUOTE)],
+    })
+    await finishReviewed(value)
     const artifact = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
-    expect(artifact.scoring_items.map(item => ({ id: item.id, parent: item.parent }))).toEqual([
-      { id: 'SC-001', parent: null },
-      { id: 'SC-002', parent: 'SC-001' },
+    expect(artifact.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score }))).toEqual([
+      { id: 'SC-001', parent: null, score: 10 },
+      { id: 'SC-004', parent: null, score: 5 },
     ])
+    expect(artifact.scoring_items[0]?.source_refs).toHaveLength(2)
     value.runtime.dispose()
   })
 
@@ -241,7 +260,7 @@ describe('tender-analysis staged submission runtime', () => {
       parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
-    await value.call('finish_tender_analysis', {})
+    await finishReviewed(value)
     const artifact = parseTenderComplianceArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/compliance.json'), 'utf8')))
     expect(artifact.compliance_items).toEqual([expect.objectContaining({ id: 'COM-001', severity: 'fatal' })])
     value.runtime.dispose()
@@ -266,7 +285,7 @@ describe('tender-analysis staged submission runtime', () => {
       parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
-    await value.call('finish_tender_analysis', {})
+    await finishReviewed(value)
     const artifact = parseTenderRequirementsArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
     expect(artifact.requirements[0]?.source_refs).toHaveLength(2)
     expect(new Set(artifact.requirements[0]?.source_refs.map(ref => ref.file_id))).toEqual(
@@ -288,12 +307,55 @@ describe('tender-analysis staged submission runtime', () => {
     scoringMissing.runtime.dispose()
   })
 
+  it('requires a same-runtime full review of the latest staged revision before publishing', async () => {
+    const value = await fixture()
+    await submitComplete(value)
+    const initialRevision = value.runtime.revision
+
+    await expect(value.call('finish_tender_analysis', {})).resolves.toEqual({
+      completed: false,
+      review_required: true,
+      revision: initialRevision,
+    })
+    expect(value.runtime.phase).toBe('review_required')
+    await expect(readFile(join(value.workspace.projectRoot, 'analysis/project.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(value.call('finish_tender_analysis', {})).resolves.toMatchObject({
+      completed: false,
+      review_required: true,
+      revision: initialRevision,
+    })
+
+    const snapshot = value.runtime.reviewSnapshot() as { revision: number; scoring: Array<{ scoring_ref: string; title: string }> }
+    expect(snapshot).toMatchObject({ revision: initialRevision })
+    expect(snapshot.scoring).toEqual([expect.objectContaining({ scoring_ref: 'S1', title: '总体技术方案' })])
+    value.runtime.beginReview()
+    const corrected = await value.call('submit_scoring_item', {
+      replace_ref: 'S1', parent_ref: null, group: '技术方案', title: '总体技术方案（复核修正）', raw_text: SCORING_QUOTE,
+      criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
+      must_answer: true, sources: [source(SCORING_QUOTE)],
+    }) as { revision: number }
+    expect(corrected.revision).toBe(initialRevision + 1)
+    await expect(value.call('finish_tender_analysis', { review_revision: initialRevision })).resolves.toMatchObject({
+      completed: false,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_REVIEW_REVISION_MISMATCH' })],
+      revision: corrected.revision,
+    })
+    await expect(value.call('finish_tender_analysis', { review_revision: corrected.revision })).resolves.toMatchObject({
+      completed: true,
+      revision: corrected.revision,
+    })
+    const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
+    expect(scoring.scoring_items[0]?.title).toBe('总体技术方案（复核修正）')
+    value.runtime.dispose()
+  })
+
   it('writes four parser-compatible Artifacts that pass the final Validator and remain S3-readable', async () => {
     const value = await fixture()
     await submitComplete(value)
-    const result = await value.call('finish_tender_analysis', {})
+    const result = await finishReviewed(value)
     expect(result).toEqual({
       completed: true,
+      revision: value.runtime.revision,
       summary: { tender_files: 2, requirements: 1, scoring_items: 1, compliance_items: 1 },
     })
     const [project, requirements, scoring, compliance] = await Promise.all([

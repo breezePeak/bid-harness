@@ -47,7 +47,7 @@ async function fixture() {
     'analysis/web-evidence-sources.json': { schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION, stage: 'evidence_mapping', sources: [] },
     'outline/outline.json': outline,
     'outline/initial-confirmed-outline.json': outline,
-    'outline/quality-report.json': { schema_version: 3, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [],
+    'outline/quality-report.json': { schema_version: 4, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [],
       checked_scoring_response_point_ids: [], reviewed_section_ids: outline.sections.map(section => section.id), issues: [] },
   }
   await Promise.all(['analysis', 'outline'].map(path => mkdir(join(workspace.projectRoot, path), { recursive: true })))

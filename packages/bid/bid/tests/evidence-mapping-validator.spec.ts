@@ -95,7 +95,7 @@ async function fixture(options: { onlyTender?: boolean } = {}) {
       }],
     })),
     writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
-      schema_version: 3,
+      schema_version: 4,
       scope: 'technical_bid',
       checked_requirement_ids: ['R-1'],
       checked_scoring_ids: ['S-1'],

@@ -24,6 +24,7 @@ it('S2 通过真实 staged 工具生成并校验四个正式 Artifact', async ()
         "submit_scoring_item",
         "submit_compliance_item",
         "finish_tender_analysis",
+        "finish_tender_analysis",
       ],
       "compliance": [
         {
