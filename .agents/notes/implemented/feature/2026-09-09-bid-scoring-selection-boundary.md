@@ -10,7 +10,7 @@ S2 的完整评分抽取同时承担事实保存和后续响应范围选择。�
 
 S2 Host 发布时把完整评分事实写入 `analysis/scoring-origin.json`，并创建 `analysis/tender-analysis-selection.json`，默认按原始顺序选中全部评分 ID。审核页始终展示原始评分集合，将 `must_answer` 的规范化编辑与“是否纳入后续响应”分别呈现；每次选择变更立即由 Host 校验 ID 并原子持久化，不能修改评分事实。
 
-用户确认 S2 时，Host 以原始评分、当前选择和受控规范化编辑生成 `analysis/scoring.json`。正式文件只保留选中项，保持稳定 ID 和原始顺序；未筛选时与原始评分集合一致。确认通过后，Host 将 S2 的模型可见上下文替换为仅声明正式评分 ID 的交接消息，避免同一 Main Agent 从旧原始评分中恢复已排除项。S3、S4、S5 只读取 `scoring.json`，不判断选择记录，也不回退读取原始评分。S2 Validator 继续验证完整的 `scoring-origin.json`，而正式 `scoring.json` 由严格 Schema 解析和筛选投影产生。
+用户确认 S2 时，Host 以原始评分、当前选择和受控规范化编辑生成 `analysis/scoring.json`。正式文件只保留选中项，保持稳定 ID 和原始顺序；未筛选时与原始评分集合一致。确认通过后，[统一阶段上下文边界](../architecture/2026-09-09-bid-stage-context-boundary.md)将 S2 模型可见上下文替换为由 S3 Stage Policy 生成的正式 Artifact 路径与摘要，避免同一 Main Agent 从旧原始评分中恢复已排除项。S3、S4、S5 只读取 `scoring.json`，不判断选择记录，也不回退读取原始评分。S2 Validator 继续验证完整的 `scoring-origin.json`，而正式 `scoring.json` 由严格 Schema 解析和筛选投影产生。
 
 重新执行或重置 S2 时清除旧原始评分、选择、正式评分和全部下游 Artifact；再次发布重新建立默认全选。确认失败不保留候选 `scoring.json`，因此下游不会读取未经确认或与当前选择不一致的评分集合。
 

@@ -20,6 +20,7 @@ import {
   type BidStageExecutorPort, type BidStageValidatorPort,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 
 interface HostExecution {
@@ -56,7 +57,7 @@ async function fixture() {
   const validator: BidStageValidatorPort = { validate: async () => ({ ok: true, issues: [] }) }
   host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, executor, {
     validate: (stage, artifacts) => stage === 'tender_analysis' ? validateTenderAnalysis(current, stage, artifacts) : validator.validate(stage, artifacts),
-  }, signal)
+  }, signal, (fromStage, toStage) => prepareBidStageContextTransition(agent.session, current, fromStage, toStage))
   const fresh = async (id: string, cwd = root, waitForIdle = true) => {
     const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId(id), agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd, agentPreset: 'bid' } })
     await vi.waitFor(() => {
@@ -161,7 +162,7 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('新项目初始化 S1，S2 在新 Session 中读取、编辑并继续确认', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+    const { ctx, workspace, fresh, executor } = await fixture()
     const a = await fresh('session-a')
     expect(await readBidProjectState(workspace)).toMatchObject({ schema_version: 1, runtime: { stage: 'file_intake', status: 'pending' } })
     await seedProjectArtifacts(workspace)
@@ -185,8 +186,15 @@ describe('Workspace 项目与独立 Session', () => {
     }))
     await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), '{}')
     const before = (await readBidProjectState(workspace))!.revision
+    const s3Contexts: string[] = []
+    executor.canExecute = stage => stage === 'outline_generation'
+    executor.execute = vi.fn(async () => {
+      s3Contexts.push(JSON.stringify(b.session.deriveMessages()))
+      if (s3Contexts.length === 1) throw new Error('模拟 S3 模型失败')
+      return []
+    })
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
-    expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'pending' } })
+    expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'failed', failureReason: 'executor failed: Error: 模拟 S3 模型失败' } })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
     const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
     const confirmedScoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
@@ -196,10 +204,15 @@ describe('Workspace 项目与独立 Session', () => {
     await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(JSON.stringify(b.session.deriveMessages())).not.toContain('SC-009')
     expect(JSON.stringify(b.session.deriveMessages())).toContain('analysis/scoring.json')
+    expect(JSON.stringify(b.session.events)).toContain('SC-009')
+    expect(await ctx.bid.retryStage(b.session)).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
+    expect(s3Contexts).toHaveLength(2)
+    expect(s3Contexts.every(context => !context.includes('SC-009'))).toBe(true)
+    expect(s3Contexts.every(context => context.includes('analysis/scoring.json'))).toBe(true)
     expect((await readBidProjectState(workspace))!.revision).toBeGreaterThan(before)
-    expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user' })
     const c = await fresh('session-c')
-    expect(runtime(c.session)).toEqual({ stage: 'outline_generation', status: 'pending' })
+    expect(runtime(c.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user' })
     expect((await ctx.bid.getDetails(c.session)).tender?.project.project_name).toBe('项目 B')
   })
 

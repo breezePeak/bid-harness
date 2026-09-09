@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import {
   BidHostRuntime, BidOrchestrator, BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog,
@@ -12,6 +13,7 @@ import {
   type Config, type OutlineArtifact, type OutlineDraftView,
 } from '@deepseek-ai/dsh-bid'
 import { executeEvidenceMappingFinalCheck } from '../src/evidence-mapping-executor.ts'
+import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 
 vi.mock('../src/evidence-mapping-executor.ts', async importOriginal => ({
   ...await importOriginal<typeof import('../src/evidence-mapping-executor.ts')>(),
@@ -37,6 +39,10 @@ async function fixture() {
   }
   const scoring = { schema_version: 1 as const, scoring_items: [] }
   const artifacts: Record<string, unknown> = {
+    'manifest.json': { version: 4, files: [] },
+    'analysis/project.json': { schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+      project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
+      implementation_constraints: [], key_technical_points: [], source_refs: [], analyzed_tender_files: [] },
     'analysis/requirements.json': { schema_version: 1, requirements: [] },
     'analysis/scoring.json': scoring,
     'analysis/scoring-response-points.json': createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [] }),
@@ -67,7 +73,8 @@ async function fixture() {
       wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [] } satisfies Config,
     inFlight: new Map(),
     automaticOrchestrator: () => new BidOrchestrator(session, { canExecute: () => false, execute: async () => [] },
-      { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }),
+      { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
+      (fromStage, toStage) => prepareBidStageContextTransition(session, workspace, fromStage, toStage)),
   }) as unknown as BidHostRuntime
   return { ctx, host, session, workspace, outline, read: (path: string) => readFile(join(workspace.projectRoot, path), 'utf8') }
 }
@@ -94,6 +101,10 @@ describe('S4 Draft 最终确认', () => {
   it('连续编辑保留研究基线与 CAS，确认时只复核语义变化的叶子并发布更新后的 Brief', async () => {
     const f = await fixture()
     try {
+      f.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'S4 旧资料与错误 Section-Z，正式版本已删除。' }],
+        source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
       const original = await f.read('outline/outline.json')
       const initial = await getOrCreateOutlineDraft(f.workspace)
       const first = await f.host.applyOutlineDraftOperations(f.session, { ...identity(initial),
@@ -112,7 +123,15 @@ describe('S4 Draft 最终确认', () => {
           ? { ...section, writing_notes: ['由验收负责人逐项核对并记录差异'] } : section) },
         evidence: parseEvidenceMapArtifact(JSON.parse(await f.read('analysis/evidence-map.json'))),
       }))
-      await expect(f.host.confirmOutline(f.session, identity(second.value))).resolves.toMatchObject({ ok: true })
+      const confirmedResult = await f.host.confirmOutline(f.session, identity(second.value))
+      if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
+      expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
+      const s5Context = JSON.stringify(f.session.deriveMessages())
+      expect(s5Context).not.toContain('S4 旧资料与错误 Section-Z')
+      for (const path of ['outline/confirmed-outline.json', 'analysis/evidence-map.json', 'analysis/scoring.json',
+        'analysis/scoring-response-points.json', 'analysis/requirements.json', 'analysis/compliance.json']) {
+        expect(s5Context).toContain(path)
+      }
       expect(executeEvidenceMappingFinalCheck).toHaveBeenCalledOnce()
       expect(vi.mocked(executeEvidenceMappingFinalCheck).mock.calls[0]?.[3]).toEqual(['SEC-1'])
       const confirmed = parseOutlineArtifact(JSON.parse(await f.read('outline/confirmed-outline.json')))
@@ -131,7 +150,8 @@ describe('S4 Draft 最终确认', () => {
         { type: 'move_section', section_id: 'SEC-2', parent_id: null, order: 1 },
       ] })
       if (!edited.ok) throw new Error(edited.error.message)
-      await expect(f.host.confirmOutline(f.session, identity(edited.value))).resolves.toMatchObject({ ok: true })
+      const confirmedResult = await f.host.confirmOutline(f.session, identity(edited.value))
+      if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
       expect(executeEvidenceMappingFinalCheck).not.toHaveBeenCalled()
     } finally { await f.ctx.fiber.dispose() }
   })

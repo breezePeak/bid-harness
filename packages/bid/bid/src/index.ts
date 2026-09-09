@@ -18,7 +18,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -46,6 +45,7 @@ import { executeOutlineGeneration, generateScopedOutlineOperations } from './out
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { inspectBidStage, installStageInteractionTools, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
+import { prepareBidStageContextTransition, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
@@ -170,6 +170,7 @@ export {
 export { BidOrchestrator, BidOrchestratorError }
 export type {
   BidOrchestratorErrorCode,
+  BidStageContextTransition,
   BidStageExecutorPort,
   BidStageValidatorPort,
 } from './orchestrator.ts'
@@ -657,39 +658,6 @@ function projectKey(session: Pick<Session, 'header'>): BidProjectKey {
   return (process.platform === 'win32' ? path.toLowerCase() : path) as BidProjectKey
 }
 
-/**
- * Replace model-visible messages produced by one Bid stage and every later stage.
- * The durable log remains intact for replay and audit.
- * @param session Live Bid session whose model-visible history is reset.
- * @param stage First stage whose context is discarded.
- * @param notice Model-visible replacement for the discarded context.
- */
-function clearStageContext(
-  session: Session,
-  stage: BidStage,
-  notice = `阶段 ${stage} 已重置。此前该阶段及后续阶段的上下文已清除；仅依据当前工作区文件和后续阶段指令重新执行。`,
-): void {
-  const stageIndex = BID_STAGES.indexOf(stage)
-  const predecessor = stageIndex === 0 ? undefined : BID_STAGES[stageIndex - 1]
-  const completedPredecessor = predecessor === undefined ? undefined : session.events.findLast(event => (
-    event.type === 'bid.stage.completed' && event.data.stage === predecessor
-  ))
-  const nodes = session.surface.nodes
-  const start = nodes.findIndex(seq => seq > (completedPredecessor?.seq ?? -1))
-  if (start < 0) return
-  const shadowed = nodes.slice(start)
-  const first = shadowed[0]
-  const last = shadowed.at(-1)
-  if (first === undefined || last === undefined) return
-  session.append('user/message', createUserMessage({
-    content: [{ type: 'text', text: notice }],
-    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: `已清除 ${stage} 及后续阶段上下文。` },
-  }), {
-    surfaceOp: { op: 'replace', start: first, end: last },
-    sourceEventSeqs: [...shadowed],
-  })
-}
-
 /** Host-owned Bid RPC runtime that serializes project mutations and publishes durable stage state. */
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
@@ -994,6 +962,7 @@ export class BidHostRuntime extends TypertRemoteService {
                 : validateOutlineGeneration(workspace, stage, artifacts),
       },
       signal,
+      (fromStage, toStage) => prepareBidStageContextTransition(agent.session, workspace, fromStage, toStage),
     )
   }
 
@@ -1072,7 +1041,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const paths = resetPaths[stage].map(path => within(workspace.projectRoot, path))
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       await Promise.all(paths.map(path => rm(path, { recursive: true, force: true })))
-      clearStageContext(session, stage)
+      resetBidStageContext(session, stage)
       session.append('bid.stage.reset', { stage, status: stage === 'file_intake' ? 'pending' : 'waiting_start' })
       await this.ctx.sessions.flush(session)
       return session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
@@ -1991,11 +1960,6 @@ export class BidHostRuntime extends TypertRemoteService {
         await restore()
         return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: validation.issues } }
       }
-      clearStageContext(
-        session,
-        'tender_analysis',
-        `招标分析已确认。后续目录生成只能读取 analysis/scoring.json 中的正式评分：${JSON.stringify(createConfirmedTenderScoring(candidate).scoring_items.map(item => item.id))}。此前 S2 的原始评分、选择和对话均不得作为 S3 输入。`,
-      )
       const confirmation = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).confirmValidatedStage('tender_analysis', artifacts)
       if (!confirmation.ok) {
         await restore()

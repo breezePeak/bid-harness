@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`BidHostRuntime.resetStage()` 在删除目标阶段及后续 Artifact 后清空 Agent inbox，并以一次模型可见替换移除目标阶段及后续阶段的当前消息。重置标记保留在模型上下文中，要求新的执行只依据当前 Workspace 文件和新的阶段指令。
+`BidHostRuntime.resetStage()` 在删除目标阶段及后续 Artifact 后清空 Agent inbox，并通过[统一阶段上下文边界](../architecture/2026-09-09-bid-stage-context-boundary.md)的替换原语移除目标阶段及后续阶段的当前消息。重置标记保留在模型上下文中，要求新的执行只依据当前 Workspace 文件和新的阶段指令。
 
 持久 Session 日志保持追加式；被替换的原始消息仍可用于审计和回放，但不会进入后续模型请求。
 

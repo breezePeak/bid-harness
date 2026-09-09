@@ -46,6 +46,9 @@ export interface BidStageValidatorPort {
   validate(stage: BidStage, artifacts: StageArtifact[]): Promise<StageValidationResult>
 }
 
+/** Prepare the model-context commit applied after a successful stage completion event. */
+export type BidStageContextTransition = (fromStage: BidStage, toStage: BidStage) => Promise<() => void>
+
 /** Result of validating and recording one explicit user-confirmed stage. */
 export type BidStageConfirmationResult =
   | { readonly ok: true; readonly state: BidRuntimeState }
@@ -88,12 +91,15 @@ export class BidOrchestrator {
    * @param session - session whose log owns all Bid state.
    * @param executor - program and agent execution adapter.
    * @param validator - artifact validation adapter.
+   * @param signal - optional operation cancellation.
+   * @param prepareContextTransition - optional Host callback that prepares the successor handoff before completion commits.
    */
   constructor(
     private readonly session: Session,
     private readonly executor: BidStageExecutorPort,
     private readonly validator: BidStageValidatorPort,
     private readonly signal?: AbortSignal,
+    private readonly prepareContextTransition?: BidStageContextTransition,
   ) {}
 
   /** Current state replayed from the session log. */
@@ -259,8 +265,10 @@ export class BidOrchestrator {
         validation = { ok: false, issues: [{ code: 'VALIDATOR_FAILED', message: String(error) }] }
       }
       if (!validation.ok) return { ok: false, validation }
+      const commitContext = await this.prepareStageContextTransition(stage)
       this.session.append('bid.user_confirmation.received', { stage, confirmed: true })
       this.session.append('bid.stage.completed', { stage, status: 'completed', artifacts })
+      commitContext()
       return { ok: true, state: await this.driveLoop() }
     })
   }
@@ -366,12 +374,28 @@ export class BidOrchestrator {
       this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
       return 'waiting_user'
     }
+    let commitContext: () => void
+    try {
+      commitContext = await this.prepareStageContextTransition(stage)
+    } catch (error: unknown) {
+      this.fail(stage, `stage context transition failed: ${String(error)}`)
+      return 'failed'
+    }
+    if (this.isAborted()) return 'aborted'
     this.session.append('bid.stage.completed', {
       stage,
       status: 'completed',
       artifacts,
     })
+    commitContext()
     return 'completed'
+  }
+
+  /** Prepare the successor handoff before committing completion; the returned mutation runs immediately after it. */
+  private async prepareStageContextTransition(stage: BidStage): Promise<() => void> {
+    const nextStage = getBidStagePolicy(stage).nextStage
+    if (nextStage === null || this.prepareContextTransition === undefined) return () => {}
+    return this.prepareContextTransition(stage, nextStage)
   }
 
   /** Validate artifacts, converting rejection and validator failures into the stage log. */
