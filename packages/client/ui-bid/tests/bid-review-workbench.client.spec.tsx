@@ -8,12 +8,13 @@ import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 afterEach(cleanup)
 
 const workbench = {
-  schema_version: 1 as const,
+  schema_version: 2 as const,
   outline: [
     { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
   ],
   summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 } },
+  global_compliance: { status: 'not_required' as const, reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
 }
 
 const chapter = {
@@ -135,6 +136,23 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByText('参考资料')).toBeTruthy()
     expect(screen.getByText('历史同类实施方案')).toBeTruthy()
     expect(screen.getByText('Evidence：available')).toBeTruthy()
+  })
+
+  it('分开显示文档级问题和项目递交待办，不改变章节需关注计数', async () => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench,
+      global_compliance: {
+        status: 'needs_attention' as const, reviewed_count: 2, total_count: 2,
+        document_issues: [{ compliance_id: 'GLOBAL-CONTENT', status: 'fail' as const, detail: '缺少整份文档必须具备的证明材料。', affected_section_ids: ['SEC-1'] }],
+        delivery_todos: [{ compliance_id: 'GLOBAL-UPLOAD', status: 'pending' as const, detail: '尚无实际上传执行证据。', affected_section_ids: [] }],
+      },
+    }) })} />)
+    expect(await screen.findByRole('heading', { name: '文档级合规核验' })).toBeTruthy()
+    expect(screen.getByText('文档级问题')).toBeTruthy()
+    expect(screen.getByText('缺少整份文档必须具备的证明材料。')).toBeTruthy()
+    expect(screen.getByText('项目／交付待办')).toBeTruthy()
+    expect(screen.getByText('尚无实际上传执行证据。')).toBeTruthy()
+    expect(screen.getByText('需关注 0')).toBeTruthy()
   })
 
   it('选择需修复章节时默认展示已保存审核问题的详情、严重程度和建议', async () => {

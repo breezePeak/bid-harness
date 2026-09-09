@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 2 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 3 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -23,6 +23,20 @@ const complianceCoverageSchema = coverageSchema.extend({
   compliance_id: z.string().min(1),
 }).strict()
 
+const globalComplianceCheckSchema = z.object({
+  compliance_id: z.string().min(1),
+  item: z.string().min(1),
+  status: z.enum(['conforms', 'violates', 'not_applicable']),
+  evidence_quotes: z.array(z.string().trim().min(1)),
+  issue: z.string().trim().min(1).nullable(),
+}).strict()
+
+const assignmentConflictSchema = z.object({
+  task: z.string().trim().min(1),
+  basis: z.string().trim().min(1),
+  related_section_ids: z.array(z.string().min(1)),
+}).strict()
+
 const claimCheckSchema = z.object({
   claim_quote: z.string().trim().min(1),
   kind: z.enum(['project_fact', 'technical_fact', 'commitment']),
@@ -35,11 +49,13 @@ const claimCheckSchema = z.object({
 export const chapterReviewSchema = z.object({
   schema_version: z.literal(CHAPTER_REVIEW_SCHEMA_VERSION),
   section_id: z.string().min(1),
-  verdict: z.enum(['pass', 'repair']),
+  verdict: z.enum(['pass', 'repair', 'blocked']),
   must_answer_coverage: z.array(coverageSchema),
   requirement_coverage: z.array(identifiedCoverageSchema),
   response_point_coverage: z.array(responsePointCoverageSchema),
   compliance_coverage: z.array(complianceCoverageSchema),
+  global_compliance_checks: z.array(globalComplianceCheckSchema),
+  assignment_conflicts: z.array(assignmentConflictSchema),
   claim_checks: z.array(claimCheckSchema),
   quality_checks: z.object({
     project_specific: z.boolean(),

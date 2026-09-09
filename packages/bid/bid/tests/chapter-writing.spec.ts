@@ -21,6 +21,7 @@ import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
+  type OutlineArtifact,
   CHAPTER_EXECUTION_SCHEMA_VERSION,
   buildBidStageTask,
   executeChapterWriting,
@@ -33,6 +34,7 @@ import {
   parseChapterReviewArtifact,
   parseEvidenceMapArtifact,
   parseChapterWritingManifest,
+  parseGlobalComplianceReviewArtifact,
   parseTenderComplianceArtifact,
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
@@ -146,16 +148,20 @@ function reviewFrom(request: SubagentStartRequest) {
   const candidate = JSON.parse(candidateLine.slice('Writer Candidate：'.length)) as { markdown: string }
   const quoteOptionsLine = lines.find(line => line.startsWith('Quote Options：'))!
   const quoteOptions = JSON.parse(quoteOptionsLine.slice('Quote Options：'.length)) as Record<string, string>
+  const globalLine = lines.find(line => line.startsWith('Global Compliance：'))
+  const globalCompliance = globalLine === undefined ? [] : JSON.parse(globalLine.slice('Global Compliance：'.length)) as Array<{ id: string; normalized_rule: string }>
   const quote = Object.entries(quoteOptions).find(([, text]) => candidate.markdown.includes(text) && !text.startsWith('#'))![0]
   const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: [quote], issue: null })
   return {
-    schema_version: 2 as const, section_id: section.id, verdict: 'pass' as const,
+    schema_version: 3 as const, section_id: section.id, verdict: 'pass' as const,
     must_answer_coverage: section.must_answer.map(coverage),
     requirement_coverage: section.requirement_ids.map(requirement_id => ({ requirement_id, ...coverage(requirement_id) })),
     response_point_coverage: section.scoring_response_point_ids.map(response_point_id => (
       { response_point_id, ...coverage(response_point_id) }
     )),
     compliance_coverage: section.compliance_ids.map(compliance_id => ({ compliance_id, ...coverage(compliance_id) })),
+    global_compliance_checks: globalCompliance.map(item => ({ compliance_id: item.id, item: item.normalized_rule, status: 'conforms' as const, evidence_quotes: [quote], issue: null })),
+    assignment_conflicts: [],
     claim_checks: [],
     quality_checks: {
       project_specific: true, structure_complete: true,
@@ -173,15 +179,15 @@ interface DeferredRun {
 
 function fixtureAgent(
   workspace: BidWorkspace,
-  _outline: ReturnType<typeof outlineFixture>,
+  _outline: OutlineArtifact,
   dependencies: Record<string, string[]> = {},
   automatic = true,
   validCandidate: (attempt: number, request: SubagentStartRequest) => boolean = () => true,
   resultForAttempt?: (attempt: number, request: SubagentStartRequest) => SubagentResult | Promise<SubagentResult>,
   webResearch = false,
 ) {
-  let planPending = false
-  const followup = vi.fn((_message: unknown) => { planPending = true })
+  let mainPending = false
+  const followup = vi.fn((_message: unknown) => { mainPending = true })
   const starts: DeferredRun[] = []
   let active = 0
   let maxActive = 0
@@ -328,7 +334,8 @@ function fixtureAgent(
             ...review.response_point_coverage, ...review.compliance_coverage,
           ]
           await call(localAgent, registry, events, 'review_coverage_items', { items: items.map((item, index) => ({ item_ref: `R${index + 1}`, status: item.status, evidence_quote_refs: item.evidence_quotes, issue: item.issue })) })
-          await call(localAgent, registry, events, 'set_review_summary', { quality_checks: review.quality_checks, blocking_issues: review.blocking_issues })
+          await call(localAgent, registry, events, 'review_global_constraints', { items: review.global_compliance_checks.map(item => ({ compliance_id: item.compliance_id, status: item.status, evidence_quote_refs: item.evidence_quotes, issue: item.issue })) })
+          await call(localAgent, registry, events, 'set_review_summary', { quality_checks: review.quality_checks, blocking_issues: review.blocking_issues, assignment_conflicts: review.assignment_conflicts })
           await call(localAgent, registry, events, 'finish_chapter_review', {})
           return { stopReason: 'completed', output: [] }
         })()
@@ -368,13 +375,25 @@ function fixtureAgent(
     },
     followup,
     whenIdle: vi.fn(async () => {
-      if (!planPending) return
-      planPending = false
-      await call(agent, definitions, listeners, 'add_global_consistency_note', { note: '统一术语。' })
-      for (const [section_id, depends] of Object.entries(dependencies)) {
-        await call(agent, definitions, listeners, 'set_chapter_relations', { section_id, depends_on: depends.map(section_id => ({ section_id, reason: '复用前置章节结论。' })), related_sections: [], planning_notes: [] })
+      if (!mainPending) return
+      mainPending = false
+      if (definitions.has('finish_chapter_plan')) {
+        await call(agent, definitions, listeners, 'add_global_consistency_note', { note: '统一术语。' })
+        for (const [section_id, depends] of Object.entries(dependencies)) {
+          await call(agent, definitions, listeners, 'set_chapter_relations', { section_id, depends_on: depends.map(section_id => ({ section_id, reason: '复用前置章节结论。' })), related_sections: [], planning_notes: [] })
+        }
+        await call(agent, definitions, listeners, 'finish_chapter_plan', {})
+        return
       }
-      await call(agent, definitions, listeners, 'finish_chapter_plan', {})
+      const first = _outline.sections.find(section => section.writable)
+      for (const compliance_id of _outline.global_compliance_ids) {
+        await call(agent, definitions, listeners, 'review_global_compliance', {
+          compliance_id, category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
+          status: 'pass', checked_section_ids: first === undefined ? [] : [first.id], evidence_refs: ['D1'],
+          affected_section_ids: [], issue: null,
+        })
+      }
+      await call(agent, definitions, listeners, 'finish_global_compliance_review', {})
     }),
   } as unknown as Agent
   return { agent, followup, starts, subagents, tools, guards, disposed, reviewerResult, maxActive: () => maxActive }
@@ -666,7 +685,7 @@ describe('chapter-writing executor', () => {
       }
     })
     const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
-    expect(artifacts).toHaveLength(3)
+    expect(artifacts).toHaveLength(4)
     await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
     expect(fixture.starts).toHaveLength(6)
     const review = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')) as {
@@ -805,7 +824,7 @@ describe('chapter-writing executor', () => {
     expect(policy.allowedTools).toEqual(['grep', 'read', 'web_search', 'web_fetch'])
     expect(policy.forbiddenTools).toEqual(['bash', 'write'])
     expect(policy.requiredInputs).toContain('analysis/web-evidence-sources.json')
-    expect(policy.requiredArtifacts).toEqual(['chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json'])
+    expect(policy.requiredArtifacts).toEqual(['chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json', 'chapters/global-compliance-review.json'])
   })
 
   it('classifies reference, reference-bid, and Web materials without source-section abstractions', () => {
@@ -854,11 +873,46 @@ describe('chapter-writing executor', () => {
     expect(context.referenceBidMaterials.map(material => material.file_id)).toEqual(['REFERENCE-BID'])
     expect(context.webMaterials.map(material => material.source_id)).toEqual(['WEB-aaaaaaaaaaaaaaaa'])
     expect(context.writingDimensions).toEqual(['需求维度', '评分维度'])
-    expect(context.compliance.map(item => item.id)).toEqual(['GLOBAL-1'])
+    expect(context.compliance).toEqual([])
+    expect(context.globalCompliance.map(item => item.id)).toEqual(['GLOBAL-1'])
     expect(context.headingPath).toEqual(['实施方案', '章节1'])
     expect(context.outlineSections).toEqual(outlineFixture().sections.map(({ id, parent_id, title, purpose, must_answer }) => (
       { id, parent_id, title, purpose, must_answer }
     )))
+  })
+
+  it('全局要求不进入章节 Checklist 或 manifest，仍由 S5 文档级核验记录', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-global-compliance-')))
+    const outline = { ...await writeInputs(workspace), global_compliance_ids: ['GLOBAL-1'] }
+    const hash = outlineArtifactSha256(outline)
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
+    await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
+    await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [{
+      id: 'GLOBAL-1', type: '全局约束', raw_text: '全书技术参数保持一致', normalized_rule: '全书技术参数保持一致', severity: 'mandatory', source_refs: source,
+    }] }))
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: {
+        ...candidateFrom(request),
+        markdown: '本章按确认职责说明技术措施、责任接口与参数一致性核验方法，形成完整可追溯记录。',
+      },
+    }))
+    fixture.reviewerResult.mockImplementation(request => ({
+      ...reviewFrom(request),
+      global_compliance_checks: [{ compliance_id: 'GLOBAL-1', item: '全书技术参数保持一致', status: 'not_applicable', evidence_quotes: [], issue: '当前背景章节没有适用参数。' }],
+    }))
+    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'))
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    expect(fixture.starts).toHaveLength(3)
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+    expect(manifest.chapters.every(chapter => chapter.compliance_ids.length === 0)).toBe(true)
+    for (const index of [1, 2, 3]) {
+      const report = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, `chapters/reviews/${String(index).padStart(4, '0')}.json`), 'utf8')))
+      expect(report.compliance_coverage).toEqual([])
+      expect(report.global_compliance_checks[0]).toMatchObject({ compliance_id: 'GLOBAL-1', status: 'not_applicable' })
+      expect(report.verdict).toBe('pass')
+    }
+    expect(parseGlobalComplianceReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/global-compliance-review.json'), 'utf8'))).items)
+      .toEqual([expect.objectContaining({ compliance_id: 'GLOBAL-1', status: 'pass' })])
   })
 
   it.each([
@@ -1083,6 +1137,7 @@ describe('chapter-writing executor', () => {
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },
       { stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' },
+      { stage: 'chapter_writing', type: 'global_compliance_review', path: 'chapters/global-compliance-review.json' },
     ])
     const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
     expect(manifest.chapters.map(chapter => chapter.section_id)).toEqual(['SEC-1', 'SEC-2', 'SEC-3'])
@@ -1206,7 +1261,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.maxActive()).toBe(2)
     fixture.starts[2]!.resolve()
     fixture.starts[3]!.resolve()
-    await expect(execution).resolves.toHaveLength(3)
+    await expect(execution).resolves.toHaveLength(4)
   })
 
   it.each([
@@ -1334,7 +1389,7 @@ describe('chapter-writing executor', () => {
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), 'utf8'))).toEqual(plan)
   })
 
-  it('恢复保留合法 repair，只重跑引句已损坏的章节', async () => {
+  it('旧审核协议失效时保留正文，只重新审核受影响章节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-repair-checkpoint-')))
     const outline = await writeInputs(workspace)
     const first = fixtureAgent(workspace, outline)
@@ -1342,16 +1397,20 @@ describe('chapter-writing executor', () => {
     await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
     const retained = await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')
     const damagedPath = join(workspace.projectRoot, 'chapters/reviews/0002.json')
-    const damaged = parseChapterReviewArtifact(JSON.parse(await readFile(damagedPath, 'utf8')))
-    const firstCoverage = damaged.must_answer_coverage[0]
-    if (firstCoverage === undefined) throw new Error('missing must-answer coverage')
-    firstCoverage.evidence_quotes = ['正文中不存在的引句']
+    const damagedBodyPath = join(workspace.projectRoot, 'chapters/sections/0002.md')
+    const damagedBody = await readFile(damagedBodyPath, 'utf8')
+    const damaged = JSON.parse(await readFile(damagedPath, 'utf8')) as Record<string, unknown>
+    damaged.schema_version = 2
+    delete damaged.global_compliance_checks
+    delete damaged.assignment_conflicts
     await writeFile(damagedPath, JSON.stringify(damaged))
     const resumed = fixtureAgent(workspace, outline)
     await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
     expect(resumed.followup).not.toHaveBeenCalled()
-    expect(resumed.starts).toHaveLength(1)
-    expect(resumed.starts[0]?.request.label).toContain('章节2')
+    expect(resumed.starts).toHaveLength(0)
+    expect(resumed.subagents.start).toHaveBeenCalledOnce()
+    expect(resumed.subagents.start.mock.calls[0]?.[1].label).toContain('章节2')
+    expect(await readFile(damagedBodyPath, 'utf8')).toBe(damagedBody)
     expect(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')).toBe(retained)
   })
 

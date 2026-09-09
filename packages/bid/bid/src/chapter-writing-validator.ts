@@ -5,6 +5,8 @@ import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-wri
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
+import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
+import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
@@ -21,6 +23,7 @@ import {
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
 const LOG = 'chapters/execution-log.json'
+const GLOBAL_REVIEW = 'chapters/global-compliance-review.json'
 
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
@@ -102,22 +105,27 @@ export async function validateChapterWriting(
     [PLAN, 'chapter_execution_plan'],
     [LOG, 'chapter_execution_log'],
     [MANIFEST, 'chapter_manifest'],
+    [GLOBAL_REVIEW, 'global_compliance_review'],
   ])
   if (artifacts.length !== expectedArtifacts.size || artifacts.some(artifact =>
     artifact.stage !== 'chapter_writing' || expectedArtifacts.get(artifact.path) !== artifact.type)
     || new Set(artifacts.map(artifact => artifact.path)).size !== expectedArtifacts.size) {
-    reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID', 'The executor must return the execution plan, execution log, and chapter manifest exactly once.', MANIFEST)
+    reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID',
+      'The executor must return the execution plan, execution log, chapter manifest, and global review exactly once.', MANIFEST)
   }
-  const [manifestRaw, planRaw, logRaw, outlineRaw, scoringRaw, catalogRaw, requirementsRaw, complianceRaw] = await Promise.all([
+  const inputs = await Promise.all([
     readJson(workspace, MANIFEST, issues), readJson(workspace, PLAN, issues),
-    readJson(workspace, LOG, issues), readJson(workspace, 'outline/confirmed-outline.json', issues),
+    readJson(workspace, LOG, issues), readJson(workspace, GLOBAL_REVIEW, issues),
+    readJson(workspace, 'outline/confirmed-outline.json', issues),
     readJson(workspace, 'analysis/scoring.json', issues),
     readJson(workspace, 'analysis/scoring-response-points.json', issues),
     readJson(workspace, 'analysis/requirements.json', issues),
     readJson(workspace, 'analysis/compliance.json', issues),
   ])
+  const [manifestRaw, planRaw, logRaw, globalReviewRaw, outlineRaw,
+    scoringRaw, catalogRaw, requirementsRaw, complianceRaw] = inputs
   if (
-    manifestRaw === undefined || planRaw === undefined || logRaw === undefined
+    manifestRaw === undefined || planRaw === undefined || logRaw === undefined || globalReviewRaw === undefined
     || outlineRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
     || requirementsRaw === undefined || complianceRaw === undefined
   ) return { ok: false, issues }
@@ -129,6 +137,7 @@ export async function validateChapterWriting(
   let catalog
   let requirements
   let compliance
+  let globalReview
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
     plan = parseChapterExecutionPlan(planRaw)
@@ -138,6 +147,7 @@ export async function validateChapterWriting(
     catalog = parseScoringResponsePointCatalog(catalogRaw)
     requirements = parseTenderRequirementsArtifact(requirementsRaw)
     compliance = parseTenderComplianceArtifact(complianceRaw)
+    globalReview = parseGlobalComplianceReviewArtifact(globalReviewRaw)
   } catch {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or scoring inputs have invalid fields.', MANIFEST)
     return { ok: false, issues }
@@ -171,6 +181,7 @@ export async function validateChapterWriting(
     return [section.id, { content: `chapters/sections/${serial}.md`, metadata: `chapters/meta/${serial}.json` }] as const
   }))
   const actual = new Set<string>()
+  const globalChapters: GlobalComplianceChapter[] = []
   for (const chapter of chapters.chapters) {
     if (actual.has(chapter.section_id)) reject(issues, 'CHAPTER_WRITING_SECTION_DUPLICATE', 'Each writable section may have one chapter only.', MANIFEST)
     actual.add(chapter.section_id)
@@ -182,7 +193,7 @@ export async function validateChapterWriting(
     }
     if (JSON.stringify(chapter.requirement_ids) !== JSON.stringify(section.requirement_ids)
       || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)
-      || JSON.stringify(chapter.compliance_ids) !== JSON.stringify([...section.compliance_ids, ...outline.global_compliance_ids])) {
+      || JSON.stringify(chapter.compliance_ids) !== JSON.stringify(section.compliance_ids)) {
       reject(issues, 'CHAPTER_WRITING_SECTION_MAPPING_INVALID', 'A chapter mapping must match its confirmed section.', MANIFEST)
     }
     if (JSON.stringify(chapter.covered_scoring_response_points) !== JSON.stringify(section.scoring_response_points)
@@ -216,6 +227,7 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
+      globalChapters.push({ section_id: section.id, title: section.title, markdown, candidate_sha256: chapterCandidateSha256(markdown) })
       if (!(await lstat(body)).isFile() || markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim())) throw new Error('empty')
       for (const message of validateChapterHeadings(markdown, section.title, section.id)) {
         reject(issues, 'CHAPTER_WRITING_OUTLINE_HEADING_INVALID', message, chapter.content_path)
@@ -232,8 +244,11 @@ export async function validateChapterWriting(
         section,
         requirements: requirements.requirements.filter(item => section.requirement_ids.includes(item.id)),
         responsePoints: catalog.points.filter(item => (section.scoring_response_point_ids ?? []).includes(item.id)),
-        compliance: compliance.compliance_items.filter(item =>
-          [...section.compliance_ids, ...outline.global_compliance_ids].includes(item.id)),
+        compliance: compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
+        globalCompliance: compliance.compliance_items.filter(item => outline.global_compliance_ids.includes(item.id)),
+        outlineSections: outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (
+          { id, parent_id, title, purpose, must_answer }
+        )),
       }, { section_id: section.id, markdown, metadata: chapter }, review))
     } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the project, or empty.', chapter.content_path) }
   }
@@ -244,5 +259,9 @@ export async function validateChapterWriting(
   await Promise.all(chapters.chapters.flatMap(chapter => chapter.local_materials_used
     .map(material => validateMaterial(workspace, bidManifest, material, issues))))
   await validateWebMaterials(workspace, chapters, issues)
+  if (globalReview.confirmed_outline_sha256 !== outlineHash) {
+    reject(issues, 'GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID', 'The document-level compliance review does not match the confirmed outline.', GLOBAL_REVIEW)
+  }
+  issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalChapters, bidManifest))
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

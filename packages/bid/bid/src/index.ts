@@ -70,6 +70,8 @@ import { estimateReviewPages, type PageEstimateSection } from './page-estimate.t
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
+import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
@@ -211,6 +213,8 @@ export { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '.
 export { validateConfirmedOutline } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
 export * from './chapter-writing-review-artifacts.ts'
+export * from './chapter-writing-global-review-artifacts.ts'
+export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
 export {
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
@@ -219,6 +223,7 @@ export {
   pickChapterContext,
   renderChapterExecutionPlanRepairTask,
   renderChapterExecutionPlanTask,
+  renderGlobalComplianceReviewTask,
   renderChapterSubagentRepairTask,
   renderChapterSubagentTask,
   validateChapterCandidate,
@@ -1636,7 +1641,7 @@ export class BidHostRuntime extends TypertRemoteService {
         try {
           artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
         } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-        if (artifact !== undefined && (!contentAvailable || artifact.candidate_sha256 !== chapterCandidateSha256(markdown))) {
+        if (artifact !== undefined && (!contentAvailable || !chapterReviewMatches(section.id, markdown, artifact))) {
           artifact = undefined
         }
         reviewStatus = projectChapterReview(section.id, contentAvailable, artifact, execution).status
@@ -1691,8 +1696,45 @@ export class BidHostRuntime extends TypertRemoteService {
       ...(outline.sections.some(section => section.parent_id === row.section_id) ? { page_estimate: { status: 'unavailable' as const } } : {}),
     })) }
     const writable = rows.filter(row => row.writable)
+    let globalCompliance: BidReviewWorkbenchView['global_compliance'] = outline.global_compliance_ids.length === 0
+      ? { status: 'not_required', reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] }
+      : { status: 'reviewing', reviewed_count: 0, total_count: outline.global_compliance_ids.length, document_issues: [], delivery_todos: [] }
+    if (outline.global_compliance_ids.length > 0) {
+      try {
+        const [report, compliance, bidManifest] = await Promise.all([
+          readFile(within(workspace.projectRoot, 'chapters/global-compliance-review.json'), 'utf8')
+            .then(value => parseGlobalComplianceReviewArtifact(JSON.parse(value))),
+          readFile(within(workspace.projectRoot, 'analysis/compliance.json'), 'utf8')
+            .then(value => parseTenderComplianceArtifact(JSON.parse(value))),
+          workspace.readManifest(),
+        ])
+        const globalChapters: GlobalComplianceChapter[] = rowContents.flatMap(({ row, markdown }) => (
+          row.writable && row.content_available
+            ? [{ section_id: row.section_id, title: row.title, markdown, candidate_sha256: chapterCandidateSha256(markdown) }]
+            : []
+        ))
+        if (report.confirmed_outline_sha256 !== outlineArtifactSha256(outline)
+          || validateGlobalComplianceReview(report, outline, compliance, globalChapters, bidManifest).length > 0) {
+          throw new Error('stale-global-compliance-review')
+        }
+        const findings = report.items.flatMap(item => item.status === 'fail' || item.status === 'pending' ? [{
+          compliance_id: item.compliance_id,
+          status: item.status,
+          detail: item.issue ?? item.item,
+          affected_section_ids: item.affected_section_ids,
+          delivery: item.category === 'delivery_requirement' || item.owners.some(owner => owner.kind === 'delivery'),
+        }] : [])
+        globalCompliance = {
+          status: findings.length === 0 ? 'pass' : 'needs_attention',
+          reviewed_count: report.items.length,
+          total_count: outline.global_compliance_ids.length,
+          document_issues: findings.filter(item => !item.delivery).map(({ delivery: _delivery, ...item }) => item),
+          delivery_todos: findings.filter(item => item.delivery).map(({ delivery: _delivery, ...item }) => item),
+        }
+      } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
+    }
     return {
-      schema_version: 1,
+      schema_version: 2,
       outline: rows,
       summary: {
         chapter_count: writable.length,
@@ -1701,6 +1743,7 @@ export class BidHostRuntime extends TypertRemoteService {
         needs_attention_count: writable.filter(row => row.review_status === 'needs_attention' || row.review_status === 'failed').length,
         page_estimate: pageEstimate,
       },
+      global_compliance: globalCompliance,
     }
   }
 
@@ -1736,7 +1779,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
     } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-    if (artifact !== undefined && (markdown === null || artifact.candidate_sha256 !== chapterCandidateSha256(markdown))) {
+    if (artifact !== undefined && (markdown === null || !chapterReviewMatches(section.id, markdown, artifact))) {
       artifact = undefined
     }
     const review = projectChapterReview(section.id, markdown?.trim().length === 0 ? false : markdown !== null, artifact, execution)
@@ -2325,6 +2368,31 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
       detail: [check.claim_quote, check.issue].filter((value): value is string => value !== null).join('：'),
     })
   }
+  for (const [index, check] of artifact.global_compliance_checks.entries()) {
+    if (check.status !== 'violates') continue
+    issues.push({
+      issue_id: `${sectionId}-global-compliance-${String(index + 1)}`,
+      section_id: sectionId,
+      source: 'review',
+      category: 'global_compliance_checks',
+      severity: 'blocking',
+      status: 'open',
+      title: `违反全局约束：${check.compliance_id}`,
+      detail: check.issue ?? check.item,
+    })
+  }
+  for (const [index, conflict] of artifact.assignment_conflicts.entries()) {
+    issues.push({
+      issue_id: `${sectionId}-assignment-conflict-${String(index + 1)}`,
+      section_id: sectionId,
+      source: 'review',
+      category: 'assignment_conflicts',
+      severity: 'blocking',
+      status: 'open',
+      title: `任务分配冲突：${conflict.task}`,
+      detail: conflict.basis,
+    })
+  }
   for (const [name, passed] of Object.entries(artifact.quality_checks)) {
     if (passed) continue
     issues.push({
@@ -2339,6 +2407,10 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
     })
   }
   return issues
+}
+
+function chapterReviewMatches(sectionId: string, markdown: string, artifact: ChapterReviewArtifact): boolean {
+  return artifact.section_id === sectionId && artifact.candidate_sha256 === chapterCandidateSha256(markdown)
 }
 
 function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutionLog['sections'][number]): BidReviewIssueView[] {

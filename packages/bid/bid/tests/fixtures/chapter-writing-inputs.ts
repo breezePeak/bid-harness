@@ -59,6 +59,7 @@ export function emptyChapterContext(section: ReturnType<typeof outlineFixture>['
     scoring: [],
     responsePoints: [],
     compliance: [],
+    globalCompliance: [],
     relatedMaterials: [],
     referenceBidMaterials: [],
     frameworkDraftMaterials: [],

@@ -8,15 +8,15 @@ Status: implemented
 
 ## Decision
 
-S5 分别拥有 planning 草稿、Writer 语义输入与 Reviewer Checklist 协议，保留现有章节调度器。Host 按确认目录预置关系计划，模型只提交特殊关系及真实全局一致性要求。Writer 使用章节内稳定 M/F/W 引用并提交完整正文；身份与 Blueprint 索引由 Host 绑定，资料错误在当前 `submit_chapter` 的工具执行路径中返回。Reviewer 使用当前候选的 R/Q/E 引用分批 upsert，Host 从 canonical 记录生成正式报告。
+S5 分别拥有 planning 草稿、Writer 语义输入、Reviewer Checklist 协议与文档级全局审核协议，保留现有章节调度器。Host 按确认目录预置关系计划，模型只提交特殊关系及真实全局一致性要求。Writer 使用章节内稳定 M/F/W 引用并提交完整正文；身份与 Blueprint 索引由 Host 绑定，资料错误在当前 `submit_chapter` 的工具执行路径中返回。Reviewer 使用当前候选的 R/Q/E 引用分批 upsert，并通过独立全局约束集合记录当前章节的适用结论；Host 从 canonical 记录生成正式章节报告。全部章节完成后，Main Agent 通过私有工具提交逐项文档级结论，Host 组装并校验全局报告，具体责任与恢复语义见[全局合规审核](../bug-fix/2026-09-09-bid-s5-global-compliance-review.md)。
 
 独立 Reviewer 的 in-process one-shot 在创建事务中等待父 Agent 作用域的 `subagent/child-setup`，让本次执行按真实 parent、Child 和请求标签安装私有能力。工具在首轮模型请求前可用，注册随 Child scope 释放。S5 finish 调用 `concludeTurn()`，只在权威 `tools/result` 成功后确认，嵌套提交同时等待外层结果。普通文本结束但未 finish 时，同一 Child 有界续行；新失败重试可以重建瞬态状态，不增加跨进程半份报告格式。
 
 Evidence Pack 只包含相关 S2 确认事实、当前候选实际使用的本地 chunk 与 Hash 验证后的 Web 原文，以及允许的前置 handoff。来源身份与允许的声明种类由 Host 校验，适用性与语义支持由 Reviewer 判断；旧标书、Web 和 handoff 不能自动证明本项目企业事实。
 
-任一 missing、quality=false、unsupported claim 或额外阻断生成 `repair`。成功 finish 表示报告完整，不表示正文通过。正文在审核前可读，完整候选语义修复按 `modelStageRepairAttempts` 回到同一 Writer，见[可续写 Writer](2026-09-07-s5-continuable-writer.md)；后续仍为 repair 或遭遇持续传输错误时保留合法已审候选和真实报告。独立合法 plan 可以在没有 execution-log 时复用；章节恢复验证真实资料、正文、报告、Hash 和 Child 身份，损坏章节重排，合法 repair 继续复用。
+任一 missing、适用的全局约束违反、quality=false、unsupported claim 或额外阻断生成 `repair`；章节职责冲突生成 `blocked`。成功 finish 表示报告完整，不表示正文通过。正文在审核前可读，完整候选语义修复按 `modelStageRepairAttempts` 回到同一 Writer，见[可续写 Writer](2026-09-07-s5-continuable-writer.md)；blocked、后续仍为 repair 或遭遇持续传输错误时保留合法已审候选和真实报告。独立合法 plan 可以在没有 execution-log 时复用；章节恢复验证真实资料、正文、报告、Hash 和 Child 身份，报告失效时保留合法正文只重新审核，正文失效时才重排章节，合法 repair 和 blocked 继续复用。
 
-持久化路径、字段和版本保持不变。`review_sha256` 与 `review.candidate_sha256` 都绑定章节正文的 `chapterCandidateSha256()`；短引用只存在于当前执行协议。最终 Validator 与正常提交共用覆盖集合、引句及 verdict 一致性检查，不增加所有章节必须 pass 的阶段完成或导出条件。
+`review_sha256` 与 `review.candidate_sha256` 都绑定章节正文的 `chapterCandidateSha256()`；短引用只存在于当前执行协议。章节报告记录全局核验和职责冲突，章节 manifest 只记录局部 Compliance；独立文档级报告记录完整全局结论。最终 Validator 与正常提交共用覆盖集合、引句、证据 Hash 及 verdict 一致性检查，不增加所有章节必须 pass 的阶段完成或导出条件。
 
 ## Alternatives considered
 

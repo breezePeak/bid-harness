@@ -214,7 +214,7 @@ describe('S5 真实 DSH Child 接入', () => {
       }
       for (const request of requests.filter(item => item.role === 'review')) {
         expect(request.tools).toEqual([...CHAPTER_REVIEW_TOOLS].sort())
-        expect(request.steps).toBe(6)
+        expect(request.steps).toBe(7)
       }
       const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
       expect(review.verdict).toBe('repair')

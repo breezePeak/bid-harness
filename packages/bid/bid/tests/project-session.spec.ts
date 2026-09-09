@@ -14,7 +14,9 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
   BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   checkpointBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
-  parseTenderScoringArtifact, readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
+  outlineArtifactSha256,
+  parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
+  parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
   type BidStageExecutorPort, type BidStageValidatorPort,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -223,11 +225,13 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 2, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 3, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       compliance_coverage: [],
+      global_compliance_checks: [],
+      assignment_conflicts: [],
       claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
       quality_checks: {
         project_specific: false, structure_complete: true, legacy_project_pollution_free: true,
@@ -237,6 +241,17 @@ describe('Workspace 项目与独立 Session', () => {
     }))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('review-projection')
+
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      ...JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')),
+      section_id: 'SEC-2',
+    }))
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'reviewing' })
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'reviewing', issues: [] })
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      ...JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')),
+      section_id: 'SEC-1',
+    }))
 
     expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'needs_attention' })
     expect((await ctx.bid.getReviewWorkbench(agent.session)).summary).toMatchObject({ reviewed_count: 1, needs_attention_count: 1 })
@@ -271,6 +286,40 @@ describe('Workspace 项目与独立 Session', () => {
       status: 'failed', issues: expect.arrayContaining([expect.objectContaining({
         source: 'review_execution', title: '章节审核执行失败', detail: 'Chapter Reviewer 未正常完成：error。',
       })]),
+    })
+  })
+
+  it('S5 工作台将文档级缺口和递交待确认与章节状态分开投影', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    const source = (JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')) as { requirements: Array<{ source_refs: unknown[] }> }).requirements[0]!.source_refs
+    outline.global_compliance_ids = ['GLOBAL-CONTENT', 'GLOBAL-UPLOAD']
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
+    await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [
+      { id: 'GLOBAL-CONTENT', type: '材料', raw_text: '须包含资格材料', normalized_rule: '整份文档包含资格材料', severity: 'mandatory', source_refs: source },
+      { id: 'GLOBAL-UPLOAD', type: '递交', raw_text: '截止前上传', normalized_rule: '截止前完成上传', severity: 'fatal', source_refs: source },
+    ] }))
+    const globalReport = {
+      schema_version: 1, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), items: [
+        { compliance_id: 'GLOBAL-CONTENT', item: '整份文档包含资格材料', category: 'document_requirement', owners: [{ kind: 'document' }], status: 'fail', checked_chapters: [], evidence: [], affected_section_ids: ['SEC-1'], issue: '缺少资格材料。' },
+        { compliance_id: 'GLOBAL-UPLOAD', item: '截止前完成上传', category: 'delivery_requirement', owners: [{ kind: 'delivery' }], status: 'pending', checked_chapters: [], evidence: [], affected_section_ids: [], issue: '缺少实际上传执行证据。' },
+      ],
+    } as const
+    await writeFile(join(workspace.projectRoot, 'chapters/global-compliance-review.json'), JSON.stringify(globalReport))
+    expect(validateGlobalComplianceReview(
+      parseGlobalComplianceReviewArtifact(globalReport), outline,
+      parseTenderComplianceArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8'))),
+      [{ section_id: 'SEC-1', title: '技术方案', markdown: '# 技术方案\n\n已有正文。\n', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex') }],
+      await workspace.readManifest(),
+    )).toEqual([])
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('global-review-projection')
+    const view = await ctx.bid.getReviewWorkbench(agent.session)
+    expect(view.summary.needs_attention_count).toBe(0)
+    expect(view.global_compliance).toEqual({
+      status: 'needs_attention', reviewed_count: 2, total_count: 2,
+      document_issues: [{ compliance_id: 'GLOBAL-CONTENT', status: 'fail', detail: '缺少资格材料。', affected_section_ids: ['SEC-1'] }],
+      delivery_todos: [{ compliance_id: 'GLOBAL-UPLOAD', status: 'pending', detail: '缺少实际上传执行证据。', affected_section_ids: [] }],
     })
   })
 

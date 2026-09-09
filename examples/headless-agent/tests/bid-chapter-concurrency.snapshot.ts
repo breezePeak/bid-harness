@@ -10,6 +10,13 @@ import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-chapter-concurrency-snapshots/', import.meta.url))
 
+function completedPlanningTurn(log: string): string {
+  const lines = log.trimEnd().split('\n')
+  const end = lines.findIndex(line => line.includes('"type":"turn/end"') && line.includes('"turn":1'))
+  if (end < 0) throw new Error('缺少已完成的 S5 计划轮次')
+  return `${lines.slice(0, end + 1).join('\n')}\n`
+}
+
 it('S5 真实 Loader 三章并发，同一 Writer 两轮修复后通过', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 并发与多轮修复', tempDirPrefix: 'dsh-s5-concurrency-snapshot-', mode: 'src',
@@ -38,7 +45,9 @@ it('S5 真实 Loader 三章并发，同一 Writer 两轮修复后通过', async 
       const byId = new Map<string, string>(logs.map(text => [(JSON.parse(text.split('\n')[0]!) as SessionHeader).id, text]))
       const sessionIds = [...byId.keys()]
       const normalize = (text: string) => normalizeSessionSnapshot(text, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
-      const snapshots: Record<string, string> = { 'planning.expected.jsonl': normalize(byId.get('parent')!) }
+      const snapshots: Record<string, string> = {
+        'planning.expected.jsonl': normalize(completedPlanningTurn(byId.get('parent')!)),
+      }
       for (const [index, section] of log.sections.entries()) {
         const writerId = section.final_writer_child_session_id!
         snapshots[`writer-${index + 1}.expected.jsonl`] = normalize(byId.get(writerId)!)

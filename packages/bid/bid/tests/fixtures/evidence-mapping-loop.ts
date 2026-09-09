@@ -419,7 +419,18 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const sessionId = SessionId('s5-real-loop')
   const workspace = new BidWorkspace(root)
   await prepareS2(workspace)
+  const requirements = parseTenderRequirementsArtifact(JSON.parse(
+    await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8'),
+  ))
+  await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({
+    schema_version: 1,
+    compliance_items: [{
+      id: 'GLOBAL-1', type: '全局约束', raw_text: '全书安全术语保持一致', normalized_rule: '全书安全术语保持一致',
+      severity: 'mandatory', source_refs: requirements.requirements[0]!.source_refs,
+    }],
+  }))
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
+  outline.global_compliance_ids = ['GLOBAL-1']
   const section = outline.sections[0]!
   Object.assign(section, partialResult('https://official.example/standard').section_mappings[0]!.writing_brief)
   const outlineHash = outlineArtifactSha256(outline)
@@ -466,10 +477,16 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       placeholder_free: true, obvious_repetition_free: true,
     },
     blocking_issues: [],
+    assignment_conflicts: [],
   }
   const parentScript = [
     toolCall('add-plan-note', 'add_global_consistency_note', { note: '统一使用访问控制项目名称和权限审计术语。' }),
     toolCall('finish-plan', 'finish_chapter_plan', {}),
+    toolCall('review-global', 'review_global_compliance', {
+      compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
+      status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+    }),
+    toolCall('finish-global-review', 'finish_global_compliance_review', {}),
   ]
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
@@ -482,6 +499,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
+    toolCall('review-global-constraint', 'review_global_constraints', {
+      items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
+    }),
     toolCall('submit-summary', 'set_review_summary', summary),
     toolCall('finish-review', 'finish_chapter_review', {}),
   ]

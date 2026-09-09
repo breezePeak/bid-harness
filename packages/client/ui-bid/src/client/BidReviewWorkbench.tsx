@@ -211,6 +211,43 @@ export function BidReviewWorkbench({
         <Button variant="primary" disabled={retryStage === undefined} onClick={() => { void retryStage?.() }}>重试</Button>
       </div>}
 
+      {workbench !== null && workbench.global_compliance.status !== 'not_required' && (
+        <section className={css.reviewSection} aria-label="文档级合规核验">
+          <div className={css.reviewHeader}>
+            <h2>文档级合规核验</h2>
+            <span className={classes(css.miniTag, workbench.global_compliance.status === 'pass' ? css.miniTagSuccess
+              : workbench.global_compliance.status === 'needs_attention' ? css.miniTagWarning : css.miniTagWriting)}>
+              {getGlobalComplianceStatusLabel(workbench.global_compliance.status)}
+            </span>
+          </div>
+          <span className={css.fieldLabel}>
+            已记录 {workbench.global_compliance.reviewed_count}/{workbench.global_compliance.total_count} 项
+          </span>
+          {workbench.global_compliance.document_issues.length > 0 && <>
+            <h3 className={css.fieldLabel}>文档级问题</h3>
+            <ul className={css.issuesList}>{workbench.global_compliance.document_issues.map(issue => (
+              <li key={issue.compliance_id} className={css.issueCard} data-severity="blocking">
+                <div className={css.issueHeader}><span className={css.issueTitle}>{issue.compliance_id}</span><span className={css.miniTag}>{issue.status === 'pending' ? '待核验' : '未通过'}</span></div>
+                <p className={css.issueDetail}>{issue.detail}</p>
+                {issue.affected_section_ids.length > 0 && <p className={css.issueDetail}>受影响章节：{issue.affected_section_ids.join('、')}</p>}
+              </li>
+            ))}</ul>
+          </>}
+          {workbench.global_compliance.delivery_todos.length > 0 && <>
+            <h3 className={css.fieldLabel}>项目／交付待办</h3>
+            <ul className={css.issuesList}>{workbench.global_compliance.delivery_todos.map(issue => (
+              <li key={issue.compliance_id} className={css.card}>
+                <div className={css.issueHeader}>
+                  <span className={css.issueTitle}>{issue.compliance_id}</span>
+                  <span className={css.miniTag}>待确认</span>
+                </div>
+                <p className={css.issueDetail}>{issue.detail}</p>
+              </li>
+            ))}</ul>
+          </>}
+        </section>
+      )}
+
       <div className={css.columns}>
         <div className={css.left}>
           <div className={css.leftHeader}>
@@ -446,6 +483,15 @@ export function BidReviewWorkbench({
       </div>}
     </section>
   )
+}
+
+function getGlobalComplianceStatusLabel(status: BidReviewWorkbenchView['global_compliance']['status']): string {
+  switch (status) {
+    case 'not_required': return '无全局要求'
+    case 'reviewing': return '待核验'
+    case 'pass': return '核验通过'
+    case 'needs_attention': return '存在未决事项'
+  }
 }
 
 function titleRowClass(_num?: string): string {

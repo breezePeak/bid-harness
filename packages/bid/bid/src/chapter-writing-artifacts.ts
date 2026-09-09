@@ -9,7 +9,7 @@ import {
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 
 /** Version of the durable S6 chapter manifest and chapter metadata records. */
-export const CHAPTER_WRITING_SCHEMA_VERSION = 5 as const
+export const CHAPTER_WRITING_SCHEMA_VERSION = 6 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 

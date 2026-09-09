@@ -3,7 +3,9 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
-import { parseChapterMetadata, parseChapterWritingManifest, parseEvidenceMapArtifact } from '@deepseek-ai/dsh-bid'
+import {
+  parseChapterMetadata, parseChapterWritingManifest, parseEvidenceMapArtifact, parseGlobalComplianceReviewArtifact,
+} from '@deepseek-ai/dsh-bid'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
@@ -28,7 +30,9 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.map(event => event.data.name)).toEqual(['read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter'])
+      expect(calls.map(event => event.data.name)).toEqual([
+        'read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter',
+      ])
       expect(writerLog).toContain('不能新增目录标题“补充服务方案”')
       expect(writerLog).toContain('Current Chapter Path：')
       expect(writerLog).toContain('Confirmed Outline Responsibilities：')
@@ -59,6 +63,10 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)
       const markdown = await readFile(join(projectRoot, manifest.chapters[0]!.content_path), 'utf8')
+      const globalReview = parseGlobalComplianceReviewArtifact(JSON.parse(
+        await readFile(join(projectRoot, 'chapters/global-compliance-review.json'), 'utf8'),
+      ))
+      expect(globalReview.items).toEqual([expect.objectContaining({ compliance_id: 'GLOBAL-1', status: 'pass' })])
       expect(markdown).not.toContain('补充服务方案')
       expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
@@ -66,7 +74,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
-        'artifacts.expected.json': JSON.stringify({ map, metadata, markdown }, null, 2) + '\n',
+        'artifacts.expected.json': JSON.stringify({ map, metadata, markdown, globalReview }, null, 2) + '\n',
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })
@@ -83,6 +91,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },
       { stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' },
+      { stage: 'chapter_writing', type: 'global_compliance_review', path: 'chapters/global-compliance-review.json' },
     ],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

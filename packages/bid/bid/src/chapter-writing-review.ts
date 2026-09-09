@@ -13,7 +13,7 @@ import { readChapterWebSource } from './chapter-writing-writer.ts'
 import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
-export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
+export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
 
 /** Checklist 的种类及其在当前章节的规范位置。 */
 export interface ChapterReviewItem {
@@ -35,7 +35,7 @@ export interface ChapterReviewEvidence {
 
 /**
  * 按当前章节规范顺序建立审核 Checklist。
- * @param context 含全局 Compliance 的 canonical 当前章节输入。
+ * @param context 当前章节的 canonical 必答输入。
  * @returns 保留每个原始条目的 R1…Rn。
  */
 export function buildChapterReviewChecklist(context: ChapterContext): ChapterReviewItem[] {
@@ -69,6 +69,7 @@ export async function buildChapterReviewEvidence(
   tender('analysis/project.json', context.project)
   for (const item of context.requirements) tender(`analysis/requirements.json#${item.id}`, item)
   for (const item of context.compliance) tender(`analysis/compliance.json#${item.id}`, item)
+  for (const item of context.globalCompliance) tender(`analysis/compliance.json#${item.id}`, item)
   for (const item of context.scoring) tender(`analysis/scoring.json#${item.id}`, item)
   for (const material of candidate.metadata.local_materials_used) {
     const resolved = await resolveEvidenceChunk(workspace, manifest, material)
@@ -104,7 +105,13 @@ const claimInput = z.object({
   claim_quote_ref: text, kind: z.enum(['project_fact', 'technical_fact', 'commitment']),
   status: z.enum(['supported', 'unsupported']), source_reference: text.nullable(), issue: text.nullable(),
 }).strict()
-const summaryInput = chapterReviewSchema.pick({ quality_checks: true, blocking_issues: true })
+const globalCheckInput = z.object({
+  compliance_id: text,
+  status: z.enum(['conforms', 'violates', 'not_applicable']),
+  evidence_quote_refs: z.array(text),
+  issue: text.nullable(),
+}).strict()
+const summaryInput = chapterReviewSchema.pick({ quality_checks: true, blocking_issues: true, assignment_conflicts: true })
 const stringParameter = { type: 'string' }
 const nullableText = { oneOf: [stringParameter, { type: 'null' }] }
 const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.shape.quality_checks.shape).map(key => [key, { type: 'boolean' }]))
@@ -125,6 +132,7 @@ export function attachChapterReview(
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
   const coverage = new Map<string, z.infer<typeof coverageInput>>()
+  const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
   const claims = new Map<string, z.infer<typeof claimInput>>()
   let summary: z.infer<typeof summaryInput> | undefined
   const quote = (ref: string): string => {
@@ -164,6 +172,35 @@ export function attachChapterReview(
       }),
     })
     runtime.register({
+      name: 'review_global_constraints', description: '逐项记录全局要求对本章的适用性；不适用不是整份文档通过，真实违反才形成正文修复问题。',
+      parameters: {
+        type: 'object', properties: { items: { type: 'array', items: {
+          type: 'object', properties: {
+            compliance_id: stringParameter,
+            status: { type: 'string', enum: ['conforms', 'violates', 'not_applicable'] },
+            evidence_quote_refs: { type: 'array', items: stringParameter },
+            issue: nullableText,
+          }, required: ['compliance_id', 'status', 'evidence_quote_refs', 'issue'], additionalProperties: false,
+        } } }, required: ['items'], additionalProperties: false,
+      },
+      execute: args => batch(args, (value) => {
+        const item = chapterToolArgs(globalCheckInput, value)
+        if (!context.globalCompliance.some(entry => entry.id === item.compliance_id)) throw new ToolArgsError([`compliance_id: 未知全局合规 ID ${item.compliance_id}。`])
+        for (const ref of item.evidence_quote_refs) quote(ref)
+        if (item.status === 'conforms' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) {
+          throw new ToolArgsError([`${item.compliance_id}: conforms 必须引用适用正文且 issue 为 null。`])
+        }
+        if (item.status === 'violates' && (item.evidence_quote_refs.length === 0 || item.issue === null)) {
+          throw new ToolArgsError([`${item.compliance_id}: violates 必须引用违规正文并说明问题。`])
+        }
+        if (item.status === 'not_applicable' && (item.evidence_quote_refs.length > 0 || item.issue === null)) {
+          throw new ToolArgsError([`${item.compliance_id}: not_applicable 不得引用正文，必须说明为何本章不适用。`])
+        }
+        globalChecks.set(item.compliance_id, item)
+        return item.compliance_id
+      }),
+    })
+    runtime.register({
       name: 'review_claims', description: '分批核验实质性事实、技术参数和承诺；只用当前 Q 原文及有资格的 E 来源，来源存在不等于语义支持。',
       parameters: {
         type: 'object', properties: { items: { type: 'array', items: {
@@ -191,22 +228,35 @@ export function attachChapterReview(
         type: 'object', properties: {
           quality_checks: { type: 'object', properties: qualityParameters, required: Object.keys(qualityParameters), additionalProperties: false },
           blocking_issues: { type: 'array', items: stringParameter },
-        }, required: ['quality_checks', 'blocking_issues'], additionalProperties: false,
+          assignment_conflicts: { type: 'array', items: { type: 'object', properties: {
+            task: stringParameter, basis: stringParameter,
+            related_section_ids: { type: 'array', items: stringParameter },
+          }, required: ['task', 'basis', 'related_section_ids'], additionalProperties: false } },
+        }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts'], additionalProperties: false,
       },
       execute(args) {
         summary = chapterToolArgs(summaryInput, args)
         summary.blocking_issues = [...new Set(summary.blocking_issues.map(value => value.trim()))]
+        for (const conflict of summary.assignment_conflicts) for (const sectionId of conflict.related_section_ids) {
+          if (!context.outlineSections.some(section => section.id === sectionId)) throw new ToolArgsError([`assignment_conflicts: 未知章节 ${sectionId}。`])
+        }
         return Promise.resolve({ recorded: true })
       },
     })
     runtime.register({
-      name: 'finish_chapter_review', description: '检查是否记录全部 R 与质量总结，再生成 pass 或 repair 报告并结束；repair 也可正常提交。',
+      name: 'finish_chapter_review', description: '检查是否记录全部 R、全局约束与质量总结，再生成报告并结束；repair 或 blocked 也可正常提交。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       execute(args, exec) {
         chapterToolArgs(z.object({}).strict(), args)
         const missing = checklist.filter(item => !coverage.has(item.item_ref)).map(item => item.item_ref)
-        if (missing.length > 0 || summary === undefined) {
-          return Promise.resolve({ completed: false, missing_items: missing, missing_summary: summary === undefined })
+        const missingGlobal = context.globalCompliance.filter(item => !globalChecks.has(item.id)).map(item => item.id)
+        if (missing.length > 0 || missingGlobal.length > 0 || summary === undefined) {
+          return Promise.resolve({
+            completed: false,
+            missing_items: missing,
+            missing_global_compliance_ids: missingGlobal,
+            missing_summary: summary === undefined,
+          })
         }
         const entries = checklist.map((item) => {
           const result = coverage.get(item.item_ref)
@@ -227,13 +277,26 @@ export function attachChapterReview(
           ...entries.filter(entry => entry.result.status === 'missing').map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
           ...Object.entries(summary.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
           ...claimChecks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
+          ...[...globalChecks.values()].filter(item => item.status === 'violates')
+            .map(item => `违反全局约束：${context.globalCompliance.find(value => value.id === item.compliance_id)?.normalized_rule}；${item.issue}`),
         ])]
+        const globalComplianceChecks = context.globalCompliance.map((item) => {
+          const result = globalChecks.get(item.id)
+          if (result === undefined) throw new Error(`S5 review lost global compliance ${item.id}`)
+          return {
+            compliance_id: item.id, item: item.normalized_rule, status: result.status,
+            evidence_quotes: result.evidence_quote_refs.map(quote), issue: result.issue,
+          }
+        })
         const review = parseChapterReview({
-          schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id, verdict: blocking.length === 0 ? 'pass' : 'repair',
+          schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
+          verdict: summary.assignment_conflicts.length > 0 ? 'blocked' : blocking.length === 0 ? 'pass' : 'repair',
           must_answer_coverage: entries.filter(entry => entry.item.kind === 'must_answer').map(entry => entry.value),
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),
           response_point_coverage: entries.filter(entry => entry.item.kind === 'response_point').map(entry => ({ ...entry.value, response_point_id: entry.item.id })),
           compliance_coverage: entries.filter(entry => entry.item.kind === 'compliance').map(entry => ({ ...entry.value, compliance_id: entry.item.id })),
+          global_compliance_checks: globalComplianceChecks,
+          assignment_conflicts: summary.assignment_conflicts,
           claim_checks: claimChecks, quality_checks: summary.quality_checks, blocking_issues: blocking,
         })
         return Promise.resolve(runtime.finish(exec, review))

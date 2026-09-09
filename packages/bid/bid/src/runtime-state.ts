@@ -57,7 +57,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/scoring-response-points.json', 'analysis/compliance.json', 'analysis/evidence-map.json',
       'analysis/web-evidence-sources.json', 'outline/confirmed-outline.json',
     ], allowedTools: ['grep', 'read', 'web_search', 'web_fetch'], forbiddenTools: ['bash', 'write'], requiredArtifacts: [
-      'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json',
+      'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json', 'chapters/global-compliance-review.json',
     ], validator: 'chapter-writing-validator', userGate: 'none', nextStage: null,
   },
   docx_export: {

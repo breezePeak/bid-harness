@@ -336,7 +336,7 @@ export type BidPageEstimate =
 
 /** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 1
+  readonly schema_version: 2
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -357,6 +357,22 @@ export interface BidReviewWorkbenchView {
     readonly needs_attention_count: number
     readonly page_estimate: BidPageEstimate
   }
+  /** 文档级核验及项目递交待办，不计入任一章节红点。 */
+  readonly global_compliance: {
+    readonly status: 'not_required' | 'reviewing' | 'pass' | 'needs_attention'
+    readonly reviewed_count: number
+    readonly total_count: number
+    readonly document_issues: readonly BidGlobalComplianceIssueView[]
+    readonly delivery_todos: readonly BidGlobalComplianceIssueView[]
+  }
+}
+
+/** Browser-safe document-level compliance finding or project-delivery todo. */
+export interface BidGlobalComplianceIssueView {
+  readonly compliance_id: string
+  readonly status: 'fail' | 'pending'
+  readonly detail: string
+  readonly affected_section_ids: readonly string[]
 }
 
 const pageEstimateSchema = z.discriminatedUnion('status', [
@@ -370,7 +386,7 @@ const chapterPageEstimateSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('unavailable') }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
@@ -381,6 +397,16 @@ const reviewWorkbenchSchema = z.strictObject({
     chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),
     reviewed_count: z.number().int().nonnegative(),
     needs_attention_count: z.number().int().nonnegative(), page_estimate: pageEstimateSchema,
+  }),
+  global_compliance: z.strictObject({
+    status: z.enum(['not_required', 'reviewing', 'pass', 'needs_attention']),
+    reviewed_count: z.number().int().nonnegative(), total_count: z.number().int().nonnegative(),
+    document_issues: z.array(z.strictObject({
+      compliance_id: z.string(), status: z.enum(['fail', 'pending']), detail: z.string(), affected_section_ids: z.array(z.string()),
+    })),
+    delivery_todos: z.array(z.strictObject({
+      compliance_id: z.string(), status: z.enum(['fail', 'pending']), detail: z.string(), affected_section_ids: z.array(z.string()),
+    })),
   }),
 })
 

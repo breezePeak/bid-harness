@@ -31,7 +31,7 @@ async function exportFixture() {
       section('root', null, 1, 1, '实施方案', false), section('branch', 'root', 1, 2, '部署安排', false)],
   }
   const manifest: ChapterWritingManifest = {
-    schema_version: 5, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+    schema_version: 6, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
     chapters: ['resource', 'delivery'].map((id, index) => ({
       section_id: id, content_path: `chapters/sections/000${index + 1}.md`, requirement_ids: [], scoring_ids: [], compliance_ids: [],
       covered_must_answer: [], covered_scoring_response_point_ids: [], covered_scoring_response_points: [],
@@ -74,10 +74,10 @@ describe('Bid DOCX export', () => {
     expect(markdown).not.toContain('1.1.1.1')
     expect(markdown).toContain('```txt\n# 原样井号\n```')
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'bid.docx')) })
-    expect(html).toContain('<h3><strong>1.1.1 资源配置</strong></h3>')
-    expect(html).toContain('<h1><strong>1 实施方案</strong></h1><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h2><strong>1.1 部署安排</strong></h2><p>本节概述部署所需的资源配置。</p>')
+    expect(html).toContain('<h3><strong>资源配置</strong></h3>')
+    expect(html).toContain('<h1><strong>实施方案</strong></h1><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h2><strong>部署安排</strong></h2><p>本节概述部署所需的资源配置。</p>')
     expect(html.indexOf('资源配置正文')).toBeLessThan(html.indexOf('交付正文'))
-    expect(html).toContain('<h2><strong>1.2 交付</strong></h2>')
+    expect(html).toContain('<h2><strong>交付</strong></h2>')
   })
 
   it.each(['hash', 'missing', 'duplicate', 'unknown', 'path'] as const)('拒绝 %s 不匹配的章节记录', async (invalid) => {

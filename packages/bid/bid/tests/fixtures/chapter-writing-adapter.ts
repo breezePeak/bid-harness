@@ -28,6 +28,7 @@ export class ChapterAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model }) }
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    const globalReview = prompt.includes('Document Global Compliance Review')
     const role = options.sessionId === 'parent' ? 'plan' : prompt.includes('Review Checklist：') ? 'review' : 'writer'
     let entry = this.requests.get(String(options.sessionId))
     if (entry === undefined) {
@@ -38,6 +39,19 @@ export class ChapterAdapter extends LlmAdapter {
     const step = entry.steps++
     if (step > 8) throw new Error(`script exceeded bound: ${role}`)
     if (role === 'plan') {
+      if (globalReview) {
+        const pendingLine = prompt.split('\n').find(line => line.startsWith('Pending Global Compliance：'))!
+        const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ id: string }>
+        const globalStep = step - 2
+        if (globalStep < pending.length) {
+          yield* call('review_global_compliance', {
+            compliance_id: pending[globalStep]!.id,
+            category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
+            status: 'pass', checked_section_ids: ['SEC-1'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+          })
+        } else yield* call('finish_global_compliance_review', {})
+        return
+      }
       yield* step === 0 ? call('add_global_consistency_note', { note: '统一接口与审计术语。' }) : call('finish_chapter_plan', {})
       return
     }
@@ -64,8 +78,14 @@ export class ChapterAdapter extends LlmAdapter {
       case 3: yield* call('review_coverage_items', { items: [...items].reverse().map(item => section.id === 'SEC-1' && item.item_ref === 'R1'
         && [...this.requests.values()].filter(request => request.role === 'review' && request.sectionId === section.id).length <= this.repairReviews
         ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '缺少适用的实际设备数量依据。' } : covered(item)) }); break
-      case 4: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [] }); break
-      case 5: yield* call('finish_chapter_review', {}); break
+      case 4: {
+        const line = prompt.split('\n').find(value => value.startsWith('Global Compliance：'))!
+        const globals = JSON.parse(line.slice('Global Compliance：'.length)) as Array<{ id: string }>
+        yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_id: item.id, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节不适用。' })) })
+        break
+      }
+      case 5: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] }); break
+      case 6: yield* call('finish_chapter_review', {}); break
       default: throw new Error('Reviewer finish did not conclude the turn')
     }
   }

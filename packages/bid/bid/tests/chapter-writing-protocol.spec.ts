@@ -14,6 +14,7 @@ import { outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-
 import { validateChapterReview } from '../src/chapter-writing-executor.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
+import { attachGlobalComplianceReview, validateGlobalComplianceReview, type GlobalComplianceEvidence } from '../src/chapter-writing-global-review.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -196,7 +197,8 @@ function reviewContext() {
   const context = emptyChapterContext(outlineFixture().sections[1]!)
   context.section = { ...context.section, must_answer: ['相同文字', '相同文字'] }
   context.requirements = [{ id: 'REQ-1', category: '技术', raw_text: '要求原文', normalized_requirement: '必须实施审计', mandatory: true, source_refs: [] }]
-  context.compliance = [{ id: 'GLOBAL-1', type: '强制', raw_text: '全局规则', normalized_rule: '全局安全约束', severity: 'mandatory', source_refs: [] }]
+  context.compliance = [{ id: 'CHAPTER-1', type: '强制', raw_text: '章节规则', normalized_rule: '本章必须说明审计', severity: 'mandatory', source_refs: [] }]
+  context.globalCompliance = [{ id: 'GLOBAL-1', type: '强制', raw_text: '全局规则', normalized_rule: '全局安全约束', severity: 'mandatory', source_refs: [] }]
   context.responsePoints = [{ id: 'RP-000001', scoring_id: 'SCORE-1', order: 1, text: '评分细项' }]
   return context
 }
@@ -210,23 +212,25 @@ const evidence: ChapterReviewEvidence[] = [
 const covered = (item_ref: string) => ({ item_ref, status: 'covered', evidence_quote_refs: ['Q1'], issue: null })
 
 describe('S5 Reviewer 分批记录', () => {
-  it('全局 Compliance、重复文本独立编号，乱序分批与同批 upsert 按 canonical 顺序组装', async () => {
+  it('全局 Compliance 与章节 Checklist 分离，重复文本仍按独立身份组装', async () => {
     const { ctx, agent, call } = await harness()
     const context = reviewContext()
     const checklist = buildChapterReviewChecklist(context)
     expect(checklist).toHaveLength(5)
-    expect(checklist[4]).toMatchObject({ item_ref: 'R5', kind: 'compliance', id: 'GLOBAL-1' })
+    expect(checklist[4]).toMatchObject({ item_ref: 'R5', kind: 'compliance', id: 'CHAPTER-1' })
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '完整正文证据']]), evidence, 1)
     for (const schema of ctx.tools.schemas(agent)) assertSupportedJsonSchema(schema.parameters)
     await call('review_coverage_items', { items: [covered('R5'), covered('R2')] })
-    expect((await call('finish_chapter_review', {})).value).toEqual({ completed: false, missing_items: ['R1', 'R3', 'R4'], missing_summary: true })
+    expect((await call('finish_chapter_review', {})).value).toEqual({ completed: false, missing_items: ['R1', 'R3', 'R4'], missing_global_compliance_ids: ['GLOBAL-1'], missing_summary: true })
     await call('review_coverage_items', { items: [covered('R4'), { item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未响应' }, covered('R1'), covered('R3')] })
-    await call('set_review_summary', { quality_checks: quality, blocking_issues: [] })
+    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及该约束。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] })
     await call('finish_chapter_review', {})
     const report = runtime.captured()!
     expect(report.verdict).toBe('pass')
     expect(report.must_answer_coverage.map(item => item.item)).toEqual(['相同文字', '相同文字'])
-    expect(report.compliance_coverage[0]?.item).toBe('全局安全约束')
+    expect(report.compliance_coverage[0]?.item).toBe('本章必须说明审计')
+    expect(report.global_compliance_checks).toEqual([{ compliance_id: 'GLOBAL-1', item: '全局安全约束', status: 'not_applicable', evidence_quotes: [], issue: '本章不涉及该约束。' }])
     expect(report.blocking_issues).toEqual([])
     const metadata = parseChapterMetadata({
       section_id: context.section.id, covered_must_answer: context.section.must_answer,
@@ -261,8 +265,9 @@ describe('S5 Reviewer 分批记录', () => {
     const context = reviewContext()
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文']]), evidence, 0)
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
-    await call('set_review_summary', { quality_checks: quality, blocking_issues: ['  可撤销  ', '可撤销'] })
-    await call('set_review_summary', { quality_checks: { ...quality, structure_complete: kind !== 'quality' }, blocking_issues: kind === 'extra' ? ['额外问题'] : [] })
+    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: ['  可撤销  ', '可撤销'], assignment_conflicts: [] })
+    await call('set_review_summary', { quality_checks: { ...quality, structure_complete: kind !== 'quality' }, blocking_issues: kind === 'extra' ? ['额外问题'] : [], assignment_conflicts: [] })
     if (kind === 'coverage') await call('review_coverage_items', { items: [{ item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '具体缺口' }] })
     await call('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact', status: 'unsupported', source_reference: null, issue: '原文没有支持' }] })
     if (kind !== 'claim') await call('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact', status: 'supported', source_reference: 'E1', issue: null }] })
@@ -271,6 +276,25 @@ describe('S5 Reviewer 分批记录', () => {
     expect(runtime.captured()?.blocking_issues).not.toContain('可撤销')
     if (kind !== 'claim') expect(runtime.captured()?.blocking_issues.join()).not.toContain('原文没有支持')
     expect(runtime.captured()?.claim_checks[0]?.source_reference).toBe(kind === 'claim' ? null : evidence[0]?.locator)
+  })
+
+  it('全局约束只有真实违规才形成章节 repair，任务分配冲突单独阻断且不要求越界扩写', async () => {
+    const { agent, call } = await harness()
+    const context = reviewContext()
+    const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文违反全局规则']]), evidence, 0)
+    await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
+    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'violates', evidence_quote_refs: ['Q1'], issue: '正文参数违反约束。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] })
+    await call('finish_chapter_review', {})
+    expect(runtime.captured()).toMatchObject({ verdict: 'repair', global_compliance_checks: [{ status: 'violates' }] })
+    runtime.dispose()
+
+    const blocked = attachChapterReview(agent, context, new Map([['Q1', '正文违反全局规则']]), evidence, 0)
+    await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
+    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不适用。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [{ task: '提交资质附件', basis: '该任务属于项目递交而非本章正文。', related_section_ids: [] }] })
+    await call('finish_chapter_review', {})
+    expect(blocked.captured()).toMatchObject({ verdict: 'blocked', assignment_conflicts: [{ task: '提交资质附件' }] })
   })
 
   it('来源和 Q 身份属于当前包，Web 或 handoff 不能洗成企业事实证据', async () => {
@@ -293,8 +317,39 @@ describe('S5 Reviewer 分批记录', () => {
     const secondRuntime = attachChapterReview(second, reviewContext(), new Map([['Q1', '第二章']]), evidence, 0)
     runtime.dispose()
     expect(ctx.tools.schemas(agent)).toEqual([])
-    expect(ctx.tools.schemas(second)).toHaveLength(4)
+    expect(ctx.tools.schemas(second)).toHaveLength(5)
     secondRuntime.dispose()
     expect(ctx.tools.schemas(second)).toEqual([])
+  })
+})
+
+describe('S5 文档级全局合规核验', () => {
+  it('保存内容缺失与递交待确认，绑定实际检查章节并允许多章共同负责', async () => {
+    const { agent, call } = await harness()
+    const outline = { ...outlineFixture(), global_compliance_ids: ['GLOBAL-CONTENT', 'GLOBAL-UPLOAD'] }
+    const compliance = { schema_version: 1 as const, compliance_items: [
+      { id: 'GLOBAL-CONTENT', type: '材料', raw_text: '整份文档应包含证明材料', normalized_rule: '整份文档包含证明材料', severity: 'mandatory' as const, source_refs: [] },
+      { id: 'GLOBAL-UPLOAD', type: '递交', raw_text: '截止前上传', normalized_rule: '截止前完成上传', severity: 'fatal' as const, source_refs: [] },
+    ] }
+    const chapters = outline.sections.filter(section => section.writable).map((section, index) => ({
+      section_id: section.id, title: section.title, markdown: `正文 ${index + 1}`, candidate_sha256: String(index + 1).repeat(64),
+    }))
+    const evidence: GlobalComplianceEvidence[] = chapters.map((chapter, index) => ({ evidence_ref: `D${index + 1}`, kind: 'chapter_quote', section_id: chapter.section_id, quote: chapter.markdown }))
+    const runtime = attachGlobalComplianceReview(agent, outline, 'a'.repeat(64), compliance, chapters, evidence, [], 0)
+    await call('review_global_compliance', {
+      compliance_id: 'GLOBAL-CONTENT', category: 'document_requirement',
+      owners: [{ kind: 'chapter', section_id: 'SEC-1' }, { kind: 'chapter', section_id: 'SEC-2' }, { kind: 'document', section_id: null }],
+      status: 'fail', checked_section_ids: ['SEC-1', 'SEC-2'], evidence_refs: [], affected_section_ids: ['SEC-1'], issue: '正文与材料中未找到必需证明。',
+    })
+    await call('review_global_compliance', {
+      compliance_id: 'GLOBAL-UPLOAD', category: 'delivery_requirement', owners: [{ kind: 'delivery', section_id: null }],
+      status: 'pending', checked_section_ids: [], evidence_refs: [], affected_section_ids: [], issue: '缺少实际上传执行证据，需人工确认。',
+    })
+    expect((await call('finish_global_compliance_review', {})).value).toEqual({ completed: true })
+    const report = runtime.captured()!
+    expect(report.items.map(item => item.status)).toEqual(['fail', 'pending'])
+    expect(validateGlobalComplianceReview(report, outline, compliance, chapters, { files: [] } as never)).toEqual([])
+    expect(validateGlobalComplianceReview(report, outline, compliance, [{ ...chapters[0]!, candidate_sha256: 'f'.repeat(64) }, ...chapters.slice(1)], { files: [] } as never))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'GLOBAL_COMPLIANCE_CHAPTER_STALE' })]))
   })
 })

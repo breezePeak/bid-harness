@@ -16,6 +16,19 @@ import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-hea
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
 import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence } from './chapter-writing-review.ts'
+import {
+  attachGlobalComplianceReview,
+  buildGlobalComplianceEvidence,
+  GLOBAL_COMPLIANCE_REVIEW_TOOLS,
+  validateGlobalComplianceReview,
+  type GlobalComplianceChapter,
+} from './chapter-writing-global-review.ts'
+import {
+  GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
+  parseGlobalComplianceReviewArtifact,
+  type GlobalComplianceReviewArtifact,
+  type GlobalComplianceReviewItem,
+} from './chapter-writing-global-review-artifacts.ts'
 import type { ChapterProtocol } from './chapter-writing-protocol.ts'
 import {
   CHAPTER_WRITING_SCHEMA_VERSION,
@@ -75,6 +88,7 @@ import {
 const PLAN_PATH = 'chapters/execution-plan.json'
 const LOG_PATH = 'chapters/execution-log.json'
 const MANIFEST_PATH = 'chapters/manifest.json'
+const GLOBAL_REVIEW_PATH = 'chapters/global-compliance-review.json'
 const MAIN_AGENT_TOOLS: readonly string[] = []
 const CHAPTER_AGENT_TOOLS = ['grep', 'read', 'web_search', 'web_fetch'] as const
 const REVIEWER_AGENT_TOOLS: readonly string[] = []
@@ -105,6 +119,8 @@ export interface ChapterContext {
   scoring: ReturnType<typeof parseTenderScoringArtifact>['scoring_items']
   responsePoints: ScoringResponsePoint[]
   compliance: ReturnType<typeof parseTenderComplianceArtifact>['compliance_items']
+  /** 全书要求供本章判断适用性与违规，不属于本章必答覆盖清单。 */
+  globalCompliance: ReturnType<typeof parseTenderComplianceArtifact>['compliance_items']
   relatedMaterials: LocalEvidenceMaterial[]
   referenceBidMaterials: LocalEvidenceMaterial[]
   frameworkDraftMaterials: FrameworkDraftMaterial[]
@@ -193,7 +209,8 @@ export function pickChapterContext(raw: {
   const requirementIds = new Set(raw.section.requirement_ids)
   const scoringIds = new Set(raw.section.scoring_ids)
   const responsePointIds = new Set(raw.section.scoring_response_point_ids ?? [])
-  const complianceIds = new Set([...raw.section.compliance_ids, ...raw.outline.global_compliance_ids])
+  const complianceIds = new Set(raw.section.compliance_ids)
+  const globalComplianceIds = new Set(raw.outline.global_compliance_ids)
   const mapping = raw.evidence.section_mappings.find(item => item.section_id === raw.section.id)
   if (mapping === undefined) throw new Error('EVIDENCE_MAPPING_SECTION_MISSING: ' + raw.section.id)
   const localMaterials = uniqueBy(mapping.local_materials, localIdentity)
@@ -210,6 +227,7 @@ export function pickChapterContext(raw: {
     scoring: raw.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
     responsePoints: raw.responsePointCatalog.filter(point => responsePointIds.has(point.id)),
     compliance: raw.compliance.compliance_items.filter(item => complianceIds.has(item.id)),
+    globalCompliance: raw.compliance.compliance_items.filter(item => globalComplianceIds.has(item.id)),
     relatedMaterials: localMaterials.filter(material => material.source_kind === 'reference'),
     referenceBidMaterials: localMaterials.filter(material => material.source_kind === 'reference_bid'),
     frameworkDraftMaterials: [],
@@ -368,7 +386,8 @@ export function renderChapterSubagentTask(
     `Relevant Requirements：${JSON.stringify(modelContext(context.requirements))}`,
     `Relevant Scoring：${JSON.stringify(modelContext(context.scoring))}`,
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
-    `Relevant Compliance：${JSON.stringify(modelContext(context.compliance))}`,
+    `Chapter Required Compliance（本章必须正文响应）：${JSON.stringify(modelContext(context.compliance))}`,
+    `Global Compliance（不要求每章重复；仅遵守适用约束，整份文档或递交义务由文档级核验负责）：${JSON.stringify(modelContext(context.globalCompliance))}`,
     renderChapterWriterReferences(context, references ?? createChapterWriterReferences(context)),
     `Framework Draft Materials（用户已有正文，可 preserve/adapt/rewrite，但不是当前项目事实 Evidence）：${JSON.stringify(context.frameworkDraftMaterials)}`,
     `Writing Dimensions：${JSON.stringify(context.writingDimensions)}`,
@@ -630,9 +649,10 @@ function renderChapterReviewerTask(
   evidence: readonly ChapterReviewEvidence[],
 ): string {
   return [
-    '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items、review_claims 分批记录，用 set_review_summary 提交质量检查，最后调用 finish_chapter_review。不要调用 structured_output 或返回整份报告。',
+    '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录本章必答覆盖，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。',
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
+    '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
     '逐项审查 Review Checklist 的 R；每批可提交多项，后续同键合法记录覆盖已有判断。covered 必须至少引用一个当前 Q 且 issue=null；missing 不得引用 Q，必须说明具体 issue。未记录的 R 必须补齐，不能以 Writer Metadata 代替正文证据。',
     'coverage 的 evidence_quote_refs 与 claim 的 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
@@ -644,7 +664,8 @@ function renderChapterReviewerTask(
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
     `Relevant Requirements：${JSON.stringify(modelContext(context.requirements))}`,
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
-    `Relevant Compliance：${JSON.stringify(modelContext(context.compliance))}`,
+    `Chapter Required Compliance：${JSON.stringify(modelContext(context.compliance))}`,
+    `Global Compliance：${JSON.stringify(modelContext(context.globalCompliance))}`,
     `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context))}`,
     `Evidence Pack：${JSON.stringify(evidence)}`,
     `Dependency Handoff：${JSON.stringify(dependencies)}`,
@@ -667,7 +688,7 @@ function exactIdentifiers<T>(values: readonly T[], expected: readonly string[], 
  * @returns 具体完整性问题；合法 repair 返回空数组。
  */
 export function validateChapterReview(
-  context: Pick<ChapterContext, 'section' | 'requirements' | 'responsePoints' | 'compliance'>,
+  context: Pick<ChapterContext, 'section' | 'requirements' | 'responsePoints' | 'compliance' | 'globalCompliance' | 'outlineSections'>,
   candidate: AcceptedChapterCandidate,
   review: ChapterReview,
 ): StageValidationIssue[] {
@@ -691,6 +712,9 @@ export function validateChapterReview(
   if (!exactIdentifiers(review.compliance_coverage, context.compliance.map(item => item.id), item => item.compliance_id)) {
     issues.push({ code: 'CHAPTER_REVIEW_COMPLIANCE_INVALID', message: 'Reviewer 必须逐项审查当前章节合规项。', path: 'compliance_coverage' })
   }
+  if (!exactIdentifiers(review.global_compliance_checks, context.globalCompliance.map(item => item.id), item => item.compliance_id)) {
+    issues.push({ code: 'CHAPTER_REVIEW_GLOBAL_COMPLIANCE_INVALID', message: 'Reviewer 必须单独记录全局要求对当前章节的适用性。', path: 'global_compliance_checks' })
+  }
   const coverage = [
     ...review.must_answer_coverage,
     ...review.requirement_coverage,
@@ -704,10 +728,19 @@ export function validateChapterReview(
       issues.push({ code: 'CHAPTER_REVIEW_COVERAGE_INVALID', message: `覆盖记录 ${item.item} 的 status、引句及 issue 不一致。`, path: 'coverage' })
     }
   }
+  for (const item of review.global_compliance_checks) {
+    quotesPresent(item.evidence_quotes, 'global_compliance_checks.evidence_quotes')
+    if ((item.status === 'conforms' && (item.evidence_quotes.length === 0 || item.issue !== null))
+      || (item.status === 'violates' && (item.evidence_quotes.length === 0 || item.issue === null))
+      || (item.status === 'not_applicable' && (item.evidence_quotes.length > 0 || item.issue === null))) {
+      issues.push({ code: 'CHAPTER_REVIEW_GLOBAL_COMPLIANCE_RESULT_INVALID', message: `全局约束 ${item.item} 的适用性、引句及 issue 不一致。`, path: 'global_compliance_checks' })
+    }
+  }
   for (const [items, expected] of [
     [review.requirement_coverage, context.requirements.map(item => item.normalized_requirement)],
     [review.response_point_coverage, context.responsePoints.map(item => item.text)],
     [review.compliance_coverage, context.compliance.map(item => item.normalized_rule)],
+    [review.global_compliance_checks, context.globalCompliance.map(item => item.normalized_rule)],
   ] as const) {
     if (!exactIdentifiers<{ item: string }>(items, expected, item => item.item)) issues.push({ code: 'CHAPTER_REVIEW_TEXT_INVALID', message: '覆盖记录文本必须匹配当前章节 canonical 条目。', path: 'coverage.item' })
   }
@@ -718,6 +751,14 @@ export function validateChapterReview(
       issues.push({ code: 'CHAPTER_REVIEW_CLAIM_INVALID', message: '声明 supported 必须有来源且无 issue，unsupported 必须说明具体问题。', path: 'claim_checks' })
     }
   }
+  for (const conflict of review.assignment_conflicts) for (const sectionId of conflict.related_section_ids) {
+    if (!context.outlineSections.some(section => section.id === sectionId)) {
+      issues.push({ code: 'CHAPTER_REVIEW_ASSIGNMENT_CONFLICT_INVALID', message: `任务分配冲突引用未知章节 ${sectionId}。`, path: 'assignment_conflicts' })
+    }
+  }
+  if ((review.verdict === 'blocked') !== (review.assignment_conflicts.length > 0)) {
+    issues.push({ code: 'CHAPTER_REVIEW_ASSIGNMENT_VERDICT_INVALID', message: 'blocked 仅用于已记录的任务分配冲突，其他结论不得隐藏该冲突。', path: 'verdict' })
+  }
   if (review.verdict === 'pass') {
     const covered = [
       ...review.must_answer_coverage,
@@ -727,12 +768,16 @@ export function validateChapterReview(
     ]
     if (review.blocking_issues.length > 0 || covered.some(item => item.status !== 'covered')
       || Object.values(review.quality_checks).some(value => !value)
-      || review.claim_checks.some(item => item.status === 'unsupported')) {
+      || review.claim_checks.some(item => item.status === 'unsupported')
+      || review.global_compliance_checks.some(item => item.status === 'violates')
+      || review.assignment_conflicts.length > 0) {
       const gaps = [
         ...covered.filter(item => item.status !== 'covered').map(item => `未覆盖：${item.item}`),
         ...review.blocking_issues,
         ...Object.entries(review.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
         ...review.claim_checks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
+        ...review.global_compliance_checks.filter(item => item.status === 'violates').map(item => `违反全局约束：${item.item}；${item.issue}`),
+        ...review.assignment_conflicts.map(item => `任务分配冲突：${item.task}；${item.basis}`),
       ]
       issues.push({ code: 'CHAPTER_REVIEW_PASS_INVALID', message: `Reviewer pass 与内容问题矛盾：${gaps.join('；')}`, path: 'verdict' })
     }
@@ -741,13 +786,13 @@ export function validateChapterReview(
 }
 
 function entryFor(
-  context: ChapterContext, outline: OutlineArtifact, candidate: AcceptedChapterCandidate, reviewPath: string, reviewSha256: string,
+  context: ChapterContext, candidate: AcceptedChapterCandidate, reviewPath: string, reviewSha256: string,
 ): ChapterManifestEntry {
   return {
     content_path: context.contentPath,
     requirement_ids: [...context.section.requirement_ids],
     scoring_ids: [...context.section.scoring_ids],
-    compliance_ids: [...context.section.compliance_ids, ...outline.global_compliance_ids],
+    compliance_ids: [...context.section.compliance_ids],
     review_path: reviewPath,
     review_sha256: reviewSha256,
     ...candidate.metadata,
@@ -758,6 +803,8 @@ interface ChapterCheckpoint {
   readonly plan: ChapterExecutionPlan
   readonly executionLog: ChapterExecutionLog
   readonly completed: Map<string, CompletedChapter>
+  /** Current bodies whose old or invalid review must be rerun before any Writer repair. */
+  readonly drafts: Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string }>
 }
 
 /**
@@ -780,6 +827,7 @@ async function loadChapterCheckpoint(
     if (executionLog.sections.length !== worklist.length) return undefined
     const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
     const completed = new Map<string, CompletedChapter>()
+    const drafts = new Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string }>()
     const manifest = await workspace.readManifest()
     const sources = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json')).sources
     for (const [index, section] of worklist.entries()) {
@@ -798,27 +846,21 @@ async function loadChapterCheckpoint(
         continue
       }
       try {
-        if (log.final_writer_child_session_id === null || log.final_reviewer_child_session_id === null) throw new Error('checkpoint-child-missing')
+        if (log.final_writer_child_session_id === null) throw new Error('checkpoint-writer-missing')
         await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
         const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
         const metadata = parseChapterMetadata(await readJson(workspace, context.metadataPath))
         const serial = context.contentPath.slice(-7, -3)
         const reviewPath = `chapters/reviews/${serial}.json`
-        const review = parseChapterReviewArtifact(await readJson(workspace, reviewPath))
         const candidateSha256 = chapterCandidateSha256(markdown)
-        if (metadata.section_id !== section.id || review.section_id !== section.id
-        || review.candidate_sha256 !== candidateSha256
-        || review.writer_child_session_id !== log.final_writer_child_session_id
-        || review.reviewer_child_session_id !== log.final_reviewer_child_session_id
+        if (metadata.section_id !== section.id
         || !log.attempts.some(attempt => attempt.role === 'writer' && attempt.accepted
           && attempt.child_session_id === log.final_writer_child_session_id)
-        || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
-          && attempt.child_session_id === log.final_reviewer_child_session_id)) {
+        ) {
           throw new Error('checkpoint-identity-invalid')
         }
         const candidate: AcceptedChapterCandidate = { section_id: section.id, markdown: markdown.trim(), metadata }
         if (validateChapterHeadings(markdown, section.title, section.id).length > 0
-        || validateChapterReview(context, candidate, review).length > 0
         || metadata.handoff.section_id !== section.id
         || JSON.stringify(metadata.covered_must_answer) !== JSON.stringify(section.must_answer)
         || JSON.stringify(metadata.covered_scoring_response_point_ids) !== JSON.stringify(section.scoring_response_point_ids ?? [])
@@ -829,11 +871,27 @@ async function loadChapterCheckpoint(
           webMaterialValid(workspace, sources, material)))).some(valid => !valid)) {
           throw new Error('checkpoint-artifact-invalid')
         }
-        completed.set(section.id, {
-          candidate,
-          entry: entryFor(context, outline, candidate, reviewPath, candidateSha256),
-        })
+        drafts.set(section.id, { candidate, writerChildSessionId: log.final_writer_child_session_id })
+        let candidateBytesChanged = false
+        try {
+          if (log.final_reviewer_child_session_id === null) throw new Error('checkpoint-reviewer-missing')
+          const review = parseChapterReviewArtifact(await readJson(workspace, reviewPath))
+          candidateBytesChanged = review.candidate_sha256 !== candidateSha256
+          if (review.section_id !== section.id || candidateBytesChanged
+          || review.writer_child_session_id !== log.final_writer_child_session_id
+          || review.reviewer_child_session_id !== log.final_reviewer_child_session_id
+          || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
+            && attempt.child_session_id === log.final_reviewer_child_session_id)
+          || validateChapterReview(context, candidate, review).length > 0) throw new Error('checkpoint-review-invalid')
+          completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
+          drafts.delete(section.id)
+        } catch {
+          if (candidateBytesChanged) throw new Error('checkpoint-candidate-changed')
+          log.status = 'pending'
+          log.final_reviewer_child_session_id = null
+        }
       } catch { /* 无法恢复的章节及其强依赖下游需要重跑，历史尝试仍保留。 */
+        drafts.delete(section.id)
         log.status = 'pending'
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
@@ -847,18 +905,19 @@ async function loadChapterCheckpoint(
         downstream.set(dependency.section_id, dependents)
       }
     }
-    const invalid = new Set(worklist.filter(section => !completed.has(section.id)).map(section => section.id))
+    const invalid = new Set(worklist.filter(section => !completed.has(section.id) && !drafts.has(section.id)).map(section => section.id))
     // Set 迭代包含新加入的节点，依赖闭包不受目录显示顺序影响。
     for (const sectionId of invalid) for (const dependent of downstream.get(sectionId) ?? []) invalid.add(dependent)
     for (const log of executionLog.sections) {
       if (!invalid.has(log.section_id)) continue
       completed.delete(log.section_id)
+      drafts.delete(log.section_id)
       log.status = 'pending'
       log.final_writer_child_session_id = null
       log.final_reviewer_child_session_id = null
     }
     executionLog.max_concurrency = maxConcurrency
-    return { plan, executionLog, completed }
+    return { plan, executionLog, completed, drafts }
   } catch {
     return undefined
   }
@@ -918,14 +977,125 @@ async function loadValidPlan(
   }
 }
 
+function retainedGlobalReviewItems(
+  report: GlobalComplianceReviewArtifact | undefined,
+  outline: OutlineArtifact,
+  outlineHash: string,
+  compliance: ReturnType<typeof parseTenderComplianceArtifact>,
+  chapters: readonly GlobalComplianceChapter[],
+  manifest: BidManifest,
+): GlobalComplianceReviewItem[] {
+  if (report === undefined || report.confirmed_outline_sha256 !== outlineHash) return []
+  const ids = new Set(outline.global_compliance_ids)
+  const canonical = new Map(compliance.compliance_items.map(item => [item.id, item.normalized_rule]))
+  const current = new Map(chapters.map(chapter => [chapter.section_id, chapter]))
+  const files = new Map(manifest.files.map(file => [String(file.id), file]))
+  const candidates = new Map(report.items.map(item => [item.compliance_id, item]))
+  return outline.global_compliance_ids.flatMap((id) => {
+    const item = candidates.get(id)
+    if (item === undefined) return []
+    if (!ids.has(item.compliance_id) || item.item !== canonical.get(item.compliance_id)) return []
+    if (item.checked_chapters.some(checked => current.get(checked.section_id)?.candidate_sha256 !== checked.candidate_sha256)) return []
+    if (item.evidence.some((evidence) => {
+      if (evidence.kind === 'chapter_quote') return !current.get(evidence.section_id)?.markdown.includes(evidence.quote)
+      const file = files.get(evidence.file_id)
+      return file === undefined || file.originalName !== evidence.name || file.role !== evidence.role
+    })) return []
+    const probe: GlobalComplianceReviewArtifact = {
+      schema_version: GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
+      scope: 'technical_bid', confirmed_outline_sha256: outlineHash, items: [item],
+    }
+    return validateGlobalComplianceReview(
+      probe, { ...outline, global_compliance_ids: [item.compliance_id] }, compliance, chapters, manifest,
+    ).length === 0 ? [item] : []
+  })
+}
+
+/** Render the one document-level global-compliance assignment run by the existing S5 Main Agent. */
+export function renderGlobalComplianceReviewTask(
+  outline: OutlineArtifact,
+  compliance: ReturnType<typeof parseTenderComplianceArtifact>,
+  chapters: readonly GlobalComplianceChapter[],
+  evidence: ReturnType<typeof buildGlobalComplianceEvidence>,
+  retained: readonly GlobalComplianceReviewItem[],
+): string {
+  const globalIds = new Set(outline.global_compliance_ids)
+  const pending = compliance.compliance_items.filter(item => globalIds.has(item.id)
+    && !retained.some(result => result.compliance_id === item.id))
+  return [
+    '当前阶段：chapter_writing / Document Global Compliance Review',
+    '你是现有 S5 Main Agent，负责整份文档的全局合规收口；不得创建新的审核 Agent、修改确认目录或生成正文。只使用 review_global_compliance 和 finish_global_compliance_review。',
+    '结合招标条款原文、确认目录职责、当前全部正文和材料身份，逐项判断核验性质与责任归属。不得按关键词、章节编号或项目名称硬编码分类。允许多个章节共同负责同一要求。',
+    'cross_chapter_constraint 检查适用正文是否违反约束及章节之间是否矛盾，不要求每章重复条款。document_requirement 必须核对实际正文、材料或有效关联位置，不能把“未发现违规”当作内容齐全。delivery_requirement 需要实际执行证据；S5 无法观察上传、截止或递交操作时必须 pending，生成文件不等于已经递交。',
+    '区分 pass、fail、pending 和 not_applicable。pass 必须选择当前 D 依据；缺少内容可 fail 且说明缺口，缺少外部材料或人工确认应 pending。不得编造正文、材料或执行证据。',
+    'checked_section_ids 只列实际检查的正文；chapter owner 表示正文责任，document 表示全书收口责任，delivery 表示项目递交责任。affected_section_ids 只列存在可执行正文问题的章节；外部待办和无归属冲突不得复制到所有章节。',
+    `Confirmed Outline Responsibilities：${JSON.stringify(outline.sections.map(({ id, parent_id, title, purpose, must_answer, compliance_ids }) => ({ id, parent_id, title, purpose, must_answer, compliance_ids })))}`,
+    `Pending Global Compliance：${JSON.stringify(modelContext(pending))}`,
+    `Retained Current Results：${JSON.stringify(retained)}`,
+    `Current Chapters：${JSON.stringify(chapters.map(({ section_id, title, candidate_sha256 }) => ({ section_id, title, candidate_sha256 })))}`,
+    `Evidence Options：${JSON.stringify(evidence)}`,
+    '只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
+  ].join('\n')
+}
+
+async function writeGlobalComplianceReview(
+  agent: Agent,
+  workspace: BidWorkspace,
+  outline: OutlineArtifact,
+  outlineHash: string,
+  compliance: ReturnType<typeof parseTenderComplianceArtifact>,
+  chapters: readonly GlobalComplianceChapter[],
+  manifest: BidManifest,
+  maxRepairAttempts: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  let saved: GlobalComplianceReviewArtifact | undefined
+  try { saved = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH)) } catch { /* 缺失或旧版本结果不参与当前核验。 */ }
+  const retained = retainedGlobalReviewItems(saved, outline, outlineHash, compliance, chapters, manifest)
+  if (outline.global_compliance_ids.length === 0) {
+    await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), {
+      schema_version: GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
+      scope: 'technical_bid', confirmed_outline_sha256: outlineHash, items: [],
+    })
+    return
+  }
+  if (retained.length === outline.global_compliance_ids.length) return
+  const tools = agent.ctx.get('tools')
+  if (tools === undefined) throw new Error('Bid global compliance review requires tools service')
+  const evidence = buildGlobalComplianceEvidence(chapters, manifest)
+  const runtime = attachGlobalComplianceReview(
+    agent, outline, outlineHash, compliance, chapters, evidence, retained, maxRepairAttempts,
+  )
+  let liftRestriction: (() => void) | undefined
+  let liftGuard: (() => void) | undefined
+  try {
+    liftRestriction = tools.restrict({ allow: [...MAIN_AGENT_TOOLS] })
+    liftGuard = tools.guard(exec => (GLOBAL_COMPLIANCE_REVIEW_TOOLS as readonly string[]).includes(exec.name)
+      ? undefined : 'S5 文档级合规核验只允许私有提交工具。')
+    signal?.throwIfAborted()
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
+    await waitForModelStageIdle(agent, signal)
+    signal?.throwIfAborted()
+    const report = runtime.captured()
+    if (report === undefined) throw new Error('GLOBAL_COMPLIANCE_REVIEW_FINISH_REQUIRED: 文档级核验未成功提交。')
+    const issues = validateGlobalComplianceReview(report, outline, compliance, chapters, manifest)
+    if (issues.length > 0) throw new Error(issues.map(issue => `${issue.code}: ${issue.message}`).join('; '))
+    await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), report)
+  } finally {
+    liftGuard?.()
+    liftRestriction?.()
+    runtime.dispose()
+  }
+}
+
 /**
  * 执行 S5 关系规划与 Host 调度的独立章节写作；execution-log 原子替换成功才表示章节完成。
  * 最终文件写入及完成日志排队期间允许取消，已开始的最小完成提交允许收敛。
- * @param agent - live parent Bid Agent used only for relation planning and Child lineage.
+ * @param agent - live parent Bid Agent used for relation planning, Child lineage, and document-level review.
  * @param workspace - Workspace 级 Bid 项目.
  * @param task - Host-issued S5 assignment.
  * @param options - Host-owned repair and concurrency limits.
- * @returns the execution plan, execution log, and chapter manifest descriptors.
+ * @returns the execution plan, execution log, chapter manifest, and document-level review descriptors.
  */
 export async function executeChapterWriting(
   agent: Agent,
@@ -942,7 +1112,7 @@ export async function executeChapterWriting(
   const index = buildChapterWorklist(outline).findIndex(section => section.id === request.reference.section_id)
   if (index < 0) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
   const serial = String(index + 1).padStart(4, '0')
-  const paths = [LOG_PATH, MANIFEST_PATH, `chapters/sections/${serial}.md`, `chapters/meta/${serial}.json`, `chapters/reviews/${serial}.json`]
+  const paths = [LOG_PATH, MANIFEST_PATH, GLOBAL_REVIEW_PATH, `chapters/sections/${serial}.md`, `chapters/meta/${serial}.json`, `chapters/reviews/${serial}.json`]
   const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
     const absolute = join(workspace.projectRoot, path)
     await assertNoLinkedPath(workspace.root, absolute)
@@ -1175,6 +1345,7 @@ async function runChapterWriting(
         review: ChapterReview,
         writerChildSessionId: string,
         reviewerChildSessionId: string,
+        persistCandidate = true,
       ): Promise<CompletedChapter> => {
         signal.throwIfAborted()
         const reviewPath = `chapters/reviews/${serial}.json`
@@ -1184,10 +1355,12 @@ async function runChapterWriting(
           assertChapterRevisionScope(revision.request, revision.original, `${candidate.markdown.trim()}\n`)
           revision.writing = true
         }
-        await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
-        signal.throwIfAborted()
-        await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
-        signal.throwIfAborted()
+        if (persistCandidate) {
+          await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
+          signal.throwIfAborted()
+          await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
+          signal.throwIfAborted()
+        }
         await writeJson(join(workspace.projectRoot, reviewPath), {
           ...review,
           candidate_sha256: candidateSha256,
@@ -1209,7 +1382,7 @@ async function runChapterWriting(
           Object.assign(log, committed)
         })
         await logWrites
-        return { candidate, entry: entryFor(context, outline, candidate, reviewPath, candidateSha256) }
+        return { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) }
       }
       let rejectedCandidate: unknown
       let latestIssues: StageValidationIssue[] = []
@@ -1221,7 +1394,104 @@ async function runChapterWriting(
         reviewerChildSessionId: string
       } | undefined
       const maxWriterAttempts = options.maxRepairAttempts + 1
-      for (let attempt = 0, infrastructureRetries = 0; attempt < maxWriterAttempts;) {
+      const reviewCandidate = async (
+        candidate: AcceptedChapterCandidate, repairRound: number,
+      ): Promise<{ review?: ChapterReview; reviewerChildSessionId?: string; issues: StageValidationIssue[] }> => {
+        const quotes = new Map(candidate.markdown.split('\n').map(line => line.trim()).filter(Boolean)
+          .map((line, index) => [`Q${index + 1}`, line]))
+        const evidencePack = await buildChapterReviewEvidence(
+          workspace, manifest, context, candidate, [...durableWebSources.values()], dependencies,
+        )
+        for (let reviewInfrastructureRetries = 0;;) {
+          signal.throwIfAborted()
+          const reviewAttempt = log.attempts.filter(item => item.role === 'reviewer').length + 1
+          const reviewRetryLabel = reviewInfrastructureRetries === 0 ? '' : ` · 运行重试 ${reviewInfrastructureRetries}`
+          const reviewLabel = `S5 · ${serial} · 审查 ${repairRound + 1}.1${reviewRetryLabel} · ${context.section.title}`
+          const reviewStartedAt = new Date().toISOString()
+          let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
+          childSetups.set(reviewLabel, (child) => {
+            reviewRuntime = attachChapterReview(child, context, quotes, evidencePack, options.maxRepairAttempts)
+          })
+          const reviewer = await subagents.start('spawn', {
+            label: reviewLabel,
+            parent: agent,
+            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack) }],
+            signal,
+            toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
+            maxDepth: 1,
+            persona: '你是技术标章节独立审查 Subagent。只审查当前候选，通过私有记录工具提交并调用 finish_chapter_review。',
+          })
+          const reviewIssues: StageValidationIssue[] = []
+          let review: ChapterReview | undefined
+          let retryReviewerInfrastructure = false
+          try {
+            const reviewResult = await reviewer.result
+            signal.throwIfAborted()
+            if (reviewResult.stopReason !== 'completed') {
+              reviewIssues.push({ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: `Chapter Reviewer 未正常完成：${reviewResult.stopReason}。${reviewResult.diagnostic ?? ''}` })
+              retryReviewerInfrastructure = reviewResult.stopReason === 'error'
+                && reviewInfrastructureRetries < options.maxRepairAttempts
+            } else if (reviewRuntime?.captured() === undefined) {
+              reviewIssues.push({ code: 'CHAPTER_REVIEWER_FINISH_REQUIRED', message: 'Chapter Reviewer 未成功提交 finish_chapter_review。' })
+            } else {
+              try {
+                review = reviewRuntime.captured()
+                if (review !== undefined) reviewIssues.push(...validateChapterReview(context, candidate, review))
+              } catch (error: unknown) {
+                reviewIssues.push(...error instanceof ZodError
+                  ? error.issues.map(issue => ({ code: 'CHAPTER_REVIEWER_RESULT_INVALID', message: issue.message, path: issue.path.join('.') }))
+                  : [{ code: 'CHAPTER_REVIEWER_RESULT_INVALID', message: 'Chapter Reviewer 返回值不符合严格 review Schema。' }])
+              }
+            }
+            const reviewAccepted = review !== undefined && reviewIssues.length === 0
+            if (reviewAccepted && review !== undefined && review.verdict === 'repair') {
+              reviewIssues.push({ code: 'CHAPTER_REVIEWER_REPAIR_REQUIRED', message: review.blocking_issues.join('；') || 'Chapter Reviewer 要求修复。' })
+            }
+            log.attempts.push({
+              role: 'reviewer', attempt: reviewAttempt, child_session_id: String(reviewer.id), label: reviewLabel,
+              started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: reviewResult.stopReason,
+              accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues),
+            })
+            await persistLog()
+            if (reviewAccepted && review !== undefined) {
+              return { review, reviewerChildSessionId: String(reviewer.id), issues: reviewIssues }
+            }
+          } finally {
+            await reviewer.dispose()
+            reviewRuntime?.dispose()
+            childSetups.delete(reviewLabel)
+          }
+          if (retryReviewerInfrastructure) {
+            reviewInfrastructureRetries += 1
+            continue
+          }
+          return { issues: reviewIssues }
+        }
+      }
+      const preserved = revision === undefined ? checkpoint?.drafts.get(sectionId) : undefined
+      let firstAttempt = 0
+      if (preserved !== undefined) {
+        const reviewed = await reviewCandidate(preserved.candidate, 0)
+        if (reviewed.review === undefined || reviewed.reviewerChildSessionId === undefined) {
+          throw new Error(`Bid chapter review failed for preserved ${sectionId}; ${reviewed.issues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
+        }
+        reviewedFallback = {
+          candidate: preserved.candidate,
+          review: reviewed.review,
+          writerChildSessionId: preserved.writerChildSessionId,
+          reviewerChildSessionId: reviewed.reviewerChildSessionId,
+        }
+        if (reviewed.review.verdict !== 'repair' || options.maxRepairAttempts === 0) {
+          return await finishChapter(
+            preserved.candidate, reviewed.review,
+            preserved.writerChildSessionId, reviewed.reviewerChildSessionId, false,
+          )
+        }
+        rejectedCandidate = projectChapterWriterCandidate(preserved.candidate, references)
+        latestIssues = reviewed.issues
+        firstAttempt = 1
+      }
+      for (let attempt = firstAttempt, infrastructureRetries = 0; attempt < maxWriterAttempts;) {
         signal.throwIfAborted()
         const writerAttempt = log.attempts.filter(item => item.role === 'writer').length + 1
         const semanticLabel = attempt === 0 ? '' : ` · 修复 ${attempt}`
@@ -1237,6 +1507,7 @@ async function runChapterWriting(
         const startedAt = new Date().toISOString()
         let retryInfrastructure = false
         let stopAfterReview = false
+        const reusableWriterId = originalWriterId ?? preserved?.writerChildSessionId
         writer ??= createChapterWriterChild(agent, label, options.maxRepairAttempts, async (child, value) => {
           const parsed = await bindChapterWriterInput(
             workspace, manifest, context, references, value,
@@ -1244,7 +1515,7 @@ async function runChapterWriting(
           )
           if (revision !== undefined) assertChapterRevisionScope(revision.request, revision.original,
             `${normalizeChapterHeadings(parsed.markdown, context.section.title, sectionId, number).trim()}\n`)
-        }, signal, originalWriterId == null ? undefined : SessionId(originalWriterId))
+        }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId))
         const run = writer
         let candidate: AcceptedChapterCandidate | undefined
         const issues: StageValidationIssue[] = []
@@ -1302,88 +1573,17 @@ async function runChapterWriting(
               await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
             }
             await persistLog()
-            const quotes = new Map(candidate.markdown.split('\n').map(line => line.trim()).filter(Boolean)
-              .map((line, index) => [`Q${index + 1}`, line]))
-            const evidencePack = await buildChapterReviewEvidence(
-              workspace, manifest, context, candidate, [...durableWebSources.values()], dependencies,
-            )
-            for (let reviewInfrastructureRetries = 0;;) {
-              signal.throwIfAborted()
-              const reviewAttempt = log.attempts.filter(item => item.role === 'reviewer').length + 1
-              const reviewRetryLabel = reviewInfrastructureRetries === 0 ? '' : ` · 运行重试 ${reviewInfrastructureRetries}`
-              const reviewLabel = `S5 · ${serial} · 审查 ${attempt + 1}.1${reviewRetryLabel} · ${context.section.title}`
-              const reviewStartedAt = new Date().toISOString()
-              let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
-              childSetups.set(reviewLabel, (child) => {
-                reviewRuntime = attachChapterReview(child, context, quotes, evidencePack, options.maxRepairAttempts)
-              })
-              const reviewer = await subagents.start('spawn', {
-                label: reviewLabel,
-                parent: agent,
-                prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack) }],
-                signal,
-                toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
-                maxDepth: 1,
-                persona: '你是技术标章节独立审查 Subagent。只审查当前候选，通过私有记录工具提交并调用 finish_chapter_review。',
-              })
-              const reviewIssues: StageValidationIssue[] = []
-              let review: ChapterReview | undefined
-              let reviewAccepted = false
-              let retryReviewerInfrastructure = false
-              try {
-                const reviewResult = await reviewer.result
-                signal.throwIfAborted()
-                if (reviewResult.stopReason !== 'completed') {
-                  reviewIssues.push({ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: `Chapter Reviewer 未正常完成：${reviewResult.stopReason}。${reviewResult.diagnostic ?? ''}` })
-                  retryReviewerInfrastructure = reviewResult.stopReason === 'error'
-                    && reviewInfrastructureRetries < options.maxRepairAttempts
-                } else if (reviewRuntime?.captured() === undefined) {
-                  reviewIssues.push({ code: 'CHAPTER_REVIEWER_FINISH_REQUIRED', message: 'Chapter Reviewer 未成功提交 finish_chapter_review。' })
-                } else {
-                  try {
-                    review = reviewRuntime.captured()
-                    if (review !== undefined) reviewIssues.push(...validateChapterReview(context, candidate, review))
-                  } catch (error: unknown) {
-                    reviewIssues.push(...error instanceof ZodError
-                      ? error.issues.map(issue => ({ code: 'CHAPTER_REVIEWER_RESULT_INVALID', message: issue.message, path: issue.path.join('.') }))
-                      : [{ code: 'CHAPTER_REVIEWER_RESULT_INVALID', message: 'Chapter Reviewer 返回值不符合严格 review Schema。' }])
-                  }
-                }
-                reviewAccepted = review !== undefined && reviewIssues.length === 0
-                if (reviewAccepted && review !== undefined && review.verdict !== 'pass') {
-                  reviewIssues.push({ code: 'CHAPTER_REVIEWER_REPAIR_REQUIRED', message: review.blocking_issues.join('；') || 'Chapter Reviewer 要求修复。' })
-                }
-                log.attempts.push({
-                  role: 'reviewer', attempt: reviewAttempt, child_session_id: String(reviewer.id), label: reviewLabel,
-                  started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: reviewResult.stopReason,
-                  accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues),
-                })
-                await persistLog()
-                if (reviewAccepted && review !== undefined) {
-                  reviewedFallback = {
-                    candidate,
-                    review,
-                    writerChildSessionId: String(run.id),
-                    reviewerChildSessionId: String(reviewer.id),
-                  }
-                  if (review.verdict === 'pass' || attempt === maxWriterAttempts - 1) {
-                    stopAfterReview = true
-                    break
-                  }
-                }
-                latestIssues = reviewIssues
-              } finally {
-                await reviewer.dispose()
-                reviewRuntime?.dispose()
-                childSetups.delete(reviewLabel)
+            const reviewed = await reviewCandidate(candidate, attempt)
+            if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
+              reviewedFallback = {
+                candidate,
+                review: reviewed.review,
+                writerChildSessionId: String(run.id),
+                reviewerChildSessionId: reviewed.reviewerChildSessionId,
               }
-              if (retryReviewerInfrastructure) {
-                reviewInfrastructureRetries += 1
-                continue
-              }
-              stopAfterReview = !reviewAccepted
-              break
-            }
+              stopAfterReview = reviewed.review.verdict !== 'repair' || attempt === maxWriterAttempts - 1
+            } else stopAfterReview = true
+            latestIssues = reviewed.issues
           }
           if (issues.length > 0) latestIssues = issues
         } catch (error: unknown) {
@@ -1504,9 +1704,30 @@ async function runChapterWriting(
     confirmed_outline_sha256: outlineHash,
     chapters: entries,
   })
+  await writeGlobalComplianceReview(
+    agent,
+    workspace,
+    outline,
+    outlineHash,
+    compliance,
+    worklist.map((section): GlobalComplianceChapter => {
+      const chapter = completed.get(section.id)
+      if (chapter === undefined) throw new Error(`Bid global compliance review missing completed section ${section.id}`)
+      return {
+        section_id: section.id,
+        title: section.title,
+        markdown: chapter.candidate.markdown,
+        candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
+      }
+    }),
+    manifest,
+    options.maxRepairAttempts,
+    signal,
+  )
   return [
     { stage: 'chapter_writing', type: 'chapter_execution_plan', path: PLAN_PATH },
     { stage: 'chapter_writing', type: 'chapter_execution_log', path: LOG_PATH },
     { stage: 'chapter_writing', type: 'chapter_manifest', path: MANIFEST_PATH },
+    { stage: 'chapter_writing', type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH },
   ]
 }
