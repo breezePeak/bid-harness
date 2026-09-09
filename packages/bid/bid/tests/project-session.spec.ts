@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -215,6 +216,62 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.retryStage(b.session)).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'chapter_writing' }))
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+  })
+
+  it('S5 工作台投影已保存审核报告，并从失败执行记录读取章节原因', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      schema_version: 2, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
+      requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
+      response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
+      compliance_coverage: [],
+      claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
+      quality_checks: {
+        project_specific: false, structure_complete: true, legacy_project_pollution_free: true,
+        placeholder_free: true, obvious_repetition_free: true,
+      },
+      blocking_issues: ['补充交付节点和保障措施。'],
+    }))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('review-projection')
+
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'needs_attention' })
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).summary).toMatchObject({ reviewed_count: 1, needs_attention_count: 1 })
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toMatchObject({
+      status: 'needs_attention', issues: expect.arrayContaining([
+        expect.objectContaining({ category: 'must_answer_coverage', detail: '正文没有交付节点。' }),
+        expect.objectContaining({ category: 'claim_checks', detail: '按期交付：未说明保障措施。' }),
+        expect.objectContaining({ category: 'quality_checks', detail: 'project_specific：false' }),
+      ]),
+    })
+
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n修订后的正文。\n')
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.review_status).toBe('reviewing')
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'reviewing', issues: [] })
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n已有正文。\n')
+
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const log = JSON.parse(await readFile(logPath, 'utf8')) as { sections: Array<Record<string, unknown>> }
+    log.sections[0] = {
+      ...log.sections[0], status: 'failed', attempts: [{
+        role: 'reviewer', attempt: 1, child_session_id: 'reviewer-b', label: 'S5 审核',
+        started_at: '2026-09-09T00:00:00.000Z', ended_at: '2026-09-09T00:00:01.000Z', stop_reason: 'error', accepted: false,
+        issues: [{ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: 'Chapter Reviewer 未正常完成：error。' }],
+      }], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: null,
+    }
+    await writeFile(logPath, `${JSON.stringify(log)}\n`)
+    await rm(join(workspace.projectRoot, 'chapters/sections/0001.md'))
+
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ writing_status: 'failed', review_status: 'failed', content_available: false })
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).summary.needs_attention_count).toBe(1)
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toMatchObject({
+      status: 'failed', issues: expect.arrayContaining([expect.objectContaining({
+        source: 'review_execution', title: '章节审核执行失败', detail: 'Chapter Reviewer 未正常完成：error。',
+      })]),
+    })
   })
 
   it('各级父节点从确认目录读取概述，不计入叶节写作和审查进度', async () => {

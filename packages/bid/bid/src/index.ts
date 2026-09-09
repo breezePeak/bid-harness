@@ -68,8 +68,8 @@ import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTempl
 import { executeDocxExport, validateDocxExport, collectDocxChapterBody, collectDocxMarkdown } from './docx-export.ts'
 import { estimateReviewPages, type PageEstimateSection } from './page-estimate.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
-import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
-import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
@@ -100,6 +100,7 @@ import type {
   BidStageStartResult,
   BidReviewWorkbenchView,
   BidReviewChapterView,
+  BidReviewIssueView,
   BidReviewMaterialView,
   BidRuntimeState,
   BidStage,
@@ -1631,12 +1632,14 @@ export class BidHostRuntime extends TypertRemoteService {
           markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
           contentAvailable = markdown.trim().length > 0
         } catch { markdown = ''; contentAvailable = false }
+        let artifact: ChapterReviewArtifact | undefined
         try {
-          const review = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
-          reviewStatus = review.verdict === 'pass' ? 'pass' : 'needs_attention'
-        } catch {
-          reviewStatus = execution?.status === 'failed' ? 'failed' : contentAvailable ? 'reviewing' : 'not_started'
+          artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+        } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
+        if (artifact !== undefined && (!contentAvailable || artifact.candidate_sha256 !== chapterCandidateSha256(markdown))) {
+          artifact = undefined
         }
+        reviewStatus = projectChapterReview(section.id, contentAvailable, artifact, execution).status
       }
       const writingStatus: BidReviewWorkbenchView['outline'][number]['writing_status'] = !section.writable || execution === undefined || execution.status === 'pending'
         ? 'not_started'
@@ -1695,7 +1698,7 @@ export class BidHostRuntime extends TypertRemoteService {
         chapter_count: writable.length,
         content_count: writable.filter(row => row.content_available).length,
         reviewed_count: writable.filter(row => row.review_status === 'pass' || row.review_status === 'needs_attention').length,
-        needs_attention_count: writable.filter(row => row.review_status === 'needs_attention').length,
+        needs_attention_count: writable.filter(row => row.review_status === 'needs_attention' || row.review_status === 'failed').length,
         page_estimate: pageEstimate,
       },
     }
@@ -1723,16 +1726,20 @@ export class BidHostRuntime extends TypertRemoteService {
     const serial = String(index + 1).padStart(4, '0')
     let markdown: string | null = null
     try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
-    let review: BidReviewChapterView['review'] = { status: markdown === null ? 'not_started' : 'reviewing', issues: [] }
+    const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
+    await assertNoLinkedPath(workspace.root, logPath)
+    let execution: ChapterExecutionLog['sections'][number] | undefined
     try {
-      const artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
-      review = {
-        status: artifact.verdict === 'pass' ? 'pass' : 'needs_attention',
-        issues: artifact.blocking_issues.map((detail, issueIndex) => ({
-          issue_id: `${section.id}-${String(issueIndex + 1)}`, section_id: section.id, category: 'chapter_review', severity: 'blocking', status: 'open', title: '章节审查问题', detail, suggestion: '根据审查意见人工确认或修订。',
-        })),
-      }
-    } catch { /* Review is not available until its independent reviewer finishes. */ }
+      execution = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.find(item => item.section_id === section.id)
+    } catch { /* S5 初始化时执行日志可能尚不可用。 */ }
+    let artifact: ChapterReviewArtifact | undefined
+    try {
+      artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+    } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
+    if (artifact !== undefined && (markdown === null || artifact.candidate_sha256 !== chapterCandidateSha256(markdown))) {
+      artifact = undefined
+    }
+    const review = projectChapterReview(section.id, markdown?.trim().length === 0 ? false : markdown !== null, artifact, execution)
     let evidenceStatus: BidReviewChapterView['evidence_status'] = 'missing'
     let materials: BidReviewMaterialView[] = []
     try {
@@ -2271,6 +2278,109 @@ function reviewHeadingPath(outline: OutlineArtifact, sectionId: string): { title
     current = current.parent_id === null ? undefined : sections.get(current.parent_id)
   }
   return { titles, numbers }
+}
+
+function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArtifact): BidReviewIssueView[] {
+  const issues: BidReviewIssueView[] = artifact.blocking_issues.map((detail, index) => ({
+    issue_id: `${sectionId}-review-blocking-${String(index + 1)}`,
+    section_id: sectionId,
+    source: 'review',
+    category: 'blocking_issues',
+    severity: 'blocking',
+    status: 'open',
+    title: '审核结论',
+    detail,
+  }))
+  const coverage = [
+    ['must_answer_coverage', artifact.must_answer_coverage],
+    ['requirement_coverage', artifact.requirement_coverage],
+    ['response_point_coverage', artifact.response_point_coverage],
+    ['compliance_coverage', artifact.compliance_coverage],
+  ] as const
+  for (const [category, checks] of coverage) {
+    for (const [index, check] of checks.entries()) {
+      if (check.status !== 'missing') continue
+      issues.push({
+        issue_id: `${sectionId}-${category}-${String(index + 1)}`,
+        section_id: sectionId,
+        source: 'review',
+        category,
+        severity: 'blocking',
+        status: 'open',
+        title: `覆盖缺口：${check.item}`,
+        detail: check.issue ?? '审核报告未提供具体说明。',
+      })
+    }
+  }
+  for (const [index, check] of artifact.claim_checks.entries()) {
+    if (check.status !== 'unsupported') continue
+    issues.push({
+      issue_id: `${sectionId}-claim-check-${String(index + 1)}`,
+      section_id: sectionId,
+      source: 'review',
+      category: 'claim_checks',
+      severity: 'blocking',
+      status: 'open',
+      title: '事实或承诺未获支持',
+      detail: [check.claim_quote, check.issue].filter((value): value is string => value !== null).join('：'),
+    })
+  }
+  for (const [name, passed] of Object.entries(artifact.quality_checks)) {
+    if (passed) continue
+    issues.push({
+      issue_id: `${sectionId}-quality-${name}`,
+      section_id: sectionId,
+      source: 'review',
+      category: 'quality_checks',
+      severity: 'warning',
+      status: 'open',
+      title: `质量检查未通过：${name}`,
+      detail: `${name}：false`,
+    })
+  }
+  return issues
+}
+
+function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutionLog['sections'][number]): BidReviewIssueView[] {
+  const attempt = execution.attempts.findLast(item => !item.accepted)
+  if (attempt === undefined) return []
+  const source = attempt.role === 'writer' ? 'writing_execution' : 'review_execution'
+  const title = attempt.role === 'writer' ? '章节编写执行失败' : '章节审核执行失败'
+  return attempt.issues.length > 0
+    ? attempt.issues.map((issue, index) => ({
+      issue_id: `${sectionId}-${source}-${String(index + 1)}`,
+      section_id: sectionId,
+      source,
+      category: issue.code,
+      severity: 'blocking',
+      status: 'open',
+      title,
+      detail: issue.message,
+    }))
+    : [{
+      issue_id: `${sectionId}-${source}-stop-reason`,
+      section_id: sectionId,
+      source,
+      category: 'stop_reason',
+      severity: 'blocking',
+      status: 'open',
+      title,
+      detail: `执行停止原因：${attempt.stop_reason}`,
+    }]
+}
+
+function projectChapterReview(
+  sectionId: string,
+  contentAvailable: boolean,
+  artifact: ChapterReviewArtifact | undefined,
+  execution: ChapterExecutionLog['sections'][number] | undefined,
+): BidReviewChapterView['review'] {
+  const reportIssues = artifact === undefined ? [] : reviewIssuesFromArtifact(sectionId, artifact)
+  if (execution?.status === 'failed') {
+    return { status: 'failed', issues: [...reviewIssuesFromExecution(sectionId, execution), ...reportIssues] }
+  }
+  if (artifact !== undefined) return { status: artifact.verdict === 'pass' ? 'pass' : 'needs_attention', issues: reportIssues }
+  return { status: contentAvailable ? 'reviewing' : 'not_started', issues: [] }
 }
 
 /** Durable manifest entry for one imported file. */

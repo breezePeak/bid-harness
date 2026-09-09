@@ -137,6 +137,92 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByText('Evidence：available')).toBeTruthy()
   })
 
+  it('选择需修复章节时默认展示已保存审核问题的详情、严重程度和建议', async () => {
+    const issue = {
+      issue_id: 'SEC-1-review-1', section_id: 'SEC-1', source: 'review' as const, category: 'blocking_issues', severity: 'blocking' as const,
+      status: 'open' as const, title: '审核结论', detail: '缺少与交付节点对应的实施措施。', suggestion: '补充交付节点和责任分工。',
+    }
+    render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'needs_attention', issues: [issue] } }) })} />)
+    expect(await screen.findByText('章节审核')).toBeTruthy()
+    expect(screen.getAllByText('正文需要修复')).toHaveLength(2)
+    expect(screen.getByText('问题数量')).toBeTruthy()
+    expect(screen.getByText('问题详情：缺少与交付节点对应的实施措施。')).toBeTruthy()
+    expect(screen.getByText('严重程度：阻断')).toBeTruthy()
+    expect(screen.getByText('修改建议：补充交付节点和责任分工。')).toBeTruthy()
+    expect(screen.getByText('参考资料')).toBeTruthy()
+  })
+
+  it('通过章节显示审核通过而非等待状态', async () => {
+    render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'pass', issues: [] } }) })} />)
+    expect((await screen.findAllByText('审核通过')).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText('本次已保存的审核报告未列出问题。')).toBeTruthy()
+  })
+
+  it('没有正文的失败章节仍可选择并显示执行记录中的失败原因', async () => {
+    const failed = {
+      ...workbench.outline[1]!, content_available: false,
+      writing_status: 'failed' as const, review_status: 'failed' as const,
+    }
+    render(<BidReviewWorkbench {...props({
+      getWorkbench: async () => ({
+        ...workbench, outline: [workbench.outline[0]!, failed],
+        summary: { ...workbench.summary, content_count: 0, needs_attention_count: 1 },
+      }),
+      getChapter: async sectionId => sectionId === 'SEC-1' ? ({
+        ...chapter, markdown: null, content_sha256: null,
+        review: { status: 'failed', issues: [{
+          issue_id: 'SEC-1-writing_execution-1', section_id: 'SEC-1', source: 'writing_execution',
+          category: 'CHAPTER_SUBAGENT_STOP_REASON_INVALID',
+          severity: 'blocking', status: 'open', title: '章节编写执行失败', detail: 'Chapter Subagent 未正常完成：error。',
+        }] },
+      }) : chapter,
+    })} />)
+    const button = await screen.findByRole('button', { name: '1.1 实施方案' })
+    expect(button).toHaveProperty('disabled', false)
+    expect(screen.getByText('正文生成后即可在此查看。')).toBeTruthy()
+    expect(screen.getByText('章节编写执行失败')).toBeTruthy()
+    expect(screen.getByText('问题详情：Chapter Subagent 未正常完成：error。')).toBeTruthy()
+  })
+
+  it('异常审核状态没有详情时说明缺失并提供只读重新加载入口', async () => {
+    const getWorkbench = vi.fn(async () => ({ ...workbench, outline: [{ ...workbench.outline[0]!, content_available: true }, { ...workbench.outline[1]!, review_status: 'needs_attention' as const }], summary: { ...workbench.summary, needs_attention_count: 1 } }))
+    render(<BidReviewWorkbench {...props({ getWorkbench, getChapter: async () => ({ ...chapter, review: { status: 'needs_attention', issues: [] } }) })} />)
+    expect(await screen.findByText('未取得具体原因。请重新加载章节状态；该操作只读取当前已保存的结果。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '重新加载' }))
+    await waitFor(() => { expect(getWorkbench.mock.calls.length).toBeGreaterThanOrEqual(2) })
+  })
+
+  it('切换章节并自动刷新后仅显示当前章节重新审核的结果', async () => {
+    vi.useFakeTimers()
+    let repaired = false
+    const second = { ...workbench.outline[1]!, section_id: 'SEC-2', order: 2, title: '质量保障', review_status: 'needs_attention' as const }
+    const getWorkbench = vi.fn(async () => ({
+      ...workbench,
+      outline: [workbench.outline[0]!, workbench.outline[1]!, { ...second, review_status: repaired ? 'pass' as const : 'needs_attention' as const }],
+      summary: { ...workbench.summary, chapter_count: 2, content_count: 2, reviewed_count: 2, needs_attention_count: repaired ? 0 : 1 },
+    }))
+    const getChapter = vi.fn(async (sectionId: string) => sectionId === 'SEC-2' ? ({
+      ...chapter, section_id: 'SEC-2', title: '质量保障', number: '1.2', heading_path: ['技术方案', '质量保障'],
+      review: repaired ? { status: 'pass' as const, issues: [] } : { status: 'needs_attention' as const, issues: [{
+        issue_id: 'SEC-2-review-1', section_id: 'SEC-2', source: 'review' as const, category: 'blocking_issues', severity: 'blocking' as const,
+        status: 'open' as const, title: '审核结论', detail: '旧问题。',
+      }] },
+    }) : chapter)
+    try {
+      render(<BidReviewWorkbench {...props({ getWorkbench, getChapter })} />)
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      const secondButton = screen.getByRole('button', { name: '1.2 质量保障' })
+      fireEvent.click(secondButton)
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(screen.getByText('问题详情：旧问题。')).toBeTruthy()
+      repaired = true
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(screen.getAllByText('审核通过').length).toBeGreaterThanOrEqual(2)
+      expect(screen.queryByText('问题详情：旧问题。')).toBeNull()
+      expect(screen.getByRole('heading', { name: '质量保障' })).toBeTruthy()
+    } finally { vi.useRealTimers() }
+  })
+
   it('默认优先叶节正文，父节点和嵌套父节点可阅读概述且刷新保留选择', async () => {
     const root = workbench.outline[0]!
     const branch = { ...root, section_id: 'BRANCH', parent_id: 'ROOT', title: '工作安排', summary: '介绍进场准备与现场实施的工作安排。' }

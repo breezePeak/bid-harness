@@ -397,12 +397,15 @@ export function parseBidReviewWorkbenchView(value: unknown): BidReviewWorkbenchV
 export interface BidReviewIssueView {
   readonly issue_id: string
   readonly section_id: string
+  /** 说明问题来自已保存的审核报告，还是 Writer / Reviewer 的执行记录。 */
+  readonly source: 'review' | 'writing_execution' | 'review_execution'
   readonly category: string
   readonly severity: 'blocking' | 'warning' | 'info'
   readonly status: 'open' | 'resolved' | 'dismissed'
   readonly title: string
   readonly detail: string
-  readonly suggestion: string
+  /** 审核报告明确给出修改建议时才返回，避免客户端编造建议。 */
+  readonly suggestion?: string
 }
 
 /** Browser-safe reference material mapped to one S5 outline section. */

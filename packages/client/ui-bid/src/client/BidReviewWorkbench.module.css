@@ -470,6 +470,11 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.reviewHeader h2 {
+  margin: 0;
+  font: inherit;
+}
+
 .card {
   padding: 12px;
   border: 1px solid var(--dsw-alias-border-l1);

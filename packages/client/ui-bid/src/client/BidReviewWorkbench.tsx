@@ -88,9 +88,9 @@ export function BidReviewWorkbench({
     return getWorkbench().then(async (value) => {
       if (version !== requestVersion.current) return
       setWorkbench(value)
-      const selected = value.outline.find(item => item.section_id === selectedSectionId.current && item.content_available)
-        ?? value.outline.find(item => item.writable && item.content_available)
-        ?? value.outline.find(item => item.content_available)
+      const selected = value.outline.find(item => item.section_id === selectedSectionId.current && isChapterSelectable(item))
+        ?? value.outline.find(item => item.writable && isChapterSelectable(item))
+        ?? value.outline.find(isChapterSelectable)
       if (selected !== undefined) {
         const next = await getChapter(selected.section_id)
         if (version !== requestVersion.current) return
@@ -249,7 +249,7 @@ export function BidReviewWorkbench({
                   <button
                     type="button"
                     className={css.sectionBtn}
-                    disabled={!section.content_available}
+                    disabled={!isChapterSelectable(section)}
                     title={title}
                     draggable={section.content_available && section.writable}
                     onDragStart={(event) => {
@@ -312,19 +312,19 @@ export function BidReviewWorkbench({
           )}
         </div>
 
-        <div className={css.review} role="complementary" aria-label="参考资料与审查">
+        <div className={css.review} role="complementary" aria-label="章节审核与参考资料">
           <div className={css.reviewHeader}>
-            <h2>参考资料</h2>
-            {chapter?.materials && chapter.materials.length > 0 && (
-              <span className={css.miniTag}>
-                {chapter.materials.length} 篇参考
+            <h2>章节审核</h2>
+            {chapter !== null && (
+              <span className={classes(css.miniTag, getReviewStatusInfo(chapter.review).className)}>
+                {getReviewStatusInfo(chapter.review).label}
               </span>
             )}
           </div>
 
           {chapter === null ? (
             <div className={css.emptyState}>
-              <p className={css.emptyStateTitle}>请选择章节查看对应的参考资料与依据。</p>
+              <p className={css.emptyStateTitle}>请选择章节查看审核结果、参考资料与依据。</p>
             </div>
           ) : !chapter.writable ? (
             <div className={css.card}>
@@ -332,7 +332,46 @@ export function BidReviewWorkbench({
             </div>
           ) : (
             <>
+              <section className={css.reviewSection} aria-label="章节审核详情">
+                <div className={css.fieldRow}>
+                  <span className={css.fieldLabel}>审核状态</span>
+                  <span className={css.fieldValue}>{getReviewStatusInfo(chapter.review).label}</span>
+                </div>
+                <div className={css.fieldRow}>
+                  <span className={css.fieldLabel}>问题数量</span>
+                  <span className={css.fieldValue}>{chapter.review.issues.length} 个</span>
+                </div>
+                {chapter.review.issues.length > 0 ? (
+                  <ul className={css.issuesList}>
+                    {chapter.review.issues.map(issue => (
+                      <li key={issue.issue_id} className={css.issueCard} data-severity={issue.severity}>
+                        <div className={css.issueHeader}>
+                          <span className={css.issueTitle}>{issue.title}</span>
+                          <span className={css.miniTag}>{getSeverityLabel(issue.severity)}</span>
+                        </div>
+                        <p className={css.issueDetail}>问题详情：{issue.detail}</p>
+                        <p className={css.issueDetail}>严重程度：{getSeverityLabel(issue.severity)}</p>
+                        {issue.suggestion !== undefined && <p className={css.issueSuggestion}>修改建议：{issue.suggestion}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : chapter.review.status === 'failed' || chapter.review.status === 'needs_attention' ? (
+                  <div className={css.card}>
+                    <span className={css.fieldLabel}>未取得具体原因。请重新加载章节状态；该操作只读取当前已保存的结果。</span>
+                    <Button variant="ghost" size="sm" icon={<IconRefreshOutline14 />} onClick={() => { void refresh() }}>重新加载</Button>
+                  </div>
+                ) : (
+                  <div className={css.card}>
+                    <span className={css.fieldLabel}>{getReviewEmptyMessage(chapter.review.status)}</span>
+                  </div>
+                )}
+              </section>
+
               <section className={css.reviewSection}>
+                <div className={css.reviewHeader}>
+                  <h2>参考资料</h2>
+                  {chapter.materials && chapter.materials.length > 0 && <span className={css.miniTag}>{chapter.materials.length} 篇参考</span>}
+                </div>
                 <span className={css.fieldLabel}>关联参考资料 ({chapter.materials?.length ?? 0})</span>
                 {(!chapter.materials || chapter.materials.length === 0) ? (
                   <div className={css.card}>
@@ -421,15 +460,25 @@ function getChapterDotInfo(
     title: section.content_available ? '章节概述' : '概述待补充',
   }
   const { writing_status: writingStatus, review_status: reviewStatus } = section
-  // 1. 异常：显示红色
-  if (writingStatus === 'failed' || reviewStatus === 'failed' || reviewStatus === 'needs_attention') {
+  if (writingStatus === 'failed') {
     return {
       className: classes(css.statusDot, css.statusDotRed),
-      title: writingStatus === 'failed' ? '编写失败' : (reviewStatus === 'needs_attention' ? '需关注' : '审核未通过'),
+      title: '章节编写执行失败',
+    }
+  }
+  if (reviewStatus === 'failed') {
+    return {
+      className: classes(css.statusDot, css.statusDotRed),
+      title: '章节审核执行失败',
+    }
+  }
+  if (reviewStatus === 'needs_attention') {
+    return {
+      className: classes(css.statusDot, css.statusDotRed),
+      title: '正文需要修复',
     }
   }
 
-  // 2. 审核了：显示绿色
   if (reviewStatus === 'pass') {
     return {
       className: classes(css.statusDot, css.statusDotGreen),
@@ -437,7 +486,6 @@ function getChapterDotInfo(
     }
   }
 
-  // 3. 编写了：显示蓝色
   if (writingStatus === 'writing' || writingStatus === 'content_ready' || writingStatus === 'completed') {
     return {
       className: classes(css.statusDot, css.statusDotBlue, writingStatus === 'writing' && css.statusDotPulsing),
@@ -445,11 +493,40 @@ function getChapterDotInfo(
     }
   }
 
-  // 4. 没有编写：显示灰色点
   return {
     className: classes(css.statusDot, css.statusDotGray),
     title: '未编写',
   }
+}
+
+function isChapterSelectable(section: BidReviewWorkbenchView['outline'][number]): boolean {
+  return section.content_available || section.writing_status === 'failed' || section.review_status === 'failed' || section.review_status === 'needs_attention'
+}
+
+function getReviewStatusInfo(review: BidReviewChapterView['review']): { label: string; className: string | undefined } {
+  switch (review.status) {
+    case 'pass': return { label: '审核通过', className: css.miniTagSuccess }
+    case 'needs_attention': return { label: '正文需要修复', className: css.miniTagWarning }
+    case 'failed': return { label: '审核执行失败', className: css.miniTagError }
+    case 'reviewing': return { label: '审核中', className: css.miniTagWriting }
+    case 'not_started': return { label: '等待审核', className: undefined }
+  }
+}
+
+function getReviewEmptyMessage(status: BidReviewChapterView['review']['status']): string {
+  switch (status) {
+    case 'pass': return '本次已保存的审核报告未列出问题。'
+    case 'needs_attention': return '审核标记为正文需要修复，但未取得具体原因。请重新加载章节状态。'
+    case 'reviewing': return '审核尚在进行中，暂未产生已保存的审核结果。'
+    case 'not_started': return '等待正文和审核结果；当前没有已保存的审核报告。'
+    case 'failed': return '未取得具体原因。'
+  }
+}
+
+function getSeverityLabel(severity: BidReviewChapterView['review']['issues'][number]['severity']): string {
+  if (severity === 'blocking') return '阻断'
+  if (severity === 'warning') return '警告'
+  return '提示'
 }
 
 const PAGE_ESTIMATE_BASIS = '按当前 Word 导出格式估算，实际分页以 Word 为准'
