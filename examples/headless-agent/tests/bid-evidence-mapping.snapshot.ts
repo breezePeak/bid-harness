@@ -11,7 +11,6 @@ import { expect, it } from 'vitest'
 const fixtureDir = fileURLToPath(new URL('./bid-evidence-mapping-snapshots/', import.meta.url))
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-evidence-mapping-driver.ts', import.meta.url))
-
 it('corrects S4 tool arguments in one Child turn through the headless Loader', async () => {
   const result = await runLoaderSmoke({
     label: 'S4 同 Child Web 证据修复',
@@ -26,7 +25,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
       expect(childLogs).toHaveLength(4)
-      const childLog = childLogs.find(log => log.includes('MAP-INIT-'))
+      const childLog = childLogs.find(log => /"type":"tool\/call".*"name":"web_search"/u.test(log))
       if (childLog === undefined) throw new Error('缺少持久化 Child 日志')
       const [headerLine, ...eventLines] = childLog.trimEnd().split('\n')
       const header = JSON.parse(headerLine!) as SessionHeader
@@ -42,12 +41,14 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('update_section_task')
       expect(childLog).toContain('lock_branch_outline')
       expect(childLog).toContain('lock-without-comparison')
-      expect(childLog).toContain('lock-blank-comparison')
-      for (const callId of ['lock-without-comparison', 'lock-blank-comparison']) {
-        expect(events.find(event => event.type === 'tool/result'
-          && event.data.message.source.kind === 'tool' && event.data.message.source.callId === callId))
-          .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
-      }
+      expect(childLog).toContain('reject-invalid-outline-edit')
+      expect(childLog).toContain('OUTLINE_SHARED_CONTAINER_EMPTY')
+      expect(events.find(event => event.type === 'tool/result'
+        && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'lock-without-comparison'))
+        .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
+      expect(events.find(event => event.type === 'tool/result'
+        && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'reject-invalid-outline-edit'))
+        .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
       expect(childLog).toContain('当前整本目录与章节职责：')
       expect(childLog).toContain('用户原始目录框架：')
       expect(childLog).toContain('资产发现')
@@ -73,7 +74,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
       expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['finish_final_check', 'list_review_items', 'review_items', 'finish_final_check'])
       expect(finalCheckLog).toContain('https://official.example/standard')
-      const refinementLogs = childLogs.filter(log => !log.includes('MAP-INIT-') && !log.includes('MAP-FINAL-CHECK'))
+      const refinementLogs = childLogs.filter(log => log.includes('submit-refinement-'))
       expect(refinementLogs).toHaveLength(2)
       const rejectedRefinementLog = refinementLogs.find(log => log.includes('submit-refinement-incomplete'))
       const acceptedRefinementLog = refinementLogs.find(log => log.includes('submit-refinement-quality'))

@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
-import { ZodError } from 'zod'
+import { z, ZodError } from 'zod'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -84,11 +84,13 @@ import {
   webEvidenceContentSha256,
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
+import { parseWritingPlan, validateWritingPlan, type WritingPlan } from './writing-requirements.ts'
 
 const PLAN_PATH = 'chapters/execution-plan.json'
 const LOG_PATH = 'chapters/execution-log.json'
 const MANIFEST_PATH = 'chapters/manifest.json'
 const GLOBAL_REVIEW_PATH = 'chapters/global-compliance-review.json'
+const APPLIED_WRITING_PLAN_PATH = 'chapters/applied-writing-plan.json'
 const MAIN_AGENT_TOOLS: readonly string[] = []
 const CHAPTER_AGENT_TOOLS = ['grep', 'read', 'web_search', 'web_fetch'] as const
 const REVIEWER_AGENT_TOOLS: readonly string[] = []
@@ -137,6 +139,12 @@ export interface ChapterContext {
   localReadLocations: LocalMaterialReadLocation[]
   frameworkReadLocations: FrameworkDraftMaterial[]
   webReadLocations: WebMaterialReadLocation[]
+  /** 已确认计划中适用于全部章节的规则；整书页数目标只供理解预算来源。 */
+  writingPlan: Pick<WritingPlan, 'overall_goal' | 'style_rules' | 'global_rules' | 'page_target' | 'plan_version'>
+  /** 当前可写叶节承担的详略、篇幅及特殊要求。 */
+  sectionWritingPlan: WritingPlan['sections'][number]
+  /** 明确点名当前章节的重点安排。 */
+  writingPriorities: WritingPlan['priorities']
 }
 
 interface LocalMaterialReadLocation {
@@ -205,6 +213,7 @@ export function pickChapterContext(raw: {
   evidence: ReturnType<typeof parseEvidenceMapArtifact>
   responsePointCatalog: readonly ScoringResponsePoint[]
   outline: OutlineArtifact
+  writingPlan: WritingPlan
 }): ChapterContext {
   const requirementIds = new Set(raw.section.requirement_ids)
   const scoringIds = new Set(raw.section.scoring_ids)
@@ -214,6 +223,8 @@ export function pickChapterContext(raw: {
   const mapping = raw.evidence.section_mappings.find(item => item.section_id === raw.section.id)
   if (mapping === undefined) throw new Error('EVIDENCE_MAPPING_SECTION_MISSING: ' + raw.section.id)
   const localMaterials = uniqueBy(mapping.local_materials, localIdentity)
+  const sectionWritingPlan = raw.writingPlan.sections.find(item => item.section_id === raw.section.id)
+  if (sectionWritingPlan === undefined) throw new Error('WRITING_PLAN_SECTION_MISSING: ' + raw.section.id)
   return {
     section: raw.section,
     headingPath: sectionEvidenceContext(raw.outline, raw.section).heading_path,
@@ -238,6 +249,15 @@ export function pickChapterContext(raw: {
     localReadLocations: [],
     frameworkReadLocations: [],
     webReadLocations: [],
+    writingPlan: {
+      overall_goal: raw.writingPlan.overall_goal,
+      style_rules: raw.writingPlan.style_rules,
+      global_rules: raw.writingPlan.global_rules,
+      page_target: raw.writingPlan.page_target,
+      plan_version: raw.writingPlan.plan_version,
+    },
+    sectionWritingPlan,
+    writingPriorities: raw.writingPlan.priorities.filter(item => item.section_ids.includes(raw.section.id)),
   }
 }
 
@@ -304,6 +324,7 @@ export function renderChapterExecutionPlanTask(
     requirements: ReturnType<typeof parseTenderRequirementsArtifact>
     scoring: ReturnType<typeof parseTenderScoringArtifact>
     compliance: ReturnType<typeof parseTenderComplianceArtifact>
+    writingPlan: WritingPlan
   },
 ): string {
   return [
@@ -320,6 +341,7 @@ export function renderChapterExecutionPlanTask(
     `Requirements：${JSON.stringify(modelContext(inputs.requirements))}`,
     `Scoring：${JSON.stringify(modelContext(inputs.scoring))}`,
     `Compliance：${JSON.stringify(modelContext(inputs.compliance))}`,
+    `Confirmed Writing Plan：${JSON.stringify(inputs.writingPlan)}`,
     '审视完整目录，再用 set_chapter_relations 提交有特殊关系或说明的章节。Host 为全部可写章节预置空关系，但这不代表已经证明它们没有语义依赖。无需逐章提交空数组。',
     'depends_on 和 related_sections 的每项只填写 {"section_id":"章节 ID","reason":"原因"}。同一章节的后续提交整体覆盖原关系。',
     '用 add_global_consistency_note 记录至少一项真实全书一致性要求；最后调用 finish_chapter_plan。存在环路时只修相关关系后再次 finish。',
@@ -380,6 +402,9 @@ export function renderChapterSubagentTask(
     '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，资料使用记录通过 metadata 登记。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Global Consistency Notes：${JSON.stringify(globalConsistencyNotes)}`,
+    `Confirmed Global Writing Rules：${JSON.stringify({ overall_goal: context.writingPlan.overall_goal, style_rules: context.writingPlan.style_rules, global_rules: context.writingPlan.global_rules })}`,
+    `Current Chapter Writing Plan：${JSON.stringify({ ...context.sectionWritingPlan, priorities: context.writingPriorities })}`,
+    '整书 page_target 仅由 Host 汇总；当前章节只执行 Current Chapter Writing Plan 的 page_budget，不得把整书目标复制为本章指标。页数均为排版估算，实际页数留待排版后核对。',
     renderChapterOutlineContext(context),
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
     `Chapter Planning Notes：${JSON.stringify(planningNotes)}`,
@@ -666,6 +691,8 @@ function renderChapterReviewerTask(
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
     `Chapter Required Compliance：${JSON.stringify(modelContext(context.compliance))}`,
     `Global Compliance：${JSON.stringify(modelContext(context.globalCompliance))}`,
+    `Applicable Writing Requirements：${JSON.stringify({ overall_goal: context.writingPlan.overall_goal, style_rules: context.writingPlan.style_rules, global_rules: context.writingPlan.global_rules, section: context.sectionWritingPlan, priorities: context.writingPriorities })}`,
+    '只审核当前章节适用的写作要求和 page_budget；不得按整书 page_target 判错，也不得因其他章节尚未完成而要求本章承担全书目标。',
     `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context))}`,
     `Evidence Pack：${JSON.stringify(evidence)}`,
     `Dependency Handoff：${JSON.stringify(dependencies)}`,
@@ -817,6 +844,7 @@ async function loadChapterCheckpoint(
   outlineHash: string,
   contexts: ReadonlyMap<string, ChapterContext>,
   maxConcurrency: number,
+  writingPlanInvalidations: ReadonlySet<string>,
 ): Promise<ChapterCheckpoint | undefined> {
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
@@ -905,7 +933,10 @@ async function loadChapterCheckpoint(
         downstream.set(dependency.section_id, dependents)
       }
     }
-    const invalid = new Set(worklist.filter(section => !completed.has(section.id) && !drafts.has(section.id)).map(section => section.id))
+    const invalid = new Set([
+      ...worklist.filter(section => !completed.has(section.id) && !drafts.has(section.id)).map(section => section.id),
+      ...writingPlanInvalidations,
+    ])
     // Set 迭代包含新加入的节点，依赖闭包不受目录显示顺序影响。
     for (const sectionId of invalid) for (const dependent of downstream.get(sectionId) ?? []) invalid.add(dependent)
     for (const log of executionLog.sections) {
@@ -941,6 +972,7 @@ async function loadValidPlan(
     requirements: ReturnType<typeof parseTenderRequirementsArtifact>
     scoring: ReturnType<typeof parseTenderScoringArtifact>
     compliance: ReturnType<typeof parseTenderComplianceArtifact>
+    writingPlan: WritingPlan
   },
   maxRepairAttempts: number,
   signal?: AbortSignal,
@@ -1018,6 +1050,7 @@ export function renderGlobalComplianceReviewTask(
   chapters: readonly GlobalComplianceChapter[],
   evidence: ReturnType<typeof buildGlobalComplianceEvidence>,
   retained: readonly GlobalComplianceReviewItem[],
+  writingPlan?: WritingPlan,
 ): string {
   const globalIds = new Set(outline.global_compliance_ids)
   const pending = compliance.compliance_items.filter(item => globalIds.has(item.id)
@@ -1032,6 +1065,10 @@ export function renderGlobalComplianceReviewTask(
     `Confirmed Outline Responsibilities：${JSON.stringify(outline.sections.map(({ id, parent_id, title, purpose, must_answer, compliance_ids }) => ({ id, parent_id, title, purpose, must_answer, compliance_ids })))}`,
     `Pending Global Compliance：${JSON.stringify(modelContext(pending))}`,
     `Retained Current Results：${JSON.stringify(retained)}`,
+    ...(writingPlan === undefined ? [] : [
+      `Confirmed Document Writing Plan：${JSON.stringify(writingPlan)}`,
+      '整书页数在此按全部叶节预算汇总，只核对计划分配和跨章适用性；排版前不得把目标页数当作实际页数，也不得因此要求所有章节重写。',
+    ]),
     `Current Chapters：${JSON.stringify(chapters.map(({ section_id, title, candidate_sha256 }) => ({ section_id, title, candidate_sha256 })))}`,
     `Evidence Options：${JSON.stringify(evidence)}`,
     '只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
@@ -1048,6 +1085,7 @@ async function writeGlobalComplianceReview(
   manifest: BidManifest,
   maxRepairAttempts: number,
   signal?: AbortSignal,
+  writingPlan?: WritingPlan,
 ): Promise<void> {
   let saved: GlobalComplianceReviewArtifact | undefined
   try { saved = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH)) } catch { /* 缺失或旧版本结果不参与当前核验。 */ }
@@ -1073,7 +1111,7 @@ async function writeGlobalComplianceReview(
     liftGuard = tools.guard(exec => (GLOBAL_COMPLIANCE_REVIEW_TOOLS as readonly string[]).includes(exec.name)
       ? undefined : 'S5 文档级合规核验只允许私有提交工具。')
     signal?.throwIfAborted()
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained, writingPlan) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
     await waitForModelStageIdle(agent, signal)
     signal?.throwIfAborted()
     const report = runtime.captured()
@@ -1161,10 +1199,11 @@ async function runChapterWriting(
     readJson(workspace, 'analysis/compliance.json'),
     readJson(workspace, 'analysis/evidence-map.json'),
     readJson(workspace, 'analysis/web-evidence-sources.json'),
+    readJson(workspace, 'chapters/writing-plan.json'),
   ])
   const [
     outlineRaw, confirmationRaw, projectRaw, requirementsRaw, scoringRaw,
-    responsePointsRaw, complianceRaw, evidenceRaw, webSourcesRaw,
+    responsePointsRaw, complianceRaw, evidenceRaw, webSourcesRaw, writingPlanRaw,
   ] = inputs
   const outline = parseConfirmedOutlineArtifact(outlineRaw)
   const confirmation = parseOutlineConfirmationArtifact(confirmationRaw)
@@ -1178,6 +1217,10 @@ async function runChapterWriting(
   if (!catalogMatchesScoring(responsePointCatalog, scoring)) throw new Error('chapter-writing-response-point-catalog-mismatch')
   const compliance = parseTenderComplianceArtifact(complianceRaw)
   const evidence = parseEvidenceMapArtifact(evidenceRaw)
+  const writingPlan = parseWritingPlan(writingPlanRaw)
+  if (writingPlan.confirmed_outline_sha256 !== outlineHash) throw new Error('chapter-writing-plan-outline-mismatch')
+  const writingPlanIssues = validateWritingPlan(writingPlan, outline)
+  if (writingPlanIssues.length > 0) throw new Error(writingPlanIssues.join('; '))
   const coverageIssues = validateSectionEvidenceCoverage(outline, evidence)
   if (coverageIssues.length > 0) throw new Error(coverageIssues.map(issue => issue.code + ': ' + issue.message).join('; '))
   const webSources = parseWebEvidenceSourcesArtifact(webSourcesRaw)
@@ -1211,8 +1254,25 @@ async function runChapterWriting(
     evidence,
     responsePointCatalog: responsePointCatalog.points,
     outline,
+    writingPlan,
   })]))
-  const checkpoint = await loadChapterCheckpoint(workspace, outline, outlineHash, contexts, options.maxConcurrency)
+  let appliedWritingPlanVersion: number | undefined
+  try {
+    appliedWritingPlanVersion = z.object({ schema_version: z.literal(1), plan_version: z.number().int().positive() }).strict()
+      .parse(await readJson(workspace, APPLIED_WRITING_PLAN_PATH)).plan_version
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const planRevision = writingPlan.revision
+  const writingPlanInvalidations = appliedWritingPlanVersion === writingPlan.plan_version
+    || appliedWritingPlanVersion === undefined && writingPlan.plan_version === 1
+    ? new Set<string>()
+    : planRevision !== null && appliedWritingPlanVersion === planRevision.base_plan_version
+      ? new Set(planRevision.affected_section_ids)
+      : new Set(worklist.map(section => section.id))
+  const checkpoint = await loadChapterCheckpoint(
+    workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations,
+  )
   const originalWriterId = revision === undefined ? undefined
     : checkpoint?.executionLog.sections.find(section => section.section_id === revision.request.reference.section_id)
       ?.final_writer_child_session_id
@@ -1227,7 +1287,7 @@ async function runChapterWriting(
   await mkdir(join(chaptersRoot, 'reviews'), { recursive: true, mode: 0o700 })
 
   const plan = checkpoint?.plan ?? await loadValidPlan(
-    agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance }, options.maxRepairAttempts,
+    agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan }, options.maxRepairAttempts,
     options.signal,
   )
   await Promise.all([...contexts.values()].map(context => resolveChapterReadLocations(
@@ -1258,6 +1318,10 @@ async function runChapterWriting(
     return logWrites
   }
   await persistLog()
+  if (revision === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
+    schema_version: 1,
+    plan_version: writingPlan.plan_version,
+  })
   const durableWebSources = new Map(webSources.sources.map(source => [source.source_id, source]))
   const readableWebPaths = new Set([...contexts.values()].flatMap(context => context.webReadLocations.map(source => source.snapshot_path)))
   let webWrites: Promise<void> = Promise.resolve()
@@ -1723,6 +1787,7 @@ async function runChapterWriting(
     manifest,
     options.maxRepairAttempts,
     signal,
+    writingPlan,
   )
   return [
     { stage: 'chapter_writing', type: 'chapter_execution_plan', path: PLAN_PATH },

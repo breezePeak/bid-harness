@@ -17,6 +17,7 @@ const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-writing-driver.t
 it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保留 S4 map', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 当前章节本地补搜', tempDirPrefix: 'dsh-s5-local-snapshot-', binScript, configPath, mode: 'src',
+    processTimeoutMs: 45_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
@@ -85,6 +86,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
   })
   expect(JSON.parse(result.stdout)).toEqual({
     evidence_unchanged: true,
+    waiting: { stage: 'chapter_writing', status: 'waiting_user' },
     runtime: { stage: 'chapter_writing', status: 'completed' },
     allowed_actions: ['export_docx', 'revise_chapter'],
     artifacts: [
@@ -94,4 +96,4 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       { stage: 'chapter_writing', type: 'global_compliance_review', path: 'chapters/global-compliance-review.json' },
     ],
   })
-}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+}, LOADER_SMOKE_TEST_TIMEOUT_MS + 15_000)

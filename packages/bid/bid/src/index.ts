@@ -17,6 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -83,6 +84,13 @@ import { checkpointBidProjectState, readBidProjectState, type BidProjectState } 
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
+import {
+  parseWritingPlan,
+  validateWritingPlan,
+  writingRequestSchema,
+  WRITING_PLAN_SCHEMA_VERSION,
+  type WritingPlanInput,
+} from './writing-requirements.ts'
 import type {
   BidDetailsView,
   BidChapterRevisionRequest,
@@ -118,6 +126,8 @@ export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDoc
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole, parseBidReviewWorkbenchView } from './control-plane-contract.ts'
+export { parseWritingPlan, validateWritingPlan, writingPlanInputSchema, writingPlanSchema, WRITING_PLAN_SCHEMA_VERSION } from './writing-requirements.ts'
+export type { WritingPlan, WritingPlanInput } from './writing-requirements.ts'
 export type {
   BidChapterRevisionReference,
   BidChapterRevisionRequest,
@@ -647,6 +657,7 @@ interface ActiveBidOperation {
   readonly settle: () => void
   reservedForReset: boolean
   interaction?: boolean
+  pauseForWritingPlan?: boolean
 }
 
 type BidProjectKey = string & { readonly __bidProjectKey: unique symbol }
@@ -656,6 +667,94 @@ function projectKey(session: Pick<Session, 'header'>): BidProjectKey {
   if (session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
   const path = realpathSync(session.header.cwd)
   return (process.platform === 'win32' ? path.toLowerCase() : path) as BidProjectKey
+}
+
+const WRITING_REQUEST_PATH = 'chapters/writing-request.json'
+const WRITING_PLAN_PATH = 'chapters/writing-plan.json'
+const WRITING_PLAN_APPLIED_PATH = 'chapters/applied-writing-plan.json'
+
+async function confirmedOutline(workspace: BidWorkspace): Promise<{ outline: OutlineArtifact; sha256: string }> {
+  const path = within(workspace.projectRoot, 'outline/confirmed-outline.json')
+  await assertNoLinkedPath(workspace.root, path)
+  const outline = parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+  return { outline, sha256: outlineArtifactSha256(outline) }
+}
+
+async function hasCurrentWritingPlan(workspace: BidWorkspace): Promise<boolean> {
+  const { sha256 } = await confirmedOutline(workspace)
+  const path = within(workspace.projectRoot, WRITING_PLAN_PATH)
+  await assertNoLinkedPath(workspace.root, path)
+  try {
+    return parseWritingPlan(JSON.parse(await readFile(path, 'utf8'))).confirmed_outline_sha256 === sha256
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function currentWritingPlan(workspace: BidWorkspace): Promise<ReturnType<typeof parseWritingPlan> | undefined> {
+  const path = within(workspace.projectRoot, WRITING_PLAN_PATH)
+  await assertNoLinkedPath(workspace.root, path)
+  try { return parseWritingPlan(JSON.parse(await readFile(path, 'utf8'))) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+async function writeWritingRequest(
+  agent: Agent,
+  workspace: BidWorkspace,
+  basePlanVersion: number | null,
+): Promise<void> {
+  const { sha256 } = await confirmedOutline(workspace)
+  const path = within(workspace.projectRoot, WRITING_REQUEST_PATH)
+  await assertNoLinkedPath(workspace.root, path)
+  await writeFileAtomic(path, `${JSON.stringify({
+    schema_version: WRITING_PLAN_SCHEMA_VERSION,
+    confirmed_outline_sha256: sha256,
+    session_id: agent.session.id,
+    request_after_seq: agent.session.events.at(-1)?.seq ?? -1,
+    base_plan_version: basePlanVersion,
+  }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+}
+
+async function ensureWritingRequirementsRequested(agent: Agent, workspace: BidWorkspace): Promise<void> {
+  const { sha256 } = await confirmedOutline(workspace)
+  const path = within(workspace.projectRoot, WRITING_REQUEST_PATH)
+  await assertNoLinkedPath(workspace.root, path)
+  try {
+    const request = writingRequestSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+    if (request.confirmed_outline_sha256 === sha256) {
+      if (request.session_id !== agent.session.id) {
+        await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+      }
+      return
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  await writeWritingRequest(agent, workspace, null)
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text: '目录已确认。正式开始写作前，请在当前对话主动询问用户对整份技术标的要求，例如目标页数、重点章节、写作风格、表格使用或旧标复用方式；用户也可以回复“没有特殊要求，直接开始”。此时只询问，不得启动章节写作。' }],
+    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+  }))
+}
+
+function exactWritingRequirementMessages(
+  session: Session,
+  input: WritingPlanInput,
+  request: zod.infer<typeof writingRequestSchema>,
+  previous?: ReturnType<typeof parseWritingPlan>,
+): WritingPlanInput {
+  if (request.session_id !== session.id) return input
+  const messages = session.events.flatMap((event) => {
+    if (event.seq <= request.request_after_seq || event.type !== 'user/message' || event.data.source.kind !== 'user') return []
+    return event.data.content.filter(block => block.type === 'text').map(block => block.text.trim()).filter(Boolean)
+  })
+  return messages.length === 0 ? input : {
+    ...input,
+    user_requirements: [...previous?.user_requirements ?? [], ...messages],
+  }
 }
 
 /** Host-owned Bid RPC runtime that serializes project mutations and publishes durable stage state. */
@@ -693,9 +792,13 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       if (operation.ready && persist) {
         const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-        if (runtime.status === 'running' && this.inFlight.get(key) === operation) session.append('bid.stage.failed', {
-          stage: runtime.stage, status: 'failed', reason: '阶段执行因后端停止而中断，请重试当前阶段。',
-        })
+        if (runtime.status === 'running' && this.inFlight.get(key) === operation) {
+          if (runtime.stage === 'chapter_writing' && operation.pauseForWritingPlan === true) {
+            session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
+          } else session.append('bid.stage.failed', {
+            stage: runtime.stage, status: 'failed', reason: '阶段执行因后端停止而中断，请重试当前阶段。',
+          })
+        }
         await this.checkpoint(operation)
       }
     } finally {
@@ -763,7 +866,39 @@ export class BidHostRuntime extends TypertRemoteService {
       if (resolveSessionPreset(session) !== 'bid') return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
-      if (session.header.cwd !== undefined && this.inFlight.has(projectKey(session))) return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
+      const cwd = session.header.cwd
+      if (cwd !== undefined) {
+        const key = projectKey(session)
+        const active = this.inFlight.get(key)
+        if (active !== undefined) {
+          const activeRuntime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+          if (activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
+            return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
+          }
+          return (async () => {
+            active.pauseForWritingPlan = true
+            active.controller.abort(new Error('用户要求更新整体写作计划。'))
+            await active.done
+            const agent = this.ctx.agents.get(session.id)
+            if (agent === undefined) return { reason: 'bid.stage_running', message: '当前会话暂不可处理写作要求。' }
+            const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
+            await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+          })()
+        }
+        if (runtime.stage === 'chapter_writing' && runtime.status === 'completed') {
+          return (async () => {
+            const agent = this.ctx.agents.get(session.id)
+            if (agent === undefined) return { reason: 'bid.completed', message: '当前会话暂不可处理写作要求。' }
+            const operation = this.beginOperation(session)
+            try {
+              await this.prepareOperation(operation)
+              await writeWritingRequest(agent, operation.workspace, (await currentWritingPlan(operation.workspace))?.plan_version ?? null)
+              session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
+              await this.checkpoint(operation)
+            } finally { await this.finishOperation(session, operation, false) }
+          })()
+        }
+      }
       if (projection.composer.enabled) return
       const reason = projection.composer.reason
       return {
@@ -785,7 +920,13 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('agent/session-start', ({ agent }) => {
       const cwd = agent.session.header.cwd
       if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
-      void this.driveStartedSession(agent, cwd).catch(error => ctx.logger.warn(`Bid 项目启动失败：${String(error)}`))
+      void this.driveStartedSession(agent, cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 项目启动失败：${String(error)}`) })
+    }, { global: true })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status !== 'idle' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return
+      const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (runtime.stage !== 'chapter_writing' || runtime.status !== 'pending') return
+      void this.driveStartedSession(agent, agent.session.header.cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 写作计划启动失败：${String(error)}`) })
     }, { global: true })
     ctx.inject(['webServer'], (webCtx) => {
       const webServer = webCtx.get('webServer') as unknown as BidBinaryUploadWebServer
@@ -819,8 +960,67 @@ export class BidHostRuntime extends TypertRemoteService {
     const backup = new Map<string, string | null>()
     try {
       runtime = await this.prepareOperation(operation)
-      if (runtime.status !== 'waiting_user' || (request.action !== 'bid_stage_inspect' && runtime.stage !== 'outline_generation' && runtime.stage !== 'evidence_mapping') || (request.action === 'bid_evidence_remap' && runtime.stage !== 'evidence_mapping')) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前阶段不允许该操作。')
+      const writingPlanAction = request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
+      const outlineAction = request.action !== 'bid_stage_inspect' && request.action !== 'bid_confirm_writing_plan'
+        && (runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping')
+      if (runtime.status !== 'waiting_user' || (request.action !== 'bid_stage_inspect' && !writingPlanAction && !outlineAction)
+        || (request.action === 'bid_evidence_remap' && runtime.stage !== 'evidence_mapping')) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前阶段不允许该操作。')
       if (request.action === 'bid_stage_inspect') return await inspectBidStage(workspace, session)
+      if (request.action === 'bid_confirm_writing_plan') {
+        const { action: _action, ...submitted } = request
+        const markerPath = within(workspace.projectRoot, WRITING_REQUEST_PATH)
+        const planPath = within(workspace.projectRoot, WRITING_PLAN_PATH)
+        const appliedPath = within(workspace.projectRoot, WRITING_PLAN_APPLIED_PATH)
+        await Promise.all([markerPath, planPath, appliedPath].map(path => assertNoLinkedPath(workspace.root, path)))
+        const marker = writingRequestSchema.parse(JSON.parse(await readFile(markerPath, 'utf8')))
+        const current = await confirmedOutline(workspace)
+        if (marker.confirmed_outline_sha256 !== current.sha256) throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
+        const previous = await currentWritingPlan(workspace)
+        if (marker.base_plan_version !== (previous?.plan_version ?? null)) throw new Error('写作计划已变化，请重新读取后再提交。')
+        if ((previous === undefined) !== (submitted.revision === null)) {
+          return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [previous === undefined
+            ? '首次计划的 revision 必须为 null'
+            : '更新计划必须说明变更摘要和受影响章节'] } }
+        }
+        let input = exactWritingRequirementMessages(session, submitted, marker, previous)
+        if (previous !== undefined && input.revision !== null) {
+          let appliedVersion = previous.plan_version
+          try {
+            appliedVersion = zod.strictObject({ schema_version: zod.literal(1), plan_version: zod.number().int().positive() })
+              .parse(JSON.parse(await readFile(appliedPath, 'utf8'))).plan_version
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+          if (appliedVersion < previous.plan_version && previous.revision !== null) input = {
+            ...input,
+            revision: {
+              ...input.revision,
+              affected_section_ids: [...new Set([
+                ...previous.revision.affected_section_ids,
+                ...input.revision.affected_section_ids,
+              ])],
+            },
+          }
+        }
+        const issues = validateWritingPlan(input, current.outline)
+        if (issues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues } }
+        const version = (previous?.plan_version ?? 0) + 1
+        const revision = input.revision === null || previous === undefined
+          ? null
+          : { ...input.revision, base_plan_version: previous.plan_version }
+        const plan = parseWritingPlan({
+          ...input,
+          revision,
+          schema_version: WRITING_PLAN_SCHEMA_VERSION,
+          scope: 'technical_bid',
+          plan_version: version,
+          confirmed: true,
+          confirmed_outline_sha256: current.sha256,
+        })
+        await writeFileAtomic(planPath, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+        return { ok: true, plan_version: version, message: '整体写作要求与计划已确认，将启动章节写作。' }
+      }
       const base = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== base.revision || request.expected_draft_sha256 !== base.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: base } }
       for (const path of ['outline/draft.json', 'outline/outline.json', 'outline/quality-report.json', ...(runtime.stage === 'evidence_mapping' ? ['analysis/evidence-map.json', 'analysis/evidence-map.candidate.json', 'analysis/evidence-mapping-quality.candidate.json', 'outline/refined-outline.candidate.json', 'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json', 'analysis/evidence-mapping-checkpoint.json'] : [])]) {
@@ -912,10 +1112,19 @@ export class BidHostRuntime extends TypertRemoteService {
     let driven = false
     try {
       const runtime = await this.prepareOperation(operation)
+      const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
+      if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') {
+        await ensureWritingRequirementsRequested(agent, workspace)
+        await this.ctx.sessions.flush(session)
+        return
+      }
       if (runtime.status !== 'pending' || runtime.stage === 'file_intake') return
       driven = true
-      const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
-      await this.automaticOrchestrator(agent, workspace, operation.controller.signal).drive()
+      const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
+      const next = runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace)
+        ? await orchestrator.runConfirmedStage()
+        : await orchestrator.drive()
+      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') await ensureWritingRequirementsRequested(agent, workspace)
       await this.ctx.sessions.flush(session)
     } finally {
       await this.finishOperation(session, operation, driven)
@@ -1076,6 +1285,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).startResetStage()
+      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') await ensureWritingRequirementsRequested(agent, workspace)
       await this.ctx.sessions.flush(session)
       return stageStartResult({ ok: true, value: next })
     } catch (error: unknown) {
@@ -1172,11 +1382,10 @@ export class BidHostRuntime extends TypertRemoteService {
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
             })
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
-            if (task.stage === 'chapter_writing') return executeChapterWriting(agent, workspace, task, {
+            return executeChapterWriting(agent, workspace, task, {
               ...repair,
               maxConcurrency: this.config.chapterWritingMaxConcurrency,
             })
-            throw new Error(`Bid Host has no executor for ${task.stage}`)
           },
         },
         {
@@ -1190,9 +1399,7 @@ export class BidHostRuntime extends TypertRemoteService {
                   ? validateEvidenceMapping(workspace, stage, artifacts)
                   : stage === 'outline_generation'
                     ? validateOutlineGeneration(workspace, stage, artifacts)
-                    : stage === 'chapter_writing'
-                      ? validateChapterWriting(workspace, stage, artifacts)
-                      : validateOutlineGeneration(workspace, stage, artifacts),
+                    : validateChapterWriting(workspace, stage, artifacts),
         },
         operation.controller.signal,
       )
@@ -1371,7 +1578,8 @@ export class BidHostRuntime extends TypertRemoteService {
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
-      const next = await orchestrator.retry()
+      const next = await orchestrator.retry(runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace))
+      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') await ensureWritingRequirementsRequested(agent, workspace)
       await this.ctx.sessions.flush(session)
       return retrySuccess(next)
     } catch (error: unknown) {
@@ -2184,6 +2392,9 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       backup.clear()
       await rm(within(workspace.projectRoot, 'outline/draft.json'), { force: true })
+      if (confirmation.state.stage === 'chapter_writing' && confirmation.state.status === 'waiting_user') {
+        await ensureWritingRequirementsRequested(agent, workspace)
+      }
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
     } catch (error) {

@@ -73,6 +73,12 @@ describe('Bid client projection', () => {
       })
       expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
         .toEqual({ stage: 'outline_generation', status: 'pending' })
+      session.append('bid.project.resumed', {
+        runtime: { stage: 'chapter_writing', status: 'completed' }, revision: 15,
+      })
+      session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
+        .toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
     } finally {
       disposeProjection()
       await projections.dispose()
@@ -101,6 +107,11 @@ describe('Bid client projection', () => {
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_running' },
     })
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'running' })).toEqual({
+      runtime: { stage: 'chapter_writing', status: 'running' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
+    })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'waiting_user' },
       allowedActions: ['confirm_tender_analysis', 'send_message'],
@@ -114,6 +125,11 @@ describe('Bid client projection', () => {
     expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
+      composer: { enabled: true },
+    })
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'waiting_user' })).toEqual({
+      runtime: { stage: 'chapter_writing', status: 'waiting_user' },
+      allowedActions: ['send_message'],
       composer: { enabled: true },
     })
     expect(getBidClientProjection({

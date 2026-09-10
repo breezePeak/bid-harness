@@ -136,7 +136,7 @@ export class BidOrchestrator {
    * @returns the state at the next stopping point.
    * @throws {@link BidOrchestratorError} unless a non-file-intake stage is failed and idle.
    */
-  retry(): Promise<BidRuntimeState> {
+  retry(beforeExecutionConfirmed = false): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state
     if (state.status !== 'failed' || state.stage === 'file_intake') {
@@ -146,7 +146,7 @@ export class BidOrchestrator {
       )
     }
     return this.begin(async () => {
-      if (getBidStagePolicy(state.stage).userGate === 'before_execution') {
+      if (getBidStagePolicy(state.stage).userGate === 'before_execution' && !beforeExecutionConfirmed) {
         this.session.append('bid.user_confirmation.required', {
           stage: state.stage,
           status: 'waiting_user',
@@ -173,6 +173,10 @@ export class BidOrchestrator {
       )
     }
     return this.begin(async () => {
+      if (getBidStagePolicy(state.stage).userGate === 'before_execution') {
+        this.session.append('bid.user_confirmation.required', { stage: state.stage, status: 'waiting_user' })
+        return this.state
+      }
       const settlement = await this.executeStage(state.stage)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
@@ -217,6 +221,25 @@ export class BidOrchestrator {
     return this.begin(async () => {
       await this.executeStage(state.stage)
       return this.state
+    })
+  }
+
+  /**
+   * Execute a pending before-execution stage after its Host-owned plan has been confirmed.
+   * @returns State after the confirmed stage settles.
+   */
+  runConfirmedStage(): Promise<BidRuntimeState> {
+    this.assertIdle()
+    const state = this.state
+    if (state.status !== 'pending' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
+      throw new BidOrchestratorError(
+        'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
+        `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+      )
+    }
+    return this.begin(async () => {
+      const settlement = await this.executeStage(state.stage)
+      return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
 

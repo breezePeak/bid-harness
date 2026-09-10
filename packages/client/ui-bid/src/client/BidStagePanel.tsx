@@ -88,6 +88,8 @@ function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
     case 'evidence_mapping': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.evidence_mapping'
     case 'outline_generation': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.outline_generation'
     case 'chapter_writing':
+      if (status === 'waiting_user') return 'prompt.writing_requirements'
+      return 'prompt.later_stage'
     case 'docx_export':
       return 'prompt.later_stage'
   }

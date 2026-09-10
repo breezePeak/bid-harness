@@ -64,6 +64,13 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
     'analysis/evidence-map.json': { schema_version: 10, section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'] }] },
     'outline/outline.json': outline,
     'outline/confirmed-outline.json': outline,
+    'chapters/writing-plan.json': {
+      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      confirmed_outline_sha256: outlineArtifactSha256(outline), user_requirements: ['没有特殊要求，直接开始'],
+      overall_goal: '完整响应招标要求。', style_rules: [], global_rules: [], priorities: [], page_target: null,
+      sections: [{ section_id: 'SEC-1', emphasis: 'standard', page_budget: null, instructions: [] }],
+      revision: null,
+    },
     'chapters/execution-log.json': { schema_version: 2, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
     'chapters/manifest.json': { schema_version: 6, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), chapters: [{
       section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [],

@@ -65,7 +65,7 @@ async function fixture() {
   session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
   session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
   await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
-  const agent = { id: session.id, session } as Agent
+  const agent = { id: session.id, session, followup: vi.fn() } as unknown as Agent
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
     ctx: { agents: { get: () => agent, list: () => [agent] }, sessions: { flush: async () => {}, list: () => [session] } },
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096, docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -76,7 +76,7 @@ async function fixture() {
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
       (fromStage, toStage) => prepareBidStageContextTransition(session, workspace, fromStage, toStage)),
   }) as unknown as BidHostRuntime
-  return { ctx, host, session, workspace, outline, read: (path: string) => readFile(join(workspace.projectRoot, path), 'utf8') }
+  return { ctx, host, agent, session, workspace, outline, read: (path: string) => readFile(join(workspace.projectRoot, path), 'utf8') }
 }
 
 afterEach(() => { vi.clearAllMocks() })
@@ -125,6 +125,12 @@ describe('S4 Draft 最终确认', () => {
       }))
       const confirmedResult = await f.host.confirmOutline(f.session, identity(second.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
+      expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+      expect(f.agent.followup).toHaveBeenCalledOnce()
+      expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
+        schema_version: 1,
+        confirmed_outline_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      })
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
       const s5Context = JSON.stringify(f.session.deriveMessages())
       expect(s5Context).not.toContain('S4 旧资料与错误 Section-Z')

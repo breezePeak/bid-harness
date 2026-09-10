@@ -76,6 +76,41 @@ describe('login flows in a real composition', () => {
 })
 
 describe('request-level dynamic profiles', () => {
+  it('registers Responses hosted search per route and sends a CPA-compatible request', async () => {
+    const dir = await home()
+    await writeFile(join(dir, '.credentials.yaml'), 'version: 1\nrefs:\n  PP_API_KEY: local-key\n', { mode: 0o600 })
+    const result = JSON.stringify({ status: 'completed', output: [{
+      type: 'web_search_call', status: 'completed',
+      action: { sources: [{ url: 'https://example.test/source', title: 'Source' }] },
+    }] })
+    const server = await mockServer([{ body: result }, { body: result }])
+    const ctx = await boot(dir, { providers: { pp: {
+      displayName: 'CLIProxyAPI', apiKeyEnv: 'PP_API_KEY', api: 'openai-responses',
+      baseURL: `${server.url}/v1`, models: [{ id: 'gpt-5.6-luna' }],
+    } } })
+    const search = () => ctx.llm.webSearch(
+      'pp',
+      { query: 'site:gov.cn 遥感监测', maxResults: 5 },
+      { model: 'gpt-5.6-luna', maxUses: 2, recordRequest: vi.fn() },
+    )
+
+    expect(ctx.llm.supports('pp', 'web_search')).toBe(true)
+    await expect(search()).resolves.toEqual({
+      sources: [{ url: 'https://example.test/source', title: 'Source' }], truncated: false,
+    })
+    expect(server.paths).toEqual(['/v1/responses'])
+    expect(server.requests[0]).toMatchObject({
+      model: 'gpt-5.6-luna', tools: [{ type: 'web_search' }], tool_choice: 'required', store: false,
+    })
+    expect(server.requests[0]).not.toHaveProperty('max_tool_calls')
+
+    await ctx.settings.update(NS, { providers: { pp: { api: 'openai-completions' } } })
+    expect(ctx.llm.supports('pp', 'web_search')).toBe(false)
+    await ctx.settings.update(NS, { providers: { pp: { api: 'openai-responses' } } })
+    expect(ctx.llm.supports('pp', 'web_search')).toBe(true)
+    await expect(search()).resolves.toMatchObject({ sources: [{ url: 'https://example.test/source' }] })
+  })
+
   it('mounts bare and dormant, then registers routes the moment settings supply providers', async () => {
     vi.stubEnv('PI_DYNAMIC_KEY', '')
     const dir = await home()

@@ -349,7 +349,13 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('read-chunk', 'read_source', { source_ref: 'M1:chunk_0001' }),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_branch_outline', {}),
-      toolCall('lock-blank-comparison', 'lock_branch_outline', { comparison: '  ' }),
+      toolCall('reject-invalid-outline-edit', 'apply_branch_outline_edit', {
+        operation: {
+          type: 'add_section', parent_id: 'SEC-SECURITY', order: 1, writable: false,
+          title: '未完成的结构节点', purpose: '组织后续安全任务。', summary: '汇总后续安全任务。',
+        },
+        basis: { kind: 'section_responsibility', explanation: '验证非法目录操作不污染待锁定目录。', requirement_ids: [] },
+      }),
     ] : []),
     toolCall('lock-initial-outline', 'lock_branch_outline', {
       comparison: '用户原框架包含访问控制与安全审计、资产盘点及其子项；当前招标范围为访问控制与安全审计。输入旧标按身份治理与安全运维组织，本分支对应其中的访问控制与安全审计，保留已聚焦的候选叶子，不引入其他主题。',
@@ -444,6 +450,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   })
   const missing = unavailableSources[0]!
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
   await writeFile(join(workspace.projectRoot, unavailableSources[1]!.snapshot_path), '与账本 Hash 不符的正文')
   const evidenceBefore = JSON.stringify({ schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION, section_mappings: [{
     section_id: section.id, local_materials: [], web_materials: [{ source_id: missing.source_id, snapshot_path: missing.snapshot_path,
@@ -458,6 +465,17 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     })),
     writeFile(evidencePath, evidenceBefore),
     writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: unavailableSources })),
+    writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
+      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      confirmed_outline_sha256: outlineHash,
+      user_requirements: ['整份约 20 页，重点展开访问控制，使用正式技术方案风格，按这些要求直接开始。'],
+      overall_goal: '完整响应访问控制与安全审计要求。',
+      style_rules: ['使用正式、可执行的技术方案表述。'], global_rules: [],
+      priorities: [{ section_ids: [section.id], instruction: '重点展开访问控制实施流程。' }],
+      page_target: { kind: 'approximate', min_pages: 18, max_pages: 22, estimate_basis: '按既有 Word 模板版式估算，实际页数排版后核对。' },
+      sections: [{ section_id: section.id, emphasis: 'detailed', page_budget: { min_pages: 18, max_pages: 22 }, instructions: ['展开访问控制实施流程。'] }],
+      revision: null,
+    })),
   ])
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)

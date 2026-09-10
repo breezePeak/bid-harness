@@ -58,7 +58,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/web-evidence-sources.json', 'outline/confirmed-outline.json',
     ], allowedTools: ['grep', 'read', 'web_search', 'web_fetch'], forbiddenTools: ['bash', 'write'], requiredArtifacts: [
       'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json', 'chapters/global-compliance-review.json',
-    ], validator: 'chapter-writing-validator', userGate: 'none', nextStage: null,
+    ], validator: 'chapter-writing-validator', userGate: 'before_execution', nextStage: null,
   },
   docx_export: {
     stage: 'docx_export', executor: 'program', requiredInputs: ['outline/confirmed-outline.json', 'chapters/manifest.json'],
@@ -138,13 +138,16 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
   switch (event.type) {
     case 'bid.project.resumed': {
       const runtime = event.data.runtime
-      const sameIssues = state.failureIssues === runtime.failureIssues || (
-        state.failureIssues !== undefined && runtime.failureIssues !== undefined
-        && state.failureIssues.length === runtime.failureIssues.length
-        && state.failureIssues.every((issue, index) => {
-          const next = runtime.failureIssues?.[index]
-          return issue.code === next?.code && issue.message === next?.message
-            && issue.artifact === next?.artifact && issue.path === next?.path
+      const previousIssues = state.failureIssues
+      const nextIssues = runtime.failureIssues
+      const sameIssues = previousIssues === nextIssues || (
+        previousIssues !== undefined && nextIssues !== undefined
+        && previousIssues.length === nextIssues.length
+        && previousIssues.every((issue, index) => {
+          const next = nextIssues[index]
+          if (next === undefined) return false
+          return issue.code === next.code && issue.message === next.message
+            && issue.artifact === next.artifact && issue.path === next.path
         })
       )
       if (state.stage === runtime.stage && state.status === runtime.status
@@ -168,11 +171,14 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         : state
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage && getBidStagePolicy(state.stage).userGate !== 'none'
-        && (state.status === 'pending' || state.status === 'running' || state.status === 'failed')
+        && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'running' || state.status === 'failed'
+          || state.stage === 'chapter_writing' && state.status === 'completed')
         ? { stage: state.stage, status: 'waiting_user' } : state
     case 'bid.user_confirmation.received':
       if (event.data.stage !== state.stage || state.status !== 'waiting_user') return state
-      return event.data.confirmed ? { stage: state.stage, status: 'running' } : { stage: state.stage, status: 'pending' }
+      return event.data.confirmed && getBidStagePolicy(state.stage).userGate === 'after_validation'
+        ? { stage: state.stage, status: 'running' }
+        : { stage: state.stage, status: 'pending' }
     case 'bid.stage.completed': {
       if (event.data.stage !== state.stage || state.status !== 'running') return state
       const next = getBidStagePolicy(event.data.stage).nextStage
@@ -197,7 +203,9 @@ export function getBidClientProjection(
   if (runtime.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { runtime: { ...runtime }, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
   if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
   if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
-  if (runtime.status === 'running') return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
+  if (runtime.status === 'running') return runtime.stage === 'chapter_writing'
+    ? { runtime: { ...runtime }, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
+    : { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
   if (runtime.status === 'completed') return {
     runtime: { ...runtime },
     allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export' ? ['export_docx', 'revise_chapter'] : [],
@@ -208,5 +216,6 @@ export function getBidClientProjection(
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
   if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
   if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
   return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
 }

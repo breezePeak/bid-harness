@@ -417,6 +417,55 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
   })
 
+  it('S5 完成后发送普通要求会进入版本化计划调整，而不是强制整书重置', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('writing-plan-update')
+
+    await expect(ctx.serial('session/prompt-admission', {
+      session: agent.session,
+      mode: 'queue',
+      content: [{ type: 'text', text: '第二章增加表格，其他章节保持不变。' }],
+    })).resolves.toBeUndefined()
+
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'waiting_user' } })
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')))
+      .toMatchObject({ session_id: agent.session.id, base_plan_version: 1 })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toContain('已有正文')
+    expect(executor.execute).not.toHaveBeenCalled()
+  })
+
+  it('S5 运行中追加要求会先排空旧计划执行，再开放计划调整', async () => {
+    const { ctx, workspace, fresh, host, executor } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
+    const agent = await fresh('writing-plan-pause')
+    const gate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'chapter_writing'
+    vi.mocked(executor.execute).mockImplementationOnce(() => gate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => {
+      expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+      expect(host.inFlight.size).toBe(1)
+    })
+
+    const admission = ctx.serial('session/prompt-admission', {
+      session: agent.session,
+      mode: 'steer',
+      content: [{ type: 'text', text: '后续章节改为简洁风格。' }],
+    })
+    gate.resolve([])
+    await expect(admission).resolves.toBeUndefined()
+    await retry
+
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+    expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'chapter_writing')).toBe(false)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')))
+      .toMatchObject({ session_id: agent.session.id, base_plan_version: 1 })
+  })
+
   it('旧 Session 日志落盘失败不会让新聊天以 S1 覆盖已有 S4 项目', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const state = { stage: 'evidence_mapping', status: 'waiting_user' } as const
@@ -500,6 +549,7 @@ describe('Workspace 项目与独立 Session', () => {
     const otherRoot = join(workspace.root, 'other-project')
     await mkdir(otherRoot)
     const otherWorkspace = new BidWorkspace(otherRoot)
+    await seedProjectArtifacts(otherWorkspace)
     const failed = { stage: 'chapter_writing', status: 'failed' } as const
     await checkpointBidProjectState(workspace, failed)
     await checkpointBidProjectState(otherWorkspace, failed)

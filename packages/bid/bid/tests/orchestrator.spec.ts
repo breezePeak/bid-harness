@@ -25,7 +25,7 @@ async function session() {
 describe('BidOrchestrator', () => {
   it('finishes the linear workflow at S5 and leaves S6 for on-demand export', async () => {
     expect(BID_STAGES).toEqual(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export'])
-    expect(BID_STAGES.map(stage => getBidStagePolicy(stage).userGate)).toEqual(['none', 'after_validation', 'after_validation', 'after_validation', 'none', 'none'])
+    expect(BID_STAGES.map(stage => getBidStagePolicy(stage).userGate)).toEqual(['none', 'after_validation', 'after_validation', 'after_validation', 'before_execution', 'none'])
 
     const current = await session()
     const execute = vi.fn(async task => artifacts(task.stage))
@@ -36,8 +36,21 @@ describe('BidOrchestrator', () => {
     await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
     await expect(orchestrator.confirmValidatedStage('tender_analysis', artifacts('tender_analysis'))).resolves.toEqual({ ok: true, state: { stage: 'outline_generation', status: 'waiting_user' } })
     await expect(orchestrator.confirmValidatedStage('outline_generation', artifacts('outline_generation'))).resolves.toEqual({ ok: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
-    await expect(orchestrator.confirmValidatedStage('evidence_mapping', artifacts('evidence_mapping'))).resolves.toEqual({ ok: true, state: { stage: 'chapter_writing', status: 'completed' } })
+    await expect(orchestrator.confirmValidatedStage('evidence_mapping', artifacts('evidence_mapping'))).resolves.toEqual({ ok: true, state: { stage: 'chapter_writing', status: 'waiting_user' } })
+    expect(execute.mock.calls.map(call => call[0].stage)).toEqual(['tender_analysis', 'outline_generation', 'evidence_mapping'])
+    current.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+    await expect(orchestrator.runConfirmedStage()).resolves.toEqual({ stage: 'chapter_writing', status: 'completed' })
     expect(execute.mock.calls.map(call => call[0].stage)).toEqual(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
+  })
+
+  it('starts a reset S5 at the writing-requirements gate without executing chapters', async () => {
+    const current = await session()
+    const execute = vi.fn(async task => artifacts(task.stage))
+    const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute }, { validate: async () => ({ ok: true }) })
+    current.append('bid.project.resumed', { runtime: { stage: 'chapter_writing', status: 'waiting_start' }, revision: 1 })
+
+    await expect(orchestrator.startResetStage()).resolves.toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+    expect(execute).not.toHaveBeenCalled()
   })
 
   it('records executor validation issues on the current stage', async () => {

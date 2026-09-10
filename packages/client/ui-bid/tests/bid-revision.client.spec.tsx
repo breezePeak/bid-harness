@@ -55,9 +55,9 @@ it('章节拖入生成独立标签，意见只提交给修订动作，成功刷�
   view.unmount()
 })
 
-it('失败保留标签，缺少引用时不委托主 Agent，并拒绝其他任务的拖入', async () => {
+it('失败保留标签，缺少引用时交还普通写作要求消息，并拒绝其他任务的拖入', async () => {
   const view = composer()
-  expect(await view.submit('重写', [], undefined)).toMatchObject({ kind: 'error' })
+  expect(await view.submit('调整整体写作要求', [], undefined)).toBeUndefined()
   view.drop('another-session')
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', '只能引用当前任务中的章节。')
   expect(view.getChapter).not.toHaveBeenCalled()

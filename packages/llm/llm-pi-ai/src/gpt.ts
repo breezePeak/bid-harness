@@ -90,6 +90,64 @@ export function mapResponsesSearch(payload: unknown): WebSearchResult {
   return { sources: [...sources.values()], truncated: false }
 }
 
+/**
+ * Discover URLs through an OpenAI Responses-compatible provider route.
+ * @param provider - configured route whose endpoint and credential are used.
+ * @param providerOptions - live profile and credential resolvers shared with model calls.
+ * @param request - search query and source limit.
+ * @param options - captured model, cancellation, and durable input recorder.
+ * @returns structured URLs and titles, without generated answer text.
+ */
+export async function searchResponses(
+  provider: string,
+  providerOptions: PiAiAdapterOptions,
+  request: WebSearchRequest,
+  options: HostedSearchOptions,
+): Promise<WebSearchResult> {
+  const profile = providerOptions.profiles().get(provider)
+  if (profile === undefined || profile.api !== 'openai-responses') {
+    throw new LlmError(`Provider "${provider}" is not configured for OpenAI Responses`, 'INVALID_CONFIG')
+  }
+  const baseURL = profile.baseURL?.replace(/\/+$/u, '')
+  if (baseURL === undefined) throw new LlmError(`Provider "${provider}" requires a Base URL`, 'INVALID_CONFIG')
+  using timeout = deadline(options.signal, profile.timeoutMs ?? 300_000, 'RESPONSES_SEARCH_TIMEOUT')
+  try {
+    const apiKey = await providerOptions.resolveApiKey(provider, profile)
+    timeout.signal.throwIfAborted()
+    const body = {
+      model: options.model,
+      input: `Perform a web search for the query: ${request.query}`,
+      tools: [{ type: 'web_search' }],
+      tool_choice: 'required',
+      include: ['web_search_call.action.sources'],
+      store: false,
+    }
+    const endpoint = `${baseURL}/responses`
+    options.recordRequest({ provider, endpoint, body })
+    const response = await fetch(endpoint, {
+      method: 'POST', redirect: 'error', signal: timeout.signal,
+      headers: {
+        ...attributionHeaders(),
+        ...apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` },
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    if ([404, 405, 501].includes(response.status)) {
+      throw new LlmError(`Provider "${provider}" does not support Responses API`, 'UNSUPPORTED_RESPONSES_API')
+    }
+    if (!response.ok) {
+      throw new LlmError(`Provider "${provider}" search request failed (HTTP ${response.status})`, 'WEB_PROVIDER_ERROR', { status: response.status })
+    }
+    return mapResponsesSearch(await response.json())
+  } catch (error) {
+    if (options.signal?.aborted) throw new LlmError(`Provider "${provider}" search aborted`, 'WEB_ABORTED')
+    if (timeout.signal.aborted) throw new LlmError(`Provider "${provider}" search timed out`, 'TIMEOUT')
+    if (error instanceof LlmError) throw error
+    throw new LlmError(`Provider "${provider}" search request failed`, 'WEB_PROVIDER_ERROR')
+  }
+}
+
 /** GPT model calls retain pi-ai's streaming, tools, usage, reasoning, and replay conversion. */
 export class GPTProvider extends PiAiAdapter {
   private readonly gptOptions: PiAiAdapterOptions
@@ -136,38 +194,7 @@ export class GPTProvider extends PiAiAdapter {
    * @returns structured URLs and titles, without generated answer text.
    */
   async search(request: WebSearchRequest, options: HostedSearchOptions): Promise<WebSearchResult> {
-    const profile = requireGptProfile(this.gptOptions.profiles())
-    const baseURL = profile.baseURL
-    if (baseURL === undefined) throw new LlmError('GPT Provider requires a Base URL', 'INVALID_CONFIG')
-    using timeout = deadline(options.signal, profile.timeoutMs ?? 300_000, 'GPT_SEARCH_TIMEOUT')
-    try {
-      const apiKey = await this.gptOptions.resolveApiKey('gpt', profile)
-      timeout.signal.throwIfAborted()
-      const body = {
-        model: options.model,
-        input: `Perform a web search for the query: ${request.query}`,
-        tools: [{ type: 'web_search' }],
-        tool_choice: 'required',
-        include: ['web_search_call.action.sources'],
-        max_tool_calls: options.maxUses,
-        store: false,
-      }
-      const endpoint = `${baseURL}/responses`
-      options.recordRequest({ provider: 'gpt', endpoint, body })
-      const response = await fetch(endpoint, {
-        method: 'POST', redirect: 'error', signal: timeout.signal,
-        headers: { ...attributionHeaders(), authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if ([404, 405, 501].includes(response.status)) throw new LlmError('GPT Provider does not support Responses API', 'UNSUPPORTED_RESPONSES_API')
-      if (!response.ok) throw new LlmError(`GPT Provider search request failed (HTTP ${response.status})`, 'WEB_PROVIDER_ERROR', { status: response.status })
-      return mapResponsesSearch(await response.json())
-    } catch (error) {
-      if (options.signal?.aborted) throw new LlmError('GPT Provider search aborted', 'WEB_ABORTED')
-      if (timeout.signal.aborted) throw new LlmError('GPT Provider search timed out', 'TIMEOUT')
-      if (error instanceof LlmError) throw error
-      throw new LlmError('GPT Provider search request failed', 'WEB_PROVIDER_ERROR')
-    }
+    return searchResponses('gpt', this.gptOptions, request, options)
   }
 }
 

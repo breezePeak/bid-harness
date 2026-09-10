@@ -1,4 +1,4 @@
-import { writeInputs, outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
+import { writeInputs, writeWritingPlan, writingPlanFixture, outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
 import { mkdir, mkdtemp, readFile, writeFile, unlink, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,6 +39,7 @@ import {
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
   parseTenderScoringArtifact,
+  parseWritingPlan,
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
 } from '@deepseek-ai/dsh-bid'
@@ -410,6 +411,7 @@ describe('chapter-writing executor', () => {
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
     const hash = outlineArtifactSha256(outline)
     await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
+    await writeWritingPlan(workspace, outline)
     const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
     evidence.section_mappings.push({ ...evidence.section_mappings[2]!, section_id: 'SEC-4' })
@@ -813,6 +815,7 @@ describe('chapter-writing executor', () => {
         requirements: parseTenderRequirementsArtifact({ schema_version: 1, requirements: [] }),
         scoring: parseTenderScoringArtifact({ schema_version: 1, scoring_items: [] }),
         compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
+        writingPlan: writingPlanFixture(outline),
       },
     )
     expect(prompt).toContain('finish_chapter_plan')
@@ -867,6 +870,7 @@ describe('chapter-writing executor', () => {
       }),
       responsePointCatalog: createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '回答评分1' }] }).points,
       outline: { ...outlineFixture(), global_compliance_ids: ['GLOBAL-1'] },
+      writingPlan: writingPlanFixture(outlineFixture()),
     })
 
     expect(context.relatedMaterials.map(material => material.file_id)).toEqual(['REFERENCE'])
@@ -887,6 +891,7 @@ describe('chapter-writing executor', () => {
     const hash = outlineArtifactSha256(outline)
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
     await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))
+    await writeWritingPlan(workspace, outline)
     await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [{
       id: 'GLOBAL-1', type: '全局约束', raw_text: '全书技术参数保持一致', normalized_rule: '全书技术参数保持一致', severity: 'mandatory', source_refs: source,
     }] }))
@@ -931,6 +936,7 @@ describe('chapter-writing executor', () => {
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
     const outlineSha256 = outlineArtifactSha256(outline)
     await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 }))
+    await writeWritingPlan(workspace, outline)
     const fixture = fixtureAgent(workspace, outline)
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
     const responsibilities = outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (
@@ -1374,6 +1380,41 @@ describe('chapter-writing executor', () => {
     const finalLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     expect(finalLog.sections.every(section => section.status === 'completed')).toBe(true)
     expect(finalLog.sections[0]?.attempts).toEqual(priorLog.sections[0]?.attempts)
+  })
+
+  it('写作计划升级只重写模型判定受影响的已完成章节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-plan-revision-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+    const retainedBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const previous = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+    await writeFile(planPath, `${JSON.stringify({
+      ...previous,
+      plan_version: 2,
+      user_requirements: [...previous.user_requirements, '第二章增加表格，其他章节保持不变。'],
+      sections: previous.sections.map(section => section.section_id === 'SEC-2'
+        ? { ...section, instructions: ['使用表格归纳实施责任。'] }
+        : section),
+      revision: { base_plan_version: 1, summary: '只调整第二章的表达形式。', affected_section_ids: ['SEC-2'] },
+    })}\n`)
+
+    const resumed = fixtureAgent(workspace, outline)
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+
+    expect(resumed.followup).not.toHaveBeenCalled()
+    expect(resumed.starts).toHaveLength(1)
+    expect(resumed.starts[0]?.request.label).toContain('章节2')
+    await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toBe(retainedBody)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/applied-writing-plan.json'), 'utf8')))
+      .toEqual({ schema_version: 1, plan_version: 2 })
   })
 
   it('仅有合法 plan、没有 log 时复用计划，不再次请求 Relation Planning', async () => {

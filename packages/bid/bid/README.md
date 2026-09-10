@@ -41,7 +41,7 @@ The browser sends one ordered, same-origin binary S1 request whose body contains
 
 S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
-In S5, the Host schedules independent Writers from the confirmed outline and makes each valid body available before its Reviewer starts. The Host binds the durable must-answer and scoring coverage indexes from that confirmed outline; the Reviewer separately verifies that the body actually covers them. A review repair receives at most one new Writer attempt. If the second review still reports problems, the durable review remains `needs_attention` and does not block on-demand export.
+S5 使用已确认写作计划向每个 Writer 注入适用的全局规则、章节重点和本叶节篇幅预算。Reviewer 只接收适用于本章的要求和预算；整书页数只在文档层汇总，不能成为每章通过条件。Host 再按确认目录调度独立 Writer，并在 Reviewer 启动前发布有效正文；Reviewer 独立核对正文覆盖。修复仍回到原 Writer，最终问题保留为 `needs_attention`，不阻断按需导出。
 
 After S5 completes, `exportDocx` validates the confirmed outline and complete chapter set, combines the bodies in outline order, and writes a fresh timestamped Markdown and DOCX pair under `outputDirectory`. Repeated exports do not change the completed S5 runtime or hide its review state. Existing projects already checkpointed at `docx_export/completed` retain the same review and export actions.
 
@@ -49,7 +49,11 @@ After S5 completes, `exportDocx` validates the confirmed outline and complete ch
 
 ### 等待确认时的阶段交互
 
-S2、S3、S4 的 `waiting_user` 开放普通消息，`running` 禁止发送。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
+S2、S3、S4、S5 的 `waiting_user` 开放普通消息，`running` 禁止发送。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
+
+S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录和资料映射解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。计划只给可写叶节分配篇幅，整书页数目标等于叶节预算汇总；约数、下限、上限和区间分别保存自己的边界，页数保留排版估算依据，实际页数在排版后核对。
+
+S5 运行中或完成后仍可用普通消息追加整体要求。Host 先取消并排空旧计划任务，再进入同一 `waiting_user` 交互；Main Agent 在新计划中说明变更及受影响叶节。`chapters/applied-writing-plan.json` 记录执行日志已采用的计划版本，恢复时只把受影响的已完成章节及其强依赖下游退回待写，未开始任务直接使用新上下文，其他已完成正文继续复用；计划落盘前旧任务已排空，因此旧版本结果不能覆盖新计划。
 
 S1→S2、S2→S3、S3→S4、S4→S5 正式完成时，Host 在最终校验和确认成功后、下一阶段首次执行前替换 Main Agent 的模型可见阶段上下文。交接消息只列出 `getBidStagePolicy(nextStage).requiredInputs` 决定的正式 Artifact 路径及 SHA-256；旧阶段消息继续保留在追加式 Session 日志中，但不再由 `deriveMessages()` 投影给模型。同阶段修复、重试和审核交互不触发替换；阶段重置复用同一替换原语，使目标阶段及后续上下文失效。决定依据见[阶段上下文边界记录](../../../.agents/notes/implemented/architecture/2026-09-09-bid-stage-context-boundary.md)。
 
@@ -69,7 +73,7 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，提交招标要求、用户修改或章节职责方面的业务依据；Host 校验范围、应用操作并分配 ID。目录锁定后，材料提交与章节任务调整使用独立工具。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，并可在锁定前按当前目录分别起草章节任务、显式提交材料用途；找到资料不会隐式占用材料提交状态。Host 校验结构范围、业务依据和 Section 身份，结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
@@ -77,9 +81,9 @@ S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVID
 
 `submit_section_mapping`、`replace_section_mapping` 只处理材料。模型提交绑定唯一文件与分块的 `material_ref`、usage 及 summary；程序回填真实身份，真实工具入口拒绝未知引用、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。找到相关资料本身不构成扩展任务的理由。
 
-目录深化与分支研究在同一 Child 内完成，`lock_branch_outline` 要求非空结构对照结论。合并后沿用现有独立目录复核与 Final Check，不新增模型阶段。复核对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责，先判断任务调整，再判断资料用途。任务越界必须修正或阻断；Final Check 不增删、移动、拆合章节或修改标题。`list_review_items` 返回每个可写章节任务、每条材料用途关联和受影响父节点总述，空材料章节也必须审查。`review_items` 按当前引用批量保留、移除、修正或阻断；任务变化使本章材料和祖先总述结论失效，用途或来源变化使该关联重新待审。correct 的新版本仍须复核。
+目录深化与分支研究在同一 Child 内完成；目录操作通过共享结构校验后才更新分支状态，`lock_branch_outline` 也只锁定结构有效且带有非空对照结论的目录，失败时保持分支可编辑。合并后沿用现有独立目录复核与 Final Check，不新增常驻模型阶段。目录复核按每个最终可写叶节分别判断 Writing Brief、writing dimensions 和 missing topics 是否聚焦且充分，并提交具体 `section_id` 与原因；只有具体问题所在的原业务分支可进行至多一次局部研究和结构修复，再复核仍未解决则阻断，不能把结构问题交给 Final Check。Final Check 对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责审查任务与资料用途，不增删、移动、拆合章节或修改标题。`list_review_items` 返回每个可写章节任务、每条材料用途关联和受影响父节点总述，空材料章节也必须审查。`review_items` 按当前引用批量保留、移除、修正或阻断；任务变化使本章材料和祖先总述结论失效，用途或来源变化使该关联重新待审。correct 的新版本仍须复核。
 
-无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v3 保存私有操作和复核记录，v1/v2 必须重置 S4，恢复不能复用旧 Final Check 结论。日志 schema v3 区分 issues 与检索 warnings，技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
+无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v4 保存私有操作、复核记录、分支结构结论及局部修复基线，旧版本必须重置 S4，恢复不能复用旧目录或 Final Check 结论。日志 schema v3 区分 issues 与检索 warnings，技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 

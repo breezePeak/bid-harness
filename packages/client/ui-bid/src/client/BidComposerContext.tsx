@@ -27,7 +27,8 @@ export function BidComposerContext({
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
   const reference = useStore(state => state.reference)
-  const enabled = isBid && (projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export')
+  const enabled = isBid && (projection?.runtime.stage === 'docx_export'
+    || projection?.runtime.stage === 'chapter_writing' && projection.runtime.status === 'completed')
   const rootRef = useRef<HTMLDivElement>(null)
   const requestVersion = useRef(0)
   const [loading, setLoading] = useState(false)
@@ -37,7 +38,7 @@ export function BidComposerContext({
   useEffect(() => {
     if (!enabled) return
     return registerSubmit((text, imageIds) => {
-      if (reference === null && !loading) return Promise.resolve({ kind: 'error', text: '请先拖入章节，或选中正文段落并添加到对话框。' })
+      if (reference === null && !loading) return undefined
       if (loading) return Promise.resolve({ kind: 'error', text: '正在读取章节，请稍后发送。' })
       if (reference === null) return undefined
       if (imageIds.length > 0) return Promise.resolve({ kind: 'error', text: '章节修改暂不支持图片附件，请先移除图片。' })

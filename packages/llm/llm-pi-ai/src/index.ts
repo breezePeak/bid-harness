@@ -61,11 +61,13 @@ import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PiAiAdapter } from './adapter.ts'
+import type { PiAiAdapterOptions } from './adapter.ts'
 import { authContextFrom, credentialStoreFrom } from './auth.ts'
 import { catalogProviderIds } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
+import { searchResponses } from './gpt.ts'
 import { registerPiAiFlows } from './login.ts'
 
 export { PiAiAdapter } from './adapter.ts'
@@ -192,7 +194,7 @@ export function apply(ctx: Context, config: Config): void {
   // through `ctx` per call, so they stay correct across the collection rebuilds
   // a configuration change causes, and a sign-in survives one.
   const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
-  const adapter = new PiAiAdapter({
+  const adapterOptions: PiAiAdapterOptions = {
     profiles,
     resolveApiKey,
     auth,
@@ -203,7 +205,8 @@ export function apply(ctx: Context, config: Config): void {
         + ` sending that message as provider-neutral content (${reason})`,
       )
     },
-  })
+  }
+  const adapter = new PiAiAdapter(adapterOptions)
   // Independent of the route set: signing in is what makes a route worth
   // adding, so the flows are offered before any profile names their provider.
   // Scoped to the authorization seam rather than injected outright, because a
@@ -258,6 +261,34 @@ export function apply(ctx: Context, config: Config): void {
   // settings section supplies profiles, and routes drop when it empties.
   let registration: AdapterRegistrationHandle | undefined
   let registeredFacts: unknown
+  const searches = new Map<string, () => void>()
+  const ensureSearchRegistrations = (): void => {
+    const desired = new Set(
+      [...profiles()].filter(([, profile]) => profile.api === 'openai-responses').map(([provider]) => provider),
+    )
+    const added: string[] = []
+    try {
+      for (const provider of desired) {
+        if (searches.has(provider)) continue
+        searches.set(provider, ctx.llm.registerWebSearch(
+          provider,
+          (request, options) => searchResponses(provider, adapterOptions, request, options),
+        ))
+        added.push(provider)
+      }
+    } catch (error) {
+      for (const provider of added) {
+        searches.get(provider)?.()
+        searches.delete(provider)
+      }
+      throw error
+    }
+    for (const [provider, dispose] of searches) {
+      if (desired.has(provider)) continue
+      dispose()
+      searches.delete(provider)
+    }
+  }
   const ensureRegistrationFacts = (): void => {
     const facts = registrationFacts(profiles())
     if (deepEqualJson(facts, registeredFacts)) return
@@ -282,6 +313,7 @@ export function apply(ctx: Context, config: Config): void {
     registeredFacts = facts
   }
   ensureRegistrationFacts()
+  ensureSearchRegistrations()
 
   installSettingsSection(ctx, NS, Config, config, {
     // Refuse an unserviceable section where it is written: without this a
@@ -300,8 +332,9 @@ export function apply(ctx: Context, config: Config): void {
       // is not serving. The previous routes keep serving either way.
       try {
         ensureRegistrationFacts()
+        ensureSearchRegistrations()
       } catch (error) {
-        ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused update')
+        ctx.logger.error('llm-pi-ai: keeping the previous route capabilities after a refused update')
         ctx.logger.error(error)
       }
       // The directory follows the profiles the registry accepted, so a route

@@ -20,8 +20,10 @@ try {
     { canExecute: stage => stage === 'chapter_writing', execute: async () => artifacts },
     { validate: (stage, output) => validateChapterWriting(workspace, stage, output) },
   )
-  const runtime = await orchestrator.drive()
-  process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
+  const waiting = await orchestrator.drive()
+  agent.session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+  const runtime = await orchestrator.runConfirmedStage()
+  process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, waiting, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()
 }

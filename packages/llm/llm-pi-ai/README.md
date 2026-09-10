@@ -6,7 +6,7 @@ Generic multi-provider adapter for the harness LLM seam backed by [`@earendil-wo
 
 The package root exposes the Cordis plugin contract, `PiAiAdapter`, and `supportedProtocols()`; profile resolution, catalog materialization, provider construction, replay conversion, and stream conversion remain package-internal.
 
-GPT / CPA 的 Responses 搜索从 `web_search_call.action.sources`、`web_search_call.results`、`url_citation` 和 `web_search_result_location` 解析 HTTP(S) 来源并按 URL 去重；普通回答正文中的 URL 不进入 `WebSearchResult.sources`。
+协议设为 `openai-responses` 的通用路由会自动注册 hosted search，搜索沿用该路由的 Base URL、凭据和模型；切换到其他协议会同步撤销能力。GPT / CPA 的 Responses 搜索从 `web_search_call.action.sources`、`web_search_call.results`、`url_citation` 和 `web_search_result_location` 解析 HTTP(S) 来源并按 URL 去重；普通回答正文中的 URL 不进入 `WebSearchResult.sources`。
 
 ## GPTProvider
 
@@ -20,7 +20,7 @@ GPT / CPA 的 Responses 搜索从 `web_search_call.action.sources`、`web_search
 | `timeoutMs` / `streamIdleTimeoutMs` | 300000 | 请求与空闲超时，单位毫秒。 |
 | `retryPolicy` | 现有 normal 策略 | 同一路由的重试，不切换 Provider。 |
 
-聊天和辅助搜索都发送到 `{baseURL}/responses`。搜索携带 `tools: [{type: 'web_search'}]`、`tool_choice: 'required'`、`include: ['web_search_call.action.sources']`；只接受完成的搜索调用中的结构化 URL 及 URL annotations，不采用生成答案作为证据。返回 404/405/501 的 Responses 端点明确报 `UNSUPPORTED_RESPONSES_API`；没有搜索调用或未完成的结果报 `WEB_PROVIDER_ERROR`，不静默降级。
+聊天和辅助搜索都发送到 `{baseURL}/responses`。搜索携带 `tools: [{type: 'web_search'}]`、`tool_choice: 'required'`、`include: ['web_search_call.action.sources']`，不发送部分兼容网关不接受的可选 `max_tool_calls`；只接受完成的搜索调用中的结构化 URL 及 URL annotations，不采用生成答案作为证据。返回 404/405/501 的 Responses 端点明确报 `UNSUPPORTED_RESPONSES_API`；没有搜索调用或未完成的结果报 `WEB_PROVIDER_ERROR`，不静默降级。
 
 模型目录可以通过现有 `llm.discoverModels` 从 `{baseURL}/models` 读取；端点未提供列表时可手工填写。远端是否支持 hosted search 由该端点决定，注册能力本身不触发付费探测。
 
