@@ -13,7 +13,7 @@ const workbench = {
     { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
   ],
-  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 } },
+  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 }, page_target: { status: 'not_required' as const } },
   global_compliance: { status: 'not_required' as const, reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
 }
 
@@ -60,12 +60,26 @@ describe('BidReviewWorkbench', () => {
   it('展示部分、完成、空和不可用的页数状态', async () => {
     const { rerender } = render(<BidReviewWorkbench {...props()} />)
     expect(await screen.findByText('正文共约 3 页')).toBeTruthy()
+    expect(screen.getByText('无页数目标')).toBeTruthy()
     rerender(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
       ...workbench, summary: { ...workbench.summary, content_count: 0, page_estimate: { status: 'empty' as const } },
       outline: workbench.outline.map(section => section.section_id === 'ROOT' ? { ...section, page_estimate: { status: 'unavailable' as const } } : section),
     }) })} />)
     expect(await screen.findByText('正文尚未生成')).toBeTruthy()
     expect(screen.getByText('暂不可用')).toBeTruthy()
+  })
+
+  it('分开显示页数目标、正文估算和未达差额', async () => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench,
+      summary: { ...workbench.summary, page_target: {
+        status: 'below',
+        target: { kind: 'minimum', min_pages: 200, max_pages: null, estimate_basis: '按当前 Word 格式估算。' },
+        estimated_pages: 150.25, difference: 49.75, format_revision: 2, format_source: 'template',
+      } },
+    }) })} />)
+    const status = await screen.findByText('目标 至少 200 页 · 尚差 49.75 页')
+    expect(status.closest('[title]')?.getAttribute('title')).toContain('当前正文估算 150.25 页')
   })
   it('章节支持拖入，正文右键将相邻完整段落添加为引用', async () => {
     const store = createBidRevisionStore().create()

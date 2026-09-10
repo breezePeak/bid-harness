@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { outlineArtifactSha256, parseWritingPlan, validateWritingPlan } from '@deepseek-ai/dsh-bid'
 import { outlineFixture, writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
 import { renderStageInteractionPrompt, stageInteractionSchema } from '../src/stage-interaction.ts'
+import { assessPageTarget } from '../src/writing-requirements.ts'
 
 describe('S5 整体写作要求计划', () => {
   it('向 Main Agent 开放自然语言计划确认，而不是固定选项或直接写作', () => {
@@ -80,5 +81,24 @@ describe('S5 整体写作要求计划', () => {
       expect.stringContaining('重复：SEC-2'),
       expect.stringContaining('非可写叶节：STRUCT'),
     ]))
+  })
+
+  it('使用未取整正文值分别校验下限、上限、区间和约数', () => {
+    const minimum = { kind: 'minimum' as const, min_pages: 200, max_pages: null, estimate_basis: '当前格式。' }
+    const maximum = { kind: 'maximum' as const, min_pages: null, max_pages: 200, estimate_basis: '当前格式。' }
+    const range = { kind: 'range' as const, min_pages: 190, max_pages: 210, estimate_basis: '当前格式。' }
+    const approximate = { ...range, kind: 'approximate' as const }
+
+    const below = assessPageTarget(minimum, 199.999)
+    expect(below.status).toBe('below')
+    if (below.status === 'below') expect(below.difference).toBeCloseTo(0.001)
+    expect(assessPageTarget(minimum, 200)).toEqual({ status: 'met', difference: 0 })
+    const above = assessPageTarget(maximum, 200.001)
+    expect(above.status).toBe('above')
+    if (above.status === 'above') expect(above.difference).toBeCloseTo(-0.001)
+    expect(assessPageTarget(range, 189.999).status).toBe('below')
+    expect(assessPageTarget(range, 210.001).status).toBe('above')
+    expect(assessPageTarget(approximate, 200)).toEqual({ status: 'met', difference: 0 })
+    expect(assessPageTarget(null, 0)).toEqual({ status: 'not_required' })
   })
 })

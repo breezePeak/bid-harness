@@ -3,8 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
 import { readDocxXml } from './docx-template.ts'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { normalizeChapterHeadings } from './chapter-headings.ts'
-import { fromMarkdown } from 'mdast-util-from-markdown'
+import { collectDocxChapterBody } from './docx-content.ts'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationResult } from './control-plane-contract.ts'
 import type { BidWorkspace } from './index.ts'
@@ -12,6 +11,8 @@ import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from './outline-
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { estimateChapterWritingPages } from './page-estimate.ts'
+import { assessPageTarget, parseWritingPlan } from './writing-requirements.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -19,33 +20,7 @@ async function readProjectFile(workspace: BidWorkspace, path: string): Promise<s
   return readFile(absolute, 'utf8')
 }
 
-/** Markdown 标题只在当前章节内分级，代码块中的井号保持原文。 */
-/**
- * 将叶节正文整理为导出标题之后的内容；页面估算与正式导出共用此口径。
- * @param markdown 已保存的叶节正文。
- * @param title 确认目录标题。
- * @param sectionId 叶节稳定身份。
- * @param number 确认目录编号。
- * @param depth 该节导出标题深度。
- * @returns 不重复当前章节标题的 Markdown 正文。
- */
-export function collectDocxChapterBody(markdown: string, title: string, sectionId: string, number: string, depth: number): string {
-  markdown = normalizeChapterHeadings(markdown, title, sectionId, number)
-  const nodes = fromMarkdown(markdown).children
-  for (const node of [...nodes].reverse()) {
-    if (node.type !== 'heading') continue
-    const start = node.position?.start.offset
-    const end = node.position?.end.offset
-    if (start === undefined || end === undefined) throw new Error('Markdown 标题缺少源码位置。')
-    const first = node.children[0]?.position?.start.offset
-    const last = node.children.at(-1)?.position?.end.offset
-    const inline = first === undefined || last === undefined ? '' : markdown.slice(first, last)
-    const text = node === nodes[0]
-      ? '' : `${'#'.repeat(Math.min(6, depth + node.depth - 1))} ${inline}`
-    markdown = markdown.slice(0, start) + text + markdown.slice(end)
-  }
-  return markdown.trim()
-}
+export { collectDocxChapterBody } from './docx-content.ts'
 
 /**
  * 按确认目录导出父节点概述及完整叶节正文；章节记录必须匹配当前目录。
@@ -126,8 +101,38 @@ export async function validateDocxExport(
     await assertNoLinkedPath(workspace.root, absolute)
     const bytes = await readFile(absolute)
     await readDocxXml(bytes)
-    return { ok: true }
   } catch {
     return { ok: false, issues: [{ code: 'DOCX_EXPORT_ARTIFACT_INVALID', message: '导出目录中缺少有效的 DOCX 产物。', artifact: path }] }
+  }
+  try {
+    const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
+    let writingPlan: ReturnType<typeof parseWritingPlan>
+    try {
+      writingPlan = parseWritingPlan(JSON.parse(await readProjectFile(workspace, 'chapters/writing-plan.json')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true }
+      throw error
+    }
+    if (writingPlan.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) {
+      throw new Error('写作计划与当前确认目录不一致。')
+    }
+    const estimate = await estimateChapterWritingPages(workspace, outline)
+    const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
+    if (assessment.status === 'below' || assessment.status === 'above') {
+      return { ok: false, issues: [{
+        code: assessment.status === 'below' ? 'DOCX_EXPORT_PAGE_TARGET_BELOW' : 'DOCX_EXPORT_PAGE_TARGET_ABOVE',
+        message: assessment.status === 'below'
+          ? `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，低于已确认下限，尚差 ${assessment.difference.toFixed(2)} 页。`
+          : `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，高于已确认上限，超出 ${Math.abs(assessment.difference).toFixed(2)} 页。`,
+        artifact: 'chapters/writing-plan.json',
+      }] }
+    }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, issues: [{
+      code: 'DOCX_EXPORT_PAGE_ESTIMATE_UNAVAILABLE',
+      message: `导出文件可读取，但当前正文篇幅无法核验：${error instanceof Error ? error.message : String(error)}`,
+      artifact: 'chapters/writing-plan.json',
+    }] }
   }
 }

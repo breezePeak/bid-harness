@@ -41,7 +41,7 @@ The browser sends one ordered, same-origin binary S1 request whose body contains
 
 S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
-S5 使用已确认写作计划向每个 Writer 注入适用的全局规则、章节重点和本叶节篇幅预算。Reviewer 只接收适用于本章的要求和预算；整书页数只在文档层汇总，不能成为每章通过条件。Host 再按确认目录调度独立 Writer，并在 Reviewer 启动前发布有效正文；Reviewer 独立核对正文覆盖。修复仍回到原 Writer，最终问题保留为 `needs_attention`，不阻断按需导出。
+S5 使用已确认写作计划向每个 Writer 注入适用的全局规则、章节重点和本叶节篇幅预算。Reviewer 只接收适用于本章的要求和预算；整书页数只在文档层汇总，不能成为每章通过条件。Host 再按确认目录调度独立 Writer，并在 Reviewer 启动前发布有效正文；Reviewer 独立核对正文覆盖。修复仍回到原 Writer，最终内容问题保留为 `needs_attention`。Host 按确认目录、父节点概述、叶节正文和当前 Word 格式计算未取整页数；明确目标未满足或测算失败时，S5 Validator 不发布完成状态，S6 也不把可读取的 DOCX 误报为篇幅达标。
 
 After S5 completes, `exportDocx` validates the confirmed outline and complete chapter set, combines the bodies in outline order, and writes a fresh timestamped Markdown and DOCX pair under `outputDirectory`. Repeated exports do not change the completed S5 runtime or hide its review state. Existing projects already checkpointed at `docx_export/completed` retain the same review and export actions.
 
@@ -49,11 +49,11 @@ After S5 completes, `exportDocx` validates the confirmed outline and complete ch
 
 ### 等待确认时的阶段交互
 
-S2、S3、S4、S5 的 `waiting_user` 开放普通消息，`running` 禁止发送。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
+S2、S3、S4、S5 的 `waiting_user` 开放普通消息；S5 的 `running` 与 `completed` 也保留主 Agent 对话。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S5 快照包含章节编号与 ID、Writer/Reviewer 尝试、最近问题、当前正文未取整页数、目标差额和 Word 格式身份。S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
 S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录和资料映射解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。计划只给可写叶节分配篇幅，整书页数目标等于叶节预算汇总；约数、下限、上限和区间分别保存自己的边界，页数保留排版估算依据，实际页数在排版后核对。
 
-S5 运行中或完成后仍可用普通消息追加整体要求。Host 先取消并排空旧计划任务，再进入同一 `waiting_user` 交互；Main Agent 在新计划中说明变更及受影响叶节。`chapters/applied-writing-plan.json` 记录执行日志已采用的计划版本，恢复时只把受影响的已完成章节及其强依赖下游退回待写，未开始任务直接使用新上下文，其他已完成正文继续复用；计划落盘前旧任务已排空，因此旧版本结果不能覆盖新计划。
+S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的整体要求变更才调用 `bid_confirm_writing_plan`。运行中的显式变更通过现有取消与排空边界进入同一版本化恢复路径；完成态的普通问答保持完成和导出能力。`chapters/applied-writing-plan.json` 记录执行日志已采用的计划版本，恢复时只把受影响的已完成章节及其强依赖下游退回待写，其他合法正文继续复用。
 
 S1→S2、S2→S3、S3→S4、S4→S5 正式完成时，Host 在最终校验和确认成功后、下一阶段首次执行前替换 Main Agent 的模型可见阶段上下文。交接消息只列出 `getBidStagePolicy(nextStage).requiredInputs` 决定的正式 Artifact 路径及 SHA-256；旧阶段消息继续保留在追加式 Session 日志中，但不再由 `deriveMessages()` 投影给模型。同阶段修复、重试和审核交互不触发替换；阶段重置复用同一替换原语，使目标阶段及后续上下文失效。决定依据见[阶段上下文边界记录](../../../.agents/notes/implemented/architecture/2026-09-09-bid-stage-context-boundary.md)。
 
@@ -139,3 +139,4 @@ The persisted inventory is append-only conversation content. Importing files in 
 - DOCX and DOC page fields remain `null` because their source structures do not provide dependable pagination.
 - DOCX export supports headings, paragraphs, lists, and tables; it does not apply a company Word template.
 - S5 的证明范围与资料身份由 Host 校验，原文是否真正支持某项内容仍由 Reviewer 判断；无密钥回放验证协议，不能替代真实模型的语义质量评估。
+- 明确页数目标未满足时，当前实现阻止 S5 完成并保留正文、测量值和差额；自动选择深化章节并在同一运行实例内完成有界补写仍待实现。

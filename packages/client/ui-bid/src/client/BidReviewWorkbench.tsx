@@ -19,6 +19,33 @@ function classes(...parts: Array<string | undefined | false | null>): string {
   return parts.filter(Boolean).join(' ')
 }
 
+function pageTargetInfo(value: BidReviewWorkbenchView['summary']['page_target'] | undefined): {
+  label: string
+  title: string
+  warning: boolean
+} {
+  if (value === undefined || value.status === 'not_set') return { label: '页数目标未设置', title: '尚未保存整书页数目标。', warning: false }
+  if (value.status === 'not_required') return { label: '无页数目标', title: '当前写作计划没有整书硬性页数目标。', warning: false }
+  if (value.status === 'unavailable') {
+    if (value.target === null) return { label: '页数目标无法读取', title: value.reason, warning: true }
+    const bounds = value.target.min_pages === null ? `不超过 ${value.target.max_pages} 页`
+      : value.target.max_pages === null ? `至少 ${value.target.min_pages} 页`
+        : `${value.target.min_pages}–${value.target.max_pages} 页`
+    return { label: `目标 ${bounds} · 无法核验`, title: value.reason, warning: true }
+  }
+  const bounds = value.target.min_pages === null ? `不超过 ${value.target.max_pages} 页`
+    : value.target.max_pages === null ? `至少 ${value.target.min_pages} 页`
+      : `${value.target.min_pages}–${value.target.max_pages} 页`
+  const result = value.status === 'met' ? '已达估算目标'
+    : value.status === 'below' ? `尚差 ${value.difference.toFixed(2)} 页`
+      : `超出 ${Math.abs(value.difference).toFixed(2)} 页`
+  return {
+    label: `目标 ${bounds} · ${result}`,
+    title: `当前正文估算 ${value.estimated_pages.toFixed(2)} 页；${value.target.estimate_basis}`,
+    warning: value.status !== 'met',
+  }
+}
+
 /** Host actions used by the live S5 writing workbench. */
 export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
@@ -163,6 +190,7 @@ export function BidReviewWorkbench({
     workbench?.summary.page_estimate,
     (workbench?.summary.content_count ?? 0) >= (workbench?.summary.chapter_count ?? 1),
   )
+  const targetInfo = pageTargetInfo(workbench?.summary.page_target)
 
   const exportWord = (): void => {
     if (!exportReady || exporting || openWordExport === undefined) return
@@ -191,6 +219,9 @@ export function BidReviewWorkbench({
             </Pill>
             <Pill className={css.statPill} title={documentPages.title}>
               {documentPages.label}
+            </Pill>
+            <Pill className={classes(css.statPill, targetInfo.warning && css.statPillWarning)}>
+              <span title={targetInfo.title}>{targetInfo.label}</span>
             </Pill>
           </div>
         </div>

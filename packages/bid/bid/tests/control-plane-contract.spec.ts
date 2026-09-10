@@ -18,7 +18,7 @@ describe('bid control-plane public contract', () => {
     const view = parseBidReviewWorkbenchView({
       schema_version: 2,
       outline: [{ section_id: 'root', parent_id: null, order: 1, title: '方案', writable: false, writing_status: 'not_started', review_status: 'not_started', content_available: false, page_estimate: { status: 'empty' } }],
-      summary: { chapter_count: 0, content_count: 0, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'unavailable' } },
+      summary: { chapter_count: 0, content_count: 0, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'unavailable' }, page_target: { status: 'not_set' } },
       global_compliance: { status: 'not_required', reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
     })
     expect(view.summary.page_estimate.status).toBe('unavailable')

@@ -66,9 +66,8 @@ import {
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateUploadResult } from './docx-format-contract.ts'
-import { executeDocxExport, validateDocxExport, collectDocxChapterBody, collectDocxMarkdown } from './docx-export.ts'
-import { estimateReviewPages, type PageEstimateSection } from './page-estimate.ts'
-import { buildOutlineView } from './outline-confirmation-browser.ts'
+import { executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
+import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
@@ -85,6 +84,7 @@ import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import {
+  assessPageTarget,
   parseWritingPlan,
   validateWritingPlan,
   writingRequestSchema,
@@ -154,6 +154,7 @@ export type {
   BidStageStartResult,
   BidReviewWorkbenchView,
   BidPageEstimate,
+  BidPageTargetStatus,
   BidReviewChapterView,
   BidReviewMaterialView,
 
@@ -875,28 +876,10 @@ export class BidHostRuntime extends TypertRemoteService {
           if (activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
             return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
           }
-          return (async () => {
-            active.pauseForWritingPlan = true
-            active.controller.abort(new Error('用户要求更新整体写作计划。'))
-            await active.done
-            const agent = this.ctx.agents.get(session.id)
-            if (agent === undefined) return { reason: 'bid.stage_running', message: '当前会话暂不可处理写作要求。' }
-            const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
-            await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
-          })()
-        }
-        if (runtime.stage === 'chapter_writing' && runtime.status === 'completed') {
-          return (async () => {
-            const agent = this.ctx.agents.get(session.id)
-            if (agent === undefined) return { reason: 'bid.completed', message: '当前会话暂不可处理写作要求。' }
-            const operation = this.beginOperation(session)
-            try {
-              await this.prepareOperation(operation)
-              await writeWritingRequest(agent, operation.workspace, (await currentWritingPlan(operation.workspace))?.plan_version ?? null)
-              session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
-              await this.checkpoint(operation)
-            } finally { await this.finishOperation(session, operation, false) }
-          })()
+          if (active.session !== session) {
+            return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行写作。' }
+          }
+          return
         }
       }
       if (projection.composer.enabled) return
@@ -948,7 +931,22 @@ export class BidHostRuntime extends TypertRemoteService {
     const { session } = agent
     const request = stageInteractionSchema.parse(input)
     if (!isBidMainSession(session) || session.header.cwd === undefined) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
-    if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
+    const key = projectKey(session)
+    const active = this.inFlight.get(key)
+    if (request.action === 'bid_stage_inspect' && active !== undefined) {
+      if (active.session !== session) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正由另一会话执行写作。')
+      return inspectBidStage(active.workspace, session)
+    }
+    if (active !== undefined) {
+      const activeRuntime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (active.session !== session || request.action !== 'bid_confirm_writing_plan'
+        || activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
+        throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
+      }
+      active.pauseForWritingPlan = true
+      active.controller.abort(new Error('Main Agent 已提交写作计划调整。'))
+      await active.done
+    }
     callerSignal.throwIfAborted()
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
     const operation = this.beginOperation(session)
@@ -960,6 +958,14 @@ export class BidHostRuntime extends TypertRemoteService {
     const backup = new Map<string, string | null>()
     try {
       runtime = await this.prepareOperation(operation)
+      if (request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
+        && (runtime.status === 'completed' || active !== undefined)) {
+        await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+        if (runtime.status === 'completed') {
+          session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
+          runtime = { stage: 'chapter_writing', status: 'waiting_user' }
+        }
+      }
       const writingPlanAction = request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
       const outlineAction = request.action !== 'bid_stage_inspect' && request.action !== 'bid_confirm_writing_plan'
         && (runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping')
@@ -1840,27 +1846,30 @@ export class BidHostRuntime extends TypertRemoteService {
     }))
     let rows = rowContents.map(item => item.row)
     let pageEstimate: BidReviewWorkbenchView['summary']['page_estimate'] = { status: 'unavailable' }
+    let writingPlan: Awaited<ReturnType<typeof currentWritingPlan>>
+    let pageTarget: BidReviewWorkbenchView['summary']['page_target']
     try {
-      const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
-      const estimateSections: PageEstimateSection[] = outline.sections.map((section, index) => {
-        const position = positions.get(section.id)
-        if (position === undefined) throw new Error('目录章节缺少导出位置。')
-        const source = rowContents[index]?.markdown ?? ''
-        return {
-          section_id: section.id, parent_id: section.parent_id, number: position.number, depth: position.depth, title: section.title,
-          writable: section.writable,
-          markdown: section.writable && source.trim() !== ''
-            ? collectDocxChapterBody(source, section.title, section.id, position.number, Math.min(6, position.depth))
-            : source,
-        }
-      })
-      const estimate = await estimateReviewPages(
-        workspace,
-        outline.document_title,
-        estimateSections,
-        (await readDocxFormat(workspace)).values,
-      )
+      writingPlan = await currentWritingPlan(workspace)
+      pageTarget = writingPlan === undefined ? { status: 'not_set' }
+        : writingPlan.page_target === null ? { status: 'not_required' }
+          : { status: 'unavailable', target: writingPlan.page_target, reason: '当前篇幅无法核验。' }
+    } catch (error) {
+      pageTarget = { status: 'unavailable', target: null, reason: `写作计划无法读取：${error instanceof Error ? error.message : String(error)}` }
+    }
+    try {
+      const estimate = await estimateChapterWritingPages(workspace, outline)
       pageEstimate = estimate.total > 0 ? { status: 'available', pages: Math.ceil(estimate.total) } : { status: 'empty' }
+      if (writingPlan?.page_target !== null && writingPlan?.page_target !== undefined) {
+        const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
+        if (assessment.status !== 'not_required') pageTarget = {
+          status: assessment.status,
+          target: writingPlan.page_target,
+          estimated_pages: estimate.total,
+          difference: assessment.difference,
+          format_revision: estimate.format.revision,
+          format_source: estimate.format.source,
+        }
+      }
       const children = new Set(outline.sections.flatMap(section => section.parent_id === null ? [] : [section.parent_id]))
       rows = rows.map((row) => {
         if (!children.has(row.section_id)) return row
@@ -1919,6 +1928,7 @@ export class BidHostRuntime extends TypertRemoteService {
         reviewed_count: writable.filter(row => row.review_status === 'pass' || row.review_status === 'needs_attention').length,
         needs_attention_count: writable.filter(row => row.review_status === 'needs_attention' || row.review_status === 'failed').length,
         page_estimate: pageEstimate,
+        page_target: pageTarget,
       },
       global_compliance: globalCompliance,
     }

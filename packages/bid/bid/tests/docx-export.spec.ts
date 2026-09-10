@@ -7,6 +7,7 @@ import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
 import { executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
+import { parseWritingPlan } from '../src/writing-requirements.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 
@@ -49,7 +50,7 @@ async function exportFixture() {
   await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify(manifest))
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n资源配置正文。\n\n## 内部措施\n\n保留正文。\n\n```txt\n# 原样井号\n```\n')
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '交付正文。')
-  return { workspace, manifest }
+  return { workspace, manifest, outline }
 }
 
 describe('Bid DOCX export', () => {
@@ -78,6 +79,29 @@ describe('Bid DOCX export', () => {
     expect(html).toContain('<h1><strong>实施方案</strong></h1><p>本章介绍部署安排与交付要求，说明项目实施的主要内容。</p><h2><strong>部署安排</strong></h2><p>本节概述部署所需的资源配置。</p>')
     expect(html.indexOf('资源配置正文')).toBeLessThan(html.indexOf('交付正文'))
     expect(html).toContain('<h2><strong>交付</strong></h2>')
+  })
+
+  it('DOCX 可读取但正文低于已确认下限时仍拒绝篇幅验收', async () => {
+    const { workspace, outline } = await exportFixture()
+    const artifacts = await executeDocxExport(workspace)
+    const plan = parseWritingPlan({
+      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+      user_requirements: ['至少 200 页。'], overall_goal: '完整响应招标要求。', style_rules: [], global_rules: [], priorities: [],
+      page_target: { kind: 'minimum', min_pages: 200, max_pages: null, estimate_basis: '按当前 Word 格式估算。' },
+      sections: ['resource', 'delivery'].map(section_id => ({
+        section_id, emphasis: 'standard', page_budget: { min_pages: 100, max_pages: null }, instructions: [],
+      })),
+      revision: null,
+    })
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), `${JSON.stringify(plan)}\n`)
+
+    const result = await validateDocxExport(workspace, 'docx_export', artifacts)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('正文不足未被拒绝')
+    expect(result.issues).toHaveLength(1)
+    expect(result.issues[0]?.code).toBe('DOCX_EXPORT_PAGE_TARGET_BELOW')
+    await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).resolves.not.toHaveLength(0)
   })
 
   it.each(['hash', 'missing', 'duplicate', 'unknown', 'path'] as const)('拒绝 %s 不匹配的章节记录', async (invalid) => {

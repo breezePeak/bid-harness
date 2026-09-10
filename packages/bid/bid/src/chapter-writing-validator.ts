@@ -14,6 +14,8 @@ import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { estimateChapterWritingPages } from './page-estimate.ts'
+import { assessPageTarget, parseWritingPlan } from './writing-requirements.ts'
 import {
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
@@ -121,13 +123,14 @@ export async function validateChapterWriting(
     readJson(workspace, 'analysis/scoring-response-points.json', issues),
     readJson(workspace, 'analysis/requirements.json', issues),
     readJson(workspace, 'analysis/compliance.json', issues),
+    readJson(workspace, 'chapters/writing-plan.json', issues),
   ])
   const [manifestRaw, planRaw, logRaw, globalReviewRaw, outlineRaw,
-    scoringRaw, catalogRaw, requirementsRaw, complianceRaw] = inputs
+    scoringRaw, catalogRaw, requirementsRaw, complianceRaw, writingPlanRaw] = inputs
   if (
     manifestRaw === undefined || planRaw === undefined || logRaw === undefined || globalReviewRaw === undefined
     || outlineRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
-    || requirementsRaw === undefined || complianceRaw === undefined
+    || requirementsRaw === undefined || complianceRaw === undefined || writingPlanRaw === undefined
   ) return { ok: false, issues }
   let chapters
   let plan
@@ -138,6 +141,7 @@ export async function validateChapterWriting(
   let requirements
   let compliance
   let globalReview
+  let writingPlan
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
     plan = parseChapterExecutionPlan(planRaw)
@@ -148,11 +152,15 @@ export async function validateChapterWriting(
     requirements = parseTenderRequirementsArtifact(requirementsRaw)
     compliance = parseTenderComplianceArtifact(complianceRaw)
     globalReview = parseGlobalComplianceReviewArtifact(globalReviewRaw)
+    writingPlan = parseWritingPlan(writingPlanRaw)
   } catch {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or scoring inputs have invalid fields.', MANIFEST)
     return { ok: false, issues }
   }
   const outlineHash = outlineArtifactSha256(outline)
+  if (writingPlan.confirmed_outline_sha256 !== outlineHash) {
+    reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_OUTLINE_MISMATCH', 'The writing page target does not match the confirmed outline.', 'chapters/writing-plan.json')
+  }
   if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'CHAPTER_WRITING_RESPONSE_POINT_CATALOG_MISMATCH', 'The scoring response-point catalog does not match scoring.json.', 'analysis/scoring-response-points.json')
   if (chapters.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_OUTLINE_HASH_INVALID', 'The chapter manifest does not match the confirmed outline.', MANIFEST)
   issues.push(...validateChapterExecutionPlan(plan, outline, outlineHash))
@@ -263,5 +271,23 @@ export async function validateChapterWriting(
     reject(issues, 'GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID', 'The document-level compliance review does not match the confirmed outline.', GLOBAL_REVIEW)
   }
   issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalChapters, bidManifest))
+  if (writingPlan.page_target !== null && writingPlan.confirmed_outline_sha256 === outlineHash) {
+    try {
+      const estimate = await estimateChapterWritingPages(workspace, outline)
+      const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
+      if (assessment.status === 'below') {
+        reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_BELOW',
+          `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，低于已确认下限 ${writingPlan.page_target.min_pages} 页，尚差 ${assessment.difference.toFixed(2)} 页。`,
+          'chapters/writing-plan.json')
+      } else if (assessment.status === 'above') {
+        reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_ABOVE',
+          `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，高于已确认上限 ${writingPlan.page_target.max_pages} 页，超出 ${Math.abs(assessment.difference).toFixed(2)} 页。`,
+          'chapters/writing-plan.json')
+      }
+    } catch (error) {
+      reject(issues, 'CHAPTER_WRITING_PAGE_ESTIMATE_UNAVAILABLE',
+        `当前篇幅无法核验：${error instanceof Error ? error.message : String(error)}`, 'chapters/writing-plan.json')
+    }
+  }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

@@ -334,6 +334,27 @@ export type BidPageEstimate =
   | { readonly status: 'empty' }
   | { readonly status: 'unavailable' }
 
+type BidPageTarget = {
+  readonly kind: 'approximate' | 'minimum' | 'maximum' | 'range'
+  readonly min_pages: number | null
+  readonly max_pages: number | null
+  readonly estimate_basis: string
+}
+
+/** 已确认目标与当前未取整正文估算的独立状态。 */
+export type BidPageTargetStatus =
+  | { readonly status: 'not_set' }
+  | { readonly status: 'not_required' }
+  | { readonly status: 'unavailable'; readonly target: BidPageTarget | null; readonly reason: string }
+  | {
+    readonly status: 'met' | 'below' | 'above'
+    readonly target: BidPageTarget
+    readonly estimated_pages: number
+    readonly difference: number
+    readonly format_revision: number
+    readonly format_source: 'default' | 'template'
+  }
+
 /** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
   readonly schema_version: 2
@@ -356,6 +377,7 @@ export interface BidReviewWorkbenchView {
     readonly reviewed_count: number
     readonly needs_attention_count: number
     readonly page_estimate: BidPageEstimate
+    readonly page_target: BidPageTargetStatus
   }
   /** 文档级核验及项目递交待办，不计入任一章节红点。 */
   readonly global_compliance: {
@@ -385,6 +407,21 @@ const chapterPageEstimateSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('empty') }),
   z.strictObject({ status: z.literal('unavailable') }),
 ])
+const pageTargetSchema = z.strictObject({
+  kind: z.enum(['approximate', 'minimum', 'maximum', 'range']),
+  min_pages: z.number().int().positive().nullable(), max_pages: z.number().int().positive().nullable(),
+  estimate_basis: z.string(),
+})
+const pageTargetStatusSchema = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('not_set') }),
+  z.strictObject({ status: z.literal('not_required') }),
+  z.strictObject({ status: z.literal('unavailable'), target: pageTargetSchema.nullable(), reason: z.string() }),
+  z.strictObject({
+    status: z.enum(['met', 'below', 'above']), target: pageTargetSchema,
+    estimated_pages: z.number().nonnegative(), difference: z.number(),
+    format_revision: z.number().int().nonnegative(), format_source: z.enum(['default', 'template']),
+  }),
+])
 const reviewWorkbenchSchema = z.strictObject({
   schema_version: z.literal(2),
   outline: z.array(z.strictObject({
@@ -397,6 +434,7 @@ const reviewWorkbenchSchema = z.strictObject({
     chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),
     reviewed_count: z.number().int().nonnegative(),
     needs_attention_count: z.number().int().nonnegative(), page_estimate: pageEstimateSchema,
+    page_target: pageTargetStatusSchema,
   }),
   global_compliance: z.strictObject({
     status: z.enum(['not_required', 'reviewing', 'pass', 'needs_attention']),

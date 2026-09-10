@@ -70,6 +70,32 @@ export const writingRequestSchema = z.object({
 export type WritingPlanInput = z.infer<typeof writingPlanInputSchema>
 export type WritingPlan = z.infer<typeof writingPlanSchema>
 
+/** Host 对当前正文未取整页数的目标比较结果。 */
+export type PageTargetAssessment =
+  | { readonly status: 'not_required' }
+  | { readonly status: 'met'; readonly difference: 0 }
+  | { readonly status: 'below'; readonly difference: number }
+  | { readonly status: 'above'; readonly difference: number }
+
+/**
+ * 使用未取整正文估算值比较已确认目标，不引入显示取整或额外容差。
+ * @param target 已确认的整书页数目标。
+ * @param actualPages 当前导出口径下的正文估算页数。
+ * @returns 是否达标以及距离最近边界的页数差。
+ */
+export function assessPageTarget(
+  target: WritingPlan['page_target'], actualPages: number,
+): PageTargetAssessment {
+  if (target === null) return { status: 'not_required' }
+  if (target.min_pages !== null && actualPages < target.min_pages) {
+    return { status: 'below', difference: target.min_pages - actualPages }
+  }
+  if (target.max_pages !== null && actualPages > target.max_pages) {
+    return { status: 'above', difference: target.max_pages - actualPages }
+  }
+  return { status: 'met', difference: 0 }
+}
+
 /** 校验模型计划只覆盖可写叶节，且文档目标等于叶节预算汇总。 */
 export function validateWritingPlan(input: WritingPlanInput, outline: OutlineArtifact): string[] {
   const issues: string[] = []

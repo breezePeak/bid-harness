@@ -672,6 +672,35 @@ describe('chapter-writing executor', () => {
     expect(await readFile(evidencePath, 'utf8')).toBe(evidenceText)
   })
 
+  it('预算已分配但真实正文低于整书下限时拒绝完成', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-page-target-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline)
+    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 3,
+    })
+    const path = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const plan = parseWritingPlan(JSON.parse(await readFile(path, 'utf8')))
+    await writeFile(path, `${JSON.stringify({
+      ...plan,
+      user_requirements: ['至少 200 页，按这些要求开始。'],
+      page_target: { kind: 'minimum', min_pages: 200, max_pages: null, estimate_basis: '按当前 Word 格式估算。' },
+      sections: plan.sections.map((section, index) => ({
+        ...section,
+        page_budget: { min_pages: [100, 60, 40][index], max_pages: null },
+      })),
+    })}\n`)
+
+    const result = await validateChapterWriting(workspace, 'chapter_writing', artifacts)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('正文不足未被拒绝')
+    expect(result.issues).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: 'CHAPTER_WRITING_PAGE_TARGET_BELOW', artifact: 'chapters/writing-plan.json',
+    })]))
+    expect(result.issues.find(issue => issue.code === 'CHAPTER_WRITING_PAGE_TARGET_BELOW')?.message)
+      .toMatch(/估算 \d+\.\d{2} 页.*下限 200 页.*尚差 \d+\.\d{2} 页/u)
+  })
+
   it('审查错误宣称通过时仍按实际内容缺口修订，保留问题并继续其他章节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-review-verdict-')))
     const outline = await writeInputs(workspace)

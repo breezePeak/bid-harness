@@ -52,6 +52,7 @@ export type {
   BidStageStartResult,
   BidReviewChapterView,
   BidPageEstimate,
+  BidPageTargetStatus,
   BidReviewIssueView,
   BidReviewMaterialView,
   BidReviewWorkbenchView,

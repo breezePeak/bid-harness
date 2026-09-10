@@ -9,6 +9,7 @@ import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import { buildOutlineView, outlineEditOperationSchema } from './outline-confirmation-edits.ts'
+import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { getOrCreateOutlineDraft } from './outline-draft-store.ts'
 import { parseEvidenceMapArtifact, parseEvidenceMappingPlan } from './evidence-mapping-artifacts.ts'
 import { readEvidenceMappingLog, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
@@ -16,7 +17,9 @@ import { parseScoringResponsePointCatalog } from './scoring-response-point-artif
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from './runtime-state.ts'
-import { parseWritingPlan, writingPlanInputSchema } from './writing-requirements.ts'
+import { assessPageTarget, parseWritingPlan, writingPlanInputSchema } from './writing-requirements.ts'
+import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { estimateChapterWritingPages } from './page-estimate.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
@@ -68,13 +71,39 @@ async function inspectBidStageValue(workspace: BidWorkspace, session: Session) {
     return { runtime, project, requirements, scoring, selected_scoring_ids: selection.selected_scoring_ids, compliance }
   }
   if (runtime.stage === 'chapter_writing') {
-    const outline = await readStageJson(workspace, 'outline/confirmed-outline.json')
+    const outline = parseOutlineArtifact(await readStageJson(workspace, 'outline/confirmed-outline.json'))
     const evidence = parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json'))
     let writing_plan = null
     try { writing_plan = parseWritingPlan(await readStageJson(workspace, 'chapters/writing-plan.json')) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    return { runtime, project, requirements, scoring, compliance, outline, evidence, writing_plan }
+    let execution_log: ReturnType<typeof parseChapterExecutionLog> | null = null
+    try { execution_log = parseChapterExecutionLog(await readStageJson(workspace, 'chapters/execution-log.json')) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
+    const writing_progress = {
+      sections: outline.sections.filter(section => section.writable).map((section) => {
+        const entry = execution_log?.sections.find(item => item.section_id === section.id)
+        return {
+          section_id: section.id,
+          number: positions.get(section.id)?.number,
+          title: section.title,
+          status: entry?.status ?? 'pending',
+          writer_attempts: entry?.attempts.filter(item => item.role === 'writer').length ?? 0,
+          reviewer_attempts: entry?.attempts.filter(item => item.role === 'reviewer').length ?? 0,
+          latest_issues: entry?.attempts.at(-1)?.issues.slice(0, 5) ?? [],
+        }
+      }),
+      page_estimate: await estimateChapterWritingPages(workspace, outline).then(estimate => ({
+        status: 'available' as const,
+        pages: estimate.total,
+        format: estimate.format,
+        target: writing_plan?.page_target ?? null,
+        assessment: assessPageTarget(writing_plan?.page_target ?? null, estimate.total),
+      }), (error: unknown) => ({ status: 'unavailable' as const, reason: error instanceof Error ? error.message : String(error) })),
+    }
+    return { runtime, project, requirements, scoring, compliance, outline, evidence, writing_plan, writing_progress }
   }
   const draft = await getOrCreateOutlineDraft(workspace, false)
   const response_points = parseScoringResponsePointCatalog(await readStageJson(workspace, 'analysis/scoring-response-points.json'))
@@ -135,6 +164,21 @@ export function renderStageInteractionPrompt(stage: string): string {
 }
 
 /**
+ * 渲染 S5 运行中或完成后的主 Agent 交互规则。
+ * @param status 当前 S5 状态。
+ * @returns 只把已提交工具结果视为状态变化的模型规则。
+ */
+export function renderChapterWritingInteractionPrompt(status: 'running' | 'completed'): string {
+  return [
+    `当前 Bid 阶段：chapter_writing；当前状态：${status}。`,
+    '先理解用户是在提问、解释已有正文，还是明确要求改变写作计划；不得用关键词、引用或发送方式替代语义判断。',
+    '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
+    '只有用户明确要求改变写作目标、风格、重点或篇幅时，才调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
+    '引用正文只是上下文；用户要求解释时不得修订，明确要求修改时才使用受控修订或计划调整。',
+  ].join('\n')
+}
+
+/**
  * 按实时阶段安装 scoped tools；全局 guard 拒绝交互期间的其他 Main Agent 工具调用。
  * @param ctx Host 插件上下文，负责全部注册释放。
  * @param execute 共享 Host 操作入口。
@@ -146,26 +190,30 @@ export function installStageInteractionTools(
   interacting: (session: Session) => boolean,
 ): void {
   ctx.inject(['tools'], (toolCtx) => {
-    const mounted = new Map<Agent, { stage: string; dispose: () => void }>()
+    const mounted = new Map<Agent, { scope: string; dispose: () => void }>()
     const sync = (agent: Agent): void => {
       const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      const stage = isBidMainSession(agent.session) && runtime.status === 'waiting_user' ? runtime.stage : undefined
+      const stage = isBidMainSession(agent.session)
+        && (runtime.status === 'waiting_user' || runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'completed'))
+        ? runtime.stage : undefined
+      const scope = stage === undefined ? undefined : `${stage}:${runtime.status}`
       const existing = mounted.get(agent)
-      if (existing?.stage === stage) return
+      if (existing?.scope === scope) return
       existing?.dispose()
       mounted.delete(agent)
       if (stage === undefined) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-      const available = stage === 'tender_analysis' ? names.slice(0, 1)
-        : stage === 'outline_generation' ? names.slice(0, 3)
-          : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
+      const available = runtime.status !== 'waiting_user' ? [names[0], names[4]]
+        : stage === 'tender_analysis' ? names.slice(0, 1)
+          : stage === 'outline_generation' ? names.slice(0, 3)
+            : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
-        disposers.push(tools.restrict({ allow: [] }))
+        if (runtime.status === 'waiting_user') disposers.push(tools.restrict({ allow: [] }))
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan' ? {} : { ...cas }
           const required = Object.keys(properties)
@@ -236,7 +284,7 @@ export function installStageInteractionTools(
         for (const dispose of disposers.reverse()) dispose()
         throw error
       }
-      mounted.set(agent, { stage, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
+      mounted.set(agent, { scope: `${stage}:${runtime.status}`, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
     }
     toolCtx.effect(() => toolCtx.tools.guard((exec) => {
       const session = exec.agent?.session
@@ -254,8 +302,12 @@ export function installStageInteractionTools(
     toolCtx.on('agent/pre-step', async ({ agent, messages }, next) => {
       const decision = await next()
       const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      if (decision.kind === 'reject' || !isBidMainSession(agent.session) || runtime.status !== 'waiting_user' || !messages.some(message => message.source.kind === 'user')) return decision
-      return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: renderStageInteractionPrompt(runtime.stage) }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
+      if (decision.kind === 'reject' || !isBidMainSession(agent.session) || !messages.some(message => message.source.kind === 'user')) return decision
+      const prompt = runtime.status === 'waiting_user' ? renderStageInteractionPrompt(runtime.stage)
+        : runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'completed')
+          ? renderChapterWritingInteractionPrompt(runtime.status) : undefined
+      if (prompt === undefined) return decision
+      return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)
     toolCtx.effect(() => () => { for (const value of mounted.values()) value.dispose(); mounted.clear() })

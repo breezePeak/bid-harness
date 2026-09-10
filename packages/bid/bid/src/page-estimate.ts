@@ -5,8 +5,13 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import type { FormatValues } from './docx-format-contract.ts'
+import { readDocxFormat } from './docx-format-store.ts'
+import { collectDocxChapterBody } from './docx-content.ts'
 import { docxImageDimensions } from './docx-render.ts'
 import type { BidWorkspace } from './index.ts'
+import type { OutlineArtifact } from './outline-generation-artifacts.ts'
+import { buildOutlineView } from './outline-confirmation-browser.ts'
+import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 type MarkdownNode = {
@@ -35,6 +40,15 @@ export interface PageEstimateSection {
 export interface PageEstimateResult {
   readonly total: number
   readonly sections: ReadonlyMap<string, { readonly pages: number; readonly incomplete: boolean; readonly hasContent: boolean }>
+}
+
+/** 当前 S5 正文、确认目录与实际 Word 配置共同形成的测算快照。 */
+export interface ChapterWritingPageEstimate extends PageEstimateResult {
+  readonly format: {
+    readonly revision: number
+    readonly source: 'default' | 'template'
+    readonly template_hash: string | null
+  }
 }
 
 type CacheEntry = {
@@ -67,7 +81,7 @@ function lineHeight(values: FormatValues, role: string): number {
   return values[`${role}.lineRule`] === 'auto' ? size * value(values, `${role}.line`) : value(values, `${role}.line`)
 }
 function characterWidth(source: string): number {
-  return [...source].reduce((width, character) => width + (/^[\x00-\x7f]$/u.test(character) ? 0.52 : 1), 0)
+  return Array.from(source).reduce((width, character) => width + (/^[\x00-\x7f]$/u.test(character) ? 0.52 : 1), 0)
 }
 function paragraphHeight(values: FormatValues, role: string, source: string, width: number, indent = 0): number {
   const size = value(values, `${role}.size`)
@@ -238,6 +252,59 @@ export async function estimateReviewPages(
   }
   if (cacheGenerations.get(workspace.projectRoot) === generation) cache.set(workspace.projectRoot, { key, result, assets })
   return result
+}
+
+/**
+ * 按正式导出顺序测算当前 S5 正文；缺失章节保持为空，不把预算计作正文。
+ * @param workspace 当前 Bid 项目。
+ * @param outline 当前确认目录。
+ * @returns 未取整总页数、分支页数及实际格式身份。
+ */
+export async function estimateChapterWritingPages(
+  workspace: BidWorkspace,
+  outline: OutlineArtifact,
+): Promise<ChapterWritingPageEstimate> {
+  const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
+  const paths = new Map(buildWritableSectionWorklist(outline).map((section, index) => (
+    [section.id, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`] as const
+  )))
+  const sections: PageEstimateSection[] = await Promise.all(outline.sections.map(async (section) => {
+    const position = positions.get(section.id)
+    if (position === undefined) throw new Error(`目录章节缺少导出位置：${section.id}`)
+    let markdown = section.writable ? '' : section.summary ?? ''
+    const path = paths.get(section.id)
+    if (path !== undefined) {
+      const absolute = within(workspace.projectRoot, path)
+      await assertNoLinkedPath(workspace.root, absolute)
+      try { markdown = await readFile(absolute, 'utf8') } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      if (markdown.trim() !== '') {
+        markdown = collectDocxChapterBody(
+          markdown, section.title, section.id, position.number, Math.min(6, position.depth),
+        )
+      }
+    }
+    return {
+      section_id: section.id,
+      parent_id: section.parent_id,
+      number: position.number,
+      depth: position.depth,
+      title: section.title,
+      writable: section.writable,
+      markdown,
+    }
+  }))
+  const format = await readDocxFormat(workspace)
+  const estimate = await estimateReviewPages(workspace, outline.document_title, sections, format.values)
+  return {
+    ...estimate,
+    format: {
+      revision: format.state.revision,
+      source: format.state.source,
+      template_hash: format.state.template?.hash ?? null,
+    },
+  }
 }
 
 /** Clear estimates for focused tests or a disposed Host. */
