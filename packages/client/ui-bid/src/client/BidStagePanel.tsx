@@ -55,6 +55,7 @@ function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'er
     case 'waiting_start': return 'warning'
     case 'waiting_user': return 'warning'
     case 'running': return 'ongoing'
+    case 'attention_required': return 'warning'
     case 'failed': return 'error'
     case 'completed': return 'done'
   }
@@ -68,6 +69,7 @@ function statusKey(status: StageRunStatus): BidKey {
     case 'waiting_start': return 'status.waiting_start'
     case 'running': return 'status.running'
     case 'waiting_user': return 'status.waiting_user'
+    case 'attention_required': return 'status.failed'
     case 'failed': return 'status.failed'
     case 'completed': return 'status.completed'
   }

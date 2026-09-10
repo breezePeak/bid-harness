@@ -205,7 +205,9 @@ describe('S5 真实 DSH Child 接入', () => {
       expect(log.sections.map(section => section.attempts.filter(attempt => attempt.role === 'writer').length)).toEqual([2, 1, 1])
       expect(log.sections.every(section => section.status === 'completed' && section.attempts.every(attempt => attempt.accepted))).toBe(true)
       const requests = [...adapter.requests.values()]
-      expect(requests.filter(item => item.role === 'plan').map(item => item.tools)).toEqual([[...CHAPTER_PLAN_TOOLS].sort()])
+      expect(requests.filter(item => item.role === 'plan').map(item => item.tools)).toEqual([
+        ['grep', 'read', 'web_fetch', 'web_search', ...CHAPTER_PLAN_TOOLS].sort(),
+      ])
       expect(requests.filter(item => item.role === 'writer')).toHaveLength(3)
       expect(requests.filter(item => item.role === 'review')).toHaveLength(4)
       for (const request of requests.filter(item => item.role === 'writer')) {
@@ -227,7 +229,7 @@ describe('S5 真实 DSH Child 接入', () => {
 
   it('首次 Writer 请求中取消，释放全部 Child 和私有工具且不发布完成产物', async () => {
     const controller = new AbortController()
-    const { ctx, workspace, agent, children } = await fixture(() =>{  controller.abort() })
+    const { ctx, workspace, agent, children } = await fixture(() => { controller.abort() })
     try {
       await expect(executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 3, signal: controller.signal })).rejects.toThrow()
       for (const id of children) expect(ctx.agents.get(SessionId(id))).toBeUndefined()

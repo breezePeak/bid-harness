@@ -9,7 +9,7 @@ import type {
   StageValidationResult,
   StageValidationIssue,
 } from './control-plane-contract.ts'
-import { BidStageExecutionError } from './control-plane-contract.ts'
+import { BidStageAttentionRequiredError, BidStageExecutionError } from './control-plane-contract.ts'
 import {
   BID_INITIAL_RUNTIME_STATE,
   buildBidStageTask,
@@ -55,7 +55,7 @@ export type BidStageConfirmationResult =
   | { readonly ok: false; readonly validation: StageValidationResult & { readonly ok: false } }
 
 /** Durable outcome of one executor and validator attempt. */
-export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'failed' | 'aborted'
+export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'attention_required' | 'failed' | 'aborted'
 
 /** Stable rejection codes for host-side Bid operation admission. */
 export type BidOrchestratorErrorCode =
@@ -133,13 +133,14 @@ export class BidOrchestrator {
   /**
    * Retry the current failed stage and continue automatic execution after success.
    * File intake requires a new upload through {@link runCurrentProgramStage}.
+   * @param beforeExecutionConfirmed Whether the caller has explicitly reopened a before-execution stage.
    * @returns the state at the next stopping point.
    * @throws {@link BidOrchestratorError} unless a non-file-intake stage is failed and idle.
    */
   retry(beforeExecutionConfirmed = false): Promise<BidRuntimeState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'failed' || state.stage === 'file_intake') {
+    if ((state.status !== 'failed' && !(state.stage === 'chapter_writing' && state.status === 'attention_required')) || state.stage === 'file_intake') {
       throw new BidOrchestratorError(
         'BID_RETRY_NOT_ALLOWED',
         `cannot retry Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -382,6 +383,10 @@ export class BidOrchestrator {
       artifacts = await this.executor.execute(buildBidStageTask(stage))
     } catch (error: unknown) {
       if (this.isAborted()) return 'aborted'
+      if (error instanceof BidStageAttentionRequiredError) {
+        this.attentionRequired(stage, error.message, [...error.issues])
+        return 'attention_required'
+      }
       if (error instanceof BidStageExecutionError) {
         this.fail(stage, error.message, [...error.issues])
         return 'failed'
@@ -443,6 +448,11 @@ export class BidOrchestrator {
   /** Append the sole failed-state transition. */
   private fail(stage: BidStage, reason: string, issues?: StageValidationIssue[]): void {
     this.session.append('bid.stage.failed', { stage, status: 'failed', reason, ...issues === undefined ? {} : { issues } })
+  }
+
+  /** Preserve usable S5 artifacts when a bounded business correction cannot reach its confirmed target. */
+  private attentionRequired(stage: BidStage, reason: string, issues: StageValidationIssue[]): void {
+    this.session.append('bid.stage.attention_required', { stage, status: 'attention_required', reason, issues })
   }
 }
 

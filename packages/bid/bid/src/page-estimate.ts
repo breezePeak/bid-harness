@@ -307,5 +307,42 @@ export async function estimateChapterWritingPages(
   }
 }
 
+/**
+ * Measure one in-memory Writer candidate with the same format and body normalization as export.
+ * @param workspace Current Bid workspace.
+ * @param outline Current confirmed outline.
+ * @param sectionId Writable section receiving the candidate.
+ * @param markdown Unpersisted Writer candidate.
+ * @returns Page estimate and effective format identity.
+ */
+export async function estimateChapterCandidatePages(
+  workspace: BidWorkspace,
+  outline: OutlineArtifact,
+  sectionId: string,
+  markdown: string,
+): Promise<ChapterWritingPageEstimate> {
+  const position = buildOutlineView(outline.sections).find(item => item.section.id === sectionId)
+  if (position === undefined || !position.section.writable) throw new Error(`目录中缺少可写章节：${sectionId}`)
+  const section: PageEstimateSection = {
+    section_id: sectionId,
+    parent_id: null,
+    number: position.number,
+    depth: position.depth,
+    title: position.section.title,
+    writable: true,
+    markdown: collectDocxChapterBody(markdown, position.section.title, sectionId, position.number, Math.min(6, position.depth)),
+  }
+  const format = await readDocxFormat(workspace)
+  const estimate = await estimateReviewPages(workspace, outline.document_title, [section], format.values)
+  return {
+    ...estimate,
+    format: {
+      revision: format.state.revision,
+      source: format.state.source,
+      template_hash: format.state.template?.hash ?? null,
+    },
+  }
+}
+
 /** Clear estimates for focused tests or a disposed Host. */
 export function clearPageEstimateCache(): void { cache.clear(); cacheGenerations.clear() }

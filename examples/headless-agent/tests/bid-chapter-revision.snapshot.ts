@@ -56,7 +56,7 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
     },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    writer_session_reused: true, original_context_retained: true, main_agent_requests_unchanged: true,
+    writer_session_reused: true, original_context_retained: true, main_agent_completion_reviewed: true,
     paragraphs_outside_selection_unchanged: true, evidence_unchanged: true,
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

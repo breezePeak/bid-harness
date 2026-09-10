@@ -15,6 +15,7 @@ import { validateChapterReview } from '../src/chapter-writing-executor.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
 import { attachGlobalComplianceReview, validateGlobalComplianceReview, type GlobalComplianceEvidence } from '../src/chapter-writing-global-review.ts'
+import { attachChapterWritingCompletionReview } from '../src/chapter-writing-completion-review.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -212,17 +213,51 @@ const evidence: ChapterReviewEvidence[] = [
 const covered = (item_ref: string) => ({ item_ref, status: 'covered', evidence_quote_refs: ['Q1'], issue: null })
 
 describe('S5 Reviewer 分批记录', () => {
+  it('preferred 语义与确定性条件未满足时保留结果但不阻断章节通过', async () => {
+    const { agent, call } = await harness()
+    const context = emptyChapterContext(outlineFixture().sections[1]!)
+    context.sectionWritingPlan = {
+      ...context.sectionWritingPlan,
+      acceptance_criteria: [{
+        id: 'AC-PREFERRED-SEMANTIC', scope: { kind: 'section', section_id: context.section.id },
+        description: '尽量补充更多实施示例。', priority: 'preferred', evaluator: { kind: 'semantic' },
+      }, {
+        id: 'AC-PREFERRED-METRIC', scope: { kind: 'section', section_id: context.section.id },
+        description: '篇幅尽量更充分。', priority: 'preferred',
+        evaluator: { kind: 'deterministic', metric: 'character_count', min: 1000, max: null },
+      }],
+    }
+    const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文']]), evidence, 0, [{
+      criterion_id: 'AC-PREFERRED-METRIC', status: 'unmet', measured: 2,
+      message: 'character_count=2.0000，范围 1000…+∞。',
+    }])
+    await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => item.id === 'AC-PREFERRED-SEMANTIC'
+      ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '当前正文没有更多示例。' }
+      : covered(item.item_ref)) })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] })
+    await call('finish_chapter_review', {})
+    expect(runtime.captured()).toMatchObject({
+      verdict: 'pass',
+      blocking_issues: [],
+      acceptance_criteria_coverage: [
+        { criterion_id: 'AC-PREFERRED-SEMANTIC', status: 'unmet' },
+        { criterion_id: 'AC-PREFERRED-METRIC', status: 'unmet', measured: 2 },
+      ],
+    })
+  })
+
   it('全局 Compliance 与章节 Checklist 分离，重复文本仍按独立身份组装', async () => {
     const { ctx, agent, call } = await harness()
     const context = reviewContext()
     const checklist = buildChapterReviewChecklist(context)
-    expect(checklist).toHaveLength(5)
+    expect(checklist).toHaveLength(6)
     expect(checklist[4]).toMatchObject({ item_ref: 'R5', kind: 'compliance', id: 'CHAPTER-1' })
+    expect(checklist[5]).toMatchObject({ item_ref: 'R6', kind: 'acceptance_criterion', id: 'AC-000002' })
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '完整正文证据']]), evidence, 1)
     for (const schema of ctx.tools.schemas(agent)) assertSupportedJsonSchema(schema.parameters)
     await call('review_coverage_items', { items: [covered('R5'), covered('R2')] })
-    expect((await call('finish_chapter_review', {})).value).toEqual({ completed: false, missing_items: ['R1', 'R3', 'R4'], missing_global_compliance_ids: ['GLOBAL-1'], missing_summary: true })
-    await call('review_coverage_items', { items: [covered('R4'), { item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未响应' }, covered('R1'), covered('R3')] })
+    expect((await call('finish_chapter_review', {})).value).toEqual({ completed: false, missing_items: ['R1', 'R3', 'R4', 'R6'], missing_global_compliance_ids: ['GLOBAL-1'], missing_summary: true })
+    await call('review_coverage_items', { items: [covered('R4'), { item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未响应' }, covered('R1'), covered('R3'), covered('R6')] })
     await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及该约束。' }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] })
     await call('finish_chapter_review', {})
@@ -256,7 +291,7 @@ describe('S5 Reviewer 分批记录', () => {
     expect(result.isError).toBeFalsy()
     expect(result.value).toMatchObject({ recorded: ['R1'] })
     expect((result.value as { rejected: unknown[] }).rejected).toHaveLength(6)
-    expect((await call('finish_chapter_review', {})).value).toMatchObject({ missing_items: ['R2', 'R3', 'R4', 'R5'] })
+    expect((await call('finish_chapter_review', {})).value).toMatchObject({ missing_items: ['R2', 'R3', 'R4', 'R5', 'R6'] })
     expect(runtime.captured()).toBeUndefined()
   })
 
@@ -320,6 +355,34 @@ describe('S5 Reviewer 分批记录', () => {
     expect(ctx.tools.schemas(second)).toHaveLength(5)
     secondRuntime.dispose()
     expect(ctx.tools.schemas(second)).toEqual([])
+  })
+})
+
+describe('S5 整书动态验收', () => {
+  it('complete 可保留 preferred 未满足，但拒绝任何 required 未满足', async () => {
+    const { agent, call } = await harness()
+    const requirements = [
+      { id: 'AC-REQUIRED', text: '必须完成核心响应。', priority: 'required' as const, section_id: 'SEC-1' },
+      { id: 'AC-PREFERRED', text: '尽量补充更多示例。', priority: 'preferred' as const, section_id: 'SEC-1' },
+    ]
+    const accepted = attachChapterWritingCompletionReview(agent, requirements, ['SEC-1'], [], 0)
+    expect((await call('submit_chapter_writing_completion_review', {
+      action: 'complete', reason: 'required 条件已经满足。', requirements: [
+        { requirement_id: 'AC-REQUIRED', status: 'met', note: '正文已覆盖。', section_ids: ['SEC-1'] },
+        { requirement_id: 'AC-PREFERRED', status: 'unmet', note: '未增加更多示例。', section_ids: ['SEC-1'] },
+      ],
+    })).isError).toBeFalsy()
+    expect(accepted.captured()).toMatchObject({ action: 'complete', requirements: [{ status: 'met' }, { status: 'unmet' }] })
+    accepted.dispose()
+
+    const rejected = attachChapterWritingCompletionReview(agent, requirements, ['SEC-1'], [], 0)
+    expect((await call('submit_chapter_writing_completion_review', {
+      action: 'complete', reason: '尝试错误完成。', requirements: [
+        { requirement_id: 'AC-REQUIRED', status: 'unmet', note: '核心响应仍缺失。', section_ids: ['SEC-1'] },
+        { requirement_id: 'AC-PREFERRED', status: 'met', note: '已有示例。', section_ids: ['SEC-1'] },
+      ],
+    })).isError).toBe(true)
+    expect(rejected.captured()).toBeUndefined()
   })
 })
 

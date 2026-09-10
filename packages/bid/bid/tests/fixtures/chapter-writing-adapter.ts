@@ -29,6 +29,7 @@ export class ChapterAdapter extends LlmAdapter {
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     const globalReview = prompt.includes('Document Global Compliance Review')
+    const completionReview = prompt.includes('Final Plan Review')
     const role = options.sessionId === 'parent' ? 'plan' : prompt.includes('Review Checklist：') ? 'review' : 'writer'
     let entry = this.requests.get(String(options.sessionId))
     if (entry === undefined) {
@@ -39,6 +40,21 @@ export class ChapterAdapter extends LlmAdapter {
     const step = entry.steps++
     if (step > 8) throw new Error(`script exceeded bound: ${role}`)
     if (role === 'plan') {
+      if (completionReview) {
+        const requirementsLine = prompt.split('\n').find(line => line.startsWith('全部待验收要求：'))!
+        const requirements = JSON.parse(requirementsLine.slice('全部待验收要求：'.length)) as Array<{
+          id: string
+          section_id: string | null
+        }>
+        yield* call('submit_chapter_writing_completion_review', {
+          action: 'complete', reason: '全部 required 条件已经满足。',
+          requirements: requirements.map(item => ({
+            requirement_id: item.id, status: 'met', note: '章节审核与摘要已经覆盖。',
+            section_ids: item.section_id === null ? [] : [item.section_id],
+          })),
+        })
+        return
+      }
       if (globalReview) {
         const pendingLine = prompt.split('\n').find(line => line.startsWith('Pending Global Compliance：'))!
         const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ id: string }>

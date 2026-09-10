@@ -1,6 +1,6 @@
 /** S5 执行私有工具：调用者隔离、可恢复参数错误及权威结果确认。 */
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { ToolArgsError, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z, ZodError } from 'zod'
 
@@ -26,6 +26,8 @@ export interface ChapterProtocol<T> {
    * @returns 权威工具结果已确认的结果；失败或未提交时为 undefined。
    */
   captured(): T | undefined
+  /** Whether a queued message is an automatic continuation owned by this protocol. */
+  ownsMessage(message: UserMessage): boolean
   /**
    * 注册当前 Agent 私有的工具及参数检查。
    * @param definition 本次执行私有的工具定义。
@@ -61,6 +63,7 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
   let captured: T | undefined
   let disposed = false
   let continuations = 0
+  const ownedMessages = new WeakSet<UserMessage>()
   const disposers: Array<() => void> = []
   const ensureOpen = (exec: ToolRunContext): void => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
@@ -87,13 +90,16 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
   disposers.push(agent.ctx.on('agent/turn-stopping', ({ signal }) => {
     if (disposed || captured !== undefined || signal.aborted || continuations >= maxContinuations) return
     continuations++
-    agent.inject(createUserMessage({
+    const message = createUserMessage({
       content: [{ type: 'text', text: `尚未完成 ${finishName}。已接受的记录仍保留；请补齐缺项、修正具体错误并调用 ${finishName}。普通文本不能完成提交。` }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-    }))
+    })
+    ownedMessages.add(message)
+    agent.inject(message)
   }))
   return {
     captured: () => captured,
+    ownsMessage: message => ownedMessages.has(message),
     register(definition) {
       disposers.push(tools.register({
         ...definition,

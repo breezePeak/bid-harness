@@ -5,14 +5,15 @@ import { readDocxXml } from './docx-template.ts'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { collectDocxChapterBody } from './docx-content.ts'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
-import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationResult } from './control-plane-contract.ts'
+import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationIssue, type StageValidationResult } from './control-plane-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
-import { assessPageTarget, parseWritingPlan } from './writing-requirements.ts'
+import { parseWritingPlan } from './writing-requirements.ts'
+import { assessBoundedMetric } from './acceptance-criteria.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -104,35 +105,56 @@ export async function validateDocxExport(
   } catch {
     return { ok: false, issues: [{ code: 'DOCX_EXPORT_ARTIFACT_INVALID', message: '导出目录中缺少有效的 DOCX 产物。', artifact: path }] }
   }
+  return { ok: true }
+}
+
+/**
+ * Independently report the confirmed page target for an already valid DOCX export.
+ * @param workspace Current project whose canonical chapter Markdown was exported.
+ * @returns Warnings that describe an unmet or unavailable estimate without invalidating the file.
+ */
+export async function assessDocxExportPageTarget(workspace: BidWorkspace): Promise<StageValidationIssue[]> {
   try {
     const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
     let writingPlan: ReturnType<typeof parseWritingPlan>
     try {
       writingPlan = parseWritingPlan(JSON.parse(await readProjectFile(workspace, 'chapters/writing-plan.json')))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       throw error
     }
-    if (writingPlan.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) {
-      throw new Error('写作计划与当前确认目录不一致。')
-    }
+    if (writingPlan.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) throw new Error('写作计划与当前确认目录不一致。')
+    const documentCriteria = writingPlan.document_acceptance.filter(item =>
+      item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+    const sectionCriteria = writingPlan.sections.flatMap(section => section.acceptance_criteria
+      .filter(item => item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+      .map(item => ({ section_id: section.section_id, criterion: item })))
+    if (documentCriteria.length === 0 && sectionCriteria.length === 0) return []
     const estimate = await estimateChapterWritingPages(workspace, outline)
-    const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
-    if (assessment.status === 'below' || assessment.status === 'above') {
-      return { ok: false, issues: [{
+    const measured = [
+      ...documentCriteria.map(criterion => ({ criterion, value: estimate.total })),
+      ...sectionCriteria.flatMap(({ section_id, criterion }) => {
+        const value = estimate.sections.get(section_id)?.pages
+        return value === undefined ? [] : [{ criterion, value }]
+      }),
+    ]
+    return measured.flatMap(({ criterion, value }): StageValidationIssue[] => {
+      if (criterion.evaluator.kind !== 'deterministic') return []
+      const assessment = assessBoundedMetric(criterion.evaluator.min, criterion.evaluator.max, value)
+      if (assessment.status === 'met') return []
+      return [{
         code: assessment.status === 'below' ? 'DOCX_EXPORT_PAGE_TARGET_BELOW' : 'DOCX_EXPORT_PAGE_TARGET_ABOVE',
         message: assessment.status === 'below'
-          ? `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，低于已确认下限，尚差 ${assessment.difference.toFixed(2)} 页。`
-          : `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，高于已确认上限，超出 ${Math.abs(assessment.difference).toFixed(2)} 页。`,
+          ? `Word 已生成；${criterion.id} 当前格式估算 ${value.toFixed(2)} 页，低于下限，尚差 ${assessment.difference.toFixed(2)} 页，实际分页尚未核验。`
+          : `Word 已生成；${criterion.id} 当前格式估算 ${value.toFixed(2)} 页，高于上限，超出 ${assessment.difference.toFixed(2)} 页，实际分页尚未核验。`,
         artifact: 'chapters/writing-plan.json',
-      }] }
-    }
-    return { ok: true }
+      }]
+    })
   } catch (error) {
-    return { ok: false, issues: [{
+    return [{
       code: 'DOCX_EXPORT_PAGE_ESTIMATE_UNAVAILABLE',
-      message: `导出文件可读取，但当前正文篇幅无法核验：${error instanceof Error ? error.message : String(error)}`,
+      message: `Word 已生成，但当前正文篇幅无法估算，实际分页尚未核验：${error instanceof Error ? error.message : String(error)}`,
       artifact: 'chapters/writing-plan.json',
-    }] }
+    }]
   }
 }

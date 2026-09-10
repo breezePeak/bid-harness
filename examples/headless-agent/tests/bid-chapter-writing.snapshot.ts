@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
 import {
-  parseChapterMetadata, parseChapterWritingManifest, parseEvidenceMapArtifact, parseGlobalComplianceReviewArtifact,
+  parseChapterMetadata, parseChapterWritingCompletionState, parseChapterWritingManifest,
+  parseEvidenceMapArtifact, parseGlobalComplianceReviewArtifact,
 } from '@deepseek-ai/dsh-bid'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
@@ -67,7 +68,11 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       const globalReview = parseGlobalComplianceReviewArtifact(JSON.parse(
         await readFile(join(projectRoot, 'chapters/global-compliance-review.json'), 'utf8'),
       ))
+      const completionReview = parseChapterWritingCompletionState(JSON.parse(
+        await readFile(join(projectRoot, 'chapters/completion-review.json'), 'utf8'),
+      ))
       expect(globalReview.items).toEqual([expect.objectContaining({ compliance_id: 'GLOBAL-1', status: 'pass' })])
+      expect(completionReview.completion?.requirements.every(item => item.status === 'met')).toBe(true)
       expect(markdown).not.toContain('补充服务方案')
       expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
@@ -75,7 +80,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
-        'artifacts.expected.json': JSON.stringify({ map, metadata, markdown, globalReview }, null, 2) + '\n',
+        'artifacts.expected.json': JSON.stringify({ map, metadata, markdown, globalReview, completionReview }, null, 2) + '\n',
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })
@@ -94,6 +99,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },
       { stage: 'chapter_writing', type: 'chapter_manifest', path: 'chapters/manifest.json' },
       { stage: 'chapter_writing', type: 'global_compliance_review', path: 'chapters/global-compliance-review.json' },
+      { stage: 'chapter_writing', type: 'chapter_completion_review', path: 'chapters/completion-review.json' },
     ],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 15_000)

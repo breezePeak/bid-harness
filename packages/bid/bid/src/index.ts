@@ -52,7 +52,13 @@ import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDr
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
-import { buildChapterWorklist, DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY, executeChapterWriting } from './chapter-writing-executor.ts'
+import {
+  buildChapterWorklist,
+  DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+  executeChapterWriting,
+  type ChapterWritingCommand,
+  type ChapterWritingControl,
+} from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
@@ -66,7 +72,7 @@ import {
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateUploadResult } from './docx-format-contract.ts'
-import { executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
+import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -84,13 +90,14 @@ import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import {
-  assessPageTarget,
+  materializeAcceptanceCriteria,
   parseWritingPlan,
   validateWritingPlan,
   writingRequestSchema,
   WRITING_PLAN_SCHEMA_VERSION,
   type WritingPlanInput,
 } from './writing-requirements.ts'
+import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type {
   BidDetailsView,
   BidChapterRevisionRequest,
@@ -226,6 +233,8 @@ export { validateConfirmedOutline } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
 export * from './chapter-writing-review-artifacts.ts'
 export * from './chapter-writing-global-review-artifacts.ts'
+export { parseChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
+export type { ChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
 export {
@@ -242,7 +251,7 @@ export {
 } from './chapter-writing-executor.ts'
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
-export { executeDocxExport, validateDocxExport } from './docx-export.ts'
+export { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from './docx-export.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 export { readBidProjectState, writeBidProjectState, checkpointBidProjectState } from './project-state.ts'
 export type { BidProjectState } from './project-state.ts'
@@ -658,7 +667,31 @@ interface ActiveBidOperation {
   readonly settle: () => void
   reservedForReset: boolean
   interaction?: boolean
-  pauseForWritingPlan?: boolean
+  readonly writingControl: HostChapterWritingControl
+}
+
+/** In-memory wakeable command queue owned by one locked Bid operation. */
+class HostChapterWritingControl implements ChapterWritingControl {
+  private readonly commands: ChapterWritingCommand[] = []
+  private readonly listeners = new Set<() => void>()
+
+  enqueue(command: ChapterWritingCommand): void {
+    this.commands.push(command)
+    for (const listener of this.listeners) listener()
+  }
+
+  drain(): ChapterWritingCommand[] {
+    return this.commands.splice(0)
+  }
+
+  pending(): boolean {
+    return this.commands.length > 0
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
 }
 
 type BidProjectKey = string & { readonly __bidProjectKey: unique symbol }
@@ -703,7 +736,7 @@ async function currentWritingPlan(workspace: BidWorkspace): Promise<ReturnType<t
 }
 
 async function writeWritingRequest(
-  agent: Agent,
+  session: Session,
   workspace: BidWorkspace,
   basePlanVersion: number | null,
 ): Promise<void> {
@@ -713,8 +746,8 @@ async function writeWritingRequest(
   await writeFileAtomic(path, `${JSON.stringify({
     schema_version: WRITING_PLAN_SCHEMA_VERSION,
     confirmed_outline_sha256: sha256,
-    session_id: agent.session.id,
-    request_after_seq: agent.session.events.at(-1)?.seq ?? -1,
+    session_id: session.id,
+    request_after_seq: session.events.at(-1)?.seq ?? -1,
     base_plan_version: basePlanVersion,
   }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
@@ -727,16 +760,16 @@ async function ensureWritingRequirementsRequested(agent: Agent, workspace: BidWo
     const request = writingRequestSchema.parse(JSON.parse(await readFile(path, 'utf8')))
     if (request.confirmed_outline_sha256 === sha256) {
       if (request.session_id !== agent.session.id) {
-        await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+        await writeWritingRequest(agent.session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
       }
       return
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
-  await writeWritingRequest(agent, workspace, null)
+  await writeWritingRequest(agent.session, workspace, null)
   agent.followup(createUserMessage({
-    content: [{ type: 'text', text: '目录已确认。正式开始写作前，请在当前对话主动询问用户对整份技术标的要求，例如目标页数、重点章节、写作风格、表格使用或旧标复用方式；用户也可以回复“没有特殊要求，直接开始”。此时只询问，不得启动章节写作。' }],
+    content: [{ type: 'text', text: '目录已确认。正式开始写作前，请在当前对话主动询问用户是否有额外写作要求；用户也可以回复“没有特殊要求，直接开始”。此时只询问，不得启动章节写作。' }],
     source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
   }))
 }
@@ -782,6 +815,7 @@ export class BidHostRuntime extends TypertRemoteService {
       done: settled.promise,
       settle: settled.resolve,
       reservedForReset: false,
+      writingControl: new HostChapterWritingControl(),
     }
     this.inFlight.set(key, operation)
     return operation
@@ -794,9 +828,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (operation.ready && persist) {
         const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
         if (runtime.status === 'running' && this.inFlight.get(key) === operation) {
-          if (runtime.stage === 'chapter_writing' && operation.pauseForWritingPlan === true) {
-            session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
-          } else session.append('bid.stage.failed', {
+          session.append('bid.stage.failed', {
             stage: runtime.stage, status: 'failed', reason: '阶段执行因后端停止而中断，请重试当前阶段。',
           })
         }
@@ -863,7 +895,7 @@ export class BidHostRuntime extends TypertRemoteService {
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
       'bid: runtime projection',
     )
-    ctx.on('session/prompt-admission', ({ session }) => {
+    ctx.on('session/prompt-admission', async ({ session }) => {
       if (resolveSessionPreset(session) !== 'bid') return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
@@ -879,7 +911,12 @@ export class BidHostRuntime extends TypertRemoteService {
           if (active.session !== session) {
             return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行写作。' }
           }
+          await writeWritingRequest(session, active.workspace, (await currentWritingPlan(active.workspace))?.plan_version ?? null)
           return
+        }
+        if (runtime.stage === 'chapter_writing' && (runtime.status === 'completed' || runtime.status === 'attention_required')) {
+          const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+          await writeWritingRequest(session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
         }
       }
       if (projection.composer.enabled) return
@@ -926,6 +963,72 @@ export class BidHostRuntime extends TypertRemoteService {
     })
   }
 
+  /** Validate and durably commit one Main-Agent-submitted S5 writing plan. */
+  private async commitWritingPlan(
+    agent: Agent,
+    workspace: BidWorkspace,
+    request: Extract<zod.infer<typeof stageInteractionSchema>, { action: 'bid_confirm_writing_plan' }>,
+  ): Promise<
+    | { ok: false; error: { code: 'BID_WRITING_PLAN_INVALID'; issues: string[] } }
+    | { ok: true; plan: ReturnType<typeof parseWritingPlan>; plan_version: number; message: string }
+  > {
+    const { action: _action, ...submitted } = request
+    const markerPath = within(workspace.projectRoot, WRITING_REQUEST_PATH)
+    const planPath = within(workspace.projectRoot, WRITING_PLAN_PATH)
+    const appliedPath = within(workspace.projectRoot, WRITING_PLAN_APPLIED_PATH)
+    await Promise.all([markerPath, planPath, appliedPath].map(path => assertNoLinkedPath(workspace.root, path)))
+    const marker = writingRequestSchema.parse(JSON.parse(await readFile(markerPath, 'utf8')))
+    const current = await confirmedOutline(workspace)
+    if (marker.confirmed_outline_sha256 !== current.sha256) throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
+    const previous = await currentWritingPlan(workspace)
+    if (marker.base_plan_version !== (previous?.plan_version ?? null)) throw new Error('写作计划已变化，请重新读取后再提交。')
+    if ((previous === undefined) !== (submitted.revision === null)) {
+      return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [previous === undefined
+        ? '首次计划的 revision 必须为 null'
+        : '更新计划必须说明变更摘要和受影响章节'] } }
+    }
+    let input = exactWritingRequirementMessages(agent.session, submitted, marker, previous)
+    if (previous !== undefined && input.revision !== null) {
+      let appliedVersion = previous.plan_version
+      try {
+        appliedVersion = zod.strictObject({ schema_version: zod.literal(1), plan_version: zod.number().int().positive() })
+          .parse(JSON.parse(await readFile(appliedPath, 'utf8'))).plan_version
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      if (appliedVersion < previous.plan_version && previous.revision !== null) input = {
+        ...input,
+        revision: {
+          ...input.revision,
+          affected_section_ids: [...new Set([
+            ...previous.revision.affected_section_ids,
+            ...input.revision.affected_section_ids,
+          ])],
+        },
+      }
+    }
+    const issues = validateWritingPlan(input, current.outline)
+    if (issues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues } }
+    const version = (previous?.plan_version ?? 0) + 1
+    const revision = input.revision === null || previous === undefined
+      ? null
+      : { ...input.revision, base_plan_version: previous.plan_version }
+    const materialized = materializeAcceptanceCriteria(input, previous)
+    const plan = parseWritingPlan({
+      ...input,
+      ...materialized,
+      revision,
+      schema_version: WRITING_PLAN_SCHEMA_VERSION,
+      scope: 'technical_bid',
+      plan_version: version,
+      confirmed: true,
+      confirmed_outline_sha256: current.sha256,
+    })
+    await writeFileAtomic(planPath, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    agent.session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+    return { ok: true, plan, plan_version: version, message: '整体写作要求与计划已确认，将由当前章节调度器应用。' }
+  }
+
   /** Main Agent 的阶段动作使用项目锁；失败恢复已保存产物，不产生确认事件。 */
   private async executeStageInteraction(agent: Agent, input: unknown, callerSignal: AbortSignal): Promise<unknown> {
     const { session } = agent
@@ -933,19 +1036,34 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!isBidMainSession(session) || session.header.cwd === undefined) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
     const key = projectKey(session)
     const active = this.inFlight.get(key)
-    if (request.action === 'bid_stage_inspect' && active !== undefined) {
-      if (active.session !== session) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正由另一会话执行写作。')
-      return inspectBidStage(active.workspace, session)
+    if (request.action === 'bid_stage_inspect') {
+      if (active !== undefined && active.session !== session) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正由另一会话执行写作。')
+      const workspace = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
+      return inspectBidStage(workspace, session, request.reference, request.view)
     }
     if (active !== undefined) {
       const activeRuntime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      if (active.session !== session || request.action !== 'bid_confirm_writing_plan'
-        || activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
+      if (active.session !== session || (request.action !== 'bid_confirm_writing_plan' && request.action !== 'bid_revise_chapter')
+         || activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
         throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
       }
-      active.pauseForWritingPlan = true
-      active.controller.abort(new Error('Main Agent 已提交写作计划调整。'))
-      await active.done
+      if (request.action === 'bid_confirm_writing_plan') {
+        const committed = await this.commitWritingPlan(agent, active.workspace, request)
+        if (!committed.ok) return committed
+        active.writingControl.enqueue({ kind: 'writing_plan', plan: committed.plan })
+        const { plan: _plan, ...result } = committed
+        return result
+      }
+      const snapshot = await inspectBidStage(active.workspace, session, request.reference)
+      if (!('chapter' in snapshot) || snapshot.chapter === null) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      active.writingControl.enqueue({ kind: 'revision', request })
+      return { ok: true, message: '章节修订已提交给当前调度器；无关 Writer 和 Reviewer 继续执行。' }
+    }
+    if (request.action === 'bid_revise_chapter') {
+      void this.reviseChapter(session, request).then((result) => {
+        if (!result.ok) this.ctx.logger.warn(`Bid 章节修订未完成：${result.error.code}: ${result.error.message}`)
+      }, (error: unknown) => { this.ctx.logger.warn(`Bid 章节修订未完成：${String(error)}`) })
+      return { ok: true, message: '章节修订已交给原 Writer，完成后可重新 inspect 查看正文。' }
     }
     callerSignal.throwIfAborted()
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
@@ -959,73 +1077,21 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       runtime = await this.prepareOperation(operation)
       if (request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
-        && (runtime.status === 'completed' || active !== undefined)) {
-        await writeWritingRequest(agent, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
-        if (runtime.status === 'completed') {
-          session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
-          runtime = { stage: 'chapter_writing', status: 'waiting_user' }
-        }
+        && (runtime.status === 'completed' || runtime.status === 'attention_required')) {
+        await writeWritingRequest(agent.session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+        session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
+        runtime = { stage: 'chapter_writing', status: 'waiting_user' }
       }
       const writingPlanAction = request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
-      const outlineAction = request.action !== 'bid_stage_inspect' && request.action !== 'bid_confirm_writing_plan'
+      const outlineAction = request.action !== 'bid_confirm_writing_plan'
         && (runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping')
-      if (runtime.status !== 'waiting_user' || (request.action !== 'bid_stage_inspect' && !writingPlanAction && !outlineAction)
+      if (runtime.status !== 'waiting_user' || (!writingPlanAction && !outlineAction)
         || (request.action === 'bid_evidence_remap' && runtime.stage !== 'evidence_mapping')) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前阶段不允许该操作。')
-      if (request.action === 'bid_stage_inspect') return await inspectBidStage(workspace, session)
       if (request.action === 'bid_confirm_writing_plan') {
-        const { action: _action, ...submitted } = request
-        const markerPath = within(workspace.projectRoot, WRITING_REQUEST_PATH)
-        const planPath = within(workspace.projectRoot, WRITING_PLAN_PATH)
-        const appliedPath = within(workspace.projectRoot, WRITING_PLAN_APPLIED_PATH)
-        await Promise.all([markerPath, planPath, appliedPath].map(path => assertNoLinkedPath(workspace.root, path)))
-        const marker = writingRequestSchema.parse(JSON.parse(await readFile(markerPath, 'utf8')))
-        const current = await confirmedOutline(workspace)
-        if (marker.confirmed_outline_sha256 !== current.sha256) throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
-        const previous = await currentWritingPlan(workspace)
-        if (marker.base_plan_version !== (previous?.plan_version ?? null)) throw new Error('写作计划已变化，请重新读取后再提交。')
-        if ((previous === undefined) !== (submitted.revision === null)) {
-          return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [previous === undefined
-            ? '首次计划的 revision 必须为 null'
-            : '更新计划必须说明变更摘要和受影响章节'] } }
-        }
-        let input = exactWritingRequirementMessages(session, submitted, marker, previous)
-        if (previous !== undefined && input.revision !== null) {
-          let appliedVersion = previous.plan_version
-          try {
-            appliedVersion = zod.strictObject({ schema_version: zod.literal(1), plan_version: zod.number().int().positive() })
-              .parse(JSON.parse(await readFile(appliedPath, 'utf8'))).plan_version
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-          }
-          if (appliedVersion < previous.plan_version && previous.revision !== null) input = {
-            ...input,
-            revision: {
-              ...input.revision,
-              affected_section_ids: [...new Set([
-                ...previous.revision.affected_section_ids,
-                ...input.revision.affected_section_ids,
-              ])],
-            },
-          }
-        }
-        const issues = validateWritingPlan(input, current.outline)
-        if (issues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues } }
-        const version = (previous?.plan_version ?? 0) + 1
-        const revision = input.revision === null || previous === undefined
-          ? null
-          : { ...input.revision, base_plan_version: previous.plan_version }
-        const plan = parseWritingPlan({
-          ...input,
-          revision,
-          schema_version: WRITING_PLAN_SCHEMA_VERSION,
-          scope: 'technical_bid',
-          plan_version: version,
-          confirmed: true,
-          confirmed_outline_sha256: current.sha256,
-        })
-        await writeFileAtomic(planPath, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-        session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
-        return { ok: true, plan_version: version, message: '整体写作要求与计划已确认，将启动章节写作。' }
+        const committed = await this.commitWritingPlan(agent, workspace, request)
+        if (!committed.ok) return committed
+        const { plan: _plan, ...result } = committed
+        return result
       }
       const base = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== base.revision || request.expected_draft_sha256 !== base.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: base } }
@@ -1162,6 +1228,7 @@ export class BidHostRuntime extends TypertRemoteService {
                     maxRepairAttempts: this.config.modelStageRepairAttempts,
                     maxConcurrency: this.config.chapterWritingMaxConcurrency,
                     signal,
+                    ...(operation === undefined ? {} : { control: operation.writingControl }),
                   })
                   : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`))
         },
@@ -1391,6 +1458,7 @@ export class BidHostRuntime extends TypertRemoteService {
             return executeChapterWriting(agent, workspace, task, {
               ...repair,
               maxConcurrency: this.config.chapterWritingMaxConcurrency,
+              control: operation.writingControl,
             })
           },
         },
@@ -1714,7 +1782,8 @@ export class BidHostRuntime extends TypertRemoteService {
         session.append('bid.stage.completed', { stage: 'docx_export', status: 'completed', artifacts })
         await this.checkpoint(operation)
       }
-      return { ok: true, value: { path: destination } }
+      const warnings = await assessDocxExportPageTarget(operation.workspace)
+      return { ok: true, value: { path: destination, ...(warnings.length === 0 ? {} : { warnings }) } }
     } catch (error: unknown) {
       if (error instanceof BidStageExecutionError) {
         return docxExportRejected('BID_DOCX_EXPORT_FAILED', '已完成章节无法导出，请检查正文完整性。', error.issues)
@@ -1850,20 +1919,38 @@ export class BidHostRuntime extends TypertRemoteService {
     let pageTarget: BidReviewWorkbenchView['summary']['page_target']
     try {
       writingPlan = await currentWritingPlan(workspace)
+      const criterion = writingPlan?.document_acceptance.find(item =>
+        item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+      const target = criterion?.evaluator.kind === 'deterministic' ? {
+        kind: criterion.evaluator.min === null ? 'maximum' as const
+          : criterion.evaluator.max === null ? 'minimum' as const : 'range' as const,
+        min_pages: criterion.evaluator.min,
+        max_pages: criterion.evaluator.max,
+        estimate_basis: 'Host estimated_pages metric',
+      } : null
       pageTarget = writingPlan === undefined ? { status: 'not_set' }
-        : writingPlan.page_target === null ? { status: 'not_required' }
-          : { status: 'unavailable', target: writingPlan.page_target, reason: '当前篇幅无法核验。' }
+        : target === null ? { status: 'not_required' }
+          : { status: 'unavailable', target, reason: '当前篇幅无法核验。' }
     } catch (error) {
       pageTarget = { status: 'unavailable', target: null, reason: `写作计划无法读取：${error instanceof Error ? error.message : String(error)}` }
     }
     try {
       const estimate = await estimateChapterWritingPages(workspace, outline)
       pageEstimate = estimate.total > 0 ? { status: 'available', pages: Math.ceil(estimate.total) } : { status: 'empty' }
-      if (writingPlan?.page_target !== null && writingPlan?.page_target !== undefined) {
-        const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
-        if (assessment.status !== 'not_required') pageTarget = {
+      const criterion = writingPlan?.document_acceptance.find(item =>
+        item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+      if (criterion?.evaluator.kind === 'deterministic') {
+        const target = {
+          kind: criterion.evaluator.min === null ? 'maximum' as const
+            : criterion.evaluator.max === null ? 'minimum' as const : 'range' as const,
+          min_pages: criterion.evaluator.min,
+          max_pages: criterion.evaluator.max,
+          estimate_basis: 'Host estimated_pages metric',
+        }
+        const assessment = assessBoundedMetric(criterion.evaluator.min, criterion.evaluator.max, estimate.total)
+        pageTarget = {
           status: assessment.status,
-          target: writingPlan.page_target,
+          target,
           estimated_pages: estimate.total,
           difference: assessment.difference,
           format_revision: estimate.format.revision,

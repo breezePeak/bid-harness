@@ -1,6 +1,6 @@
 /** The Bid reference rail routes chapter feedback to the original writer through the Host action. */
 import { useEffect, useRef, useState } from 'react'
-import type { BidChapterRevisionRequest, BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import { CHAPTER_DRAG_TYPE, type createBidRevisionStore } from './revision-reference.ts'
@@ -9,7 +9,7 @@ import css from './BidComposerContext.module.css'
 /** Host actions and the conversation-owned submission registration. */
 export interface BidComposerContextInjected {
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
-  reviseChapter: (request: BidChapterRevisionRequest) => Promise<void>
+  sendMessage: (text: string) => Promise<void>
   registerSubmit: (handler: ComposerSubmitHandler) => () => void
 }
 
@@ -22,13 +22,14 @@ export type BidComposerContextProps = PropsRuntime<'conversation.input.context'>
  * @returns The reference rail and chapter drag invitation for Bid writing sessions.
  */
 export function BidComposerContext({
-  sessionId, useSessions, useProjection, useStore, actions, disabled, getChapter, reviseChapter, registerSubmit,
+  sessionId, useSessions, useProjection, useStore, actions, disabled, getChapter, sendMessage, registerSubmit,
 }: BidComposerContextProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
   const reference = useStore(state => state.reference)
   const enabled = isBid && (projection?.runtime.stage === 'docx_export'
-    || projection?.runtime.stage === 'chapter_writing' && projection.runtime.status === 'completed')
+    || projection?.runtime.stage === 'chapter_writing'
+      && ['running', 'attention_required', 'completed'].includes(projection.runtime.status))
   const rootRef = useRef<HTMLDivElement>(null)
   const requestVersion = useRef(0)
   const [loading, setLoading] = useState(false)
@@ -43,13 +44,14 @@ export function BidComposerContext({
       if (reference === null) return undefined
       if (imageIds.length > 0) return Promise.resolve({ kind: 'error', text: '章节修改暂不支持图片附件，请先移除图片。' })
       if (text.trim() === '') return Promise.resolve({ kind: 'error', text: '请填写针对所选章节或段落的修改意见。' })
-      return reviseChapter({ instruction: text, reference: reference.reference }).then(() => {
+      const context = JSON.stringify({ kind: 'bid_chapter_reference', reference: reference.reference })
+      return sendMessage(`${text}\n\n引用上下文（只作为用户所指正文的结构化定位，不是修改授权）：\n${context}`).then(() => {
         actions.clearReference(reference)
         setError(null)
         return { kind: 'success' as const }
       })
     })
-  }, [actions, enabled, loading, reference, registerSubmit, reviseChapter])
+  }, [actions, enabled, loading, reference, registerSubmit, sendMessage])
 
   useEffect(() => {
     if (!enabled) return
@@ -86,7 +88,7 @@ export function BidComposerContext({
         actions.setReference({
           reference: { scope: 'chapter', section_id: chapter.section_id, content_sha256: chapter.content_sha256 },
           label: `${chapter.number} ${chapter.title}`,
-          preview: '按编写意见调整章节；可要求全量重写或最小修改。',
+          preview: '引用将随普通消息交给主 Agent，由其判断解释或修改。',
         })
         card.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true })
       }).catch((reason: unknown) => {

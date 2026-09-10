@@ -32,7 +32,7 @@ if (configPath === undefined) throw new Error('缺少章节修订回放配置路
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-chapter-revision-snapshot', configPath)
-  const { agent, workspace, requests, childScript } = await runChapterWritingLoop(ctx, process.cwd())
+  const { agent, workspace, requests, parentScript, childScript } = await runChapterWritingLoop(ctx, process.cwd())
   const markdownPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
@@ -53,15 +53,33 @@ try {
     if (invalidMarkdown !== undefined) childScript.push(toolCall('reject-outside-selection', 'submit_chapter', candidate(invalidMarkdown)))
     childScript.push(
       toolCall(`submit-revision-${revisionNumber}`, 'submit_chapter', candidate(markdown)),
-      toolCall('review-coverage', 'review_coverage_items', { items: ['R1', 'R2', 'R3'].map(item_ref => ({
+      toolCall('review-coverage', 'review_coverage_items', { items: ['R1', 'R2', 'R3', 'R4'].map(item_ref => ({
         item_ref, status: 'covered', evidence_quote_refs: ['Q2'], issue: null,
       })) }),
+      toolCall('review-global-constraint', 'review_global_constraints', {
+        items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
+      }),
       toolCall('review-summary', 'set_review_summary', {
         quality_checks: { project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
           placeholder_free: true, obvious_repetition_free: true },
         blocking_issues: [],
+        assignment_conflicts: [],
       }),
       toolCall('finish-review', 'finish_chapter_review', {}),
+    )
+    parentScript.push(
+      toolCall(`review-global-${revisionNumber}`, 'review_global_compliance', {
+        compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
+        status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+      }),
+      toolCall(`finish-global-review-${revisionNumber}`, 'finish_global_compliance_review', {}),
+      toolCall(`finish-writing-plan-${revisionNumber}`, 'submit_chapter_writing_completion_review', {
+        action: 'complete', reason: '修订后的章节与整书 required 条件均已满足。',
+        requirements: [
+          { requirement_id: 'AC-000001', status: 'met', note: '整书术语与技术响应一致。', section_ids: [] },
+          { requirement_id: 'AC-000002', status: 'met', note: '本章已完整说明访问控制实施流程。', section_ids: ['SEC-SECURITY'] },
+        ],
+      }),
     )
     const outcome = await ctx!.bid.reviseChapter(user, revision)
     assert.equal(outcome.ok, true, JSON.stringify(outcome))
@@ -69,7 +87,7 @@ try {
     assert.equal(persisted, markdown)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     assert.equal(log.sections[0]!.final_writer_child_session_id, writerId)
-    assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount)
+    assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount + revisionNumber * 3)
     assert.equal(requests.filter(request => request.sessionId === user.id).length, 0)
     return persisted
   }
@@ -120,8 +138,9 @@ try {
   for (const request of revisionRequests) assert.ok(JSON.stringify(request.messages).includes('本地资料只有实施流程。'))
   assert.ok(JSON.stringify(revisionRequests.at(-1)!.messages).includes('统一使用已确认的项目术语'))
   assert.equal(childScript.length, 0)
+  assert.equal(parentScript.length, 0)
   process.stdout.write(`${JSON.stringify({
-    writer_session_reused: true, original_context_retained: true, main_agent_requests_unchanged: true,
+    writer_session_reused: true, original_context_retained: true, main_agent_completion_reviewed: true,
     paragraphs_outside_selection_unchanged: true, evidence_unchanged: true,
   })}\n`)
 } finally {

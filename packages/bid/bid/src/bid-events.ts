@@ -6,6 +6,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
   'bid.stage.started',
   'bid.stage.completed',
+  'bid.stage.attention_required',
   'bid.stage.failed',
   'bid.stage.reset',
   'bid.user_confirmation.required',
@@ -27,6 +28,14 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.stage.started': { stage: BidStage; status: 'running' }
     /** A stage passed validation; artifacts remain in the workspace at these references. */
     'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
+    /**
+     * A stage retained usable artifacts but exhausted a bounded business correction.
+     * @param stage Stage whose current artifacts remain readable.
+     * @param status Stable recoverable status.
+     * @param reason Short user-visible summary.
+     * @param issues Browser-safe unmet business conditions.
+     */
+    'bid.stage.attention_required': { stage: BidStage; status: 'attention_required'; reason: string; issues: StageValidationIssue[] }
     /**
      * A stage failed before validation could authorize a transition.
      * @param stage Failed stage.

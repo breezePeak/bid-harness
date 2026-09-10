@@ -22,6 +22,7 @@ describe('browser-safe Bid control-plane export', () => {
       'applyTenderAnalysisEdits',
       'buildOutlineView',
       'isBidDocumentRole',
+      'parseBidReviewWorkbenchView',
     ])
     expect(controlPlane.BID_RUNTIME_PROJECTION_KEY).toBe('bid.runtime')
     expect(controlPlane.BID_STAGES).toEqual([

@@ -65,10 +65,20 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
     'outline/outline.json': outline,
     'outline/confirmed-outline.json': outline,
     'chapters/writing-plan.json': {
-      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineArtifactSha256(outline), user_requirements: ['没有特殊要求，直接开始'],
-      overall_goal: '完整响应招标要求。', style_rules: [], global_rules: [], priorities: [], page_target: null,
-      sections: [{ section_id: 'SEC-1', emphasis: 'standard', page_budget: null, instructions: [] }],
+      global_instructions: ['完整响应招标要求。'],
+      document_acceptance: [{
+        id: 'AC-000001', scope: { kind: 'document' }, description: '整书完整响应要求。',
+        priority: 'required', evaluator: { kind: 'semantic' },
+      }],
+      sections: [{
+        section_id: 'SEC-1', task: '完成技术方案。', user_requirements: [], writing_instructions: [],
+        acceptance_criteria: [{
+          id: 'AC-000002', scope: { kind: 'section', section_id: 'SEC-1' }, description: '完成本章任务。',
+          priority: 'required', evaluator: { kind: 'semantic' },
+        }],
+      }],
       revision: null,
     },
     'chapters/execution-log.json': { schema_version: 2, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },

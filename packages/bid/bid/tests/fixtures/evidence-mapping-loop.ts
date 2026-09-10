@@ -466,14 +466,22 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     writeFile(evidencePath, evidenceBefore),
     writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: unavailableSources })),
     writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
-      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineHash,
       user_requirements: ['整份约 20 页，重点展开访问控制，使用正式技术方案风格，按这些要求直接开始。'],
-      overall_goal: '完整响应访问控制与安全审计要求。',
-      style_rules: ['使用正式、可执行的技术方案表述。'], global_rules: [],
-      priorities: [{ section_ids: [section.id], instruction: '重点展开访问控制实施流程。' }],
-      page_target: { kind: 'approximate', min_pages: 18, max_pages: 22, estimate_basis: '按既有 Word 模板版式估算，实际页数排版后核对。' },
-      sections: [{ section_id: section.id, emphasis: 'detailed', page_budget: { min_pages: 18, max_pages: 22 }, instructions: ['展开访问控制实施流程。'] }],
+      global_instructions: ['完整响应访问控制与安全审计要求。', '使用正式、可执行的技术方案表述。'],
+      document_acceptance: [{
+        id: 'AC-000001', scope: { kind: 'document' }, description: '整书形成一致且完整的技术响应。',
+        priority: 'required', evaluator: { kind: 'semantic' },
+      }],
+      sections: [{
+        section_id: section.id, task: '完整响应访问控制与安全审计要求。', user_requirements: ['重点展开访问控制。'],
+        writing_instructions: ['展开访问控制实施流程。'],
+        acceptance_criteria: [{
+          id: 'AC-000002', scope: { kind: 'section', section_id: section.id }, description: '详细说明访问控制实施流程。',
+          priority: 'required', evaluator: { kind: 'semantic' },
+        }],
+      }],
       revision: null,
     })),
   ])
@@ -505,6 +513,13 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
     }),
     toolCall('finish-global-review', 'finish_global_compliance_review', {}),
+    toolCall('finish-writing-plan', 'submit_chapter_writing_completion_review', {
+      action: 'complete', reason: '章节与整书 required 条件均已满足。',
+      requirements: [
+        { requirement_id: 'AC-000001', status: 'met', note: '整书术语与技术响应一致。', section_ids: [] },
+        { requirement_id: 'AC-000002', status: 'met', note: '本章已完整说明访问控制实施流程。', section_ids: ['SEC-SECURITY'] },
+      ],
+    }),
   ]
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
@@ -516,7 +531,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('reject-new-setext-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n补充服务方案\n---\n\n不属于确认目录的目录层级。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
-    toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
+    toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('review-global-constraint', 'review_global_constraints', {
       items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
     }),
@@ -529,7 +544,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
-  return { agent, artifacts, workspace, requests: adapter.requests, childScript }
+  return { agent, artifacts, workspace, requests: adapter.requests, parentScript, childScript }
 }
 
 /**

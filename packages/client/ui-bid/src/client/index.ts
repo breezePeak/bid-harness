@@ -133,10 +133,10 @@ export function apply(ctx: ClientContext): void {
     store: revisionStore,
     inject: (sessionId: SessionId) => ({
       getChapter: (sectionId: string) => getChapter(sessionId, sectionId),
-      reviseChapter: async (request: import('@deepseek-ai/dsh-bid/control-plane').BidChapterRevisionRequest) => {
-        const result = await ctx.remote.bid.reviseChapter(sessionId, request)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error)
+      sendMessage: (text: string) => {
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
+        return conversation.send(text)
       },
       registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
         ctx.conversation.submitHandlers.register(sessionId, handler),

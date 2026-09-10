@@ -34,11 +34,12 @@ describe('bid control-plane public contract', () => {
       'chapter_writing',
       'docx_export',
     ])
-    expect(STAGE_RUN_STATUSES).toEqual(['pending', 'waiting_start', 'running', 'waiting_user', 'failed', 'completed'])
+    expect(STAGE_RUN_STATUSES).toEqual(['pending', 'waiting_start', 'running', 'waiting_user', 'attention_required', 'failed', 'completed'])
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
       'bid.stage.started',
       'bid.stage.completed',
+      'bid.stage.attention_required',
       'bid.stage.failed',
       'bid.stage.reset',
       'bid.user_confirmation.required',

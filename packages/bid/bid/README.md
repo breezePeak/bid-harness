@@ -41,7 +41,7 @@ The browser sends one ordered, same-origin binary S1 request whose body contains
 
 S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
-S5 使用已确认写作计划向每个 Writer 注入适用的全局规则、章节重点和本叶节篇幅预算。Reviewer 只接收适用于本章的要求和预算；整书页数只在文档层汇总，不能成为每章通过条件。Host 再按确认目录调度独立 Writer，并在 Reviewer 启动前发布有效正文；Reviewer 独立核对正文覆盖。修复仍回到原 Writer，最终内容问题保留为 `needs_attention`。Host 按确认目录、父节点概述、叶节正文和当前 Word 格式计算未取整页数；明确目标未满足或测算失败时，S5 Validator 不发布完成状态，S6 也不把可读取的 DOCX 误报为篇幅达标。
+S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。`required` 失败回到原 Writer 定向修复，`preferred` 失败保留在报告中但不自动阻断。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
 After S5 completes, `exportDocx` validates the confirmed outline and complete chapter set, combines the bodies in outline order, and writes a fresh timestamped Markdown and DOCX pair under `outputDirectory`. Repeated exports do not change the completed S5 runtime or hide its review state. Existing projects already checkpointed at `docx_export/completed` retain the same review and export actions.
 
@@ -51,9 +51,9 @@ After S5 completes, `exportDocx` validates the confirmed outline and complete ch
 
 S2、S3、S4、S5 的 `waiting_user` 开放普通消息；S5 的 `running` 与 `completed` 也保留主 Agent 对话。Main Agent 通过 `bid_stage_inspect` 读取最新阶段资料；S5 快照包含章节编号与 ID、Writer/Reviewer 尝试、最近问题、当前正文未取整页数、目标差额和 Word 格式身份。S3/S4 另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
-S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录和资料映射解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。计划只给可写叶节分配篇幅，整书页数目标等于叶节预算汇总；约数、下限、上限和区间分别保存自己的边界，页数保留排版估算依据，实际页数在排版后核对。
+S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录、S4 Blueprint 与 Evidence 解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
 
-S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的整体要求变更才调用 `bid_confirm_writing_plan`。运行中的显式变更通过现有取消与排空边界进入同一版本化恢复路径；完成态的普通问答保持完成和导出能力。`chapters/applied-writing-plan.json` 记录执行日志已采用的计划版本，恢复时只把受影响的已完成章节及其强依赖下游退回待写，其他合法正文继续复用。
+S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的新要求才调用 `bid_confirm_writing_plan`。Host 把新计划送入当前调度器，不取消无关 Writer 或 Reviewer：未开始章节读取新契约，已完成的受影响章节进入定向修复，运行中的受影响章节递增输入 epoch 并丢弃迟到旧结果。`chapters/applied-writing-plan.json` 记录执行日志采用的计划版本；模型决定 `revision.affected_section_ids`，程序只扩展真实强依赖下游。
 
 S1→S2、S2→S3、S3→S4、S4→S5 正式完成时，Host 在最终校验和确认成功后、下一阶段首次执行前替换 Main Agent 的模型可见阶段上下文。交接消息只列出 `getBidStagePolicy(nextStage).requiredInputs` 决定的正式 Artifact 路径及 SHA-256；旧阶段消息继续保留在追加式 Session 日志中，但不再由 `deriveMessages()` 投影给模型。同阶段修复、重试和审核交互不触发替换；阶段重置复用同一替换原语，使目标阶段及后续上下文失效。决定依据见[阶段上下文边界记录](../../../.agents/notes/implemented/architecture/2026-09-09-bid-stage-context-boundary.md)。
 
@@ -93,17 +93,17 @@ S5 以 `outline/confirmed-outline.json` 为唯一章节结构。各级父节点�
 
 Writer 只提交完整 `markdown` 与语义 `metadata`，空数组和 handoff 成员可省略。三个 `section_id` 与三个 `covered_*` 索引由 Host 按 Blueprint 绑定；覆盖索引不代表正文已经响应。资料使用本章稳定的 M（映射材料）、F（可补搜文件）和 W（已验证网页）引用，工具读取仍使用真实路径。相同资料经不同短引用提交时按真实身份去重，语义冲突可恢复地拒绝。框架只作为 preserve/adapt/rewrite 写作输入，不进入 M/F Evidence；新 URL 必须有当前 Writer 的成功 fetch 正文。引用、chunk、usage 和 Snapshot Hash 在 `structured_output` 完成前校验，允许当前 Writer 修正。
 
-Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通过 `review_global_constraints` 独立核验全局要求，再由 `set_review_summary` 替换质量检查、职责冲突和额外阻断，最后以 `finish_chapter_review` 提交。canonical R Checklist 只包含本章的 must-answer、Requirement、评分响应点和局部 Compliance；全局要求不进入章节覆盖索引或 manifest。当前候选 Q 原文与只读 E Evidence Pack 包含相关 S2 确认事实、实际使用的本地 chunk、Hash 验证后的 Web 正文及前置 handoff，明确各来源的证明范围。每批可提交多项并分别返回接受项和失败项；漏项或缺少 summary 的 finish 保留记录并返回缺项。普通文本结束时在同一 Child 内按 `modelStageRepairAttempts` 有限续行。
+Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通过 `review_global_constraints` 独立核验全局要求，再由 `set_review_summary` 替换质量检查、职责冲突和额外阻断，最后以 `finish_chapter_review` 提交。canonical R Checklist 包含本章 must-answer、Requirement、评分响应点、局部 Compliance 和当前 `semantic` 验收条件；显式 `deterministic` 条件由 Host 测量并与同一报告合并。当前候选 Q 原文与只读 E Evidence Pack 包含相关 S2 确认事实、实际使用的本地 chunk、Hash 验证后的 Web 正文及前置 handoff，明确各来源的证明范围。每批可提交多项并分别返回接受项和失败项；漏项或缺少 summary 的 finish 保留记录并返回缺项。普通文本结束时在同一 Child 内按 `modelStageRepairAttempts` 有限续行。
 
-Host 从记录确定 verdict：任一 coverage=missing、适用的全局要求违反、quality=false、unsupported claim 或额外阻断都为 `repair`；章节职责冲突为 `blocked`，不把错误分工作为正文缺陷交给 Writer 修订。成功 finish 表示报告收集完整，可以是 repair 或 blocked。正文在 Reviewer 启动前即可读取；最多一次完整候选替换式修复，修复仍不通过、职责冲突或持续传输错误时保留最近的合法已审候选和真实问题，不增加全部章节必须 pass 的查看、完成或导出限制。
+Host 从记录确定 verdict：既有固定审核失败或任一 `required` 动态条件未满足都为 `repair`；`preferred` 未满足只保留独立 coverage，章节职责冲突为 `blocked`，不把错误分工作为正文缺陷交给 Writer 修订。成功 finish 表示报告收集完整，可以是 pass、repair 或 blocked。正文在 Reviewer 启动前即可读取；内容问题使用相同有界修复预算回到原 Writer，耗尽后保留最近的合法已审候选和真实问题。
 
-全部章节完成后，现有 Main Agent 对完整正文只运行一次文档级合规审核，并通过私有工具写入 `chapters/global-compliance-review.json`。跨章节约束和文档内容要求必须以章节原文或已登记资料为证据；交付、签署、盖章等执行责任在 S5 没有真实执行证据时保持 `pending`，不会被误报为正文缺陷。报告按责任方分别投影章节问题、文档问题与交付待办；最终 Validator 校验覆盖集合、受影响章节、证据引用和正文 Hash。没有全局要求时 Host 直接生成空报告，不发起额外模型调用。
+全部章节完成后，现有 Main Agent 先完成文档级合规审核，再逐项验收当前计划的章节与整书条件。Main Agent 对 `semantic` 条件判断 met/unmet，显式 `deterministic` 条件服从 Host 测量；任一 `required` 未满足时选择最小充分章节并给出具体修订，调度器复用原 Writer 后重新执行章节审核、全局审核和整书验收。完成账本绑定计划版本、Word 格式版本、正文 Hash 和每轮修改前后身份；`preferred` 未满足可以随完成结论持久化。
 
 私有工具通过 in-process 的 `subagent/child-setup` 在 Child 发布前安装，以真实 Agent 和本次章节尝试隔离。finish 调用 `concludeTurn()`，只在权威 `tools/result`（嵌套调用同时等待外层结果）成功后确认；结束或释放后不能修改结果。Writer、Reviewer 均为 fresh-context 一层 Child，默认章节并发为 3，强依赖等待、弱关联不阻塞。路径、持久化字段和版本不变；M/F/W/R/Q/E 不进入外部 Artifact。
 
 Writer 或 Reviewer 异常结束时，执行日志和阶段失败消息保留 Provider 提供的安全诊断，便于区分模型服务故障与产物校验问题。
 
-S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证原计划、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份；正文与 metadata 合法但 Reviewer 报告缺失或协议过期时保留正文并只重新审核，未完成、正文损坏或身份失效的章节及其全部强依赖下游才重置为 pending。弱关联不传播失效，无关的合法 completed（包括 repair 和 blocked）继续复用。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。文档级报告逐项绑定其检查过的章节 Hash 与资料证据，未变化项可在恢复时复用，变化项重新审核。
+S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证当前计划版本、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份；正文与 metadata 合法但 Reviewer 报告缺失或协议过期时保留正文并只重新审核，未完成、正文损坏、身份失效或当前计划明确影响的章节及其全部强依赖下游才重置为 pending。弱关联不传播失效，无关的合法 completed 继续复用。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。文档级报告逐项绑定其检查过的章节 Hash 与资料证据，未变化项可在恢复时复用，变化项重新审核。
 
 候选 Web 来源缺失、Hash 错误或路径不安全时，预检及 W 引用表向 Writer 标明不可用，不影响无关章节，也不删掉对应写作要求；实际引用仍在当前提交工具中校验账本身份与正文。已发 W 在同章修复中保留编号，不因过滤或追加来源重编号。整体账本错误和 Host 写盘失败仍会使执行失败。
 
@@ -116,21 +116,33 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 ## Model Experience
 
-章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer，会话恢复失败时拒绝修订。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；Host 校验连续顶层段落，在提交工具和落盘处拒绝选区外变动。用户意见及当前正文进入原 Writer 的会话日志；修订期间父 Agent 不执行模型步骤。失败恢复章节正文、metadata、审查与执行记录；其他章节不重写。
-
-### Inventory text
+### Bid inventory and S5 task context
 
 #### What the model sees
 
-调用方将 `messageInventory()` 持久化为用户消息，包含文件名、工作区相对源路径、解析正文与结构路径以及解析状态；文件字节和宿主绝对路径不进入这条清单。S4 研究任务另行携带旧标完整标题列表和本次目录职责，S5 Writer 与 Reviewer 同时获得确认目录职责和当前章节路径；这些任务输入均进入相应会话记录。
+调用方将 `messageInventory()` 持久化为用户消息，包含文件名、工作区相对源路径、解析正文与结构路径以及解析状态；文件字节和宿主绝对路径不进入这条清单。S4 研究任务另行携带旧标完整标题列表和本次目录职责。S5 Main Agent 从用户要求生成任务契约；Writer 获得当前章节的完整契约，Reviewer 获得确认目录职责、当前章节路径及逐项验收清单，整书审核获得有界章节摘要和既有审核结论。这些输入均进入相应会话记录。
 
 #### Token effect
 
-文件清单按每份导入文档增加固定字段；S4 目录上下文随旧标标题数和本次目录规模增长，S5 目录上下文随确认目录规模增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；正文仍按需读取分块，不随目录整份注入。
+文件清单按每份导入文档增加固定字段；S4 目录上下文随旧标标题数和本次目录规模增长，S5 上下文随确认目录、适用任务条件和章节摘要增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；正文仍按需读取分块，整书验收也不再次注入完整正文。
 
 #### KV Cache effect
 
-The persisted inventory is append-only conversation content. Importing files in a later user message does not change the earlier request prefix.
+持久化清单和任务交互是追加式会话内容；后续导入文件或热更新计划不会改写更早的请求前缀。计划版本变化会改变后续 Writer、Reviewer 和整书审核的任务输入。
+
+### Chapter revision context
+
+#### What the model sees
+
+章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer；用户意见、当前正文和限定引用进入原 Writer 的会话日志。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
+
+#### Token effect
+
+修订请求随当前章节正文、用户意见和引用数量增长，不重复注入其他章节正文。失败恢复章节正文、metadata、审查与执行记录，其他章节不重写。
+
+#### KV Cache effect
+
+修订追加到原 Writer 会话；既有 Writer 前缀保持不变。修订期间父 Agent 不执行模型步骤，失败不会改变其他章节的会话前缀。
 
 ## Known Limitations and Deferred Work
 
@@ -139,4 +151,4 @@ The persisted inventory is append-only conversation content. Importing files in 
 - DOCX and DOC page fields remain `null` because their source structures do not provide dependable pagination.
 - DOCX export supports headings, paragraphs, lists, and tables; it does not apply a company Word template.
 - S5 的证明范围与资料身份由 Host 校验，原文是否真正支持某项内容仍由 Reviewer 判断；无密钥回放验证协议，不能替代真实模型的语义质量评估。
-- 明确页数目标未满足时，当前实现阻止 S5 完成并保留正文、测量值和差额；自动选择深化章节并在同一运行实例内完成有界补写仍待实现。
+- 整书语义验收使用有界章节摘要和既有审核结论，不把完整正文再次复制进 Main Agent 输入；需要跨章逐句比对的条件仍依赖模型在现有证据范围内判断。

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -28,6 +28,36 @@ interface HostExecution {
   automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
 }
 
+function toolCall(name: string, args: object): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'tool-call' },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(name), name, arguments: JSON.stringify(args) } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
+function answer(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
+class ProjectSessionAdapter extends LlmAdapter {
+  readonly script: StreamChunk[][] = []
+
+  override resolveModel(provider: string, model: string) {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const response = this.script.shift()
+    if (response === undefined) throw new Error('Project Session 模型脚本已耗尽')
+    yield* response
+  }
+}
+
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const dispose of disposals.splice(0).reverse()) await dispose()
@@ -43,6 +73,8 @@ async function fixture() {
   const ctx = new Context()
   disposals.push(() => ctx.fiber.dispose())
   await ctx.plugin(LlmRuntime)
+  const adapter = new ProjectSessionAdapter()
+  ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'test' })
   await ctx.plugin(ToolRuntime)
@@ -53,7 +85,8 @@ async function fixture() {
   await ctx.plugin(BidHostRuntime)
   const workspace = new BidWorkspace(root)
   const host = ctx.bid as unknown as HostExecution
-  const executor: BidStageExecutorPort = { canExecute: () => false, execute: vi.fn(async () => []) }
+  const executeStage = vi.fn(async () => [])
+  const executor: BidStageExecutorPort = { canExecute: () => false, execute: executeStage }
   const validator: BidStageValidatorPort = { validate: async () => ({ ok: true, issues: [] }) }
   host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, executor, {
     validate: (stage, artifacts) => stage === 'tender_analysis' ? validateTenderAnalysis(current, stage, artifacts) : validator.validate(stage, artifacts),
@@ -66,7 +99,7 @@ async function fixture() {
     })
     return handle.agent
   }
-  return { ctx, workspace, fresh, host, executor, validator }
+  return { ctx, workspace, fresh, host, executor, executeStage, validator, adapter }
 }
 
 describe('Workspace 项目与独立 Session', () => {
@@ -238,11 +271,15 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 3, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 4, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       compliance_coverage: [],
+      acceptance_criteria_coverage: [{
+        criterion_id: 'AC-000002', item: '完成本章任务。', evaluator: 'semantic', status: 'unmet',
+        evidence_quotes: [], measured: null, issue: '尚未完成本章任务。',
+      }],
       global_compliance_checks: [],
       assignment_conflicts: [],
       claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
@@ -432,13 +469,42 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
-      .rejects.toMatchObject({ code: 'ENOENT' })
+      .resolves.toContain('"base_plan_version": 1')
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toContain('已有正文')
     expect(executor.execute).not.toHaveBeenCalled()
   })
 
-  it('S5 运行中普通消息不取消当前写作', async () => {
-    const { ctx, workspace, fresh, host, executor } = await fixture()
+  it('S5 完成且无运行操作时通过真实工具读取任务上下文，不重开写作', async () => {
+    const { ctx, workspace, fresh, host, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('completed-inspect')
+
+    const result = await ctx.tools.execute({
+      agent,
+      name: 'bid_stage_inspect',
+      arguments: { view: 'task_contract_context' },
+      callId: CallId('completed-inspect'),
+      signal: new AbortController().signal,
+    })
+
+    expect(result).toMatchObject({
+      isError: false,
+      value: {
+        runtime: { stage: 'chapter_writing', status: 'completed' },
+        task_contract_context: {
+          requirements: { requirements: [{ id: 'REQ-1' }] },
+          evidence: { section_mappings: [{ section_id: 'SEC-1' }] },
+        },
+      },
+    })
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(host.inFlight.size).toBe(0)
+    expect(executeStage).not.toHaveBeenCalled()
+  })
+
+  it('S5 运行中主 Agent 回答普通消息且不取消当前写作', async () => {
+    const { ctx, workspace, fresh, host, executor, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const agent = await fresh('writing-plan-pause')
@@ -457,6 +523,19 @@ describe('Workspace 项目与独立 Session', () => {
       content: [{ type: 'text', text: '现在写到哪了？' }],
     })
     await expect(admission).resolves.toBeUndefined()
+    adapter.script.push(
+      toolCall('bid_stage_inspect', { view: 'summary' }),
+      answer('正文仍在写作，当前任务继续运行。'),
+    )
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '现在写到哪了？' }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+
+    expect(adapter.script).toEqual([])
+    expect(agent.session.events.some(event => event.type === 'tool/call' && event.data.name === 'bid_stage_inspect')).toBe(true)
+    expect(agent.session.deriveMessages().at(-1)?.content).toContainEqual({ type: 'text', text: '正文仍在写作，当前任务继续运行。' })
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.size).toBe(1)
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
@@ -466,7 +545,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'chapter_writing')).toBe(true)
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
-      .rejects.toMatchObject({ code: 'ENOENT' })
+      .resolves.toContain('"base_plan_version": 1')
   })
 
   it('旧 Session 日志落盘失败不会让新聊天以 S1 覆盖已有 S4 项目', async () => {

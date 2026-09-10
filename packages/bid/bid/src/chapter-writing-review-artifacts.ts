@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 3 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 4 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -31,6 +31,16 @@ const globalComplianceCheckSchema = z.object({
   issue: z.string().trim().min(1).nullable(),
 }).strict()
 
+const acceptanceCriterionCoverageSchema = z.object({
+  criterion_id: z.string().min(1),
+  item: z.string().min(1),
+  evaluator: z.enum(['semantic', 'deterministic']),
+  status: z.enum(['met', 'unmet', 'unavailable']),
+  evidence_quotes: z.array(z.string().trim().min(1)),
+  measured: z.union([z.number(), z.string()]).nullable(),
+  issue: z.string().min(1).nullable(),
+}).strict()
+
 const assignmentConflictSchema = z.object({
   task: z.string().trim().min(1),
   basis: z.string().trim().min(1),
@@ -54,6 +64,7 @@ export const chapterReviewSchema = z.object({
   requirement_coverage: z.array(identifiedCoverageSchema),
   response_point_coverage: z.array(responsePointCoverageSchema),
   compliance_coverage: z.array(complianceCoverageSchema),
+  acceptance_criteria_coverage: z.array(acceptanceCriterionCoverageSchema),
   global_compliance_checks: z.array(globalComplianceCheckSchema),
   assignment_conflicts: z.array(assignmentConflictSchema),
   claim_checks: z.array(claimCheckSchema),

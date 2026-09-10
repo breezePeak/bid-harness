@@ -13,13 +13,16 @@ const reference = {
 }
 
 /** 来自对话框的章节引用及独立编写意见。 */
+export const chapterRevisionReferenceSchema = z.discriminatedUnion('scope', [
+  z.object({ ...reference, scope: z.literal('chapter') }).strict(),
+  z.object({ ...reference, scope: z.literal('paragraphs'), start: z.number().int().nonnegative(),
+    end: z.number().int().positive(), text: z.string().min(1) }).strict(),
+])
+
+/** 来自对话框的章节引用及独立编写意见。 */
 export const chapterRevisionRequestSchema = z.object({
   instruction: z.string().trim().min(1),
-  reference: z.discriminatedUnion('scope', [
-    z.object({ ...reference, scope: z.literal('chapter') }).strict(),
-    z.object({ ...reference, scope: z.literal('paragraphs'), start: z.number().int().nonnegative(),
-      end: z.number().int().positive(), text: z.string().min(1) }).strict(),
-  ]),
+  reference: chapterRevisionReferenceSchema,
 }).strict()
 
 /**

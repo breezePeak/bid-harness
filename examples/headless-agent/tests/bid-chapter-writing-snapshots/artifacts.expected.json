@@ -93,5 +93,33 @@
         "issue": null
       }
     ]
+  },
+  "completionReview": {
+    "schema_version": 1,
+    "confirmed_outline_sha256": "b559af528e830034c7665e9b10557f7fb3d6bb51d067dd61fd886eaa31d427bd",
+    "rounds": [],
+    "completion": {
+      "plan_version": 1,
+      "format_revision": 0,
+      "pages": 0.15045356079068506,
+      "document_sha256": "e9373460cd816ea91317883395b1120e77656b88cdf29863ae846c722d2aee9d",
+      "reason": "章节与整书 required 条件均已满足。",
+      "requirements": [
+        {
+          "requirement_id": "AC-000001",
+          "status": "met",
+          "note": "整书术语与技术响应一致。",
+          "section_ids": []
+        },
+        {
+          "requirement_id": "AC-000002",
+          "status": "met",
+          "note": "本章已完整说明访问控制实施流程。",
+          "section_ids": [
+            "SEC-SECURITY"
+          ]
+        }
+      ]
+    }
   }
 }

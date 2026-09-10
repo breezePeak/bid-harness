@@ -15,7 +15,10 @@ import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scori
 import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
-import { assessPageTarget, parseWritingPlan } from './writing-requirements.ts'
+import { parseWritingPlan, validateWritingPlan } from './writing-requirements.ts'
+import { parseChapterWritingCompletionState, chapterWritingRequirements } from './chapter-writing-completion-review.ts'
+import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
+import { chapterContentSha256 } from './chapter-revision.ts'
 import {
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
@@ -26,6 +29,7 @@ const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
 const LOG = 'chapters/execution-log.json'
 const GLOBAL_REVIEW = 'chapters/global-compliance-review.json'
+const COMPLETION_REVIEW = 'chapters/completion-review.json'
 
 function reject(issues: StageValidationIssue[], code: string, message: string, artifact?: string): void {
   issues.push({ code, message, ...(artifact === undefined ? {} : { artifact }) })
@@ -108,12 +112,13 @@ export async function validateChapterWriting(
     [LOG, 'chapter_execution_log'],
     [MANIFEST, 'chapter_manifest'],
     [GLOBAL_REVIEW, 'global_compliance_review'],
+    [COMPLETION_REVIEW, 'chapter_completion_review'],
   ])
   if (artifacts.length !== expectedArtifacts.size || artifacts.some(artifact =>
     artifact.stage !== 'chapter_writing' || expectedArtifacts.get(artifact.path) !== artifact.type)
     || new Set(artifacts.map(artifact => artifact.path)).size !== expectedArtifacts.size) {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_SET_INVALID',
-      'The executor must return the execution plan, execution log, chapter manifest, and global review exactly once.', MANIFEST)
+      'The executor must return the execution plan, execution log, chapter manifest, global review, and completion review exactly once.', MANIFEST)
   }
   const inputs = await Promise.all([
     readJson(workspace, MANIFEST, issues), readJson(workspace, PLAN, issues),
@@ -123,14 +128,14 @@ export async function validateChapterWriting(
     readJson(workspace, 'analysis/scoring-response-points.json', issues),
     readJson(workspace, 'analysis/requirements.json', issues),
     readJson(workspace, 'analysis/compliance.json', issues),
-    readJson(workspace, 'chapters/writing-plan.json', issues),
+    readJson(workspace, 'chapters/writing-plan.json', issues), readJson(workspace, COMPLETION_REVIEW, issues),
   ])
   const [manifestRaw, planRaw, logRaw, globalReviewRaw, outlineRaw,
-    scoringRaw, catalogRaw, requirementsRaw, complianceRaw, writingPlanRaw] = inputs
+    scoringRaw, catalogRaw, requirementsRaw, complianceRaw, writingPlanRaw, completionReviewRaw] = inputs
   if (
     manifestRaw === undefined || planRaw === undefined || logRaw === undefined || globalReviewRaw === undefined
     || outlineRaw === undefined || scoringRaw === undefined || catalogRaw === undefined
-    || requirementsRaw === undefined || complianceRaw === undefined || writingPlanRaw === undefined
+    || requirementsRaw === undefined || complianceRaw === undefined || writingPlanRaw === undefined || completionReviewRaw === undefined
   ) return { ok: false, issues }
   let chapters
   let plan
@@ -142,6 +147,7 @@ export async function validateChapterWriting(
   let compliance
   let globalReview
   let writingPlan
+  let completionReview
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
     plan = parseChapterExecutionPlan(planRaw)
@@ -153,14 +159,16 @@ export async function validateChapterWriting(
     compliance = parseTenderComplianceArtifact(complianceRaw)
     globalReview = parseGlobalComplianceReviewArtifact(globalReviewRaw)
     writingPlan = parseWritingPlan(writingPlanRaw)
+    completionReview = parseChapterWritingCompletionState(completionReviewRaw)
   } catch {
     reject(issues, 'CHAPTER_WRITING_ARTIFACT_INVALID', 'The chapter manifest, confirmed outline, or scoring inputs have invalid fields.', MANIFEST)
     return { ok: false, issues }
   }
   const outlineHash = outlineArtifactSha256(outline)
   if (writingPlan.confirmed_outline_sha256 !== outlineHash) {
-    reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_OUTLINE_MISMATCH', 'The writing page target does not match the confirmed outline.', 'chapters/writing-plan.json')
+    reject(issues, 'CHAPTER_WRITING_PLAN_OUTLINE_MISMATCH', 'The writing plan does not match the confirmed outline.', 'chapters/writing-plan.json')
   }
+  for (const issue of validateWritingPlan(writingPlan, outline)) reject(issues, 'CHAPTER_WRITING_PLAN_INVALID', issue, 'chapters/writing-plan.json')
   if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'CHAPTER_WRITING_RESPONSE_POINT_CATALOG_MISMATCH', 'The scoring response-point catalog does not match scoring.json.', 'analysis/scoring-response-points.json')
   if (chapters.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_OUTLINE_HASH_INVALID', 'The chapter manifest does not match the confirmed outline.', MANIFEST)
   issues.push(...validateChapterExecutionPlan(plan, outline, outlineHash))
@@ -248,6 +256,8 @@ export async function validateChapterWriting(
       const sectionLog = executionLog.sections.find(section => section.section_id === chapter.section_id)
       if (sectionLog === undefined || review.writer_child_session_id !== sectionLog.final_writer_child_session_id
         || review.reviewer_child_session_id !== sectionLog.final_reviewer_child_session_id) throw new Error('review-child-invalid')
+      const sectionWritingPlan = writingPlan.sections.find(item => item.section_id === section.id)
+      if (sectionWritingPlan === undefined) throw new Error('writing-plan-section-missing')
       issues.push(...validateChapterReview({
         section,
         requirements: requirements.requirements.filter(item => section.requirement_ids.includes(item.id)),
@@ -257,6 +267,7 @@ export async function validateChapterWriting(
         outlineSections: outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (
           { id, parent_id, title, purpose, must_answer }
         )),
+        sectionWritingPlan,
       }, { section_id: section.id, markdown, metadata: chapter }, review))
     } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the project, or empty.', chapter.content_path) }
   }
@@ -271,23 +282,52 @@ export async function validateChapterWriting(
     reject(issues, 'GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID', 'The document-level compliance review does not match the confirmed outline.', GLOBAL_REVIEW)
   }
   issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalChapters, bidManifest))
-  if (writingPlan.page_target !== null && writingPlan.confirmed_outline_sha256 === outlineHash) {
-    try {
-      const estimate = await estimateChapterWritingPages(workspace, outline)
-      const assessment = assessPageTarget(writingPlan.page_target, estimate.total)
-      if (assessment.status === 'below') {
-        reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_BELOW',
-          `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，低于已确认下限 ${writingPlan.page_target.min_pages} 页，尚差 ${assessment.difference.toFixed(2)} 页。`,
-          'chapters/writing-plan.json')
-      } else if (assessment.status === 'above') {
-        reject(issues, 'CHAPTER_WRITING_PAGE_TARGET_ABOVE',
-          `当前格式下正文估算 ${estimate.total.toFixed(2)} 页，高于已确认上限 ${writingPlan.page_target.max_pages} 页，超出 ${Math.abs(assessment.difference).toFixed(2)} 页。`,
-          'chapters/writing-plan.json')
-      }
-    } catch (error) {
-      reject(issues, 'CHAPTER_WRITING_PAGE_ESTIMATE_UNAVAILABLE',
-        `当前篇幅无法核验：${error instanceof Error ? error.message : String(error)}`, 'chapters/writing-plan.json')
+  const criteria = chapterWritingRequirements(writingPlan)
+  const completion = completionReview.completion
+  const documentSha256 = chapterContentSha256(JSON.stringify(buildChapterWorklist(outline).map((section) => {
+    const chapter = globalChapters.find(item => item.section_id === section.id)
+    return [section.id, chapter?.candidate_sha256 ?? null]
+  })))
+  if (completionReview.confirmed_outline_sha256 !== outlineHash || completion === undefined
+    || completion.plan_version !== writingPlan.plan_version || completion.document_sha256 !== documentSha256
+    || completion.requirements.length !== criteria.length
+    || completion.requirements.some((item, index) => item.requirement_id !== criteria[index]?.id
+      || criteria[index].priority === 'required' && item.status !== 'met')) {
+    reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID', 'The current plan and chapter identities require a complete Main-Agent review with every required criterion met.', COMPLETION_REVIEW)
+  }
+  const allCriteria = [...writingPlan.document_acceptance, ...writingPlan.sections.flatMap(section => section.acceptance_criteria)]
+  const hasPageCriteria = allCriteria.some(item => item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+  const needsPages = allCriteria.some(item => item.priority === 'required'
+    && item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
+  let estimate: Awaited<ReturnType<typeof estimateChapterWritingPages>> | undefined
+  if (hasPageCriteria) {
+    try { estimate = await estimateChapterWritingPages(workspace, outline) } catch (error) {
+      if (needsPages) reject(issues, 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNAVAILABLE', `estimated_pages 无法测量：${error instanceof Error ? error.message : String(error)}`, COMPLETION_REVIEW)
     }
+  }
+  if (estimate !== undefined && completion !== undefined
+    && (completion.format_revision !== estimate.format.revision || completion.pages !== estimate.total)) {
+    reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID',
+      'The completion review must be rerun after the effective Word format or measured page result changes.', COMPLETION_REVIEW)
+  }
+  const globalMarkdown = globalChapters.map(item => item.markdown).join('\n\n')
+  const hostResults = [
+    ...evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
+      markdown: globalMarkdown,
+      ...(estimate === undefined ? {} : { estimatedPages: estimate.total }),
+    }),
+    ...writingPlan.sections.flatMap((section) => {
+      const chapter = globalChapters.find(item => item.section_id === section.section_id)
+      const pages = estimate?.sections.get(section.section_id)?.pages
+      return evaluateHostAcceptanceCriteria(section.acceptance_criteria, {
+        ...(chapter === undefined ? {} : { markdown: chapter.markdown }),
+        ...(pages === undefined ? {} : { estimatedPages: pages }),
+      })
+    }),
+  ]
+  for (const result of hostResults) if (result.status !== 'met'
+    && allCriteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required') {
+    reject(issues, 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNMET', `${result.criterion_id}: ${result.message}`, COMPLETION_REVIEW)
   }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

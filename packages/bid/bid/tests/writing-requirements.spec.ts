@@ -1,104 +1,118 @@
 import { describe, expect, it } from 'vitest'
-import { outlineArtifactSha256, parseWritingPlan, validateWritingPlan } from '@deepseek-ai/dsh-bid'
+import {
+  materializeAcceptanceCriteria,
+  validateWritingPlan,
+  type AcceptanceCriterionInput,
+  type WritingPlanInput,
+} from '../src/writing-requirements.ts'
+import { assessBoundedMetric, evaluateHostAcceptanceCriteria } from '../src/acceptance-criteria.ts'
 import { outlineFixture, writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
 import { renderStageInteractionPrompt, stageInteractionSchema } from '../src/stage-interaction.ts'
-import { assessPageTarget } from '../src/writing-requirements.ts'
 
-describe('S5 整体写作要求计划', () => {
-  it('向 Main Agent 开放自然语言计划确认，而不是固定选项或直接写作', () => {
+function semantic(description: string, priority: 'required' | 'preferred' = 'required'): AcceptanceCriterionInput {
+  return { description, priority, evaluator: { kind: 'semantic' } }
+}
+
+function inputFixture(): WritingPlanInput {
+  const plan = writingPlanFixture(outlineFixture())
+  return {
+    user_requirements: plan.user_requirements,
+    global_instructions: plan.global_instructions,
+    document_acceptance: plan.document_acceptance.map(({ id: _id, scope: _scope, ...criterion }) => criterion),
+    sections: plan.sections.map(section => ({
+      ...section,
+      acceptance_criteria: section.acceptance_criteria.map(({ id: _id, scope: _scope, ...criterion }) => criterion),
+    })),
+    revision: null,
+  }
+}
+
+describe('S5 通用写作任务契约', () => {
+  it('Main Agent 只提交语义契约，Host 字段不出现在工具输入中', () => {
     const prompt = renderStageInteractionPrompt('chapter_writing')
     expect(prompt).toContain('自然语言要求')
-    expect(prompt).toContain('没有特殊要求，直接开始')
-    expect(prompt).toContain('bid_confirm_writing_plan')
-    expect(prompt).toContain('不要直接 write Artifact 或调用其他工具启动章节任务')
-    const { schema_version: _schema, scope: _scope, plan_version: _version, confirmed: _confirmed,
-      confirmed_outline_sha256: _hash, ...input } = writingPlanFixture(outlineFixture())
-    expect(stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input }))
-      .toMatchObject({ action: 'bid_confirm_writing_plan', overall_goal: input.overall_goal })
+    expect(prompt).toContain('global_instructions')
+    expect(prompt).toContain('条件 ID、作用域、计划版本和执行状态由 Host 生成')
+    const input = inputFixture()
+    const parsed = stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input })
+    expect(parsed).toMatchObject({ action: 'bid_confirm_writing_plan', global_instructions: input.global_instructions })
+    expect(() => stageInteractionSchema.parse({
+      action: 'bid_confirm_writing_plan',
+      ...input,
+      document_acceptance: [{ ...input.document_acceptance[0], id: 'MODEL-ID' }],
+    })).toThrow()
   })
 
-  it('只汇总可写叶节预算，并保持整书目标口径一致', () => {
-    const outline = outlineFixture()
-    const plan = {
-      ...writingPlanFixture(outline),
-      user_requirements: ['整份约 200 页，重点展开第一章，按这些要求直接开始'],
-      page_target: { kind: 'approximate' as const, min_pages: 190, max_pages: 210, estimate_basis: '按用户提供的 Word 模板版式估算，实际页数排版后核对。' },
-      priorities: [{ section_ids: ['SEC-1'], instruction: '重点展开技术路线。' }],
-      sections: [
-        { section_id: 'SEC-1', emphasis: 'detailed' as const, page_budget: { min_pages: 100, max_pages: 110 }, instructions: ['展开技术路线。'] },
-        { section_id: 'SEC-2', emphasis: 'standard' as const, page_budget: { min_pages: 60, max_pages: 65 }, instructions: [] },
-        { section_id: 'SEC-3', emphasis: 'concise' as const, page_budget: { min_pages: 30, max_pages: 35 }, instructions: [] },
-      ],
+  it('不同自然语言要求使用同一任务与验收协议', () => {
+    const requirements: AcceptanceCriterionInput[] = [
+      { description: '整本至少 200 页', priority: 'required', evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 200, max: null } },
+      semantic('第三章详细一点，其他章节保持现在这样'),
+      semantic('最好多使用一些表格', 'preferred'),
+      semantic('不要出现没有资料证明的企业能力'),
+      semantic('重点突出实施风险控制'),
+    ]
+    for (const criterion of requirements) {
+      const input = { ...inputFixture(), document_acceptance: [criterion] }
+      expect(stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input }).document_acceptance)
+        .toEqual([criterion])
     }
-
-    expect(validateWritingPlan(plan, outline)).toEqual([])
-    expect(parseWritingPlan({ ...plan, confirmed_outline_sha256: outlineArtifactSha256(outline) }).user_requirements)
-      .toEqual(plan.user_requirements)
-
-    const minimum = {
-      ...plan,
-      user_requirements: ['至少 200 页，按这些要求直接开始'],
-      page_target: { kind: 'minimum' as const, min_pages: 200, max_pages: null, estimate_basis: '按现有版式估算下限。' },
-      sections: [
-        { section_id: 'SEC-1', emphasis: 'detailed' as const, page_budget: { min_pages: 100, max_pages: null }, instructions: [] },
-        { section_id: 'SEC-2', emphasis: 'standard' as const, page_budget: { min_pages: 60, max_pages: null }, instructions: [] },
-        { section_id: 'SEC-3', emphasis: 'standard' as const, page_budget: { min_pages: 40, max_pages: null }, instructions: [] },
-      ],
-    }
-    expect(validateWritingPlan(minimum, outline)).toEqual([])
-    expect(parseWritingPlan({ ...minimum, confirmed_outline_sha256: outlineArtifactSha256(outline) }).page_target)
-      .toMatchObject({ kind: 'minimum', min_pages: 200, max_pages: null })
   })
 
-  it('拒绝父节点预算、叶节遗漏和不一致的整书汇总', () => {
-    const outline = outlineFixture()
-    const plan = writingPlanFixture(outline)
-    const invalid = {
-      ...plan,
-      page_target: { kind: 'range' as const, min_pages: 11, max_pages: 21, estimate_basis: '排版估算。' },
-      sections: [
-        { section_id: 'STRUCT', emphasis: 'standard' as const, page_budget: { min_pages: 5, max_pages: 10 }, instructions: [] },
-        { section_id: 'SEC-1', emphasis: 'standard' as const, page_budget: { min_pages: 5, max_pages: 10 }, instructions: [] },
-      ],
-    }
+  it('Host 生成作用域和 ID，并为未变化条件复用 ID', () => {
+    const input = inputFixture()
+    const first = materializeAcceptanceCriteria(input)
+    expect(first.document_acceptance[0]).toMatchObject({ id: 'AC-000001', scope: { kind: 'document' } })
+    expect(first.sections[0]?.acceptance_criteria[0]).toMatchObject({
+      id: 'AC-000002', scope: { kind: 'section', section_id: 'SEC-1' },
+    })
+    const previous = writingPlanFixture(outlineFixture())
+    const updated = materializeAcceptanceCriteria({
+      ...input,
+      sections: input.sections.map(section => section.section_id === 'SEC-2' ? {
+        ...section, acceptance_criteria: [semantic('第二章采用新的验收条件。')],
+      } : section),
+    }, previous)
+    expect(updated.sections[0]?.acceptance_criteria[0]?.id).toBe('AC-000002')
+    expect(updated.sections[1]?.acceptance_criteria[0]?.id).toBe('AC-000005')
+    expect(updated.sections[2]?.acceptance_criteria[0]?.id).toBe('AC-000004')
+  })
 
-    expect(validateWritingPlan(invalid, outline)).toEqual(expect.arrayContaining([
+  it('只接受覆盖全部可写叶节的契约和最小显式影响范围', () => {
+    const input = inputFixture()
+    const invalid: WritingPlanInput = {
+      ...input,
+      sections: [
+        { ...input.sections[0]!, section_id: 'STRUCT' },
+        input.sections[1]!,
+      ],
+      revision: { summary: '只调整第二章。', affected_section_ids: ['SEC-2', 'SEC-2', 'STRUCT'] },
+    }
+    expect(validateWritingPlan(invalid, outlineFixture())).toEqual(expect.arrayContaining([
       expect.stringContaining('不是已确认目录中的可写叶节'),
-      expect.stringContaining('缺少可写叶节：SEC-2'),
-      expect.stringContaining('叶节最小页数预算汇总'),
-    ]))
-  })
-
-  it('变更影响范围只接受可写叶节且不能重复', () => {
-    const outline = outlineFixture()
-    const plan = {
-      ...writingPlanFixture(outline),
-      revision: { base_plan_version: 1, summary: '只调整第二章。', affected_section_ids: ['SEC-2', 'SEC-2', 'STRUCT'] },
-      plan_version: 2,
-    }
-
-    expect(validateWritingPlan(plan, outline)).toEqual(expect.arrayContaining([
+      expect.stringContaining('缺少可写叶节：SEC-1'),
+      expect.stringContaining('缺少可写叶节：SEC-3'),
       expect.stringContaining('重复：SEC-2'),
       expect.stringContaining('非可写叶节：STRUCT'),
     ]))
   })
 
-  it('使用未取整正文值分别校验下限、上限、区间和约数', () => {
-    const minimum = { kind: 'minimum' as const, min_pages: 200, max_pages: null, estimate_basis: '当前格式。' }
-    const maximum = { kind: 'maximum' as const, min_pages: null, max_pages: 200, estimate_basis: '当前格式。' }
-    const range = { kind: 'range' as const, min_pages: 190, max_pages: 210, estimate_basis: '当前格式。' }
-    const approximate = { ...range, kind: 'approximate' as const }
-
-    const below = assessPageTarget(minimum, 199.999)
+  it('确定性执行只读取 evaluator 判别标签，不读取条件描述', () => {
+    const semanticCriterion = {
+      ...semantic('整本至少 200 页'), id: 'AC-000001', scope: { kind: 'document' as const },
+    }
+    const deterministicCriterion = {
+      description: '任意描述', priority: 'required' as const,
+      evaluator: { kind: 'deterministic' as const, metric: 'estimated_pages' as const, min: 200, max: null },
+      id: 'AC-000002', scope: { kind: 'document' as const },
+    }
+    expect(evaluateHostAcceptanceCriteria([semanticCriterion], { estimatedPages: 199.999 })).toEqual([])
+    expect(evaluateHostAcceptanceCriteria([deterministicCriterion], { estimatedPages: 199.999 })[0])
+      .toMatchObject({ criterion_id: 'AC-000002', status: 'unmet', measured: 199.999 })
+    const below = assessBoundedMetric(200, null, 199.999)
+    const above = assessBoundedMetric(null, 200, 200.001)
     expect(below.status).toBe('below')
-    if (below.status === 'below') expect(below.difference).toBeCloseTo(0.001)
-    expect(assessPageTarget(minimum, 200)).toEqual({ status: 'met', difference: 0 })
-    const above = assessPageTarget(maximum, 200.001)
+    expect(below.difference).toBeCloseTo(0.001)
     expect(above.status).toBe('above')
-    if (above.status === 'above') expect(above.difference).toBeCloseTo(-0.001)
-    expect(assessPageTarget(range, 189.999).status).toBe('below')
-    expect(assessPageTarget(range, 210.001).status).toBe('above')
-    expect(assessPageTarget(approximate, 200)).toEqual({ status: 'met', difference: 0 })
-    expect(assessPageTarget(null, 0)).toEqual({ status: 'not_required' })
+    expect(above.difference).toBeCloseTo(0.001)
   })
 })

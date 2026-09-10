@@ -19,6 +19,7 @@ export const STAGE_RUN_STATUSES = [
   'waiting_start',
   'running',
   'waiting_user',
+  'attention_required',
   'failed',
   'completed',
 ] as const
@@ -131,6 +132,14 @@ export class BidStageExecutionError extends Error {
       issue.message,
     ].filter(value => value !== undefined).join(' ')).join('; '))
     this.name = 'BidStageExecutionError'
+  }
+}
+
+/** A business result that preserves usable stage artifacts while requiring a bounded recovery or user decision. */
+export class BidStageAttentionRequiredError extends BidStageExecutionError {
+  constructor(issues: readonly StageValidationIssue[]) {
+    super(issues)
+    this.name = 'BidStageAttentionRequiredError'
   }
 }
 
@@ -316,7 +325,7 @@ export type BidDocxExportErrorCode =
 
 /** Result returned after an on-demand DOCX export settles without changing S5 state. */
 export type BidDocxExportResult =
-  | { readonly ok: true; readonly value: { readonly path: string } }
+  | { readonly ok: true; readonly value: { readonly path: string; readonly warnings?: readonly StageValidationIssue[] } }
   | {
     readonly ok: false
     readonly error: { readonly code: BidDocxExportErrorCode; readonly message: string; readonly issues?: readonly StageValidationIssue[] }

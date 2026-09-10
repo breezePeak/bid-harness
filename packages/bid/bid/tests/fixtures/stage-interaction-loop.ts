@@ -56,15 +56,18 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const concurrent: Promise<string>[] = []
   const releaseObserver = ctx.on('session/event', (session, event) => {
     if (session !== agent.session || event.type !== 'bid.stage.started') return
-    if (ctx.bail('session/prompt-admission', { session, mode: 'steer', content: [{ type: 'text', text: 'test' }] }) === undefined) throw new Error('阶段执行期间接受了普通消息')
-    concurrent.push(ctx.bid.applyOutlineDraftOperations(session, { expected_revision: 1, expected_draft_sha256: 'a'.repeat(64), operations: [] })
+    concurrent.push(ctx.serial('session/prompt-admission', { session, mode: 'steer', content: [{ type: 'text', text: 'test' }] })
+      .then((rejection) => {
+        if (rejection === undefined) throw new Error('阶段执行期间接受了普通消息')
+        return ctx.bid.applyOutlineDraftOperations(session, { expected_revision: 1, expected_draft_sha256: 'a'.repeat(64), operations: [] })
+      })
       .then(() => 'unexpected success', (error: unknown) => error instanceof BidOrchestratorError ? error.code : String(error)))
   }, { global: true })
   const turns: Array<{ input: string; admitted: boolean }> = []
   const send = async (input: string, script: StreamChunk[][]) => {
-    const rejection = ctx.bail('session/prompt-admission', { session: agent.session, mode: 'steer', content: [{ type: 'text', text: input }] })
+    const rejection = await ctx.serial('session/prompt-admission', { session: agent.session, mode: 'steer', content: [{ type: 'text', text: input }] })
     turns.push({ input, admitted: rejection === undefined })
-    if (rejection !== undefined) throw new Error(JSON.stringify(rejection))
+    if (rejection !== undefined) throw new Error(`${input}: ${JSON.stringify(rejection)}`)
     parentScript.push(...script)
     agent.followup(createUserMessage({ content: [{ type: 'text', text: input }], source: { kind: 'user' } }))
     await agent.whenIdle()

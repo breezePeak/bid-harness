@@ -30,7 +30,12 @@ export type GlobalComplianceEvidence =
   | { readonly evidence_ref: string; readonly kind: 'chapter_quote'; readonly section_id: string; readonly quote: string }
   | { readonly evidence_ref: string; readonly kind: 'material'; readonly file_id: string; readonly name: string; readonly role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }
 
-/** Build stable evidence references from current chapter lines and imported material identities. */
+/**
+ * Build stable evidence references from current chapter lines and imported material identities.
+ * @param chapters Current accepted chapter bodies.
+ * @param manifest Current imported-material identities.
+ * @returns Stable evidence references in chapter then manifest order.
+ */
 export function buildGlobalComplianceEvidence(
   chapters: readonly GlobalComplianceChapter[], manifest: BidManifest,
 ): GlobalComplianceEvidence[] {
@@ -150,6 +155,7 @@ export function validateGlobalComplianceReview(
  * Install the document-level review tools on the existing S5 Main Agent.
  * @param agent S5 Main Agent.
  * @param outline Current confirmed outline.
+ * @param outlineHash SHA-256 identity of the confirmed outline.
  * @param compliance Canonical compliance input.
  * @param chapters Current chapter bodies and hashes.
  * @param evidence Host-bound evidence choices.

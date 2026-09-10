@@ -11,6 +11,7 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { readChapterWebSource } from './chapter-writing-writer.ts'
 import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
+import type { HostAcceptanceResult } from './acceptance-criteria.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
 export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
@@ -18,7 +19,7 @@ export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_global_con
 /** Checklist 的种类及其在当前章节的规范位置。 */
 export interface ChapterReviewItem {
   readonly item_ref: string
-  readonly kind: 'must_answer' | 'requirement' | 'response_point' | 'compliance'
+  readonly kind: 'must_answer' | 'requirement' | 'response_point' | 'compliance' | 'acceptance_criterion'
   readonly id: string | null
   readonly text: string
 }
@@ -44,6 +45,8 @@ export function buildChapterReviewChecklist(context: ChapterContext): ChapterRev
     ...context.requirements.map(value => ({ kind: 'requirement' as const, id: value.id, text: value.normalized_requirement })),
     ...context.responsePoints.map(value => ({ kind: 'response_point' as const, id: value.id, text: value.text })),
     ...context.compliance.map(value => ({ kind: 'compliance' as const, id: value.id, text: value.normalized_rule })),
+    ...context.sectionWritingPlan.acceptance_criteria.filter(value => value.evaluator.kind === 'semantic')
+      .map(value => ({ kind: 'acceptance_criterion' as const, id: value.id, text: value.description })),
   ]
   return items.map((item, index) => ({ item_ref: `R${index + 1}`, ...item }))
 }
@@ -123,11 +126,13 @@ const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.sha
  * @param quotes 当前候选专属 Q 引用。
  * @param evidence 当前候选只读 E 引用。
  * @param maxContinuations 未 finish 时同一 Child 的有限续行次数。
+ * @param hostAcceptanceResults 当前章节确定性条件的 Host 测量。
  * @returns 仅在权威 finish 结果成功后可读的报告。
  */
 export function attachChapterReview(
   agent: Agent, context: ChapterContext, quotes: ReadonlyMap<string, string>,
   evidence: readonly ChapterReviewEvidence[], maxContinuations: number,
+  hostAcceptanceResults: readonly HostAcceptanceResult[] = [],
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
@@ -274,11 +279,17 @@ export function attachChapterReview(
         }))
         const blocking = [...new Set([
           ...summary.blocking_issues,
-          ...entries.filter(entry => entry.result.status === 'missing').map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
+          ...entries.filter(entry => entry.result.status === 'missing'
+            && (entry.item.kind !== 'acceptance_criterion'
+              || context.sectionWritingPlan.acceptance_criteria.find(item => item.id === entry.item.id)?.priority === 'required'))
+            .map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
           ...Object.entries(summary.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
           ...claimChecks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
           ...[...globalChecks.values()].filter(item => item.status === 'violates')
             .map(item => `违反全局约束：${context.globalCompliance.find(value => value.id === item.compliance_id)?.normalized_rule}；${item.issue}`),
+          ...hostAcceptanceResults.filter(result => result.status !== 'met'
+            && context.sectionWritingPlan.acceptance_criteria.find(item => item.id === result.criterion_id)?.priority === 'required')
+            .map(item => `动态验收未通过：${context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)?.description}；${item.message}`),
         ])]
         const globalComplianceChecks = context.globalCompliance.map((item) => {
           const result = globalChecks.get(item.id)
@@ -288,6 +299,34 @@ export function attachChapterReview(
             evidence_quotes: result.evidence_quote_refs.map(quote), issue: result.issue,
           }
         })
+        const semanticAcceptance = new Map(entries.filter(entry => entry.item.kind === 'acceptance_criterion')
+          .map(entry => [entry.item.id, entry] as const))
+        const acceptanceCriteriaCoverage = context.sectionWritingPlan.acceptance_criteria.map((item) => {
+          if (item.evaluator.kind === 'semantic') {
+            const entry = semanticAcceptance.get(item.id)
+            if (entry === undefined) throw new Error(`S5 review lost acceptance criterion ${item.id}`)
+            return {
+              criterion_id: item.id,
+              item: item.description,
+              evaluator: 'semantic' as const,
+              status: entry.result.status === 'covered' ? 'met' as const : 'unmet' as const,
+              evidence_quotes: entry.value.evidence_quotes,
+              measured: null,
+              issue: entry.value.issue,
+            }
+          }
+          const result = hostAcceptanceResults.find(value => value.criterion_id === item.id)
+            ?? { criterion_id: item.id, status: 'unavailable' as const, measured: null, message: 'Host 未提供测量结果。' }
+          return {
+            criterion_id: item.id,
+            item: item.description,
+            evaluator: 'deterministic' as const,
+            status: result.status,
+            evidence_quotes: [],
+            measured: result.measured,
+            issue: result.status === 'met' ? null : result.message,
+          }
+        })
         const review = parseChapterReview({
           schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
           verdict: summary.assignment_conflicts.length > 0 ? 'blocked' : blocking.length === 0 ? 'pass' : 'repair',
@@ -295,6 +334,7 @@ export function attachChapterReview(
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),
           response_point_coverage: entries.filter(entry => entry.item.kind === 'response_point').map(entry => ({ ...entry.value, response_point_id: entry.item.id })),
           compliance_coverage: entries.filter(entry => entry.item.kind === 'compliance').map(entry => ({ ...entry.value, compliance_id: entry.item.id })),
+          acceptance_criteria_coverage: acceptanceCriteriaCoverage,
           global_compliance_checks: globalComplianceChecks,
           assignment_conflicts: summary.assignment_conflicts,
           claim_checks: claimChecks, quality_checks: summary.quality_checks, blocking_issues: blocking,

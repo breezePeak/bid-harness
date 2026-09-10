@@ -158,8 +158,15 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
         } }
     }
     case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'failed' || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
+      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'failed'
+        || state.stage === 'chapter_writing' && state.status === 'attention_required'
+        || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
         ? { stage: state.stage, status: 'running' } : state
+    case 'bid.stage.attention_required':
+      return event.data.stage === state.stage && state.stage === 'chapter_writing' && state.status === 'running'
+        ? { stage: state.stage, status: 'attention_required', failureReason: event.data.reason,
+          failureIssues: event.data.issues.map(issue => ({ ...issue })) }
+        : state
     case 'bid.stage.failed':
       return event.data.stage === state.stage && state.status === 'running'
         ? { stage: state.stage, status: 'failed', failureReason: event.data.reason,
@@ -172,7 +179,7 @@ export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEven
     case 'bid.user_confirmation.required':
       return event.data.stage === state.stage && getBidStagePolicy(state.stage).userGate !== 'none'
         && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'running' || state.status === 'failed'
-          || state.stage === 'chapter_writing' && state.status === 'completed')
+          || state.stage === 'chapter_writing' && (state.status === 'completed' || state.status === 'attention_required'))
         ? { stage: state.stage, status: 'waiting_user' } : state
     case 'bid.user_confirmation.received':
       if (event.data.stage !== state.stage || state.status !== 'waiting_user') return state
@@ -202,6 +209,10 @@ export function getBidClientProjection(
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (runtime.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { runtime: { ...runtime }, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
   if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
+  if (runtime.stage === 'chapter_writing' && runtime.status === 'attention_required') return {
+    runtime: { ...runtime }, allowedActions: ['send_message', 'retry_stage', 'export_docx', 'revise_chapter'],
+    composer: { enabled: true }, ...fileView,
+  }
   if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
   if (runtime.status === 'running') return runtime.stage === 'chapter_writing'
     ? { runtime: { ...runtime }, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }

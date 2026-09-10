@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import mammoth from 'mammoth'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
-import { executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
+import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
 import { parseWritingPlan } from '../src/writing-requirements.ts'
@@ -81,26 +81,32 @@ describe('Bid DOCX export', () => {
     expect(html).toContain('<h2><strong>交付</strong></h2>')
   })
 
-  it('DOCX 可读取但正文低于已确认下限时仍拒绝篇幅验收', async () => {
+  it('DOCX 可读取但正文低于已确认下限时仍生成文件并单独报告篇幅', async () => {
     const { workspace, outline } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
     const plan = parseWritingPlan({
-      schema_version: 1, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
-      user_requirements: ['至少 200 页。'], overall_goal: '完整响应招标要求。', style_rules: [], global_rules: [], priorities: [],
-      page_target: { kind: 'minimum', min_pages: 200, max_pages: null, estimate_basis: '按当前 Word 格式估算。' },
-      sections: ['resource', 'delivery'].map(section_id => ({
-        section_id, emphasis: 'standard', page_budget: { min_pages: 100, max_pages: null }, instructions: [],
+      user_requirements: ['至少 200 页。'], global_instructions: ['完整响应招标要求。'],
+      document_acceptance: [{
+        id: 'AC-000001', scope: { kind: 'document' }, description: '整本至少 200 页。', priority: 'required',
+        evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 200, max: null },
+      }],
+      sections: ['resource', 'delivery'].map((section_id, index) => ({
+        section_id, task: '完成本章技术响应。', user_requirements: [], writing_instructions: [],
+        acceptance_criteria: [{
+          id: `AC-00000${index + 2}`, scope: { kind: 'section', section_id }, description: '完成本章任务。',
+          priority: 'required', evaluator: { kind: 'semantic' },
+        }],
       })),
       revision: null,
     })
     await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), `${JSON.stringify(plan)}\n`)
 
-    const result = await validateDocxExport(workspace, 'docx_export', artifacts)
-    expect(result.ok).toBe(false)
-    if (result.ok) throw new Error('正文不足未被拒绝')
-    expect(result.issues).toHaveLength(1)
-    expect(result.issues[0]?.code).toBe('DOCX_EXPORT_PAGE_TARGET_BELOW')
+    await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
+    const warnings = await assessDocxExportPageTarget(workspace)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]?.code).toBe('DOCX_EXPORT_PAGE_TARGET_BELOW')
     await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).resolves.not.toHaveLength(0)
   })
 

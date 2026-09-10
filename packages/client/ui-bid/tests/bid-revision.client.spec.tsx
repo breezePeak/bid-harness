@@ -19,7 +19,7 @@ const chapter: BidReviewChapterView = {
 
 function composer() {
   const store = createBidRevisionStore().create()
-  const reviseChapter = vi.fn(async () => {})
+  const sendMessage = vi.fn(async () => {})
   const getChapter = vi.fn(async () => chapter)
   let submit: ComposerSubmitHandler | undefined
   const registerSubmit = vi.fn((handler: ComposerSubmitHandler) => {
@@ -33,24 +33,23 @@ function composer() {
     useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => (
       select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot()))
     ),
-    actions: store.actions, getChapter, reviseChapter, registerSubmit,
+    actions: store.actions, getChapter, sendMessage, registerSubmit,
   } as BidComposerContextProps
   const view = render(<div data-composer-card=""><BidComposerContext {...props} /><textarea aria-label="编写意见" /></div>)
   const drop = (sessionId = 'bid') => fireEvent.drop(view.container.firstChild!, {
     dataTransfer: { types: [CHAPTER_DRAG_TYPE], getData: () => JSON.stringify({ sessionId, sectionId: 'SEC-1' }) },
   })
-  return { ...view, store, drop, getChapter, reviseChapter, submit: (...args: Parameters<ComposerSubmitHandler>) => submit!(...args) }
+  return { ...view, store, drop, getChapter, sendMessage, submit: (...args: Parameters<ComposerSubmitHandler>) => submit!(...args) }
 }
 
-it('章节拖入生成独立标签，意见只提交给修订动作，成功刷新并释放引用', async () => {
+it('章节拖入生成独立标签，引用随普通消息交给主 Agent 判断，成功后释放引用', async () => {
   const view = composer()
   view.drop()
   expect(await screen.findByText('章节 · 1 实施方案')).toBeTruthy()
   expect(screen.getByRole('textbox', { name: '编写意见' })).toHaveProperty('value', '')
   await act(async () => { expect(await view.submit('请最小修改', [], undefined)).toEqual({ kind: 'success' }) })
-  expect(view.reviseChapter).toHaveBeenCalledWith({ instruction: '请最小修改', reference: {
-    scope: 'chapter', section_id: 'SEC-1', content_sha256: chapter.content_sha256,
-  } })
+  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'))
+  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('请最小修改'))
   expect(view.store.getSnapshot()).toMatchObject({ reference: null, revision: 1 })
   view.unmount()
 })
@@ -63,8 +62,8 @@ it('失败保留标签，缺少引用时交还普通写作要求消息，并拒�
   expect(view.getChapter).not.toHaveBeenCalled()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
-  view.reviseChapter.mockRejectedValueOnce(new Error('正文已变化'))
-  await act(async () => { await expect(view.submit('重写', [], undefined)).rejects.toThrow('正文已变化') })
+  view.sendMessage.mockRejectedValueOnce(new Error('发送失败'))
+  await act(async () => { await expect(view.submit('这是什么意思', [], undefined)).rejects.toThrow('发送失败') })
   expect(view.store.getSnapshot().reference).not.toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '移除章节引用' }))
   await waitFor(() => { expect(view.store.getSnapshot().reference).toBeNull() })
