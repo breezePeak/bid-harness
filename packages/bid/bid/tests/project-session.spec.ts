@@ -271,15 +271,12 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 4, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 5, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       compliance_coverage: [],
-      acceptance_criteria_coverage: [{
-        criterion_id: 'AC-000002', item: '完成本章任务。', evaluator: 'semantic', status: 'unmet',
-        evidence_quotes: [], measured: null, issue: '尚未完成本章任务。',
-      }],
+      acceptance_criteria_results: [],
       global_compliance_checks: [],
       assignment_conflicts: [],
       claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
@@ -325,6 +322,7 @@ describe('Workspace 项目与独立 Session', () => {
         role: 'reviewer', attempt: 1, child_session_id: 'reviewer-b', label: 'S5 审核',
         started_at: '2026-09-09T00:00:00.000Z', ended_at: '2026-09-09T00:00:01.000Z', stop_reason: 'error', accepted: false,
         issues: [{ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: 'Chapter Reviewer 未正常完成：error。' }],
+        input: { plan_version: 1, section_epoch: 0, dependencies: [] },
       }], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: null,
     }
     await writeFile(logPath, `${JSON.stringify(log)}\n`)
@@ -469,9 +467,54 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
-      .resolves.toContain('"base_plan_version": 1')
+      .rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toContain('已有正文')
     expect(executor.execute).not.toHaveBeenCalled()
+  })
+
+  it('多轮用户原话通过稳定引用共同进入一个 Task Contract patch', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('multi-turn-contract')
+    for (const content of ['第二章写详细一点。', '对，其他章节不用动。']) {
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: content }], source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
+    }
+    const inspected = await ctx.tools.execute({
+      agent, name: 'bid_stage_inspect', arguments: { view: 'task_contract_context' },
+      callId: CallId('multi-turn-inspect'), signal: new AbortController().signal,
+    })
+    expect(inspected.isError).toBe(false)
+    const refs = (inspected.value as { task_contract_context: { user_messages: Array<{ ref: object; text: string }> } })
+      .task_contract_context.user_messages
+    expect(refs.map(item => item.text)).toEqual(['第二章写详细一点。', '对，其他章节不用动。'])
+
+    const committed = await ctx.tools.execute({
+      agent, name: 'bid_confirm_writing_plan', arguments: {
+        update_kind: 'patch', base_plan_version: 1,
+        user_message_refs: refs.map(item => item.ref), summary: '只细化现有技术方案章节。',
+        affected_section_ids: [],
+        sections: [{
+          section_id: 'SEC-1', task: '详细完成技术方案。',
+          add_user_message_refs: refs.map(item => item.ref),
+        }],
+      },
+      callId: CallId('multi-turn-commit'), signal: new AbortController().signal,
+    })
+    expect(committed.isError, JSON.stringify(committed)).toBe(false)
+    expect(committed.value).toMatchObject({ ok: true, plan_version: 2 })
+    const plan = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')) as {
+      user_requirements: string[]
+      sections: Array<{ user_requirements: string[] }>
+      revision: { affected_section_ids: string[] }
+    }
+    expect(plan.user_requirements).toEqual([
+      '没有特殊要求，直接开始', '第二章写详细一点。', '对，其他章节不用动。',
+    ])
+    expect(plan.sections[0]?.user_requirements).toEqual(['第二章写详细一点。', '对，其他章节不用动。'])
+    expect(plan.revision.affected_section_ids).toEqual(['SEC-1'])
   })
 
   it('S5 完成且无运行操作时通过真实工具读取任务上下文，不重开写作', async () => {
@@ -545,7 +588,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'chapter_writing')).toBe(true)
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
-      .resolves.toContain('"base_plan_version": 1')
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('旧 Session 日志落盘失败不会让新聊天以 S1 覆盖已有 S4 项目', async () => {

@@ -20,9 +20,10 @@ const outline: OutlineArtifact = {
 
 function validPlan(): ChapterExecutionPlan {
   return {
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     scope: 'technical_bid' as const,
     confirmed_outline_sha256: hash,
+    writing_plan_version: 7,
     global_consistency_notes: ['统一术语。'],
     sections: [
       { section_id: 'A', depends_on: [], related_sections: [{ section_id: 'C', strength: 'weak' as const, reason: '共享术语。' }], planning_notes: [] },
@@ -34,7 +35,7 @@ function validPlan(): ChapterExecutionPlan {
 
 describe('chapter execution plan', () => {
   it('accepts complete acyclic coverage', () => {
-    expect(validateChapterExecutionPlan(parseChapterExecutionPlan(validPlan()), outline, hash)).toEqual([])
+    expect(validateChapterExecutionPlan(parseChapterExecutionPlan(validPlan()), outline, hash, 7)).toEqual([])
   })
 
   it.each([
@@ -51,7 +52,12 @@ describe('chapter execution plan', () => {
   ])('rejects %s', (_name, mutate, code) => {
     const plan = validPlan()
     mutate(plan)
-    expect(validateChapterExecutionPlan(parseChapterExecutionPlan(plan), outline, hash).map(item => item.code)).toContain(code)
+    expect(validateChapterExecutionPlan(parseChapterExecutionPlan(plan), outline, hash, 7).map(item => item.code)).toContain(code)
+  })
+
+  it('rejects a relation plan bound to an older Writing Plan', () => {
+    expect(validateChapterExecutionPlan(validPlan(), outline, hash, 8).map(item => item.code))
+      .toContain('CHAPTER_PLAN_WRITING_PLAN_INVALID')
   })
 
   it('rejects schema versions and empty reasons at strict parsing', () => {

@@ -466,8 +466,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     writeFile(evidencePath, evidenceBefore),
     writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: unavailableSources })),
     writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
-      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineHash,
+      user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
       user_requirements: ['整份约 20 页，重点展开访问控制，使用正式技术方案风格，按这些要求直接开始。'],
       global_instructions: ['完整响应访问控制与安全审计要求。', '使用正式、可执行的技术方案表述。'],
       document_acceptance: [{
@@ -475,7 +476,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
         priority: 'required', evaluator: { kind: 'semantic' },
       }],
       sections: [{
-        section_id: section.id, task: '完整响应访问控制与安全审计要求。', user_requirements: ['重点展开访问控制。'],
+        section_id: section.id, task: '完整响应访问控制与安全审计要求。',
+        user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
+        user_requirements: ['重点展开访问控制。'],
         writing_instructions: ['展开访问控制实施流程。'],
         acceptance_criteria: [{
           id: 'AC-000002', scope: { kind: 'section', section_id: section.id }, description: '详细说明访问控制实施流程。',
@@ -515,9 +518,8 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('finish-global-review', 'finish_global_compliance_review', {}),
     toolCall('finish-writing-plan', 'submit_chapter_writing_completion_review', {
       action: 'complete', reason: '章节与整书 required 条件均已满足。',
-      requirements: [
-        { requirement_id: 'AC-000001', status: 'met', note: '整书术语与技术响应一致。', section_ids: [] },
-        { requirement_id: 'AC-000002', status: 'met', note: '本章已完整说明访问控制实施流程。', section_ids: ['SEC-SECURITY'] },
+      document_acceptance: [
+        { criterion_id: 'AC-000001', status: 'met', evidence_quote_refs: [], reason: '整书术语与技术响应一致。' },
       ],
     }),
   ]
@@ -534,6 +536,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('review-global-constraint', 'review_global_constraints', {
       items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
+    }),
+    toolCall('review-acceptance', 'review_acceptance_criteria', {
+      items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
     }),
     toolCall('submit-summary', 'set_review_summary', summary),
     toolCall('finish-review', 'finish_chapter_review', {}),

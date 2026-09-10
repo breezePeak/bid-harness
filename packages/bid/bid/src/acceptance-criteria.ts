@@ -1,5 +1,17 @@
 /** Deterministic evaluators for Main-Agent-authored acceptance criteria. */
+import { z } from 'zod'
 import type { AcceptanceCriterion } from './writing-requirements.ts'
+
+/** Semantic Reviewer submission; quote refs are optional evidence, not coverage proof. */
+export const semanticAcceptanceSubmissionSchema = z.object({
+  criterion_id: z.string().min(1),
+  status: z.enum(['met', 'unmet']),
+  evidence_quote_refs: z.array(z.string().min(1)),
+  reason: z.string().trim().min(1),
+}).strict()
+
+/** One semantic acceptance result before Host quote resolution. */
+export type SemanticAcceptanceSubmission = z.infer<typeof semanticAcceptanceSubmissionSchema>
 
 /** Host inputs available at either a chapter or whole-document boundary. */
 export interface HostAcceptanceContext {

@@ -17,7 +17,11 @@ import { parseScoringResponsePointCatalog } from './scoring-response-point-artif
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from './runtime-state.ts'
-import { parseWritingPlan, writingPlanInputSchema } from './writing-requirements.ts'
+import {
+  initialWritingPlanInputSchema,
+  parseWritingPlan,
+  writingPlanPatchInputSchema,
+} from './writing-requirements.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
@@ -29,7 +33,7 @@ const identity = { expected_revision: z.number().int().positive(), expected_draf
 const scope = z.array(z.string().min(1)).min(1)
 
 /** 在工具执行入口重新验证阶段操作参数，CAS 必须来自最近一次 inspect。 */
-export const stageInteractionSchema = z.discriminatedUnion('action', [
+export const stageInteractionSchema = z.union([
   z.object({
     action: z.literal('bid_stage_inspect'),
     view: z.enum(['summary', 'task_contract_context']).optional(),
@@ -38,7 +42,8 @@ export const stageInteractionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
-  writingPlanInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),
+  initialWritingPlanInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),
+  writingPlanPatchInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),
   chapterRevisionRequestSchema.extend({ action: z.literal('bid_revise_chapter') }).strict(),
 ])
 
@@ -93,6 +98,13 @@ async function inspectBidStageValue(
         compliance,
         blueprint: outline,
         evidence: parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json')),
+        user_messages: session.events.slice(-200).flatMap(event => event.type === 'user/message'
+          && event.data.source.kind === 'user'
+          ? [{
+            ref: { session_id: String(session.id), message_id: String(event.data.id), seq: event.seq },
+            text: event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'),
+          }]
+          : []),
       }
       : undefined
     let writing_plan = null
@@ -202,10 +214,11 @@ export function renderStageInteractionPrompt(stage: string): string {
     '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；需要改变目录时，引导用户重置并重新确认 S4，不得偷偷改目录。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
     '有特殊要求时，先用简短中文说明你的理解、重点和篇幅安排并请用户确认；用户已明确说“按这些要求直接开始”或“没有特殊要求，直接开始”时无需再次确认。',
-    '把自然语言要求统一拆成 global_instructions、每个可写叶节的 task、相关 user_requirements、writing_instructions、章节 acceptance_criteria 和 document_acceptance。程序不会按用户措辞选择任务结构；由你根据语义决定作用范围、required/preferred 和验收方式。',
+    '把自然语言要求统一拆成 global_instructions、每个可写叶节的 task、相关 user_message_refs、writing_instructions、章节 acceptance_criteria 和 document_acceptance。程序不会按用户措辞选择任务结构；由你根据语义决定作用范围、required/preferred 和验收方式。',
     'semantic 条件交给 Reviewer 根据正文判断；只有要求能直接绑定工具 schema 已列出的 Host metric 时才使用 deterministic，数值由 Host 测量，不自行计算。条件 ID、作用域、计划版本和执行状态由 Host 生成，不得在描述中伪造这些字段。',
-    '获得确认或直接开始授权后调用 bid_confirm_writing_plan。user_requirements 必须逐条原样复制本次门禁期间的用户表述；Host 会与既有原话合并。sections 必须覆盖每个可写叶节且只出现一次，每节都要有具体 task 和至少一个动态验收条件。',
-    '首次计划的 revision 填 null。修改既有计划时，revision.summary 说明调整安排，revision.affected_section_ids 只列按新要求需要改写的可写叶节；未开始任务自动采用新计划，已完成的受影响章节及其强依赖下游会定向重写。全局变化确实影响全部正文时才列出全部叶节。',
+    '获得确认或直接开始授权后调用 bid_confirm_writing_plan。只引用 task_contract_context.user_messages 中确实构成写作要求或确认语境的 ref；Host 从 Session Log 回查并持久化准确原文，进度询问等普通消息不得引用。',
+    '首次提交 update_kind=initial 的完整计划，sections 覆盖每个可写叶节且只出现一次。没有额外动态验收条件时 document_acceptance 和章节 acceptance_criteria 可以为空，固定 Reviewer 仍会执行。',
+    '修改既有计划时提交 update_kind=patch 和当前 base_plan_version，只列真实变化的全局指令、document acceptance、section task/instructions/acceptance 以及明确删除的 criterion ID。affected_section_ids 表示语义影响范围；Host 自动纳入实际修改的章节，未修改章节及其 AC ID 保持不变。',
     '工具成功即完成确认；随后 Host 会在本轮结束后启动既有章节写作与审核链路。不要直接 write Artifact 或调用其他工具启动章节任务。',
   ].join('\n')
   return [
@@ -277,6 +290,7 @@ export function installStageInteractionTools(
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan' || name === 'bid_revise_chapter' ? {} : { ...cas }
           const required = Object.keys(properties)
+          let parameters: JsonSchemaNode | undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
             type: 'object', properties: { section_id: text, content_sha256: text, scope: { type: 'string', enum: ['chapter'] } },
             required: ['section_id', 'content_sha256', 'scope'], additionalProperties: false,
@@ -305,36 +319,65 @@ export function installStageInteractionTools(
           if (name === 'bid_outline_regenerate_scope') { properties.feedback = text; required.push('feedback') }
           if (name === 'bid_evidence_remap') { properties.reason = text; properties.mode = { type: 'string', enum: ['replace', 'supplement'] } }
           if (name === 'bid_confirm_writing_plan') {
-            properties.user_requirements = strings
-            properties.global_instructions = strings
+            const acceptanceEvaluator: JsonSchemaNode = { oneOf: [
+              { type: 'object', properties: { kind: { type: 'string', enum: ['semantic'] } }, required: ['kind'], additionalProperties: false },
+              { type: 'object', properties: {
+                kind: { type: 'string', enum: ['deterministic'] },
+                metric: { type: 'string', enum: ['estimated_pages', 'character_count'] },
+                min: { oneOf: [{ type: 'number' }, { type: 'null' }] },
+                max: { oneOf: [{ type: 'number' }, { type: 'null' }] },
+              }, required: ['kind', 'metric', 'min', 'max'], additionalProperties: false },
+            ] }
             const acceptanceCriterion: JsonSchemaNode = {
               type: 'object', properties: {
                 description: text,
                 priority: { type: 'string', enum: ['required', 'preferred'] },
-                evaluator: { oneOf: [
-                  { type: 'object', properties: { kind: { type: 'string', enum: ['semantic'] } }, required: ['kind'], additionalProperties: false },
-                  { type: 'object', properties: {
-                    kind: { type: 'string', enum: ['deterministic'] },
-                    metric: { type: 'string', enum: ['estimated_pages', 'character_count'] },
-                    min: { oneOf: [{ type: 'number' }, { type: 'null' }] },
-                    max: { oneOf: [{ type: 'number' }, { type: 'null' }] },
-                  }, required: ['kind', 'metric', 'min', 'max'], additionalProperties: false },
-                ] },
+                evaluator: acceptanceEvaluator,
               }, required: ['description', 'priority', 'evaluator'], additionalProperties: false,
             }
-            properties.document_acceptance = { type: 'array', items: acceptanceCriterion }
-            properties.sections = { type: 'array', items: {
+            const messageRef: JsonSchemaNode = {
+              type: 'object', properties: { session_id: text, message_id: text, seq: { type: 'integer' } },
+              required: ['session_id', 'message_id', 'seq'], additionalProperties: false,
+            }
+            const messageRefs: JsonSchemaNode = { type: 'array', items: messageRef }
+            const criterionDelta: JsonSchemaNode = {
               type: 'object', properties: {
-                section_id: text, task: text, user_requirements: strings,
+                add: { type: 'array', items: acceptanceCriterion },
+                update: { type: 'array', items: { type: 'object', properties: {
+                  criterion_id: text,
+                  description: text,
+                  priority: { type: 'string', enum: ['required', 'preferred'] },
+                  evaluator: acceptanceEvaluator,
+                }, required: ['criterion_id'], additionalProperties: false } },
+                delete: strings,
+              }, required: ['add', 'update', 'delete'], additionalProperties: false,
+            }
+            const initialSections: JsonSchemaNode = { type: 'array', items: {
+              type: 'object', properties: {
+                section_id: text, task: text, user_message_refs: messageRefs,
                 acceptance_criteria: { type: 'array', items: acceptanceCriterion },
                 writing_instructions: strings,
-              }, required: ['section_id', 'task', 'user_requirements', 'writing_instructions', 'acceptance_criteria'], additionalProperties: false,
+              }, required: ['section_id', 'task', 'user_message_refs', 'writing_instructions', 'acceptance_criteria'], additionalProperties: false,
             } }
-            properties.revision = { oneOf: [{
-              type: 'object', properties: { summary: text, affected_section_ids: strings },
-              required: ['summary', 'affected_section_ids'], additionalProperties: false,
-            }, { type: 'null' }] }
-            required.push('user_requirements', 'global_instructions', 'document_acceptance', 'sections', 'revision')
+            const patchSections: JsonSchemaNode = { type: 'array', items: {
+              type: 'object', properties: {
+                section_id: text, task: text, add_user_message_refs: messageRefs,
+                acceptance_criteria: criterionDelta, writing_instructions: strings,
+              }, required: ['section_id'], additionalProperties: false,
+            } }
+            parameters = { oneOf: [{
+              type: 'object', properties: {
+                update_kind: { type: 'string', enum: ['initial'] }, user_message_refs: messageRefs,
+                global_instructions: strings, document_acceptance: { type: 'array', items: acceptanceCriterion },
+                sections: initialSections,
+              }, required: ['update_kind', 'user_message_refs', 'global_instructions', 'document_acceptance', 'sections'], additionalProperties: false,
+            }, {
+              type: 'object', properties: {
+                update_kind: { type: 'string', enum: ['patch'] }, base_plan_version: { type: 'integer' },
+                user_message_refs: messageRefs, summary: text, affected_section_ids: strings,
+                global_instructions: strings, document_acceptance: criterionDelta, sections: patchSections,
+              }, required: ['update_kind', 'base_plan_version', 'user_message_refs', 'summary', 'affected_section_ids', 'sections'], additionalProperties: false,
+            }] }
           }
           const definition: ToolDefinition = {
             name,
@@ -344,7 +387,7 @@ export function installStageInteractionTools(
                   : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
                     : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
                       : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
-            parameters: { type: 'object', properties, required, additionalProperties: false },
+            parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
               if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')

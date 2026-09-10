@@ -31,11 +31,12 @@ const relationParameter = {
  * @param agent 当前规划 Agent。
  * @param outline 唯一确认目录。
  * @param outlineHash 当前目录 Hash。
+ * @param writingPlanVersion 当前 Writing Plan 版本。
  * @param maxContinuations 未 finish 的有限续行次数。
  * @returns 已确认计划及作用域工具的释放句柄。
  */
 export function attachChapterPlan(
-  agent: Agent, outline: OutlineArtifact, outlineHash: string, maxContinuations: number,
+  agent: Agent, outline: OutlineArtifact, outlineHash: string, writingPlanVersion: number, maxContinuations: number,
 ): ChapterProtocol<ChapterExecutionPlan> {
   const runtime = createChapterProtocol<ChapterExecutionPlan>(agent, 'finish_chapter_plan', maxContinuations)
   const sections = new Map<string, ChapterExecutionPlan['sections'][number]>(buildWritableSectionWorklist(outline).map(section => [section.id, {
@@ -44,7 +45,8 @@ export function attachChapterPlan(
   const notes = new Set<string>()
   const assemble = (): ChapterExecutionPlan => ({
     schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION, scope: 'technical_bid',
-    confirmed_outline_sha256: outlineHash, global_consistency_notes: [...notes], sections: [...sections.values()],
+    confirmed_outline_sha256: outlineHash, writing_plan_version: writingPlanVersion,
+    global_consistency_notes: [...notes], sections: [...sections.values()],
   })
   try {
     runtime.register({
@@ -71,7 +73,7 @@ export function attachChapterPlan(
         const draft = { ...input, related_sections: input.related_sections.map(item => ({ ...item, strength: 'weak' as const })) }
         const plan = assemble()
         plan.sections = plan.sections.map(section => section.section_id === input.section_id ? draft : section)
-        const issues = validateChapterExecutionPlan(plan, outline, outlineHash).filter(issue => issue.code !== 'CHAPTER_PLAN_DEPENDENCY_CYCLE')
+        const issues = validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion).filter(issue => issue.code !== 'CHAPTER_PLAN_DEPENDENCY_CYCLE')
         if (issues.length > 0) throw new ToolArgsError(issues.map(issue => `${issue.path}: ${issue.message}`))
         sections.set(input.section_id, draft)
         return Promise.resolve({ recorded: true, section_id: input.section_id })
@@ -84,7 +86,7 @@ export function attachChapterPlan(
         chapterToolArgs(z.object({}).strict(), args)
         if (notes.size === 0) return Promise.resolve({ completed: false, issues: ['缺少 global_consistency_notes：请补充至少一项真实全书一致性要求。'] })
         const plan = parseChapterExecutionPlan(assemble())
-        const issues = validateChapterExecutionPlan(plan, outline, outlineHash)
+        const issues = validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion)
         return Promise.resolve(issues.length > 0 ? { completed: false, issues } : runtime.finish(exec, plan))
       },
     })

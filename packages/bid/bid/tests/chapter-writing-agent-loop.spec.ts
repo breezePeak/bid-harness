@@ -71,9 +71,11 @@ describe('S5 真实 DSH Child 接入', () => {
   it.each([0, 1, 3])('修复上限为 %i 时保留最后已审候选，不无限循环', async (maxRepairAttempts) => {
     const { ctx, workspace, adapter, agent } = await fixture()
     adapter.reviewPreamble = false
+    adapter.repairReviews = Infinity
     try {
-      const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts, maxConcurrency: 3 })
-      await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+      await expect(executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts, maxCompletionRepairRounds: 0, maxConcurrency: 3,
+      })).rejects.toThrow('CHAPTER_WRITING_COMPLETION_ROUND_LIMIT')
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       const writers = log.sections[0]!.attempts.filter(attempt => attempt.role === 'writer')
       expect(writers).toHaveLength(maxRepairAttempts + 1)
@@ -102,9 +104,11 @@ describe('S5 真实 DSH Child 接入', () => {
   it('修复只返回普通文本时不能沿用旧提交冒充新候选', async () => {
     const { ctx, workspace, adapter, agent } = await fixture()
     adapter.omitRepairSubmission = true
+    adapter.repairReviews = Infinity
     try {
-      const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 3 })
-      await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+      await expect(executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxCompletionRepairRounds: 0, maxConcurrency: 3,
+      })).rejects.toThrow('CHAPTER_WRITING_COMPLETION_ROUND_LIMIT')
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       const writers = log.sections[0]!.attempts.filter(attempt => attempt.role === 'writer')
       expect(writers.map(attempt => attempt.accepted)).toEqual([true, false])
@@ -184,19 +188,20 @@ describe('S5 真实 DSH Child 接入', () => {
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       expect(log.observed_max_concurrency).toBe(3)
       expect(log.sections.map(section => section.status)).toEqual(['completed', 'completed', 'completed'])
-      expect(log.sections.map(section => section.attempts.filter(attempt => attempt.role === 'writer').length)).toEqual([2, 1, 1])
+      expect(log.sections.map(section => section.attempts.filter(attempt => attempt.role === 'writer').length)).toEqual([1, 1, 1])
       for (const index of [1, 2, 3]) {
         const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot, `chapters/meta/${String(index).padStart(4, '0')}.json`), 'utf8')))
         expect(metadata.web_materials_used).toEqual([])
       }
-      expect(new Set(children).size).toBe(7)
+      expect(new Set(children).size).toBe(6)
       for (const id of children) expect(ctx.agents.get(SessionId(id))).toBeUndefined()
       expect(ctx.tools.schemas(agent).map(tool => tool.name).sort()).toEqual(['grep', 'read', 'web_fetch', 'web_search'])
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 
-  it('三章并发，首轮工具隔离，同一 Writer 纠错、同一 Reviewer 续行并保留合法 repair', async () => {
+  it('三章并发，首轮工具隔离，同一 Writer 纠错、Reviewer 分批续行并在修复后通过', async () => {
     const { ctx, workspace, adapter, agent, children } = await fixture()
+    adapter.repairReviews = 1
     try {
       const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 3 })
       await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
@@ -216,11 +221,11 @@ describe('S5 真实 DSH Child 接入', () => {
       }
       for (const request of requests.filter(item => item.role === 'review')) {
         expect(request.tools).toEqual([...CHAPTER_REVIEW_TOOLS].sort())
-        expect(request.steps).toBe(7)
+        expect(request.steps).toBe(8)
       }
       const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
-      expect(review.verdict).toBe('repair')
-      expect(review.blocking_issues.join()).toContain('实际设备数量')
+      expect(review.verdict).toBe('pass')
+      expect(review.blocking_issues).toEqual([])
       expect(ctx.tools.schemas(agent).map(tool => tool.name).sort()).toEqual(['grep', 'read', 'web_fetch', 'web_search'])
       expect(new Set(children).size).toBe(7)
       for (const id of children) expect(ctx.agents.get(SessionId(id))).toBeUndefined()

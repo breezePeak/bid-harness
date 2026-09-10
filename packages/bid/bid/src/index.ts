@@ -54,6 +54,7 @@ import { validateOutlineDraftForConfirmation } from './outline-confirmation-vali
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import {
   buildChapterWorklist,
+  DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   executeChapterWriting,
   type ChapterWritingCommand,
@@ -90,12 +91,13 @@ import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import {
-  materializeAcceptanceCriteria,
+  applyWritingPlanInput,
   parseWritingPlan,
   validateWritingPlan,
+  validateWritingPlanInput,
   writingRequestSchema,
   WRITING_PLAN_SCHEMA_VERSION,
-  type WritingPlanInput,
+  type WritingRequirementMessageRef,
 } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type {
@@ -238,6 +240,7 @@ export type { ChapterWritingCompletionState } from './chapter-writing-completion
 export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
 export {
+  DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   buildChapterWorklist,
   executeChapterWriting,
@@ -315,6 +318,8 @@ export interface Config {
   evidenceMappingMaxConcurrency: number
   /** Maximum Chapter Subagents running at the same time during S5. */
   chapterWritingMaxConcurrency: number
+  /** Maximum Main-Agent whole-document repair rounds after chapter review. */
+  chapterWritingCompletionRepairRounds: number
   /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
   trustedHosts: string[]
   /** Word 自然语言格式建议的输出 token 上限。 */
@@ -332,6 +337,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   modelStageRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   evidenceMappingMaxConcurrency: DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+  chapterWritingCompletionRepairRounds: DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   trustedHosts: [],
   wordFormatMaxTokens: 8192,
   wordFormatTimeoutMs: 120000,
@@ -347,6 +353,8 @@ export const Config: z<Config> = z.object({
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
   evidenceMappingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.evidenceMappingMaxConcurrency),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
+  chapterWritingCompletionRepairRounds: z.natural().min(1).max(20)
+    .default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingCompletionRepairRounds),
   trustedHosts: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.trustedHosts),
   wordFormatMaxTokens: z.natural().min(256).max(32768).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatMaxTokens),
   wordFormatTimeoutMs: z.natural().min(1000).max(600000).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatTimeoutMs),
@@ -736,9 +744,7 @@ async function currentWritingPlan(workspace: BidWorkspace): Promise<ReturnType<t
 }
 
 async function writeWritingRequest(
-  session: Session,
   workspace: BidWorkspace,
-  basePlanVersion: number | null,
 ): Promise<void> {
   const { sha256 } = await confirmedOutline(workspace)
   const path = within(workspace.projectRoot, WRITING_REQUEST_PATH)
@@ -746,9 +752,6 @@ async function writeWritingRequest(
   await writeFileAtomic(path, `${JSON.stringify({
     schema_version: WRITING_PLAN_SCHEMA_VERSION,
     confirmed_outline_sha256: sha256,
-    session_id: session.id,
-    request_after_seq: session.events.at(-1)?.seq ?? -1,
-    base_plan_version: basePlanVersion,
   }, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
@@ -758,37 +761,32 @@ async function ensureWritingRequirementsRequested(agent: Agent, workspace: BidWo
   await assertNoLinkedPath(workspace.root, path)
   try {
     const request = writingRequestSchema.parse(JSON.parse(await readFile(path, 'utf8')))
-    if (request.confirmed_outline_sha256 === sha256) {
-      if (request.session_id !== agent.session.id) {
-        await writeWritingRequest(agent.session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
-      }
-      return
-    }
+    if (request.confirmed_outline_sha256 === sha256) return
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
-  await writeWritingRequest(agent.session, workspace, null)
+  await writeWritingRequest(workspace)
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: '目录已确认。正式开始写作前，请在当前对话主动询问用户是否有额外写作要求；用户也可以回复“没有特殊要求，直接开始”。此时只询问，不得启动章节写作。' }],
     source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
   }))
 }
 
-function exactWritingRequirementMessages(
+function resolveWritingRequirementMessages(
   session: Session,
-  input: WritingPlanInput,
-  request: zod.infer<typeof writingRequestSchema>,
-  previous?: ReturnType<typeof parseWritingPlan>,
-): WritingPlanInput {
-  if (request.session_id !== session.id) return input
-  const messages = session.events.flatMap((event) => {
-    if (event.seq <= request.request_after_seq || event.type !== 'user/message' || event.data.source.kind !== 'user') return []
-    return event.data.content.filter(block => block.type === 'text').map(block => block.text.trim()).filter(Boolean)
+  refs: readonly WritingRequirementMessageRef[],
+): Array<{ ref: WritingRequirementMessageRef; text: string }> {
+  return refs.map((ref) => {
+    if (ref.session_id !== session.id) throw new Error(`用户消息引用不属于当前 Session：${ref.session_id}/${ref.seq}`)
+    const event = session.events[ref.seq]
+    if (event?.type !== 'user/message' || event.data.source.kind !== 'user'
+      || String(event.data.id) !== ref.message_id) {
+      throw new Error(`用户消息引用不存在或身份不匹配：${ref.session_id}/${ref.seq}/${ref.message_id}`)
+    }
+    const text = event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
+    if (text.length === 0) throw new Error(`用户消息引用没有可持久化的文本：${ref.session_id}/${ref.seq}`)
+    return { ref, text }
   })
-  return messages.length === 0 ? input : {
-    ...input,
-    user_requirements: [...previous?.user_requirements ?? [], ...messages],
-  }
 }
 
 /** Host-owned Bid RPC runtime that serializes project mutations and publishes durable stage state. */
@@ -895,7 +893,7 @@ export class BidHostRuntime extends TypertRemoteService {
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
       'bid: runtime projection',
     )
-    ctx.on('session/prompt-admission', async ({ session }) => {
+    ctx.on('session/prompt-admission', ({ session }) => {
       if (resolveSessionPreset(session) !== 'bid') return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const projection = getBidClientProjection(runtime)
@@ -911,12 +909,7 @@ export class BidHostRuntime extends TypertRemoteService {
           if (active.session !== session) {
             return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行写作。' }
           }
-          await writeWritingRequest(session, active.workspace, (await currentWritingPlan(active.workspace))?.plan_version ?? null)
           return
-        }
-        if (runtime.stage === 'chapter_writing' && (runtime.status === 'completed' || runtime.status === 'attention_required')) {
-          const workspace = new BidWorkspace(key, workspaceConfig(this.config))
-          await writeWritingRequest(session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
         }
       }
       if (projection.composer.enabled) return
@@ -981,14 +974,24 @@ export class BidHostRuntime extends TypertRemoteService {
     const current = await confirmedOutline(workspace)
     if (marker.confirmed_outline_sha256 !== current.sha256) throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
     const previous = await currentWritingPlan(workspace)
-    if (marker.base_plan_version !== (previous?.plan_version ?? null)) throw new Error('写作计划已变化，请重新读取后再提交。')
-    if ((previous === undefined) !== (submitted.revision === null)) {
-      return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [previous === undefined
-        ? '首次计划的 revision 必须为 null'
-        : '更新计划必须说明变更摘要和受影响章节'] } }
+    const input = submitted
+    const inputIssues = validateWritingPlanInput(input, current.outline, previous)
+    if (inputIssues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: inputIssues } }
+    let resolved: ReturnType<typeof resolveWritingRequirementMessages>
+    try {
+      resolved = resolveWritingRequirementMessages(agent.session, input.user_message_refs)
+    } catch (error: unknown) {
+      return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [error instanceof Error ? error.message : String(error)] } }
     }
-    let input = exactWritingRequirementMessages(agent.session, submitted, marker, previous)
-    if (previous !== undefined && input.revision !== null) {
+    let materialized: ReturnType<typeof applyWritingPlanInput>
+    try {
+      materialized = applyWritingPlanInput(input, resolved, previous)
+    } catch (error: unknown) {
+      return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: [error instanceof Error ? error.message : String(error)] } }
+    }
+    const { affected_section_ids: materializedAffectedSectionIds, ...planFields } = materialized
+    let affectedSectionIds = [...materializedAffectedSectionIds]
+    if (previous !== undefined && input.update_kind === 'patch') {
       let appliedVersion = previous.plan_version
       try {
         appliedVersion = zod.strictObject({ schema_version: zod.literal(1), plan_version: zod.number().int().positive() })
@@ -996,27 +999,18 @@ export class BidHostRuntime extends TypertRemoteService {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       }
-      if (appliedVersion < previous.plan_version && previous.revision !== null) input = {
-        ...input,
-        revision: {
-          ...input.revision,
-          affected_section_ids: [...new Set([
-            ...previous.revision.affected_section_ids,
-            ...input.revision.affected_section_ids,
-          ])],
-        },
+      if (appliedVersion < previous.plan_version && previous.revision !== null) {
+        affectedSectionIds = [...new Set([...previous.revision.affected_section_ids, ...affectedSectionIds])]
       }
     }
-    const issues = validateWritingPlan(input, current.outline)
-    if (issues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues } }
     const version = (previous?.plan_version ?? 0) + 1
-    const revision = input.revision === null || previous === undefined
-      ? null
-      : { ...input.revision, base_plan_version: previous.plan_version }
-    const materialized = materializeAcceptanceCriteria(input, previous)
+    const revision = input.update_kind === 'initial' || previous === undefined ? null : {
+      summary: input.summary,
+      affected_section_ids: affectedSectionIds,
+      base_plan_version: previous.plan_version,
+    }
     const plan = parseWritingPlan({
-      ...input,
-      ...materialized,
+      ...planFields,
       revision,
       schema_version: WRITING_PLAN_SCHEMA_VERSION,
       scope: 'technical_bid',
@@ -1024,6 +1018,8 @@ export class BidHostRuntime extends TypertRemoteService {
       confirmed: true,
       confirmed_outline_sha256: current.sha256,
     })
+    const issues = validateWritingPlan(plan, current.outline)
+    if (issues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues } }
     await writeFileAtomic(planPath, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     agent.session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
     return { ok: true, plan, plan_version: version, message: '整体写作要求与计划已确认，将由当前章节调度器应用。' }
@@ -1078,7 +1074,7 @@ export class BidHostRuntime extends TypertRemoteService {
       runtime = await this.prepareOperation(operation)
       if (request.action === 'bid_confirm_writing_plan' && runtime.stage === 'chapter_writing'
         && (runtime.status === 'completed' || runtime.status === 'attention_required')) {
-        await writeWritingRequest(agent.session, workspace, (await currentWritingPlan(workspace))?.plan_version ?? null)
+        await writeWritingRequest(workspace)
         session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
         runtime = { stage: 'chapter_writing', status: 'waiting_user' }
       }
@@ -1227,6 +1223,7 @@ export class BidHostRuntime extends TypertRemoteService {
                   ? executeChapterWriting(agent, workspace, task, {
                     maxRepairAttempts: this.config.modelStageRepairAttempts,
                     maxConcurrency: this.config.chapterWritingMaxConcurrency,
+                    maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
                     signal,
                     ...(operation === undefined ? {} : { control: operation.writingControl }),
                   })
@@ -1458,6 +1455,7 @@ export class BidHostRuntime extends TypertRemoteService {
             return executeChapterWriting(agent, workspace, task, {
               ...repair,
               maxConcurrency: this.config.chapterWritingMaxConcurrency,
+              maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
               control: operation.writingControl,
             })
           },
@@ -1860,6 +1858,7 @@ export class BidHostRuntime extends TypertRemoteService {
       await executeChapterWriting(parent, operation.workspace, buildBidStageTask('chapter_writing'), {
         maxRepairAttempts: this.config.modelStageRepairAttempts,
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
+        maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
         signal: operation.controller.signal,
         revision: parsed.data,
       })

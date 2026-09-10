@@ -128,7 +128,7 @@ describe('S4 Draft 最终确认', () => {
       expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
       expect(f.agent.followup).toHaveBeenCalledOnce()
       expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
-        schema_version: 2,
+        schema_version: 3,
         confirmed_outline_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       })
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')

@@ -12,7 +12,7 @@ S5 的消息准入曾在读取用户语义前取消写作并重开要求确认�
 
 正文工作台、运行态 inspect 和显式 `estimated_pages` 条件共用 `estimateChapterWritingPages()`。该入口按正式导出顺序统计确认目录标题、父节点概述和已有叶节正文，并读取当前 `word-export/config.json` 的生效值；缺失正文保持为空，审核记录和聊天内容不参与计数。条件比较使用未取整值且不增加业务容差；测算异常产生 unavailable 结果，不能当作零页或达标。是否建立该条件及其优先级由 Main Agent 判断，Host 不从条件描述或用户原话推断。
 
-S5 完成校验重新读取 `chapters/writing-plan.json` 并核对确认目录 Hash。Main Agent 的整书验收逐项提交 semantic 结论并服从 Host 的 deterministic 结果；任一 required 条件未满足时不能发布完成状态，preferred 条件只保留结果。[按需导出](../feature/2026-09-04-bid-s5-persistent-review-export.md)仍可生成文件，但 S6 不把 DOCX 结构可读取解释成动态条件达标。工作台把确定性测量、格式版本和动态条件结果与现有整数页数分开投影，通用协议见[任务契约与动态验收](../architecture/2026-09-10-s5-generic-task-contract-acceptance.md)。
+S5 完成校验重新读取 `chapters/writing-plan.json` 并核对确认目录 Hash。Chapter Reviewer 的章节 semantic 结论和 Host deterministic 结果是 section acceptance 权威输入；Main Agent 的整书验收只提交 document semantic 结论并服从 document deterministic 结果。任一 required 条件未满足时不能发布完成状态，preferred 条件只保留结果。[按需导出](../feature/2026-09-04-bid-s5-persistent-review-export.md)仍可生成文件，但 S6 不把 DOCX 结构可读取解释成动态条件达标。工作台把确定性测量、格式版本和动态条件结果与现有整数页数分开投影，通用协议见[任务契约与动态验收](../architecture/2026-09-10-s5-generic-task-contract-acceptance.md)。
 
 ## Alternatives considered
 
@@ -26,6 +26,6 @@ S5 完成校验重新读取 `chapters/writing-plan.json` 并核对确认目录 H
 
 ## Consequences
 
-写作期间的普通对话不改变 S5 生命周期，完成态问答也不影响导出。显式变更由 Main Agent 提交新计划和影响范围；Host 在当前调度器中使目标章节失效，其他章节继续执行，迟到旧结果不能提交。
+写作期间的普通对话不改变 S5 生命周期，完成态问答也不影响导出。显式变更由 Main Agent 提交当前计划的 patch 和影响范围；Host 在当前调度器中使目标章节及其强依赖下游失效，其他章节继续执行，迟到旧结果按计划版本、section epoch 和依赖身份拒绝提交。
 
 显式确定性条件成为正文结果约束而非计划说明。required 条件不通过时，Main Agent 在同一运行实例内选择最小修订范围并进入有界补写；预算耗尽仍保留正文、测量和验收记录。定向测试覆盖未取整边界、普通消息不取消运行、完成态问答不重开门禁、required/preferred 分流、运行中计划失效，以及 DOCX 结构校验与动态验收的独立结果。

@@ -16,7 +16,7 @@ import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTende
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan, validateWritingPlan } from './writing-requirements.ts'
-import { parseChapterWritingCompletionState, chapterWritingRequirements } from './chapter-writing-completion-review.ts'
+import { parseChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { chapterContentSha256 } from './chapter-revision.ts'
 import {
@@ -171,8 +171,9 @@ export async function validateChapterWriting(
   for (const issue of validateWritingPlan(writingPlan, outline)) reject(issues, 'CHAPTER_WRITING_PLAN_INVALID', issue, 'chapters/writing-plan.json')
   if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'CHAPTER_WRITING_RESPONSE_POINT_CATALOG_MISMATCH', 'The scoring response-point catalog does not match scoring.json.', 'analysis/scoring-response-points.json')
   if (chapters.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_OUTLINE_HASH_INVALID', 'The chapter manifest does not match the confirmed outline.', MANIFEST)
-  issues.push(...validateChapterExecutionPlan(plan, outline, outlineHash))
+  issues.push(...validateChapterExecutionPlan(plan, outline, outlineHash, writingPlan.plan_version))
   if (executionLog.confirmed_outline_sha256 !== outlineHash) reject(issues, 'CHAPTER_WRITING_LOG_OUTLINE_HASH_INVALID', 'The execution log does not match the confirmed outline.', LOG)
+  if (executionLog.writing_plan_version !== writingPlan.plan_version) reject(issues, 'CHAPTER_WRITING_LOG_PLAN_VERSION_INVALID', 'The execution log does not match the current writing plan.', LOG)
   const plannedDependencies = new Map(plan.sections.map(section => [section.section_id, section.depends_on.map(item => item.section_id)]))
   const loggedSections = new Set<string>()
   for (const section of executionLog.sections) {
@@ -198,6 +199,7 @@ export async function validateChapterWriting(
   }))
   const actual = new Set<string>()
   const globalChapters: GlobalComplianceChapter[] = []
+  const chapterReviews = new Map<string, ReturnType<typeof parseChapterReviewArtifact>>()
   for (const chapter of chapters.chapters) {
     if (actual.has(chapter.section_id)) reject(issues, 'CHAPTER_WRITING_SECTION_DUPLICATE', 'Each writable section may have one chapter only.', MANIFEST)
     actual.add(chapter.section_id)
@@ -251,6 +253,7 @@ export async function validateChapterWriting(
       const reviewRaw = await readJson(workspace, chapter.review_path, issues)
       if (reviewRaw === undefined) throw new Error('review-missing')
       const review = parseChapterReviewArtifact(reviewRaw)
+      chapterReviews.set(chapter.section_id, review)
       if (review.section_id !== chapter.section_id || review.candidate_sha256 !== chapter.review_sha256
         || review.candidate_sha256 !== chapterCandidateSha256(markdown)) throw new Error('review-invalid')
       const sectionLog = executionLog.sections.find(section => section.section_id === chapter.section_id)
@@ -282,7 +285,6 @@ export async function validateChapterWriting(
     reject(issues, 'GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID', 'The document-level compliance review does not match the confirmed outline.', GLOBAL_REVIEW)
   }
   issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalChapters, bidManifest))
-  const criteria = chapterWritingRequirements(writingPlan)
   const completion = completionReview.completion
   const documentSha256 = chapterContentSha256(JSON.stringify(buildChapterWorklist(outline).map((section) => {
     const chapter = globalChapters.find(item => item.section_id === section.id)
@@ -290,10 +292,9 @@ export async function validateChapterWriting(
   })))
   if (completionReview.confirmed_outline_sha256 !== outlineHash || completion === undefined
     || completion.plan_version !== writingPlan.plan_version || completion.document_sha256 !== documentSha256
-    || completion.requirements.length !== criteria.length
-    || completion.requirements.some((item, index) => item.requirement_id !== criteria[index]?.id
-      || criteria[index].priority === 'required' && item.status !== 'met')) {
-    reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID', 'The current plan and chapter identities require a complete Main-Agent review with every required criterion met.', COMPLETION_REVIEW)
+    || completion.document_acceptance_results.length !== writingPlan.document_acceptance.length
+    || completion.document_acceptance_results.some((item, index) => item.criterion_id !== writingPlan.document_acceptance[index]?.id)) {
+    reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID', 'The current plan and chapter identities require a complete Main-Agent document review.', COMPLETION_REVIEW)
   }
   const allCriteria = [...writingPlan.document_acceptance, ...writingPlan.sections.flatMap(section => section.acceptance_criteria)]
   const hasPageCriteria = allCriteria.some(item => item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
@@ -311,23 +312,79 @@ export async function validateChapterWriting(
       'The completion review must be rerun after the effective Word format or measured page result changes.', COMPLETION_REVIEW)
   }
   const globalMarkdown = globalChapters.map(item => item.markdown).join('\n\n')
-  const hostResults = [
-    ...evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
-      markdown: globalMarkdown,
-      ...(estimate === undefined ? {} : { estimatedPages: estimate.total }),
-    }),
-    ...writingPlan.sections.flatMap((section) => {
-      const chapter = globalChapters.find(item => item.section_id === section.section_id)
-      const pages = estimate?.sections.get(section.section_id)?.pages
-      return evaluateHostAcceptanceCriteria(section.acceptance_criteria, {
-        ...(chapter === undefined ? {} : { markdown: chapter.markdown }),
-        ...(pages === undefined ? {} : { estimatedPages: pages }),
-      })
-    }),
-  ]
+  const documentHostResults = evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
+    markdown: globalMarkdown,
+    ...(estimate === undefined ? {} : { estimatedPages: estimate.total }),
+  })
+  const sectionHostResults = writingPlan.sections.flatMap((section) => {
+    const chapter = globalChapters.find(item => item.section_id === section.section_id)
+    const pages = estimate?.sections.get(section.section_id)?.pages
+    return evaluateHostAcceptanceCriteria(section.acceptance_criteria, {
+      ...(chapter === undefined ? {} : { markdown: chapter.markdown }),
+      ...(pages === undefined ? {} : { estimatedPages: pages }),
+    })
+  })
+  const hostResults = [...documentHostResults, ...sectionHostResults]
   for (const result of hostResults) if (result.status !== 'met'
     && allCriteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required') {
     reject(issues, 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNMET', `${result.criterion_id}: ${result.message}`, COMPLETION_REVIEW)
+  }
+  for (const section of writingPlan.sections) {
+    const review = chapterReviews.get(section.section_id)
+    if (review === undefined) continue
+    for (const criterion of section.acceptance_criteria) {
+      const result = review.acceptance_criteria_results.find(item => item.criterion_id === criterion.id)
+      if (result === undefined || criterion.priority === 'required' && result.status !== 'met') {
+        reject(issues, 'CHAPTER_WRITING_SECTION_ACCEPTANCE_UNMET', `${section.section_id}/${criterion.id} 缺少当前 Chapter Reviewer 的 required met 结论。`, review.section_id)
+      }
+      const host = sectionHostResults.find(item => item.criterion_id === criterion.id)
+      if (criterion.evaluator.kind === 'deterministic' && (host === undefined || result === undefined
+        || result.status !== host.status || result.measured !== host.measured || result.reason !== host.message)) {
+        reject(issues, 'CHAPTER_WRITING_SECTION_ACCEPTANCE_STALE', `${section.section_id}/${criterion.id} 与当前 Host 事实不一致。`, review.section_id)
+      }
+    }
+  }
+  if (completion !== undefined) for (const criterion of writingPlan.document_acceptance) {
+    const result = completion.document_acceptance_results.find(item => item.criterion_id === criterion.id)
+    if (result === undefined || result.evaluator !== criterion.evaluator.kind
+      || criterion.priority === 'required' && result.status !== 'met') {
+      reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_UNMET', `${criterion.id} 缺少当前整书验收的 required met 结论。`, COMPLETION_REVIEW)
+      continue
+    }
+    for (const evidence of result.evidence_quotes) {
+      const chapter = globalChapters.find(item => item.section_id === evidence.section_id)
+      if (chapter === undefined || !chapter.markdown.includes(evidence.quote)) {
+        reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_QUOTE_INVALID', `${criterion.id} 引用了非当前正文。`, COMPLETION_REVIEW)
+      }
+    }
+    const host = documentHostResults.find(item => item.criterion_id === criterion.id)
+    if (criterion.evaluator.kind === 'deterministic' && (host === undefined
+      || result.status !== host.status || result.measured !== host.measured || result.reason !== host.message)) {
+      reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_STALE', `${criterion.id} 与当前 Host 事实不一致。`, COMPLETION_REVIEW)
+    }
+  }
+  const chapterById = new Map(chapters.chapters.map(chapter => [chapter.section_id, chapter]))
+  for (const sectionLog of executionLog.sections) {
+    const planned = plan.sections.find(section => section.section_id === sectionLog.section_id)
+    if (planned === undefined) continue
+    const expectedDependencies = planned.depends_on.flatMap((dependency) => {
+      const chapter = chapterById.get(dependency.section_id)
+      const body = globalChapters.find(item => item.section_id === dependency.section_id)
+      return chapter === undefined || body === undefined ? [] : [{
+        section_id: dependency.section_id,
+        candidate_sha256: body.candidate_sha256,
+        handoff_sha256: chapterCandidateSha256(JSON.stringify(chapter.handoff)),
+      }]
+    })
+    for (const role of ['writer', 'reviewer'] as const) {
+      const childId = role === 'writer' ? sectionLog.final_writer_child_session_id : sectionLog.final_reviewer_child_session_id
+      const attempt = sectionLog.attempts.findLast(item => item.role === role && item.child_session_id === childId && item.accepted)
+      if (attempt === undefined || attempt.input.plan_version !== writingPlan.plan_version
+        || attempt.input.section_epoch !== sectionLog.epoch
+        || JSON.stringify(attempt.input.dependencies) !== JSON.stringify(expectedDependencies)) {
+        reject(issues, 'CHAPTER_WRITING_INPUT_IDENTITY_INVALID', `${sectionLog.section_id} 的最终 ${role} 输入身份已失效。`, LOG)
+      }
+    }
   }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

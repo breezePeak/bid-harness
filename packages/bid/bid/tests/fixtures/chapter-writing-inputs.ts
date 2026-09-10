@@ -33,26 +33,20 @@ export async function writeWritingPlan(workspace: BidWorkspace, outline: ReturnT
 
 export function writingPlanFixture(outline: ReturnType<typeof outlineFixture>): WritingPlan {
   const outlineSha256 = outlineArtifactSha256(outline)
+  const request = { session_id: 'main', message_id: 'message-1', seq: 1 }
   return {
-    schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
-    confirmed_outline_sha256: outlineSha256, user_requirements: ['没有特殊要求，直接开始'],
+    schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
+    confirmed_outline_sha256: outlineSha256, user_message_refs: [request],
+    user_requirements: ['没有特殊要求，直接开始'],
     global_instructions: ['完整响应已确认的招标要求和目录职责。'],
-    document_acceptance: [{
-      id: 'AC-000001', scope: { kind: 'document' }, description: '整书形成一致且完整的技术响应。',
-      priority: 'required', evaluator: { kind: 'semantic' },
-    }],
-    sections: outline.sections.filter(section => section.writable).map((section, index) => ({
+    document_acceptance: [],
+    sections: outline.sections.filter(section => section.writable).map(section => ({
       section_id: section.id,
       task: `完成${section.title}的完整技术响应。`,
+      user_message_refs: [],
       user_requirements: [],
       writing_instructions: [],
-      acceptance_criteria: [{
-        id: `AC-${String(index + 2).padStart(6, '0')}`,
-        scope: { kind: 'section', section_id: section.id },
-        description: `正文完整履行${section.title}的章节任务。`,
-        priority: 'required',
-        evaluator: { kind: 'semantic' },
-      }],
+      acceptance_criteria: [],
     })),
     revision: null,
   }

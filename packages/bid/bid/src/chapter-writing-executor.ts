@@ -87,7 +87,6 @@ import {
 import { parseWritingPlan, validateWritingPlan, type WritingPlan } from './writing-requirements.ts'
 import {
   attachChapterWritingCompletionReview,
-  chapterWritingRequirements,
   CHAPTER_WRITING_COMPLETION_TOOLS,
   parseChapterWritingCompletionState,
   renderChapterWritingCompletionTask,
@@ -110,6 +109,8 @@ const MAX_DEPENDENCY_HANDOFF_CHARS = 12_000
 
 /** Default Host limit for simultaneous Chapter Subagents. */
 export const DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY = 3
+/** Maximum whole-document repair rounds after chapter-level Writer/Reviewer attempts. */
+export const DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS = 3
 
 /** A validated Host command applied by the currently running S5 scheduler. */
 export type ChapterWritingCommand =
@@ -130,6 +131,8 @@ export interface ChapterWritingControl {
 export interface ChapterWritingExecutionOptions extends ModelStageExecutionOptions {
   /** Maximum Chapter Subagents that may run simultaneously. */
   maxConcurrency: number
+  /** Maximum Main-Agent-selected whole-document repair rounds. */
+  maxCompletionRepairRounds: number
   /** 只续用目标章节已保存的 Writer；其余章节保持原文。 */
   revision?: BidChapterRevisionRequest
   /** 当前 Host 操作的运行中计划及定向修订命令。 */
@@ -700,12 +703,12 @@ function renderChapterReviewerTask(
   hostAcceptanceResults: readonly HostAcceptanceResult[],
 ): string {
   return [
-    '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录本章必答覆盖，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。',
+    '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录固定覆盖项，用 review_acceptance_criteria 独立记录本章 semantic acceptance，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。',
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
-    '逐项审查 Review Checklist 的原有 R 和 evaluator.kind=semantic 的动态 R；每批可提交多项，后续同键合法记录覆盖已有判断。covered 必须至少引用一个当前 Q 且 issue=null；missing 不得引用 Q，必须说明具体 issue。未记录的 R 必须补齐，不能以 Writer Metadata 代替正文证据。',
-    'coverage 的 evidence_quote_refs 与 claim 的 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
+    '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_id、met/unmet、reason 和可选 evidence_quote_refs；负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
+    '所有 evidence_quote_refs 与 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
     '明确作为本次拟采用方案提出的实施方法、职责分工、台账字段和质量控制措施，不因采购原文未逐项列出而成为 unsupported claim。审查其是否符合采购要求、是否自洽和可执行；合理方案设计不登记为需要来源证明的既有事实。若方案冒充既有人员设备或企业能力、违反采购要求、迁入旧项目条件或作出缺少支撑的硬承诺，应说明具体问题并要求修复。',
@@ -720,6 +723,7 @@ function renderChapterReviewerTask(
     `Applicable Writing Contract：${JSON.stringify({ global: context.writingPlan, section: context.sectionWritingPlan })}`,
     '只审核当前章节的 task、用户要求和动态验收条件；全书级条件不得转成本章独立指标。Dynamic Host Acceptance Results 由 Host 按 evaluator 判别标签计算，Reviewer 不重新估算也不得覆盖。',
     `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context))}`,
+    `Semantic Acceptance：${JSON.stringify(context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic'))}`,
     `Dynamic Host Acceptance Results：${JSON.stringify(hostAcceptanceResults)}`,
     `Evidence Pack：${JSON.stringify(evidence)}`,
     `Dependency Handoff：${JSON.stringify(dependencies)}`,
@@ -739,12 +743,14 @@ function exactIdentifiers<T>(values: readonly T[], expected: readonly string[], 
  * @param context 当前章节规范覆盖条目。
  * @param candidate 冻结的完整正文与 metadata。
  * @param review 待验证的独立审核报告。
+ * @param hostAcceptanceResults Host 对本章 deterministic 条件的当前计算结果。
  * @returns 具体完整性问题；合法 repair 返回空数组。
  */
 export function validateChapterReview(
   context: Pick<ChapterContext, 'section' | 'requirements' | 'responsePoints' | 'compliance' | 'globalCompliance' | 'outlineSections' | 'sectionWritingPlan'>,
   candidate: AcceptedChapterCandidate,
   review: ChapterReview,
+  hostAcceptanceResults: readonly HostAcceptanceResult[] = [],
 ): StageValidationIssue[] {
   const issues: StageValidationIssue[] = []
   const markdown = candidate.markdown
@@ -767,11 +773,11 @@ export function validateChapterReview(
     issues.push({ code: 'CHAPTER_REVIEW_COMPLIANCE_INVALID', message: 'Reviewer 必须逐项审查当前章节合规项。', path: 'compliance_coverage' })
   }
   if (!exactIdentifiers(
-    review.acceptance_criteria_coverage,
+    review.acceptance_criteria_results,
     context.sectionWritingPlan.acceptance_criteria.map(item => item.id),
     item => item.criterion_id,
   )) {
-    issues.push({ code: 'CHAPTER_REVIEW_ACCEPTANCE_CRITERIA_INVALID', message: 'Reviewer 必须逐项记录当前章节动态验收条件。', path: 'acceptance_criteria_coverage' })
+    issues.push({ code: 'CHAPTER_REVIEW_ACCEPTANCE_CRITERIA_INVALID', message: 'Reviewer 必须逐项记录当前章节动态验收条件。', path: 'acceptance_criteria_results' })
   }
   if (!exactIdentifiers(review.global_compliance_checks, context.globalCompliance.map(item => item.id), item => item.compliance_id)) {
     issues.push({ code: 'CHAPTER_REVIEW_GLOBAL_COMPLIANCE_INVALID', message: 'Reviewer 必须单独记录全局要求对当前章节的适用性。', path: 'global_compliance_checks' })
@@ -789,16 +795,16 @@ export function validateChapterReview(
       issues.push({ code: 'CHAPTER_REVIEW_COVERAGE_INVALID', message: `覆盖记录 ${item.item} 的 status、引句及 issue 不一致。`, path: 'coverage' })
     }
   }
-  for (const item of review.acceptance_criteria_coverage) {
-    quotesPresent(item.evidence_quotes, 'acceptance_criteria_coverage.evidence_quotes')
+  for (const item of review.acceptance_criteria_results) {
+    quotesPresent(item.evidence_quotes, 'acceptance_criteria_results.evidence_quotes')
     const criterion = context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)
+    const hostResult = hostAcceptanceResults.find(value => value.criterion_id === item.criterion_id)
     if (criterion === undefined || item.evaluator !== criterion.evaluator.kind
-      || (item.evaluator === 'semantic' && item.status === 'met' && (item.evidence_quotes.length === 0 || item.issue !== null))
-      || (item.evaluator === 'semantic' && item.status !== 'met' && (item.evidence_quotes.length > 0 || item.issue === null))
+      || (item.evaluator === 'semantic' && (item.status === 'unavailable' || item.measured !== null))
       || (item.evaluator === 'deterministic' && item.evidence_quotes.length > 0)
-      || (item.status === 'met' && item.issue !== null)
-      || (item.status !== 'met' && item.issue === null)) {
-      issues.push({ code: 'CHAPTER_REVIEW_ACCEPTANCE_RESULT_INVALID', message: `动态验收 ${item.criterion_id} 的 evaluator、status、证据和 issue 不一致。`, path: 'acceptance_criteria_coverage' })
+      || (item.evaluator === 'deterministic' && hostAcceptanceResults.length > 0 && (hostResult === undefined
+        || item.status !== hostResult.status || item.measured !== hostResult.measured || item.reason !== hostResult.message))) {
+      issues.push({ code: 'CHAPTER_REVIEW_ACCEPTANCE_RESULT_INVALID', message: `动态验收 ${item.criterion_id} 的 evaluator、status、证据和 reason 不一致。`, path: 'acceptance_criteria_results' })
     }
   }
   for (const item of review.global_compliance_checks) {
@@ -840,7 +846,7 @@ export function validateChapterReview(
       ...review.compliance_coverage,
     ]
     if (review.blocking_issues.length > 0 || covered.some(item => item.status !== 'covered')
-      || review.acceptance_criteria_coverage.some(item => item.status !== 'met'
+      || review.acceptance_criteria_results.some(item => item.status !== 'met'
         && context.sectionWritingPlan.acceptance_criteria.find(criterion => criterion.id === item.criterion_id)?.priority === 'required')
       || Object.values(review.quality_checks).some(value => !value)
       || review.claim_checks.some(item => item.status === 'unsupported')
@@ -897,12 +903,14 @@ async function loadChapterCheckpoint(
   contexts: ReadonlyMap<string, ChapterContext>,
   maxConcurrency: number,
   writingPlanInvalidations: ReadonlySet<string>,
+  writingPlanVersion: number,
 ): Promise<ChapterCheckpoint | undefined> {
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
-    if (validateChapterExecutionPlan(plan, outline, outlineHash).length > 0) return undefined
+    if (validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion).length > 0) return undefined
     const executionLog = parseChapterExecutionLog(await readJson(workspace, LOG_PATH))
-    if (executionLog.confirmed_outline_sha256 !== outlineHash) return undefined
+    if (executionLog.confirmed_outline_sha256 !== outlineHash
+      || executionLog.writing_plan_version !== writingPlanVersion) return undefined
     const worklist = buildChapterWorklist(outline)
     if (executionLog.sections.length !== worklist.length) return undefined
     const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
@@ -1133,9 +1141,9 @@ async function loadValidPlan(
   // 合法计划独立于 execution-log；中断发生在两者写入之间时也可复用。
   try {
     const saved = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
-    if (validateChapterExecutionPlan(saved, outline, outlineHash).length === 0) return saved
+    if (validateChapterExecutionPlan(saved, outline, outlineHash, inputs.writingPlan.plan_version).length === 0) return saved
   } catch { /* 缺失或非法计划必须重新规划。 */ }
-  const runtime = attachChapterPlan(agent, outline, outlineHash, maxRepairAttempts)
+  const runtime = attachChapterPlan(agent, outline, outlineHash, inputs.writingPlan.plan_version, maxRepairAttempts)
   try {
     signal?.throwIfAborted()
     const plan = await runMainAgentProtocol(
@@ -1217,7 +1225,7 @@ export function renderGlobalComplianceReviewTask(
     `Retained Current Results：${JSON.stringify(retained)}`,
     ...(writingPlan === undefined ? [] : [
       `Confirmed Document Writing Plan：${JSON.stringify(writingPlan)}`,
-      '整书页数在此按全部叶节预算汇总，只核对计划分配和跨章适用性；排版前不得把目标页数当作实际页数，也不得因此要求所有章节重写。',
+      '动态验收由所属 Reviewer 在对应协议中处理；本轮只核验固定的全局 Compliance。',
     ]),
     `Current Chapters：${JSON.stringify(chapters.map(({ section_id, title, candidate_sha256 }) => ({ section_id, title, candidate_sha256 })))}`,
     `Evidence Options：${JSON.stringify(evidence)}`,
@@ -1285,6 +1293,7 @@ export async function executeChapterWriting(
   options: ChapterWritingExecutionOptions = {
     maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
     maxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
+    maxCompletionRepairRounds: DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   },
 ): Promise<StageArtifact[]> {
   const discardOwnedChildNotices = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
@@ -1382,7 +1391,7 @@ async function reviewWritingPlanCompletion(
           verdict: review.verdict,
           blocking_issues: review.blocking_issues,
           quality_checks: review.quality_checks,
-          acceptance_criteria_coverage: review.acceptance_criteria_coverage,
+          acceptance_criteria_results: review.acceptance_criteria_results,
         },
       }
     }))
@@ -1408,7 +1417,7 @@ async function reviewWritingPlanCompletion(
   }
   let current = await snapshot(measured.estimate)
   let recovery: ChapterWritingCompletionState = {
-    schema_version: 1, confirmed_outline_sha256: outlineHash, rounds: [],
+    schema_version: 2, confirmed_outline_sha256: outlineHash, rounds: [],
   }
   try {
     const saved = parseChapterWritingCompletionState(await readJson(workspace, COMPLETION_REVIEW_PATH))
@@ -1434,7 +1443,6 @@ async function reviewWritingPlanCompletion(
       artifact: COMPLETION_REVIEW_PATH,
     }])
   }
-  const sectionBudget = options.maxRepairAttempts * options.maxConcurrency
   while (true) {
     if (options.control?.pending() === true) {
       artifacts = await runChapterWriting(agent, workspace, task, options)
@@ -1443,26 +1451,11 @@ async function reviewWritingPlanCompletion(
     if (recovery.stopped_reason !== undefined) {
       return stop(recovery.stopped_reason, '正文和审核结果已保留；请调整写作计划或明确新的定向要求后继续。')
     }
-    const used = recovery.rounds.reduce((total, round) => total + round.sections.length, 0)
-    const requirements = chapterWritingRequirements(writingPlan)
-    const hostResults = [
-      ...evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
-        markdown: current.documentMarkdown,
-        ...(measured.estimate === undefined ? {} : { estimatedPages: measured.estimate.total }),
-      }),
-      ...writingPlan.sections.flatMap((section) => {
-        const markdown = current.contents.get(section.section_id)
-        const estimatedPages = measured.estimate?.sections.get(section.section_id)?.pages
-        return evaluateHostAcceptanceCriteria(section.acceptance_criteria, {
-          ...(markdown === undefined ? {} : { markdown }),
-          ...(estimatedPages === undefined ? {} : { estimatedPages }),
-        })
-      }),
-    ]
-    const allCriteria = [
-      ...writingPlan.document_acceptance,
-      ...writingPlan.sections.flatMap(section => section.acceptance_criteria),
-    ]
+    const hostResults = evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
+      markdown: current.documentMarkdown,
+      ...(measured.estimate === undefined ? {} : { estimatedPages: measured.estimate.total }),
+    })
+    const allCriteria = writingPlan.document_acceptance
     const unavailable = hostResults.filter(result => result.status === 'unavailable'
       && allCriteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required')
     if (unavailable.length > 0) {
@@ -1473,15 +1466,20 @@ async function reviewWritingPlanCompletion(
       })))
     }
     const reviewRuntime = attachChapterWritingCompletionReview(
-      agent, requirements, worklist.map(section => section.id), hostResults, options.maxRepairAttempts,
+      agent,
+      writingPlan,
+      current.sections.map(section => ({ section_id: section.section_id, review: section.review })),
+      new Map(current.sections.map(section => [section.section_id, {
+        markdown: current.contents.get(section.section_id) ?? '', content_sha256: section.content_sha256,
+      }])),
+      hostResults,
+      options.maxRepairAttempts,
     )
     let decision: ChapterWritingCompletionDecision
     try {
+      const globalReview = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH))
       decision = await runMainAgentProtocol(agent, renderChapterWritingCompletionTask({
-        planVersion: writingPlan.plan_version,
-        requirements,
-        hostResults,
-        sections: current.sections,
+        plan: writingPlan, hostResults, sections: current.sections, globalReview,
       }), CHAPTER_WRITING_COMPLETION_TOOLS, reviewRuntime, options.signal)
     } finally { reviewRuntime.dispose() }
     if (decision.action === 'complete') {
@@ -1493,20 +1491,17 @@ async function reviewWritingPlanCompletion(
           pages: measured.estimate?.total ?? null,
           document_sha256: current.documentSha256,
           reason: decision.reason,
-          requirements: decision.requirements,
+          document_acceptance_results: decision.document_acceptance_results,
         },
       }
       await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery)
       return completedArtifacts()
     }
-    if (recovery.rounds.length >= options.maxRepairAttempts) {
-      return stop('round_limit', `正文和审核结果已保留；整体写作计划验收已达到 ${options.maxRepairAttempts} 轮修订上限。`)
+    if (recovery.rounds.length >= options.maxCompletionRepairRounds) {
+      return stop('round_limit', `正文和审核结果已保留；整书验收已达到 ${options.maxCompletionRepairRounds} 轮修订上限。`)
     }
-    const remaining = sectionBudget - used
-    if (decision.sections.length > remaining) {
-      return stop('section_budget', `Main Agent 选择了 ${decision.sections.length} 个章节，但本次只剩 ${remaining} 个有界修订任务。`)
-    }
-    const selectedRevisions = await Promise.all(decision.sections.map(async (selected) => {
+    const selected = decision.sections ?? []
+    const selectedRevisions = await Promise.all(selected.map(async (selected) => {
       const index = worklist.findIndex(section => section.id === selected.section_id)
       if (index < 0) throw new Error(`Main Agent selected unknown section ${selected.section_id}`)
       const contentPath = join(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`)
@@ -1553,7 +1548,7 @@ async function reviewWritingPlanCompletion(
       before_pages: measured.estimate?.total ?? null,
       before_document_sha256: current.documentSha256,
       reason: decision.reason,
-      requirements: decision.requirements,
+      document_acceptance_results: decision.document_acceptance_results,
       sections: changed,
       after_pages: afterMeasurement.estimate?.total ?? null,
       after_document_sha256: afterSnapshot.documentSha256,
@@ -1661,8 +1656,11 @@ async function runChapterWriting(
     : planRevision !== null && appliedWritingPlanVersion === planRevision.base_plan_version
       ? new Set(planRevision.affected_section_ids)
       : new Set(worklist.map(section => section.id))
-  const checkpoint = await loadChapterCheckpoint(
-    workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations,
+  const checkpointVersion = writingPlanInvalidations.size > 0 && appliedWritingPlanVersion !== undefined
+    ? appliedWritingPlanVersion
+    : writingPlan.plan_version
+  let checkpoint = await loadChapterCheckpoint(
+    workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations, checkpointVersion,
   )
   const originalWriterId = revision === undefined ? undefined
     : checkpoint?.executionLog.sections.find(section => section.section_id === revision.request.reference.section_id)
@@ -1677,25 +1675,71 @@ async function runChapterWriting(
   await mkdir(join(chaptersRoot, 'meta'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'reviews'), { recursive: true, mode: 0o700 })
 
-  const plan = checkpoint?.plan ?? await loadValidPlan(
-    agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan }, options.maxRepairAttempts,
-    options.signal,
-  )
+  const checkpointPlan = checkpoint?.plan
+  let plan: ChapterExecutionPlan
+  if (checkpointPlan === undefined || checkpointPlan.writing_plan_version !== writingPlan.plan_version) {
+    const previousPlan = checkpointPlan
+    plan = await loadValidPlan(
+      agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan }, options.maxRepairAttempts,
+      options.signal,
+    )
+    if (checkpoint !== undefined && previousPlan !== undefined) {
+      const previousRelations = new Map(previousPlan.sections.map(section => [section.section_id, section]))
+      const relationInvalidations = new Set(plan.sections.filter(section =>
+        JSON.stringify(previousRelations.get(section.section_id)) !== JSON.stringify(section),
+      ).map(section => section.section_id))
+      for (const sectionId of relationInvalidations) {
+        for (const dependent of plan.sections.filter(section =>
+          section.depends_on.some(dependency => dependency.section_id === sectionId))) {
+          relationInvalidations.add(dependent.section_id)
+        }
+      }
+      for (const sectionId of relationInvalidations) {
+        const log = checkpoint.executionLog.sections.find(section => section.section_id === sectionId)
+        const context = contexts.get(sectionId)
+        if (log === undefined || context === undefined) continue
+        const writerId = log.final_writer_child_session_id ?? checkpoint.drafts.get(sectionId)?.writerChildSessionId
+        if (writerId !== undefined && checkpoint.completed.has(sectionId)) {
+          const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+          checkpoint.reusableWriterIds.set(sectionId, writerId)
+          checkpoint.planRevisions.set(sectionId, {
+            instruction: `Writing Plan v${writingPlan.plan_version} 已重新判断章节关系；只调整受当前依赖与关联变化影响的内容。`,
+            reference: { scope: 'chapter', section_id: sectionId, content_sha256: chapterContentSha256(markdown) },
+          })
+        }
+        checkpoint.completed.delete(sectionId)
+        checkpoint.drafts.delete(sectionId)
+        log.status = 'pending'
+        log.final_writer_child_session_id = null
+        log.final_reviewer_child_session_id = null
+      }
+      const currentRelations = new Map(plan.sections.map(section => [section.section_id, section]))
+      checkpoint.executionLog.writing_plan_version = writingPlan.plan_version
+      for (const log of checkpoint.executionLog.sections) {
+        const relation = currentRelations.get(log.section_id)
+        log.depends_on = relation?.depends_on.map(item => item.section_id) ?? []
+        log.related_sections = relation?.related_sections.map(item => item.section_id) ?? []
+      }
+      checkpoint = { ...checkpoint, plan }
+    }
+  } else plan = checkpointPlan
   await Promise.all([...contexts.values()].map(context => resolveChapterReadLocations(
     workspace, manifest, webSources.sources, context,
   )))
   options.signal?.throwIfAborted()
-  const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
+  let planSections = new Map(plan.sections.map(section => [section.section_id, section]))
   const executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
     schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION,
     scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash,
+    writing_plan_version: writingPlan.plan_version,
     max_concurrency: options.maxConcurrency,
     observed_max_concurrency: 0,
     sections: worklist.map(section => ({
       section_id: section.id,
       depends_on: planSections.get(section.id)?.depends_on.map(item => item.section_id) ?? [],
       related_sections: planSections.get(section.id)?.related_sections.map(item => item.section_id) ?? [],
+      epoch: 0,
       status: 'pending',
       attempts: [],
       final_writer_child_session_id: null,
@@ -1758,7 +1802,7 @@ async function runChapterWriting(
     | { readonly sectionId: string; readonly error: unknown }
   const running = new Map<string, Promise<SectionSettlement>>()
   const failures = new Map<string, unknown>()
-  const sectionEpochs = new Map(worklist.map(section => [section.id, 0]))
+  const sectionEpochs = new Map(executionLog.sections.map(section => [section.section_id, section.epoch]))
   const pendingRevisions = new Map<string, BidChapterRevisionRequest>(checkpoint?.planRevisions)
   const priorHandoffs = new Map<string, string>()
   const reusableWriterIds = new Map([
@@ -1778,7 +1822,9 @@ async function runChapterWriting(
     if (activeWriterId !== undefined) reusableWriterIds.set(sectionId, activeWriterId)
     const previous = completed.get(sectionId)
     if (previous !== undefined) priorHandoffs.set(sectionId, JSON.stringify(previous.candidate.metadata.handoff))
-    sectionEpochs.set(sectionId, (sectionEpochs.get(sectionId) ?? 0) + 1)
+    const epoch = (sectionEpochs.get(sectionId) ?? 0) + 1
+    sectionEpochs.set(sectionId, epoch)
+    log.epoch = epoch
     completed.delete(sectionId)
     checkpoint?.drafts.delete(sectionId)
     pending.add(sectionId)
@@ -1797,12 +1843,14 @@ async function runChapterWriting(
         if (affected.has(dependent.section_id)) continue
         affected.add(dependent.section_id)
         const context = contexts.get(dependent.section_id)
-        if (context === undefined || !completed.has(dependent.section_id)) continue
-        const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
-        pendingRevisions.set(dependent.section_id, {
-          instruction: `强依赖章节 ${sectionId} 的交接决策已经变化；只调整受该新交接影响的内容，其他正文保持不变。`,
-          reference: { scope: 'chapter', section_id: dependent.section_id, content_sha256: chapterContentSha256(markdown) },
-        })
+        if (context === undefined || (!completed.has(dependent.section_id) && !running.has(dependent.section_id))) continue
+        if (completed.has(dependent.section_id)) {
+          const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+          pendingRevisions.set(dependent.section_id, {
+            instruction: `强依赖章节 ${sectionId} 的交接决策已经变化；只调整受该新交接影响的内容，其他正文保持不变。`,
+            reference: { scope: 'chapter', section_id: dependent.section_id, content_sha256: chapterContentSha256(markdown) },
+          })
+        }
         invalidateSection(dependent.section_id)
       }
     }
@@ -1819,7 +1867,10 @@ async function runChapterWriting(
         if (context === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
         validateChapterRevisionReference(request, await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
         pendingRevisions.set(request.reference.section_id, request)
-        invalidateSection(request.reference.section_id)
+        const affected = new Set([request.reference.section_id])
+        for (const id of affected) for (const dependent of plan.sections.filter(section =>
+          section.depends_on.some(dependency => dependency.section_id === id))) affected.add(dependent.section_id)
+        for (const sectionId of affected) invalidateSection(sectionId)
         continue
       }
       const next = parseWritingPlan(command.plan)
@@ -1835,7 +1886,28 @@ async function runChapterWriting(
         await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
         contexts.set(section.id, context)
       }
-      const affected = next.revision?.affected_section_ids ?? worklist.map(section => section.id)
+      const previousPlan = plan
+      plan = await loadValidPlan(
+        agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan },
+        options.maxRepairAttempts, signal,
+      )
+      planSections = new Map(plan.sections.map(section => [section.section_id, section]))
+      const previousRelations = new Map(previousPlan.sections.map(section => [section.section_id, section]))
+      const affected = new Set(next.revision?.affected_section_ids ?? worklist.map(section => section.id))
+      for (const relation of plan.sections) {
+        if (JSON.stringify(previousRelations.get(relation.section_id)) !== JSON.stringify(relation)) affected.add(relation.section_id)
+      }
+      for (const id of affected) {
+        for (const dependent of plan.sections.filter(section => section.depends_on.some(dependency => dependency.section_id === id))) {
+          affected.add(dependent.section_id)
+        }
+      }
+      executionLog.writing_plan_version = next.plan_version
+      for (const log of executionLog.sections) {
+        const relation = planSections.get(log.section_id)
+        log.depends_on = relation?.depends_on.map(item => item.section_id) ?? []
+        log.related_sections = relation?.related_sections.map(item => item.section_id) ?? []
+      }
       for (const sectionId of affected) {
         if (completed.has(sectionId) || pendingRevisions.has(sectionId)) {
           const context = contexts.get(sectionId)
@@ -1858,9 +1930,7 @@ async function runChapterWriting(
     let writer: ChapterWriterChild | undefined
     signal.throwIfAborted()
     const inputEpoch = sectionEpochs.get(sectionId) ?? 0
-    const assertCurrentInput = (): void => {
-      if (sectionEpochs.get(sectionId) !== inputEpoch) throw new Error('BID_CHAPTER_INPUT_STALE')
-    }
+    const inputPlanVersion = writingPlan.plan_version
     const context = contexts.get(sectionId)
     const planned = planSections.get(sectionId)
     const number = outlineNumbers.get(sectionId)
@@ -1887,6 +1957,34 @@ async function runChapterWriting(
           handoff,
         }
       })
+      const inputIdentity: ChapterExecutionAttempt['input'] = {
+        plan_version: inputPlanVersion,
+        section_epoch: inputEpoch,
+        dependencies: planned.depends_on.map((dependency) => {
+          const prior = completed.get(dependency.section_id)
+          if (prior === undefined) throw new Error(`Bid chapter dependency ${dependency.section_id} is incomplete`)
+          return {
+            section_id: dependency.section_id,
+            candidate_sha256: chapterCandidateSha256(prior.candidate.markdown),
+            handoff_sha256: chapterCandidateSha256(JSON.stringify(prior.candidate.metadata.handoff)),
+          }
+        }),
+      }
+      const assertCurrentInput = (): void => {
+        const currentDependencies = planned.depends_on.flatMap((dependency) => {
+          const prior = completed.get(dependency.section_id)
+          return prior === undefined ? [] : [{
+            section_id: dependency.section_id,
+            candidate_sha256: chapterCandidateSha256(prior.candidate.markdown),
+            handoff_sha256: chapterCandidateSha256(JSON.stringify(prior.candidate.metadata.handoff)),
+          }]
+        })
+        if (writingPlan.plan_version !== inputIdentity.plan_version
+          || sectionEpochs.get(sectionId) !== inputIdentity.section_epoch
+          || JSON.stringify(currentDependencies) !== JSON.stringify(inputIdentity.dependencies)) {
+          throw new Error('BID_CHAPTER_INPUT_STALE')
+        }
+      }
       const references = createChapterWriterReferences(context)
       await appendChapterWebReferences(workspace, references, [...durableWebSources.values()])
       const serial = context.contentPath.slice(-7, -3)
@@ -1915,8 +2013,10 @@ async function runChapterWriting(
         if (persistCandidate) {
           await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
           signal.throwIfAborted()
+          assertCurrentInput()
           await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
           signal.throwIfAborted()
+          assertCurrentInput()
         }
         await writeJson(join(workspace.projectRoot, reviewPath), {
           ...review,
@@ -1925,8 +2025,10 @@ async function runChapterWriting(
           reviewer_child_session_id: reviewerChildSessionId,
         })
         signal.throwIfAborted()
+        assertCurrentInput()
         logWrites = logWrites.then(async () => {
           signal.throwIfAborted()
+          assertCurrentInput()
           const committed = {
             ...log, status: 'completed' as const,
             final_writer_child_session_id: writerChildSessionId,
@@ -1936,6 +2038,7 @@ async function runChapterWriting(
           await writeJson(join(workspace.projectRoot, LOG_PATH), {
             ...executionLog, sections: executionLog.sections.map(section => section === log ? committed : section),
           })
+          assertCurrentInput()
           Object.assign(log, committed)
         })
         await logWrites
@@ -1995,6 +2098,7 @@ async function runChapterWriting(
           try {
             const reviewResult = await reviewer.result
             signal.throwIfAborted()
+            assertCurrentInput()
             if (reviewResult.stopReason !== 'completed') {
               reviewIssues.push({ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: `Chapter Reviewer 未正常完成：${reviewResult.stopReason}。${reviewResult.diagnostic ?? ''}` })
               retryReviewerInfrastructure = reviewResult.stopReason === 'error'
@@ -2004,7 +2108,7 @@ async function runChapterWriting(
             } else {
               try {
                 review = reviewRuntime.captured()
-                if (review !== undefined) reviewIssues.push(...validateChapterReview(context, candidate, review))
+                if (review !== undefined) reviewIssues.push(...validateChapterReview(context, candidate, review, hostAcceptanceResults))
               } catch (error: unknown) {
                 reviewIssues.push(...error instanceof ZodError
                   ? error.issues.map(issue => ({ code: 'CHAPTER_REVIEWER_RESULT_INVALID', message: issue.message, path: issue.path.join('.') }))
@@ -2018,12 +2122,23 @@ async function runChapterWriting(
             log.attempts.push({
               role: 'reviewer', attempt: reviewAttempt, child_session_id: String(reviewer.id), label: reviewLabel,
               started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: reviewResult.stopReason,
-              accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues),
+              accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues), input: inputIdentity,
             })
             await persistLog()
             if (reviewAccepted && review !== undefined) {
               return { review, reviewerChildSessionId: String(reviewer.id), issues: reviewIssues }
             }
+          } catch (error: unknown) {
+            if (!(error instanceof Error) || error.message !== 'BID_CHAPTER_INPUT_STALE') throw error
+            log.attempts.push({
+              role: 'reviewer', attempt: reviewAttempt, child_session_id: String(reviewer.id), label: reviewLabel,
+              started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: 'stale-input',
+              accepted: false,
+              issues: [{ code: 'BID_CHAPTER_INPUT_STALE', message: 'Reviewer 输入绑定的计划、章节 epoch 或强依赖身份已失效。' }],
+              input: inputIdentity,
+            })
+            await persistLog()
+            throw error
           } finally {
             await reviewer.dispose()
             reviewRuntime?.dispose()
@@ -2128,6 +2243,7 @@ async function runChapterWriting(
             }
           }
           const accepted = candidate !== undefined && issues.length === 0
+          if (accepted) assertCurrentInput()
           log.attempts.push({
             role: 'writer',
             attempt: writerAttempt,
@@ -2138,6 +2254,7 @@ async function runChapterWriting(
             stop_reason: result.stopReason,
             accepted,
             issues: safeAttemptIssues(issues),
+            input: inputIdentity,
           })
           await persistLog()
           if (accepted && candidate !== undefined) {
@@ -2149,6 +2266,7 @@ async function runChapterWriting(
               await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
               assertCurrentInput()
               await writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
+              assertCurrentInput()
             }
             await persistLog()
             const reviewed = await reviewCandidate(candidate, attempt)
@@ -2166,7 +2284,24 @@ async function runChapterWriting(
           if (issues.length > 0) latestIssues = issues
         } catch (error: unknown) {
           if (signal.aborted) throw error
-          if (error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
+          if (error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') {
+            const staleIssue = { code: 'BID_CHAPTER_INPUT_STALE', message: 'Writer 输入绑定的计划、章节 epoch 或强依赖身份已失效。' }
+            const recorded = log.attempts.findLast(attempt => attempt.role === 'writer'
+              && attempt.child_session_id === String(run.id) && attempt.input === inputIdentity)
+            if (recorded === undefined) {
+              log.attempts.push({
+                role: 'writer', attempt: writerAttempt, child_session_id: String(run.id), label,
+                started_at: startedAt, ended_at: new Date().toISOString(), stop_reason: 'stale-input',
+                accepted: false, issues: [staleIssue], input: inputIdentity,
+              })
+            } else {
+              recorded.accepted = false
+              recorded.stop_reason = 'stale-input'
+              recorded.issues = [staleIssue]
+            }
+            await persistLog()
+            throw error
+          }
           latestStopReason = 'infrastructure-error'
           issues.push({
             code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR',
@@ -2182,6 +2317,7 @@ async function runChapterWriting(
             stop_reason: latestStopReason,
             accepted: false,
             issues: safeAttemptIssues(issues),
+            input: inputIdentity,
           })
           await persistLog()
           latestIssues = issues

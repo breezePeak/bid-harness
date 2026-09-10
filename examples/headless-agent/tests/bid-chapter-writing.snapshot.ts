@@ -72,7 +72,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
         await readFile(join(projectRoot, 'chapters/completion-review.json'), 'utf8'),
       ))
       expect(globalReview.items).toEqual([expect.objectContaining({ compliance_id: 'GLOBAL-1', status: 'pass' })])
-      expect(completionReview.completion?.requirements.every(item => item.status === 'met')).toBe(true)
+      expect(completionReview.completion?.document_acceptance_results.every(item => item.status === 'met')).toBe(true)
       expect(markdown).not.toContain('补充服务方案')
       expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]

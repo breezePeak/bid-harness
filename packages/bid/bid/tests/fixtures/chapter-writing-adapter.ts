@@ -19,7 +19,7 @@ const quality = {
 export class ChapterAdapter extends LlmAdapter {
   readonly requests = new Map<string, { role: 'plan' | 'writer' | 'review'; tools: string[]; steps: number; sectionId?: string }>()
   writerMetadata?: (sectionId: string, step: number) => object
-  repairReviews = Infinity
+  repairReviews = 0
   failWriterStep?: number
   omitRepairSubmission = false
   reviewPreamble = true
@@ -29,7 +29,7 @@ export class ChapterAdapter extends LlmAdapter {
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     const globalReview = prompt.includes('Document Global Compliance Review')
-    const completionReview = prompt.includes('Final Plan Review')
+    const completionReview = prompt.includes('Final Document Review')
     const role = options.sessionId === 'parent' ? 'plan' : prompt.includes('Review Checklist：') ? 'review' : 'writer'
     let entry = this.requests.get(String(options.sessionId))
     if (entry === undefined) {
@@ -41,17 +41,25 @@ export class ChapterAdapter extends LlmAdapter {
     if (step > 8) throw new Error(`script exceeded bound: ${role}`)
     if (role === 'plan') {
       if (completionReview) {
-        const requirementsLine = prompt.split('\n').find(line => line.startsWith('全部待验收要求：'))!
-        const requirements = JSON.parse(requirementsLine.slice('全部待验收要求：'.length)) as Array<{
+        const documentLine = prompt.split('\n').find(line => line.startsWith('Document Acceptance：'))!
+        const criteria = JSON.parse(documentLine.slice('Document Acceptance：'.length)) as Array<{
           id: string
-          section_id: string | null
+          evaluator: { kind: 'semantic' | 'deterministic' }
         }>
+        const sectionsLine = prompt.split('\n').find(line => line.startsWith('章节摘要、正文身份与 Chapter Reviewer 权威结果：'))!
+        const sections = JSON.parse(sectionsLine.slice('章节摘要、正文身份与 Chapter Reviewer 权威结果：'.length)) as Array<{
+          section_id: string
+          review: { verdict: 'pass' | 'repair' | 'blocked' }
+        }>
+        const failed = sections.filter(section => section.review.verdict !== 'pass')
         yield* call('submit_chapter_writing_completion_review', {
-          action: 'complete', reason: '全部 required 条件已经满足。',
-          requirements: requirements.map(item => ({
-            requirement_id: item.id, status: 'met', note: '章节审核与摘要已经覆盖。',
-            section_ids: item.section_id === null ? [] : [item.section_id],
+          action: failed.length === 0 ? 'complete' : 'revise', reason: '已消费章节权威审核并完成文档验收。',
+          document_acceptance: criteria.filter(item => item.evaluator.kind === 'semantic').map(item => ({
+            criterion_id: item.id, status: 'met', evidence_quote_refs: [], reason: '章节审核与摘要足以判断。',
           })),
+          ...(failed.length === 0 ? {} : { sections: failed.map(section => ({
+            section_id: section.section_id, instruction: '修复 Chapter Reviewer 记录的未满足项。',
+          })) }),
         })
         return
       }
@@ -100,8 +108,16 @@ export class ChapterAdapter extends LlmAdapter {
         yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_id: item.id, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节不适用。' })) })
         break
       }
-      case 5: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] }); break
-      case 6: yield* call('finish_chapter_review', {}); break
+      case 5: {
+        const line = prompt.split('\n').find(value => value.startsWith('Semantic Acceptance：'))!
+        const criteria = JSON.parse(line.slice('Semantic Acceptance：'.length)) as Array<{ id: string }>
+        yield* call('review_acceptance_criteria', { items: criteria.map(item => ({
+          criterion_id: item.id, status: 'met', evidence_quote_refs: [], reason: '当前正文满足该条件。',
+        })) })
+        break
+      }
+      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] }); break
+      case 7: yield* call('finish_chapter_review', {}); break
       default: throw new Error('Reviewer finish did not conclude the turn')
     }
   }

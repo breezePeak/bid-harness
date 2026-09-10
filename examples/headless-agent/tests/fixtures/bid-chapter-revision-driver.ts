@@ -59,6 +59,9 @@ try {
       toolCall('review-global-constraint', 'review_global_constraints', {
         items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
       }),
+      toolCall('review-acceptance', 'review_acceptance_criteria', {
+        items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
+      }),
       toolCall('review-summary', 'set_review_summary', {
         quality_checks: { project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
           placeholder_free: true, obvious_repetition_free: true },
@@ -75,9 +78,8 @@ try {
       toolCall(`finish-global-review-${revisionNumber}`, 'finish_global_compliance_review', {}),
       toolCall(`finish-writing-plan-${revisionNumber}`, 'submit_chapter_writing_completion_review', {
         action: 'complete', reason: '修订后的章节与整书 required 条件均已满足。',
-        requirements: [
-          { requirement_id: 'AC-000001', status: 'met', note: '整书术语与技术响应一致。', section_ids: [] },
-          { requirement_id: 'AC-000002', status: 'met', note: '本章已完整说明访问控制实施流程。', section_ids: ['SEC-SECURITY'] },
+        document_acceptance: [
+          { criterion_id: 'AC-000001', status: 'met', evidence_quote_refs: [], reason: '整书术语与技术响应一致。' },
         ],
       }),
     )

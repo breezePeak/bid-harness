@@ -85,15 +85,16 @@ describe('Bid DOCX export', () => {
     const { workspace, outline } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
     const plan = parseWritingPlan({
-      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+      user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
       user_requirements: ['至少 200 页。'], global_instructions: ['完整响应招标要求。'],
       document_acceptance: [{
         id: 'AC-000001', scope: { kind: 'document' }, description: '整本至少 200 页。', priority: 'required',
         evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 200, max: null },
       }],
       sections: ['resource', 'delivery'].map((section_id, index) => ({
-        section_id, task: '完成本章技术响应。', user_requirements: [], writing_instructions: [],
+        section_id, task: '完成本章技术响应。', user_message_refs: [], user_requirements: [], writing_instructions: [],
         acceptance_criteria: [{
           id: `AC-00000${index + 2}`, scope: { kind: 'section', section_id }, description: '完成本章任务。',
           priority: 'required', evaluator: { kind: 'semantic' },

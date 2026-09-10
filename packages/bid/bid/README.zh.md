@@ -39,7 +39,7 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
-Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8。
+Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8；`chapterWritingCompletionRepairRounds` 单独限制 S5 整书验收后的修订轮数，默认为 3，不随并发数变化。
 
 `bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令和 `/bid-start` 确认命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset`，并停在 `waiting_start`。UI 和命令会明确告知“已重置完毕”；只有用户点击“开始本阶段”或执行 `/bid-start` 后，Host 才从阶段入口执行。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
@@ -49,7 +49,7 @@ DOCX 模板通过独立同源二进制请求上传，请求头只携带 Session�
 
 S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题回到同一 Writer 会话，按 `modelStageRepairAttempts` 自动修复（默认 3 次，含初稿共最多 4 轮），最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
 
-S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试会严格校验原计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留有效的 completed 章节，只重新排队 failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
+S5 将 `execution-plan.json` 和 `execution-log.json` 绑定当前 Writing Plan 版本，并以日志作为章节级检查点。每次 Writer 和 Reviewer 尝试都绑定计划版本、section epoch，以及全部强依赖章节的正文和 handoff 身份；正文、审核、文件写入与完成日志提交前都会重新核对。计划、章节或上游交接变化会使迟到结果记为 `stale-input` 和 `accepted=false`，不能覆盖正文或成为最终审核。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试严格校验关系计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留仍绑定当前契约的 completed 章节，只重新排队失效、failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
 
 Writer 使用私有 `submit_chapter` 提交完整候选，工具参数错误在当前回合纠正；每轮语义修复保留 Writer 身份并启动独立 Reviewer，引用和报告按当前候选重新生成。正文标题在审查前按确认目录统一编号；页面读取同一正文，Word 保留相同编号并调整文档标题层级。
 
@@ -72,7 +72,13 @@ S3 初稿、复核修改及失败重试共用候选修复入口。JSON 格式修
 
 S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
 
-S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。主 Agent 只写章节关系计划；共用背景、资料或业务流程先后不构成写作强依赖，只有必须消费前章具体决策、成果结构或最终索引时才使用 `depends_on`。Host 按强依赖 DAG 调度 Writer，并按每个 Section 的 `framework_refs` 注入精确框架正文分块。框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。企业事实缺少本地依据时保留 `unresolved_topics`，不得由框架或 Web 资料替代。明确作为拟议方案的实施方法、分工、台账字段与质控措施，只要不违背采购要求，不因原文未逐项列出而自动判为无依据。
+S5 Main Agent 从最近的有界用户消息清单中选择稳定的 Session、Message 和 Seq 引用，Host 回查 Session Log 原文并生成 `writing-plan.json` schema v3。首次提交包含完整 Task Contract；后续只能基于当前版本提交 patch，分别更新全书指令、document acceptance、section task、section acceptance 和删除项。Host 保留未修改章节及其 `AC-*`，把实际提交 section patch 自动并入影响范围，并校验 AC 全局唯一及 scope 与容器一致。普通进度询问可以不引用，因此不会修改 Task Contract 或停止 Writer；没有额外动态要求时 section 和 document criteria 可以为空。
+
+动态 acceptance 与 Requirement、Scoring Response Point、Compliance 的 `covered/missing` 覆盖协议彼此独立。语义条件由相应 Reviewer 提交 `criterion_id`、`met/unmet`、正文 quote 引用和 reason；否定条件可以在 `unmet` 时引用违规句，整章或整书判断可以不提交单句 quote。确定性条件只由 Host 按显式 metric 计算，Reviewer 不能覆盖。Chapter Reviewer 是 section acceptance 的唯一权威，required 失败会回到原 Writer 并重新审核；Final Main Agent 只判断 document semantic acceptance、消费章节权威结果并选择最小修复范围，不能重判 section criterion。整书判断需要正文时可通过只读工具按 Section 获取最多 12,000 字符的当前完成正文。
+
+S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。Main Agent 根据当前 Task Contract 生成绑定 Writing Plan 版本的章节关系计划；共用背景、资料或业务流程先后不构成写作强依赖，只有必须消费前章具体决策、成果结构或最终索引时才使用 `depends_on`。Writing Plan 更新后，Main Agent 重新判断受影响范围的 `depends_on`、`related_sections`、章节规划说明和全书一致性说明，Host 校验 DAG 并按实际强依赖传播失效。Host 按每个 Section 的 `framework_refs` 注入精确框架正文分块；框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。企业事实缺少本地依据时保留 `unresolved_topics`，不得由框架或 Web 资料替代。明确作为拟议方案的实施方法、分工、台账字段与质控措施，只要不违背采购要求，不因原文未逐项列出而自动判为无依据。
+
+最终 Validator 不依赖 Final Main Agent 复述章节判断，而是独立校验当前计划版本的全部 required section 结果来自最新 Chapter Reviewer、required document 结果来自最终整书验收、确定性结果等于 Host 当前事实，并复核每次最终 Writer/Reviewer 输入身份。通过后才发布 S5 完成状态。
 
 S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章状态常驻。审核工作台中的“导出 Word”调用 Host `exportDocx`，程序核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文；每次在 `outputDirectory` 写入一对带时间标识的 Markdown 和 DOCX 文件。导出成功或失败都不改变 S5 状态，可重复执行。已经保存为 `docx_export/completed` 的旧项目同样保留审核工作台和导出动作。
 

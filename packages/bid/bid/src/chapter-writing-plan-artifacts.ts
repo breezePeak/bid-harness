@@ -3,7 +3,7 @@ import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 
 /** Durable S6 relation-plan and execution-log format version. */
-export const CHAPTER_EXECUTION_SCHEMA_VERSION = 2 as const
+export const CHAPTER_EXECUTION_SCHEMA_VERSION = 3 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 
@@ -17,6 +17,7 @@ export const chapterExecutionPlanSchema = z.object({
   schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
+  writing_plan_version: z.number().int().positive(),
   global_consistency_notes: z.array(z.string().trim().min(1)).min(1),
   sections: z.array(z.object({
     section_id: z.string().min(1),
@@ -36,6 +37,15 @@ const executionAttemptSchema = z.object({
   stop_reason: z.string().min(1),
   accepted: z.boolean(),
   issues: z.array(z.object({ code: z.string().min(1), message: z.string().min(1) }).strict()),
+  input: z.object({
+    plan_version: z.number().int().positive(),
+    section_epoch: z.number().int().nonnegative(),
+    dependencies: z.array(z.object({
+      section_id: z.string().min(1),
+      candidate_sha256: sha256Schema,
+      handoff_sha256: sha256Schema,
+    }).strict()),
+  }).strict(),
 }).strict()
 
 /** Host-owned record of the Child Sessions that produced each chapter. */
@@ -43,12 +53,14 @@ export const chapterExecutionLogSchema = z.object({
   schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
+  writing_plan_version: z.number().int().positive(),
   max_concurrency: z.number().int().min(1).max(8),
   observed_max_concurrency: z.number().int().min(0).max(8),
   sections: z.array(z.object({
     section_id: z.string().min(1),
     depends_on: z.array(z.string().min(1)),
     related_sections: z.array(z.string().min(1)),
+    epoch: z.number().int().nonnegative(),
     status: z.enum(['pending', 'running', 'completed', 'failed']),
     attempts: z.array(executionAttemptSchema),
     final_writer_child_session_id: z.string().min(1).nullable(),
@@ -90,16 +102,21 @@ function issue(code: string, message: string, path?: string): StageValidationIss
  * @param plan - schema-valid relation plan.
  * @param outline - current confirmed outline.
  * @param outlineHash - SHA-256 of the confirmed outline.
+ * @param writingPlanVersion - current Writing Plan version.
  * @returns all deterministic plan issues; an empty result authorizes Child creation.
  */
 export function validateChapterExecutionPlan(
   plan: ChapterExecutionPlan,
   outline: OutlineArtifact,
   outlineHash: string,
+  writingPlanVersion: number,
 ): StageValidationIssue[] {
   const issues: StageValidationIssue[] = []
   if (plan.confirmed_outline_sha256 !== outlineHash) {
     issues.push(issue('CHAPTER_PLAN_OUTLINE_HASH_INVALID', '执行计划与当前确认目录不匹配。', 'confirmed_outline_sha256'))
+  }
+  if (plan.writing_plan_version !== writingPlanVersion) {
+    issues.push(issue('CHAPTER_PLAN_WRITING_PLAN_INVALID', '执行计划与当前 Writing Plan 版本不匹配。', 'writing_plan_version'))
   }
   const writable = new Set(outline.sections.filter(section => section.writable).map(section => section.id))
   const seen = new Set<string>()

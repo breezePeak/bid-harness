@@ -65,23 +65,19 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
     'outline/outline.json': outline,
     'outline/confirmed-outline.json': outline,
     'chapters/writing-plan.json': {
-      schema_version: 2, scope: 'technical_bid', plan_version: 1, confirmed: true,
-      confirmed_outline_sha256: outlineArtifactSha256(outline), user_requirements: ['没有特殊要求，直接开始'],
+      schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      confirmed_outline_sha256: outlineArtifactSha256(outline),
+      user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
+      user_requirements: ['没有特殊要求，直接开始'],
       global_instructions: ['完整响应招标要求。'],
-      document_acceptance: [{
-        id: 'AC-000001', scope: { kind: 'document' }, description: '整书完整响应要求。',
-        priority: 'required', evaluator: { kind: 'semantic' },
-      }],
+      document_acceptance: [],
       sections: [{
-        section_id: 'SEC-1', task: '完成技术方案。', user_requirements: [], writing_instructions: [],
-        acceptance_criteria: [{
-          id: 'AC-000002', scope: { kind: 'section', section_id: 'SEC-1' }, description: '完成本章任务。',
-          priority: 'required', evaluator: { kind: 'semantic' },
-        }],
+        section_id: 'SEC-1', task: '完成技术方案。', user_message_refs: [], user_requirements: [],
+        writing_instructions: [], acceptance_criteria: [],
       }],
       revision: null,
     },
-    'chapters/execution-log.json': { schema_version: 2, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
+    'chapters/execution-log.json': { schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
     'chapters/manifest.json': { schema_version: 6, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), chapters: [{
       section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [],
       covered_must_answer: ['按期交付'], covered_scoring_response_point_ids: ['RP-000001'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],

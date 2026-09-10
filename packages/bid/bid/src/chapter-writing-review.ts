@@ -11,15 +11,15 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { readChapterWebSource } from './chapter-writing-writer.ts'
 import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
-import type { HostAcceptanceResult } from './acceptance-criteria.ts'
+import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
-export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
+export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_acceptance_criteria', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
 
 /** Checklist 的种类及其在当前章节的规范位置。 */
 export interface ChapterReviewItem {
   readonly item_ref: string
-  readonly kind: 'must_answer' | 'requirement' | 'response_point' | 'compliance' | 'acceptance_criterion'
+  readonly kind: 'must_answer' | 'requirement' | 'response_point' | 'compliance'
   readonly id: string | null
   readonly text: string
 }
@@ -45,8 +45,6 @@ export function buildChapterReviewChecklist(context: ChapterContext): ChapterRev
     ...context.requirements.map(value => ({ kind: 'requirement' as const, id: value.id, text: value.normalized_requirement })),
     ...context.responsePoints.map(value => ({ kind: 'response_point' as const, id: value.id, text: value.text })),
     ...context.compliance.map(value => ({ kind: 'compliance' as const, id: value.id, text: value.normalized_rule })),
-    ...context.sectionWritingPlan.acceptance_criteria.filter(value => value.evaluator.kind === 'semantic')
-      .map(value => ({ kind: 'acceptance_criterion' as const, id: value.id, text: value.description })),
   ]
   return items.map((item, index) => ({ item_ref: `R${index + 1}`, ...item }))
 }
@@ -114,6 +112,7 @@ const globalCheckInput = z.object({
   evidence_quote_refs: z.array(text),
   issue: text.nullable(),
 }).strict()
+const acceptanceInput = semanticAcceptanceSubmissionSchema
 const summaryInput = chapterReviewSchema.pick({ quality_checks: true, blocking_issues: true, assignment_conflicts: true })
 const stringParameter = { type: 'string' }
 const nullableText = { oneOf: [stringParameter, { type: 'null' }] }
@@ -137,6 +136,7 @@ export function attachChapterReview(
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
   const coverage = new Map<string, z.infer<typeof coverageInput>>()
+  const acceptance = new Map<string, z.infer<typeof acceptanceInput>>()
   const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
   const claims = new Map<string, z.infer<typeof claimInput>>()
   let summary: z.infer<typeof summaryInput> | undefined
@@ -206,6 +206,28 @@ export function attachChapterReview(
       }),
     })
     runtime.register({
+      name: 'review_acceptance_criteria', description: '按独立的 met/unmet 协议记录本章 semantic acceptance；引用可为空，但填写的 Q 必须来自当前正文。',
+      parameters: {
+        type: 'object', properties: { items: { type: 'array', items: {
+          type: 'object', properties: {
+            criterion_id: stringParameter,
+            status: { type: 'string', enum: ['met', 'unmet'] },
+            evidence_quote_refs: { type: 'array', items: stringParameter },
+            reason: stringParameter,
+          }, required: ['criterion_id', 'status', 'evidence_quote_refs', 'reason'], additionalProperties: false,
+        } } }, required: ['items'], additionalProperties: false,
+      },
+      execute: args => batch(args, (value) => {
+        const item = chapterToolArgs(acceptanceInput, value)
+        const criterion = context.sectionWritingPlan.acceptance_criteria.find(candidate =>
+          candidate.id === item.criterion_id && candidate.evaluator.kind === 'semantic')
+        if (criterion === undefined) throw new ToolArgsError([`criterion_id: 未知 semantic criterion ${item.criterion_id}。`])
+        for (const ref of item.evidence_quote_refs) quote(ref)
+        acceptance.set(item.criterion_id, item)
+        return item.criterion_id
+      }),
+    })
+    runtime.register({
       name: 'review_claims', description: '分批核验实质性事实、技术参数和承诺；只用当前 Q 原文及有资格的 E 来源，来源存在不等于语义支持。',
       parameters: {
         type: 'object', properties: { items: { type: 'array', items: {
@@ -254,11 +276,14 @@ export function attachChapterReview(
       execute(args, exec) {
         chapterToolArgs(z.object({}).strict(), args)
         const missing = checklist.filter(item => !coverage.has(item.item_ref)).map(item => item.item_ref)
+        const missingAcceptance = context.sectionWritingPlan.acceptance_criteria
+          .filter(item => item.evaluator.kind === 'semantic' && !acceptance.has(item.id)).map(item => item.id)
         const missingGlobal = context.globalCompliance.filter(item => !globalChecks.has(item.id)).map(item => item.id)
-        if (missing.length > 0 || missingGlobal.length > 0 || summary === undefined) {
+        if (missing.length > 0 || missingAcceptance.length > 0 || missingGlobal.length > 0 || summary === undefined) {
           return Promise.resolve({
             completed: false,
             missing_items: missing,
+            missing_acceptance_criterion_ids: missingAcceptance,
             missing_global_compliance_ids: missingGlobal,
             missing_summary: summary === undefined,
           })
@@ -279,10 +304,11 @@ export function attachChapterReview(
         }))
         const blocking = [...new Set([
           ...summary.blocking_issues,
-          ...entries.filter(entry => entry.result.status === 'missing'
-            && (entry.item.kind !== 'acceptance_criterion'
-              || context.sectionWritingPlan.acceptance_criteria.find(item => item.id === entry.item.id)?.priority === 'required'))
+          ...entries.filter(entry => entry.result.status === 'missing')
             .map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
+          ...context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic'
+            && item.priority === 'required' && acceptance.get(item.id)?.status === 'unmet')
+            .map(item => `动态验收未通过：${item.description}；${acceptance.get(item.id)?.reason}`),
           ...Object.entries(summary.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
           ...claimChecks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
           ...[...globalChecks.values()].filter(item => item.status === 'violates')
@@ -299,32 +325,28 @@ export function attachChapterReview(
             evidence_quotes: result.evidence_quote_refs.map(quote), issue: result.issue,
           }
         })
-        const semanticAcceptance = new Map(entries.filter(entry => entry.item.kind === 'acceptance_criterion')
-          .map(entry => [entry.item.id, entry] as const))
-        const acceptanceCriteriaCoverage = context.sectionWritingPlan.acceptance_criteria.map((item) => {
+        const acceptanceCriteriaResults = context.sectionWritingPlan.acceptance_criteria.map((item) => {
           if (item.evaluator.kind === 'semantic') {
-            const entry = semanticAcceptance.get(item.id)
+            const entry = acceptance.get(item.id)
             if (entry === undefined) throw new Error(`S5 review lost acceptance criterion ${item.id}`)
             return {
               criterion_id: item.id,
-              item: item.description,
               evaluator: 'semantic' as const,
-              status: entry.result.status === 'covered' ? 'met' as const : 'unmet' as const,
-              evidence_quotes: entry.value.evidence_quotes,
+              status: entry.status,
+              evidence_quotes: entry.evidence_quote_refs.map(quote),
               measured: null,
-              issue: entry.value.issue,
+              reason: entry.reason,
             }
           }
           const result = hostAcceptanceResults.find(value => value.criterion_id === item.id)
             ?? { criterion_id: item.id, status: 'unavailable' as const, measured: null, message: 'Host 未提供测量结果。' }
           return {
             criterion_id: item.id,
-            item: item.description,
             evaluator: 'deterministic' as const,
             status: result.status,
             evidence_quotes: [],
             measured: result.measured,
-            issue: result.status === 'met' ? null : result.message,
+            reason: result.message,
           }
         })
         const review = parseChapterReview({
@@ -334,7 +356,7 @@ export function attachChapterReview(
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),
           response_point_coverage: entries.filter(entry => entry.item.kind === 'response_point').map(entry => ({ ...entry.value, response_point_id: entry.item.id })),
           compliance_coverage: entries.filter(entry => entry.item.kind === 'compliance').map(entry => ({ ...entry.value, compliance_id: entry.item.id })),
-          acceptance_criteria_coverage: acceptanceCriteriaCoverage,
+          acceptance_criteria_results: acceptanceCriteriaResults,
           global_compliance_checks: globalComplianceChecks,
           assignment_conflicts: summary.assignment_conflicts,
           claim_checks: claimChecks, quality_checks: summary.quality_checks, blocking_issues: blocking,
