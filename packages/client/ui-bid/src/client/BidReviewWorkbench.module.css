@@ -377,6 +377,10 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.articleBody > div > p {
+  text-indent: 2em;
+}
+
 .selectionMenu {
   position: fixed;
   z-index: 100;

@@ -51,6 +51,10 @@ it('章节拖入和段落右键引用使用专用修订接口，失败不发送�
     await reader.getByText('选中第一段。', { exact: true }).waitFor({ timeout: 10_000 }).catch(async (error: unknown) => {
       throw new Error(await page.locator('body').innerText(), { cause: error })
     })
+    expect(await reader.getByText('选中第一段。', { exact: true }).evaluate((element) => {
+      const style = getComputedStyle(element)
+      return Number.parseFloat(style.textIndent) / Number.parseFloat(style.fontSize)
+    })).toBe(2)
     const composer = page.locator('[data-composer-card]')
     const input = composer.locator('textarea')
     await page.getByRole('navigation', { name: '章节目录' }).getByRole('button', { name: /技术方案/ }).dragTo(input)

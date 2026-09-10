@@ -47,11 +47,13 @@ describe('项目 Word 格式链路', () => {
   it('导出六级可编辑编号，标题文字不含手写序号，样式关联同一多级列表', async () => {
     const project = await workspace()
     const view = await readDocxFormat(project)
+    expect(view.values).toMatchObject({ 'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'heading1.firstLine': 0 })
     const result = await renderDocx(project, '# 项目标题\n\n# **1 一级**\n\n## 1.1 二级\n\n### 1.1.1 三级\n\n#### 1.1.1.1 四级\n\n##### 1.1.1.1.1 五级\n\n###### 1.1.1.1.1.1 六级\n\n# 2 下一章\n\n# 插入新章', view.values)
     const zip = await JSZip.loadAsync(result.bytes)
     const document = await zip.file('word/document.xml')!.async('string')
     const styles = await zip.file('word/styles.xml')!.async('string')
     const numbering = await zip.file('word/numbering.xml')!.async('string')
+    expect(/<w:style\b[^>]*w:styleId="Normal"[^>]*>[\s\S]*?<\/w:style>/u.exec(styles)?.[0]).toContain('w:firstLineChars="200"')
     expect(document).toContain('<w:t xml:space="preserve">一级</w:t>')
     expect(document).not.toContain('>1 一级<')
     expect(document.match(/<w:numPr>/gu)).toHaveLength(8)

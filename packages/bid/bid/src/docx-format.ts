@@ -79,8 +79,8 @@ export function formatFields(defaults: {
         'center',
         'right',
         'both'])
-    add(`${role}.firstLineUnit`, group, `${label}首行缩进单位`, 'mm', ['mm', 'chars'])
-    add(`${role}.firstLine`, group, `${label}首行缩进`, 0, undefined, 0, 100)
+    add(`${role}.firstLineUnit`, group, `${label}首行缩进单位`, role === 'body' ? 'chars' : 'mm', ['mm', 'chars'])
+    add(`${role}.firstLine`, group, `${label}首行缩进`, role === 'body' ? 2 : 0, undefined, 0, 100)
     add(`${role}.lineRule`, group, `${label}行距类型`, 'auto', ['auto', 'exact', 'atLeast'])
     add(`${role}.line`, group, `${label}行距（倍数或磅）`, 1.5, undefined, 0.5, 100)
     add(`${role}.before`, group, `${label}段前（磅）`, 0, undefined, 0, 100)
