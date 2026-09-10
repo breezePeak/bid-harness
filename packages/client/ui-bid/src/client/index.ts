@@ -305,7 +305,6 @@ export function apply(ctx: ClientContext): void {
       },
       preview: async () => unwrap(await remote.previewDocx(sessionId)),
       generate: async () => unwrap(unwrap(await remote.exportDocx(sessionId))),
-      suggest: async () => unwrap(await remote.suggestDocxFormat(sessionId)),
       download: async () => {
         const file = unwrap(await remote.downloadDocx(sessionId))
         const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(file.data), c => c.charCodeAt(0))], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }))
@@ -347,16 +346,11 @@ export function apply(ctx: ClientContext): void {
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
         },
-        openWordExport: async () => {
-          const word = wordRemote(sessionId)
-          const view = await word.getFormat()
-          if (!view.state.opened) await word.saveFormat({
-            revision: view.state.revision, source: view.state.source, overrides: view.state.overrides,
-            mapping: view.state.mapping, description: view.state.description,
-          })
+        openWordExport: () => {
           const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
           conversation?.setViewAvailable('bid-word-export', true)
           conversation?.selectView('bid-word-export')
+          return Promise.resolve()
         },
         retryStage: async () => {
           const result = await remote.retryStage(sessionId)

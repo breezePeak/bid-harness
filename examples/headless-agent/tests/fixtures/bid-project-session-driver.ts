@@ -43,8 +43,7 @@ try {
   await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'pending' })
   const exporting = await createFresh('export-session-a', exportRoot)
   const automaticExport = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
-  const originalFormat = await ctx.bid.getDocxFormat(exporting)
-  await ctx.bid.saveDocxFormat(exporting, { revision: originalFormat.state.revision, source: 'default', mapping: {}, overrides: { 'body.size': 15, 'heading1.size': 22 }, description: '正文15磅' })
+  const startingFormat = await ctx.bid.getDocxFormat(exporting)
   const preview = await ctx.bid.previewDocx(exporting)
   const beforeGenerate = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
   const generated = await ctx.bid.exportDocx(exporting)
@@ -65,7 +64,7 @@ try {
     fileCount: (await workspace.readManifest()).files.length,
     previousMessageCount: a.deriveMessages().length,
     export: {
-      automaticExport, beforeGenerate, formatRestored: restoredFormat.values['body.size'] === 15, previewMatches: preview.fingerprint === restoredFormat.state.lastExport?.fingerprint, sampleVisible: preview.previewHtml?.includes('非正文'),
+      automaticExport, beforeGenerate, formatRestored: JSON.stringify(restoredFormat.state.resolved) === JSON.stringify(startingFormat.state.resolved), previewIsFixedSample: preview.previewHtml?.includes('这是一段正文示例'),
       details: {
         tender: completedDetails.tender?.project.project_name,
         outline: completedDetails.outline?.sections.map(section => section.title), body: completedDetails.body,

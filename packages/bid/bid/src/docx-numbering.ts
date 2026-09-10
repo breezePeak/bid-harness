@@ -107,6 +107,42 @@ function numeral(value: number, format: string): string {
   return result.replace(/^一十/u, '十')
 }
 /**
+ * 解析图题和表题的独立原生编号定义。
+ * @param values 生效的 resolved 格式。
+ * @returns 可直接加入 DOCX numbering 配置的两个单级列表。
+ */
+export function resolveCaptionNumbering(values: FormatValues): Array<{
+  role: 'figureCaption' | 'tableCaption'
+  reference: string
+  level: ILevelsOptions
+}> {
+  return (['figureCaption', 'tableCaption'] as const).map(role => ({
+    role,
+    reference: `dsh-${role}`,
+    level: {
+      level: 0,
+      format: String(values[`${role}.numbering.format`]) as NonNullable<ILevelsOptions['format']>,
+      text: `${String(values[`${role}.numbering.prefix`])}${String(values[`${role}.numbering.prefixIndexSeparator`])}%1${String(values[`${role}.numbering.indexTitleSeparator`])}`,
+      start: 1,
+      suffix: 'nothing',
+      alignment: 'left',
+    },
+  }))
+}
+
+/**
+ * 创建图题和表题预览计数器；DOCX 由两个原生列表独立计数。
+ * @param values 生效的 resolved 格式。
+ * @returns 接受题注角色并返回前缀、序号及标题分隔符的函数。
+ */
+export function createCaptionNumberer(values: FormatValues): (role: 'figureCaption' | 'tableCaption') => string {
+  const counts = { figureCaption: 0, tableCaption: 0 }
+  return (role) => {
+    counts[role]++
+    return `${String(values[`${role}.numbering.prefix`])}${String(values[`${role}.numbering.prefixIndexSeparator`])}${numeral(counts[role], String(values[`${role}.numbering.format`]))}${String(values[`${role}.numbering.indexTitleSeparator`])}`
+  }
+}
+/**
  * 创建浏览器预览独占的计数器；Word 文件由原生编号自行计数。
  * @param values 生效编号格式。
  * @returns 接受标题级别并返回显示文字的函数。

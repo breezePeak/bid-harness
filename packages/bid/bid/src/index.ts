@@ -63,7 +63,7 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
-import { readDocxFormat, saveDocxFormat, saveDocxTemplate, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
+import { readDocxFormat, saveDocxFormat, saveDocxTemplate, saveDocxFormatInterpretation, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
   DOCX_TEMPLATE_NAME_HEADER,
@@ -1585,11 +1585,26 @@ export class BidHostRuntime extends TypertRemoteService {
       const bytes = await readExactRequestBody(req, size, 'DOCX 模板内容与声明大小不一致。')
       const operation = this.beginOperation(session)
       try {
-        result = { ok: true, value: await saveDocxTemplate(operation.workspace, {
+        const previous = await readDocxFormat(operation.workspace)
+        let view = await saveDocxTemplate(operation.workspace, {
           revision,
           name: decodeURIComponent(nameHeader),
           bytes,
-        }) }
+        })
+        try {
+          const suggestion = await suggestDocxFormat(
+            this.ctx,
+            session,
+            view,
+            AbortSignal.any([operation.controller.signal, AbortSignal.timeout(this.config.wordFormatTimeoutMs)]),
+            this.config.wordFormatMaxTokens,
+          )
+          view = await saveDocxFormatInterpretation(operation.workspace, view.state.revision, suggestion)
+        } catch (error) {
+          await writeDocxFormat(operation.workspace, previous.state)
+          throw error
+        }
+        result = { ok: true, value: view }
       } finally { await this.finishOperation(session, operation, false) }
     } catch (error) {
       result = docxTemplateUploadFailure(error)
@@ -1712,8 +1727,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     try {
       const view = await readDocxFormat(operation.workspace)
-      const markdown = await collectDocxMarkdown(operation.workspace)
-      const rendered = await renderDocx(operation.workspace, markdown, view.values, true)
+      const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
+      const rendered = await renderDocx(operation.workspace, markdown, view.state.resolved)
       return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
     } finally { await this.finishOperation(session, operation, false) }
   }
@@ -3076,8 +3091,9 @@ export class BidWorkspace {
     await assertNoLinkedPath(this.root, sourcePath)
     const markdown = await readFile(sourcePath, 'utf8')
     const view = await readDocxFormat(this)
-    if (Object.values(view.sources).includes('待确认')) throw new Error('模板存在待确认的格式变体，请选择样式或明确使用默认方案。')
-    const rendered = await renderDocx(this, markdown, view.values)
+    const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
+    if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
+    const rendered = await renderDocx(this, markdown, view.state.resolved)
     await readDocxXml(rendered.bytes)
     await atomicBytes(this.root, destinationPath, rendered.bytes)
     await writeDocxFormat(this, { ...view.state,

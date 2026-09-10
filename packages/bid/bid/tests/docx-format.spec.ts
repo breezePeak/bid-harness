@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
@@ -8,330 +8,185 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { BidWorkspace } from '../src/index.ts'
-import { formatFields, resolveFormat, validateFormatValues } from '../src/docx-format.ts'
-import { readDocxFormat, saveDocxFormat, saveDocxTemplate } from '../src/docx-format-store.ts'
-import { DOCX_TEMPLATE_MAX_BYTES } from '../src/docx-format-contract.ts'
+import { defaultDocxFormatState, formatFields, resolveFormat, validateFormatValues } from '../src/docx-format.ts'
+import { readDocxFormat, saveDocxFormat, saveDocxFormatInterpretation, saveDocxTemplate } from '../src/docx-format-store.ts'
+import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from '../src/docx-format-contract.ts'
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
 import { suggestDocxFormat, validateFormatSuggestion } from '../src/docx-format-suggestions.ts'
-import { createHeadingNumberer } from '../src/docx-numbering.ts'
+import { createCaptionNumberer, createHeadingNumberer } from '../src/docx-numbering.ts'
+
 const defaults = { font: '宋体', bodySize: 24, headingSize: 32 }
 async function workspace(): Promise<BidWorkspace> {
   const root = await mkdtemp(join(tmpdir(), 'bid-word-format-'))
-  // 这些纯文件函数不依赖 Host；只提供它们实际读取的工作区字段。
   return { root, projectRoot: root, config: defaults } as BidWorkspace
 }
 async function template(): Promise<Buffer> {
   return Packer.toBuffer(new Document({ styles: { paragraphStyles: [
-    { id: 'BaseBody',
-      name: 'Base Body',
-      run: { font: { eastAsia: '仿宋',
-        ascii: 'Arial' },
-      size: 28 },
+    { id: 'Normal', name: 'Normal', run: { font: { eastAsia: '仿宋', ascii: 'Arial' }, size: 28 },
       paragraph: { spacing: { line: 360 } } },
-    { id: 'Normal', name: 'Normal', basedOn: 'BaseBody' },
-    { id: 'ChapterStyle', name: '章标题', paragraph: { outlineLevel: 0 }, run: { size: 40 } },
-  ] },
-  sections: [{ properties: { page: { margin: { left: 1440,
-    right: 1440,
-    header: 720 },
-  size: { width: 11906,
-    height: 16838 } } },
-  children: [
-    new Paragraph({ style: 'Normal', children: [new TextRun('旧公司正文')] }),
-    new Paragraph({ style: 'ChapterStyle', children: [new TextRun('第一章 旧项目')] }),
-    new Paragraph({ style: 'ChapterStyle', children: [new TextRun({ text: '手动变体', size: 48 })] }),
+    { id: 'ChapterStyle', name: 'Heading 1', paragraph: { outlineLevel: 0 }, run: { size: 40 } },
+    { id: 'Caption', name: 'Caption', run: { size: 24 }, paragraph: { alignment: 'center' } },
+  ] }, sections: [{ properties: { page: { margin: { left: 1440, right: 1440, header: 720 },
+    size: { width: 11906, height: 16838 } } }, children: [
+    new Paragraph({ style: 'Normal', children: [new TextRun('正文小四宋体，英文及数字 Times New Roman，首行缩进 2 字符，1.5 倍行距。')] }),
+    new Paragraph({ style: 'ChapterStyle', children: [new TextRun({ text: '第一章 标题', size: 48, font: { eastAsia: '宋体' } })] }),
+    new Paragraph({ style: 'Caption', children: [new TextRun({ text: '图1 图片标题', size: 26 })] }),
+    new Paragraph({ style: 'Caption', children: [new TextRun({ text: '表1 表格标题', size: 26 })] }),
   ] }] }))
 }
+
 describe('项目 Word 格式链路', () => {
-  it('导出六级可编辑编号，标题文字不含手写序号，样式关联同一多级列表', async () => {
-    const project = await workspace()
-    const view = await readDocxFormat(project)
-    expect(view.values).toMatchObject({ 'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'heading1.firstLine': 0 })
-    const result = await renderDocx(project, '# 项目标题\n\n# **1 一级**\n\n## 1.1 二级\n\n### 1.1.1 三级\n\n#### 1.1.1.1 四级\n\n##### 1.1.1.1.1 五级\n\n###### 1.1.1.1.1.1 六级\n\n# 2 下一章\n\n# 插入新章', view.values)
-    const zip = await JSZip.loadAsync(result.bytes)
-    const document = await zip.file('word/document.xml')!.async('string')
-    const styles = await zip.file('word/styles.xml')!.async('string')
-    const numbering = await zip.file('word/numbering.xml')!.async('string')
-    expect(/<w:style\b[^>]*w:styleId="Normal"[^>]*>[\s\S]*?<\/w:style>/u.exec(styles)?.[0]).toContain('w:firstLineChars="200"')
-    expect(document).toContain('<w:t xml:space="preserve">一级</w:t>')
-    expect(document).not.toContain('>1 一级<')
-    expect(document.match(/<w:numPr>/gu)).toHaveLength(8)
-    const ids = [...document.matchAll(/<w:numId w:val="(\d+)"\/>/gu)].map(match => match[1])
-    expect(new Set(ids).size).toBe(1)
-    for (let level = 1; level <= 6; level++) {
-      const heading = new RegExp(`<w:style\\b[^>]*w:styleId="Heading${level}"[^>]*>[\\s\\S]*?<\\/w:style>`, 'u').exec(styles)?.[0]
-      expect(heading).toContain(`<w:outlineLvl w:val="${level - 1}"/>`)
-      expect(heading).toContain(`<w:numId w:val="${ids[0]}"/>`)
-      expect(numbering).toContain(`<w:pStyle w:val="Heading${level}"/>`)
-      expect(numbering).toContain(`<w:lvlText w:val="${Array.from({ length: level }, (_, index) => `%${index + 1}`).join('.')}"/>`)
-    }
-    expect(result.html).toContain('1.1.1.1 四级')
-    expect(result.html).toContain('2 下一章')
-    expect(result.html).toContain('3 插入新章')
-    const none = await renderDocx(project, '# 项目标题\n\n# 1 一级', { ...view.values, 'numbering.mode': 'none' })
-    const unnumbered = await JSZip.loadAsync(none.bytes)
-    expect(await unnumbered.file('word/document.xml')!.async('string')).not.toContain('<w:numPr>')
-    expect(none.html).not.toContain('1 一级')
-  })
-  it('原生编号保留模板起始值、中文格式及跨父级连续计数', async () => {
-    const project = await workspace()
-    const view = await readDocxFormat(project)
-    const result = await renderDocx(project, '# 项目标题\n\n# 1 一级\n\n## 1.1 二级\n\n# 2 下一章\n\n## 2.1 二级', {
-      ...view.values, 'numbering.mode': 'template', 'numbering.1.start': 3, 'numbering.1.format': 'chineseCounting',
-      'numbering.1.text': '第%1章', 'numbering.2.restart': false,
+  it('角色识别后仍合并 Named Style、段落和 Run 直接格式并保留冲突', async () => {
+    const parsed = await parseDocxTemplate(await template(), '模板.docx')
+    const heading = parsed.extracted.candidates.filter(candidate => candidate.roles.includes('heading1'))
+    expect(heading.some(candidate => candidate.id === 'ChapterStyle' && candidate.values.size === 20)).toBe(true)
+    expect(heading.some(candidate => candidate.id.startsWith('direct-') && candidate.values.size === 24 && candidate.values.font === '宋体')).toBe(true)
+    const saved = await saveDocxTemplate(await workspace(), { revision: 0, name: '模板.docx', bytes: await template() })
+    expect(saved.state.conflicts.find(conflict => conflict.key === 'heading1.size')).toMatchObject({
+      resolvedValue: 24,
+      status: 'conflict',
     })
-    const zip = await JSZip.loadAsync(result.bytes)
+    expect(saved.state.resolved['heading1.font']).toBe('宋体')
+  })
+
+  it('把 asciiTheme、hAnsiTheme 和 eastAsiaTheme 解析为 Theme 中的真实字体', async () => {
+    const zip = await JSZip.loadAsync(await template())
+    zip.file('word/theme/theme1.xml', '<?xml version="1.0"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Custom"><a:majorFont><a:latin typeface="Cambria"/><a:ea typeface="宋体"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface="等线"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>')
+    zip.file('word/styles.xml', '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="majorEastAsia"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>')
+    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>')
+    const parsed = await parseDocxTemplate(await zip.generateAsync({ type: 'nodebuffer' }), 'Theme.docx')
+    const normal = parsed.extracted.candidates.find(candidate => candidate.id === 'Normal')
+    expect(normal?.values).toMatchObject({ font: '宋体', latinFont: 'Arial' })
+    expect(Object.values(normal?.values ?? {})).not.toContain('majorEastAsia')
+    expect(Object.values(normal?.values ?? {})).not.toContain('minorAscii')
+  })
+
+  it('模型只把模板正文中的明确格式说明写入 modelInterpreted', async () => {
+    const project = await workspace()
+    const extracted = await saveDocxTemplate(project, { revision: 0, name: '说明模板.docx', bytes: await template() })
+    const suggestion = validateFormatSuggestion({ rules: [
+      { key: 'body.font', value: '宋体', evidence: '正文小四宋体' },
+      { key: 'body.latinFont', value: 'Times New Roman', evidence: '英文及数字 Times New Roman' },
+      { key: 'body.firstLine', value: 2, evidence: '首行缩进 2 字符' },
+      { key: 'body.firstLineUnit', value: 'chars', evidence: '首行缩进 2 字符' },
+      { key: 'body.line', value: 1.5, evidence: '1.5 倍行距' },
+    ], mapping: { body: 'Normal' } }, extracted)
+    const saved = await saveDocxFormatInterpretation(project, extracted.state.revision, suggestion)
+    expect(saved.state.modelInterpreted.values).toMatchObject({ 'body.font': '宋体', 'body.latinFont': 'Times New Roman',
+      'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.line': 1.5 })
+    expect(saved.state.resolved['body.font']).toBe('宋体')
+    expect(() => validateFormatSuggestion({ rules: [{ key: 'body.size', value: 15, evidence: '模板里没有这句话' }], mapping: {} }, extracted)).toThrow('模板原文')
+  })
+
+  it('Word Caption 和题注样式可同时映射图题与表题并保留多个样本', async () => {
+    const parsed = await parseDocxTemplate(await template(), '题注.docx')
+    const caption = parsed.extracted.candidates.find(candidate => candidate.id === 'Caption')
+    expect(caption?.roles).toEqual(['figureCaption', 'tableCaption'])
+    expect(caption?.samples).toEqual(['图1 图片标题', '表1 表格标题'])
+    const direct = parsed.extracted.candidates.find(candidate => candidate.id.startsWith('direct-')
+      && candidate.samples.includes('图1 图片标题'))
+    expect(direct?.roles).toEqual(['figureCaption', 'tableCaption'])
+    expect(direct?.samples).toEqual(['图1 图片标题', '表1 表格标题'])
+    expect(parsed.extracted.values).toMatchObject({
+      'figureCaption.numbering.prefix': '图',
+      'tableCaption.numbering.prefix': '表',
+    })
+  })
+
+  it('同一字段保存所有相异证据及优先级选出的 resolvedValue', async () => {
+    const fields = formatFields(defaults)
+    const state = defaultDocxFormatState(fields)
+    state.extracted.candidates = [{ id: 'caption', name: 'Caption', roles: ['tableCaption'], samples: ['表1'],
+      values: { size: 16 }, evidence: [
+        { key: 'size', value: 12, source: 'named_style', text: 'Caption 样式' },
+        { key: 'size', value: 16, source: 'direct_format', text: '表1' },
+      ] }]
+    state.modelInterpreted = { values: { 'tableCaption.size': 14 }, mapping: { tableCaption: 'caption' }, evidence: [
+      { key: 'tableCaption.size', value: 14, source: 'template_instruction', text: '表题使用 14 磅' },
+    ] }
+    const view = resolveFormat(state, fields)
+    const conflict = view.state.conflicts.find(item => item.key === 'tableCaption.size')
+    expect(conflict?.evidence.map(item => item.value)).toEqual(expect.arrayContaining([12, 16, 14]))
+    expect(conflict).toMatchObject({ resolvedValue: 14, status: 'conflict' })
+  })
+
+  it('用户确认冲突后只更新 userConfirmed 和 resolved', async () => {
+    const project = await workspace()
+    const extracted = await saveDocxTemplate(project, { revision: 0, name: '冲突模板.docx', bytes: await template() })
+    const confirmed = await saveDocxFormat(project, { revision: extracted.state.revision,
+      userConfirmed: { 'heading1.size': 20 } })
+    expect(confirmed.state.extracted).toEqual(extracted.state.extracted)
+    expect(confirmed.state.modelInterpreted).toEqual(extracted.state.modelInterpreted)
+    expect(confirmed.state.userConfirmed).toEqual({ 'heading1.size': 20 })
+    expect(confirmed.state.resolved['heading1.size']).toBe(20)
+    expect(confirmed.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('confirmed')
+    await expect(saveDocxFormat(project, { revision: confirmed.state.revision,
+      userConfirmed: { 'heading1.size': 21 } })).rejects.toThrow('候选')
+    const replaced = await saveDocxTemplate(project, { revision: confirmed.state.revision,
+      name: '替换模板.docx', bytes: await template() })
+    expect(replaced.state.userConfirmed).toEqual({})
+    expect(replaced.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
+  })
+
+  it('浏览器 HTML 与最终 DOCX 使用同一份 resolved 格式和原生图表编号', async () => {
+    const project = await workspace()
+    const fields = formatFields(defaults)
+    const state = defaultDocxFormatState(fields)
+    state.userConfirmed = {}
+    const view = resolveFormat({ ...state, modelInterpreted: { values: { 'body.size': 15 }, mapping: {}, evidence: [
+      { key: 'body.size', value: 15, source: 'template_instruction', text: '正文 15 磅' },
+    ] } }, fields)
+    const rendered = await renderDocx(project, '正文\n\n图 图片标题\n\n表 表格标题', view.state.resolved)
+    const zip = await JSZip.loadAsync(rendered.bytes)
+    const styles = await zip.file('word/styles.xml')!.async('string')
+    const document = await zip.file('word/document.xml')!.async('string')
     const numbering = await zip.file('word/numbering.xml')!.async('string')
-    expect(numbering).toContain('<w:start w:val="3"/>')
-    expect(numbering).toContain('<w:numFmt w:val="chineseCounting"/>')
-    expect(numbering).toContain('<w:lvlText w:val="第%1章"/>')
-    expect(numbering.match(/<w:lvlRestart w:val="0"\/>/gu)).toHaveLength(1)
-    expect(result.html).toContain('第三章 一级')
-    expect(result.html).toContain('四.2 二级')
-    const parsed = await parseDocxTemplate(result.bytes, '原生编号.docx')
-    expect(parsed.values).toMatchObject({ 'numbering.1.start': 3, 'numbering.1.format': 'chineseCounting',
-      'numbering.1.text': '第%1章', 'numbering.2.restart': false })
+    expect(rendered.html).toContain('font-size:15pt')
+    expect(styles).toContain('<w:sz w:val="30"/>')
+    expect(document.match(/<w:numPr>/gu)).toHaveLength(2)
+    expect(numbering).toContain('<w:lvlText w:val="图%1 "/>')
+    expect(numbering).toContain('<w:lvlText w:val="表%1 "/>')
+    expect(document).not.toContain('图 图片标题')
   })
-  it.each([
-    { font: '楷体', color: 'A04020', italics: true, after: 240, size: 30 },
-    { font: '仿宋', color: '207050', italics: false, after: 100, size: 22 },
-  ])('从独立模板的默认值和继承链保留 $font、$color、$after 段距', async (spec) => {
-    const zip = await JSZip.loadAsync(await template())
-    zip.file('word/styles.xml', `<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-      <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:eastAsia="${spec.font}"/><w:color w:val="${spec.color}"/></w:rPr></w:rPrDefault>
-      <w:pPrDefault><w:pPr><w:spacing w:before="80" w:after="${spec.after}"/></w:pPr></w:pPrDefault></w:docDefaults>
-      <w:style w:type="paragraph" w:styleId="Base"><w:name w:val="Base"/><w:rPr><w:i w:val="${spec.italics}"/><w:sz w:val="${spec.size}"/></w:rPr></w:style>
-      <w:style w:type="paragraph" w:styleId="Section"><w:name w:val="heading 4"/><w:basedOn w:val="Base"/><w:pPr><w:spacing w:before="0"/></w:pPr></w:style>
-      </w:styles>`)
-    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Section"/></w:pPr><w:r><w:t>独立样式示例</w:t></w:r></w:p></w:body></w:document>')
+
+  it('自动模型请求包含实际模板正文和多角色候选并记录到会话', async () => {
     const project = await workspace()
-    const saved = await saveDocxTemplate(project, { revision: 0, name: '继承规则.docx', bytes: await zip.generateAsync({ type: 'nodebuffer' }) })
-    expect(saved.values).toMatchObject({ 'heading4.font': spec.font, 'heading4.color': spec.color,
-      'heading4.italics': spec.italics, 'heading4.after': spec.after / 20, 'heading4.before': 0, 'heading4.size': spec.size / 2 })
-    const result = await renderDocx(project, '# 文档标题\n\n#### 1.1.1.1 独立样式示例', saved.values)
-    const output = await JSZip.loadAsync(result.bytes)
-    const xml = await output.file('word/styles.xml')!.async('string')
-    const heading = /<w:style\b[^>]*w:styleId="Heading4"[^>]*>[\s\S]*?<\/w:style>/u.exec(xml)?.[0]
-    expect(heading).toContain(`w:color w:val="${spec.color}"`)
-    expect(heading).toContain(`w:eastAsia="${spec.font}"`)
-    expect(heading).toContain(`w:after="${spec.after}"`)
-    expect(heading).toContain(spec.italics ? '<w:i/>' : '<w:i w:val="false"/>')
-  })
-  it('标题样式使用模板颜色、正斜体和间距，未声明间距不补入产品段后值', async () => {
-    const project = await workspace()
-    const zip = await JSZip.loadAsync(await template())
-    const styles = await zip.file('word/styles.xml')!.async('string')
-    zip.file('word/styles.xml', styles.replace('</w:styles>', '<w:style w:type="paragraph" w:styleId="Fourth"><w:name w:val="heading 4"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>'))
-    const source = await zip.file('word/document.xml')!.async('string')
-    zip.file('word/document.xml', source.replace('<w:body>', '<w:body><w:p><w:pPr><w:pStyle w:val="Fourth"/></w:pPr><w:r><w:t>四级标题</w:t></w:r></w:p>'))
-    const saved = await saveDocxTemplate(project, { revision: 0, name: '标题模板.docx', bytes: await zip.generateAsync({ type: 'nodebuffer' }) })
-    expect(saved.values).toMatchObject({ 'body.after': 0, 'heading4.after': 0, 'heading4.italics': false, 'heading4.color': '000000' })
-    const markdown = '# 当前项目\n\n#### 1.1.1.1 四级标题\n\n正文与*强调*。'
-    const result = await renderDocx(project, markdown, saved.values)
-    const output = await JSZip.loadAsync(result.bytes)
-    const outputStyles = await output.file('word/styles.xml')!.async('string')
-    const heading = /<w:style\b[^>]*w:styleId="Heading4"[^>]*>[\s\S]*?<\/w:style>/u.exec(outputStyles)?.[0]
-    expect(heading).toContain('w:color w:val="000000"')
-    expect(heading).toContain('w:i w:val="false"')
-    expect(heading).toContain('w:after="0"')
-    expect(heading).not.toContain('2E74B5')
-    expect(result.html).toContain('font-style:normal;color:#000000')
-    const custom = await saveDocxFormat(project, { revision: saved.state.revision, source: 'template', mapping: saved.state.mapping,
-      overrides: { 'heading4.color': '123456', 'heading4.italics': true }, description: '' })
-    const colored = await renderDocx(project, markdown, custom.values)
-    expect(colored.html).toContain('font-style:italic;color:#123456')
-    expect(() => validateFormatValues({ 'heading4.color': 'blue;display:none' }, saved.fields)).toThrow('六位十六进制')
-    const coloredStyles = await zip.file('word/styles.xml')!.async('string')
-    zip.file('word/styles.xml', coloredStyles.replace('<w:rPr><w:b/><w:sz w:val="32"/>', '<w:rPr><w:color w:val="123456"/><w:i/><w:b/><w:sz w:val="32"/>'))
-    const parsed = await parseDocxTemplate(await zip.generateAsync({ type: 'nodebuffer' }), '彩色模板.docx')
-    expect(parsed.candidates.find(item => item.id === 'Fourth')?.values).toMatchObject({ color: '123456', italics: true })
-  })
-  it('字符缩进优先于长度缩进，继承后按字符写入 Word，并刷新旧解析缓存', async () => {
-    const zip = await JSZip.loadAsync(await template())
-    const styles = await zip.file('word/styles.xml')!.async('string')
-    zip.file('word/styles.xml', styles.replace('<w:spacing w:line="360"', '<w:ind w:firstLineChars="200" w:firstLine="200"/><w:spacing w:line="360"'))
-    const bytes = await zip.generateAsync({ type: 'nodebuffer' })
-    const project = await workspace()
-    const saved = await saveDocxTemplate(project, { revision: 0, name: '字符模板.docx', bytes })
-    expect(saved.values).toMatchObject({ 'body.firstLine': 2, 'body.firstLineUnit': 'chars' })
-    const rendered = await renderDocx(project, '正文', saved.values)
-    const output = await JSZip.loadAsync(rendered.bytes)
-    expect(await output.file('word/document.xml')!.async('string')).toContain('w:firstLineChars="200"')
-    expect(rendered.html).toContain('text-indent:2em')
-    const path = join(project.projectRoot, 'word-export/config.json')
-    const stale = JSON.parse(await readFile(path, 'utf8')) as { template: { parserVersion?: number; candidates: unknown[] } }
-    delete stale.template.parserVersion
-    stale.template.candidates = []
-    await writeFile(path, JSON.stringify(stale))
-    const refreshed = await saveDocxTemplate(project, { revision: saved.state.revision, name: '字符模板.docx', bytes })
-    expect(refreshed.values).toMatchObject({ 'body.firstLine': 2, 'body.firstLineUnit': 'chars' })
-    zip.file('word/styles.xml', styles.replace('<w:spacing w:line="360"', '<w:ind w:firstLineChars="0" w:firstLine="200"/><w:spacing w:line="360"'))
-    const zero = await parseDocxTemplate(await zip.generateAsync({ type: 'nodebuffer' }), '无缩进.docx')
-    expect(zero.candidates.find(item => item.id === 'Normal')?.values).toMatchObject({ firstLine: 0, firstLineUnit: 'chars' })
-  })
-  it('格式识别以紧凑候选保留全部 441 个样式，记录实际模型输入并接受末尾候选', async () => {
-    const view = await readDocxFormat(await workspace())
-    const candidates = Array.from({ length: 441 }, (_, index) => ({
-      id: `style-${index}`, name: `样式${index}`, role: 'body', sample: '正文格式样本'.repeat(25),
-      values: { font: '宋体', latinFont: 'Times New Roman', size: 12, alignment: 'left', firstLine: 6.35, lineRule: 'auto', line: 1.5 },
-    }))
-    view.state.template = { hash: 'a'.repeat(64), name: '复杂模板.docx', candidates, values: {}, warnings: [] }
-    expect(Buffer.byteLength(JSON.stringify(candidates))).toBeGreaterThan(64 * 1024)
-    const generate = vi.fn(async (_request: GenerateOptions) => ({
-      finish: { kind: 'stop' }, message: { content: [{ type: 'text', text: '{"changes":[],"mapping":{"body":"style-440"}}' }] },
-    }))
+    const view = await saveDocxTemplate(project, { revision: 0, name: '模型模板.docx', bytes: await template() })
+    const generate = vi.fn(async (_request: GenerateOptions) => ({ finish: { kind: 'stop' }, message: { content: [{ type: 'text', text: '{"rules":[{"key":"body.font","value":"宋体","evidence":"正文小四宋体"}],"mapping":{"figureCaption":"Caption","tableCaption":"Caption"}}' }] } }))
     const append = vi.fn()
-    // 该函数只读取模型路由并记录请求；文件解析及会话生命周期由各自测试覆盖。
     const ctx = { get: () => ({ generate }) } as unknown as Context
     const session = { id: 'format-test', requestHeader: () => ({ config: { provider: 'test', model: 'test' } }), append } as unknown as Session
     const result = await suggestDocxFormat(ctx, session, view, new AbortController().signal, 4096)
-    expect(result.mapping.body).toBe('style-440')
+    expect(result.mapping).toEqual({ figureCaption: 'Caption', tableCaption: 'Caption' })
     const request = generate.mock.calls[0]![0]
     const block = request.messages[0]!.content[0]!
     if (block.type !== 'text') throw new Error('格式输入必须是文本')
-    expect(Buffer.byteLength(block.text)).toBeLessThanOrEqual(64 * 1024)
-    const input = JSON.parse(block.text) as { candidateColumns: string[]; candidates: unknown[][] }
-    expect(input.candidateColumns).toEqual(['id', 'name', 'role', 'sample'])
-    expect(input.candidates).toHaveLength(441)
-    expect(input.candidates.at(-1)?.slice(0, 3)).toEqual(['style-440', '样式440', 'body'])
-    const sample = input.candidates.at(-1)?.[3] as string
-    expect(sample.length).toBeGreaterThan(0)
-    expect(sample.length).toBeLessThanOrEqual(40)
-    expect(candidates[440]!.sample.startsWith(sample)).toBe(true)
+    const input = JSON.parse(block.text) as { templateParagraphs: string[]; candidateColumns: string[] }
+    expect(input.templateParagraphs.join('')).toContain('正文小四宋体')
+    expect(input.candidateColumns).toEqual(['id', 'name', 'roles', 'samples'])
     expect(append.mock.calls[0]![0]).toBe('bid.word-format.request')
-    const recorded = append.mock.calls[0]![1] as { messages: unknown }
-    expect(recorded.messages).toEqual(request.messages)
-    for (const candidate of candidates) candidate.name = '复杂样式'.repeat(50)
-    await expect(suggestDocxFormat(ctx, session, view, new AbortController().signal, 4096)).rejects.toThrow('模板候选过多')
-    expect(generate).toHaveBeenCalledTimes(1)
-    expect(append).toHaveBeenCalledTimes(1)
   })
-  it('完整保存超过 200 项实际使用的命名样式和直接格式，重新加载及缓存复用后仍可映射末尾候选', async () => {
-    const zip = await JSZip.loadAsync(await template())
-    const styles = await zip.file('word/styles.xml')!.async('string')
-    zip.file('word/styles.xml', styles.replace('</w:styles>', Array.from({ length: 220 }, (_, index) =>
-      `<w:style w:type="paragraph" w:styleId="Extra${index}"><w:name w:val="自定义${index}"/><w:basedOn w:val="Normal"/></w:style>`,
-    ).join('') + '</w:styles>'))
-    const document = await zip.file('word/document.xml')!.async('string')
-    zip.file('word/document.xml', document.replace('<w:body>', '<w:body>' + Array.from({ length: 240 }, (_, index) =>
-      `<w:p><w:pPr><w:pStyle w:val="Extra${index % 220}"/><w:spacing w:before="${index + 1}"/></w:pPr><w:r><w:t>格式样本${index}</w:t></w:r></w:p>`,
-    ).join('')))
-    const bytes = await zip.generateAsync({ type: 'nodebuffer' })
-    const project = await workspace()
-    const saved = await saveDocxTemplate(project, { revision: 0, name: '复杂模板.docx', bytes })
-    const candidates = saved.state.template!.candidates
-    expect(candidates.length).toBeGreaterThan(460)
-    expect(candidates.some(item => item.id === 'Extra219')).toBe(true)
-    const last = candidates.find(item => item.sample === '格式样本239')!
-    expect(last.values.before).toBe(12)
-    expect(saved.state.mapping.body).toBe('Normal')
-    const restored = await readDocxFormat(project)
-    expect(restored.state.template?.candidates).toEqual(candidates)
-    const mapped = await saveDocxFormat(project, {
-      revision: restored.state.revision, source: 'template', mapping: { body: last.id }, overrides: {}, description: '',
-    })
-    expect(mapped.values['body.before']).toBe(12)
-    const other = await saveDocxTemplate(project, { revision: mapped.state.revision, name: '简单模板.docx', bytes: await template() })
-    const cached = await saveDocxTemplate(project, { revision: other.state.revision, name: '复杂模板.docx', bytes })
-    expect(cached.state.template?.candidates).toEqual(candidates)
+
+  it('标题及图表编号在浏览器预览中独立计数', () => {
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    const heading = createHeadingNumberer(values)
+    expect([1, 2, 1].map(heading)).toEqual(['1', '1.1', '2'])
+    const caption = createCaptionNumberer(values)
+    expect([caption('figureCaption'), caption('tableCaption'), caption('figureCaption')]).toEqual(['图1 ', '表1 ', '图2 '])
   })
-  it('提示招标格式条款与明确冲突，不将未解析的要求标记为符合', async () => {
+
+  it('解析缓存随 parser version 刷新并拒绝旧配置格式', async () => {
     const project = await workspace()
-    await mkdir(join(project.projectRoot, 'analysis'))
-    await writeFile(join(project.projectRoot, 'analysis/requirements.json'), JSON.stringify({
-      schema_version: 1,
-      requirements: [{ id: 'R1', category: '格式', raw_text: '正文字号为15磅。正文使用仿宋。',
-        normalized_requirement: '正文字号为15磅。正文使用仿宋。', mandatory: true,
-        source_refs: [{ file_id: 'F1', chunk: 'chunk-1', line_start: 1, line_end: 1 }] }],
-    }))
-    const view = await readDocxFormat(project)
-    expect(view.warnings).toContain('格式冲突：招标要求正文字号 15 磅，当前为 12 磅。')
-    expect(view.warnings).toContain('格式冲突：招标要求正文字体 仿宋，当前为 宋体。')
-    const saved = await saveDocxFormat(project, {
-      revision: 0, source: 'default', mapping: {}, description: '', overrides: { 'body.size': 15, 'body.font': '仿宋' },
-    })
-    expect(saved.warnings.some(message => message.startsWith('格式冲突'))).toBe(false)
-    expect(saved.warnings.some(message => message.startsWith('招标格式要求（请核对）'))).toBe(true)
-  })
-  it('按声明的样式识别标题级别，局部字号不生成额外标题候选', async () => {
-    const parsed = await parseDocxTemplate(await template(), '模板.docx')
-    expect(parsed.candidates.find(item => item.id === 'Normal')?.values).toMatchObject({ font: '仿宋', latinFont: 'Arial', size: 14 })
-    expect(parsed.candidates.filter(item => item.role === 'heading1')).toHaveLength(1)
-    expect(parsed.candidates.find(item => item.role === 'heading1')?.values.size).toBe(20)
-    expect(parsed.candidates.some(item => item.id === 'BaseBody')).toBe(false)
-    expect(parsed.values).toMatchObject({ 'page.paper': 'A4', 'page.left': 25.4, 'page.header': 12.7 })
-    const project = await workspace()
-    const initial = await readDocxFormat(project)
     const bytes = await template()
-    const saved = await saveDocxTemplate(project,
-      { revision: 0, name: '模板.docx', bytes })
-    expect(initial.state.opened).toBe(false)
-    expect(saved.sources['heading1.size']).toBe('模板提取')
-    expect(saved.state.mapping.heading1).toBe('ChapterStyle')
-    expect(saved.state.mapping.body).toBe('Normal')
-    expect(saved.values['body.size']).toBe(14)
-    const renamed = await saveDocxTemplate(project,
-      { revision: saved.state.revision, name: '公司模板.docx', bytes })
-    expect(renamed.state.template?.name).toBe('公司模板.docx')
+    const saved = await saveDocxTemplate(project, { revision: 0, name: '模板.docx', bytes })
+    expect(saved.state.template?.parserVersion).toBe(DOCX_TEMPLATE_PARSER_VERSION)
+    const config = join(project.projectRoot, 'word-export/config.json')
+    await writeFile(config, `${JSON.stringify({ ...saved.state, version: 1 })}\n`)
+    await expect(readDocxFormat(project)).rejects.toThrow('版本过旧')
   })
-  it('跨工作区实例恢复配置、保留手动覆盖并拒绝旧版本与非法字段', async () => {
-    const project = await workspace()
-    const first = await saveDocxFormat(project,
-      { revision: 0,
-        source: 'default',
-        mapping: {},
-        overrides: { 'body.size': 15 },
-        description: '正文15磅' })
-    const second = await readDocxFormat({ root: project.root, projectRoot: project.projectRoot, config: project.config } as BidWorkspace)
-    expect(second.state).toEqual(first.state)
-    expect(second.values['body.size']).toBe(15)
-    expect(second.sources['body.size']).toBe('用户修改')
-    await expect(saveDocxFormat(project,
-      { revision: 0,
-        source: 'default',
-        mapping: {},
-        overrides: {},
-        description: '' })).rejects.toThrow('其他页面')
-    expect(() => validateFormatValues({ '../path': 'x' }, formatFields(defaults))).toThrow('配置无效')
-    expect(() => validateFormatValues({ 'body.size': -1 }, formatFields(defaults))).toThrow('配置无效')
-    expect(() => validateFormatValues({ 'numbering.1.text': '%2' }, formatFields(defaults))).toThrow('不能引用下级')
-  })
-  it('用同一配置渲染标题、富文本、嵌套列表、表格和图片，不带旧模板文字', async () => {
-    const project = await workspace()
-    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=', 'base64')
-    await writeFile(join(project.root, 'image.png'), png)
-    const view = resolveFormat({ version: 1,
-      revision: 0,
-      opened: true,
-      source: 'default',
-      mapping: {},
-      overrides: { 'body.size': 15,
-        'heading1.size': 22,
-        'header.text': '当前项目' },
-      description: '' },
-    formatFields(defaults))
-    const markdown = '# 当前项目技术标\n\n# 1 实施方案\n\n**加粗**与*斜体*和[链接](https://example.com)。\n\n1. 一级\n   - 二级\n\n| 表头 | 说明 |\n| --- | --- |\n| 单元格 | **值** |\n\n![示意图](image.png)\n\n```txt\n# 代码内容\n```'
-    const result = await renderDocx(project, markdown, view.values)
-    await expect(readDocxXml(result.bytes)).resolves.toBeDefined()
-    const zip = await JSZip.loadAsync(result.bytes)
-    const xml = await zip.file('word/document.xml')!.async('string')
-    expect(xml).toContain('w:val="Title"')
-    expect(xml).toContain('w:val="Heading1"')
-    expect(xml).toContain('w:sz w:val="30"')
-    expect(xml).toContain('w:sz w:val="44"')
-    expect(xml).toContain('<w:b/>')
-    expect(xml).toContain('<w:i/>')
-    expect(xml).toContain('<w:tbl>')
-    expect(xml).toContain('w:drawing')
-    expect(result.html).toContain('<strong>加粗</strong>')
-    expect(result.html).toContain('font-size:15pt')
-    expect(result.html).toContain('data:image/png;base64,')
-    expect(xml).not.toContain('旧公司')
-    await expect(renderDocx(project, '<script>bad</script>', view.values)).rejects.toThrow('第 1 行不支持 html')
-    await expect(renderDocx(project, '![远程](https://example.com/a.png)', view.values)).rejects.toThrow('不自动访问外部资源')
-  })
-  it('拒绝无效 DOCX、DTD、循环样式和路径逃逸', async () => {
+
+  it('拒绝无效 DOCX、DTD、循环样式、危险路径和超限 XML', async () => {
     await expect(readDocxXml({ length: DOCX_TEMPLATE_MAX_BYTES + 1 } as Uint8Array)).rejects.toThrow('不超过 300 MiB')
     await expect(readDocxXml(Buffer.from('not zip'))).rejects.toThrow('有效的 DOCX')
     const bytes = await template()
@@ -343,57 +198,26 @@ describe('项目 Word 格式链路', () => {
       zip.file(path!, content!)
       await expect(readDocxXml(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(message!)
     }
-    const zip = await JSZip.loadAsync(bytes)
-    zip.file('word/styles.xml',
-      '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Normal"><w:basedOn w:val="Normal"/></w:style></w:styles>')
-    await expect(parseDocxTemplate(await zip.generateAsync({ type: 'nodebuffer' }), '坏模板.docx')).rejects.toThrow('循环继承')
+    const cyclic = await JSZip.loadAsync(bytes)
+    cyclic.file('word/styles.xml', '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Normal"><w:basedOn w:val="Normal"/></w:style></w:styles>')
+    await expect(parseDocxTemplate(await cyclic.generateAsync({ type: 'nodebuffer' }), '坏模板.docx')).rejects.toThrow('循环继承')
+    const oversized = await JSZip.loadAsync(bytes)
+    oversized.file('word/document.xml', ' '.repeat(32 * 1024 * 1024 + 1))
+    await expect(parseDocxTemplate(await oversized.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }), '超大 XML.docx')).rejects.toThrow('解压后超过')
   })
-  it('只提取 XML，不执行宏、控件或嵌入对象', async () => {
-    const zip = await JSZip.loadAsync(await template())
-    zip.file('word/vbaProject.bin', 'macro')
-    zip.file('word/activeX/activeX1.bin', 'control')
-    zip.file('word/embeddings/oleObject1.bin', 'attachment')
-    zip.file('word/media/image1.png', Buffer.alloc(33 * 1024 * 1024))
-    const parsed = await parseDocxTemplate(await zip.generateAsync({ type: 'nodebuffer' }), '兼容模板.docx')
-    expect(parsed.candidates.length).toBeGreaterThan(0)
+
+  it('字段校验拒绝未知键、越界值和无效编号', () => {
+    const fields = formatFields(defaults)
+    expect(() => validateFormatValues({ '../path': 'x' }, fields)).toThrow('配置无效')
+    expect(() => validateFormatValues({ 'body.size': -1 }, fields)).toThrow('配置无效')
+    expect(() => validateFormatValues({ 'numbering.1.text': '%2' }, fields)).toThrow('不能引用下级')
   })
-  it('拒绝格式 XML 解压超过 32 MiB 的模板', async () => {
-    const zip = await JSZip.loadAsync(await template())
-    zip.file('word/document.xml', ' '.repeat(32 * 1024 * 1024 + 1))
-    const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
-    await expect(parseDocxTemplate(bytes, '超大XML.docx')).rejects.toThrow('DOCX 格式 XML 解压后超过 32 MiB 限制。')
-  })
-  it('模型只能建议有用户原话的合法字段和存在的候选', async () => {
-    const view = await saveDocxFormat(await workspace(),
-      { revision: 0,
-        source: 'default',
-        overrides: {},
-        mapping: {},
-        description: '正文15磅' })
-    expect(validateFormatSuggestion({ changes: [{ key: 'body.size',
-      value: 15,
-      evidence: '正文15磅' }],
-    mapping: {} },
-    view).overrides).toEqual({ 'body.size': 15 })
-    expect(() => validateFormatSuggestion({ changes: [{ key: 'body.size',
-      value: 15,
-      evidence: '不存在的原话' }],
-    mapping: {} },
-    view)).toThrow('用户原话')
-    expect(() => validateFormatSuggestion({ changes: [], mapping: { body: 'invented' } }, view)).toThrow('不存在')
-  })
-  it('模板编号按层级重启或连续，编号文字只生成一次', async () => {
-    const view = await saveDocxFormat(await workspace(),
-      { revision: 0,
-        source: 'default',
-        overrides: { 'numbering.mode': 'template',
-          'numbering.1.format': 'chineseCounting',
-          'numbering.1.text': '第%1章',
-          'numbering.2.text': '%1.%2',
-          'numbering.2.restart': false },
-        mapping: {},
-        description: '' })
-    const number = createHeadingNumberer(view.values)
-    expect([1, 2, 2, 1, 2].map(number)).toEqual(['第一章', '一.1', '一.2', '第二章', '二.3'])
+
+  it('配置指纹只读取 resolved 而不重新猜测模板', async () => {
+    const project = await workspace()
+    const view = await saveDocxTemplate(project, { revision: 0, name: '模板.docx', bytes: await template() })
+    const persisted = JSON.parse(await readFile(join(project.projectRoot, 'word-export/config.json'), 'utf8')) as { resolved: unknown }
+    expect(persisted.resolved).toEqual(view.state.resolved)
+    expect((await readDocxFormat(project)).values).toBeDefined()
   })
 })

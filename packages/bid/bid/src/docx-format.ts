@@ -1,9 +1,9 @@
 /** Word 样式字段与合并；DOCX 和浏览器预览读取同一组生效值。 */
 import { z } from 'zod'
 import { DOCX_TEMPLATE_MAX_BYTES } from './docx-format-contract.ts'
-import type { DocxFormatState, DocxFormatView, FormatField, FormatValues, FormatSource } from './docx-format-contract.ts'
+import type { DocxFormatState, DocxFormatView, FormatEvidence, FormatField, FormatRole, FormatValue, FormatValues } from './docx-format-contract.ts'
 /** 当前标书内容可映射的独立格式角色。 */
-export const FORMAT_ROLES = ['title',
+export const FORMAT_ROLES: FormatRole[] = ['title',
   'heading1',
   'heading2',
   'heading3',
@@ -114,6 +114,17 @@ export function formatFields(defaults: {
   add('table.borderSize', '表格与图表说明', '边框粗细（磅）', 0.5, undefined, 0, 8)
   add('table.fill', '表格与图表说明', '表头底色（十六进制）', 'EEEEEE')
   add('table.width', '表格与图表说明', '表格宽度（页面百分比）', 100, undefined, 10, 100)
+  for (const [role, label, prefix] of [['figureCaption', '图题', '图'], ['tableCaption', '表题', '表']] as const) {
+    add(`${role}.numbering.prefix`, '表格与图表说明', `${label}编号前缀`, prefix)
+    add(`${role}.numbering.format`, '表格与图表说明', `${label}编号形式`, 'decimal', ['decimal',
+      'upperRoman',
+      'lowerRoman',
+      'upperLetter',
+      'lowerLetter',
+      'chineseCounting'])
+    add(`${role}.numbering.prefixIndexSeparator`, '表格与图表说明', `${label}前缀与序号分隔符`, '')
+    add(`${role}.numbering.indexTitleSeparator`, '表格与图表说明', `${label}序号与标题分隔符`, ' ')
+  }
   add('header.text', '页眉页脚', '页眉文字（留空使用当前文档标题）', '')
   add('footer.text', '页眉页脚', '页脚文字', '')
   add('footer.pageNumber', '页眉页脚', '页码形式', 'current', ['none', 'current', 'total'])
@@ -155,44 +166,126 @@ export function validateFormatValues(values: unknown, fields: FormatField[]): Fo
   }
   return result
 }
+const evidencePriority: Record<FormatEvidence['source'], number> = {
+  system_default: 0,
+  doc_defaults: 1,
+  theme: 2,
+  named_style: 3,
+  direct_format: 4,
+  template_instruction: 5,
+  user_requirement: 6,
+  user_confirmed: 7,
+}
+const evidenceValue = (value: FormatValue): string => `${typeof value}:${String(value)}`
+
 /**
- * 合并默认、模板映射和用户覆盖，保留每个字段的来源。
- * @param state 保存的项目配置。
- * @param fields 可用字段。
+ * 创建尚未上传模板的完整默认状态。
+ * @param fields 当前部署的字段定义。
+ * @returns 可直接供预览和导出读取的 resolved 状态。
+ */
+export function defaultDocxFormatState(fields: FormatField[]): DocxFormatState {
+  return {
+    version: 2,
+    revision: 0,
+    opened: false,
+    extracted: { values: {}, candidates: [], paragraphs: [], evidence: [], warnings: [] },
+    modelInterpreted: { values: {}, mapping: {}, evidence: [] },
+    conflicts: [],
+    resolved: Object.fromEntries(fields.map(field => [field.key, field.value])),
+    userConfirmed: {},
+  }
+}
+
+function candidateEvidence(candidate: DocxFormatState['extracted']['candidates'][number], role: FormatRole): FormatEvidence[] {
+  const byKey = new Map<string, FormatEvidence[]>()
+  for (const evidence of candidate.evidence) {
+    const entries = byKey.get(evidence.key) ?? []
+    entries.push(evidence)
+    byKey.set(evidence.key, entries)
+  }
+  return Object.entries(candidate.values).flatMap(([key, value]) => {
+    const evidence = byKey.get(key)
+    if (evidence?.length) return evidence.map(item => ({ ...item, key: `${role}.${key}`, candidateId: candidate.id }))
+    return [{ key: `${role}.${key}`, value, source: 'named_style' as const, text: candidate.name, candidateId: candidate.id }]
+  })
+}
+
+/**
+ * 按证据优先级重建冲突和最终值。
+ * @param state 已校验的提取、模型解释及用户确认。
+ * @param fields 当前部署的字段定义。
  * @param templateMaxBytes 当前部署允许的模板原始字节数。
- * @returns 生效值、来源和支持范围提示。
+ * @returns 保存和展示使用的完整视图；values 与 state.resolved 是同一结果。
  */
 export function resolveFormat(state: DocxFormatState, fields: FormatField[], templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES): DocxFormatView {
-  const values = Object.fromEntries(fields.map(field => [field.key, field.value]))
-  const sources: Record<string, FormatSource> = Object.fromEntries(fields.map(field => [field.key, '默认补充']))
-  const apply = (next: FormatValues, source: FormatSource): void => {
-    for (const [key, value] of Object.entries(validateFormatValues(next, fields))) {
-      values[key] = value
-      sources[key] = source
-    }
+  const evidence = new Map<string, FormatEvidence[]>()
+  const add = (item: FormatEvidence): void => {
+    const entries = evidence.get(item.key) ?? []
+    entries.push(item)
+    evidence.set(item.key, entries)
   }
-  const warnings = ['样式预览，分页以 Word 为准；浏览器和 Word 的字体可用性可能不同。', '仅比较明确的正文字号及字体要求，其余招标格式条款需人工核对。']
-  if (state.source === 'template' && state.template) {
-    apply(state.template.values, '模板提取')
-    warnings.push(...state.template.warnings)
-    for (const role of FORMAT_ROLES) {
-      const candidate = state.template.candidates.find(item => item.id === state.mapping[role])
-      if (!candidate) {
-        const ambiguous = state.mapping[role] !== '__default__' && state.template.candidates.filter(item => item.role === role).length > 1
-        if (ambiguous)
-          for (const field of fields.filter(item => item.key.startsWith(`${role}.`)))
-            sources[field.key] = '待确认'
-        warnings.push(`${roleLabels[FORMAT_ROLES.indexOf(role)]}${ambiguous ? '有多个格式变体，待确认：请选择候选或明确使用默认方案。' : '使用默认方案，可手动修改。'}`)
-        continue
-      }
-      apply(Object.fromEntries(Object.entries(candidate.values).map(([key, value]) => [`${role}.${key}`, value])), '模板提取')
-    }
+  for (const field of fields) add({ key: field.key, value: field.value, source: 'system_default' })
+  for (const [key, value] of Object.entries(validateFormatValues(state.extracted.values, fields)))
+    add(state.extracted.evidence.find(item => item.key === key && evidenceValue(item.value) === evidenceValue(value))
+      ?? { key, value, source: 'direct_format' })
+  for (const role of FORMAT_ROLES) {
+    const mapped = state.modelInterpreted.mapping[role]
+    const candidates = mapped
+      ? state.extracted.candidates.filter(candidate => candidate.id === mapped
+        || candidate.id.startsWith('direct-') && candidate.roles.includes(role))
+      : state.extracted.candidates.filter(candidate => candidate.roles.includes(role))
+    for (const candidate of candidates)
+      for (const item of candidateEvidence(candidate, role)) add(item)
   }
-  apply(state.overrides, '用户修改')
-  const shortEdge = values['page.paper'] === 'A3' ? 297 : values['page.paper'] === 'Letter' ? 215.9 : 210
-  const longEdge = values['page.paper'] === 'A3' ? 420 : values['page.paper'] === 'Letter' ? 279.4 : 297
-  const pageWidth = values['page.orientation'] === 'landscape' ? longEdge : shortEdge
-  if (Number(values['page.left']) + Number(values['page.right']) >= pageWidth)
+  for (const [key, value] of Object.entries(validateFormatValues(state.modelInterpreted.values, fields)))
+    add(state.modelInterpreted.evidence.find(item => item.key === key && evidenceValue(item.value) === evidenceValue(value))
+      ?? { key, value, source: 'template_instruction' })
+  const confirmed = validateFormatValues(state.userConfirmed, fields)
+  for (const [key, value] of Object.entries(confirmed)) add({ key, value, source: 'user_confirmed' })
+
+  const resolved: FormatValues = {}
+  const conflicts = [...evidence].flatMap(([key, entries]) => {
+    const ranked = entries.toSorted((left, right) => evidencePriority[right.source] - evidencePriority[left.source])
+    const winner = ranked[0]
+    if (!winner) return []
+    resolved[key] = winner.value
+    const meaningful = ranked.filter(item => !['system_default', 'doc_defaults', 'theme', 'user_confirmed'].includes(item.source))
+    const values = new Set(meaningful.map(item => evidenceValue(item.value)))
+    if (values.size < 2) return []
+    return [{ key,
+      resolvedValue: winner.value,
+      status: key in confirmed ? 'confirmed' as const : 'conflict' as const,
+      evidence: meaningful }]
+  })
+  validateFormatValues(resolved, fields)
+  const shortEdge = resolved['page.paper'] === 'A3' ? 297 : resolved['page.paper'] === 'Letter' ? 215.9 : 210
+  const longEdge = resolved['page.paper'] === 'A3' ? 420 : resolved['page.paper'] === 'Letter' ? 279.4 : 297
+  const pageWidth = resolved['page.orientation'] === 'landscape' ? longEdge : shortEdge
+  if (Number(resolved['page.left']) + Number(resolved['page.right']) >= pageWidth)
     throw new Error('左右页边距过大，请缩小边距。')
-  return { state, templateMaxBytes, fields, values, sources, warnings }
+  const nextState = { ...state, resolved, conflicts }
+  return { state: nextState,
+    templateMaxBytes,
+    fields,
+    values: nextState.resolved,
+    warnings: ['样式预览，分页以 Word 为准；浏览器和 Word 的字体可用性可能不同。', ...state.extracted.warnings] }
+}
+
+/**
+ * 从磁盘状态创建视图，不重新解释或合并模板。
+ * @param state 已保存且完整校验的状态。
+ * @param fields 当前部署的字段定义。
+ * @param templateMaxBytes 当前部署允许的模板原始字节数。
+ * @returns 仅投影 state.resolved 的视图。
+ */
+export function viewResolvedFormat(
+  state: DocxFormatState,
+  fields: FormatField[],
+  templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES,
+): DocxFormatView {
+  const resolved = validateFormatValues(state.resolved, fields)
+  if (Object.keys(resolved).length !== fields.length)
+    throw new Error('保存的 Word 格式缺少最终确认字段，请重新上传模板。')
+  return { state, templateMaxBytes, fields, values: state.resolved,
+    warnings: ['样式预览，分页以 Word 为准；浏览器和 Word 的字体可用性可能不同。', ...state.extracted.warnings] }
 }

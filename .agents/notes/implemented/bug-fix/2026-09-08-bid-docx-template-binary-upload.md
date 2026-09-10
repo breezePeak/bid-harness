@@ -8,7 +8,7 @@ Word 格式页把 DOCX 模板编码为 base64 后放入配置 Remote 的 JSON。
 
 ## Decision
 
-浏览器把 DOCX `File` 直接交给独立同源二进制端点，请求头携带 Session、显示文件名、原始长度和配置 revision。Host 复用 [S1 二进制上传](2026-09-01-file-intake-batch-completeness.md) 的来源校验与精确长度读取，在项目锁内解析并保存模板；配置 Remote 只保存格式字段。页面存在未保存编辑时先保存编辑，再用返回的 revision 上传模板，使模板替换保留当前覆盖项和描述。
+浏览器把 DOCX `File` 直接交给独立同源二进制端点，请求头携带 Session、显示文件名、原始长度和配置 revision。Host 复用 [S1 二进制上传](2026-09-01-file-intake-batch-completeness.md) 的来源校验与精确长度读取，在项目锁内完成[模板证据解析与确认](../feature/2026-09-10-word-template-evidence-resolution.md)；配置 Remote 只保存冲突确认。模板解释失败会恢复上传前配置，已写入的内容摘要缓存可供同一文件重试。
 
 `docxTemplateMaxBytes` 是 Host 配置，默认 300 MiB，并通过 `DocxFormatView.templateMaxBytes` 返回浏览器。浏览器预检负责即时反馈，Host 的相同限制负责最终准入。DOCX ZIP 解析仍需要随机访问，因此 Host 在长度准入后把二进制请求体缓冲一次；传输过程中不创建 base64 字符串。
 

@@ -301,7 +301,7 @@ export async function estimateChapterWritingPages(
     ...estimate,
     format: {
       revision: format.state.revision,
-      source: format.state.source,
+      source: format.state.template ? 'template' : 'default',
       template_hash: format.state.template?.hash ?? null,
     },
   }
@@ -338,7 +338,7 @@ export async function estimateChapterCandidatePages(
     ...estimate,
     format: {
       revision: format.state.revision,
-      source: format.state.source,
+      source: format.state.template ? 'template' : 'default',
       template_hash: format.state.template?.hash ?? null,
     },
   }

@@ -2,8 +2,8 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { formatFields, resolveFormat } from '../src/docx-format.ts'
-import { readDocxFormat, saveDocxFormat } from '../src/docx-format-store.ts'
+import { defaultDocxFormatState, formatFields } from '../src/docx-format.ts'
+import { readDocxFormat } from '../src/docx-format-store.ts'
 import { clearPageEstimateCache, estimateReviewPages } from '../src/page-estimate.ts'
 import type { BidWorkspace } from '../src/index.ts'
 
@@ -15,7 +15,7 @@ async function workspace(): Promise<BidWorkspace> {
 }
 
 function values(overrides = {}) {
-  return resolveFormat({ version: 1, revision: 0, opened: false, source: 'default', mapping: {}, overrides, description: '' }, formatFields(defaults)).values
+  return { ...defaultDocxFormatState(formatFields(defaults)).resolved, ...overrides }
 }
 
 describe('Word page estimate', () => {
@@ -44,8 +44,7 @@ describe('Word page estimate', () => {
     const first = await estimateReviewPages(project, '技术标', base, initial.values)
     expect(await estimateReviewPages(project, '技术标', base, initial.values)).toBe(first)
     const revised = await estimateReviewPages(project, '技术标', [{ ...base[0], markdown: '修订后的正文。' }], values())
-    const saved = await saveDocxFormat(project, { revision: initial.state.revision, source: 'default', mapping: {}, overrides: { 'body.size': 18 }, description: '' })
-    const reformatted = await estimateReviewPages(project, '技术标', base, saved.values)
+    const reformatted = await estimateReviewPages(project, '技术标', base, values({ 'body.size': 18 }))
     expect(revised).not.toBe(first)
     expect(reformatted).not.toBe(first)
   })

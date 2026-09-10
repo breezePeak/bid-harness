@@ -79,7 +79,14 @@ class BidAnalysisAdapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
 
-  override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.system?.includes('你只解释给定 DOCX 模板')) {
+      const text = '{"rules":[],"mapping":{"body":"Normal"}}'
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     const session = this.session
     if (session === undefined) throw new Error('Bid analysis adapter has no Session')
     this.call += 1
@@ -442,7 +449,7 @@ describe('web e2e: Bid file intake', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({
       ok: true,
-      value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 1, source: 'template', template: { name: '公司 模板.docx' } } },
+      value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 2, template: { name: '公司 模板.docx' } } },
     })
     const hash = createHash('sha256').update(bytes).digest('hex')
     expect(await readFile(join(cwd, '.bid-harness', `word-export/templates/${hash}.docx`))).toEqual(Buffer.from(bytes))
@@ -455,16 +462,16 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('region', { name: '导出 Word' }).waitFor()
     const snapshot = await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(WORD_TEMPLATE_EXPECTED, snapshot, MODE)
-    expect(snapshot).toContain('上传 DOCX 模板（最多 300 MiB）')
+    expect(snapshot).toContain('选择 .docx 文件（最多 300 MiB）')
 
-    const templateInput = page.getByLabel('上传 DOCX 模板')
+    const templateInput = page.getByLabel('上传 Word 模板')
     await templateInput.setInputFiles({
       name: '界面模板.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       buffer: Buffer.from(bytes),
     })
-    await page.getByRole('status').getByText('模板已解析；请检查来源、候选和默认补充项').waitFor()
-    await page.getByText('当前模板：界面模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
+    await page.getByRole('status').getByText('模板解析完成').waitFor()
+    await page.getByText('界面模板.docx', { exact: true }).waitFor()
     expect(await templateInput.inputValue()).toContain('界面模板.docx')
 
     const mismatched = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
@@ -503,18 +510,18 @@ describe('web e2e: Bid file intake', () => {
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       buffer: Buffer.from(docxTemplateBytes(240)),
     })
-    await page.getByText('当前模板：复杂模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
+    await page.getByText('复杂模板.docx', { exact: true }).waitFor()
     const config = JSON.parse(await readFile(join(cwd, '.bid-harness/word-export/config.json'), 'utf8')) as {
-      template: { candidates: unknown[] }
+      extracted: { candidates: unknown[] }
     }
-    expect(config.template.candidates).toHaveLength(241)
+    expect(config.extracted.candidates).toHaveLength(241)
     const reloadWarningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     acknowledgeReloadConnectionLoss(tripwire, reloadWarningStart)
     await page.getByRole('tab', { name: '导出 Word' }).click()
-    await page.getByText('当前模板：复杂模板.docx。更换模板保留用户修改；旧模板按文件标识保存。').waitFor()
-    expect(await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)).toContain('格式样本239')
+    await page.getByText('复杂模板.docx', { exact: true }).waitFor()
+    expect(await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)).not.toContain('格式样本239')
   }, 60_000)
 
   it('shows an S2 failure and retries it through the Host without starting S3', async () => {

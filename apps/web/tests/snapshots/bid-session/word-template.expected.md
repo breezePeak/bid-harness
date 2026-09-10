@@ -1,104 +1,61 @@
 - region "导出 Word":
   - strong: 导出 Word
-  - group "格式来源":
-    - text: 格式来源 来源
-    - combobox "格式来源":
-      - option "默认样式"
-      - option "已上传模板" [selected]
-    - button "使用已保存配置"
-    - text: 上传 DOCX 模板（最多 300 MiB）
-    - button "上传 DOCX 模板"
-    - paragraph: 当前模板：公司 模板.docx。更换模板保留用户修改；旧模板按文件标识保存。
-    - text: 格式描述
-    - textbox "格式描述"
-    - paragraph: 格式描述不会直接改写配置；请核对建议或在下方手动设置实际值。
-    - button "识别格式要求与模糊样式"
-  - group:
-    - text: 模板样式映射与待确认候选 文档标题
-    - combobox "文档标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 一级标题
-    - combobox "一级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 二级标题
-    - combobox "二级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 三级标题
-    - combobox "三级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 四级标题
-    - combobox "四级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 五级标题
-    - combobox "五级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 六级标题
-    - combobox "六级标题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 正文
-    - combobox "正文模板映射":
-      - option "未映射（请检查默认补充或待确认项）"
-      - option "明确使用默认方案"
-      - option "Normal — 旧模板正文" [selected]
-    - text: before=0；after=0；bold=false；italics=false；color=000000 表头
-    - combobox "表头模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 单元格
-    - combobox "单元格模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 图题
-    - combobox "图题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 表题
-    - combobox "表题模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 页眉
-    - combobox "页眉模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。 页脚
-    - combobox "页脚模板映射":
-      - option "未映射（请检查默认补充或待确认项）" [selected]
-      - option "明确使用默认方案"
-    - text: 未映射；请核对下方字段来源。
-  - group: 页面设置
-  - group: 标题
-  - group: 正文
-  - group: 表格与图表说明
-  - group: 页眉页脚
-  - group: 标题编号
-  - button "保存配置"
-  - group: 与更换前配置比较：默认配置
-  - paragraph: 样式预览，分页以 Word 为准；浏览器和 Word 的字体可用性可能不同。
-  - paragraph: 仅比较明确的正文字号及字体要求，其余招标格式条款需人工核对。
-  - paragraph: 仅套用格式；旧正文、目录、批注和页眉页脚文字均不复制。
-  - paragraph: 文档标题使用默认方案，可手动修改。
-  - paragraph: 一级标题使用默认方案，可手动修改。
-  - paragraph: 二级标题使用默认方案，可手动修改。
-  - paragraph: 三级标题使用默认方案，可手动修改。
-  - paragraph: 四级标题使用默认方案，可手动修改。
-  - paragraph: 五级标题使用默认方案，可手动修改。
-  - paragraph: 六级标题使用默认方案，可手动修改。
-  - paragraph: 表头使用默认方案，可手动修改。
-  - paragraph: 单元格使用默认方案，可手动修改。
-  - paragraph: 图题使用默认方案，可手动修改。
-  - paragraph: 表题使用默认方案，可手动修改。
-  - paragraph: 页眉使用默认方案，可手动修改。
-  - paragraph: 页脚使用默认方案，可手动修改。
-  - button "更新预览"
-  - button "生成 Word" [disabled]
-  - status: 配置已读取
-  - paragraph: 样式预览，分页以 Word 为准。
-  - paragraph: 正文编写完成后才能生成 Word。
-  - paragraph: 点击“更新预览”查看当前格式。切换页面不会自动解析模板或生成文件。
+  - strong: 上传 Word 模板
+  - text: 选择 .docx 文件（最多 300 MiB）
+  - button "上传 Word 模板"
+  - text: 公司 模板.docx
+  - status
+  - table "模板主要格式":
+    - caption: 模板主要格式
+    - rowgroup:
+      - row "类型 字体 字号 对齐 行距 缩进 状态":
+        - columnheader "类型"
+        - columnheader "字体"
+        - columnheader "字号"
+        - columnheader "对齐"
+        - columnheader "行距"
+        - columnheader "缩进"
+        - columnheader "状态"
+    - rowgroup:
+      - row "一级标题 Microsoft YaHei / Times New Roman 16pt 左对齐 1.5 0 正常":
+        - rowheader "一级标题"
+        - cell "Microsoft YaHei / Times New Roman"
+        - cell "16pt"
+        - cell "左对齐"
+        - cell "1.5"
+        - cell "0"
+        - cell "正常"
+      - row "二级标题 Microsoft YaHei / Times New Roman 16pt 左对齐 1.5 0 正常":
+        - rowheader "二级标题"
+        - cell "Microsoft YaHei / Times New Roman"
+        - cell "16pt"
+        - cell "左对齐"
+        - cell "1.5"
+        - cell "0"
+        - cell "正常"
+      - row "正文 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 2字符 正常":
+        - rowheader "正文"
+        - cell "Microsoft YaHei / Times New Roman"
+        - cell "11pt"
+        - cell "左对齐"
+        - cell "1.5"
+        - cell "2字符"
+        - cell "正常"
+      - row "图题 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 0 正常":
+        - rowheader "图题"
+        - cell "Microsoft YaHei / Times New Roman"
+        - cell "11pt"
+        - cell "左对齐"
+        - cell "1.5"
+        - cell "0"
+        - cell "正常"
+      - row "表题 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 0 正常":
+        - rowheader "表题"
+        - cell "Microsoft YaHei / Times New Roman"
+        - cell "11pt"
+        - cell "左对齐"
+        - cell "1.5"
+        - cell "0"
+        - cell "正常"
+  - iframe
+  - button "导出 Word" [disabled]

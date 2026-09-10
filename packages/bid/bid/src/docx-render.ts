@@ -23,7 +23,7 @@ import { Document,
 import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
-import { applyHeadingRestartRules, createHeadingNumberer, resolveHeadingNumbering } from './docx-numbering.ts'
+import { applyHeadingRestartRules, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
 type Node = {
   type: string
   value?: string | undefined
@@ -49,8 +49,8 @@ const escape = (value: string): string => value.replaceAll('&',
   '&#39;')
 const content = (node: Node): string => node.value ?? (node.children ?? []).map(content).join('')
 const mm = (value: number): number => Math.round(value * 1440 / 25.4)
-function withoutHeadingNumber(nodes: Node[]): Node[] {
-  let remaining = /^\d+(?:\.\d+)*\s+/u.exec(nodes.map(content).join(''))?.[0].length ?? 0
+function withoutLeadingText(nodes: Node[], marker: RegExp): Node[] {
+  let remaining = marker.exec(nodes.map(content).join(''))?.[0].length ?? 0
   const visit = (items: Node[]): Node[] => items.map((node) => {
     if (!remaining) return node
     if (node.value !== undefined) {
@@ -149,12 +149,30 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
   const assets = await readAssets(workspace, root)
   const numberHeading = createHeadingNumberer(values)
+  const numberCaption = createCaptionNumberer(values)
   const headingLevels = resolveHeadingNumbering(values)
+  const captionLevels = resolveCaptionNumbering(values)
   const headingReference = 'dsh-headings'
   const headingNumbering = (level: number): NonNullable<IParagraphOptions['numbering']> => ({ reference: headingReference, level })
   const definitions = new Map(root.children.filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const num = (key: string): number => Number(values[key])
   const str = (key: string): string => String(values[key])
+  const captionMarker = (role: 'figureCaption' | 'tableCaption'): RegExp => {
+    const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    const prefix = escaped(str(`${role}.numbering.prefix`))
+    const prefixSeparator = str(`${role}.numbering.prefixIndexSeparator`)
+    const titleSeparator = str(`${role}.numbering.indexTitleSeparator`)
+    const beforeNumber = prefixSeparator ? escaped(prefixSeparator) : '\\s*'
+    const afterNumber = titleSeparator ? escaped(titleSeparator) : '\\s*'
+    const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
+    const withoutNumber = titleSeparator ? `${prefix}${escaped(titleSeparator)}` : `${prefix}\\s+`
+    return new RegExp(`^\\s*(?:${prefix}${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
+  }
+  const captionRole = (value: string): 'figureCaption' | 'tableCaption' | undefined =>
+    captionLevels.find(({ role }) => {
+      if (!str(`${role}.numbering.prefix`)) return false
+      return captionMarker(role).test(value)
+    })?.role
   const run = (role: string): IRunOptions => ({ font: { eastAsia: str(`${role}.font`),
     ascii: str(`${role}.latinFont`),
     hAnsi: str(`${role}.latinFont`) },
@@ -245,23 +263,27 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
       if (node.type === 'definition')
         continue
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
-        const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}` : /^图\s*\d/u.test(content(node)) ? 'figureCaption' : /^表\s*\d/u.test(content(node)) ? 'tableCaption' : 'body'
+        const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}` : captionRole(content(node)) ?? 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
         const numberedHeading = node.type === 'heading' && role !== 'title'
         if (numberedHeading)
-          contents = withoutHeadingNumber(contents)
+          contents = withoutLeadingText(contents, /^\d+(?:\.\d+)*\s+/u)
+        const numberedCaption = role === 'figureCaption' || role === 'tableCaption'
+        if (numberedCaption) contents = withoutLeadingText(contents, captionMarker(role))
         const rendered = await inline(contents, role)
         const prefix = index === 0 ? listPrefix : ''
         doc.push(new Paragraph({ ...paragraph(role),
           ...(level > 0 ? { indent: { left: mm(level * 6) } } : {}),
           ...(node.type === 'heading' ? { heading: role === 'title' ? 'Title' : `Heading${role.slice(7)}` as 'Heading1' } : {}),
           ...(numberedHeading && headingLevels.length ? { numbering: headingNumbering((node.depth ?? 1) - 1) } : {}),
+          ...(numberedCaption ? { numbering: { reference: `dsh-${role}`, level: 0 } } : {}),
           children: [...(prefix ? [new TextRun({ ...run(role),
             text: prefix })] : []),
           ...rendered.runs] }))
         const tag = role === 'title' ? 'h1' : node.type === 'heading' ? `h${Math.min(6, Number(role.slice(7)) + 1)}` : node.type === 'code' ? 'pre' : 'p'
         const headingPrefix = numberedHeading ? numberHeading(node.depth ?? 1) : ''
-        html.push(`<${tag} style="${style(role)}">${escape(prefix)}${headingPrefix ? `${escape(headingPrefix)} ` : ''}${rendered.html}</${tag}>`)
+        const captionPrefix = numberedCaption ? numberCaption(role) : ''
+        html.push(`<${tag} style="${style(role)}">${escape(prefix)}${headingPrefix ? `${escape(headingPrefix)} ` : ''}${escape(captionPrefix)}${rendered.html}</${tag}>`)
         continue
       }
       if (node.type === 'list') {
@@ -347,9 +369,10 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const headerText = str('header.text') || title, footerText = str('footer.text')
   const pageNumber = str('footer.pageNumber')
   const page = values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
-  const document = new Document({ numbering: { config: headingLevels.length ? [{ reference: headingReference,
+  const document = new Document({ numbering: { config: [...(headingLevels.length ? [{ reference: headingReference,
     levels: headingLevels.map(level => ({ ...level, style: { ...level.style, run: run(`heading${level.level + 1}`) } })),
-  }] : [] }, styles: { default: {
+  }] : []), ...captionLevels.map(({ role, reference, level }) => ({ reference,
+    levels: [{ ...level, style: { run: run(role), paragraph: paragraph(role) } }] }))] }, styles: { default: {
     document: { run: run('body') },
     ...Object.fromEntries(['title', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6']
       .map(role => [role, { basedOn: 'DshHeadingBase', run: run(role), paragraph: { ...paragraph(role),
