@@ -165,13 +165,13 @@ describe('Word 导出页面', () => {
     if (!registration) throw new Error('Word export registration is unavailable')
     const injected = (registration[0] as { inject: (sessionId: string) => BidWordExportInjected }).inject('session_bid')
     const view = await fixture().actions.getFormat()
-    const uploadFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, value: view }), { status: 200,
+    const uploadFetch = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true, value: view }), { status: 200,
       headers: { 'content-type': 'application/json' } }))
     vi.stubGlobal('fetch', uploadFetch)
     const file = new File([Uint8Array.of(1, 2, 3, 4)], '公司 模板.docx')
     await expect(injected.uploadTemplate(file, 7)).resolves.toEqual(view)
     const [url, init] = uploadFetch.mock.calls[0]!
-    expect((url as URL).pathname).toBe('/api/bid-docx-template')
+    expect(new URL(String(url)).pathname).toBe('/api/bid-docx-template')
     expect(init?.body).toBe(file)
     expect(init?.headers).toMatchObject({ 'x-dsh-bid-session-id': 'session_bid',
       'x-dsh-bid-docx-name': encodeURIComponent(file.name), 'x-dsh-bid-docx-size': '4', 'x-dsh-bid-docx-revision': '7' })

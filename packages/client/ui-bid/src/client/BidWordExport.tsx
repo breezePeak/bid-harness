@@ -146,7 +146,7 @@ export function BidWordExport({ sessionId,
           {otherConflicts.map(conflict => <button key={conflict.key}
             ref={conflict.key === firstUnresolvedKey ? firstConflict : undefined}
             type="button" onClick={() => { openConflict(conflict) }}>
-            {view.fields.find(field => field.key === conflict.key)?.label ?? conflict.key}：
+            {view?.fields.find(field => field.key === conflict.key)?.label ?? conflict.key}：
             {displayValue(conflict.resolvedValue)}
           </button>)}
         </div>}

@@ -1614,6 +1614,7 @@ describe('chapter-writing executor', () => {
     }
     const fixture = fixtureAgent(workspace, outline, {}, false, () => true, (_attempt, request) => {
       const candidate = candidateFrom(request)
+      if (!('markdown' in candidate)) throw new Error('expected writer candidate')
       return {
         stopReason: 'completed', output: [],
         structured: {

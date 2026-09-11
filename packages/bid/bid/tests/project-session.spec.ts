@@ -100,7 +100,7 @@ async function fixture() {
   await ctx.plugin(BidHostRuntime)
   const workspace = new BidWorkspace(root)
   const host = ctx.bid as unknown as HostExecution
-  const executeStage = vi.fn(async () => [])
+  const executeStage = vi.fn<BidStageExecutorPort['execute']>(async () => [])
   const executor: BidStageExecutorPort = { canExecute: () => false, execute: executeStage }
   const validator: BidStageValidatorPort = { validate: async () => ({ ok: true, issues: [] }) }
   host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, {
