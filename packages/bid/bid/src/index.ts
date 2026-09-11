@@ -92,6 +92,7 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import {
   applyWritingPlanInput,
+  createAutomaticWritingPlan,
   parseWritingPlan,
   validateWritingPlan,
   validateWritingPlanInput,
@@ -104,6 +105,8 @@ import type {
   BidDetailsView,
   BidChapterRevisionRequest,
   BidChapterRevisionResult,
+  BidChapterWritingGateErrorCode,
+  BidChapterWritingGateResult,
   BidEvidenceMappingProgress,
   BidDocxExportErrorCode,
   BidDocxExportResult,
@@ -137,12 +140,14 @@ export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDoc
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, STAGE_RUN_STATUSES, isBidDocumentRole, parseBidReviewWorkbenchView } from './control-plane-contract.ts'
-export { parseWritingPlan, validateWritingPlan, writingPlanInputSchema, writingPlanSchema, WRITING_PLAN_SCHEMA_VERSION } from './writing-requirements.ts'
+export { createAutomaticWritingPlan, parseWritingPlan, validateWritingPlan, writingPlanInputSchema, writingPlanSchema, WRITING_PLAN_SCHEMA_VERSION } from './writing-requirements.ts'
 export type { WritingPlan, WritingPlanInput } from './writing-requirements.ts'
 export type {
   BidChapterRevisionReference,
   BidChapterRevisionRequest,
   BidChapterRevisionResult,
+  BidChapterWritingGateErrorCode,
+  BidChapterWritingGateResult,
   BidClientAction,
   BidDocumentRole,
   BidEvidenceMappingProgress,
@@ -453,26 +458,24 @@ function retrySuccess(value: BidRuntimeState): BidRetryResult {
   return Object.freeze({ ok: true, value: Object.freeze({ ...value }) })
 }
 
-/** Build one immutable post-reset start result. */
-function stageStartResult(
-  result: { readonly ok: true; readonly value: BidRuntimeState }
-    | { readonly ok: false; readonly code: BidStageStartErrorCode; readonly message: string },
-): BidStageStartResult {
+type RuntimeActionInput<Code extends string> = { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly code: Code; readonly message: string }
+type RuntimeActionResult<Code extends string> = { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: Code; readonly message: string } }
+
+/** Build an immutable state-bearing Host action result. */
+function runtimeActionResult<Code extends string>(result: RuntimeActionInput<Code>): RuntimeActionResult<Code> {
   return result.ok
     ? Object.freeze({ ok: true, value: Object.freeze({ ...result.value }) })
     : Object.freeze({ ok: false, error: Object.freeze({ code: result.code, message: result.message }) })
 }
 
-/** Build one immutable explicit-stage-stop result. */
-function stageStopResult(
-  result: { readonly ok: true; readonly value: BidRuntimeState }
-    | { readonly ok: false; readonly code: BidStageStopErrorCode; readonly message: string },
-): BidStageStopResult {
-  if (!result.ok) {
-    return Object.freeze({ ok: false, error: Object.freeze({ code: result.code, message: result.message }) })
-  }
-  return Object.freeze({ ok: true, value: Object.freeze({ ...result.value }) })
-}
+/** Result builders retain each public action's narrower rejection vocabulary. */
+const stageStartResult: (result: RuntimeActionInput<BidStageStartErrorCode>) => BidStageStartResult = runtimeActionResult
+const chapterWritingGateResult: (
+  result: RuntimeActionInput<BidChapterWritingGateErrorCode>,
+) => BidChapterWritingGateResult = runtimeActionResult
+const stageStopResult: (result: RuntimeActionInput<BidStageStopErrorCode>) => BidStageStopResult = runtimeActionResult
 
 /** Minimal webserver registration face used only when the web carrier is composed. */
 interface BidBinaryUploadWebServer {
@@ -1430,6 +1433,82 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * Ask the Main Agent for manual S5 writing requirements.
+   * @param session - live Bid Session waiting before chapter writing.
+   * @returns the unchanged waiting state after the request is durably queued.
+   */
+  @Remote('requestWritingRequirements')
+  async requestWritingRequirements(session: Session): Promise<BidChapterWritingGateResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Writing requirements require a Bid Session with a Host workspace.' })
+    }
+    if (this.inFlight.has(projectKey(session))) {
+      return chapterWritingGateResult({ ok: false, code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' })
+    }
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('request_writing_requirements')) {
+        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED', message: 'Writing requirements are not requested in the current Bid stage state.' })
+      }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) {
+        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'Bid Session has no live Agent.' })
+      }
+      await ensureWritingRequirementsRequested(agent, operation.workspace)
+      await this.ctx.sessions.flush(session)
+      return chapterWritingGateResult({ ok: true, value: runtime })
+    } catch {
+      return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'The Bid Host could not request writing requirements.' })
+    } finally {
+      await this.finishOperation(session, operation)
+    }
+  }
+
+  /**
+   * Start S5 with a Host-generated plan that contains no user requirements.
+   * @param session - live Bid Session waiting before chapter writing.
+   * @returns the state reached through the existing confirmed-stage orchestrator.
+   */
+  @Remote('autoStartChapterWriting')
+  async autoStartChapterWriting(session: Session): Promise<BidChapterWritingGateResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Automatic chapter writing requires a Bid Session with a Host workspace.' })
+    }
+    if (this.inFlight.has(projectKey(session))) {
+      return chapterWritingGateResult({ ok: false, code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' })
+    }
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('auto_start_chapter_writing')) {
+        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED', message: 'Automatic chapter writing is not allowed in the current Bid stage state.' })
+      }
+      const agent = this.ctx.agents.get(session.id)
+      if (agent === undefined) {
+        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'Bid Session has no live Agent.' })
+      }
+      const current = await confirmedOutline(operation.workspace)
+      const plan = createAutomaticWritingPlan(current.outline, current.sha256)
+      const issues = validateWritingPlan(plan, current.outline)
+      if (issues.length > 0) {
+        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'The automatic writing plan is invalid.' })
+      }
+      const planPath = within(operation.workspace.projectRoot, WRITING_PLAN_PATH)
+      await assertNoLinkedPath(operation.workspace.root, planPath)
+      await writeFileAtomic(planPath, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+      session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+      const next = await this.automaticOrchestrator(agent, operation.workspace, operation.controller.signal).runConfirmedStage()
+      await this.ctx.sessions.flush(session)
+      return chapterWritingGateResult({ ok: true, value: next })
+    } catch {
+      return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'The Bid Host could not start automatic chapter writing.' })
+    } finally {
+      await this.finishOperation(session, operation)
+    }
+  }
+
+  /**
    * Start the stage that a completed reset left at its explicit user gate.
    * @param session - Host-resolved Bid Session whose reset state authorizes execution.
    * @returns the stage state after normal execution reaches validation, failure, or completion.
@@ -1454,7 +1533,6 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).startResetStage()
-      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') await ensureWritingRequirementsRequested(agent, workspace)
       await this.ctx.sessions.flush(session)
       return stageStartResult({ ok: true, value: next })
     } catch (error: unknown) {
@@ -1801,7 +1879,6 @@ export class BidHostRuntime extends TypertRemoteService {
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
       const next = await orchestrator.retry(runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace))
-      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') await ensureWritingRequirementsRequested(agent, workspace)
       await this.ctx.sessions.flush(session)
       return retrySuccess(next)
     } catch (error: unknown) {
@@ -2638,9 +2715,6 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       backup.clear()
       await rm(within(workspace.projectRoot, 'outline/draft.json'), { force: true })
-      if (confirmation.state.stage === 'chapter_writing' && confirmation.state.status === 'waiting_user') {
-        await ensureWritingRequirementsRequested(agent, workspace)
-      }
       await this.ctx.sessions.flush(session)
       return { ok: true, value: confirmation.state }
     } catch (error) {

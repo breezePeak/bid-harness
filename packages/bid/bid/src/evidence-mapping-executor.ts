@@ -250,6 +250,27 @@ const taskBasisSchema = z.object({
 const outlineOperationBasisSchema = taskBasisSchema.extend({
   finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
 }).strict()
+const topicDispositionBasisSchema = z.object({
+  kind: z.enum([
+    'requirement', 'scoring', 'response_point', 'user_framework', 'reference_outline', 'local_material', 'web_material',
+  ]),
+  ref: z.string().trim().min(1),
+}).strict()
+const topicDispositionSchema = z.object({
+  topic: z.string().trim().min(1),
+  placement: z.enum(['separate_section', 'within_section', 'covered_elsewhere', 'excluded']),
+  target_section_id: z.string().trim().min(1).optional(),
+  reason: z.string().trim().min(1),
+  basis: z.array(topicDispositionBasisSchema).min(1),
+}).strict().superRefine((disposition, context) => {
+  if (disposition.placement === 'covered_elsewhere' && disposition.target_section_id === undefined) {
+    context.addIssue({ code: 'custom', path: ['target_section_id'], message: 'covered_elsewhere 必须指定目标章节' })
+  }
+  if ((disposition.placement === 'within_section' || disposition.placement === 'excluded')
+    && disposition.target_section_id !== undefined) {
+    context.addIssue({ code: 'custom', path: ['target_section_id'], message: `${disposition.placement} 不接受目标章节` })
+  }
+})
 const sectionResearchAssessmentFields = {
   sufficient_for_outline_decision: z.boolean(),
   diagnostics: z.object({
@@ -267,15 +288,24 @@ const sectionResearchAssessmentFields = {
     decision: z.enum(['adequate', 'refinement_needed', 'undetermined']),
     reason: z.string().trim().min(1),
   }).strict(),
+  topic_dispositions: z.array(topicDispositionSchema).min(1),
 } as const
 function addSectionResearchAssessmentIssues(
   assessment: {
     sufficient_for_outline_decision: boolean
     unresolved_gaps: Array<{ affects_outline_decision: boolean }>
     outline_capacity: { decision: 'adequate' | 'refinement_needed' | 'undetermined' }
+    topic_dispositions: Array<{ topic: string }>
   },
   context: z.RefinementCtx,
 ): void {
+  const seenTopics = new Set<string>()
+  for (const [index, disposition] of assessment.topic_dispositions.entries()) {
+    if (seenTopics.has(disposition.topic)) {
+      context.addIssue({ code: 'custom', path: ['topic_dispositions', index, 'topic'], message: 'topic 不得重复' })
+    }
+    seenTopics.add(disposition.topic)
+  }
   if (!assessment.sufficient_for_outline_decision) return
   if (assessment.outline_capacity.decision === 'undetermined') {
     context.addIssue({ code: 'custom', path: ['outline_capacity', 'decision'], message: '研究充分时必须形成目录承载判断' })
@@ -338,7 +368,7 @@ const taskResearchCandidatesSchema = z.object({
 }).strict()
 type TaskResearchCandidates = z.infer<typeof taskResearchCandidatesSchema>
 const evidenceMappingCheckpointSchema = z.object({
-  schema_version: z.literal(8),
+  schema_version: z.literal(9),
   tasks: z.array(z.object({
     task_id: z.string().min(1), completed: z.boolean(), result: evidenceMappingPartialResultSchema,
     outline_operations: z.array(outlineEditOperationSchema).optional(),
@@ -367,12 +397,12 @@ interface MappingSubmissionState {
   generation: number
   captured: { generation: number; value: MappingSubmission } | undefined
   everInstalled: boolean
+  outlineBaseline: OutlineArtifact
   stagedOutline: OutlineArtifact
   acceptedOperations: OutlineEditOperation[]
   outlineOperationBases: Array<z.infer<typeof outlineOperationBasisSchema>>
   researchReady: boolean
   researchAssessment: SectionResearchAssessment | undefined
-  structuralRefinementApplied: boolean
   locked: boolean
   mappings: Map<string, PartialSectionMapping>
   submittedMappings: Set<string>
@@ -523,8 +553,134 @@ function researchFindingRef(finding: string): string {
   return `RF-${createHash('sha256').update(finding).digest('hex').slice(0, 16)}`
 }
 
-function outlineStructureSnapshot(outline: OutlineArtifact): string {
-  return JSON.stringify(outline.sections.map(({ id, parent_id, order, level, writable }) => ({ id, parent_id, order, level, writable })))
+function userFrameworkHeadingRef(frameworkIndex: number, headingIndex: number): string {
+  return `UF${frameworkIndex + 1}:H${headingIndex + 1}`
+}
+
+function referenceOutlineHeadingRef(locationIndex: number, headingIndex: number): string {
+  return `RO${locationIndex + 1}:H${headingIndex + 1}`
+}
+
+function successfulLocalResearchRefs(
+  captured: Iterable<CapturedWebResult>,
+  locations: readonly MappingCorpusLocation[],
+): Set<string> {
+  const fileIds = new Set(locations.map(location => location.file_id))
+  const refs = new Set<string>()
+  for (const { exec, result } of captured) {
+    if (result.isError || (exec.name !== 'read_source' && exec.name !== 'search_sources')) continue
+    const value = record(result.value)
+    const fileId = value?.file_id
+    if (typeof fileId === 'string' && fileIds.has(fileId)) {
+      const sourceRef = record(exec.arguments)?.source_ref
+      if (typeof sourceRef === 'string') refs.add(sourceRef)
+      const materials = value?.materials
+      if (Array.isArray(materials)) for (const material of materials) {
+        const materialRef = record(material)?.material_ref
+        if (typeof materialRef === 'string') refs.add(materialRef)
+      }
+    }
+    const hits = value?.hits
+    if (Array.isArray(hits)) for (const hit of hits) {
+      const item = record(hit)
+      if (typeof item?.file_id === 'string' && fileIds.has(item.file_id) && typeof item.source_ref === 'string') {
+        refs.add(item.source_ref)
+      }
+    }
+  }
+  return refs
+}
+
+function assertTopicDispositionReferences(
+  assessment: SectionResearchAssessment,
+  inputs: EvidenceMappingInputs,
+  locations: readonly MappingCorpusLocation[],
+  state: MappingSubmissionState,
+  task: EvidenceMappingTask,
+  captured: Iterable<CapturedWebResult>,
+): void {
+  const capturedResults = [...captured]
+  const validRefs = {
+    requirement: new Set(inputs.requirements.requirements.map(item => item.id)),
+    scoring: new Set(inputs.scoring.scoring_items.map(item => item.id)),
+    response_point: new Set(inputs.responsePoints.points.map(item => item.id)),
+    user_framework: new Set(inputs.frameworks.flatMap((framework, frameworkIndex) => framework.headings
+      .map((_heading, headingIndex) => userFrameworkHeadingRef(frameworkIndex, headingIndex)))),
+    reference_outline: new Set(locations.flatMap((location, locationIndex) => (location.outline ?? [])
+      .map((_heading, headingIndex) => referenceOutlineHeadingRef(locationIndex, headingIndex)))),
+    local_material: successfulLocalResearchRefs(capturedResults, locations),
+    web_material: new Set(buildWebEvidenceSnapshots(capturedResults).flatMap(snapshot => [
+      normalizeWebEvidenceUrl(snapshot.source.requested_url), normalizeWebEvidenceUrl(snapshot.source.final_url),
+    ]).filter(value => value !== undefined)),
+  }
+  const rootId = taskOutlineEditRootId(task)
+  const outlineIds = new Set(state.stagedOutline.sections.map(section => section.id))
+  const editableIds = taskEditableSectionIds(state.stagedOutline, task)
+  const violations: string[] = []
+  for (const [topicIndex, disposition] of assessment.topic_dispositions.entries()) {
+    const path = `topic_dispositions.${topicIndex}`
+    if (disposition.placement === 'covered_elsewhere') {
+      if (disposition.target_section_id === rootId) violations.push(`${path}.target_section_id: covered_elsewhere 不能指向当前 Section。`)
+      else if (disposition.target_section_id !== undefined && !outlineIds.has(disposition.target_section_id)) {
+        violations.push(`${path}.target_section_id: 未知 Section ${disposition.target_section_id}。`)
+      }
+    }
+    if (disposition.placement === 'separate_section' && disposition.target_section_id !== undefined
+      && (!outlineIds.has(disposition.target_section_id) || disposition.target_section_id === rootId
+        || !editableIds.has(disposition.target_section_id))) {
+      violations.push(`${path}.target_section_id: ${disposition.target_section_id} 不是当前子树中的独立 Section。`)
+    }
+    for (const [basisIndex, basis] of disposition.basis.entries()) {
+      const ref = basis.kind === 'web_material' ? normalizeWebEvidenceUrl(basis.ref) : basis.ref
+      if (ref === undefined || !validRefs[basis.kind].has(ref)) {
+        violations.push(`${path}.basis.${basisIndex}.ref: ${basis.ref} 不是当前运行中已验证的 ${basis.kind} 引用。`)
+      }
+    }
+  }
+  if (violations.length > 0) throw new ToolArgsError(violations)
+}
+
+function structuralSectionState(section: OutlineArtifact['sections'][number] | undefined): unknown {
+  if (section === undefined) return null
+  const { id, parent_id, order, level, writable } = section
+  return { id, parent_id, order, level, writable }
+}
+
+function structurallyChangedSectionIds(before: OutlineArtifact, after: OutlineArtifact): Set<string> {
+  const beforeById = new Map(before.sections.map(section => [section.id, section]))
+  const afterById = new Map(after.sections.map(section => [section.id, section]))
+  return new Set([...new Set([...beforeById.keys(), ...afterById.keys()])].filter(id =>
+    JSON.stringify(structuralSectionState(beforeById.get(id))) !== JSON.stringify(structuralSectionState(afterById.get(id)))))
+}
+
+function assertTopicDispositionsLockable(
+  assessment: SectionResearchAssessment,
+  state: MappingSubmissionState,
+  task: EvidenceMappingTask,
+): void {
+  const rootId = taskOutlineEditRootId(task)
+  const currentById = new Map(state.stagedOutline.sections.map(section => [section.id, section]))
+  const editableIds = taskEditableSectionIds(state.stagedOutline, task)
+  const changedIds = structurallyChangedSectionIds(state.outlineBaseline, state.stagedOutline)
+  const violations: string[] = []
+  for (const [index, disposition] of assessment.topic_dispositions.entries()) {
+    const path = `topic_dispositions.${index}.target_section_id`
+    if (disposition.placement === 'separate_section') {
+      const targetId = disposition.target_section_id
+      const target = targetId === undefined ? undefined : currentById.get(targetId)
+      if (targetId === undefined) violations.push(`${path}: separate_section 必须指定已落实的独立 Section。`)
+      else if (targetId === rootId || target?.writable !== true || !editableIds.has(targetId)) {
+        violations.push(`${path}: ${targetId} 不是当前子树中的独立可写 Section。`)
+      } else if (!changedIds.has(targetId)) {
+        violations.push(`${path}: ${targetId} 未形成真实结构变化。`)
+      }
+    } else if (disposition.placement === 'covered_elsewhere') {
+      const targetId = disposition.target_section_id
+      if (targetId === rootId) violations.push(`${path}: covered_elsewhere 不能指向当前 Section。`)
+      else if (targetId === undefined || !currentById.has(targetId)) violations.push(`${path}: 未知目标 Section ${targetId ?? ''}。`)
+    }
+  }
+  if (violations.length > 0) throw new ToolArgsError(violations)
 }
 
 function invalidateChangedSectionDrafts(
@@ -706,6 +862,18 @@ function outlineTaskDifferences(before: OutlineArtifact, after: OutlineArtifact)
   })
 }
 
+function outlineStructureDifferences(before: OutlineArtifact, after: OutlineArtifact) {
+  const project = (outline: OutlineArtifact) => new Map(outline.sections.map(({ id, parent_id, order, level, title, writable }) =>
+    [id, { id, parent_id, order, level, title, writable }]))
+  const previous = project(before)
+  const current = project(after)
+  return [...new Set([...previous.keys(), ...current.keys()])].flatMap((id) => {
+    const left = previous.get(id) ?? null
+    const right = current.get(id) ?? null
+    return JSON.stringify(left) === JSON.stringify(right) ? [] : [{ section_id: id, before: left, after: right }]
+  })
+}
+
 async function parseSectionMappingSubmission(
   raw: unknown,
   schema: ObjectJsonSchema,
@@ -833,6 +1001,7 @@ function attachMappingSubmissionRuntime(
   task: EvidenceMappingTask,
   locations: readonly MappingCorpusLocation[],
   state: MappingSubmissionState,
+  captured: () => Iterable<CapturedWebResult>,
   snapshots: () => readonly WebEvidenceSnapshot[],
   persistProgress: (submission: MappingSubmission, completed: boolean) => Promise<void> = () => Promise.resolve(),
 ): () => void {
@@ -862,7 +1031,7 @@ function attachMappingSubmissionRuntime(
   for (const definition of createMappingSourceTools(locations, snapshots)) register(definition)
   if (taskOwnsOutlineRefinement(task)) register({
     name: 'submit_section_research_assessment',
-    description: '提交当前 Section 的多维研究充分性判断；Host 为 key_findings 返回稳定 finding_ref，但不修改目录。结论不足时继续研究并可重新提交，只有充分结论才开放当前子树和 Writing Brief 操作。',
+    description: '提交当前 Section 的多维研究充分性判断和全部研究主题归位；每个 topic 必须引用当前运行中的真实依据。Host 为 key_findings 返回稳定 finding_ref，但不替模型判断业务语义。结论不足时继续研究并可重新提交，只有充分结论才开放当前子树和 Writing Brief 操作。',
     parameters: z.toJSONSchema(sectionResearchAssessmentInputSchema, { target: 'draft-7' }), output,
     execute(raw: unknown): Promise<unknown> {
       if (state.locked) throw new ToolArgsError(['research_assessment: 当前 Section 子树已经锁定。'])
@@ -871,6 +1040,7 @@ function attachMappingSubmissionRuntime(
         ...submitted,
         key_findings: submitted.key_findings.map(finding => ({ finding_ref: researchFindingRef(finding), finding })),
       })
+      assertTopicDispositionReferences(assessment, inputs, locations, state, task, captured())
       const retainedFindingRefs = new Set(assessment.key_findings.map(finding => finding.finding_ref))
       const missingFindingRefs = [...new Set(state.outlineOperationBases.map(basis => basis.finding_ref))]
         .filter(findingRef => !retainedFindingRefs.has(findingRef))
@@ -879,7 +1049,6 @@ function attachMappingSubmissionRuntime(
       }
       state.researchAssessment = assessment
       state.researchReady = assessment.sufficient_for_outline_decision
-      state.structuralRefinementApplied = false
       state.lastIncompleteIssues = assessment.sufficient_for_outline_decision ? [] : [{
         code: 'EVIDENCE_MAPPING_RESEARCH_NOT_READY',
         message: '当前研究仍不足以支持目录结构决策；请针对诊断与缺口继续检索、阅读并重新评估。',
@@ -887,6 +1056,7 @@ function attachMappingSubmissionRuntime(
       return Promise.resolve({
         research_ready: state.researchReady,
         outline_capacity: assessment.outline_capacity,
+        topic_dispositions: assessment.topic_dispositions,
         key_findings: assessment.key_findings,
         unresolved_gaps: assessment.unresolved_gaps,
       })
@@ -904,7 +1074,7 @@ function attachMappingSubmissionRuntime(
         operation: change.operation,
         before: sectionTaskSemanticState(change.before),
         after: sectionTaskSemanticState(change.after),
-        ...(task.phase === 'final_check' ? { pending_items: pendingReviews(state, task) } : {}) }
+        ...(task.phase === 'final_check' ? { review_progress: reviewProgress(state, task) } : {}) }
     },
   })
 
@@ -912,7 +1082,7 @@ function attachMappingSubmissionRuntime(
     const editSchema = closedObject({ operation: z.toJSONSchema(outlineEditOperationSchema, { target: 'draft-7' }) as JsonSchemaNode,
       basis: z.toJSONSchema(outlineOperationBasisSchema, { target: 'draft-7' }) as JsonSchemaNode })
     register({
-      name: 'apply_section_outline_edit', description: '按当前 Research Assessment 的 finding_ref 修改当前 Section 自身或其新生成的后代；adequate 只允许 update_section，refinement_needed 的有效结构调整完成后才可锁定。Host 分配并返回新增 Section ID。',
+      name: 'apply_section_outline_edit', description: '按当前 Research Assessment 的 finding_ref 修改当前 Section 自身或其新生成的后代；outline_capacity 不限制结构编辑。Host 校验作用域、ID、操作和共享目录结构，并分配新增 Section ID。',
       parameters: editSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
@@ -930,9 +1100,6 @@ function attachMappingSubmissionRuntime(
           if (error instanceof ZodError) throw new ToolArgsError(submissionViolations(error))
           throw error
         }
-        if (operation.type !== 'update_section' && state.researchAssessment.outline_capacity.decision === 'adequate') {
-          throw new ToolArgsError(['outline_capacity: 当前结论为 adequate，只允许 update_section；如需结构深化，请先重新提交 Research Assessment。'])
-        }
         const beforeOutline = state.stagedOutline
         const before = new Set(beforeOutline.sections.map(section => section.id))
         const candidate = applyTaskOutlineOperations(beforeOutline, task, [operation])
@@ -946,8 +1113,6 @@ function attachMappingSubmissionRuntime(
         state.stagedOutline = candidate
         state.acceptedOperations.push(operation)
         state.outlineOperationBases.push(basis)
-        if (operation.type !== 'update_section'
-          && outlineStructureSnapshot(beforeOutline) !== outlineStructureSnapshot(candidate)) state.structuralRefinementApplied = true
         state.lastIncompleteIssues = []
         return Promise.resolve({
           applied: true,
@@ -962,14 +1127,11 @@ function attachMappingSubmissionRuntime(
       description: '保存本轮粒度结论：列出研究识别的重要子主题及其独立成节、留在章内或排除的具体理由，并简述资料是否足以支持该判断。',
     } })
     register({
-      name: 'lock_section_outline', description: '提交当前 Section 子树的结构对照结论；refinement_needed 必须先完成有效结构调整，共享目录结构有效时才锁定。',
+      name: 'lock_section_outline', description: '提交当前 Section 子树的结构对照结论；Host 同时校验最新 topic_dispositions 的目标落实情况和共享目录结构。',
       parameters: lockSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
-        if (state.researchAssessment.outline_capacity.decision === 'refinement_needed'
-          && !state.structuralRefinementApplied) {
-          throw new ToolArgsError(['outline_capacity: 当前结论为 refinement_needed，必须先完成有效结构调整。'])
-        }
+        assertTopicDispositionsLockable(state.researchAssessment, state, task)
         const violations = validateJsonSchemaValue(lockSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
         const comparison = record(args)?.comparison
@@ -1029,7 +1191,7 @@ function attachMappingSubmissionRuntime(
         .map(section => section.id)
         .filter(id => !state.submittedMappings.has(id) && !state.baselineMappings.has(id))
       return { recorded: true, section_id: mapping.section_id, remaining_section_ids: remaining,
-        ...(task.phase === 'final_check' ? { pending_items: pendingReviews(state, task) } : {}) }
+        ...(task.phase === 'final_check' ? { review_progress: reviewProgress(state, task) } : {}) }
     },
   })
 
@@ -1049,7 +1211,7 @@ function attachMappingSubmissionRuntime(
       assertCustomerFacingSummary(summary)
       state.branchSummaries.set(sectionId, summary)
       await persistProgress(mappingSubmissionSnapshot(state, task), false)
-      return { recorded: true, section_id: sectionId, pending_items: pendingReviews(state, task) }
+      return { recorded: true, section_id: sectionId, review_progress: reviewProgress(state, task) }
     },
   })
 
@@ -1139,7 +1301,7 @@ function attachMappingSubmissionRuntime(
         state.reviewSequence = draft.reviewSequence
         state.reviewInvalidated = draft.reviewInvalidated
         await persistProgress(mappingSubmissionSnapshot(state, task), false)
-        return { recorded: true, pending_items: pendingReviews(state, task) }
+        return { recorded: true, review_progress: reviewProgress(state, task) }
       },
     })
   }
@@ -1175,7 +1337,7 @@ function attachMappingSubmissionRuntime(
           code: item.conclusion?.decision === 'block' ? 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED' : 'EVIDENCE_MAPPING_REVIEW_PENDING',
           message: `${item.review_ref} / ${item.section_id} / ${item.kind}：${item.conclusion?.reason ?? '当前版本尚未复核。'}`,
         }))
-        return { completed: false, pending_items: pendingItems }
+        return { completed: false, review_progress: reviewProgress(state, task) }
       }
       const result = parseEvidenceMappingPartialResult({
         task_id: task.task_id,
@@ -1400,20 +1562,23 @@ export function renderEvidenceMappingSubagentTask(
     `current_section_scope：${JSON.stringify(currentSectionScope)}`,
     `global_outline_index：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, title, purpose, writable }) => ({ id, parent_id, title, purpose, writable })))}`,
     ...(taskOwnsOutlineRefinement(task) ? [
-      `用户原始目录框架：${JSON.stringify(inputs.frameworks.map(({ name, headings }) => ({ name, headings: headings.map(({ title, level, order }) => ({ title, level, order })) })))}`,
+      `用户原始目录框架：${JSON.stringify(inputs.frameworks.map(({ name, headings }, frameworkIndex) => ({ name, headings: headings.map(({ title, level, order }, headingIndex) => ({ ref: userFrameworkHeadingRef(frameworkIndex, headingIndex), title, level, order })) })))}`,
       `参考旧标书完整目录：${JSON.stringify(locations.flatMap((location, index) => location.role === 'reference_bid' ? [{
         file_ref: `F${index + 1}`, name: location.name,
-        headings: location.outline?.map(({ title, level, order }) => ({ title, level, order })),
+        headings: location.outline?.map(({ title, level, order }, headingIndex) => ({
+          ref: referenceOutlineHeadingRef(index, headingIndex), title, level, order,
+        })),
       }] : []))}`,
       ...(task.review_issues?.length ? [
         `目录复核要求局部修复的问题：${JSON.stringify(task.review_issues)}`,
         '这是当前 Section 子树的受控修复轮次。复用已有研究上下文和候选资料，只处理列出的具体结构问题；未影响的兄弟 Section 不在当前范围。',
       ] : []),
       '先理解 S3 已确认章节职责并列出影响写作深度和结构判断的研究问题，再阅读本地资料，按需检索 Web。以当前招标要求和用户原始框架为约束，旧标目录用于结构参照；不得机械照抄任意目录树，也不得把旧项目事实带入本项目。',
-      '研究后调用 submit_section_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断。Host 为 key_findings 返回稳定 finding_ref。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定当前子树或调用 update_section_task。',
+      '研究后调用 submit_section_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断，并把全部研究主题逐项归为 separate_section、within_section、covered_elsewhere 或 excluded。每个 topic 至少引用一个真实 basis：Requirement、Scoring 和 Response Point 使用当前输入 ID，人工框架与参考目录使用 Host 注入的 ref，本地资料使用本轮成功 search_sources/read_source 返回的 ref，Web 使用本轮成功 web_fetch 的 URL。Host 为 key_findings 返回稳定 finding_ref。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定当前子树或调用 update_section_task。',
       'Research Ready 不按网页、资料或工具调用数量判断。招标信息本身足够时允许零联网；客观不可获得的信息只有在边界已确认且不影响当前层级结构判断时才可保留为 unresolved_gaps 并进入 Ready，禁止补写不存在的依据。',
-      'Research Ready 后再判断当前叶子是否包含职责、目标、方法、输入输出或验证方式明显不同且值得在 S5 独立论证的主题，并检查与兄弟章节是否重复。独立主题必须通过目录操作落实，不得长期只塞入 writing_dimensions、must_answer 或 writing_notes；同一技术过程的连续步骤留在章内，不能把每个维度机械变成子目录。',
-      '目录深化遵循研究结论和输入文件的主题，不预设标题、固定层级或节点数量。outline_capacity=adequate 时不得执行 add、split、merge、move、delete；确需改变结构时先重新评估为 refinement_needed。refinement_needed 必须完成有效结构调整后才能锁定。update_section 只修正现有节点，不算结构调整。',
+      'S3 Leaf 只是当前研究起点，不代表目录已经足够细。判断对象是研究发现的每个主题是否值得独立编写，不是当前章节整体是否已经可写。主题具有独立的方法、流程、成果、评分响应、职责或完整论证内容时，应认真考虑 separate_section；不得仅因现有章节可写而把全部主题归为 within_section，也不得长期只塞入 writing_dimensions、must_answer 或 writing_notes。',
+      'Research Ready 后检查与兄弟章节是否重复。separate_section 必须通过目录操作落实为当前子树中的真实独立可写节点，并在 Host 返回 ID 后重新提交 target_section_id；within_section 说明为何无需独立成节；covered_elsewhere 引用真实且非当前 Section 的 target_section_id；excluded 说明为何不属于当前技术方案，资料不足不能作为排除理由。同一技术过程的连续步骤可以留在章内，不能把每个维度机械变成子目录。',
+      '目录深化遵循研究结论和输入文件的主题，不预设标题、固定层级或节点数量，也不要求目录必然变化。outline_capacity 只记录总体判断，不控制 add、split、merge、move、delete 或锁定；Host 只校验编辑作用域、ID、操作一致性、topic 目标落实和最终目录结构。',
     ] : []),
     `Project 摘要：${JSON.stringify(subagentTaskContext(inputs.project))}`,
     `相关 Requirements：${JSON.stringify(subagentTaskContext(requirements))}`,
@@ -1435,14 +1600,14 @@ export function renderEvidenceMappingSubagentTask(
     '只通过 update_section_task 维护写作任务、writing_dimensions、职责内 missing_topics 和明确的 coverage_override；材料提交不能改变这些字段。每次调整说明招标要求、用户修改或章节职责依据。purpose 不能重复标题，must_answer 将评分转为具体写作任务；writing_dimensions 或 writing_notes 至少一项指导展开。找到相关资料不构成扩大本章任务的理由。',
     ...(taskOwnsOutlineRefinement(task) ? [
       '每次调用 apply_section_outline_edit 都在 basis.finding_ref 引用当前 Research Assessment 返回的一个 key finding；Host 只校验引用归属，不替你判断操作是否符合发现。只能编辑 outline_edit_scope_id 标识的 Section 自身和新生成的后代，不得修改父节点或兄弟 Section。新增 ID 由程序返回。',
-      '目录判断完成后调用 lock_section_outline(comparison)，保存 key findings 中重要主题独立成节、留在章内或排除的具体理由。若 mapping_sections 仍包含当前叶子，再为它调用 submit_section_mapping；若拆分后 mapping_sections 为空，不得替 queued_leaf_sections 提交 Evidence，直接调用 finish_mapping_task，Host 会为新叶子创建独立任务。',
+      '目录判断完成后调用 lock_section_outline(comparison)。锁定使用最新 topic_dispositions 校验全部 topic 已归位、separate_section 已形成真实结构变化、covered_elsewhere 目标有效；comparison 只补充整体对照说明。若 mapping_sections 仍包含当前叶子，再为它调用 submit_section_mapping；若拆分后 mapping_sections 为空，不得替 queued_leaf_sections 提交 Evidence，直接调用 finish_mapping_task，Host 会为新叶子创建独立任务。',
       '覆盖关联默认为当前目录关联；需要调整时，在 update_section_task 中明确提交三类 coverage_override，只能引用当前任务可见 ID。必须修正任务越界，不能写入 add_mapping_suggestion 后当作已解决。',
       '当前任务的单个 mapping Section 完成，或者它已转为父节点后，调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的当前 Section。',
       '拆分可写叶子时，先用 update_section 为将成为结构节点的原章节补充 summary，再执行 split_section。',
     ] : task.phase === 'final_check' ? [
       '先对照 S3 已确认任务、S2 要求、用户修改、S4 调整前后差异及全书职责，判断任务调整本身是否合理，再判断材料能否支持该任务。不能先扩大任务，再以材料符合扩大后的任务为由通过。空材料章节和职责内缺口也必须复核。',
       '待审任务中的 identified_issues 是目录复核发现的阻断问题，必须逐项核对并通过任务修正解决；只有能够引用原始业务依据说明问题不成立时才可 keep，并写明理由。仍未解决或超出当前编辑权限时必须 block，不能仅登记为建议。在本章职责内可以设计作业方法，但不得把参考方案写成本项目既定事实。',
-      '通过 list_review_items 获取当前待审引用，review_items 批量提交 keep、remove、correct 或 block 及具体理由。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。correct 的新版本须再次复核。',
+      '提示末尾的 pending_review_items 提供当前待审引用；开始时不得重复调用 list_review_items。review_items 批量提交 keep、remove、correct 或 block 及具体理由；修正产生新版本或工具进度仍有待审但现有引用已处理时，再调用 list_review_items 刷新。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。correct 的新版本须再次复核。',
       '为当前受影响父节点调用 submit_branch_summary，再复核其正文是否符合正式技术标文体和职责。最后调用无参数 finish_final_check，由程序计算漏项、过期结论及阻断项。Final Check 不能新增、删除、移动、拆分、合并章节或修改标题；遇到超出权限的问题用 block 说明具体原因，沿用有限修复流程处理。',
     ] : [
       '逐章调用 submit_section_mapping，并按 remaining_section_ids 继续；最后调用 finish_mapping_task。若返回缺失列表或 issues，只处理明确章节，直到 completed=true。',
@@ -1676,7 +1841,7 @@ function structureRepairTasks(
       research_candidate_task_ids: uniqueStrings(candidateTasks),
       title: `修复目录范围：${section.title}`,
       heading_path: sectionEvidenceContext(outline, section).heading_path,
-      review_issues: sectionIssues.map(issue => `${issue.section_id}：${issue.reason}`),
+      review_issues: sectionIssues.map(issue => `${issue.code} / ${issue.section_id}：${issue.reason}`),
     }
   })
 }
@@ -2109,13 +2274,14 @@ function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSc
     checked_scoring_response_point_ids: ids(inputs.responsePoints.points.map(item => item.id)),
     issues: stringArray('仅记录不阻断发布的业务层级、章节边界或覆盖建议；没有问题时返回空数组。'),
     blocking_issues: { type: 'array', items: closedObject({
+      code: { type: 'string', description: '大写下划线问题代码；遗漏目录深化使用 OUTLINE_REFINEMENT_MISSED。' },
       section_id: stringChoice(inputs.outline.sections.map(section => section.id), '问题所在的当前章节；Host 据此定位 Section 子树。'),
       reason: { type: 'string', description: '具体结构问题及业务理由。' },
     }), description: '目录过粗、任务越界、扩展缺少依据或职责冲突等必须返回相关章节；不能以资料符合修改后任务为由放行。' },
   })
 }
 
-type OutlineStructureIssue = { section_id: string; reason: string }
+type OutlineStructureIssue = { code: string; section_id: string; reason: string }
 
 async function reviewRefinedOutline(
   agent: Agent,
@@ -2131,16 +2297,23 @@ async function reviewRefinedOutline(
   const qualityPath = join(workspace.projectRoot, QUALITY_CANDIDATE_PATH)
   await Promise.all([removeAttemptPath(candidatePath), removeAttemptPath(qualityPath)])
   await writeJson(candidatePath, inputs.outline)
+  const initialOutline = parseOutlineArtifact(await readJson(workspace, 'outline/initial-confirmed-outline.json'))
   const review = [
     '当前阶段：evidence_mapping / Outline Review',
     '目录结构和 Writing Brief 已由各 Section 任务研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
     '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理；不重新检索或重生成整本目录。',
-    '分别检查评分和要求覆盖、同级职责、叶子内部粒度。尤其检查 Research Assessment 已确认具有独立写作价值的主题是否仍只藏在 writing_dimensions、是否存在没有 key findings 支持的新增章节，以及是否过度拆分或与兄弟章节职责冲突；是否构成结构问题由你结合业务语义判断，不能按维度条数、关键词或零新增判断。',
-    '通过结构化输出返回质量报告；issues 只记录非阻断建议。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回当前 section_id 与业务理由，Host 会只重开所属 Section 子树。不能把资料命中当作扩大章节任务的依据。',
+    '分别检查评分和要求覆盖、同级职责、叶子内部粒度。核对 separate_section 是否真实落入目录、covered_elsewhere 是否由目标章节承担、within_section 是否隐藏明显应独立成节的主题，以及 Writing Brief 是否包含 topic_dispositions 未处理的独立内容；同时检查重复拆分、过度拆分、没有研究依据的新增章节和兄弟职责冲突。是否构成结构问题由你结合业务语义判断，不能按维度条数、关键词或零新增判断。',
+    '通过结构化输出返回质量报告；issues 只记录非阻断建议。遗漏深化使用 code=OUTLINE_REFINEMENT_MISSED；具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回 code、当前 section_id 与业务理由，Host 会只重开所属 Section 子树。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
-    `S3 已确认目录：${JSON.stringify(await readJson(workspace, 'outline/initial-confirmed-outline.json'))}`,
+    `S3 已确认目录：${JSON.stringify(initialOutline)}`,
     `相关招标要求：${JSON.stringify(inputs.requirements)}`,
+    `相关评分：${JSON.stringify(inputs.scoring)}`,
+    `相关 Response Points：${JSON.stringify(inputs.responsePoints)}`,
     `待复核目录：${JSON.stringify(inputs.outline)}`,
+    `S3→S4 结构 diff：${JSON.stringify(outlineStructureDifferences(initialOutline, inputs.outline))}`,
+    `实际 Outline Operations：${JSON.stringify(researchResults.flatMap(item => item.outlineOperations === undefined ? [] : [{
+      task_id: item.task.task_id, section_ids: item.task.section_ids, operations: item.outlineOperations,
+    }]))}`,
     `最终章节写作维度与研究用途：${JSON.stringify(researchResults.flatMap(item => item.result.section_mappings.map(mapping => ({
       section_id: mapping.section_id, writing_dimensions: mapping.writing_dimensions,
       missing_topics: mapping.missing_topics, writing_brief: mapping.writing_brief,
@@ -2152,8 +2325,10 @@ async function reviewRefinedOutline(
     `Section 粒度结论：${JSON.stringify(researchResults.flatMap(item => item.refinementConclusion === undefined ? [] : [{
       task_id: item.task.task_id, section_ids: item.task.section_ids, conclusion: item.refinementConclusion,
     }]))}`,
-    `Section 研究充分性结论：${JSON.stringify(researchResults.flatMap(item => item.researchAssessment === undefined ? [] : [{
-      task_id: item.task.task_id, section_ids: item.task.section_ids, assessment: item.researchAssessment,
+    `Section 研究发现与 topic_dispositions：${JSON.stringify(researchResults.flatMap(item => item.researchAssessment === undefined ? [] : [{
+      task_id: item.task.task_id, section_ids: item.task.section_ids,
+      key_findings: item.researchAssessment.key_findings, unresolved_gaps: item.researchAssessment.unresolved_gaps,
+      topic_dispositions: item.researchAssessment.topic_dispositions,
     }]))}`,
   ].join('\n')
   const hostIssues: StageValidationIssue[] = []
@@ -2322,7 +2497,7 @@ async function executeEvidenceMappingRun(
   }
   let previous: EvidenceMapArtifact | undefined
   let previousWeb: WebEvidenceSourcesArtifact | undefined
-  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 8, tasks: [] }
+  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 9, tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
   if (!localRun) {
@@ -2337,9 +2512,9 @@ async function executeEvidenceMappingRun(
         if (JSON.stringify(savedInitial) !== JSON.stringify(expectedInitial)) throw new Error('evidence-mapping-resume-plan-mismatch')
         const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
         if (rawCheckpoint !== undefined) {
-          if (record(rawCheckpoint)?.schema_version !== 8) throw new BidStageExecutionError([{
+          if (record(rawCheckpoint)?.schema_version !== 9) throw new BidStageExecutionError([{
             code: 'EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED',
-            message: 'S4 检查点缺少逐叶任务与研究候选信息，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
+            message: 'S4 检查点缺少逐叶任务、研究候选或主题归位信息，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
           }])
           checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
         }
@@ -2438,7 +2613,7 @@ async function executeEvidenceMappingRun(
         ...(submission.refinementConclusion === undefined ? {} : { refinement_conclusion: submission.refinementConclusion }),
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
       })
-      checkpoint = { schema_version: 8, tasks: plan.tasks.flatMap((item) => {
+      checkpoint = { schema_version: 9, tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }
@@ -2502,6 +2677,7 @@ async function executeEvidenceMappingRun(
     if (request === undefined) return () => {}
     return attachMappingSubmissionRuntime(
       childCtx, workspace, request.inputs, request.task, locations, request.state,
+      () => capturedByChild.get(String(child.session.id))?.values() ?? [],
       () => [
         ...buildWebEvidenceSnapshots(capturedByChild.get(String(child.session.id))?.values() ?? []),
         ...availableSnapshots,
@@ -2583,11 +2759,11 @@ async function executeEvidenceMappingRun(
           generation: 1,
           captured: undefined,
           everInstalled: false,
+          outlineBaseline: parseOutlineArtifact(structuredClone(restoredOutline)),
           stagedOutline: restoredOutline,
           acceptedOperations: [],
           researchReady: !taskOwnsOutlineRefinement(mappingTask),
           researchAssessment: undefined,
-          structuralRefinementApplied: false,
           locked: !taskOwnsOutlineRefinement(mappingTask),
           mappings: new Map(restoredResult?.section_mappings.map(mapping => [mapping.section_id, mapping]) ?? []),
           submittedMappings: new Set(restoredResult?.section_mappings.map(mapping => mapping.section_id) ?? []),

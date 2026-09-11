@@ -69,6 +69,8 @@ export const BID_CLIENT_ACTIONS = [
   'confirm_tender_analysis',
   'confirm_outline',
   'regenerate_outline',
+  'request_writing_requirements',
+  'auto_start_chapter_writing',
   'send_message',
 ] as const
 
@@ -316,6 +318,18 @@ export type BidStageStartErrorCode =
 export type BidStageStartResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: BidStageStartErrorCode; readonly message: string } }
+
+/** Stable rejection codes for the two S5 waiting-user actions. */
+export type BidChapterWritingGateErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED'
+  | 'BID_CHAPTER_WRITING_GATE_FAILED'
+
+/** Result of requesting manual requirements or starting S5 with the automatic default plan. */
+export type BidChapterWritingGateResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: BidChapterWritingGateErrorCode; readonly message: string } }
 
 /** Stable business rejection codes returned by the explicit running-stage stop action. */
 export type BidStageStopErrorCode =

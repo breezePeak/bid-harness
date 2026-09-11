@@ -1,3 +1,28 @@
+.confirmationModeButton {
+  display: inline-flex;
+  height: 28px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: var(--dsw-font-xs-13);
+  white-space: nowrap;
+}
+
+.confirmationModeButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.confirmationModeChevron {
+  flex: none;
+}
+
 .root {
   box-sizing: border-box;
   flex: none;

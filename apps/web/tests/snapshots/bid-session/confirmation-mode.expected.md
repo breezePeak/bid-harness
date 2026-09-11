@@ -1,0 +1,5 @@
+- menu:
+  - menuitem "手动确认":
+    - text: 手动确认
+    - img
+  - menuitem "自动确认"

@@ -127,7 +127,7 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'chapter_writing', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'chapter_writing', status: 'waiting_user' },
-      allowedActions: ['send_message'],
+      allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
       composer: { enabled: true },
     })
     expect(getBidClientProjection({

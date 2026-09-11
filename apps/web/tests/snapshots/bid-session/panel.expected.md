@@ -1,9 +1,0 @@
-- region "技术标生成":
-  - text: 文件接入
-  - status: 请上传本次招标文件
-  - text: 等待处理
-  - paragraph: 支持 .pdf, .docx, .doc, .xlsx, .xls, .txt, .md，最多 20 个文件
-  - button "Choose File"
-  - button "上传招标文件":
-    - img
-    - text: 上传招标文件

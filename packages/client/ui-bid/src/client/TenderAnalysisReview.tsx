@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
   TenderAnalysisConfirmationView,
@@ -93,6 +93,7 @@ interface ReviewItem {
 export function TenderAnalysisReview({
   value,
   pending,
+  autoConfirm = false,
   onConfirm,
   t,
   readOnly = false,
@@ -101,6 +102,7 @@ export function TenderAnalysisReview({
 }: {
   value: TenderAnalysisConfirmationView
   pending: boolean
+  autoConfirm?: boolean
   readOnly?: boolean
   notice?: ReactNode
   onScoringSelectionChange?: (scoringId: string, selected: boolean) => Promise<TenderAnalysisConfirmationView>
@@ -118,7 +120,20 @@ export function TenderAnalysisReview({
   const totalScore = draft.scoring.scoring_items.reduce((sum, item) => sum + (item.score ?? 0), 0)
   const selectedScoringIds = new Set(draft.selected_scoring_ids)
   const modifiedOperations = buildOperations(value, draft)
+  const automaticConfirmation = useRef({ onConfirm, operations: modifiedOperations })
+  const automaticAttempted = useRef(false)
+  automaticConfirmation.current = { onConfirm, operations: modifiedOperations }
   const docTitle = draft.project.tender_name || draft.project.project_name || t('analysis.title')
+
+  useEffect(() => {
+    if (!autoConfirm) {
+      automaticAttempted.current = false
+      return
+    }
+    if (pending || selectionPending !== null || automaticAttempted.current) return
+    automaticAttempted.current = true
+    automaticConfirmation.current.onConfirm(automaticConfirmation.current.operations)
+  }, [autoConfirm, pending, selectionPending])
 
   // 构建扁平化的审查条目清单
   const allItems = useMemo<ReviewItem[]>(() => {

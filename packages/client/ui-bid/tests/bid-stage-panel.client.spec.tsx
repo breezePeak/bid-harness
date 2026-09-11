@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
+import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
+import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
+import { createBidConfirmationModeStore } from '../src/client/confirmation-mode.ts'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(() => {
@@ -47,9 +49,29 @@ function props(
     setDetailsAvailable: vi.fn(),
     selectReviewView: vi.fn(),
     reviewSurface: { host: () => document.body, subscribe: () => () => {} },
+    useStore: <T,>(selector: (state: { mode: 'manual' | 'automatic'; attempted: string[] }) => T): T => (
+      selector({ mode: 'manual', attempted: [] })
+    ),
+    actions: {
+      setMode: vi.fn(),
+      markAttempted: vi.fn(),
+      clearAttempted: vi.fn(),
+    },
     t,
     ...patch,
   } as unknown as BidStagePanelProps
+}
+
+function confirmationStore(mode: 'manual' | 'automatic' = 'manual') {
+  const instance = createBidConfirmationModeStore().create()
+  if (mode !== 'manual') instance.actions.setMode(mode)
+  return {
+    instance,
+    useStore: <T,>(selector: (state: ReturnType<typeof instance.getSnapshot>) => T): T => selector(
+      useSyncExternalStore(listener => instance.subscribe(listener), () => instance.getSnapshot()),
+    ),
+    actions: instance.actions,
+  }
 }
 
 function outlineDraft(outline: OutlineArtifact): OutlineDraftView {
@@ -66,6 +88,113 @@ function outlineStore(initial: OutlineDraftView) {
 }
 
 describe('BidStagePanel', () => {
+  it('确认模式默认手动并可从输入工具栏切换为自动确认', () => {
+    const store = confirmationStore()
+    render(<BidConfirmationModeControl {...({
+      sessionId: 'session_bid',
+      useSessions: (selector: (state: unknown) => unknown) => selector({ byId: { session_bid: { agentPreset: 'bid' } } }),
+      useStore: store.useStore,
+      actions: store.actions,
+      t,
+    } as unknown as Parameters<typeof BidConfirmationModeControl>[0])} />)
+
+    expect(screen.getByRole('button', { name: '确认模式' }).textContent).toContain('手动确认')
+    fireEvent.click(screen.getByRole('button', { name: '确认模式' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '自动确认' }))
+    expect(screen.getByRole('button', { name: '确认模式' }).textContent).toContain('自动确认')
+    expect(store.instance.getSnapshot().mode).toBe('automatic')
+  })
+
+  it('自动确认目录等待草稿保存，并按 revision 与摘要只提交一次', async () => {
+    const mode = confirmationStore()
+    const initial = outlineDraft({
+      schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [{
+        id: 'SEC-1', parent_id: null, order: 1, level: 1, title: '交付方案', purpose: '响应交付', writable: true,
+        must_answer: ['交付计划'], requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated',
+        scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      }],
+    })
+    const saved = { ...initial, revision: 2, draft_outline_sha256: 'c'.repeat(64) }
+    let finishSave!: (value: OutlineDraftView) => void
+    const save = new Promise<OutlineDraftView>((resolve) => { finishSave = resolve })
+    const applyOutlineDraftOperations = vi.fn(async () => save)
+    const confirmOutline = vi.fn(async () => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'outline_generation', status: 'waiting_user' },
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
+    }), {
+      ...mode,
+      getOutlineDraft: async () => initial,
+      applyOutlineDraftOperations,
+      confirmOutline,
+    })} />)
+    const title = await screen.findByLabelText('SEC-1 标题')
+    fireEvent.click(screen.getByRole('button', { name: '编辑 交付方案' }))
+    fireEvent.change(title, { target: { value: '更新后的交付方案' } })
+    fireEvent.blur(title)
+    await waitFor(() => { expect(applyOutlineDraftOperations).toHaveBeenCalledOnce() })
+
+    act(() => { mode.actions.setMode('automatic') })
+    expect(confirmOutline).not.toHaveBeenCalled()
+    await act(async () => { finishSave(saved); await save })
+
+    await waitFor(() => {
+      expect(confirmOutline).toHaveBeenCalledOnce()
+      expect(confirmOutline).toHaveBeenCalledWith({
+        expected_revision: 2,
+        expected_draft_sha256: 'c'.repeat(64),
+      })
+    })
+  })
+
+  it('自动目录确认失败后不循环重试', async () => {
+    const mode = confirmationStore('automatic')
+    const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
+    const confirmOutline = vi.fn(async () => { throw new Error('确认失败') })
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
+    }), { ...mode, getOutlineDraft: async () => draft, confirmOutline })} />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('确认失败')
+    await act(async () => { await Promise.resolve() })
+    expect(confirmOutline).toHaveBeenCalledOnce()
+  })
+
+  it('S5 手动模式请求写作要求，自动模式直接启动且不处理失败或等待开始', async () => {
+    const manualMode = confirmationStore()
+    const requestWritingRequirements = vi.fn(async () => {})
+    const autoStartChapterWriting = vi.fn(async () => {})
+    const waiting = projection({
+      runtime: { stage: 'chapter_writing', status: 'waiting_user' },
+      allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
+      composer: { enabled: true },
+    })
+    const manual = render(<BidStagePanel {...props(waiting, {
+      ...manualMode, requestWritingRequirements, autoStartChapterWriting,
+    })} />)
+    await waitFor(() => { expect(requestWritingRequirements).toHaveBeenCalledOnce() })
+    expect(autoStartChapterWriting).not.toHaveBeenCalled()
+    manual.unmount()
+
+    const automaticMode = confirmationStore('automatic')
+    const automatic = render(<BidStagePanel {...props(waiting, {
+      ...automaticMode, requestWritingRequirements, autoStartChapterWriting,
+    })} />)
+    await waitFor(() => { expect(autoStartChapterWriting).toHaveBeenCalledOnce() })
+    expect(requestWritingRequirements).toHaveBeenCalledOnce()
+    automatic.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'chapter_writing', status: 'failed', failureReason: '正文失败' },
+      allowedActions: ['retry_stage'],
+    }), { ...automaticMode, requestWritingRequirements, autoStartChapterWriting })} />)
+    automatic.rerender(<BidStagePanel {...props(projection({
+      runtime: { stage: 'chapter_writing', status: 'waiting_start' },
+      allowedActions: ['start_stage'],
+    }), { ...automaticMode, requestWritingRequirements, autoStartChapterWriting })} />)
+    await act(async () => { await Promise.resolve() })
+    expect(autoStartChapterWriting).toHaveBeenCalledOnce()
+  })
+
   it('会话摘要尚未补齐 preset 时仍以 Bid 投影开放分析视图', async () => {
     const setDetailsAvailable = vi.fn()
     render(<BidStagePanel {...props(projection({
@@ -687,11 +816,27 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'failed' as const } },
       })
+    const remoteRequestWritingRequirements = vi.fn<(_sessionId: string) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'waiting_user' as const } },
+      })
+    const remoteAutoStartChapterWriting = vi.fn<(_sessionId: string) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'running' as const } },
+      })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
-      remote: { bid: { retryStage: remoteRetry, startStage: remoteStart, stopStage: remoteStop } },
+      remote: { bid: {
+        retryStage: remoteRetry,
+        startStage: remoteStart,
+        stopStage: remoteStop,
+        requestWritingRequirements: remoteRequestWritingRequirements,
+        autoStartChapterWriting: remoteAutoStartChapterWriting,
+      } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -702,6 +847,9 @@ describe('ui-bid browser plugin', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
     }), BidStagePanel)
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'conversation.input.left', id: 'bid-confirmation-mode', order: 20,
+    }), BidConfirmationModeControl)
     const registration = register.mock.calls.find(([definition]) => (definition as { name: string }).name === 'conversation.input.dock')
     if (registration === undefined) throw new Error('Bid dock registration is unavailable')
     const options = registration[0] as {
@@ -711,6 +859,8 @@ describe('ui-bid browser plugin', () => {
         retryStage: () => Promise<void>
         startStage: () => Promise<void>
         stopStage: () => Promise<void>
+        requestWritingRequirements: () => Promise<void>
+        autoStartChapterWriting: () => Promise<void>
       }
     }
     const injected = options.inject('session_bid')
@@ -774,6 +924,10 @@ describe('ui-bid browser plugin', () => {
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
     await injected.stopStage()
     expect(remoteStop).toHaveBeenCalledWith('session_bid')
+    await injected.requestWritingRequirements()
+    expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
+    await injected.autoStartChapterWriting()
+    expect(remoteAutoStartChapterWriting).toHaveBeenCalledWith('session_bid')
   })
 
   it('supports direct editing of the selected S2 review item and submits the change', async () => {

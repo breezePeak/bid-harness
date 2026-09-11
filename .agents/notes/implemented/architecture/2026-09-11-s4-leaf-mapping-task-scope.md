@@ -14,7 +14,7 @@ Initial 与 Repair Child 完成[研究充分性判断](../bug-fix/2026-09-11-s4-
 
 可写叶子被拆分后，原任务的正式 Mapping 范围变为空，`lock_section_outline` 只把最终新叶作为 `queued_leaf_sections` 返回；父 Child 可以明确新叶职责，但不能提交它们的 Evidence。Host 合并这一代目录后，只为从非可写状态新变成的可写叶创建下一代独立任务，其他已完成任务不重跑。Repair 也走同一队列；目录复核同时指向祖先和后代时，Host 把问题归并到同一个最上层受影响子树，只并发互不相交的修复范围。
 
-每个完成任务把成功 `read_source` 返回的材料引用和成功 Web Snapshot 身份保存为 `research_candidates`。动态子任务只把这些记录作为检索入口；Host 不据标题、关键词或父任务判断生成 `local_materials` 或 `web_materials`，子任务仍须按自身 Requirement、Scoring、Response Point 和职责读取、判断并显式提交。私有 plan schema 为 v6，checkpoint schema 为 v8；正式 Evidence Map 维持 v10，S5 不读取 Mapping Task、代次或研究候选。
+每个完成任务把成功 `read_source` 返回的材料引用和成功 Web Snapshot 身份保存为 `research_candidates`。动态子任务只把这些记录作为检索入口；Host 不据标题、关键词或父任务判断生成 `local_materials` 或 `web_materials`，子任务仍须按自身 Requirement、Scoring、Response Point 和职责读取、判断并显式提交。私有 plan schema 为 v6，checkpoint schema 为 v9；正式 Evidence Map 维持 v10，S5 不读取 Mapping Task、代次或研究候选。
 
 本记录替代[增量映射工具](../simplification/2026-09-07-s4-incremental-mapping-tools.md)、[章节研究任务](../feature/2026-09-03-bid-section-research-blueprint.md)和[目录结构与叶节写作](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)中的业务分支任务范围；这些记录继续分别约束小工具提交、S5 补搜与叶节正文结构。
 

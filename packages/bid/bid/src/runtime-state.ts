@@ -227,6 +227,11 @@ export function getBidClientProjection(
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
   if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
   if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
+  if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') return {
+    runtime: { ...runtime },
+    allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
+    composer: { enabled: true },
+    ...fileView,
+  }
   return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
 }

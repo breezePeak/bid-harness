@@ -37,6 +37,7 @@ const INTAKE_FIXTURE = fileURLToPath(new URL(
 ))
 const INTAKE_FILE_NAME = 'tender-notice.md'
 const SNAPSHOT_DIR = fileURLToPath(new URL('./snapshots/bid-session', import.meta.url))
+const CONFIRMATION_MODE_EXPECTED = join(SNAPSHOT_DIR, 'confirmation-mode.expected.md')
 const WORD_TEMPLATE_EXPECTED = join(SNAPSHOT_DIR, 'word-template.expected.md')
 const MODE = webSnapshotMode()
 
@@ -48,17 +49,25 @@ interface AnalysisManifestFile {
   chunkIndexPath: string | null
 }
 
+interface AnalysisSource {
+  file_ref: string
+  chunk: string
+  semantic_hint: string
+}
+
 /** Deterministic model that drives S2 through the real Agent tool loop. */
 class BidAnalysisAdapter extends LlmAdapter {
   readonly toolNames: string[] = []
   private call = 0
   private failFirstAnalysis = false
   private session: { cwd: string; id: string } | undefined
+  private source: AnalysisSource | undefined
 
   setSession(cwd: string, id: string, failFirstAnalysis = false): void {
     this.session = { cwd, id }
     this.call = 0
     this.failFirstAnalysis = failFirstAnalysis
+    this.source = undefined
     this.toolNames.length = 0
   }
 
@@ -79,6 +88,32 @@ class BidAnalysisAdapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
 
+  private async analysisSource(): Promise<AnalysisSource> {
+    if (this.source !== undefined) return this.source
+    const session = this.session
+    if (session === undefined) throw new Error('Bid analysis adapter has no Session')
+    const projectRoot = join(session.cwd, '.bid-harness')
+    const manifest = JSON.parse(await readFile(join(projectRoot, 'manifest.json'), 'utf8')) as {
+      files: AnalysisManifestFile[]
+    }
+    const tenderIndex = manifest.files.findIndex(file => file.role === 'tender' && file.parseStatus === 'success')
+    const tender = manifest.files[tenderIndex]
+    if (tender === undefined || tender.chunksPath === null || tender.chunkIndexPath === null) {
+      throw new Error('Tender file has no chunks')
+    }
+    const index = JSON.parse(await readFile(join(projectRoot, tender.chunkIndexPath), 'utf8')) as {
+      chunks: Array<{ id: string; path: string }>
+    }
+    const chunk = index.chunks[0]
+    if (chunk === undefined) throw new Error('Tender file has no chunk entry')
+    const content = await readFile(join(projectRoot, tender.chunksPath, chunk.path), 'utf8')
+    const lines = content.replace(/<!--[\s\S]*?-->/gu, '').split('\n')
+    const semanticHint = lines.find(line => line.trim().length > 0)?.trim()
+    if (semanticHint === undefined) throw new Error('Tender chunk has no source text')
+    this.source = { file_ref: `T${String(tenderIndex + 1)}`, chunk: chunk.id, semantic_hint: semanticHint }
+    return this.source
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.system?.includes('你只解释给定 DOCX 模板')) {
       const text = '{"rules":[],"mapping":{"body":"Normal"}}'
@@ -89,86 +124,57 @@ class BidAnalysisAdapter extends LlmAdapter {
     }
     const session = this.session
     if (session === undefined) throw new Error('Bid analysis adapter has no Session')
-    this.call += 1
-    const phase = (this.call - 1) % 3
+    const phase = this.call++
     const base = '.bid-harness'
     if (phase === 0) {
-      yield* this.toolCalls([
-        { name: 'read', args: { file_path: `${base}/manifest.json` } },
-        { name: 'grep', args: { pattern: '交付|评分|必须', path: `${base}/corpus` } },
-        { name: 'read', args: { file_path: `${base}/corpus/${INTAKE_FILE_NAME}/chunks/index.json` } },
-      ])
+      yield* this.toolCalls([{ name: 'read', args: { file_path: `${base}/manifest.json` } }])
       return
     }
     if (phase === 1) {
-      const failThisAttempt = this.failFirstAnalysis
-      this.failFirstAnalysis = false
-      const projectRoot = join(session.cwd, '.bid-harness')
-      const manifest = JSON.parse(await readFile(join(projectRoot, 'manifest.json'), 'utf8')) as {
-        files: AnalysisManifestFile[]
-      }
-      const tenderFiles = manifest.files.filter(file => file.role === 'tender' && file.parseStatus === 'success')
-      const sources = await Promise.all(tenderFiles.map(async (file) => {
-        if (file.chunksPath === null || file.chunkIndexPath === null) throw new Error('Tender file has no chunks')
-        const index = JSON.parse(await readFile(join(projectRoot, file.chunkIndexPath), 'utf8')) as {
-          chunks: Array<{ path: string }>
-        }
-        const chunk = index.chunks[0]
-        if (chunk === undefined) throw new Error('Tender file has no chunk entry')
-        const chunkPath = `${file.chunksPath}/${chunk.path}`
-        const lines = (await readFile(join(projectRoot, chunkPath), 'utf8')).split('\n')
-        const rawText = lines.find(line => line.trim().length > 0)?.trim()
-        if (rawText === undefined) throw new Error('Tender chunk has no source text')
-        return {
-          ref: { file_id: file.id, chunk: chunkPath, line_start: 1, line_end: lines.length },
-          rawText,
-        }
-      }))
-      const refs = sources.map(source => source.ref)
-      const ref = refs[0]
-      const rawText = sources[0]?.rawText
-      if (ref === undefined || rawText === undefined) throw new Error('Bid analysis needs a tender source')
-      const documents = {
-        'project.json': {
-          schema_version: 1, project_name: '示例项目', tender_name: '示例招标', purchaser: null, owner: null,
-          project_scope: ['完成项目交付'], technical_scope: [], delivery_scope: ['按期交付'],
-          source_refs: refs, analyzed_tender_files: tenderFiles.map(file => file.id),
-        },
-        'requirements.json': {
-          schema_version: 1,
-          requirements: [{
-            id: 'REQ-1', category: 'delivery',
-            raw_text: rawText,
-            normalized_requirement: '前端只展示 Host 投影的处理进度',
-            mandatory: true, source_refs: [ref],
-          }],
-        },
-        'scoring.json': {
-          schema_version: 1,
-          scoring_items: [{
-            id: 'SCORE-1', parent: null, group: null, title: '交付能力',
-            raw_text: rawText,
-            criterion: '满足交付期限', score: null, score_range: null, must_answer: true, source_refs: [ref],
-          }],
-        },
-        'compliance.json': {
-          schema_version: 1,
-          compliance_items: [{
-            id: 'COMP-1', type: 'delivery', raw_text: rawText,
-            normalized_rule: '前端不得推进业务阶段',
-            severity: 'mandatory', source_refs: [ref],
-          }],
-        },
-      }
-      yield* this.toolCalls(Object.entries(documents).map(([name, document]) => ({
-        name: 'write',
+      yield* this.toolCalls([{ name: 'grep', args: { pattern: '交付|评分|必须', path: `${base}/corpus` } }])
+      return
+    }
+    if (phase === 2) {
+      yield* this.toolCalls([{ name: 'read', args: { file_path: `${base}/corpus/${INTAKE_FILE_NAME}/chunks/index.json` } }])
+      return
+    }
+    if (this.failFirstAnalysis) {
+      if (phase === 3) yield* this.toolCalls([{ name: 'finish_tender_analysis', args: {} }])
+      else yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    const source = await this.analysisSource()
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [
+      {
+        name: 'submit_project_fact',
+        args: { field: 'project_name', value: '示例项目', sources: [source] },
+      },
+      {
+        name: 'submit_requirement',
         args: {
-          file_path: `${base}/analysis/${name}`,
-          content: failThisAttempt && name === 'requirements.json'
-            ? '{ invalid json'
-            : `${JSON.stringify(document, null, 2)}\n`,
+          category: 'delivery', normalized_requirement: '前端只展示 Host 投影的处理进度',
+          mandatory: true, sources: [source],
         },
-      })))
+      },
+      {
+        name: 'submit_scoring_item',
+        args: {
+          group: null, title: '交付能力', criterion: '满足交付期限', score: null, score_range: null,
+          must_answer: true, sources: [source],
+        },
+      },
+      {
+        name: 'submit_compliance_item',
+        args: {
+          type: 'delivery', normalized_rule: '前端不得推进业务阶段', severity: 'mandatory', sources: [source],
+        },
+      },
+      { name: 'finish_tender_analysis', args: {} },
+      { name: 'finish_tender_analysis', args: { review_revision: 4 } },
+    ]
+    const call = calls[phase - 3]
+    if (call !== undefined) {
+      yield* this.toolCalls([call])
       return
     }
     yield { type: 'finish', reason: { kind: 'stop' } }
@@ -250,7 +256,7 @@ describe('web e2e: Bid file intake', () => {
   afterAll(async () => {
     await browser?.close()
     await scaffold?.close()
-    await assertFixtureInventory(SNAPSHOT_DIR, ['panel.expected.md', 'word-template.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['confirmation-mode.expected.md', 'word-template.expected.md'])
   })
 
   it('uploads a Markdown tender through the Host and restores the advanced stage', async () => {
@@ -270,9 +276,24 @@ describe('web e2e: Bid file intake', () => {
 
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
-    await panel.getByText('文件接入', { exact: true }).waitFor()
+    await panel.getByText('资料上传', { exact: true }).waitFor()
     await page.getByText('请添加本项目资料', { exact: true }).waitFor()
     await page.getByText('等待处理', { exact: true }).first().waitFor()
+    const confirmationMode = page.getByRole('button', { name: '确认模式', exact: true })
+    await confirmationMode.waitFor()
+    expect(await confirmationMode.textContent()).toContain('手动确认')
+    await confirmationMode.click()
+    await page.getByRole('menuitem', { name: '自动确认', exact: true }).waitFor()
+    await compareOrRefreshGolden(
+      CONFIRMATION_MODE_EXPECTED,
+      await captureStableAria(page, '[role="menu"]', scaffold.workspaceCwd),
+      MODE,
+    )
+    await page.getByRole('menuitem', { name: '自动确认', exact: true }).click()
+    expect(await confirmationMode.textContent()).toContain('自动确认')
+    await confirmationMode.click()
+    await page.getByRole('menuitem', { name: '手动确认', exact: true }).click()
+    expect(await confirmationMode.textContent()).toContain('手动确认')
 
     let promptPosts = 0
     let uploadPosts = 0
@@ -284,7 +305,7 @@ describe('web e2e: Bid file intake', () => {
     })
 
     const chooserReady = page.waitForEvent('filechooser')
-    await page.getByRole('button', { name: '添加项目资料' }).click()
+    await page.getByRole('button', { name: '上传招标文件' }).click()
     const chooser = await chooserReady
     await chooser.setFiles(INTAKE_FIXTURE)
 
@@ -298,15 +319,25 @@ describe('web e2e: Bid file intake', () => {
     ))
     await page.getByRole('button', { name: '上传并解析' }).click()
     await page.getByText('正在上传并解析文件', { exact: true }).waitFor({ timeout: 15_000 })
-    await panel.getByText('文件接入', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('资料上传', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await uploadResponse).status()).toBe(200)
 
-    await panel.getByText('证据映射', { exact: true }).waitFor({ timeout: 15_000 })
-    await panel.getByText('等待处理', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('等待确认', { exact: true }).waitFor({ timeout: 15_000 })
+    await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
 
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
-    expect(analysisAdapter.toolNames).toEqual(['read', 'grep', 'read', 'write', 'write', 'write', 'write'])
+    expect(analysisAdapter.toolNames).toEqual([
+      'read',
+      'grep',
+      'read',
+      'submit_project_fact',
+      'submit_requirement',
+      'submit_scoring_item',
+      'submit_compliance_item',
+      'finish_tender_analysis',
+      'finish_tender_analysis',
+    ])
 
     if (bid?.sessionId === undefined) throw new Error('Bid session id is unavailable')
     const sessionId = SessionId(bid.sessionId)
@@ -316,7 +347,6 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
       { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
-      { type: 'bid.stage.completed', stage: 'tender_analysis', status: 'completed' },
     ])
 
     const sessionCwd = agent.session.header.cwd
@@ -372,7 +402,7 @@ describe('web e2e: Bid file intake', () => {
     for (const chunk of chunkIndex.chunks) {
       expect((await stat(join(projectRoot, chunksPath, chunk.path))).isFile()).toBe(true)
     }
-    for (const name of ['project.json', 'requirements.json', 'scoring.json', 'compliance.json']) {
+    for (const name of ['project.json', 'requirements.json', 'scoring-origin.json', 'compliance.json']) {
       expect((await stat(join(projectRoot, 'analysis', name))).isFile()).toBe(true)
     }
 
@@ -381,7 +411,6 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
       { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
-      { type: 'bid.stage.completed', stage: 'tender_analysis', status: 'completed' },
     ])
 
     const warningStart = tripwire.warnings.length
@@ -389,8 +418,7 @@ describe('web e2e: Bid file intake', () => {
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
-    await page.getByRole('region', { name: '技术标生成' })
-      .getByText('证据映射', { exact: true }).waitFor({ timeout: 15_000 })
+    await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
     expect((await listedSessions(scaffold.baseUrl))[0]?.sessionId).toBe(sessionId)
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
@@ -413,7 +441,7 @@ describe('web e2e: Bid file intake', () => {
     if (agent === undefined) throw new Error('Bid Session has no live Agent')
     const cwd = agent.session.header.cwd
     if (cwd === undefined) throw new Error('Bid Session has no workspace cwd')
-    if (!agent.session.events.some(event => event.type === 'bid.stage.completed'
+    if (!agent.session.events.some(event => event.type === 'bid.stage.started'
       && event.data.stage === 'tender_analysis')) {
       analysisAdapter.setSession(cwd, bid.sessionId)
       const tenderBytes = await readFile(INTAKE_FIXTURE)
@@ -460,6 +488,7 @@ describe('web e2e: Bid file intake', () => {
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     await page.getByRole('tab', { name: '导出 Word' }).click()
     await page.getByRole('region', { name: '导出 Word' }).waitFor()
+    await page.getByText('公司 模板.docx', { exact: true }).waitFor()
     const snapshot = await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(WORD_TEMPLATE_EXPECTED, snapshot, MODE)
     expect(snapshot).toContain('选择 .docx 文件（最多 300 MiB）')
@@ -526,13 +555,9 @@ describe('web e2e: Bid file intake', () => {
 
   it('shows an S2 failure and retries it through the Host without starting S3', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session-retry'))
-    await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
-
-    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && session.blank), { timeout: 15_000 }).toBeDefined()
     const bid = (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && session.blank)
-    if (bid === undefined) throw new Error('fresh Bid Session is unavailable')
+      .find(session => session.agentPreset === 'bid')
+    if (bid === undefined) throw new Error('Bid Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(bid.sessionId))
     if (agent === undefined) throw new Error(`Bid session ${bid.sessionId} has no live Agent`)
     const bidCwd = agent.session.header.cwd
@@ -548,22 +573,17 @@ describe('web e2e: Bid file intake', () => {
       if (path === '/api/bid/retryStage') retryPosts += 1
     })
 
+    expect(await scaffold.ctx.bid.resetStage(agent, 'tender_analysis')).toEqual({
+      stage: 'tender_analysis', status: 'waiting_start',
+    })
+    expect(await scaffold.ctx.bid.startStage(agent.session)).toMatchObject({ ok: true, value: {
+      stage: 'tender_analysis', status: 'failed',
+    } })
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
-    const chooserReady = page.waitForEvent('filechooser')
-    await page.getByRole('button', { name: '添加项目资料' }).click()
-    const chooser = await chooserReady
-    await chooser.setFiles(INTAKE_FIXTURE)
-    const uploadResponse = page.waitForResponse(response => (
-      response.request().method() === 'POST'
-      && new URL(response.url()).pathname === '/api/bid-upload'
-    ))
-    await page.getByRole('button', { name: '上传并解析' }).click()
-    expect((await uploadResponse).status()).toBe(200)
-
     await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 30_000 })
     await panel.getByText('处理失败', { exact: true }).waitFor({ timeout: 15_000 })
-    await panel.getByText(/失败原因：.*TENDER_ANALYSIS_ARTIFACT_INVALID/u)
+    await panel.getByText(/缺少必需的招标分析文件/u).first()
       .waitFor({ timeout: 15_000 })
     await panel.getByRole('button', { name: '重试' }).waitFor({ timeout: 15_000 })
 
@@ -571,34 +591,34 @@ describe('web e2e: Bid file intake', () => {
       response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/bid/retryStage'
     ))
+    analysisAdapter.setSession(bidCwd, bid.sessionId)
     await panel.getByRole('button', { name: '重试' }).click()
     expect((await retryResponse).status()).toBe(200)
-    await panel.getByText('证据映射', { exact: true }).waitFor({ timeout: 30_000 })
-    await panel.getByText('等待处理', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('等待确认', { exact: true }).waitFor({ timeout: 30_000 })
+    await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
 
     expect(promptPosts).toBe(0)
     expect(retryPosts).toBe(1)
-    expect(bidStageLifecycle(agent.session.events)).toEqual([
-      { type: 'bid.stage.started', stage: 'file_intake', status: 'running' },
-      { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
+    expect(bidStageLifecycle(agent.session.events).slice(-3)).toEqual([
       { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
       { type: 'bid.stage.failed', stage: 'tender_analysis', status: 'failed' },
       { type: 'bid.stage.started', stage: 'tender_analysis', status: 'running' },
-      { type: 'bid.stage.completed', stage: 'tender_analysis', status: 'completed' },
     ])
     expect(bidStageLifecycle(agent.session.events)
-      .some(event => event.stage === 'evidence_mapping' && event.type === 'bid.stage.started')).toBe(false)
+      .some(event => event.stage === 'outline_generation' && event.type === 'bid.stage.started')).toBe(false)
   }, 120_000)
 
   it('creates another Bid Session in the same Workspace after one starts', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-started-session'))
+    const before = await listedSessions(scaffold.baseUrl)
+    const existingIds = new Set(before.map(session => session.sessionId))
     await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
 
     await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && session.blank), { timeout: 15_000 }).toBeDefined()
+      .find(session => session.agentPreset === 'bid' && !existingIds.has(session.sessionId)), { timeout: 15_000 }).toBeDefined()
     const firstBid = (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && session.blank)
-    if (firstBid === undefined) throw new Error('fresh Bid Session is unavailable')
+      .find(session => session.agentPreset === 'bid' && !existingIds.has(session.sessionId))
+    if (firstBid === undefined) throw new Error('new Bid Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(firstBid.sessionId))
     if (agent === undefined) throw new Error(`Bid session ${firstBid.sessionId} has no live Agent`)
     agent.session.append('turn/start', { turn: 1 })
@@ -607,12 +627,18 @@ describe('web e2e: Bid file intake', () => {
 
     await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
       .find(session => session.sessionId === firstBid.sessionId)?.blank, { timeout: 15_000 }).toBe(false)
+    await page.reload({ waitUntil: 'load' })
+    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
 
     await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && session.blank), { timeout: 15_000 }).toBeDefined()
+      .find(session => session.agentPreset === 'bid'
+        && !existingIds.has(session.sessionId)
+        && session.sessionId !== firstBid.sessionId), { timeout: 15_000 }).toBeDefined()
     const sessions = await listedSessions(scaffold.baseUrl)
-    const freshBid = sessions.find(session => session.agentPreset === 'bid' && session.blank)
+    const freshBid = sessions.find(session => session.agentPreset === 'bid'
+      && !existingIds.has(session.sessionId)
+      && session.sessionId !== firstBid.sessionId)
     expect(freshBid?.sessionId).not.toBe(firstBid.sessionId)
     expect(sessions.find(session => session.sessionId === firstBid.sessionId)?.agentPreset).toBe('bid')
     await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })

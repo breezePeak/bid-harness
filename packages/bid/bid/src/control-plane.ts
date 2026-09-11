@@ -31,6 +31,8 @@ export type {
   BidChapterRevisionReference,
   BidChapterRevisionRequest,
   BidChapterRevisionResult,
+  BidChapterWritingGateErrorCode,
+  BidChapterWritingGateResult,
   BidClientProjection,
   BidComposerCapability,
   BidComposerReason,

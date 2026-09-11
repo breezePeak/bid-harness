@@ -65,7 +65,8 @@ async function fixture() {
   session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
   session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
   await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
-  const agent = { id: session.id, session, followup: vi.fn() } as unknown as Agent
+  const followup = vi.fn()
+  const agent = { id: session.id, session, followup } as unknown as Agent
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
     ctx: { agents: { get: () => agent, list: () => [agent] }, sessions: { flush: async () => {}, list: () => [session] } },
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096, docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -77,7 +78,7 @@ async function fixture() {
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
       (fromStage, toStage) => prepareBidStageContextTransition(session, workspace, fromStage, toStage)),
   }) as unknown as BidHostRuntime
-  return { ctx, host, agent, session, workspace, outline, read: (path: string) => readFile(join(workspace.projectRoot, path), 'utf8') }
+  return { ctx, host, followup, session, workspace, outline, read: (path: string) => readFile(join(workspace.projectRoot, path), 'utf8') }
 }
 
 afterEach(() => { vi.clearAllMocks() })
@@ -127,11 +128,16 @@ describe('S4 Draft 最终确认', () => {
       const confirmedResult = await f.host.confirmOutline(f.session, identity(second.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
       expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
-      expect(f.agent.followup).toHaveBeenCalledOnce()
-      expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
-        schema_version: 3,
-        confirmed_outline_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      })
+      expect(f.followup).not.toHaveBeenCalled()
+      await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
+      expect(f.followup).toHaveBeenCalledOnce()
+      const writingRequest = JSON.parse(await f.read('chapters/writing-request.json')) as {
+        schema_version: number
+        confirmed_outline_sha256: string
+      }
+      expect(writingRequest.schema_version).toBe(3)
+      expect(writingRequest.confirmed_outline_sha256).toMatch(/^[a-f0-9]{64}$/u)
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
       const s5Context = JSON.stringify(f.session.deriveMessages())
       expect(s5Context).not.toContain('S4 旧资料与错误 Section-Z')
@@ -160,6 +166,46 @@ describe('S4 Draft 最终确认', () => {
       const confirmedResult = await f.host.confirmOutline(f.session, identity(edited.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
       expect(executeEvidenceMappingFinalCheck).not.toHaveBeenCalled()
+    } finally { await f.ctx.fiber.dispose() }
+  })
+
+  it('自动模式不询问用户，生成默认计划后通过 Orchestrator 启动 S5', async () => {
+    const f = await fixture()
+    try {
+      const draft = await getOrCreateOutlineDraft(f.workspace)
+      const confirmed = await f.host.confirmOutline(f.session, identity(draft))
+      if (!confirmed.ok) throw new Error(JSON.stringify(confirmed.error))
+      const execute = vi.fn(async () => [])
+      const host = f.host as unknown as {
+        automaticOrchestrator: typeof f.host['automaticOrchestrator']
+      }
+      host.automaticOrchestrator = () => new BidOrchestrator(
+        f.session,
+        { canExecute: stage => stage === 'chapter_writing', execute },
+        { validate: async () => ({ ok: true }) },
+      )
+
+      const result = await f.host.autoStartChapterWriting(f.session)
+
+      expect(result).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
+      expect(f.followup).not.toHaveBeenCalled()
+      await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(JSON.parse(await f.read('chapters/writing-plan.json'))).toMatchObject({
+        schema_version: 3,
+        confirmed: true,
+        user_message_refs: [],
+        user_requirements: [],
+        global_instructions: ['按最终确认目录、招标要求和现有资料完成技术标正文'],
+        sections: [
+          { section_id: 'SEC-1', task: '说明项目阶段1的交付安排', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
+          { section_id: 'SEC-2', task: '说明项目阶段2的交付安排', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
+        ],
+      })
+      expect(execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'chapter_writing' }))
+      expect(f.session.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'bid.user_confirmation.received', data: { stage: 'chapter_writing', confirmed: true } }),
+        expect.objectContaining({ type: 'bid.stage.started', data: { stage: 'chapter_writing', status: 'running' } }),
+      ]))
     } finally { await f.ctx.fiber.dispose() }
   })
 

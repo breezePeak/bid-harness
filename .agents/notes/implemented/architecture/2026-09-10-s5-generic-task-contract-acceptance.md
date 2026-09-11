@@ -10,7 +10,7 @@ Status: implemented
 
 S5 Main Agent 根据用户消息、S2 Requirement/Scoring/Compliance、确认目录、S4 Blueprint/Evidence 和章节运行状态生成统一任务契约。`chapters/writing-plan.json` schema v3 保存用户原话、全书指令、整书验收条件，以及每个可写叶节的任务、用户要求、写作指令和验收条件。首次计划是完整输入；已有计划只接受绑定当前 `base_plan_version` 的 patch，分别表达全书指令替换、document acceptance 增删改和 section task、消息引用、写作指令、acceptance 增删改。未提交的章节保持原值，Host 把实际 section patch 并入影响范围。
 
-Main Agent 从 Host 提供的最近 200 条人类用户消息中选择稳定的 `session_id`、`message_id` 和 `seq` 引用。Host 从 Session Log 回查准确原文并持久化引用与文本；普通对话未被引用时不进入任务契约。模型不提交条件 ID、scope、计划版本或执行状态；Host 按条件所属数组绑定 document/section scope，单调分配全局唯一的 `AC-*`，并为未修改条件保留 ID。动态条件数组允许为空，固定 Reviewer 不依赖占位条件运行。
+手动模式下，Main Agent 从 Host 提供的最近 200 条人类用户消息中选择稳定的 `session_id`、`message_id` 和 `seq` 引用。Host 从 Session Log 回查准确原文并持久化引用与文本；普通对话未被引用时不进入任务契约。用户选择的[自动确认模式](../feature/2026-09-11-bid-automatic-confirmation-mode.md)没有可引用原话，Host 生成的默认计划允许顶层及逐节 `user_message_refs`、`user_requirements` 为空，但仍提供非空全书指令并覆盖全部可写叶节。模型不提交条件 ID、scope、计划版本或执行状态；Host 按条件所属数组绑定 document/section scope，单调分配全局唯一的 `AC-*`，并为未修改条件保留 ID。动态条件数组允许为空，固定 Reviewer 不依赖占位条件运行。
 
 每个条件声明 `required` 或 `preferred`，以及 `semantic` 或 `deterministic` evaluator。Semantic 内容由 Reviewer 或最终 Main Agent 判断。Deterministic 内容只允许模型显式选择 Host 已公布的 metric 和上下界；当前 metric 为 `estimated_pages` 与 `character_count`。Host 测量正文与排版事实并返回 met、unmet 或 unavailable，不读取条件描述和用户原话来选择 evaluator。模型负责决定是否建立条件、优先级、作用范围和修订方向。
 

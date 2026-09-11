@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
   IconBrowseOutline16,
   IconCheckOutline14,
+  IconChevronDownOutline14,
   IconChecklistOutline14,
   IconCloseOutline16,
   IconPaperclipOutline16,
   IconRefreshOutline16,
+  Menu,
   Portal,
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -19,15 +21,23 @@ import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from
 import type { BidKey } from './locales.ts'
 import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
+import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
 export type BidStagePanelProps =
   PropsRuntime<'conversation.input.dock'>
+  & PropsStore<ReturnType<typeof createBidConfirmationModeStore>>
   & InjectFace<BidStagePanelInjected>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'start' | 'stop' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
+/** Full props for the Bid confirmation-mode control in the composer tool row. */
+export type BidConfirmationModeControlProps =
+  PropsRuntime<'conversation.input.left'>
+  & PropsStore<ReturnType<typeof createBidConfirmationModeStore>>
+  & PropsLocale<'bid'>
+
+type PendingAction = 'upload' | 'start' | 'stop' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -36,6 +46,42 @@ type SelectedFile = BidSelectedFile & {
   progress: number
   status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
   error: string | undefined
+}
+
+/** Select manual or automatic confirmation for the current Bid Session. */
+export function BidConfirmationModeControl({ sessionId, useSessions, useStore, actions, t }: BidConfirmationModeControlProps) {
+  const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const mode = useStore(state => state.mode)
+  const [open, setOpen] = useState(false)
+  if (!isBidSession) return null
+  const label = t(`confirmation.mode.${mode}`)
+  return (
+    <Menu
+      open={open}
+      onClose={() => { setOpen(false) }}
+      items={(['manual', 'automatic'] as const).map(id => ({ id, label: t(`confirmation.mode.${id}`) }))}
+      selectedId={mode}
+      onSelect={(id) => {
+        setOpen(false)
+        actions.setMode(id as BidConfirmationMode)
+      }}
+      portal
+      anchor={(
+        <button
+          type="button"
+          className={css.confirmationModeButton}
+          aria-label={t('confirmation.mode.label')}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title={t('confirmation.mode.label')}
+          onClick={() => { setOpen(!open) }}
+        >
+          {label}
+          <IconChevronDownOutline14 className={css.confirmationModeChevron} />
+        </button>
+      )}
+    />
+  )
 }
 
 function formatFileSize(bytes: number): string {
@@ -143,6 +189,8 @@ export function BidStagePanel({
   startStage,
   stopStage,
   retryStage,
+  requestWritingRequirements,
+  autoStartChapterWriting,
   confirmOutline,
   regenerateOutline,
   getOutlineDraft,
@@ -152,6 +200,8 @@ export function BidStagePanel({
   getTenderAnalysisForConfirmation,
   setTenderScoringSelection,
   getEvidenceMappingProgress,
+  useStore,
+  actions,
   t,
 }: BidStagePanelProps) {
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
@@ -182,6 +232,28 @@ export function BidStagePanel({
   const draftEpoch = useRef(0)
   const reviewReady = useRef<string | null>(null)
   const [updatedForConfirmation, setUpdatedForConfirmation] = useState(false)
+  const confirmationMode = useStore(state => state.mode)
+  const automaticAttempts = useStore(state => state.attempted)
+
+  const invoke = useCallback((kind: PendingAction, action: (() => Promise<void>) | undefined): void => {
+    if (action === undefined || pendingAction.current !== null) return
+    const epoch = requestEpoch.current
+    pendingAction.current = kind
+    actionErrorVisible.current = false
+    setRequestPending(kind)
+    setRequestError(null)
+    void action().then(() => {
+      if (!alive.current || requestEpoch.current !== epoch) return
+      pendingAction.current = null
+      setRequestPending(null)
+    }, (reason: unknown) => {
+      if (!alive.current || requestEpoch.current !== epoch) return
+      pendingAction.current = null
+      setRequestPending(null)
+      actionErrorVisible.current = true
+      setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: reason instanceof BidActionError ? reason.issues : [] })
+    })
+  }, [t])
 
   useEffect(() => {
     alive.current = true
@@ -333,6 +405,54 @@ export function BidStagePanel({
     })
   }, [canConfirmAnalysis, getTenderAnalysisForConfirmation, t])
 
+  const tenderAutomaticKey = `${sessionId}:tender_analysis`
+  const chapterManualKey = `${sessionId}:chapter_writing:manual`
+  const chapterAutomaticKey = `${sessionId}:chapter_writing:automatic`
+  useEffect(() => {
+    if (projection?.runtime.stage !== 'tender_analysis' || projection.runtime.status !== 'waiting_user') {
+      actions.clearAttempted(tenderAutomaticKey)
+    }
+    if (projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user') {
+      actions.clearAttempted(chapterManualKey)
+      actions.clearAttempted(chapterAutomaticKey)
+    }
+  }, [actions, chapterAutomaticKey, chapterManualKey, projection?.runtime.stage, projection?.runtime.status, tenderAutomaticKey])
+
+  useEffect(() => {
+    if (confirmationMode !== 'automatic' || !canConfirm || confirmOutline === undefined || draft === null
+      || draftSaveState !== 'saved' || requestPending !== null) return
+    const key = `${sessionId}:${projection?.runtime.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
+    if (automaticAttempts.includes(key)) return
+    actions.markAttempted(key)
+    invoke('confirm', async () => {
+      await draftQueue.current
+      const current = draftRef.current
+      if (current === null || current.revision !== draft.revision
+        || current.draft_outline_sha256 !== draft.draft_outline_sha256) return
+      await confirmOutline({ expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256 })
+    })
+  }, [
+    actions, automaticAttempts, canConfirm, confirmationMode, confirmOutline, draft,
+    draftSaveState, invoke, projection?.runtime.stage, requestPending, sessionId,
+  ])
+
+  useEffect(() => {
+    if (projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user'
+      || requestPending !== null) return
+    const automatic = confirmationMode === 'automatic'
+    const key = automatic ? chapterAutomaticKey : chapterManualKey
+    const action = automatic ? autoStartChapterWriting : requestWritingRequirements
+    const admitted = projection.allowedActions.includes(
+      automatic ? 'auto_start_chapter_writing' : 'request_writing_requirements',
+    )
+    if (!admitted || action === undefined || automaticAttempts.includes(key)) return
+    actions.markAttempted(key)
+    invoke(automatic ? 'auto_start' : 'request_requirements', action)
+  }, [
+    actions, automaticAttempts, autoStartChapterWriting, chapterAutomaticKey, chapterManualKey,
+    confirmationMode, invoke, projection, requestPending, requestWritingRequirements,
+  ])
+
   if (!hasProjection) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
@@ -341,26 +461,6 @@ export function BidStagePanel({
   const canRetry = projection.allowedActions.includes('retry_stage')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
-
-  const invoke = (kind: PendingAction, action: (() => Promise<void>) | undefined): void => {
-    if (action === undefined || pendingAction.current !== null) return
-    const epoch = requestEpoch.current
-    pendingAction.current = kind
-    actionErrorVisible.current = false
-    setRequestPending(kind)
-    setRequestError(null)
-    void action().then(() => {
-      if (!alive.current || requestEpoch.current !== epoch) return
-      pendingAction.current = null
-      setRequestPending(null)
-    }, (reason: unknown) => {
-      if (!alive.current || requestEpoch.current !== epoch) return
-      pendingAction.current = null
-      setRequestPending(null)
-      actionErrorVisible.current = true
-      setRequestError({ message: t('error.action', { message: reason instanceof Error ? reason.message : String(reason) }), issues: reason instanceof BidActionError ? reason.issues : [] })
-    })
-  }
 
   const updateSelectedFiles = (update: (files: readonly SelectedFile[]) => readonly SelectedFile[]): void => {
     const next = [...update(selectedFilesRef.current)]
@@ -710,6 +810,7 @@ export function BidStagePanel({
             {canConfirmAnalysis && tenderAnalysis !== null && (
               <TenderAnalysisReview
                 value={tenderAnalysis}
+                autoConfirm={confirmationMode === 'automatic' && !automaticAttempts.includes(tenderAutomaticKey)}
                 notice={errorNotice}
                 pending={requestPending === 'confirm_analysis'}
                 t={t}
@@ -726,6 +827,10 @@ export function BidStagePanel({
                   }
                 }}
                 onConfirm={(operations) => {
+                  if (confirmationMode === 'automatic') {
+                    if (automaticAttempts.includes(tenderAutomaticKey)) return
+                    actions.markAttempted(tenderAutomaticKey)
+                  }
                   invoke(
                     'confirm_analysis',
                     confirmTenderAnalysis === undefined ? undefined : () => confirmTenderAnalysis(operations),

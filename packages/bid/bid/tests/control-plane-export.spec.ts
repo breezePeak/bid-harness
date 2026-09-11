@@ -38,6 +38,8 @@ describe('browser-safe Bid control-plane export', () => {
       'confirm_tender_analysis',
       'confirm_outline',
       'regenerate_outline',
+      'request_writing_requirements',
+      'auto_start_chapter_writing',
       'send_message',
     ])
   })

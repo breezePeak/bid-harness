@@ -8,7 +8,7 @@ S4 最终目录确认后曾立即启动章节关系规划和 Writer，用户没�
 
 ## Decision
 
-`chapter_writing` 使用 `before_execution` 用户门禁。S4 确认和 S5 重置启动只进入 `waiting_user`，Host 按 `outline/confirmed-outline.json` 哈希保存 `chapters/writing-request.json` 并唤醒 Main Agent 发出一次自然语言询问。项目恢复读取该标记，因而刷新或切换 Session 不会重复询问；未获得确认时不存在章节执行事件。
+`chapter_writing` 使用 `before_execution` 用户门禁。S4 确认和 S5 重置启动只进入 `waiting_user`。手动确认模式通过正式 Host Action 按 `outline/confirmed-outline.json` 哈希保存 `chapters/writing-request.json` 并唤醒 Main Agent 发出一次自然语言询问。项目恢复读取该标记，因而刷新或切换 Session 不会重复询问；未获得确认时不存在章节执行事件。用户主动选择的全自动模式按[自动确认模式](2026-09-11-bid-automatic-confirmation-mode.md)直接提交无用户原话的默认任务契约，不改变本记录拥有的手动交互语义。
 
 Main Agent 通过 `bid_stage_inspect` 读取确认目录、招标要求与资料映射，负责解释要求、识别关键歧义与冲突并生成全书及逐节任务契约。只有用户确认安排或明确授权直接开始后，Main Agent 才调用 `bid_confirm_writing_plan`。Host 向该工具提供最近 200 条人类用户消息的稳定 Session、Message 和 Seq 引用；Main Agent 选择形成契约的引用，Host 从 Session Log 回查原文并写入 `chapters/writing-plan.json`。计划与确认目录哈希绑定，版本由 Host 单调递增。
 
@@ -30,7 +30,7 @@ Main Agent 通过 `bid_stage_inspect` 读取确认目录、招标要求与资料
 
 ## Consequences
 
-用户在 S4 确认或 S5 重置后必须完成一次写作要求交互，才会进入原有关系规划、依赖调度、Writer 和 Reviewer 链路。“没有特殊要求，直接开始”仍会形成默认计划，但不增加第二次确认。
+手动模式下，用户在 S4 确认或 S5 重置后必须完成一次写作要求交互，才会进入原有关系规划、依赖调度、Writer 和 Reviewer 链路。“没有特殊要求，直接开始”仍会形成包含真实消息引用的计划，但不增加第二次确认。全自动模式由用户预先选择并使用独立 Host Action，不要求这次对话。
 
 写作计划 schema v3 和确认目录哈希成为 S5 执行输入；缺失、损坏、目录不匹配、章节集合不完整、条件身份或 scope 非法都会阻止启动。S5 明确重置会删除 `chapters`，因此也删除询问标记和计划并重新询问；执行失败后的普通重试复用同一确认计划。
 

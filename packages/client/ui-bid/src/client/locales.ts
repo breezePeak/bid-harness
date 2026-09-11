@@ -3,6 +3,9 @@
 /** Simplified Chinese dictionary and key-set source. */
 export const zh = {
   title: '技术标生成',
+  'confirmation.mode.label': '确认模式',
+  'confirmation.mode.manual': '手动确认',
+  'confirmation.mode.automatic': '自动确认',
   'stage.file_intake': '资料上传',
   'stage.tender_analysis': '招标分析',
   'stage.evidence_mapping': '目录生成/资料映射',
@@ -126,6 +129,9 @@ export type BidKey = keyof typeof zh
 /** English dictionary checked against the Chinese key set. */
 export const en = {
   title: 'Technical bid',
+  'confirmation.mode.label': 'Confirmation mode',
+  'confirmation.mode.manual': 'Manual',
+  'confirmation.mode.automatic': 'Automatic',
   'stage.file_intake': 'Material upload',
   'stage.tender_analysis': 'Tender analysis',
   'stage.evidence_mapping': 'Outline generation / material mapping',

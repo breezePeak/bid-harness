@@ -40,3 +40,23 @@ it('单独持久化是否纳入响应，不修改 must_answer，并在确认时�
   fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
   expect(confirm).toHaveBeenCalledWith([])
 })
+
+it('切换自动确认时提交当前已编辑内容而不是空操作', async () => {
+  const confirm = vi.fn()
+  const shared = {
+    value,
+    pending: false,
+    onConfirm: confirm,
+    t: (key: keyof typeof zh) => zh[key],
+  }
+  const view = render(<TenderAnalysisReview {...shared} />)
+  fireEvent.change(screen.getByLabelText('项目名称'), { target: { value: '自动确认后的项目名称' } })
+
+  view.rerender(<TenderAnalysisReview {...shared} autoConfirm />)
+
+  await waitFor(() => {
+    expect(confirm).toHaveBeenCalledWith([
+      { type: 'update_project', fields: { project_name: '自动确认后的项目名称' } },
+    ])
+  })
+})

@@ -14,12 +14,13 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
-import { BidStagePanel } from './BidStagePanel.tsx'
+import { BidConfirmationModeControl, BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbench.tsx'
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { createBidRevisionStore } from './revision-reference.ts'
+import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
 
 export type { BidKey } from './locales.ts'
@@ -67,6 +68,10 @@ export interface BidStagePanelInjected {
   startStage?: () => Promise<void>
   /** Explicitly stop the running stage without cancelling an unrelated chat response. */
   stopStage?: () => Promise<void>
+  /** Ask the Main Agent for manual S5 writing requirements. */
+  requestWritingRequirements?: () => Promise<void>
+  /** Create the default S5 writing plan and start the confirmed stage. */
+  autoStartChapterWriting?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
   getOutlineReviewContext?: () => Promise<OutlineReviewContext>
   getOutlineDraft?: () => Promise<OutlineDraftView>
@@ -118,6 +123,7 @@ function actionFailure(error: {
  */
 export function apply(ctx: ClientContext): void {
   const revisionStore = createBidRevisionStore()
+  const confirmationModeStore = createBidConfirmationModeStore()
   const getChapter = async (sessionId: SessionId, sectionId: string): Promise<BidReviewChapterView> => {
     const result = await ctx.remote.bid.getReviewChapter(sessionId, sectionId)
     if (!result.ok) throw actionFailure(result.error)
@@ -129,6 +135,13 @@ export function apply(ctx: ClientContext): void {
     return result.value
   }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-bid: dictionaries')
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
+    id: 'bid-confirmation-mode',
+    order: 20,
+    locale: NS,
+    store: confirmationModeStore,
+  }, BidConfirmationModeControl))
   ctx.slots.inject('conversation.input.context', () => ctx.slots.register({
     name: 'conversation.input.context',
     id: 'bid-revision',
@@ -149,6 +162,7 @@ export function apply(ctx: ClientContext): void {
     id: 'bid',
     order: -10,
     locale: NS,
+    store: confirmationModeStore,
     inject: (sessionId: SessionId): BidStagePanelInjected => ({
       getDetails: () => getDetails(sessionId),
       setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {
@@ -212,6 +226,16 @@ export function apply(ctx: ClientContext): void {
         const result = await remote.stopStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_STOP_FAILED', message: '阶段停止失败。' })
+      },
+      requestWritingRequirements: async () => {
+        const result = await ctx.remote.bid.requestWritingRequirements(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+      },
+      autoStartChapterWriting: async () => {
+        const result = await ctx.remote.bid.autoStartChapterWriting(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
       },
       getEvidenceMappingProgress: async () => {
         const result = await ctx.remote.bid.getEvidenceMappingProgress(sessionId)

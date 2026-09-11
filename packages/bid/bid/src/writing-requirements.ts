@@ -117,8 +117,8 @@ export const writingPlanSchema = z.object({
   plan_version: z.number().int().positive(),
   confirmed: z.literal(true),
   confirmed_outline_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  user_message_refs: z.array(writingRequirementMessageRefSchema).min(1),
-  user_requirements: z.array(z.string().trim().min(1)).min(1),
+  user_message_refs: z.array(writingRequirementMessageRefSchema),
+  user_requirements: z.array(z.string().trim().min(1)),
   global_instructions: z.array(z.string().trim().min(1)).min(1),
   document_acceptance: z.array(acceptanceCriterionSchema),
   sections: z.array(sectionTaskSchema),
@@ -146,6 +146,39 @@ export type WritingRequirementMessageRef = z.infer<typeof writingRequirementMess
 export interface ResolvedWritingRequirementMessage {
   readonly ref: WritingRequirementMessageRef
   readonly text: string
+}
+
+/**
+ * 按确认目录构造无用户原话的自动写作计划。
+ * @param outline 当前最终确认目录。
+ * @param confirmedOutlineSha256 当前确认目录的 SHA-256。
+ * @returns 覆盖全部可写叶节的 schema v3 Writing Plan。
+ */
+export function createAutomaticWritingPlan(
+  outline: OutlineArtifact,
+  confirmedOutlineSha256: string,
+): WritingPlan {
+  const parentIds = new Set(outline.sections.map(section => section.parent_id).filter((id): id is string => id !== null))
+  return writingPlanSchema.parse({
+    schema_version: WRITING_PLAN_SCHEMA_VERSION,
+    scope: 'technical_bid',
+    plan_version: 1,
+    confirmed: true,
+    confirmed_outline_sha256: confirmedOutlineSha256,
+    user_message_refs: [],
+    user_requirements: [],
+    global_instructions: ['按最终确认目录、招标要求和现有资料完成技术标正文'],
+    document_acceptance: [],
+    sections: outline.sections.filter(section => section.writable && !parentIds.has(section.id)).map(section => ({
+      section_id: section.id,
+      task: section.purpose,
+      user_message_refs: [],
+      user_requirements: [],
+      writing_instructions: [],
+      acceptance_criteria: [],
+    })),
+    revision: null,
+  })
 }
 
 function refKey(ref: WritingRequirementMessageRef): string {

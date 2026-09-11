@@ -329,6 +329,11 @@ function researchAssessment(sufficient: boolean, affectsOutlineDecision: boolean
       decision: sufficient ? 'adequate' : 'undetermined',
       reason: sufficient ? '当前叶子可承载统一安全过程，不需要机械拆节。' : '需要确认资料边界是否影响章节结构。',
     },
+    topic_dispositions: [{
+      topic: '访问控制与安全审计', placement: 'within_section',
+      reason: '身份鉴别、权限控制和审计记录属于统一安全技术过程，在当前章节内连续论证。',
+      basis: [{ kind: 'requirement', ref: 'REQ-1' }],
+    }],
   }
 }
 
@@ -381,16 +386,6 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_section_outline', {}),
-      toolCall('reject-invalid-outline-edit', 'apply_section_outline_edit', {
-        operation: {
-          type: 'add_section', parent_id: 'SEC-SECURITY', order: 1, writable: false,
-          title: '未完成的结构节点', purpose: '组织后续安全任务。', summary: '汇总后续安全任务。',
-        },
-        basis: {
-          kind: 'section_responsibility', explanation: '验证 adequate 结论禁止结构深化。', requirement_ids: [],
-          finding_ref: 'RF-ff8a1adbc819d315',
-        },
-      }),
     ] : []),
     toolCall('lock-initial-outline', 'lock_section_outline', {
       comparison: '用户原框架包含访问控制与安全审计、资产盘点及其子项；当前招标范围为访问控制与安全审计。输入旧标按身份治理与安全运维组织，本分支对应其中的访问控制与安全审计，保留已聚焦的候选叶子，不引入其他主题。',

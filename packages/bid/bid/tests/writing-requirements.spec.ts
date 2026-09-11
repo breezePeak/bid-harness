@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyWritingPlanInput,
+  createAutomaticWritingPlan,
   validateWritingPlan,
   validateWritingPlanInput,
   type AcceptanceCriterionInput,
@@ -53,6 +54,22 @@ function persisted(input: WritingPlanInput): WritingPlan {
 }
 
 describe('S5 通用写作任务契约', () => {
+  it('自动模式生成无用户原话且覆盖全部可写叶节的默认计划', () => {
+    const outline = outlineFixture()
+    const plan = createAutomaticWritingPlan(outline, 'a'.repeat(64))
+
+    expect(plan.user_message_refs).toEqual([])
+    expect(plan.user_requirements).toEqual([])
+    expect(plan.global_instructions).toEqual(['按最终确认目录、招标要求和现有资料完成技术标正文'])
+    expect(plan.document_acceptance).toEqual([])
+    expect(plan.sections.map(section => section.section_id)).toEqual(['SEC-1', 'SEC-2', 'SEC-3'])
+    expect(plan.sections.every(section => section.user_message_refs.length === 0
+      && section.user_requirements.length === 0
+      && section.writing_instructions.length === 0
+      && section.acceptance_criteria.length === 0)).toBe(true)
+    expect(validateWritingPlan(plan, outline)).toEqual([])
+  })
+
   it('Main Agent 只提交真实消息引用和语义契约，Host 字段不出现在工具输入中', () => {
     const prompt = renderStageInteractionPrompt('chapter_writing')
     expect(prompt).toContain('user_message_refs')
