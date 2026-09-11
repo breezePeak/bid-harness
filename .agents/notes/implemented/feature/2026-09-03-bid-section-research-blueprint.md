@@ -10,7 +10,7 @@ Status: implemented
 
 材料与任务的独立提交、按当前版本逐项复核及正式父总述遵循[材料用途与职责复核](2026-09-08-s4-material-purpose-review.md)；本记录保留分支研究、S5 补搜及确认发布的取舍。
 
-S4 保持按业务分支并行的初始任务和现有并发上限。Child 先对照[完整旧标和本次目录](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，再研究 purpose、must_answer、写作维度、表图建议、业务关联、Evidence 和真实资料缺口，返回完整 Writing Brief。运行内候选池汇集所有分支材料；一次目录深化同步生成每个新叶子的任务定义和父节点摘要。后续单个轻量 Final Check 优先复用候选，只为具体问题局部检索，不能增删章节或调整层级。
+S4 保持按业务分支并行的初始任务和现有并发上限。Child 先对照[完整旧标和本次目录](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，研究 purpose、must_answer、写作维度、表图建议、业务关联、Evidence 和真实资料缺口，并按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过结构化判断后才修改目录和形成 Writing Brief。运行内候选池汇集所有分支材料；一次目录深化同步生成每个新叶子的任务定义和父节点摘要。后续单个轻量 Final Check 优先复用候选，只为具体问题局部检索，不能增删章节或调整层级。
 
 短文件引用只属于模型输入输出，Host 通过本轮定位表回填真实 file_id 和 source_kind。正式 Evidence Map v10 和 missing_topics:string[] 保持不变。技术错误进入执行日志及有限修复，单条错误引用不丢弃同章有效材料，也不自动变成资料缺口。Final Check 无法形成有效章节结论时拒绝发布。
 

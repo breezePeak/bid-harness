@@ -39,7 +39,7 @@ The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-
 
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
-S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，在一次目录深化后完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
+S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；Host 解析 `T1` 等短文件引用和 `chunk_*`、唯一原文 quote，计算真实文件 ID 与行号，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 按业务分支并行研究章节任务与资料，通过研究充分性判断后决定是否深化目录，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
 S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。`required` 失败回到原 Writer 定向修复，`preferred` 失败保留在报告中但不自动阻断。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
@@ -73,7 +73,7 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，并可在锁定前按当前目录分别起草章节任务、显式提交材料用途；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前分支职责、对应 S3 基线、局部差异和确定性筛选的候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关分支的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Host 校验结构范围、业务依据和 Section 身份，结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial 与 Repair Child 先研究并通过结构化充分性判断，Host 才允许目录操作和章节任务固化；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前分支职责、对应 S3 基线、局部差异和确定性筛选的候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关分支的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Host 校验研究状态、结构范围、业务依据和 Section 身份，结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
@@ -81,9 +81,9 @@ S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVID
 
 `submit_section_mapping`、`replace_section_mapping` 只处理材料。模型提交绑定唯一文件与分块的 `material_ref`、usage 及 summary；程序回填真实身份，真实工具入口拒绝未知引用、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。找到相关资料本身不构成扩展任务的理由。
 
-目录深化与分支研究在同一 Child 内完成；目录操作通过共享结构校验后才更新分支状态，`lock_branch_outline` 也只锁定结构有效且带有非空对照结论的目录，失败时保持分支可编辑。合并后沿用现有独立目录复核与 Final Check，不新增常驻模型阶段。目录复核按每个最终可写叶节分别判断 Writing Brief、writing dimensions 和 missing topics 是否聚焦且充分，并提交具体 `section_id` 与原因；只有具体问题所在的原业务分支可进行至多一次局部研究和结构修复，再复核仍未解决则阻断，不能把结构问题交给 Final Check。Final Check 对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责审查任务与资料用途，不增删、移动、拆合章节或修改标题。Host 为任务、材料和父节点总述计算稳定 `review_key` 与内容 fingerprint，运行内 `review_ref` 只作短引用；fingerprint 未变的 keep 继续有效，任务变化只使本章任务、材料和祖先总述失效，材料变化只使该关联重新待审。Final Check Prompt 只展开 pending 项、必要 summary 依赖和 Web 引用，已复用项仅进入计数。correct 的新版本仍须复核。
+分支 Child 通过 `submit_branch_research_assessment` 记录招标与响应点、技术路线、依据与推断、项目质量风险及目录承载能力；不足时继续研究并可重复提交。充分性不按资料数量判断，零联网可以通过，不影响结构决策的不可获得信息保留为缺口；影响结构的缺口会阻止 Ready。Ready 后的目录操作通过共享结构校验才更新分支状态，`lock_branch_outline` 只锁定研究就绪、结构有效且带非空对照结论的目录。合并后沿用现有独立目录复核与 Final Check，不新增常驻模型阶段。目录复核同时读取各分支最终充分性判断，检查独立主题是否仍藏在 writing dimensions、增设章节是否缺少研究依据，以及过度拆分或兄弟职责冲突；具体问题只重开所属业务分支一次，再复核仍未解决则阻断。Final Check 对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责审查任务与资料用途，不获得结构编辑权限。Host 继续按内容 fingerprint 管理任务、材料和父节点总述的复核状态。
 
-无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v5 在每次成功的任务修改、材料替换、总述提交和批量复核后保存当前 mapping、操作、summary、稳定复核记录及完成状态；恢复时重算 fingerprint，只向新 Child 交付新增、变化和未审项，合法的已完成 Final Check 不再启动 Child。旧版本必须重置 S4，不能静默解释为增量状态。日志 schema v3 区分 issues 与检索 warnings，并记录每个任务的 `prompt_context_stats` 和 Final Check 的 `review_progress`，不保存完整 Prompt；技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
+无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v6 为 Initial 与 Repair 保存最终 Research Assessment，并继续保存 mapping、目录与任务操作、summary、稳定复核记录及完成状态；恢复、局部 Repair 和全局目录复核读取同一记录，合法的已完成 Final Check 不再启动 Child。旧版本必须重置 S4，不能静默解释为增量状态。日志 schema v3 区分 issues 与检索 warnings，并记录每个任务的 `prompt_context_stats` 和 Final Check 的 `review_progress`，不保存完整 Prompt；技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 

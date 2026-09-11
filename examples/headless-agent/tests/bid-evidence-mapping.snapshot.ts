@@ -39,10 +39,17 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('search_sources')
       expect(childLog).toContain('read_source')
       expect(childLog).toContain('update_section_task')
+      expect(childLog).toContain('submit_branch_research_assessment')
       expect(childLog).toContain('lock_branch_outline')
+      expect(childLog).toContain('lock-before-research-ready')
+      expect(childLog).toContain('research-not-ready')
+      expect(childLog).toContain('research-ready')
       expect(childLog).toContain('lock-without-comparison')
       expect(childLog).toContain('reject-invalid-outline-edit')
       expect(childLog).toContain('OUTLINE_SHARED_CONTAINER_EMPTY')
+      expect(events.find(event => event.type === 'tool/result'
+        && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'lock-before-research-ready'))
+        .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
       expect(events.find(event => event.type === 'tool/result'
         && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'lock-without-comparison'))
         .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
@@ -100,6 +107,16 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         suggested_tables: ['角色权限与审计记录对照表'],
       })
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+      const checkpoint = JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+        schema_version: number
+        tasks: Array<{ task_id: string; research_assessment?: { sufficient_for_outline_decision: boolean; unresolved_gaps: unknown[] } }>
+      }
+      expect(checkpoint.schema_version).toBe(6)
+      expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
+        .toMatchObject({
+          sufficient_for_outline_decision: true,
+          unresolved_gaps: [expect.objectContaining({ affects_outline_decision: false })],
+        })
       const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
       expect(ledger.sources).toHaveLength(1)
       expect(map.section_mappings[0]!.web_materials[0]).toMatchObject({

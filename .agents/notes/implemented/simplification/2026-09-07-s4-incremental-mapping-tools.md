@@ -10,7 +10,7 @@ S4 Mapping Child 通过一个工具同时提交 Task 身份、全量章节数组
 
 材料字段、独立任务操作及 Final Check 完成机制遵循[材料用途与职责复核](../feature/2026-09-08-s4-material-purpose-review.md)；本记录保留逐次工具提交、分支范围和同回合参数修复的取舍。
 
-Initial Mapping Child 在自己的业务分支内逐次调用 `update_section_task` 保存研究草稿，并可与 `apply_branch_outline_edit` 交替；Host 对现有 `OutlineEditOperation` 形成的候选执行共享结构校验，成功后才发布分支状态、返回实际生成的临时 Section ID 并失效结构或职责受影响的草稿，失败操作不污染后续目录。`lock_branch_outline` 再次检查共享结构，保存[目录粒度结论](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，只在目录有效时固定分支并返回权威可写章节。Child 随后通过 `submit_section_mapping` 逐章 upsert 正式材料，通过 `add_mapping_suggestion` 去重保存全局建议，并用 `finish_mapping_task` 请求 Host 按真实提交状态检查缺失章节和可修正问题。Remap 使用已锁定范围内的 `submit_section_mapping` 与 `finish_mapping_task`，不获得目录工具。
+Initial Mapping Child 按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过 Research Ready 后，在自己的业务分支内逐次调用 `update_section_task` 或 `apply_branch_outline_edit`；Host 对现有 `OutlineEditOperation` 形成的候选执行共享结构校验，成功后才发布分支状态、返回实际生成的临时 Section ID 并失效结构或职责受影响的草稿，失败操作不污染后续目录。`lock_branch_outline` 再次检查共享结构，保存[目录粒度结论](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，只在目录有效时固定分支并返回权威可写章节。Child 随后通过 `submit_section_mapping` 逐章 upsert 正式材料，通过 `add_mapping_suggestion` 去重保存全局建议，并用 `finish_mapping_task` 请求 Host 按真实提交状态检查缺失章节和可修正问题。Remap 使用已锁定范围内的 `submit_section_mapping` 与 `finish_mapping_task`，不获得目录工具。
 
 Section 工具只要求模型提供章节 ID、Writing Brief 和资料语义。省略的材料、缺口、展开维度和写作数组由 Host 补为空数组；既有 Section 省略 coverage 时继承锁定目录，S4 新建 Section 必须一次提交当前 Task 范围内的 Requirement、Scoring 和 Response Point override。Host 在单次调用内解析短文件引用、绑定真实文件身份、校验分块存在及 usage，并只接受当前 Child 已成功抓取或 Host 已登记正文的 Web URL。每个 Section 使用 Map 保存当前内容，另由 Host Set 记录成功的材料工具结果；再次提交覆盖材料且不能形成重复项，只更新任务不会冒充材料已提交。显式空材料提交仍会记录成功，已有有效 baseline 在局部重映射和 Final Check 中继续复用。
 

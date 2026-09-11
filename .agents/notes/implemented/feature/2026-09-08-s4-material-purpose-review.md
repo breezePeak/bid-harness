@@ -16,7 +16,7 @@ S4 保持初始分支研究、现有目录复核与 Final Check，不新增模�
 
 replace、supplement 与确认前复核都审最终合并结果，只涉及目标叶节及必要祖先；材料合并不能恢复旧写作维度。局部 Draft 中其他尚未研究的新叶节不视为已审，由确认前复核补齐；整本确认仍运行完整 Validator。父 summary 根据最终任务和确认信息写成自然技术标总述，不展开步骤、不新增承诺、不声称核验尚未生成的 S5 正文。文体和适用性由模型判断，程序只校验节点、非空和复核状态。
 
-正式 Evidence Map v10、分块索引、S5 输入及前端接口不变。私有 checkpoint v5 在成功的 `review_items`、`replace_section_mapping`、`update_section_task`、`submit_branch_summary` 和 `finish_final_check` 后保存当前 mapping、任务操作、父节点总述、稳定复核记录、累计失效数及完成状态。失败恢复重算稳定身份和 fingerprint，复用仍有效的 keep；已完成 Final Check 可直接恢复，不再启动 Child。缺少这些事实的旧检查点必须重置 S4。正式产物在复核与整体验证后发布，沿用有限修复、关键写入和 Host 回滚。候选 Web 快照保留至发布后按引用裁剪。
+正式 Evidence Map v10、分块索引、S5 输入及前端接口不变。私有 checkpoint 的研究充分性与版本由[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)定义，并继续在成功的 `review_items`、`replace_section_mapping`、`update_section_task`、`submit_branch_summary` 和 `finish_final_check` 后保存当前 mapping、任务操作、父节点总述、稳定复核记录、累计失效数及完成状态。失败恢复重算稳定身份和 fingerprint，复用仍有效的 keep；已完成 Final Check 可直接恢复，不再启动 Child。缺少这些事实的旧检查点必须重置 S4。正式产物在复核与整体验证后发布，沿用有限修复、关键写入和 Host 回滚。候选 Web 快照保留至发布后按引用裁剪。
 
 本记录部分替代[章节研究与 Blueprint](2026-09-03-bid-section-research-blueprint.md)的材料任务合并与目录式概述、[增量映射工具](../simplification/2026-09-07-s4-incremental-mapping-tools.md)的 baseline 免审和章节提交字段，以及[目录结构与叶节写作](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)的 S4 检查点版本。旧记录仍保留分支调度、S5 补搜、同回合工具修复、完整目录和叶节标题约束的独立决策价值，不归档；更早的[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)及[等待态交互](2026-09-03-bid-waiting-user-stage-interaction.md)继续以各自后继记录为当前规则。
 

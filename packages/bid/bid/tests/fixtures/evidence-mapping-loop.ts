@@ -306,6 +306,28 @@ function sectionSubmission(url: string) {
   }
 }
 
+function researchAssessment(sufficient: boolean, affectsOutlineDecision: boolean) {
+  return {
+    sufficient_for_outline_decision: sufficient,
+    diagnostics: {
+      tender_and_response_points: '已理解访问控制与安全审计要求及评分响应点。',
+      technical_approach: '已研究身份鉴别、权限控制和安全审计的技术路线。',
+      evidence_and_inferences: '本地资料支持实施组织，公开标准用于技术背景，未把参考项目写成本项目事实。',
+      project_specific_quality_risks: '已检查访问控制验证、审计完整性和项目资料边界。',
+    },
+    key_findings: ['访问控制与安全审计属于同一安全技术过程，可在当前叶子内按写作维度展开。'],
+    unresolved_gaps: [{
+      topic: '当前项目的既有账号与权限清单未提供',
+      affects_outline_decision: affectsOutlineDecision,
+      writing_impact: '不虚构具体账号规模，S5 按已确认边界编写核查方法。',
+    }],
+    outline_capacity: {
+      decision: sufficient ? 'adequate' : 'undetermined',
+      reason: sufficient ? '当前叶子可承载统一安全过程，不需要机械拆节。' : '需要确认资料边界是否影响章节结构。',
+    },
+  }
+}
+
 /**
  * 在已组装的服务上执行 S4，模型与 Web 返回使用固定数据。
  * @param ctx - 真实 Agent、工具、持久化和 Subagent 服务。
@@ -347,6 +369,12 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('read-heading', 'read_source', { source_ref: 'F2:H1:full' }),
     toolCall('search-local', 'search_sources', { scope_ref: 'F1', keywords: ['实施流程'] }),
     toolCall('read-chunk', 'read_source', { source_ref: 'M1:chunk_0001' }),
+    ...(repair ? [
+      toolCall('lock-before-research-ready', 'lock_branch_outline', { comparison: '尚未提交研究充分性判断。' }),
+    ] : []),
+    toolCall('research-not-ready', 'submit_branch_research_assessment', researchAssessment(false, true)),
+    toolCall('search-research-gap', 'search_sources', { scope_ref: 'ALL', keywords: ['权限', '审计'] }),
+    toolCall('research-ready', 'submit_branch_research_assessment', researchAssessment(true, false)),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_branch_outline', {}),
       toolCall('reject-invalid-outline-edit', 'apply_branch_outline_edit', {

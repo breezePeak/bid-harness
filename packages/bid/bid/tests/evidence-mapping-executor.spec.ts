@@ -159,6 +159,27 @@ async function writeInputs(workspace: BidWorkspace) {
   }
 }
 
+function branchResearchAssessment(
+  sufficient = true,
+  unresolvedGaps: Array<{ topic: string; affects_outline_decision: boolean; writing_impact: string }> = [],
+) {
+  return {
+    sufficient_for_outline_decision: sufficient,
+    diagnostics: {
+      tender_and_response_points: '已理解本分支招标要求、评分点和响应点。',
+      technical_approach: '已核对相关技术原理、实施路线和验证方法。',
+      evidence_and_inferences: '重要判断已有资料或已明确标记为推断。',
+      project_specific_quality_risks: '已检查项目特有信息、质量验证、风险与约束。',
+    },
+    key_findings: ['当前叶子职责与已研究技术主题的对应关系明确。'],
+    unresolved_gaps: unresolvedGaps,
+    outline_capacity: {
+      decision: sufficient ? 'adequate' : 'undetermined',
+      reason: sufficient ? '现有叶子可以承载已研究的独立主题。' : '仍需研究才能判断目录承载能力。',
+    },
+  }
+}
+
 function mappingFixture(
   workspace: BidWorkspace,
   material: { chunk: string; fileId: string },
@@ -389,6 +410,8 @@ function mappingFixture(
       const candidates = submissionCandidates(submissionArgs(parsed))
       const first = candidates[0] as Record<string, unknown> | undefined
       if (!preparedChildren.has(String(child.id)) && first !== undefined) {
+        const assessment = tools.get('submit_branch_research_assessment')
+        if (assessment !== undefined) await invokeSubmissionTool(child, assessment, branchResearchAssessment())
         const apply = tools.get('apply_branch_outline_edit')
         if (apply !== undefined) for (const operation of first.outline_operations as unknown[] ?? []) {
           if ((await invokeSubmissionTool(child, apply, { operation, basis: { kind: 'section_responsibility', explanation: '按已确认职责细化主题。', requirement_ids: [] } })).isError) break
@@ -1098,10 +1121,38 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const childId = start.request.childId!
+    const basis = { kind: 'section_responsibility', explanation: '验证目录锁定前的结构修复。', requirement_ids: [] }
+    const validEdit = { operation: { type: 'update_section', section_id: 'SEC-1', purpose: '保持现有章节职责。' }, basis }
+    const expectResearchBlocked = async (name: string, args: unknown) => {
+      const result = await fixture.invokeSubmissionTool(childId, name, args)
+      expect(result).toMatchObject({ isError: true })
+      if (result.isError) expect(result.error.message).toContain('research_assessment')
+    }
+    await expectResearchBlocked('apply_branch_outline_edit', validEdit)
+    await expectResearchBlocked('lock_branch_outline', { comparison: '现有目录足以承载研究主题。' })
+    const withNotes = (sectionId: string, purpose: string) => ({
+      section_id: sectionId, basis: { kind: 'section_responsibility', explanation: '明确本章技术响应职责。', requirement_ids: [] },
+      writing_brief: { purpose, must_answer: [`${sectionId} 必须回答的事项。`], writing_notes: ['说明实施方法。'], suggested_tables: [], suggested_figures: [] },
+    })
+    await expectResearchBlocked('update_section_task', withNotes('SEC-1', '未通过研究判断的草稿'))
+    const unavailableGap = {
+      topic: '设备现场清单尚未提供', affects_outline_decision: false,
+      writing_impact: '不影响当前层级，留待 S5 写作时按真实清单补充参数。',
+    }
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment(false, [{
+      ...unavailableGap, affects_outline_decision: true,
+    }]))).resolves.toMatchObject({ isError: false, value: { research_ready: false } })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [{
+      ...unavailableGap, affects_outline_decision: true,
+    }]))).resolves.toMatchObject({ isError: true })
+    await expectResearchBlocked('apply_branch_outline_edit', validEdit)
+    await expect(fixture.invokeSubmissionTool(childId, 'search_sources', { scope_ref: 'ALL', keywords: ['实施'] }))
+      .resolves.toMatchObject({ isError: false })
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap])))
+      .resolves.toMatchObject({ isError: false, value: { research_ready: true, unresolved_gaps: [unavailableGap] } })
     for (const args of [{}, { comparison: '' }, { comparison: ' \n\t' }]) {
       await expect(fixture.invokeSubmissionTool(childId, 'lock_branch_outline', args)).resolves.toMatchObject({ isError: true })
     }
-    const basis = { kind: 'section_responsibility', explanation: '验证目录锁定前的结构修复。', requirement_ids: [] }
     for (const [operation, code] of [
       [{ type: 'add_section', parent_id: 'SEC-1', order: 1, writable: true,
         title: '子任务', purpose: '说明子任务。', must_answer: ['如何完成子任务？'] }, 'OUTLINE_SHARED_WRITABLE_NOT_LEAF'],
@@ -1113,10 +1164,6 @@ describe('evidence-mapping Agent executor', () => {
       expect(result, code).toMatchObject({ isError: true })
       if (result.isError) expect(result.error.message).toContain(code)
     }
-    const withNotes = (sectionId: string, purpose: string) => ({
-      section_id: sectionId, basis: { kind: 'section_responsibility', explanation: '明确本章技术响应职责。', requirement_ids: [] },
-      writing_brief: { purpose, must_answer: [`${sectionId} 必须回答的事项。`], writing_notes: ['说明实施方法。'], suggested_tables: [], suggested_figures: [] },
-    })
     await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', withNotes('SEC-1', '锁前研究草稿一')))
       .resolves.toMatchObject({ isError: false })
     await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', withNotes('SEC-2', '锁前研究草稿二')))
@@ -1189,6 +1236,16 @@ describe('evidence-mapping Agent executor', () => {
     const finalOutline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
     expect(finalOutline.sections.find(section => section.id === 'SEC-1')?.purpose).toBe('锁前研究草稿一')
     expect(finalOutline.sections.find(section => section.id === 'BRANCH')?.summary).toBe('覆盖后的最终摘要。')
+    expect(JSON.stringify({ map, finalOutline })).not.toContain('research_assessment')
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      schema_version: number
+      tasks: Array<{ task_id: string; research_assessment?: ReturnType<typeof branchResearchAssessment> }>
+    }
+    expect(checkpoint.schema_version).toBe(6)
+    expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
+      .toMatchObject({ sufficient_for_outline_decision: true, unresolved_gaps: [unavailableGap] })
+    expect(fixture.outlineReviewPrompts[0]).toContain('分支研究充分性结论：')
+    expect(fixture.outlineReviewPrompts[0]).toContain('设备现场清单尚未提供')
   })
 
   it('目录工具分配新 ID，新增章节任务及覆盖关联通过独立操作提交', async () => {
@@ -1201,6 +1258,8 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const childId = start.request.childId!
+    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment()))
+      .resolves.toMatchObject({ isError: false, value: { research_ready: true } })
     await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', {
       section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '记录拆分前研究草稿。', requirement_ids: [] },
       writing_dimensions: ['原章内的实施方法与质量控制'],
@@ -1704,8 +1763,9 @@ describe('evidence-mapping Agent executor', () => {
     expect(referenceOutlines[0]!.headings[5]).toEqual({
       title: '数据血缘', level: 4, order: 6,
     })
-    expect(initialPrompt).toContain('不得只塞入 writing_dimensions、must_answer 或 writing_notes')
-    expect(initialPrompt).toContain('评分和要求是否覆盖、同级章节职责是否清楚、每个叶子内是否仍有值得独立编写的主题')
+    expect(initialPrompt).toContain('不得长期只塞入 writing_dimensions、must_answer 或 writing_notes')
+    expect(initialPrompt).toContain('在 research_ready=true 前不得编辑目录、锁定分支或调用 update_section_task')
+    expect(initialPrompt).toContain('招标信息本身足够时允许零联网')
     expect(initialPrompt).toContain('不预设标题、固定层级或节点数量')
     expect(promptText(fixture.starts[0]!.request.request)).toContain('相关 Requirements：[{"id":"R-1"')
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain('"id":"R-2"')
@@ -1770,10 +1830,11 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.tasks.at(-1)?.review_progress).toMatchObject({ review_pending: 0, review_invalidated: 0 })
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
       schema_version: number
-      tasks: Array<{ task_id: string; refinement_conclusion?: string }>
+      tasks: Array<{ task_id: string; refinement_conclusion?: string; research_assessment?: ReturnType<typeof branchResearchAssessment> }>
     }
-    expect(checkpoint.schema_version).toBe(5)
+    expect(checkpoint.schema_version).toBe(6)
     expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => Boolean(item.refinement_conclusion))).toBe(true)
+    expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => item.research_assessment?.sufficient_for_outline_decision === true)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
     expect(fixture.followup).not.toHaveBeenCalled()
     expect(fixture.outlineReviewPrompts).toHaveLength(1)
@@ -1823,7 +1884,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(attempts[1]).toMatchObject({ accepted: true, issues: [], warnings: [] })
   })
 
-  it.each([1, 2, 3, 4, 5])('重跑只接受 v5 checkpoint，当前版本为 %s', async (version) => {
+  it.each([1, 2, 3, 4, 5, 6])('重跑只接受 v6 checkpoint，当前版本为 %s', async (version) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-resume-')))
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material)
@@ -1838,11 +1899,11 @@ describe('evidence-mapping Agent executor', () => {
 
     const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
     const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { schema_version: number }
-    expect(checkpoint.schema_version).toBe(5)
-    if (version !== 5) await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: version }))
+    expect(checkpoint.schema_version).toBe(6)
+    if (version !== 6) await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: version }))
     const resumed = mappingFixture(workspace, material)
     const completedRun = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0, maxConcurrency: 2 })
-    if (version !== 5) {
+    if (version !== 6) {
       await expect(completedRun).rejects.toThrow('EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED')
       expect(resumed.starts).toHaveLength(0)
       return
@@ -1935,11 +1996,19 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.outlineReviewPrompts[0]).toContain('分支粒度结论：')
     expect(promptText(fixture.finalStarts[0]!.request.request)).not.toContain('"identified_issues":')
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
-      tasks: Array<{ task_id: string; refinement_conclusion?: string; repair_base_outline?: unknown }>
+      tasks: Array<{
+        task_id: string
+        refinement_conclusion?: string
+        research_assessment?: ReturnType<typeof branchResearchAssessment>
+        repair_base_outline?: unknown
+      }>
     }
     const repairCheckpoint = checkpoint.tasks.find(item => item.task_id === 'MAP-REPAIR-SEC-1')
     expect(typeof repairCheckpoint?.refinement_conclusion).toBe('string')
+    expect(repairCheckpoint?.research_assessment?.sufficient_for_outline_decision).toBe(true)
     expect(repairCheckpoint?.repair_base_outline).toBeDefined()
+    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-SEC-1')))
+      .toContain('prior_branch_research_assessments：')
   })
 
   it('Final Check 逐项保留未变更章节，程序发布完整 baseline 映射', async () => {
