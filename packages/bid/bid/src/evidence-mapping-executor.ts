@@ -887,6 +887,12 @@ function attachMappingSubmissionRuntime(
         ...submitted,
         key_findings: submitted.key_findings.map(finding => ({ finding_ref: researchFindingRef(finding), finding })),
       })
+      const retainedFindingRefs = new Set(assessment.key_findings.map(finding => finding.finding_ref))
+      const missingFindingRefs = [...new Set(state.outlineOperationBases.map(basis => basis.finding_ref))]
+        .filter(findingRef => !retainedFindingRefs.has(findingRef))
+      if (missingFindingRefs.length > 0) {
+        throw new ToolArgsError([`key_findings: 缺少已用于目录操作的 finding_ref：${missingFindingRefs.join('、')}。`])
+      }
       state.researchAssessment = assessment
       state.researchReady = assessment.sufficient_for_outline_decision
       state.structuralRefinementApplied = false

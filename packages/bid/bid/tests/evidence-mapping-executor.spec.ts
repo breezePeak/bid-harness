@@ -1112,7 +1112,7 @@ describe('evidence-mapping Agent executor', () => {
     await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({ completed: 3, failed: 0 })
   })
 
-  it('小工具以 Host 状态完成 missing、upsert、即时引用校验和 Final baseline/summary 聚合', async () => {
+  it('小工具以 Host 状态完成 missing、upsert、无目录操作的 Assessment 重提、即时引用校验和 Final baseline/summary 聚合', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-incremental-mapping-tools-')))
     const material = await writeInputs(workspace)
     const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
@@ -1177,6 +1177,14 @@ describe('evidence-mapping Agent executor', () => {
       childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap]),
     )
     expect(submittedFindingRef(repeatedAssessment)).toBe(findingRef)
+    const replacementAssessment = branchResearchAssessment(true, [unavailableGap])
+    replacementAssessment.key_findings = ['未发生目录操作时允许替换研究发现。']
+    await expect(fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', replacementAssessment,
+    )).resolves.toMatchObject({ isError: false })
+    await expect(fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap]),
+    )).resolves.toMatchObject({ isError: false })
     for (const args of [{}, { comparison: '' }, { comparison: ' \n\t' }]) {
       await expect(fixture.invokeSubmissionTool(childId, 'lock_branch_outline', args)).resolves.toMatchObject({ isError: true })
     }
@@ -1297,7 +1305,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.outlineReviewPrompts[0]).toContain('设备现场清单尚未提供')
   })
 
-  it('目录工具分配新 ID，新增章节任务及覆盖关联通过独立操作提交', async () => {
+  it('目录工具保留已用 finding ref，并分配新 ID、通过独立操作提交新增章节任务及覆盖关联', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-incremental-new-sections-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
@@ -1338,6 +1346,18 @@ describe('evidence-mapping Agent executor', () => {
     const createdIds = split.isError ? [] : (split.value as { created_section_ids: string[] }).created_section_ids
     expect(createdIds).toHaveLength(2)
     expect(createdIds.every(id => id.startsWith('NEW-'))).toBe(true)
+    const replacementAssessment = branchResearchAssessment()
+    replacementAssessment.key_findings = ['拆分后的补充研究发现。']
+    const rejectedAssessment = await fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', replacementAssessment,
+    )
+    expect(rejectedAssessment).toMatchObject({ isError: true })
+    if (rejectedAssessment.isError) expect(rejectedAssessment.error.message).toContain(findingRef)
+    const preservingAssessment = branchResearchAssessment()
+    preservingAssessment.key_findings.push('拆分后的补充研究发现。')
+    await expect(fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', preservingAssessment,
+    )).resolves.toMatchObject({ isError: false })
     const lock = await fixture.invokeSubmissionTool(childId, 'lock_branch_outline', { comparison: '原章节包含两个独立子任务，已按旧标任务层次拆为两个可写叶子。' })
     expect(lock).toMatchObject({ isError: false, value: { writable_sections: createdIds.map(section_id => ({ section_id })) } })
     const brief = (sectionId: string) => ({
