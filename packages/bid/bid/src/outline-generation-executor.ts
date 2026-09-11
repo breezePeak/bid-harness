@@ -115,7 +115,12 @@ function latestOutlineFeedback(agent: Agent): string | undefined {
 }
 
 /** Render the S3 semantic scoring analysis assignment. */
-function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
+function renderResponsePointAnalysisTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: BidStageTask,
+  scoringIds: readonly string[],
+): string {
   const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     `当前阶段：${task.stage} / 评分响应点分析`,
@@ -123,7 +128,7 @@ function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, 
     `读取 ${root}/analysis/scoring.json。`,
     '逐项理解评分语义，将每个评分项拆成一个或多个可独立回答、可独立审查，或在实际评分逻辑中明显独立评价的最小合理业务单元。重点识别原文明列事项、包括或包括但不限于的独立内容、编号或分号列项、逐项得分或扣分，以及虽在同一句但可独立编写审查的技术内容。',
     '不要按顿号、逗号、和、及或分值数量机械切分。完整、合理、可行、准确、符合要求等质量判断词不是独立写作主题，除非原文明确定义为分别响应的评价维度；不得凭常识新增原文没有依据的评分内容。',
-    `唯一输出：${root}/${RESPONSE_POINT_CANDIDATE}。严格写入 {"schema_version":1,"points":[{"scoring_id":"SCORE-...","order":1,"text":"具体响应点"}]}。`,
+    `唯一输出：${root}/${RESPONSE_POINT_CANDIDATE}。严格写入 {"schema_version":1,"points":[{"scoring_id":"从合法 ID 中选择","order":1,"text":"具体响应点"}]}。scoring_id 必须逐字复制 scoring.json 中的 id；本次合法 ID：${JSON.stringify(scoringIds)}。`,
     '每个 scoring_id 至少一个响应点，同一评分项的 order 从 1 连续递增。写完停止，稳定 RP ID 由 Host 分配。',
   ].join('\n')
 }
@@ -132,15 +137,21 @@ function renderResponsePointAnalysisTask(agent: Agent, workspace: BidWorkspace, 
  * Render the independent S3 semantic review that repairs the candidate in place.
  * @param agent - live Bid Agent receiving the review assignment.
  * @param workspace - Workspace 级 Bid 项目.
+ * @param scoringIds - 当前评分 Artifact 中允许使用的评分 ID；省略时不注入项目清单。
  * @returns model-visible semantic review instructions.
  */
-export function renderResponsePointSemanticReviewTask(agent: Agent, workspace: BidWorkspace): string {
+export function renderResponsePointSemanticReviewTask(
+  agent: Agent,
+  workspace: BidWorkspace,
+  scoringIds?: readonly string[],
+): string {
   const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
   return [
     '当前阶段：outline_generation / Response Point Semantic Review',
     `Bid Session：${agent.id}`,
     `重新读取 ${root}/analysis/scoring.json 和 ${root}/${RESPONSE_POINT_CANDIDATE}。`,
     '逐个评分项复核：原文明列事项是否遗漏，多个独立内容是否错误合并，完整单义要求是否过度拆碎，质量评价词是否误作写作主题，是否新增无原文依据的内容，scoring_id 与顺序是否正确，每个响应点是否具体到可直接用于目录设计。',
+    ...(scoringIds === undefined ? [] : [`本次合法 scoring_id：${JSON.stringify(scoringIds)}；候选中的 scoring_id 必须逐字复制这些值。`]),
     '典型逐项计分原文中的项目目标、预期成果、总体设计对相关政策与现有条件的符合性、软件技术路线、总体设计应分别保留；完整、合理可行、现状分析准确清晰、符合项目要求、满足采购需求仍是质量标准。整体表述“总体方案完整、合理、可行，得5分”应保留为一个合理响应点，不得按分值拆成五项。',
     `发现过粗、遗漏或误拆时直接重写 ${root}/${RESPONSE_POINT_CANDIDATE}；没有问题则保持文件内容。不得另写 review report。完成后停止，Host 只校验 JSON、scoring_id、每项至少一点、连续 order 和非空文本。`,
   ].join('\n')
@@ -434,9 +445,9 @@ export async function executeOutlineGeneration(
     if (catalog === undefined) {
       if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
       if (await read(RESPONSE_POINT_CANDIDATE) === undefined) {
-        await run(renderResponsePointAnalysisTask(agent, workspace, task), [RESPONSE_POINT_CANDIDATE])
+        await run(renderResponsePointAnalysisTask(agent, workspace, task, scoring.scoring_items.map(item => item.id)), [RESPONSE_POINT_CANDIDATE])
       }
-      await run(renderResponsePointSemanticReviewTask(agent, workspace), [RESPONSE_POINT_CANDIDATE])
+      await run(renderResponsePointSemanticReviewTask(agent, workspace, scoring.scoring_items.map(item => item.id)), [RESPONSE_POINT_CANDIDATE])
       const candidate = parseScoringResponsePointCandidate(JSON.parse((await read(RESPONSE_POINT_CANDIDATE)) ?? 'null'))
       catalog = createScoringResponsePointCatalog(scoring, candidate)
       await write(RESPONSE_POINT_CATALOG, catalog)

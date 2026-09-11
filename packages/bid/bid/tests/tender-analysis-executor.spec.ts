@@ -75,10 +75,11 @@ describe('tender-analysis Agent executor', () => {
     const repair = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
     expect(initial.content[0]?.text).toContain('T1:')
     expect(initial.content[0]?.text).toContain('submit_project_fact')
-    expect(initial.content[0]?.text).toContain('不得填写 file_id、source_refs、line_start 或 line_end')
+    expect(initial.content[0]?.text).toContain('不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref')
+    expect(initial.content[0]?.text).toContain('semantic_hint')
     expect(initial.content[0]?.text).toContain('评分响应点')
     expect(initial.content[0]?.text).toContain('评分大项')
-    expect(initial.content[0]?.text).toContain('不得另建评分项或填写 parent_ref')
+    expect(initial.content[0]?.text).toContain('不得另建评分项')
     expect(initial.content[0]?.text).toContain('远距离第二评分区域')
     expect(repair.content[0]?.text).toContain('TENDER_ANALYSIS_FINISH_REQUIRED')
     expect(result.map(value => value.path)).toEqual(task.requiredArtifacts)
@@ -128,7 +129,7 @@ describe('tender-analysis Agent executor', () => {
       if (idle === 2) {
         await definitions.get('submit_project_fact')?.execute({
           field: 'project_name', value: '审计平台',
-          sources: [{ file_ref: 'T1', chunk: 'chunk_0001', quote: '项目名称：审计平台。' }],
+          sources: [{ file_ref: 'T1', chunk: 'chunk_0001', semantic_hint: '项目名称审计平台' }],
         }, exec)
         const staged = await definitions.get('finish_tender_analysis')?.execute({}, exec) as { revision?: number }
         reviewRevision = staged.revision

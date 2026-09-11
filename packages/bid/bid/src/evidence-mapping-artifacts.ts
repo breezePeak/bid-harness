@@ -77,18 +77,43 @@ const evidenceMapSchema = z.object({
 }).strict()
 
 /** Version of the Host-private S4 task plan. */
-export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 5 as const
+export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 6 as const
 
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
+  task_kind: z.enum(['section_mapping', 'outline_repair', 'section_remap', 'final_check']),
+  generation: z.number().int().nonnegative(),
   title: z.string().min(1),
   phase: z.enum(['initial', 'final_check']),
   section_ids: z.array(z.string().min(1)),
+  outline_edit_scope_id: z.string().min(1).optional(),
+  research_candidate_task_ids: z.array(z.string().min(1)).optional(),
   summary_section_ids: z.array(z.string().min(1)).optional(),
   review_issues: z.array(z.string().min(1)).optional(),
   heading_path: z.array(z.string().min(1)).min(1),
-}).strict().refine(task => task.section_ids.length > 0 || (task.phase === 'final_check' && (task.summary_section_ids?.length ?? 0) > 0),
-  { message: '映射任务必须包含可写章节或待复核的父节点总述。' })
+}).strict().superRefine((task, context) => {
+  const final = task.task_kind === 'final_check'
+  if ((task.phase === 'final_check') !== final) {
+    context.addIssue({ code: 'custom', path: ['task_kind'], message: 'task kind must match phase' })
+  }
+  const ownsOutline = task.task_kind === 'section_mapping' || task.task_kind === 'outline_repair'
+  if (ownsOutline !== (task.outline_edit_scope_id !== undefined)) {
+    context.addIssue({ code: 'custom', path: ['outline_edit_scope_id'], message: 'outline-editing tasks require one explicit subtree root' })
+  }
+  if (task.task_kind === 'section_mapping' && task.section_ids.length !== 1) {
+    context.addIssue({ code: 'custom', path: ['section_ids'], message: 'a section mapping task owns exactly one writable leaf' })
+  }
+  if (task.task_kind === 'outline_repair' && task.section_ids.length > 1) {
+    context.addIssue({ code: 'custom', path: ['section_ids'], message: 'an outline repair maps at most its writable scope root' })
+  }
+  if (task.section_ids.length === 0 && !(task.task_kind === 'outline_repair'
+    || final && (task.summary_section_ids?.length ?? 0) > 0)) {
+    context.addIssue({ code: 'custom', path: ['section_ids'], message: '映射任务必须包含可写章节或待复核的父节点总述。' })
+  }
+  if (new Set(task.research_candidate_task_ids ?? []).size !== (task.research_candidate_task_ids?.length ?? 0)) {
+    context.addIssue({ code: 'custom', path: ['research_candidate_task_ids'], message: 'research candidate task ids must be unique' })
+  }
+})
 
 const evidenceMappingPlanSchema = z.object({
   schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),
@@ -131,7 +156,7 @@ export type WebEvidenceMaterial = z.infer<typeof webEvidenceMaterialSchema>
 export type SectionEvidenceMapping = z.infer<typeof sectionEvidenceMappingSchema>
 /** Parsed evidence-map Artifact. */
 export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>
-/** Host 按目录业务分支生成的 S4 执行批次，包含多个章节。 */
+/** Host 生成的 S4 任务；初始章节任务每项只映射一个可写叶子。 */
 export type EvidenceMappingTask = z.infer<typeof evidenceMappingTaskSchema>
 /** Host 私有的确定性 S4 任务计划。 */
 export type EvidenceMappingPlan = z.infer<typeof evidenceMappingPlanSchema>

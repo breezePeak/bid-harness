@@ -39,8 +39,8 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('search_sources')
       expect(childLog).toContain('read_source')
       expect(childLog).toContain('update_section_task')
-      expect(childLog).toContain('submit_branch_research_assessment')
-      expect(childLog).toContain('lock_branch_outline')
+      expect(childLog).toContain('submit_section_research_assessment')
+      expect(childLog).toContain('lock_section_outline')
       expect(childLog).toContain('lock-before-research-ready')
       expect(childLog).toContain('research-not-ready')
       expect(childLog).toContain('research-ready')
@@ -58,8 +58,8 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'reject-invalid-outline-edit'))
         .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
       expect(childLog).toContain('global_outline_index：')
-      expect(childLog).toContain('current_branch：')
-      expect(childLog).toContain('current_branch_baseline：')
+      expect(childLog).toContain('current_section_scope：')
+      expect(childLog).toContain('current_section_baseline：')
       expect(childLog).toContain('scoped_diffs：')
       expect(childLog).toContain('scoped_candidate_refs：')
       expect(childLog).not.toContain('当前整本目录与章节职责：')
@@ -112,7 +112,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         schema_version: number
         tasks: Array<{ task_id: string; research_assessment?: { sufficient_for_outline_decision: boolean; unresolved_gaps: unknown[] } }>
       }
-      expect(checkpoint.schema_version).toBe(7)
+      expect(checkpoint.schema_version).toBe(8)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
           sufficient_for_outline_decision: true,

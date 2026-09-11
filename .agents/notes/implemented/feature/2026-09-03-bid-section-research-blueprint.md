@@ -8,9 +8,9 @@ Status: implemented
 
 ## Decision
 
-材料与任务的独立提交、按当前版本逐项复核及正式父总述遵循[材料用途与职责复核](2026-09-08-s4-material-purpose-review.md)；本记录保留分支研究、S5 补搜及确认发布的取舍。
+材料与任务的独立提交、按当前版本逐项复核及正式父总述遵循[材料用途与职责复核](2026-09-08-s4-material-purpose-review.md)，任务作用域遵循[逐叶研究任务](../architecture/2026-09-11-s4-leaf-mapping-task-scope.md)；本记录保留章节研究、S5 补搜及确认发布的取舍。
 
-S4 保持按业务分支并行的初始任务和现有并发上限。Child 先对照[完整旧标和本次目录](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，研究 purpose、must_answer、写作维度、表图建议、业务关联、Evidence 和真实资料缺口，并按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过结构化判断后才修改目录和形成 Writing Brief。运行内候选池汇集所有分支材料；一次目录深化同步生成每个新叶子的任务定义和父节点摘要。后续单个轻量 Final Check 优先复用候选，只为具体问题局部检索，不能增删章节或调整层级。
+S4 为每个可写叶子创建独立初始任务并保持现有并发上限。Child 先对照[完整旧标和本次目录](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，研究 purpose、must_answer、写作维度、表图建议、业务关联、Evidence 和真实资料缺口，并按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过结构化判断后才修改当前 Section 子树和形成 Writing Brief。目录深化把新叶分别加入下一代任务；父任务读过的材料只作为候选，新叶仍须独立判断并提交 Evidence。后续单个轻量 Final Check 优先复用候选，只为具体问题局部检索，不能增删章节或调整层级。
 
 短文件引用只属于模型输入输出，Host 通过本轮定位表回填真实 file_id 和 source_kind。正式 Evidence Map v10 和 missing_topics:string[] 保持不变。技术错误进入执行日志及有限修复，单条错误引用不丢弃同章有效材料，也不自动变成资料缺口。Final Check 无法形成有效章节结论时拒绝发布。
 
@@ -28,7 +28,7 @@ S4、S5 的 Corpus 读取 Guard 由各 Child 的工具作用域持有，随 Chil
 
 **每次编辑自动启动模型。** 连续调整会重复消耗研究时间；保存只做确定性校验，最终确认集中处理真实语义变化。
 
-**逐章节独立 Agent、持久知识库或复杂拆分来源图。** 当前分支调度、内存候选集合与既有 Corpus 已足够支持复用；新增持久索引和来源状态会扩大一致性维护范围。
+**持久知识库或复杂拆分来源图。** 逐叶任务只需在私有 checkpoint 保存父任务实际读取的候选引用；新增语义索引和来源状态会扩大一致性维护范围，也会诱导 Host 自动判断材料适用性。
 
 **另派 S5 Writer 编写父节点概述。** S4 已有经过确认的摘要；再次生成会增加模型调用和第二份正文状态，使目录、工作台与导出内容可能不一致。
 

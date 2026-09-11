@@ -60,11 +60,17 @@ export interface TenderLocator {
   readonly chunks: ReadonlyMap<string, TenderChunkLocator>
 }
 
-/** Model-side citation resolved immediately to a canonical tender source reference. */
-export interface TenderQuoteSource {
+/** Model-side semantic locator resolved immediately against one tender chunk. */
+export interface TenderSourceHint {
   readonly file_ref: string
   readonly chunk: string
+  readonly semantic_hint: string
+}
+
+/** Exact chunk text and canonical reference selected by the Host. */
+export interface ResolvedTenderSource {
   readonly quote: string
+  readonly source_ref: TenderSourceRef
 }
 
 interface SourcedValue<T> {
@@ -83,7 +89,6 @@ interface RequirementDraft {
 
 interface ScoringDraft {
   readonly id: string
-  readonly parent_ref: string | null
   readonly group: string | null
   readonly title: string
   readonly raw_text: string
@@ -103,13 +108,13 @@ interface ComplianceDraft {
   readonly source_refs: TenderSourceRef[]
 }
 
-const quoteSourceSchema = z.object({
+const text = z.string().trim().min(1)
+const sourceHintSchema = z.object({
   file_ref: z.string().regex(/^T[1-9]\d*$/u),
   chunk: z.string().regex(/^chunk_[0-9]+$/u),
-  quote: z.string().min(1).refine(value => value.trim().length > 0, 'quote must contain text'),
+  semantic_hint: text,
 }).strict()
-const sourcesSchema = z.array(quoteSourceSchema).min(1)
-const text = z.string().trim().min(1)
+const sourcesSchema = z.array(sourceHintSchema).min(1)
 const replaceRef = (prefix: string) => z.string().regex(new RegExp(`^${prefix}[1-9]\\d*$`, 'u')).optional()
 
 const projectFactSchema = z.object({
@@ -120,7 +125,6 @@ const projectFactSchema = z.object({
 const requirementSchema = z.object({
   replace_ref: replaceRef('R'),
   category: text,
-  raw_text: text,
   normalized_requirement: text,
   mandatory: z.boolean(),
   sources: sourcesSchema,
@@ -129,10 +133,8 @@ const scoreRangeSchema = z.object({ min: z.number(), max: z.number() }).strict()
   .refine(value => value.max >= value.min, 'score_range.max must be at least score_range.min')
 const scoringSchema = z.object({
   replace_ref: replaceRef('S'),
-  parent_ref: z.union([z.string().regex(/^S[1-9]\d*$/u), z.null()]),
   group: z.union([text, z.null()]),
   title: text,
-  raw_text: text,
   criterion: text,
   score: z.union([z.number(), z.null()]),
   score_range: z.union([scoreRangeSchema, z.null()]),
@@ -142,7 +144,6 @@ const scoringSchema = z.object({
 const complianceSchema = z.object({
   replace_ref: replaceRef('C'),
   type: text,
-  raw_text: text,
   normalized_rule: text,
   severity: z.enum(['fatal', 'mandatory', 'warning']),
   sources: sourcesSchema,
@@ -180,6 +181,34 @@ function maskHtmlComments(value: string): string {
   return value.replace(/<!--[\s\S]*?-->/gu, match => match.replace(/[^\r\n]/gu, ' '))
 }
 
+function searchableText(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function bigrams(value: string): Set<string> {
+  const values = new Set<string>()
+  for (let index = 0; index < value.length - 1; index++) values.add(value.slice(index, index + 2))
+  return values
+}
+
+interface QuoteCandidate {
+  readonly quote: string
+  readonly offset: number
+  readonly searchable: string
+}
+
+function quoteCandidates(content: string): QuoteCandidate[] {
+  const visible = maskHtmlComments(content)
+  return [...visible.matchAll(/[^\r\n]+/gu)].flatMap((match) => {
+    if (match[0].trim().length === 0) return []
+    const index = match.index
+    const sourceLine = content.slice(index, index + match[0].length)
+    const quote = sourceLine.trim()
+    if (quote.length === 0) return []
+    return [{ quote, offset: index + sourceLine.indexOf(quote), searchable: searchableText(quote) }]
+  }).filter(candidate => candidate.searchable.length > 0)
+}
+
 function lineAt(value: string, offset: number): number {
   let line = 1
   for (let index = 0; index < offset; index++) if (value.charCodeAt(index) === 10) line++
@@ -187,35 +216,50 @@ function lineAt(value: string, offset: number): number {
 }
 
 /**
- * Resolve one model citation against the exact tender chunk and quote.
+ * Resolve one semantic hint to an exact visible line in its tender chunk.
  * @param workspace Workspace that owns the tender corpus.
  * @param locators Host-built tender identity table for this S2 execution.
- * @param source Model-provided short file reference, chunk id, and exact quote.
- * @returns Canonical file id, workspace-relative chunk path, and inclusive one-based lines.
+ * @param source Model-provided short file reference, chunk id, and semantic location hint.
+ * @returns Original chunk text and its canonical inclusive one-based line reference.
  */
-export async function resolveTenderQuoteSourceRef(
+export async function resolveTenderSourceHint(
   workspace: BidWorkspace,
   locators: readonly TenderLocator[],
-  source: TenderQuoteSource,
-): Promise<TenderSourceRef> {
+  source: TenderSourceHint,
+): Promise<ResolvedTenderSource> {
   const locator = locators.find(value => value.file_ref === source.file_ref)
   if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${source.file_ref}。`])
   const chunk = locator.chunks.get(source.chunk)
   if (chunk === undefined) throw new ToolArgsError([`chunk: ${source.chunk} 不属于 ${source.file_ref}。`])
   await assertNoLinkedPath(workspace.root, chunk.absolutePath)
   const content = await readFile(chunk.absolutePath, 'utf8')
-  const searchable = maskHtmlComments(content)
-  const first = searchable.indexOf(source.quote)
-  if (first < 0) throw new ToolArgsError([`quote: 在 ${source.file_ref}/${source.chunk} 正文中不存在。`])
-  if (searchable.indexOf(source.quote, first + 1) >= 0) {
-    throw new ToolArgsError([`quote: 在 ${source.file_ref}/${source.chunk} 正文中出现多次；请提交更长的唯一原文。`])
+  const hint = searchableText(source.semantic_hint)
+  if (hint.length < 4) throw new ToolArgsError(['semantic_hint: 请提供至少四个字母或数字的语义线索。'])
+  const hintBigrams = bigrams(hint)
+  const minimumCommon = Math.max(2, Math.ceil(hintBigrams.size * 0.35))
+  const candidates = quoteCandidates(content).map((candidate) => {
+    const candidateBigrams = bigrams(candidate.searchable)
+    const common = [...hintBigrams].filter(value => candidateBigrams.has(value)).length
+    return { ...candidate, exact: candidate.searchable.includes(hint), common }
+  }).filter(candidate => candidate.exact || candidate.common >= minimumCommon)
+    .sort((left, right) => Number(right.exact) - Number(left.exact) || right.common - left.common)
+  const selected = candidates[0]
+  if (selected === undefined) {
+    throw new ToolArgsError([`semantic_hint: 无法在 ${source.file_ref}/${source.chunk} 正文中定位相关原文。`])
   }
-  const last = first + source.quote.length - 1
-  const lineStart = lineAt(content, first)
+  const tied = candidates[1]
+  if (tied !== undefined && tied.exact === selected.exact && tied.common === selected.common) {
+    throw new ToolArgsError([`semantic_hint: 在 ${source.file_ref}/${source.chunk} 正文中定位不唯一；请补充区分该位置的语义线索。`])
+  }
+  const last = selected.offset + selected.quote.length - 1
+  const lineStart = lineAt(content, selected.offset)
   const lineEnd = lineAt(content, last)
   const lineCount = content.split('\n').length
   if (lineStart < 1 || lineEnd < lineStart || lineEnd > lineCount) throw new Error('tender-analysis-source-line-resolution-invalid')
-  return { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: lineStart, line_end: lineEnd }
+  return {
+    quote: selected.quote,
+    source_ref: { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: lineStart, line_end: lineEnd },
+  }
 }
 
 /**
@@ -307,9 +351,16 @@ export async function attachTenderAnalysisSubmissionRuntime(
   let revision = 0
   let lastIssues: StageValidationIssue[] = []
 
-  const sources = async (values: readonly TenderQuoteSource[]): Promise<TenderSourceRef[]> => (
-    uniqueSourceRefs(await Promise.all(values.map(value => resolveTenderQuoteSourceRef(workspace, locators, value))))
-  )
+  const sources = async (values: readonly TenderSourceHint[]): Promise<{
+    quotes: string[]
+    source_refs: TenderSourceRef[]
+  }> => {
+    const resolved = await Promise.all(values.map(value => resolveTenderSourceHint(workspace, locators, value)))
+    return {
+      quotes: [...new Set(resolved.map(value => value.quote))],
+      source_refs: uniqueSourceRefs(resolved.map(value => value.source_ref)),
+    }
+  }
   const ensureAgent = (exec: ToolRunContext): void => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
     if (phase === 'completed') throw new ToolArgsError(['value: tender analysis 已完成。'])
@@ -349,12 +400,12 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const input = toolArgs(args, projectFactSchema)
       const resolved = await sources(input.sources)
       if (isSingleField(input.field)) {
-        singles.set(input.field, { value: input.value, source_refs: resolved })
+        singles.set(input.field, { value: input.value, source_refs: resolved.source_refs })
       } else {
         if (input.value === null) throw new ToolArgsError(['value: 数组字段必须逐项提交非空字符串。'])
         const field = input.field
         const values = lists.get(field) ?? new Map<string, TenderSourceRef[]>()
-        values.set(input.value, uniqueSourceRefs([...(values.get(input.value) ?? []), ...resolved]))
+        values.set(input.value, uniqueSourceRefs([...(values.get(input.value) ?? []), ...resolved.source_refs]))
         lists.set(field, values)
       }
       return {
@@ -376,13 +427,14 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const ref = input.replace_ref ?? `R${String(requirements.size + 1)}`
       const current = requirements.get(ref)
       if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Requirement 引用 ${ref}。`])
+      const resolved = await sources(input.sources)
       requirements.set(ref, {
         id: current?.id ?? `REQ-${String(requirements.size + 1).padStart(3, '0')}`,
         category: input.category,
-        raw_text: input.raw_text,
+        raw_text: resolved.quotes.join('\n'),
         normalized_requirement: input.normalized_requirement,
         mandatory: input.mandatory,
-        source_refs: await sources(input.sources),
+        source_refs: resolved.source_refs,
       })
       lastIssues = []
       return { recorded: true, requirement_ref: ref, total_requirements: requirements.size, revision: accepted() }
@@ -391,28 +443,25 @@ export async function attachTenderAnalysisSubmissionRuntime(
 
   register({
     name: 'submit_scoring_item',
-    description: '新增或按 scoring_ref 覆盖一个原文评分大项；parent_ref 仅兼容标记误拆的内部细则，finish 不会将其写入正式评分项。',
+    description: '新增或按 scoring_ref 覆盖一个原文评分大项；Host 固定正式评分项的 parent 为 null。',
     parameters: schema(scoringSchema),
     async execute(args, exec) {
       ensureAgent(exec)
       const input = toolArgs(args, scoringSchema)
-      if (input.parent_ref !== null && !scoring.has(input.parent_ref)) {
-        throw new ToolArgsError([`parent_ref: 未知 Scoring 引用 ${input.parent_ref}。`])
-      }
       const ref = input.replace_ref ?? `S${String(scoring.size + 1)}`
       const current = scoring.get(ref)
       if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Scoring 引用 ${ref}。`])
+      const resolved = await sources(input.sources)
       scoring.set(ref, {
         id: current?.id ?? `SC-${String(scoring.size + 1).padStart(3, '0')}`,
-        parent_ref: input.parent_ref,
         group: input.group,
         title: input.title,
-        raw_text: input.raw_text,
+        raw_text: resolved.quotes.join('\n'),
         criterion: input.criterion,
         score: input.score,
         score_range: input.score_range,
         must_answer: input.must_answer,
-        source_refs: await sources(input.sources),
+        source_refs: resolved.source_refs,
       })
       lastIssues = []
       return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size, revision: accepted() }
@@ -429,13 +478,14 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const ref = input.replace_ref ?? `C${String(compliance.size + 1)}`
       const current = compliance.get(ref)
       if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Compliance 引用 ${ref}。`])
+      const resolved = await sources(input.sources)
       compliance.set(ref, {
         id: current?.id ?? `COM-${String(compliance.size + 1).padStart(3, '0')}`,
         type: input.type,
-        raw_text: input.raw_text,
+        raw_text: resolved.quotes.join('\n'),
         normalized_rule: input.normalized_rule,
         severity: input.severity,
-        source_refs: await sources(input.sources),
+        source_refs: resolved.source_refs,
       })
       lastIssues = []
       return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size, revision: accepted() }
@@ -476,9 +526,8 @@ export async function attachTenderAnalysisSubmissionRuntime(
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
         requirements: [...requirements.values()],
       })
-      const scoringItems = new Map<string, Omit<ScoringDraft, 'parent_ref'> & { parent: null }>()
-      for (const { parent_ref: parentRef, ...item } of scoring.values()) {
-        if (parentRef !== null) continue
+      const scoringItems = new Map<string, ScoringDraft & { parent: null }>()
+      for (const item of scoring.values()) {
         const key = JSON.stringify([
           item.group, item.title, item.raw_text, item.criterion, item.score, item.score_range, item.must_answer,
         ])

@@ -16,7 +16,7 @@ function evidence(value: OutlineArtifact): EvidenceMapArtifact {
   return { schema_version: 10, section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
 }
 
-it('14 个可写叶子按两个业务分支分为 2 个 Task，S5 仍逐章节写作', () => {
+it('14 个可写叶子生成 14 个独立 Mapping Task，S5 仍逐章节写作', () => {
   const value: OutlineArtifact = { ...outline(), sections: [
     { ...section('ROOT', null, 1), writable: false, must_answer: [] },
     ...['TECH', 'DELIVERY'].flatMap((id, index) => [
@@ -25,8 +25,10 @@ it('14 个可写叶子按两个业务分支分为 2 个 Task，S5 仍逐章节�
     ]),
   ] }
   const plan = buildEvidenceMappingPlan(value)
-  expect(plan.tasks).toHaveLength(2)
-  expect(plan.tasks.map(task => task.section_ids.length)).toEqual([7, 7])
+  expect(plan.tasks).toHaveLength(14)
+  expect(plan.tasks.every(task => task.section_ids.length === 1)).toBe(true)
+  expect(plan.tasks.every(task => task.task_kind === 'section_mapping' && task.generation === 0)).toBe(true)
+  expect(plan.tasks.map(task => task.outline_edit_scope_id)).toEqual(plan.tasks.flatMap(task => task.section_ids))
   expect(plan.tasks.flatMap(task => task.section_ids)).toEqual(buildChapterWorklist(value).map(section => section.id))
   expect(buildChapterWorklist(value)).toEqual(buildWritableSectionWorklist(value))
   expect(buildEvidenceMappingPlan({ ...value, sections: [...value.sections].reverse() })).toEqual(plan)
@@ -34,12 +36,22 @@ it('14 个可写叶子按两个业务分支分为 2 个 Task，S5 仍逐章节�
   expect(() => buildEvidenceMappingPlan(value)).toThrow('OUTLINE_SHARED_WRITABLE_NOT_LEAF')
 })
 
-it('单根目录直属的 14 个叶子合为一个执行批次', () => {
+it('单根目录直属的 14 个叶子仍各自形成一个执行任务', () => {
   const value: OutlineArtifact = { ...outline(), sections: [
     { ...section('ROOT', null, 1), writable: false, must_answer: [] },
     ...Array.from({ length: 14 }, (_, index) => section(`SEC-${index}`, 'ROOT', index + 1)),
   ] }
-  expect(buildEvidenceMappingPlan(value).tasks.map(task => task.section_ids.length)).toEqual([14])
+  expect(buildEvidenceMappingPlan(value).tasks.map(task => task.section_ids.length)).toEqual(Array(14).fill(1))
+})
+
+it('5 个可写叶子生成 5 个任务，非可写父节点不生成正文任务', () => {
+  const value: OutlineArtifact = { ...outline(), sections: [
+    { ...section('ROOT', null, 1), writable: false, must_answer: [] },
+    ...Array.from({ length: 5 }, (_, index) => section(`LEAF-${index + 1}`, 'ROOT', index + 1)),
+  ] }
+  const plan = buildEvidenceMappingPlan(value)
+  expect(plan.tasks.map(task => task.section_ids)).toEqual(value.sections.slice(1).map(item => [item.id]))
+  expect(plan.tasks.some(task => task.section_ids.includes('ROOT'))).toBe(false)
 })
 
 it('排序不触发复核，章节及祖先语义变化只影响对应叶子', () => {

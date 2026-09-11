@@ -12,7 +12,7 @@ import {
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
   parseTenderScoringArtifact,
-  resolveTenderQuoteSourceRef,
+  resolveTenderSourceHint,
   validateTenderAnalysis,
 } from '@deepseek-ai/dsh-bid'
 
@@ -46,7 +46,7 @@ async function fixture(): Promise<Fixture> {
         '# 项目概况', PROJECT_QUOTE,
         '# 技术要求', REQUIREMENT_QUOTE, COMPLIANCE_QUOTE,
         '# 技术评分', SCORING_QUOTE,
-        '重复短语。重复短语。',
+        '重复短语。', '重复短语。',
       ].join('\n\n')),
     },
     { name: 'second-tender.md', role: 'tender', bytes: new TextEncoder().encode(second) },
@@ -72,25 +72,25 @@ async function fixture(): Promise<Fixture> {
   return { workspace, agent, tools: definitions, runtime, concludeTurn, call }
 }
 
-function source(quote: string, chunk?: string, file_ref = 'T1') {
-  const resolvedChunk = chunk ?? (quote === PROJECT_QUOTE ? 'chunk_0001'
-    : quote === REQUIREMENT_QUOTE || quote === COMPLIANCE_QUOTE ? 'chunk_0002' : 'chunk_0003')
-  return { file_ref, chunk: resolvedChunk, quote }
+function source(semantic_hint: string, chunk?: string, file_ref = 'T1') {
+  const resolvedChunk = chunk ?? (semantic_hint === PROJECT_QUOTE ? 'chunk_0001'
+    : semantic_hint === REQUIREMENT_QUOTE || semantic_hint === COMPLIANCE_QUOTE ? 'chunk_0002' : 'chunk_0003')
+  return { file_ref, chunk: resolvedChunk, semantic_hint }
 }
 
 async function submitComplete(value: Fixture): Promise<void> {
   await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
   await value.call('submit_requirement', {
-    category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '系统应支持统一身份认证和审计日志。',
+    category: '功能要求', normalized_requirement: '系统应支持统一身份认证和审计日志。',
     mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
   })
   await value.call('submit_scoring_item', {
-    parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+    group: '技术方案', title: '总体技术方案',
     criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
     must_answer: true, sources: [source(SCORING_QUOTE)],
   })
   await value.call('submit_compliance_item', {
-    type: '强制要求', raw_text: COMPLIANCE_QUOTE, normalized_rule: '技术方案必须提供数据安全措施。',
+    type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。',
     severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
   })
 }
@@ -103,40 +103,42 @@ async function finishReviewed(value: Fixture): Promise<unknown> {
 }
 
 describe('tender-analysis staged submission runtime', () => {
-  it('builds T1/T2 from successful tenders only and resolves a unique quote to exact lines', async () => {
+  it('builds T1/T2 from successful tenders and resolves a semantic hint to exact chunk text and lines', async () => {
     const value = await fixture()
     expect(value.runtime.locators.map(locator => ({ ref: locator.file_ref, name: locator.name }))).toEqual([
       { ref: 'T1', name: 'main-tender.md' },
       { ref: 'T2', name: 'second-tender.md' },
     ])
     const locator = value.runtime.locators[0]!
-    const resolved = await resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source(REQUIREMENT_QUOTE))
+    const resolved = await resolveTenderSourceHint(value.workspace, value.runtime.locators, source('统一认证与审计日志', 'chunk_0002'))
     const raw = await readFile(locator.chunks.get('chunk_0002')!.absolutePath, 'utf8')
     const start = raw.indexOf(REQUIREMENT_QUOTE)
     const expectedLine = raw.slice(0, start).split('\n').length
     expect(resolved).toEqual({
-      file_id: locator.file_id,
-      chunk: locator.chunks.get('chunk_0002')!.artifactPath,
-      line_start: expectedLine,
-      line_end: expectedLine,
+      quote: REQUIREMENT_QUOTE,
+      source_ref: {
+        file_id: locator.file_id,
+        chunk: locator.chunks.get('chunk_0002')!.artifactPath,
+        line_start: expectedLine,
+        line_end: expectedLine,
+      },
     })
-    const multiline = `${REQUIREMENT_QUOTE}\n\n${COMPLIANCE_QUOTE}`
-    await expect(resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source(multiline, 'chunk_0002')))
-      .resolves.toMatchObject({ line_start: expectedLine, line_end: expectedLine + 2 })
     value.runtime.dispose()
   })
 
-  it('rejects unknown file refs, wrong chunks, missing quotes, and ambiguous quotes immediately', async () => {
+  it('rejects unknown file refs, wrong chunks, weak hints, and ambiguous semantic locations immediately', async () => {
     const value = await fixture()
-    await expect(resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0001', 'T9')))
+    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0001', 'T9')))
       .rejects.toThrow('未知 tender 引用')
     expect(value.runtime.locators[1]?.chunks.has('chunk_0004')).toBe(true)
-    await expect(resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0004')))
+    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0004')))
       .rejects.toThrow('不属于 T1')
-    await expect(resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source('并不存在的原文', 'chunk_0001')))
-      .rejects.toThrow('正文中不存在')
-    await expect(resolveTenderQuoteSourceRef(value.workspace, value.runtime.locators, source('重复短语', 'chunk_0003')))
-      .rejects.toThrow('出现多次')
+    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('无关的虚构语义位置', 'chunk_0001')))
+      .rejects.toThrow('无法在 T1/chunk_0001 正文中定位')
+    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('main tender md', 'chunk_0001')))
+      .rejects.toThrow('无法在 T1/chunk_0001 正文中定位')
+    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('重复短语', 'chunk_0003')))
+      .rejects.toThrow('定位不唯一')
     value.runtime.dispose()
   })
 
@@ -146,11 +148,11 @@ describe('tender-analysis staged submission runtime', () => {
     await value.call('submit_project_fact', args)
     await value.call('submit_project_fact', args)
     await value.call('submit_requirement', {
-      category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: REQUIREMENT_QUOTE,
+      category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     const result = await finishReviewed(value)
@@ -176,56 +178,58 @@ describe('tender-analysis staged submission runtime', () => {
   it('assigns stable REQ IDs, replaces by runtime ref, and rejects model-owned fields', async () => {
     const value = await fixture()
     const first = await value.call('submit_requirement', {
-      category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '初始归纳', mandatory: true,
+      category: '功能要求', normalized_requirement: '初始归纳', mandatory: true,
       sources: [source(REQUIREMENT_QUOTE)],
     }) as { requirement_ref: string }
     await value.call('submit_requirement', {
-      replace_ref: first.requirement_ref, category: '功能要求', raw_text: REQUIREMENT_QUOTE,
+      replace_ref: first.requirement_ref, category: '功能要求',
       normalized_requirement: '修正后的归纳', mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await expect(value.call('submit_requirement', {
       id: 'REQ-CUSTOM', category: '功能要求', raw_text: REQUIREMENT_QUOTE,
       normalized_requirement: '非法', mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })).rejects.toThrow()
+    await expect(value.call('submit_requirement', {
+      category: '功能要求', normalized_requirement: '非法', mandatory: true,
+      sources: [{ file_ref: 'T1', chunk: 'chunk_0002', quote: REQUIREMENT_QUOTE }],
+    })).rejects.toThrow()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await finishReviewed(value)
     const artifact = parseTenderRequirementsArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
-    expect(artifact.requirements).toEqual([expect.objectContaining({ id: 'REQ-001', normalized_requirement: '修正后的归纳' })])
+    expect(artifact.requirements).toEqual([expect.objectContaining({
+      id: 'REQ-001', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '修正后的归纳',
+    })])
     expect(artifact.requirements[0]?.source_refs[0]).not.toHaveProperty('file_ref')
     value.runtime.dispose()
   })
 
-  it('keeps original scoring groups, drops nested details, and deduplicates identical groups structurally', async () => {
+  it('keeps original scoring groups, fixes parent to null, and deduplicates identical groups structurally', async () => {
     const value = await fixture()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
-      category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: REQUIREMENT_QUOTE,
+      category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await expect(value.call('submit_scoring_item', {
-      parent_ref: 'S99', group: '技术方案', title: '未知父项', raw_text: SCORING_QUOTE,
+      parent_ref: 'S1', group: '技术方案', title: '内部细则',
       criterion: '非法', score: null, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
-    })).rejects.toThrow('未知 Scoring 引用')
-    const parent = await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+    })).rejects.toThrow()
+    await value.call('submit_scoring_item', {
+      group: '技术方案', title: '总体技术方案',
       criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
-    }) as { scoring_ref: string }
-    await value.call('submit_scoring_item', {
-      parent_ref: parent.scoring_ref, group: '技术方案', title: '完整性', raw_text: SCORING_QUOTE,
-      criterion: '按完整性评分', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
-      must_answer: true, sources: [source('# 技术评分', 'chunk_0003'), source(SCORING_QUOTE)],
+      must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '另一独立评分区块的规则。', score: 5, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
     })
@@ -233,41 +237,43 @@ describe('tender-analysis staged submission runtime', () => {
     const artifact = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8')))
     expect(artifact.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score }))).toEqual([
       { id: 'SC-001', parent: null, score: 10 },
-      { id: 'SC-004', parent: null, score: 5 },
+      { id: 'SC-003', parent: null, score: 5 },
     ])
     expect(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8')))
-      .toEqual({ schema_version: 1, selected_scoring_ids: ['SC-001', 'SC-004'] })
+      .toEqual({ schema_version: 1, selected_scoring_ids: ['SC-001', 'SC-003'] })
     await expect(readFile(join(value.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(artifact.scoring_items[0]?.source_refs).toHaveLength(2)
+    expect(artifact.scoring_items[0]).toMatchObject({ raw_text: SCORING_QUOTE, source_refs: [expect.any(Object)] })
     value.runtime.dispose()
   })
 
   it('assigns stable COM IDs on replace and rejects an invalid severity at the tool boundary', async () => {
     const value = await fixture()
     const first = await value.call('submit_compliance_item', {
-      type: '强制要求', raw_text: COMPLIANCE_QUOTE, normalized_rule: '初始规则', severity: 'mandatory',
+      type: '强制要求', normalized_rule: '初始规则', severity: 'mandatory',
       sources: [source(COMPLIANCE_QUOTE)],
     }) as { compliance_ref: string }
     await value.call('submit_compliance_item', {
-      replace_ref: first.compliance_ref, type: '强制要求', raw_text: COMPLIANCE_QUOTE,
+      replace_ref: first.compliance_ref, type: '强制要求',
       normalized_rule: '技术方案必须提供数据安全措施。', severity: 'fatal', sources: [source(COMPLIANCE_QUOTE)],
     })
     await expect(value.call('submit_compliance_item', {
-      type: '强制要求', raw_text: COMPLIANCE_QUOTE, normalized_rule: '非法', severity: 'critical',
+      type: '强制要求', normalized_rule: '非法', severity: 'critical',
       sources: [source(COMPLIANCE_QUOTE)],
     })).rejects.toThrow()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
-      category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: REQUIREMENT_QUOTE,
+      category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await finishReviewed(value)
     const artifact = parseTenderComplianceArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/compliance.json'), 'utf8')))
-    expect(artifact.compliance_items).toEqual([expect.objectContaining({ id: 'COM-001', severity: 'fatal' })])
+    expect(artifact.compliance_items).toEqual([expect.objectContaining({
+      id: 'COM-001', raw_text: COMPLIANCE_QUOTE, severity: 'fatal',
+    })])
     value.runtime.dispose()
   })
 
@@ -282,16 +288,16 @@ describe('tender-analysis staged submission runtime', () => {
     const secondQuote = secondQuoteMatch[0]
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
-      category: '功能要求', raw_text: `${REQUIREMENT_QUOTE}${secondQuote}`,
-      normalized_requirement: '系统支持审计并保持稳定运行。', mandatory: true,
+      category: '功能要求', normalized_requirement: '系统支持审计并保持稳定运行。', mandatory: true,
       sources: [source(REQUIREMENT_QUOTE), source(secondQuote, chunkId, 'T2')],
     })
     await value.call('submit_scoring_item', {
-      parent_ref: null, group: '技术方案', title: '总体技术方案', raw_text: SCORING_QUOTE,
+      group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await finishReviewed(value)
     const artifact = parseTenderRequirementsArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
+    expect(artifact.requirements[0]?.raw_text).toBe(`${REQUIREMENT_QUOTE}\n${secondQuote}`)
     expect(artifact.requirements[0]?.source_refs).toHaveLength(2)
     expect(new Set(artifact.requirements[0]?.source_refs.map(ref => ref.file_id))).toEqual(
       new Set(value.runtime.locators.map(locator => locator.file_id)),
@@ -328,9 +334,9 @@ describe('tender-analysis staged submission runtime', () => {
     await expect(value.call('finish_tender_analysis', {})).rejects.toThrow('当前初始分析已结束')
     for (const [name, args] of [
       ['submit_project_fact', { field: 'project_name', value: '不应写入', sources: [source(PROJECT_QUOTE)] }],
-      ['submit_requirement', { category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '不应写入', mandatory: true, sources: [source(REQUIREMENT_QUOTE)] }],
-      ['submit_scoring_item', { parent_ref: null, group: '技术方案', title: '不应写入', raw_text: SCORING_QUOTE, criterion: '不应写入', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)] }],
-      ['submit_compliance_item', { type: '强制要求', raw_text: COMPLIANCE_QUOTE, normalized_rule: '不应写入', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] }],
+      ['submit_requirement', { category: '功能要求', normalized_requirement: '不应写入', mandatory: true, sources: [source(REQUIREMENT_QUOTE)] }],
+      ['submit_scoring_item', { group: '技术方案', title: '不应写入', criterion: '不应写入', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)] }],
+      ['submit_compliance_item', { type: '强制要求', normalized_rule: '不应写入', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] }],
     ] as const) await expect(value.call(name, args)).rejects.toThrow('当前初始分析已结束')
     expect(value.runtime.revision).toBe(initialRevision)
 
@@ -339,7 +345,7 @@ describe('tender-analysis staged submission runtime', () => {
     expect(snapshot.scoring).toEqual([expect.objectContaining({ scoring_ref: 'S1', title: '总体技术方案' })])
     value.runtime.beginReview()
     const corrected = await value.call('submit_scoring_item', {
-      replace_ref: 'S1', parent_ref: null, group: '技术方案', title: '总体技术方案（复核修正）', raw_text: SCORING_QUOTE,
+      replace_ref: 'S1', group: '技术方案', title: '总体技术方案（复核修正）',
       criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
     }) as { revision: number }

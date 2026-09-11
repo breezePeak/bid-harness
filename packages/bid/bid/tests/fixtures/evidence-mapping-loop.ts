@@ -14,7 +14,8 @@ import {
   executeOutlineGeneration, validateOutlineGeneration,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
-  parseTenderScoringArtifact, EVIDENCE_MAPPING_SCHEMA_VERSION, webEvidenceContentSha256, webEvidenceSourceId,
+  parseTenderScoringArtifact, parseTenderScoringSelection, EVIDENCE_MAPPING_SCHEMA_VERSION,
+  webEvidenceContentSha256, webEvidenceSourceId,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -189,30 +190,26 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   }
   const chunk = index.chunks[0]?.id
   if (chunk === undefined) throw new Error('S2 integration chunk missing')
-  const source = (quote: string) => ({ file_ref: 'T1', chunk, quote })
+  const source = (semantic_hint: string) => ({ file_ref: 'T1', chunk, semantic_hint })
   const sessionId = SessionId('s2-real-loop')
   const parentScript = [
     toolCall('submit-project', 'submit_project_fact', {
       field: 'project_name', value: '智慧审计平台建设项目', sources: [source('智慧审计平台建设项目')],
     }),
     toolCall('submit-requirement', 'submit_requirement', {
-      category: '功能要求', raw_text: '系统必须支持统一身份认证和审计日志。',
-      normalized_requirement: '系统必须支持统一身份认证和审计日志。', mandatory: true,
+      category: '功能要求', normalized_requirement: '系统必须支持统一身份认证和审计日志。', mandatory: true,
       sources: [source('系统必须支持统一身份认证和审计日志。')],
     }),
     toolCall('submit-scoring', 'submit_scoring_item', {
-      parent_ref: null, group: '技术评分', title: '总体技术方案',
-      raw_text: '技术评分：总体技术方案完整合理得 10 分。', criterion: '总体技术方案完整合理得 10 分。',
+      group: '技术评分', title: '总体技术方案', criterion: '总体技术方案完整合理得 10 分。',
       score: 10, score_range: null, must_answer: true,
       sources: [source('技术评分：总体技术方案完整合理得 10 分。')],
     }),
     toolCall('submit-compliance', 'submit_compliance_item', {
-      type: '强制要求', raw_text: '技术方案必须提供数据安全措施。',
-      normalized_rule: '技术方案必须提供数据安全措施。', severity: 'mandatory',
+      type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。', severity: 'mandatory',
       sources: [source('技术方案必须提供数据安全措施。')],
     }),
     toolCall('finish-analysis', 'finish_tender_analysis', {}),
-    finalText('S2 staged submission ready for mandatory review.'),
     toolCall('finish-analysis-review', 'finish_tender_analysis', { review_revision: 4 }),
     finalText('S2 staged submission reviewed and completed.'),
   ]
@@ -221,13 +218,20 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 0 })
   const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
-  const [project, requirements, scoring, selection, compliance] = await Promise.all([
+  if (!validation.ok) {
+    const results = agent.session.events.filter(event => event.type === 'tool/result').map(event => event.data.message.content)
+    throw new Error(`S2 integration validation failed: ${JSON.stringify({ validation, results })}`)
+  }
+  const [project, requirements, scoring, compliance] = await Promise.all([
     readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8').then(JSON.parse).then(parseTenderProjectArtifact),
     readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse).then(parseTenderRequirementsArtifact),
     readFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
-    readFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8').then(JSON.parse),
     readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
   ])
+  const selection = parseTenderScoringSelection(
+    JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8')),
+    scoring,
+  )
   return {
     calls: agent.session.events.flatMap(event => event.type === 'tool/call' ? [event.data.name] : []),
     validation,
@@ -370,14 +374,14 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('search-local', 'search_sources', { scope_ref: 'F1', keywords: ['实施流程'] }),
     toolCall('read-chunk', 'read_source', { source_ref: 'M1:chunk_0001' }),
     ...(repair ? [
-      toolCall('lock-before-research-ready', 'lock_branch_outline', { comparison: '尚未提交研究充分性判断。' }),
+      toolCall('lock-before-research-ready', 'lock_section_outline', { comparison: '尚未提交研究充分性判断。' }),
     ] : []),
-    toolCall('research-not-ready', 'submit_branch_research_assessment', researchAssessment(false, true)),
+    toolCall('research-not-ready', 'submit_section_research_assessment', researchAssessment(false, true)),
     toolCall('search-research-gap', 'search_sources', { scope_ref: 'ALL', keywords: ['权限', '审计'] }),
-    toolCall('research-ready', 'submit_branch_research_assessment', researchAssessment(true, false)),
+    toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
     ...(repair ? [
-      toolCall('lock-without-comparison', 'lock_branch_outline', {}),
-      toolCall('reject-invalid-outline-edit', 'apply_branch_outline_edit', {
+      toolCall('lock-without-comparison', 'lock_section_outline', {}),
+      toolCall('reject-invalid-outline-edit', 'apply_section_outline_edit', {
         operation: {
           type: 'add_section', parent_id: 'SEC-SECURITY', order: 1, writable: false,
           title: '未完成的结构节点', purpose: '组织后续安全任务。', summary: '汇总后续安全任务。',
@@ -388,7 +392,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
         },
       }),
     ] : []),
-    toolCall('lock-initial-outline', 'lock_branch_outline', {
+    toolCall('lock-initial-outline', 'lock_section_outline', {
       comparison: '用户原框架包含访问控制与安全审计、资产盘点及其子项；当前招标范围为访问控制与安全审计。输入旧标按身份治理与安全运维组织，本分支对应其中的访问控制与安全审计，保留已聚焦的候选叶子，不引入其他主题。',
     }),
     toolCall('submit-invalid-usage', 'submit_section_mapping', {

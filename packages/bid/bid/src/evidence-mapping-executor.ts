@@ -15,7 +15,7 @@ import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnap
 import { evidenceChunkId } from './document-chunk.ts'
 import { mappingCorpusToolGuard, resolveMappingCorpusLocations, type MappingCorpusLocation } from './evidence-mapping-corpus.ts'
 import { createMappingSourceTools, mappingMaterialRef, mappingSourceCatalog } from './evidence-mapping-source-tools.ts'
-import { buildWritableSectionWorklist, sectionEvidenceContext, outlineSectionScope } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, changedWritableSectionIds, sectionEvidenceContext, outlineSectionScope } from './section-evidence-context.ts'
 import {
   EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
   EVIDENCE_MAPPING_SCHEMA_VERSION,
@@ -36,7 +36,6 @@ import {
 } from './evidence-mapping-artifacts.ts'
 import {
   OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
-  outlineArtifactSchema,
   parseOutlineArtifact,
   parseOutlineQualityReport,
   type OutlineArtifact,
@@ -86,46 +85,32 @@ const QUALITY_PATH = 'outline/quality-report.json'
 const MAPPING_AGENT_TOOLS = ['web_search', 'web_fetch'] as const
 const SOURCE_TOOLS = ['read_source', 'search_sources'] as const
 const INITIAL_MAPPING_TOOLS = [
-  'submit_branch_research_assessment', 'apply_branch_outline_edit', 'lock_branch_outline', 'submit_section_mapping',
+  'submit_section_research_assessment', 'apply_section_outline_edit', 'lock_section_outline', 'submit_section_mapping',
   'update_section_task', 'add_mapping_suggestion', 'finish_mapping_task',
 ] as const
 const REMAP_MAPPING_TOOLS = ['submit_section_mapping', 'update_section_task', 'finish_mapping_task'] as const
 const FINAL_CHECK_TOOLS = ['replace_section_mapping', 'update_section_task', 'submit_branch_summary', 'list_review_items', 'review_items', 'finish_final_check'] as const
-const MAX_BRANCH_NEW_SECTIONS = 100
+const MAX_TASK_NEW_SECTIONS = 100
 
 /**
- * 按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属叶子合为一批。
+ * 为每个已确认可写叶子创建独立研究任务。
  * @param outline - 初步确认目录。
- * @returns 按目录顺序生成的执行批次，每个可写 Section 恰好属于一个 Task。
+ * @returns 按目录顺序生成的任务，每个可写 Section 恰好属于一个 Task。
  */
 export function buildEvidenceMappingPlan(outline: OutlineArtifact): EvidenceMappingPlan {
-  const sections = buildWritableSectionWorklist(outline)
-  const byId = new Map(outline.sections.map(section => [section.id, section]))
-  const roots = outline.sections.filter(section => section.parent_id === null)
-  const root = roots.length === 1 ? roots[0] : undefined
-  const container = root !== undefined && !root.writable ? root.id : undefined
-  const groups = new Map<string, EvidenceMappingTask>()
-  for (const section of sections) {
-    let branch = section
-    while (branch.parent_id !== null && branch.parent_id !== container) {
-      const parent = byId.get(branch.parent_id)
-      if (parent === undefined) throw new Error(`evidence-mapping-section-missing:${branch.parent_id}`)
-      branch = parent
-    }
-    if (container !== undefined && branch.writable && branch.parent_id === container) {
-      const parent = byId.get(container)
-      if (parent === undefined) throw new Error(`evidence-mapping-section-missing:${container}`)
-      branch = parent
-    }
-    let task = groups.get(branch.id)
-    if (task === undefined) {
-      task = { task_id: `MAP-INIT-${branch.id}`, phase: 'initial', section_ids: [], title: branch.title,
-        heading_path: sectionEvidenceContext(outline, branch).heading_path }
-      groups.set(branch.id, task)
-    }
-    task.section_ids.push(section.id)
+  return {
+    schema_version: EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
+    tasks: buildWritableSectionWorklist(outline).map(section => ({
+      task_id: `MAP-INIT-${section.id}`,
+      task_kind: 'section_mapping',
+      generation: 0,
+      phase: 'initial',
+      section_ids: [section.id],
+      outline_edit_scope_id: section.id,
+      title: section.title,
+      heading_path: sectionEvidenceContext(outline, section).heading_path,
+    })),
   }
-  return { schema_version: EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION, tasks: [...groups.values()] }
 }
 
 /** Default Host limit for simultaneous S4 Mapping Subagents. */
@@ -250,7 +235,7 @@ interface MappingSubmission {
   result: EvidenceMappingPartialResult
   outlineOperations?: OutlineEditOperation[]
   refinementConclusion?: string
-  researchAssessment?: BranchResearchAssessment
+  researchAssessment?: SectionResearchAssessment
   taskOperations: SectionTaskChange[]
   outlineOperationBases: Array<z.infer<typeof outlineOperationBasisSchema>>
   reviewRecords: ReviewItem[]
@@ -265,7 +250,7 @@ const taskBasisSchema = z.object({
 const outlineOperationBasisSchema = taskBasisSchema.extend({
   finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
 }).strict()
-const branchResearchAssessmentFields = {
+const sectionResearchAssessmentFields = {
   sufficient_for_outline_decision: z.boolean(),
   diagnostics: z.object({
     tender_and_response_points: z.string().trim().min(1),
@@ -283,7 +268,7 @@ const branchResearchAssessmentFields = {
     reason: z.string().trim().min(1),
   }).strict(),
 } as const
-function addBranchResearchAssessmentIssues(
+function addSectionResearchAssessmentIssues(
   assessment: {
     sufficient_for_outline_decision: boolean
     unresolved_gaps: Array<{ affects_outline_decision: boolean }>
@@ -299,18 +284,18 @@ function addBranchResearchAssessmentIssues(
     context.addIssue({ code: 'custom', path: ['unresolved_gaps', index, 'affects_outline_decision'], message: '影响目录决策的缺口未解决时不能声明研究充分' })
   }
 }
-const branchResearchAssessmentInputSchema = z.object({
-  ...branchResearchAssessmentFields,
+const sectionResearchAssessmentInputSchema = z.object({
+  ...sectionResearchAssessmentFields,
   key_findings: z.array(z.string().trim().min(1)).min(1),
-}).strict().superRefine(addBranchResearchAssessmentIssues)
-const branchResearchAssessmentSchema = z.object({
-  ...branchResearchAssessmentFields,
+}).strict().superRefine(addSectionResearchAssessmentIssues)
+const sectionResearchAssessmentSchema = z.object({
+  ...sectionResearchAssessmentFields,
   key_findings: z.array(z.object({
     finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
     finding: z.string().trim().min(1),
   }).strict()).min(1),
-}).strict().superRefine(addBranchResearchAssessmentIssues)
-type BranchResearchAssessment = z.infer<typeof branchResearchAssessmentSchema>
+}).strict().superRefine(addSectionResearchAssessmentIssues)
+type SectionResearchAssessment = z.infer<typeof sectionResearchAssessmentSchema>
 const sectionTaskOperationSchema = z.object({
   section_id: z.string().min(1),
   basis: taskBasisSchema,
@@ -347,31 +332,32 @@ const reviewRecordSchema = z.object({
   material_index: z.number().int().nonnegative().optional(), value: z.unknown(),
   conclusion: z.object({ decision: z.enum(['keep', 'block']), reason: z.string().min(1) }).strict().optional(),
 }).strict()
+const taskResearchCandidatesSchema = z.object({
+  local_material_refs: z.array(z.string().regex(/^M\d+:chunk_\d{4}$/u)),
+  web_source_ids: z.array(z.string().regex(/^WEB-[a-f0-9]{16}$/u)),
+}).strict()
+type TaskResearchCandidates = z.infer<typeof taskResearchCandidatesSchema>
 const evidenceMappingCheckpointSchema = z.object({
-  schema_version: z.literal(7),
+  schema_version: z.literal(8),
   tasks: z.array(z.object({
     task_id: z.string().min(1), completed: z.boolean(), result: evidenceMappingPartialResultSchema,
     outline_operations: z.array(outlineEditOperationSchema).optional(),
     refinement_conclusion: z.string().trim().min(1).optional(),
-    research_assessment: branchResearchAssessmentSchema.optional(),
-    repair_base_outline: outlineArtifactSchema.optional(),
+    research_assessment: sectionResearchAssessmentSchema.optional(),
+    research_candidates: taskResearchCandidatesSchema,
     task_operations: z.array(taskChangeSchema),
     outline_operation_bases: z.array(outlineOperationBasisSchema),
     review_records: z.array(reviewRecordSchema),
     review_invalidated: z.number().int().nonnegative(),
   }).strict().superRefine((entry, context) => {
     if (entry.outline_operations !== undefined && entry.refinement_conclusion === undefined) {
-      context.addIssue({ code: 'custom', path: ['refinement_conclusion'], message: 'branch refinement requires a saved conclusion' })
+      context.addIssue({ code: 'custom', path: ['refinement_conclusion'], message: 'outline refinement requires a saved conclusion' })
     }
     if ((entry.outline_operations?.length ?? 0) !== entry.outline_operation_bases.length) {
       context.addIssue({ code: 'custom', path: ['outline_operation_bases'], message: 'every outline operation requires one research finding basis' })
     }
-    if ((entry.task_id.startsWith('MAP-INIT-') || entry.task_id.startsWith('MAP-REPAIR-'))
-      && entry.research_assessment?.sufficient_for_outline_decision !== true) {
-      context.addIssue({ code: 'custom', path: ['research_assessment'], message: 'branch refinement requires a sufficient research assessment' })
-    }
-    if (entry.task_id.startsWith('MAP-REPAIR-') && entry.repair_base_outline === undefined) {
-      context.addIssue({ code: 'custom', path: ['repair_base_outline'], message: 'structure repair requires its candidate base' })
+    if (entry.outline_operations !== undefined && entry.research_assessment?.sufficient_for_outline_decision !== true) {
+      context.addIssue({ code: 'custom', path: ['research_assessment'], message: 'outline refinement requires a sufficient research assessment' })
     }
   })),
 }).strict()
@@ -385,7 +371,7 @@ interface MappingSubmissionState {
   acceptedOperations: OutlineEditOperation[]
   outlineOperationBases: Array<z.infer<typeof outlineOperationBasisSchema>>
   researchReady: boolean
-  researchAssessment: BranchResearchAssessment | undefined
+  researchAssessment: SectionResearchAssessment | undefined
   structuralRefinementApplied: boolean
   locked: boolean
   mappings: Map<string, PartialSectionMapping>
@@ -437,7 +423,7 @@ function sectionMappingSubmissionSchema(
     summary: { type: 'string', description: '说明支持本章哪项任务、可采用哪些内容以及展开限度；此说明将进入正式 Evidence Map。' },
   })
   return closedObject({
-    section_id: { type: 'string', description: '必须来自 lock_branch_outline 或当前 Final Check 目录。' },
+    section_id: { type: 'string', description: '必须来自 lock_section_outline 或当前 Final Check 目录。' },
     local_materials: { type: 'array', items: localMaterial },
     web_materials: { type: 'array', items: closedObject({
       url: { type: 'string' },
@@ -453,25 +439,24 @@ function submissionViolations(error: ZodError): string[] {
 }
 
 function mappingTaskSections(outline: OutlineArtifact, task: EvidenceMappingTask): OutlineArtifact['sections'] {
-  if (!taskOwnsBranchRefinement(task)) {
-    const selected = new Set(task.section_ids)
-    return buildWritableSectionWorklist(outline).filter(section => selected.has(section.id))
-  }
-  const editable = taskEditableSectionIds(outline, task)
-  const newPrefix = branchNewIdPrefix(task)
-  return buildWritableSectionWorklist(outline).filter(section => editable.has(section.id) || section.id.startsWith(newPrefix))
+  const selected = new Set(task.section_ids)
+  return buildWritableSectionWorklist(outline).filter(section => selected.has(section.id))
 }
 
-function mappingBranchSections(outline: OutlineArtifact, task: EvidenceMappingTask): Array<{
+function mappingTaskWritingSections(outline: OutlineArtifact, task: EvidenceMappingTask): OutlineArtifact['sections'] {
+  if (!taskOwnsOutlineRefinement(task)) return mappingTaskSections(outline, task)
+  const editable = taskEditableSectionIds(outline, task)
+  return buildWritableSectionWorklist(outline).filter(section => editable.has(section.id))
+}
+
+function mappingTaskOutlineSections(outline: OutlineArtifact, task: EvidenceMappingTask): Array<{
   section_id: string
   parent_id: string | null
   title: string
   writable: boolean
 }> {
   const editable = taskEditableSectionIds(outline, task)
-  const branchRoot = mappingBranchId(task)
-  const newPrefix = branchNewIdPrefix(task)
-  return outline.sections.filter(section => editable.has(section.id) || section.id === branchRoot || section.id.startsWith(newPrefix))
+  return outline.sections.filter(section => editable.has(section.id))
     .map(section => ({ section_id: section.id, parent_id: section.parent_id, title: section.title, writable: section.writable }))
 }
 
@@ -492,10 +477,10 @@ function currentSectionMapping(state: MappingSubmissionState, task: EvidenceMapp
 }
 
 function applySectionTaskOperation(state: MappingSubmissionState, task: EvidenceMappingTask, raw: unknown): SectionTaskChange {
-  if (taskOwnsBranchRefinement(task)) assertResearchReady(state)
-  else if (!state.locked) throw new ToolArgsError(['section_id: 必须先调用 lock_branch_outline。'])
+  if (taskOwnsOutlineRefinement(task)) assertResearchReady(state)
+  else if (!state.locked) throw new ToolArgsError(['section_id: 必须先调用 lock_section_outline。'])
   const operation = sectionTaskOperationSchema.parse(raw)
-  if (!mappingTaskSections(state.stagedOutline, task).some(section => section.id === operation.section_id)) {
+  if (!mappingTaskWritingSections(state.stagedOutline, task).some(section => section.id === operation.section_id)) {
     throw new ToolArgsError([`section_id: ${operation.section_id} 不属于当前任务。`])
   }
   if (operation.basis.kind === 'tender_requirement' && operation.basis.requirement_ids.length === 0) {
@@ -528,9 +513,9 @@ function applySectionTaskOperation(state: MappingSubmissionState, task: Evidence
 
 function assertResearchReady(
   state: MappingSubmissionState,
-): asserts state is MappingSubmissionState & { researchAssessment: BranchResearchAssessment } {
+): asserts state is MappingSubmissionState & { researchAssessment: SectionResearchAssessment } {
   if (!state.researchReady || state.researchAssessment?.sufficient_for_outline_decision !== true) {
-    throw new ToolArgsError(['research_assessment: 必须先提交 sufficient_for_outline_decision=true 的分支研究充分性判断。'])
+    throw new ToolArgsError(['research_assessment: 必须先提交 sufficient_for_outline_decision=true 的当前 Section 研究充分性判断。'])
   }
 }
 
@@ -644,7 +629,7 @@ function refreshReviewItems(state: MappingSubmissionState, task: EvidenceMapping
     }
   }
   for (const section of affectedSummarySections(state.stagedOutline, task)) {
-    const children = branchSectionIds(state.stagedOutline, section.id)
+    const children = sectionSubtreeIds(state.stagedOutline, section.id)
     const context = state.stagedOutline.sections.filter(item => children.has(item.id)).map(item => ({
       id: item.id, parent_id: item.parent_id, title: item.title, purpose: item.purpose,
       task: item.writable ? (() => {
@@ -708,7 +693,7 @@ function mappingSubmissionSnapshot(state: MappingSubmissionState, task: Evidence
     reviewInvalidated: state.reviewInvalidated,
     ...(state.researchAssessment === undefined ? {} : { researchAssessment: structuredClone(state.researchAssessment) }),
     ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
-    ...(taskOwnsBranchRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
+    ...(taskOwnsOutlineRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
   }
 }
 
@@ -814,10 +799,9 @@ async function validateCompletedMappingState(
       issues.push({ code: 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE', message: `章节 ${mapping.section_id} 缺少展开维度或写作要求。`, path: 'writing_brief.writing_notes' })
     }
   }
-  const candidate = taskOwnsBranchRefinement(task)
-    ? applyBranchOutlineOperations(inputs.outline, task, state.acceptedOperations)
-    : state.stagedOutline
-  const researched = applyResearchBriefs(candidate, [result], inputs.responsePoints)
+  const researched = taskOwnsOutlineRefinement(task)
+    ? state.stagedOutline
+    : applyResearchBriefs(state.stagedOutline, [result], inputs.responsePoints)
   const customerTextContext = {
     outline: researched,
     requirements: inputs.requirements,
@@ -837,7 +821,7 @@ async function validateCompletedMappingState(
   }
   validateOutlineSharedStructure(researched.sections, issues)
   validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
-  if (taskOwnsBranchRefinement(task)) await validateOutlineFrameworkRefs(workspace, researched, issues)
+  if (taskOwnsOutlineRefinement(task)) await validateOutlineFrameworkRefs(workspace, researched, issues)
   return issues
 }
 
@@ -876,14 +860,14 @@ function attachMappingSubmissionRuntime(
     }
   }
   for (const definition of createMappingSourceTools(locations, snapshots)) register(definition)
-  if (taskOwnsBranchRefinement(task)) register({
-    name: 'submit_branch_research_assessment',
-    description: '提交当前分支的多维研究充分性判断；Host 为 key_findings 返回稳定 finding_ref，但不修改目录。结论不足时继续研究并可重新提交，只有充分结论才开放目录和 Writing Brief 操作。',
-    parameters: z.toJSONSchema(branchResearchAssessmentInputSchema, { target: 'draft-7' }), output,
+  if (taskOwnsOutlineRefinement(task)) register({
+    name: 'submit_section_research_assessment',
+    description: '提交当前 Section 的多维研究充分性判断；Host 为 key_findings 返回稳定 finding_ref，但不修改目录。结论不足时继续研究并可重新提交，只有充分结论才开放当前子树和 Writing Brief 操作。',
+    parameters: z.toJSONSchema(sectionResearchAssessmentInputSchema, { target: 'draft-7' }), output,
     execute(raw: unknown): Promise<unknown> {
-      if (state.locked) throw new ToolArgsError(['research_assessment: 当前业务分支已经锁定。'])
-      const submitted = branchResearchAssessmentInputSchema.parse(raw)
-      const assessment = branchResearchAssessmentSchema.parse({
+      if (state.locked) throw new ToolArgsError(['research_assessment: 当前 Section 子树已经锁定。'])
+      const submitted = sectionResearchAssessmentInputSchema.parse(raw)
+      const assessment = sectionResearchAssessmentSchema.parse({
         ...submitted,
         key_findings: submitted.key_findings.map(finding => ({ finding_ref: researchFindingRef(finding), finding })),
       })
@@ -924,15 +908,15 @@ function attachMappingSubmissionRuntime(
     },
   })
 
-  if (taskOwnsBranchRefinement(task)) {
+  if (taskOwnsOutlineRefinement(task)) {
     const editSchema = closedObject({ operation: z.toJSONSchema(outlineEditOperationSchema, { target: 'draft-7' }) as JsonSchemaNode,
       basis: z.toJSONSchema(outlineOperationBasisSchema, { target: 'draft-7' }) as JsonSchemaNode })
     register({
-      name: 'apply_branch_outline_edit', description: '按当前 Research Assessment 的 finding_ref 对业务分支应用一个目录操作；adequate 只允许 update_section，refinement_needed 的有效结构调整完成后才可锁定。Host 分配并返回新增 Section ID。',
+      name: 'apply_section_outline_edit', description: '按当前 Research Assessment 的 finding_ref 修改当前 Section 自身或其新生成的后代；adequate 只允许 update_section，refinement_needed 的有效结构调整完成后才可锁定。Host 分配并返回新增 Section ID。',
       parameters: editSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
-        if (state.locked) throw new ToolArgsError(['operation: 当前业务分支已经锁定。'])
+        if (state.locked) throw new ToolArgsError(['operation: 当前 Section 子树已经锁定。'])
         const violations = validateJsonSchemaValue(editSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
         const basis = outlineOperationBasisSchema.parse(record(args)?.basis)
@@ -951,12 +935,12 @@ function attachMappingSubmissionRuntime(
         }
         const beforeOutline = state.stagedOutline
         const before = new Set(beforeOutline.sections.map(section => section.id))
-        const candidate = applyBranchOutlineOperations(beforeOutline, task, [operation])
+        const candidate = applyTaskOutlineOperations(beforeOutline, task, [operation])
         const created = candidate.sections.filter(section => !before.has(section.id)).map(section => section.id)
         const issues: StageValidationIssue[] = []
         validateOutlineSharedStructure(candidate.sections, issues)
         if (issues.length > 0) throw new ToolArgsError(issues.map(issue => `${issue.code} ${issue.message}`))
-        const branchSections = mappingBranchSections(candidate, task)
+        const scopedSections = mappingTaskOutlineSections(candidate, task)
         const writableSectionIds = mappingTaskSections(candidate, task).map(section => section.id)
         invalidateChangedSectionDrafts(state, beforeOutline, candidate)
         state.stagedOutline = candidate
@@ -968,7 +952,7 @@ function attachMappingSubmissionRuntime(
         return Promise.resolve({
           applied: true,
           created_section_ids: created,
-          branch_sections: branchSections,
+          scoped_sections: scopedSections,
           writable_section_ids: writableSectionIds,
         })
       },
@@ -978,7 +962,7 @@ function attachMappingSubmissionRuntime(
       description: '保存本轮粒度结论：列出研究识别的重要子主题及其独立成节、留在章内或排除的具体理由，并简述资料是否足以支持该判断。',
     } })
     register({
-      name: 'lock_branch_outline', description: '提交目录结构对照结论；refinement_needed 必须先完成有效结构调整，共享目录结构有效时才锁定当前分支。',
+      name: 'lock_section_outline', description: '提交当前 Section 子树的结构对照结论；refinement_needed 必须先完成有效结构调整，共享目录结构有效时才锁定。',
       parameters: lockSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
@@ -998,18 +982,20 @@ function attachMappingSubmissionRuntime(
           state.lastIncompleteIssues = issues
           return Promise.resolve({
             locked: false, issues: toolIssues(issues),
-            branch_sections: mappingBranchSections(state.stagedOutline, task),
+            scoped_sections: mappingTaskOutlineSections(state.stagedOutline, task),
           })
         }
         state.refinementConclusion = comparison.trim()
         state.locked = true
         state.lastIncompleteIssues = []
-        return Promise.resolve({ locked: true, writable_sections: mappingTaskSections(state.stagedOutline, task).map(section => ({
+        return Promise.resolve({ locked: true, mapping_sections: mappingTaskSections(state.stagedOutline, task).map(section => ({
           section_id: section.id, title: section.title, parent_id: section.parent_id,
           purpose: section.purpose, must_answer: section.must_answer,
           requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
           scoring_response_point_ids: section.scoring_response_point_ids ?? [],
-        })) })
+        })), queued_leaf_sections: mappingTaskWritingSections(state.stagedOutline, task)
+          .filter(section => !task.section_ids.includes(section.id))
+          .map(section => ({ section_id: section.id, title: section.title, parent_id: section.parent_id })) })
       },
     })
     register({
@@ -1032,7 +1018,7 @@ function attachMappingSubmissionRuntime(
       : '只提交或覆盖一个章节的材料与用途说明；不得夹带 Writing Brief、展开维度、覆盖关联或缺口结论。',
     parameters: schema as unknown as Record<string, unknown>, output,
     async execute(args: unknown): Promise<unknown> {
-      if (!state.locked) throw new ToolArgsError(['section_id: 必须先调用 lock_branch_outline。'])
+      if (!state.locked) throw new ToolArgsError(['section_id: 必须先调用 lock_section_outline。'])
       const mapping = await parseSectionMappingSubmission(args, schema, workspace, locations, task, state, snapshots())
       state.mappings.set(mapping.section_id, { ...mapping,
         local_materials: uniqueMaterials(mapping.local_materials), web_materials: uniqueWebMaterials(mapping.web_materials) })
@@ -1173,7 +1159,7 @@ function attachMappingSubmissionRuntime(
           .map(section => section.id)
         : []
       if (!state.locked || missing.length > 0 || missingSummaries.length > 0) {
-        const issues = state.locked ? [] : [{ code: 'EVIDENCE_MAPPING_BRANCH_NOT_LOCKED', message: '必须先锁定当前业务分支目录。' }]
+        const issues = state.locked ? [] : [{ code: 'EVIDENCE_MAPPING_SECTION_NOT_LOCKED', message: '必须先锁定当前 Section 子树。' }]
         state.lastIncompleteIssues = [
           ...issues,
           ...missing.map(sectionId => ({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING', message: `Section mapping 缺少已分配 ID ${sectionId}。` })),
@@ -1215,7 +1201,7 @@ function attachMappingSubmissionRuntime(
         reviewInvalidated: state.reviewInvalidated,
         ...(state.researchAssessment === undefined ? {} : { researchAssessment: structuredClone(state.researchAssessment) }),
         ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
-        ...(taskOwnsBranchRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
+        ...(taskOwnsOutlineRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
       }
       await persistProgress(submission, true)
       staged.set(exec, {
@@ -1263,9 +1249,31 @@ interface CompletedMappingTask {
   result: EvidenceMappingPartialResult
   outlineOperations?: OutlineEditOperation[]
   refinementConclusion?: string
-  researchAssessment?: BranchResearchAssessment
+  researchAssessment?: SectionResearchAssessment
+  taskOperations: SectionTaskChange[]
+  researchCandidates: TaskResearchCandidates
   snapshots: WebEvidenceSnapshot[]
   fetchedSnapshots: WebEvidenceSnapshot[]
+}
+
+function buildTaskResearchCandidates(
+  captured: Iterable<CapturedWebResult>,
+  snapshots: readonly WebEvidenceSnapshot[],
+): TaskResearchCandidates {
+  const local = new Set<string>()
+  for (const { exec, result } of captured) {
+    if (exec.name !== 'read_source' || result.isError) continue
+    const materials = record(result.value)?.materials
+    if (!Array.isArray(materials)) continue
+    for (const material of materials) {
+      const ref = record(material)?.material_ref
+      if (typeof ref === 'string' && /^M\d+:chunk_\d{4}$/u.test(ref)) local.add(ref)
+    }
+  }
+  return taskResearchCandidatesSchema.parse({
+    local_material_refs: [...local],
+    web_source_ids: uniqueStrings(snapshots.map(snapshot => snapshot.source.source_id)),
+  })
 }
 
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
@@ -1359,6 +1367,7 @@ function subagentTaskContext(value: unknown): unknown {
  * @param task - Section-based task assigned to this Child.
  * @param inputs - current outline and related tender-analysis records.
  * @param locations - Host 预检的绝对 Corpus 路径。
+ * @param promptTask - Final Check 中经未完成复核项缩减后的可见任务范围。
  * @returns model-visible Child assignment.
  */
 export function renderEvidenceMappingSubagentTask(
@@ -1367,13 +1376,9 @@ export function renderEvidenceMappingSubagentTask(
   locations: readonly MappingCorpusLocation[],
   promptTask: EvidenceMappingTask = task,
 ): string {
-  const sections = promptTask.section_ids.map((id) => {
-    const section = inputs.outline.sections.find(item => item.id === id)
-    if (section === undefined) throw new Error('evidence-mapping-section-missing:' + id)
-    return section
-  })
-  const summaryContext = new Set((promptTask.summary_section_ids ?? []).flatMap(id => [...branchSectionIds(inputs.outline, id)]))
-  const contextSections = [...sections, ...inputs.outline.sections.filter(section => summaryContext.has(section.id))]
+  const summaryContext = new Set((promptTask.summary_section_ids ?? []).flatMap(id => [...sectionSubtreeIds(inputs.outline, id)]))
+  const currentScope = scopedSectionIds(inputs.outline, promptTask)
+  const contextSections = inputs.outline.sections.filter(section => currentScope.has(section.id) || summaryContext.has(section.id))
   const requirementIds = new Set(contextSections.flatMap(section => section.requirement_ids))
   const scoringIds = new Set(contextSections.flatMap(section => section.scoring_ids))
   const responsePointIds = new Set(contextSections.flatMap(section => section.scoring_response_point_ids ?? []))
@@ -1382,18 +1387,19 @@ export function renderEvidenceMappingSubagentTask(
   const scoring = inputs.scoring.scoring_items.filter(item => scoringIds.has(item.id))
   const responsePoints = inputs.responsePoints.points.filter(item => responsePointIds.has(item.id))
   const compliance = inputs.compliance.compliance_items.filter(item => complianceIds.has(item.id))
-  const currentScope = scopedSectionIds(inputs.outline, promptTask)
-  const currentBranch = inputs.outline.sections.filter(section => currentScope.has(section.id))
+  const currentSectionScope = inputs.outline.sections.filter(section => currentScope.has(section.id))
     .map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }))
   const phaseTools = task.phase === 'final_check'
     ? FINAL_CHECK_TOOLS
-    : taskOwnsBranchRefinement(task) ? INITIAL_MAPPING_TOOLS : REMAP_MAPPING_TOOLS
+    : taskOwnsOutlineRefinement(task) ? INITIAL_MAPPING_TOOLS : REMAP_MAPPING_TOOLS
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
-    `Mapping Task：${JSON.stringify({ task_id: task.task_id, phase: task.phase, section_ids: task.section_ids, title: task.title, heading_path: task.heading_path })}`,
-    `current_branch：${JSON.stringify(currentBranch)}`,
+    `Mapping Task：${JSON.stringify({ task_id: task.task_id, task_kind: task.task_kind, generation: task.generation,
+      phase: task.phase, section_ids: task.section_ids, outline_edit_scope_id: task.outline_edit_scope_id,
+      title: task.title, heading_path: task.heading_path })}`,
+    `current_section_scope：${JSON.stringify(currentSectionScope)}`,
     `global_outline_index：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, title, purpose, writable }) => ({ id, parent_id, title, purpose, writable })))}`,
-    ...(taskOwnsBranchRefinement(task) ? [
+    ...(taskOwnsOutlineRefinement(task) ? [
       `用户原始目录框架：${JSON.stringify(inputs.frameworks.map(({ name, headings }) => ({ name, headings: headings.map(({ title, level, order }) => ({ title, level, order })) })))}`,
       `参考旧标书完整目录：${JSON.stringify(locations.flatMap((location, index) => location.role === 'reference_bid' ? [{
         file_ref: `F${index + 1}`, name: location.name,
@@ -1401,10 +1407,10 @@ export function renderEvidenceMappingSubagentTask(
       }] : []))}`,
       ...(task.review_issues?.length ? [
         `目录复核要求局部修复的问题：${JSON.stringify(task.review_issues)}`,
-        '这是原业务分支的受控修复轮次。复用已有研究上下文和候选资料，只处理列出的具体结构问题；重新锁定并提交最终可写章节，未影响分支不在当前范围。',
+        '这是当前 Section 子树的受控修复轮次。复用已有研究上下文和候选资料，只处理列出的具体结构问题；未影响的兄弟 Section 不在当前范围。',
       ] : []),
       '先理解 S3 已确认章节职责并列出影响写作深度和结构判断的研究问题，再阅读本地资料，按需检索 Web。以当前招标要求和用户原始框架为约束，旧标目录用于结构参照；不得机械照抄任意目录树，也不得把旧项目事实带入本项目。',
-      '研究后调用 submit_branch_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断。Host 为 key_findings 返回稳定 finding_ref。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定分支或调用 update_section_task。',
+      '研究后调用 submit_section_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断。Host 为 key_findings 返回稳定 finding_ref。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定当前子树或调用 update_section_task。',
       'Research Ready 不按网页、资料或工具调用数量判断。招标信息本身足够时允许零联网；客观不可获得的信息只有在边界已确认且不影响当前层级结构判断时才可保留为 unresolved_gaps 并进入 Ready，禁止补写不存在的依据。',
       'Research Ready 后再判断当前叶子是否包含职责、目标、方法、输入输出或验证方式明显不同且值得在 S5 独立论证的主题，并检查与兄弟章节是否重复。独立主题必须通过目录操作落实，不得长期只塞入 writing_dimensions、must_answer 或 writing_notes；同一技术过程的连续步骤留在章内，不能把每个维度机械变成子目录。',
       '目录深化遵循研究结论和输入文件的主题，不预设标题、固定层级或节点数量。outline_capacity=adequate 时不得执行 add、split、merge、move、delete；确需改变结构时先重新评估为 refinement_needed。refinement_needed 必须完成有效结构调整后才能锁定。update_section 只修正现有节点，不算结构调整。',
@@ -1425,13 +1431,13 @@ export function renderEvidenceMappingSubagentTask(
     '同一材料可以用于多个章节，但每章必须分别判断用途并写入 summary。候选池中的用途属于标明的 section_id，不能复制为其他章节的通用用途。真实来源、引用合法和记录齐全都不代表语义正确；不得按标题同名或关键词判断材料是否适用。',
     'web_materials 只写实际 web_fetch 并读过正文的 URL，或任务提供的已登记候选正文；新检索 URL 必须成功 fetch。Host 会绑定本地 Web Snapshot 后持久化最终 Evidence Map。',
     '不得填写 task_id、完整 section_mappings 数组、真实 file_id、source_kind、Web source_id 或 snapshot_path。Host 根据当前任务、工具状态和成功 fetch 生成这些确定性字段。不得写文件，普通文字回复不作为结果。',
-    '研究充分性判断通过后，按研究结论完成必要的目录操作，再逐章形成可直接交给 S5 的 Writing Brief；结构变化后按工具返回的当前章节重新分配职责和覆盖，不把原章任务机械复制给每个子章。材料提交仍须目录锁定后另行完成。',
+    '研究充分性判断通过后，按研究结论完成必要的目录操作，再形成可直接交给 S5 的 Writing Brief。结构变化后为新叶子分别明确职责和覆盖，不把原章任务机械复制给每个子章。',
     '只通过 update_section_task 维护写作任务、writing_dimensions、职责内 missing_topics 和明确的 coverage_override；材料提交不能改变这些字段。每次调整说明招标要求、用户修改或章节职责依据。purpose 不能重复标题，must_answer 将评分转为具体写作任务；writing_dimensions 或 writing_notes 至少一项指导展开。找到相关资料不构成扩大本章任务的理由。',
-    ...(taskOwnsBranchRefinement(task) ? [
-      '每次调用 apply_branch_outline_edit 都在 basis.finding_ref 引用当前 Research Assessment 返回的一个 key finding；Host 只校验引用归属，不替你判断操作是否符合发现。不得编辑或移动其他分支。新增 ID 由程序返回，禁止自行预测 NEW-* ID。',
-      '目录判断完成后调用 lock_branch_outline(comparison)，保存 key findings 中重要主题独立成节、留在章内或排除的具体理由。之后以它返回的最新 writable_sections 为准，逐章调用 submit_section_mapping；只更新任务不会从 remaining_section_ids 消失。',
+    ...(taskOwnsOutlineRefinement(task) ? [
+      '每次调用 apply_section_outline_edit 都在 basis.finding_ref 引用当前 Research Assessment 返回的一个 key finding；Host 只校验引用归属，不替你判断操作是否符合发现。只能编辑 outline_edit_scope_id 标识的 Section 自身和新生成的后代，不得修改父节点或兄弟 Section。新增 ID 由程序返回。',
+      '目录判断完成后调用 lock_section_outline(comparison)，保存 key findings 中重要主题独立成节、留在章内或排除的具体理由。若 mapping_sections 仍包含当前叶子，再为它调用 submit_section_mapping；若拆分后 mapping_sections 为空，不得替 queued_leaf_sections 提交 Evidence，直接调用 finish_mapping_task，Host 会为新叶子创建独立任务。',
       '覆盖关联默认为当前目录关联；需要调整时，在 update_section_task 中明确提交三类 coverage_override，只能引用当前任务可见 ID。必须修正任务越界，不能写入 add_mapping_suggestion 后当作已解决。',
-      '所有章节完成后调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的章节，直到 completed=true。',
+      '当前任务的单个 mapping Section 完成，或者它已转为父节点后，调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的当前 Section。',
       '拆分可写叶子时，先用 update_section 为将成为结构节点的原章节补充 summary，再执行 split_section。',
     ] : task.phase === 'final_check' ? [
       '先对照 S3 已确认任务、S2 要求、用户修改、S4 调整前后差异及全书职责，判断任务调整本身是否合理，再判断材料能否支持该任务。不能先扩大任务，再以材料符合扩大后的任务为由通过。空材料章节和职责内缺口也必须复核。',
@@ -1617,49 +1623,52 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)]
 }
 
-function mappingBranchId(task: EvidenceMappingTask): string | undefined {
-  if (task.phase !== 'initial') return undefined
-  return task.task_id.replace(/^MAP-(?:INIT|REMAP|REPAIR)-/u, '')
+function taskOutlineEditRootId(task: EvidenceMappingTask): string | undefined {
+  return task.outline_edit_scope_id
 }
 
-function taskOwnsBranchRefinement(task: EvidenceMappingTask): boolean {
-  return task.phase === 'initial' && (task.task_id.startsWith('MAP-INIT-') || task.task_id.startsWith('MAP-REPAIR-'))
+function taskOwnsOutlineRefinement(task: EvidenceMappingTask): boolean {
+  return task.phase === 'initial' && taskOutlineEditRootId(task) !== undefined
 }
 
 function structureRepairTasks(
   outline: OutlineArtifact,
-  initialTasks: readonly EvidenceMappingTask[],
+  completedTasks: readonly CompletedMappingTask[],
   issues: readonly OutlineStructureIssue[],
+  generation: number,
 ): EvidenceMappingTask[] {
-  const byBranch = new Map<string, OutlineStructureIssue[]>()
+  const bySection = new Map<string, OutlineStructureIssue[]>()
   for (const issue of issues) {
-    const owner = initialTasks.find((task) => {
-      const root = mappingBranchId(task)
-      return root !== undefined && branchSectionIds(outline, root).has(issue.section_id)
-    })
-    if (owner === undefined) throw new BidStageExecutionError([{
+    if (!outline.sections.some(section => section.id === issue.section_id)) throw new BidStageExecutionError([{
       code: 'OUTLINE_REFINEMENT_REPAIR_SCOPE_INVALID',
-      message: `目录复核问题无法定位业务分支：${issue.section_id} / ${issue.reason}`,
+      message: `目录复核问题无法定位 Section：${issue.section_id} / ${issue.reason}`,
     }])
-    const root = mappingBranchId(owner)
-    if (root === undefined) throw new Error('evidence-mapping-repair-branch-missing')
-    byBranch.set(root, [...byBranch.get(root) ?? [], issue])
+    bySection.set(issue.section_id, [...bySection.get(issue.section_id) ?? [], issue])
   }
-  return [...byBranch].map(([root, branchIssues]) => {
-    const title = outline.sections.find(section => section.id === root)?.title ?? root
-    const branch = branchSectionIds(outline, root)
+  return [...bySection].map(([sectionId, sectionIssues]) => {
+    const section = outline.sections.find(item => item.id === sectionId)
+    if (section === undefined) throw new Error('evidence-mapping-repair-section-missing')
+    const scope = sectionSubtreeIds(outline, sectionId)
+    const candidateTasks = completedTasks.flatMap((item) => {
+      const root = taskOutlineEditRootId(item.task)
+      return root !== undefined && scope.has(root) ? [item.task.task_id] : []
+    })
     return {
-      task_id: `MAP-REPAIR-${root}`,
+      task_id: `MAP-REPAIR-${sectionId}`,
+      task_kind: 'outline_repair',
+      generation,
       phase: 'initial',
-      section_ids: buildWritableSectionWorklist(outline).filter(section => branch.has(section.id)).map(section => section.id),
-      title: `修复目录分支：${title}`,
-      heading_path: [outline.document_title, title],
-      review_issues: branchIssues.map(issue => `${issue.section_id}：${issue.reason}`),
+      section_ids: section.writable ? [sectionId] : [],
+      outline_edit_scope_id: sectionId,
+      research_candidate_task_ids: uniqueStrings(candidateTasks),
+      title: `修复目录范围：${section.title}`,
+      heading_path: sectionEvidenceContext(outline, section).heading_path,
+      review_issues: sectionIssues.map(issue => `${issue.section_id}：${issue.reason}`),
     }
   })
 }
 
-function branchSectionIds(outline: OutlineArtifact, rootId: string): Set<string> {
+function sectionSubtreeIds(outline: OutlineArtifact, rootId: string): Set<string> {
   const ids = new Set([rootId])
   for (let changed = true; changed;) {
     changed = false
@@ -1673,28 +1682,22 @@ function branchSectionIds(outline: OutlineArtifact, rootId: string): Set<string>
   return ids
 }
 
-function branchNewIdPrefix(task: EvidenceMappingTask): string {
-  return `NEW-${task.task_id.replaceAll(/[^A-Za-z0-9]+/gu, '-')}-`
+function taskNewSectionIdPrefix(task: EvidenceMappingTask): string {
+  return `SEC-S4-${createHash('sha256').update(task.task_id).digest('hex').slice(0, 8)}-`
 }
 
 function taskEditableSectionIds(outline: OutlineArtifact, task: EvidenceMappingTask): Set<string> {
-  const rootId = mappingBranchId(task)
-  const root = rootId === undefined ? undefined : outline.sections.find(section => section.id === rootId)
-  const editable = root === undefined || root.parent_id === null
-    ? new Set(task.section_ids)
-    : branchSectionIds(outline, root.id)
-  for (const section of outline.sections) if (section.id.startsWith(branchNewIdPrefix(task))) editable.add(section.id)
-  return editable
+  const rootId = taskOutlineEditRootId(task)
+  if (rootId === undefined) return new Set(task.section_ids)
+  return outline.sections.some(section => section.id === rootId) ? sectionSubtreeIds(outline, rootId) : new Set()
 }
 
-function applyBranchOutlineOperations(
+function applyTaskOutlineOperations(
   outline: OutlineArtifact,
   task: EvidenceMappingTask,
   operations: readonly OutlineEditOperation[],
 ): OutlineArtifact {
-  const branchRoot = mappingBranchId(task)
-  const protectedRoot = outline.sections.find(section => section.id === branchRoot)?.parent_id === null ? undefined : branchRoot
-  const prefix = branchNewIdPrefix(task)
+  const prefix = taskNewSectionIdPrefix(task)
   let allocated = outline.sections.reduce((maximum, section) => {
     const sequence = section.id.startsWith(prefix) ? Number(section.id.slice(prefix.length)) : 0
     return Number.isSafeInteger(sequence) ? Math.max(maximum, sequence) : maximum
@@ -1709,23 +1712,20 @@ function applyBranchOutlineOperations(
         if (!editable.has(id)) violations.push(`${field}: Section ${id} 不属于当前 Mapping Task。`)
       }
       if (operation.type === 'add_section') {
-        if (operation.parent_id === null) violations.push(`${path}.parent_id: 不允许在当前业务分支外新增顶层节点。`)
+        if (operation.parent_id === null) violations.push(`${path}.parent_id: 不允许在当前 Section 子树外新增顶层节点。`)
         else requireEditable(operation.parent_id, `${path}.parent_id`)
       } else if (operation.type === 'merge_sections') {
         for (const [itemIndex, id] of operation.section_ids.entries()) requireEditable(id, `${path}.section_ids.${itemIndex}`)
-        if (protectedRoot !== undefined && operation.section_ids.includes(protectedRoot)) violations.push(`${path}.section_ids: 不允许合并业务分支根。`)
       } else {
         requireEditable(operation.section_id, `${path}.section_id`)
-        if ((operation.type === 'delete_section' || operation.type === 'move_section' || operation.type === 'split_section')
-          && operation.section_id === protectedRoot) violations.push(`${path}.section_id: 不允许删除、移动或拆分业务分支根。`)
         if (operation.type === 'move_section') {
-          if (operation.parent_id === null) violations.push(`${path}.parent_id: 不允许把节点移出当前业务分支。`)
+          if (operation.parent_id === null) violations.push(`${path}.parent_id: 不允许把节点移出当前 Section 子树。`)
           else requireEditable(operation.parent_id, `${path}.parent_id`)
         }
       }
       if (violations.length > 0) throw new ToolArgsError(violations)
       candidate = parseOutlineArtifact(applyOutlineEdits(candidate, [operation], () => {
-        if (++allocated > MAX_BRANCH_NEW_SECTIONS) throw new ToolArgsError([`outline_operations: 单个分支最多新增 ${MAX_BRANCH_NEW_SECTIONS} 个章节。`])
+        if (++allocated > MAX_TASK_NEW_SECTIONS) throw new ToolArgsError([`outline_operations: 单个任务最多新增 ${MAX_TASK_NEW_SECTIONS} 个章节。`])
         return `${prefix}${String(allocated).padStart(3, '0')}`
       }))
     }
@@ -1737,72 +1737,123 @@ function applyBranchOutlineOperations(
   }
 }
 
-async function validateRefinedBranch(
+async function validateRefinedTask(
   workspace: BidWorkspace,
   inputs: EvidenceMappingInputs,
   task: EvidenceMappingTask,
   operations: readonly OutlineEditOperation[] | undefined,
+  taskOperations: readonly SectionTaskChange[],
   result?: EvidenceMappingPartialResult,
 ): Promise<{ issues: StageValidationIssue[]; writableIds: string[] }> {
   const issues: StageValidationIssue[] = []
   if (operations === undefined) {
-    issues.push({ code: 'EVIDENCE_MAPPING_REFINED_BRANCH_MISSING', message: `Mapping Task ${task.task_id} 未提交目录编辑操作。` })
+    issues.push({ code: 'EVIDENCE_MAPPING_REFINED_SCOPE_MISSING', message: `Mapping Task ${task.task_id} 未提交目录锁定结论。` })
     return { issues, writableIds: task.section_ids.slice() }
   }
   let candidate: OutlineArtifact
   try {
-    candidate = applyBranchOutlineOperations(inputs.outline, task, operations)
+    candidate = applyTaskOutlineOperations(inputs.outline, task, operations)
   } catch (error: unknown) {
     const messages = error instanceof ToolArgsError ? error.violations : [error instanceof Error ? error.message : String(error)]
-    issues.push(...messages.map(message => ({ code: 'EVIDENCE_MAPPING_REFINED_BRANCH_OPERATION_INVALID', message })))
+    issues.push(...messages.map(message => ({ code: 'EVIDENCE_MAPPING_REFINED_SCOPE_OPERATION_INVALID', message })))
     return { issues, writableIds: task.section_ids.slice() }
   }
-  const originalScope = taskEditableSectionIds(inputs.outline, task)
-  const newPrefix = branchNewIdPrefix(task)
-  const taskSections = candidate.sections.filter(section => originalScope.has(section.id) || section.id.startsWith(newPrefix))
   validateOutlineSharedStructure(candidate.sections, issues)
-  const researched = result === undefined ? candidate : applyResearchBriefs(candidate, [result], inputs.responsePoints)
+  const researched = applyResearchBriefs(candidate, [{
+    task_id: task.task_id,
+    section_mappings: [...taskOperations.map(change => change.after), ...result?.section_mappings ?? []],
+    refinement_suggestions: [],
+  }], inputs.responsePoints)
   validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
   await validateOutlineFrameworkRefs(workspace, researched, issues)
-  return { issues, writableIds: taskSections.filter(section => section.writable).map(section => section.id) }
+  return { issues, writableIds: mappingTaskSections(researched, task).map(section => section.id) }
 }
 
-function mergeRefinedBranches(
+function taskScopeSnapshot(outline: OutlineArtifact, task: EvidenceMappingTask): string {
+  const root = taskOutlineEditRootId(task)
+  if (root === undefined) return JSON.stringify([])
+  const scope = sectionSubtreeIds(outline, root)
+  return JSON.stringify(outline.sections.filter(section => scope.has(section.id)))
+}
+
+function mergeRefinedTasks(
   initial: OutlineArtifact,
   tasks: readonly CompletedMappingTask[],
+  responsePoints: EvidenceMappingInputs['responsePoints'],
 ): { outline: OutlineArtifact; tasks: CompletedMappingTask[] } {
   let outline = initial
   for (const item of tasks) {
     if (item.outlineOperations === undefined) continue
-    outline = applyBranchOutlineOperations(outline, item.task, item.outlineOperations)
+    if (taskScopeSnapshot(initial, item.task) !== taskScopeSnapshot(outline, item.task)) {
+      throw new BidStageExecutionError([{
+        code: 'EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE',
+        message: `Mapping Task ${item.task.task_id} 的 Section 子树在并发研究期间已变更。`,
+      }])
+    }
+    outline = applyTaskOutlineOperations(outline, item.task, item.outlineOperations)
+    outline = applyResearchBriefs(outline, [{
+      task_id: item.task.task_id,
+      section_mappings: item.taskOperations.map(change => change.after),
+      refinement_suggestions: [],
+    }], responsePoints)
   }
-  const existing = new Set(initial.sections.map(section => section.id))
-  let next = initial.sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
-  const replacements = new Map<string, string>()
-  for (const section of outline.sections) if (!existing.has(section.id) && !replacements.has(section.id)) {
-    replacements.set(section.id, `SEC-${String(++next).padStart(3, '0')}`)
+  return { outline, tasks: [...tasks] }
+}
+
+function dynamicLeafMappingTasks(
+  before: OutlineArtifact,
+  after: OutlineArtifact,
+  completed: readonly CompletedMappingTask[],
+  existingTaskIds: ReadonlySet<string>,
+): EvidenceMappingTask[] {
+  const changed = new Set(changedWritableSectionIds(before, after))
+  const created: EvidenceMappingTask[] = []
+  for (const item of completed) {
+    const rootId = taskOutlineEditRootId(item.task)
+    const root = rootId === undefined ? undefined : after.sections.find(section => section.id === rootId)
+    if (root === undefined || root.writable) continue
+    const scope = sectionSubtreeIds(after, root.id)
+    for (const section of buildWritableSectionWorklist(after)) {
+      if (!scope.has(section.id) || !changed.has(section.id)) continue
+      const baseId = `MAP-INIT-${section.id}`
+      const taskId = existingTaskIds.has(baseId) || created.some(task => task.task_id === baseId)
+        ? `MAP-REFINE-${createHash('sha256').update(`${item.task.task_id}\0${section.id}`).digest('hex').slice(0, 12)}`
+        : baseId
+      if (existingTaskIds.has(taskId) || created.some(task => task.task_id === taskId)) continue
+      created.push({
+        task_id: taskId,
+        task_kind: 'section_mapping',
+        generation: item.task.generation + 1,
+        phase: 'initial',
+        section_ids: [section.id],
+        outline_edit_scope_id: section.id,
+        research_candidate_task_ids: uniqueStrings([
+          ...item.task.research_candidate_task_ids ?? [], item.task.task_id,
+        ]),
+        title: section.title,
+        heading_path: sectionEvidenceContext(after, section).heading_path,
+      })
+    }
   }
-  const replaceId = (id: string): string => replacements.get(id) ?? id
-  const stableOutline = parseOutlineArtifact({
-    ...initial,
-    sections: outline.sections.map(section => ({
-      ...section,
-      id: replaceId(section.id),
-      parent_id: section.parent_id === null ? null : replaceId(section.parent_id),
-    })),
-  })
-  return {
-    outline: stableOutline,
-    tasks: tasks.map(item => ({
-      ...item,
-      task: { ...item.task, section_ids: item.result.section_mappings.map(mapping => replaceId(mapping.section_id)) },
-      result: {
-        ...item.result,
-        section_mappings: item.result.section_mappings.map(mapping => ({ ...mapping, section_id: replaceId(mapping.section_id) })),
-      },
-      ...(item.outlineOperations === undefined ? {} : { outlineOperations: item.outlineOperations }),
-    })),
+  return created
+}
+
+function currentCompletedTaskResults(
+  outline: OutlineArtifact,
+  tasks: readonly CompletedMappingTask[],
+): CompletedMappingTask[] {
+  const writable = new Set(buildWritableSectionWorklist(outline).map(section => section.id))
+  const owner = new Map<string, CompletedMappingTask>()
+  for (const item of tasks) for (const mapping of item.result.section_mappings) {
+    if (writable.has(mapping.section_id)) owner.set(mapping.section_id, item)
   }
+  return tasks.map(item => ({
+    ...item,
+    result: {
+      ...item.result,
+      section_mappings: item.result.section_mappings.filter(mapping => owner.get(mapping.section_id) === item),
+    },
+  }))
 }
 
 function localMaterialKey(material: LocalEvidenceMaterial): string {
@@ -1863,8 +1914,8 @@ function sectionCoverage(section: OutlineArtifact['sections'][number] | undefine
 }
 
 function scopedSectionIds(outline: OutlineArtifact, task: EvidenceMappingTask): Set<string> {
-  if (taskOwnsBranchRefinement(task)) {
-    return new Set(mappingBranchSections(outline, task).map(section => section.section_id))
+  if (taskOwnsOutlineRefinement(task)) {
+    return new Set(mappingTaskOutlineSections(outline, task).map(section => section.section_id))
   }
   const ids = new Set(task.section_ids)
   for (const section of affectedSummarySections(outline, task)) ids.add(section.id)
@@ -2045,7 +2096,7 @@ function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSc
     checked_scoring_response_point_ids: ids(inputs.responsePoints.points.map(item => item.id)),
     issues: stringArray('仅记录不阻断发布的业务层级、章节边界或覆盖建议；没有问题时返回空数组。'),
     blocking_issues: { type: 'array', items: closedObject({
-      section_id: stringChoice(inputs.outline.sections.map(section => section.id), '问题所在的当前章节；Host 据此定位业务分支。'),
+      section_id: stringChoice(inputs.outline.sections.map(section => section.id), '问题所在的当前章节；Host 据此定位 Section 子树。'),
       reason: { type: 'string', description: '具体结构问题及业务理由。' },
     }), description: '目录过粗、任务越界、扩展缺少依据或职责冲突等必须返回相关章节；不能以资料符合修改后任务为由放行。' },
   })
@@ -2069,10 +2120,10 @@ async function reviewRefinedOutline(
   await writeJson(candidatePath, inputs.outline)
   const review = [
     '当前阶段：evidence_mapping / Outline Review',
-    '目录结构和 Writing Brief 已由各分支研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
+    '目录结构和 Writing Brief 已由各 Section 任务研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
     '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理；不重新检索或重生成整本目录。',
     '分别检查评分和要求覆盖、同级职责、叶子内部粒度。尤其检查 Research Assessment 已确认具有独立写作价值的主题是否仍只藏在 writing_dimensions、是否存在没有 key findings 支持的新增章节，以及是否过度拆分或与兄弟章节职责冲突；是否构成结构问题由你结合业务语义判断，不能按维度条数、关键词或零新增判断。',
-    '通过结构化输出返回质量报告；issues 只记录非阻断建议。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回当前 section_id 与业务理由，Host 会只重开所属分支。不能把资料命中当作扩大章节任务的依据。',
+    '通过结构化输出返回质量报告；issues 只记录非阻断建议。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回当前 section_id 与业务理由，Host 会只重开所属 Section 子树。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
     `S3 已确认目录：${JSON.stringify(await readJson(workspace, 'outline/initial-confirmed-outline.json'))}`,
     `相关招标要求：${JSON.stringify(inputs.requirements)}`,
@@ -2085,10 +2136,10 @@ async function reviewRefinedOutline(
         ...mapping.web_materials.map(material => ({ usage: material.usage, summary: material.summary, supports: material.supports })),
       ],
     }))))}`,
-    `分支粒度结论：${JSON.stringify(researchResults.flatMap(item => item.refinementConclusion === undefined ? [] : [{
+    `Section 粒度结论：${JSON.stringify(researchResults.flatMap(item => item.refinementConclusion === undefined ? [] : [{
       task_id: item.task.task_id, section_ids: item.task.section_ids, conclusion: item.refinementConclusion,
     }]))}`,
-    `分支研究充分性结论：${JSON.stringify(researchResults.flatMap(item => item.researchAssessment === undefined ? [] : [{
+    `Section 研究充分性结论：${JSON.stringify(researchResults.flatMap(item => item.researchAssessment === undefined ? [] : [{
       task_id: item.task.task_id, section_ids: item.task.section_ids, assessment: item.researchAssessment,
     }]))}`,
   ].join('\n')
@@ -2239,20 +2290,26 @@ async function executeEvidenceMappingRun(
   const manifest = await workspace.readManifest()
   let plan = buildEvidenceMappingPlan(inputs.outline)
   const finalTask = (outline: OutlineArtifact, ids: readonly string[]): EvidenceMappingTask => ({
-    task_id: 'MAP-FINAL-CHECK', phase: 'final_check', section_ids: [...ids], title: '章节写作任务与资料闭环检查',
+    task_id: 'MAP-FINAL-CHECK', task_kind: 'final_check', generation: 0,
+    phase: 'final_check', section_ids: [...ids], title: '章节写作任务与资料闭环检查',
     ...(options.summarySectionIds === undefined ? {} : { summary_section_ids: [...options.summarySectionIds] }),
     heading_path: [outline.document_title],
   })
   if (finalCheck !== undefined) plan.tasks = [finalTask(inputs.outline, finalCheck.section_ids)]
   if (options.remap !== undefined) {
     const selected = outlineSectionScope(inputs.outline, options.remap.section_ids)
-    plan.tasks = plan.tasks.map(item => ({ ...item, task_id: item.task_id.replace('MAP-INIT-', 'MAP-REMAP-'), section_ids: item.section_ids.filter(id => selected.has(id)) }))
+    plan.tasks = plan.tasks.map(({ outline_edit_scope_id: _scope, research_candidate_task_ids: _candidateTasks, ...item }) => ({
+      ...item,
+      task_id: item.task_id.replace('MAP-INIT-', 'MAP-REMAP-'),
+      task_kind: 'section_remap' as const,
+      section_ids: item.section_ids.filter(id => selected.has(id)),
+    }))
       .filter(item => item.section_ids.length > 0)
     if (plan.tasks.length === 0) throw new Error('BID_SECTION_SCOPE_INVALID')
   }
   let previous: EvidenceMapArtifact | undefined
   let previousWeb: WebEvidenceSourcesArtifact | undefined
-  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 7, tasks: [] }
+  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 8, tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
   if (!localRun) {
@@ -2262,13 +2319,14 @@ async function executeEvidenceMappingRun(
       if (savedLog.failure !== undefined) {
         const savedPlan = parseEvidenceMappingPlan(await readJson(workspace, PLAN_PATH))
         const expectedInitial = plan.tasks.map(({ task_id, section_ids }) => ({ task_id, section_ids }))
-        const savedInitial = savedPlan.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).map(({ task_id, section_ids }) => ({ task_id, section_ids }))
+        const savedInitial = savedPlan.tasks.filter(item => item.task_kind === 'section_mapping' && item.generation === 0)
+          .map(({ task_id, section_ids }) => ({ task_id, section_ids }))
         if (JSON.stringify(savedInitial) !== JSON.stringify(expectedInitial)) throw new Error('evidence-mapping-resume-plan-mismatch')
         const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
         if (rawCheckpoint !== undefined) {
-          if (record(rawCheckpoint)?.schema_version !== 7) throw new BidStageExecutionError([{
+          if (record(rawCheckpoint)?.schema_version !== 8) throw new BidStageExecutionError([{
             code: 'EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED',
-            message: 'S4 检查点缺少分支研究 finding 引用或增量 Final Check 进度，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
+            message: 'S4 检查点缺少逐叶任务与研究候选信息，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
           }])
           checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
         }
@@ -2343,7 +2401,7 @@ async function executeEvidenceMappingRun(
     outlineOperations: readonly OutlineEditOperation[] | undefined,
     snapshots: readonly WebEvidenceSnapshot[],
     submission: MappingSubmission,
-    repairBaseOutline?: OutlineArtifact,
+    researchCandidates: TaskResearchCandidates = { local_material_refs: [], web_source_ids: [] },
     completed = true,
   ): Promise<void> => {
     criticalStateWrites = criticalStateWrites.then(async () => {
@@ -2362,12 +2420,12 @@ async function executeEvidenceMappingRun(
         outline_operation_bases: submission.outlineOperationBases,
         review_records: submission.reviewRecords,
         review_invalidated: submission.reviewInvalidated,
+        research_candidates: researchCandidates,
         ...(submission.researchAssessment === undefined ? {} : { research_assessment: submission.researchAssessment }),
         ...(submission.refinementConclusion === undefined ? {} : { refinement_conclusion: submission.refinementConclusion }),
-        ...(repairBaseOutline === undefined ? {} : { repair_base_outline: repairBaseOutline }),
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
       })
-      checkpoint = { schema_version: 7, tasks: plan.tasks.flatMap((item) => {
+      checkpoint = { schema_version: 8, tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }
@@ -2457,6 +2515,8 @@ async function executeEvidenceMappingRun(
         ...(saved.outline_operations === undefined ? {} : { outlineOperations: saved.outline_operations as OutlineEditOperation[] }),
         ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
         ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
+        taskOperations: structuredClone(saved.task_operations),
+        researchCandidates: structuredClone(saved.research_candidates),
         snapshots: availableSnapshots,
         fetchedSnapshots: [],
       }
@@ -2469,12 +2529,17 @@ async function executeEvidenceMappingRun(
       executionLog.observed_max_concurrency = Math.max(executionLog.observed_max_concurrency, activeTasks)
       await persistLog()
       const baselineMappings = new Map<string, PartialSectionMapping>()
-      if (mappingTask.phase === 'final_check' || options.remap !== undefined || mappingTask.task_id.startsWith('MAP-REPAIR-')) for (const sectionId of mappingTask.section_ids) {
+      const baselineSectionIds = taskOwnsOutlineRefinement(mappingTask)
+        ? mappingTaskWritingSections(runInputs.outline, mappingTask).map(section => section.id)
+        : mappingTask.section_ids
+      if (mappingTask.phase === 'final_check' || options.remap !== undefined || mappingTask.task_kind === 'outline_repair') for (const sectionId of baselineSectionIds) {
         const mapping = acceptedMappings.get(sectionId)
         if (mapping !== undefined) baselineMappings.set(sectionId, mapping)
       }
-      const assignedSections = mappingTask.section_ids.map(id => runInputs.outline.sections.find(section => section.id === id))
-        .filter((section): section is OutlineArtifact['sections'][number] => section !== undefined)
+      const assignedIds = taskOwnsOutlineRefinement(mappingTask)
+        ? taskEditableSectionIds(runInputs.outline, mappingTask)
+        : new Set(mappingTask.section_ids)
+      const assignedSections = runInputs.outline.sections.filter(section => assignedIds.has(section.id))
       const savedProgress = mappingTask.phase === 'final_check' ? checkpointTasks.get(mappingTask.task_id) : undefined
       const restoredResult = savedProgress?.result
       const restoredReviews = new Map((savedProgress?.review_records ?? []).map((item, index) => {
@@ -2507,10 +2572,10 @@ async function executeEvidenceMappingRun(
           everInstalled: false,
           stagedOutline: restoredOutline,
           acceptedOperations: [],
-          researchReady: !taskOwnsBranchRefinement(mappingTask),
+          researchReady: !taskOwnsOutlineRefinement(mappingTask),
           researchAssessment: undefined,
           structuralRefinementApplied: false,
-          locked: !taskOwnsBranchRefinement(mappingTask),
+          locked: !taskOwnsOutlineRefinement(mappingTask),
           mappings: new Map(restoredResult?.section_mappings.map(mapping => [mapping.section_id, mapping]) ?? []),
           submittedMappings: new Set(restoredResult?.section_mappings.map(mapping => mapping.section_id) ?? []),
           refinementConclusion: undefined,
@@ -2550,12 +2615,13 @@ async function executeEvidenceMappingRun(
         summary_section_ids: [...pendingSummaryIds],
       }
       const promptScope = scopedSectionIds(runInputs.outline, promptTask)
-      const currentBranch = runInputs.outline.sections.filter(section => promptScope.has(section.id))
-      const promptCoverage = new Set(currentBranch.flatMap(section => [...sectionCoverage(section)]))
+      const currentSectionScope = runInputs.outline.sections.filter(section => promptScope.has(section.id))
+      const promptCoverage = new Set(currentSectionScope.flatMap(section => [...sectionCoverage(section)]))
       const sharesTaskCoverage = (section: OutlineArtifact['sections'][number]): boolean => [...sectionCoverage(section)]
         .some(id => promptCoverage.has(id))
-      const branchBaseline = confirmedS3.sections.filter(section => promptScope.has(section.id) || sharesTaskCoverage(section))
-      const promptRelatedIds = new Set([...promptScope, ...branchBaseline.map(section => section.id)])
+      const sectionBaseline = confirmedS3.sections.filter(section => promptScope.has(section.id) || sharesTaskCoverage(section))
+      const promptRelatedIds = new Set([...promptScope, ...sectionBaseline.map(section => section.id)])
+      const inheritedCandidateTaskIds = new Set(mappingTask.research_candidate_task_ids ?? [])
       const scopedTaskOperations = [...checkpointTasks.values()].flatMap(saved => saved.task_operations)
         .filter(change => promptRelatedIds.has(change.operation.section_id))
         .map(change => ({
@@ -2564,22 +2630,35 @@ async function executeEvidenceMappingRun(
           after: sectionTaskSemanticState(change.after),
         }))
       const scopedOutlineOperations = [...checkpointTasks.values()].flatMap((saved) => {
-        if (!saved.result.section_mappings.some(mapping => promptScope.has(mapping.section_id))) return []
+        if (!inheritedCandidateTaskIds.has(saved.task_id)
+          && !saved.result.section_mappings.some(mapping => promptScope.has(mapping.section_id))) return []
         return (saved.outline_operations ?? []).map((operation, index) => ({ operation, basis: saved.outline_operation_bases[index] }))
       })
       const scopedResearchAssessments = [...checkpointTasks.values()].flatMap((saved) => {
         if (saved.research_assessment === undefined
-          || !saved.result.section_mappings.some(mapping => promptRelatedIds.has(mapping.section_id))) return []
+          || !inheritedCandidateTaskIds.has(saved.task_id)
+          && !saved.result.section_mappings.some(mapping => promptRelatedIds.has(mapping.section_id))) return []
         return [{ task_id: saved.task_id, assessment: saved.research_assessment }]
       })
       const scopedCandidates = scopedCandidateEvidenceRefs(
         candidateMappings, locations, runInputs.outline, confirmedS3, promptTask, availableSnapshots,
       )
+      const inheritedResearchCandidates = [...inheritedCandidateTaskIds].flatMap((taskId) => {
+        const candidates = checkpointTasks.get(taskId)?.research_candidates
+        return candidates === undefined ? [] : [candidates]
+      })
+      const researchCandidates = {
+        local_material_refs: uniqueStrings(inheritedResearchCandidates.flatMap(item => item.local_material_refs)),
+        web_material_refs: uniqueStrings(inheritedResearchCandidates.flatMap(item => item.web_source_ids)).flatMap((sourceId) => {
+          const snapshot = availableSnapshots.find(item => item.source.source_id === sourceId)
+          return snapshot === undefined ? [] : [{ url: snapshot.source.final_url, source_ref: `W:${sourceId}` }]
+        }),
+      }
       const summaryDependencies = affectedSummarySections(runInputs.outline, mappingTask)
         .filter(section => pendingSummaryIds.has(section.id))
         .map(section => ({
           section_id: section.id,
-          descendants: runInputs.outline.sections.filter(item => branchSectionIds(runInputs.outline, section.id).has(item.id))
+          descendants: runInputs.outline.sections.filter(item => sectionSubtreeIds(runInputs.outline, section.id).has(item.id))
             .map(item => ({ id: item.id, parent_id: item.parent_id, title: item.title, purpose: item.purpose,
               task: item.writable
                 ? sectionTaskSemanticState(currentSectionMapping(submissionRequest.state, mappingTask, item.id))
@@ -2593,7 +2672,7 @@ async function executeEvidenceMappingRun(
           ? [{ url: material.url, source_ref: `W:${snapshot.source.source_id}` }] : []
       }))
       const uniquePendingWebRefs = [...new Map(pendingWebRefs.map(item => [item.source_ref, item])).values()]
-      const currentBranchMapping = options.remap?.mode !== 'supplement' ? [] : mappingTaskSections(runInputs.outline, mappingTask).flatMap((section) => {
+      const currentSectionMappings = options.remap?.mode !== 'supplement' ? [] : mappingTaskSections(runInputs.outline, mappingTask).flatMap((section) => {
         const mapping = submissionRequest.state.baselineMappings.get(section.id)
         return mapping === undefined ? [] : [{
           ...mapping,
@@ -2607,7 +2686,7 @@ async function executeEvidenceMappingRun(
         }]
       })
       const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask),
-        `current_branch_baseline：${JSON.stringify(branchBaseline)}`,
+        `current_section_baseline：${JSON.stringify(sectionBaseline)}`,
         `scoped_diffs：${JSON.stringify({
           outline_changes: outlineTaskDifferences(confirmedS3, runInputs.outline)
             .filter(change => promptRelatedIds.has(change.section_id)),
@@ -2616,11 +2695,13 @@ async function executeEvidenceMappingRun(
           outline_operations: scopedOutlineOperations,
           request: options.remap?.reason ?? null,
         })}`,
-        ...(taskOwnsBranchRefinement(mappingTask) && scopedResearchAssessments.length > 0
-          ? [`prior_branch_research_assessments：${JSON.stringify(scopedResearchAssessments)}`]
+        ...(taskOwnsOutlineRefinement(mappingTask) && scopedResearchAssessments.length > 0
+          ? [`prior_section_research_assessments：${JSON.stringify(scopedResearchAssessments)}`]
           : []),
         `scoped_candidate_refs：${JSON.stringify(scopedCandidates)}`,
-        ...(currentBranchMapping.length === 0 ? [] : [`current_branch_mapping：${JSON.stringify(currentBranchMapping)}`]),
+        `research_candidates：${JSON.stringify(researchCandidates)}`,
+        '传入的 research_candidates 只是前置研究读过的候选。Candidate 不是 Evidence；必须结合当前 Section 职责、Requirement、Scoring 和 Response Point 重新读取并判断，Host 不会自动写入 local_materials 或 web_materials。',
+        ...(currentSectionMappings.length === 0 ? [] : [`current_section_mapping：${JSON.stringify(currentSectionMappings)}`]),
         ...(mappingTask.phase !== 'final_check' ? [] : [
           '当前任务是 Final Check，复核对象是最终准备发布的合并结果，包括保留的旧资料。先核对章节任务依据，再审材料用途；发现具体缺口时使用受控资料工具扩大范围，适合公开资料时可联网。',
           '指纹未变的已审项由 Host 复用，不再出现在待审输入中。只审查当前 pending 项；修正内容后审查新指纹。',
@@ -2631,19 +2712,19 @@ async function executeEvidenceMappingRun(
             .filter(section => !submissionRequest.state.branchSummaries.has(section.id)))}`,
           '父节点 summary 是可以直接用于标书正文的章节总述。根据父节点职责、最终修正的子章节任务和已确认项目信息，用一小段自然正文直接说明我方或本方案的总体思路、实施措施和预期成果，衔接后文，不规定字数、不逐条复述目录。采购要求只可在理解方案所必需时用一句话概括，不得成为总述主体；不得写成需求解读、内部目录解说，也不得描述模型任务、生成过程或系统状态。',
           '总述及其中的表格不得出现 Requirement、Scoring、Compliance、Response Point、Section 或 Acceptance Criterion 的系统内部编号；需求对应关系使用招标文件原有条款编号、需求名称或简要原文。',
-          '总述只在父节点层级概括，不展开子章节操作步骤，不引入其他分支实施细节，不新增未经确认的项目事实、企业能力或服务承诺。S5 尚未生成正文，不得声称已经总结或核验实际正文。子章节任务变化后，重新检查受影响的父节点总述。',
+          '总述只在父节点层级概括，不展开子章节操作步骤，不引入其他 Section 的实施细节，不新增未经确认的项目事实、企业能力或服务承诺。S5 尚未生成正文，不得声称已经总结或核验实际正文。子章节任务变化后，重新检查受影响的父节点总述。',
         ]), ...(options.remap === undefined ? [] : [
           `当前任务是局部 ${options.remap.mode} 资料映射，仅处理 Mapping Task.section_ids。`,
           `用户要求：${options.remap.reason ?? '重新研究选中章节的资料。'}`,
-          ...(options.remap.mode === 'supplement' ? ['已有资料通过 current_branch_mapping 和 scoped_candidate_refs 提供。'] : []),
+          ...(options.remap.mode === 'supplement' ? ['已有资料通过 current_section_mapping 和 scoped_candidate_refs 提供。'] : []),
         ])].join('\n')
       log.prompt_context_stats = {
         task_id: mappingTask.task_id,
-        scoped_section_count: currentBranch.length,
+        scoped_section_count: currentSectionScope.length,
         global_index_section_count: runInputs.outline.sections.length,
         candidate_material_count: scopedCandidates.reduce(
           (count, entry) => count + entry.local_material_refs.length + entry.web_material_refs.length,
-          0,
+          researchCandidates.local_material_refs.length + researchCandidates.web_material_refs.length,
         ),
         prompt_char_count: basePrompt.length,
       }
@@ -2699,13 +2780,14 @@ async function executeEvidenceMappingRun(
                   message: `Mapping Subagent 未成功调用 ${mappingTask.phase === 'final_check' ? 'finish_final_check' : 'finish_mapping_task'} 完成当前任务。`,
                 }])
               if (partial !== undefined) {
-                const branchValidation = taskOwnsBranchRefinement(mappingTask)
-                  ? await validateRefinedBranch(workspace, runInputs, mappingTask, outlineOperations, partial)
+                const scopeValidation = taskOwnsOutlineRefinement(mappingTask)
+                  ? await validateRefinedTask(workspace, runInputs, mappingTask, outlineOperations,
+                    submission?.taskOperations ?? [], partial)
                   : { issues: [], writableIds: mappingTask.section_ids }
-                issues.push(...branchValidation.issues)
-                const expectedMappingIds = branchValidation.writableIds
+                issues.push(...scopeValidation.issues)
+                const expectedMappingIds = scopeValidation.writableIds
                 issues.push(...await validatePartialResult(workspace, locations, mappingTask, partial, snapshots, expectedMappingIds))
-                if (!taskOwnsBranchRefinement(mappingTask)) {
+                if (!taskOwnsOutlineRefinement(mappingTask)) {
                   const researched = applyResearchBriefs(runInputs.outline, [partial], runInputs.responsePoints)
                   validateOutlineSharedCoverage(
                     researched, runInputs.requirements, runInputs.scoring, runInputs.compliance, runInputs.responsePoints, issues,
@@ -2726,7 +2808,7 @@ async function executeEvidenceMappingRun(
               })
               await persistLog()
               if (partial !== undefined && (accepted || attempt === maxMappingRepairs)) {
-                if (!accepted && taskOwnsBranchRefinement(mappingTask)) throw new BidStageExecutionError(issues)
+                if (!accepted && taskOwnsOutlineRefinement(mappingTask)) throw new BidStageExecutionError(issues)
                 if (!accepted && (mappingTask.phase === 'final_check' || options.remap !== undefined)) {
                   throw new BidStageExecutionError(issues)
                 }
@@ -2734,8 +2816,9 @@ async function executeEvidenceMappingRun(
                   partial = salvageMappingResult(partial, mappingTask, runInputs.outline)
                 }
                 if (submission === undefined) throw new Error('evidence-mapping-submission-missing')
+                const researchCandidates = buildTaskResearchCandidates(captured.values(), fetchedSnapshots)
                 await persistTaskCheckpoint(mappingTask.task_id, partial, outlineOperations, fetchedSnapshots, submission,
-                  mappingTask.task_id.startsWith('MAP-REPAIR-') ? runInputs.outline : undefined)
+                  researchCandidates)
                 candidateMappings = [...candidateMappings, ...partial.section_mappings]
                 if (mappingTask.phase === 'initial') {
                   for (const mapping of partial.section_mappings) acceptedMappings.set(mapping.section_id, mapping)
@@ -2748,6 +2831,8 @@ async function executeEvidenceMappingRun(
                   ...(outlineOperations === undefined ? {} : { outlineOperations }), snapshots, fetchedSnapshots,
                   ...(submission.refinementConclusion === undefined ? {} : { refinementConclusion: submission.refinementConclusion }),
                   ...(submission.researchAssessment === undefined ? {} : { researchAssessment: submission.researchAssessment }),
+                  taskOperations: structuredClone(submission.taskOperations),
+                  researchCandidates,
                 }
               }
               latestIssues = issues
@@ -2787,10 +2872,12 @@ async function executeEvidenceMappingRun(
         })
         await persistLog()
         if (signal.aborted) throw error
-        if (taskOwnsBranchRefinement(mappingTask) || mappingTask.phase === 'final_check' || options.remap !== undefined) throw error
+        if (taskOwnsOutlineRefinement(mappingTask) || mappingTask.phase === 'final_check' || options.remap !== undefined) throw error
         return {
           task: mappingTask,
           result: emptyMappingResult(mappingTask, runInputs.outline),
+          taskOperations: [],
+          researchCandidates: { local_material_refs: [], web_source_ids: [] },
           snapshots: [],
           fetchedSnapshots: [],
         }
@@ -2829,6 +2916,41 @@ async function executeEvidenceMappingRun(
       return value
     })
   }
+  const appendPlannedTasks = async (tasks: readonly EvidenceMappingTask[]): Promise<void> => {
+    if (tasks.length === 0) return
+    plan.tasks.push(...tasks)
+    executionLog.tasks.push(...tasks.map(item => ({
+      task_id: item.task_id,
+      phase: item.phase,
+      title: item.title,
+      status: 'pending' as const,
+      attempts: [],
+      final_child_session_id: null,
+    })))
+    await writeMappingState(agent, planPath, plan)
+    await persistLog()
+  }
+  const runTaskQueue = async (
+    seedTasks: readonly EvidenceMappingTask[],
+    runInputs: EvidenceMappingInputs,
+  ): Promise<{ outline: OutlineArtifact; tasks: CompletedMappingTask[] }> => {
+    const pending = [...seedTasks]
+    const completed: CompletedMappingTask[] = []
+    let outline = runInputs.outline
+    while (pending.length > 0) {
+      const generation = Math.min(...pending.map(task => task.generation))
+      const wave = pending.filter(task => task.generation === generation)
+      for (const task of wave) pending.splice(pending.indexOf(task), 1)
+      const before = outline
+      const results = await runBatch(wave, { ...runInputs, outline: before })
+      outline = mergeRefinedTasks(before, results, runInputs.responsePoints).outline
+      completed.push(...results)
+      const dynamic = dynamicLeafMappingTasks(before, outline, results, new Set(plan.tasks.map(task => task.task_id)))
+      await appendPlannedTasks(dynamic)
+      pending.push(...dynamic)
+    }
+    return { outline, tasks: completed }
+  }
   let finalOutline = inputs.outline
   let finalEvidence: EvidenceMapArtifact | undefined
   try {
@@ -2843,36 +2965,13 @@ async function executeEvidenceMappingRun(
           }
         }
       } else {
-        const initialTasks = plan.tasks.filter(item => options.remap !== undefined
-          ? item.phase === 'initial'
-          : item.task_id.startsWith('MAP-INIT-'))
-        const resumedRepairTasks = resuming ? plan.tasks.filter(item => item.task_id.startsWith('MAP-REPAIR-')) : []
-        const mergedBranches = resumedRepairTasks.length === 0
-          ? mergeRefinedBranches(inputs.outline, await runBatch(initialTasks, inputs))
-          : await (async () => {
-            const savedRepairBase = resumedRepairTasks.map(item => checkpointTasks.get(item.task_id)?.repair_base_outline).find(Boolean)
-            const repairBase = parseOutlineArtifact(savedRepairBase ?? await readJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH))
-            const repairedRoots = new Set(resumedRepairTasks.map(item => mappingBranchId(item)))
-            const retained = initialTasks.flatMap((item) => {
-              if (repairedRoots.has(mappingBranchId(item))) return []
-              const saved = checkpointTasks.get(item.task_id)
-              return saved === undefined ? [] : [{
-                task: item, result: saved.result,
-                ...(saved.outline_operations === undefined
-                  ? {}
-                  : { outlineOperations: saved.outline_operations as OutlineEditOperation[] }),
-                ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
-                ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
-                snapshots: availableSnapshots, fetchedSnapshots: [],
-              }]
-            })
-            const repaired = mergeRefinedBranches(repairBase, await runBatch(resumedRepairTasks, { ...inputs, outline: repairBase }))
-            return { outline: repaired.outline, tasks: [...retained, ...repaired.tasks] }
-          })()
-        let initialResults = mergedBranches.tasks
+        const initialTasks = plan.tasks.filter(item => item.phase === 'initial')
+        const resumedRepair = initialTasks.some(item => item.task_kind === 'outline_repair')
+        const executed = await runTaskQueue(initialTasks, inputs)
+        let initialResults = currentCompletedTaskResults(executed.outline, executed.tasks)
         let initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
         for (const mapping of initialMerged.section_mappings) acceptedMappings.set(mapping.section_id, mapping)
-        finalOutline = applyResearchBriefs(mergedBranches.outline, initialResults.map(item => item.result), inputs.responsePoints)
+        finalOutline = applyResearchBriefs(executed.outline, initialResults.map(item => item.result), inputs.responsePoints)
         let preliminary = buildEvidenceMap(initialMerged, initialResults, finalOutline)
         signal.throwIfAborted()
         availableSnapshots = [...availableSnapshots, ...preliminary.snapshots]
@@ -2900,26 +2999,18 @@ async function executeEvidenceMappingRun(
             agent, workspace, { ...inputs, outline: finalOutline }, initialResults, options.maxRepairAttempts, signal,
           )
           if (reviewedOutline.blockingIssues.length > 0) {
-            if (options.maxRepairAttempts < 1 || resumedRepairTasks.length > 0) {
+            if (options.maxRepairAttempts < 1 || resumedRepair) {
               throw new BidStageExecutionError(reviewedOutline.blockingIssues.map(issue => ({
                 code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED',
                 message: `${issue.section_id}：${issue.reason}`,
               })))
             }
-            const repairTasks = structureRepairTasks(finalOutline, initialTasks, reviewedOutline.blockingIssues)
-            plan.tasks.push(...repairTasks)
-            executionLog.tasks.push(...repairTasks.map(item => ({
-              task_id: item.task_id, phase: item.phase, title: item.title, status: 'pending' as const, attempts: [], final_child_session_id: null,
-            })))
+            const generation = Math.max(0, ...plan.tasks.filter(task => task.phase === 'initial').map(task => task.generation)) + 1
+            const repairTasks = structureRepairTasks(finalOutline, initialResults, reviewedOutline.blockingIssues, generation)
             await writeJson(join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH), finalOutline)
-            await writeMappingState(agent, planPath, plan)
-            await persistLog()
-            const repaired = mergeRefinedBranches(finalOutline, await runBatch(repairTasks, { ...inputs, outline: finalOutline }))
-            const repairedRoots = new Set(repairTasks.map(task => mappingBranchId(task)))
-            initialResults = [
-              ...initialResults.filter(item => !repairedRoots.has(mappingBranchId(item.task))),
-              ...repaired.tasks,
-            ]
+            await appendPlannedTasks(repairTasks)
+            const repaired = await runTaskQueue(repairTasks, { ...inputs, outline: finalOutline })
+            initialResults = currentCompletedTaskResults(repaired.outline, [...initialResults, ...repaired.tasks])
             finalOutline = applyResearchBriefs(repaired.outline, initialResults.map(item => item.result), inputs.responsePoints)
             initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
             acceptedMappings.clear()
@@ -3022,7 +3113,7 @@ export async function executeEvidenceMappingFinalCheck(
 }
 
 /**
- * 执行分支研究、一次目录深化和轻量闭环检查；结构化参数在模型回合内纠正，语义错误最多在同一 Child 修复一次。
+ * 执行逐 Section 研究、目录深化和轻量闭环检查；结构化参数在模型回合内纠正，语义错误最多在同一 Child 修复一次。
  * @param agent - 当前父 Agent。
  * @param workspace - 项目工作区。
  * @param task - S4 阶段任务。

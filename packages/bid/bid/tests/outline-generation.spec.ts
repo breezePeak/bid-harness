@@ -519,6 +519,11 @@ describe('outline-generation Blueprint Quality Review', () => {
     })
     await expect(executeOutlineGeneration(agent, workspace, task)).resolves.toEqual(artifacts)
     expect(followup).toHaveBeenCalledTimes(4)
+    const analysisPrompt = followup.mock.calls[0]![0].content[0]!.text
+    expect(analysisPrompt).toContain('本次合法 ID：["SCORE-SCHEDULE"]')
+    expect(analysisPrompt).not.toContain('"scoring_id":"SCORE-..."')
+    const semanticPrompt = followup.mock.calls[1]![0].content[0]!.text
+    expect(semanticPrompt).toContain('本次合法 scoring_id：["SCORE-SCHEDULE"]')
     for (const index of [2, 3]) {
       const prompt = followup.mock.calls[index]![0].content[0]!.text
       expect(prompt).toContain('analysis/scoring-response-points.json')

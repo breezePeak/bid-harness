@@ -4,22 +4,22 @@ Status: implemented
 
 ## Problem
 
-S2 的 Requirement、Scoring item 和 Compliance item 需要把冗长招标条款整理为可独立响应的内容。要求 `raw_text` 逐字存在于一个引用范围会拒绝不改变原意的提取、压缩、去冗余和原子化，并把确定性的来源合法性校验错误地扩展为文本推导判断。
+S2 的 Requirement、Scoring item 和 Compliance item 需要把冗长招标条款整理为可独立响应的内容。让模型同时生成语义结论和逐字 quote，会因标点、空白或轻微改写使真实来源被拒绝；让模型生成 `raw_text` 又把可由已定位原文确定的字段留在非确定性输出中。
 
 ## Decision
 
-S2 提交工具先根据模型提供的 `file_ref`、chunk ID 和唯一 quote 生成 `source_refs`：`file_id` 必须对应成功解析的 tender 文件，chunk 必须由该文件的索引拥有，行号由 Host 在真实 chunk 中计算，所有路径必须位于 Session Workspace 且通过链接路径检查。最终 Validator 重新检查这些确定性字段，但不比较 `raw_text` 与引用正文，也不引入相似度或额外模型判断。
+S2 提交工具根据模型提供的 `file_ref`、chunk ID 和 `semantic_hint` 生成原文 quote 与 `source_refs`：`file_id` 必须对应成功解析的 tender 文件，chunk 必须由该文件的索引拥有，所有路径必须位于 Session Workspace 且通过链接路径检查。Host 排除 HTML comment 元数据，规范化正文行和线索，以固定双字符组覆盖下限选择唯一最佳行，再从未规范化的 chunk 原文直接截取 quote、生成三类记录的 `raw_text` 并计算行号。线索不足或最佳行并列时拒绝当前条目；最终 Validator 重新检查真实文件、chunk、路径和行号。
 
-生成与 staged Repair 提示词允许 Agent 在引用原文含义内提取、压缩、去冗余和原子化 `raw_text`，同时禁止改变关键数字、单位、强制语义或新增要求。Agent 提交 quote 前读取真实 chunk；归纳分别写入 `normalized_requirement`、`normalized_rule` 或 `criterion`，评分响应点仍由 S3 生成。
+Agent 负责选择 tender 与 chunk、提供语义位置线索，并把归纳分别写入 `normalized_requirement`、`normalized_rule` 或 `criterion`；它不提交 quote、`raw_text`、真实 source/path 或行号。一个 source 定位一行正文，跨行或跨 chunk 内容使用多个 source；评分响应点仍由 S3 生成。
 
 ## Alternatives considered
 
-**继续要求逐字包含。** 放弃，因为该规则把合理的结构化提取当成错误，造成无法通过引用修复解决的重复失败。
+**继续要求模型提交逐字 quote。** 放弃，因为该规则把抄写差异当成来源错误，并要求模型反复修订本可由 Host 截取的字段。
 
-**引入文本相似度阈值。** 放弃，因为阈值不能可靠判断数字、单位和强制语义是否被改变，还会增加不透明的误判。
+**用相似度判断语义结论是否忠实。** 放弃，因为阈值不能可靠判断数字、单位和强制语义是否被改变。固定双字符组覆盖只用于模型已选 chunk 内的行定位，不替代全量语义复核。
 
 **增加一次 LLM 语义校验。** 放弃，因为它引入额外成本和非确定性，且不能替代真实文件、chunk、行号和路径的确定性校验。
 
 ## Consequences
 
-合理改写不会因字面差异被 Validator 拒绝，S2 仍保留可定位到真实招标文件范围的来源链。关键事实是否忠实由生成、自审和修复提示词约束；Validator 只对可确定证明的引用合法性负责，不声称验证语义忠实度。
+模型的标点、空白和轻微措辞差异不会污染最终 quote；三类 `raw_text` 均由真实 chunk 原文组成，S2 输出的 `source_refs` 结构以及 S3–S5 的读取方式不变。固定行级定位会拒绝线索过短、重合不足或并列的位置；关键事实是否忠实仍由生成与独立全量复核负责，Validator 不声称验证语义忠实度。

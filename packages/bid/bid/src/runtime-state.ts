@@ -90,11 +90,11 @@ const CONSTRAINTS: { readonly [K in BidStage]: readonly string[] } = {
     '不得使用 Web Search、grep 或生成章节正文。',
   ],
   evidence_mapping: [
-    'Host 按已确认初步目录的业务分支生成 Mapping Task，每批可含多个 Section，只处理技术标范围。',
-    '每个 Child 只接收当前批次的 Section 及其关联 Requirement、Scoring、Response Point、Compliance 和 corpus 定位。',
+    'Host 为已确认初步目录的每个可写叶子生成独立 Mapping Task，只处理技术标范围。',
+    '每个 Child 只研究当前 Section，并接收其关联 Requirement、Scoring、Response Point、Compliance 和 corpus 定位。',
     '优先搜索本地资料；是否补充 Web Research 由 Agent 按章节需要判断。',
     '资料缺失写入 missing_topics，不得因此删除招标要求或评分章节。',
-    '一轮映射后深化一次目录，再按 Section ID 对齐证据；新增章节保留材料缺口，拆分章节可继承原资料供 S5 筛选。',
+    '研究后只能深化当前 Section 子树；拆分产生的新叶子分别入队，前置研究结果只作为候选，不自动成为 Evidence。',
   ],
   chapter_writing: [
     'confirmed-outline.json 是唯一章节结构来源。',
