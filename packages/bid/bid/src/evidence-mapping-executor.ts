@@ -15,7 +15,7 @@ import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnap
 import { evidenceChunkId } from './document-chunk.ts'
 import { mappingCorpusToolGuard, resolveMappingCorpusLocations, type MappingCorpusLocation } from './evidence-mapping-corpus.ts'
 import { createMappingSourceTools, mappingMaterialRef, mappingSourceCatalog } from './evidence-mapping-source-tools.ts'
-import { buildWritableSectionWorklist, changedWritableSectionIds, sectionEvidenceContext, outlineSectionScope } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, sectionEvidenceContext, outlineSectionScope } from './section-evidence-context.ts'
 import {
   EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION,
   EVIDENCE_MAPPING_SCHEMA_VERSION,
@@ -1637,14 +1637,27 @@ function structureRepairTasks(
   issues: readonly OutlineStructureIssue[],
   generation: number,
 ): EvidenceMappingTask[] {
-  const bySection = new Map<string, OutlineStructureIssue[]>()
+  const byId = new Map(outline.sections.map(section => [section.id, section]))
+  const issueSectionIds = new Set<string>()
   for (const issue of issues) {
-    if (!outline.sections.some(section => section.id === issue.section_id)) throw new BidStageExecutionError([{
+    if (!byId.has(issue.section_id)) throw new BidStageExecutionError([{
       code: 'OUTLINE_REFINEMENT_REPAIR_SCOPE_INVALID',
       message: `目录复核问题无法定位 Section：${issue.section_id} / ${issue.reason}`,
     }])
-    bySection.set(issue.section_id, [...bySection.get(issue.section_id) ?? [], issue])
+    issueSectionIds.add(issue.section_id)
   }
+  const roots = [...issueSectionIds].filter((sectionId) => {
+    let parentId = byId.get(sectionId)?.parent_id
+    while (parentId !== undefined && parentId !== null) {
+      if (issueSectionIds.has(parentId)) return false
+      parentId = byId.get(parentId)?.parent_id
+    }
+    return true
+  })
+  const bySection = new Map(roots.map((sectionId) => {
+    const scope = sectionSubtreeIds(outline, sectionId)
+    return [sectionId, issues.filter(issue => scope.has(issue.section_id))] as const
+  }))
   return [...bySection].map(([sectionId, sectionIssues]) => {
     const section = outline.sections.find(item => item.id === sectionId)
     if (section === undefined) throw new Error('evidence-mapping-repair-section-missing')
@@ -1806,7 +1819,7 @@ function dynamicLeafMappingTasks(
   completed: readonly CompletedMappingTask[],
   existingTaskIds: ReadonlySet<string>,
 ): EvidenceMappingTask[] {
-  const changed = new Set(changedWritableSectionIds(before, after))
+  const previousWritable = new Set(buildWritableSectionWorklist(before).map(section => section.id))
   const created: EvidenceMappingTask[] = []
   for (const item of completed) {
     const rootId = taskOutlineEditRootId(item.task)
@@ -1814,7 +1827,7 @@ function dynamicLeafMappingTasks(
     if (root === undefined || root.writable) continue
     const scope = sectionSubtreeIds(after, root.id)
     for (const section of buildWritableSectionWorklist(after)) {
-      if (!scope.has(section.id) || !changed.has(section.id)) continue
+      if (!scope.has(section.id) || previousWritable.has(section.id)) continue
       const baseId = `MAP-INIT-${section.id}`
       const taskId = existingTaskIds.has(baseId) || created.some(task => task.task_id === baseId)
         ? `MAP-REFINE-${createHash('sha256').update(`${item.task.task_id}\0${section.id}`).digest('hex').slice(0, 12)}`

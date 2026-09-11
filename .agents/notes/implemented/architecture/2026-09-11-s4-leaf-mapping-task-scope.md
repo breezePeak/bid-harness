@@ -12,7 +12,7 @@ S3 已经把技术标目录细化为可写叶子，S4 却再次按顶层业务�
 
 Initial 与 Repair Child 完成[研究充分性判断](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)后，只能通过 `apply_section_outline_edit` 修改当前 Section 自身及其后代。Host 在每次操作和并发合并时按根 ID 校验子树快照，使用任务 ID 派生的命名空间分配新 Section ID；父节点、兄弟节点和子树外的新父节点均不属于该任务权限。
 
-可写叶子被拆分后，原任务的正式 Mapping 范围变为空，`lock_section_outline` 只把最终新叶作为 `queued_leaf_sections` 返回；父 Child 可以明确新叶职责，但不能提交它们的 Evidence。Host 合并这一代目录后，根据真实新增或受影响的可写叶创建下一代独立任务，其他已完成任务不重跑。Repair 也走同一队列，因此局部结构修复产生的新叶不会绕过逐叶研究。
+可写叶子被拆分后，原任务的正式 Mapping 范围变为空，`lock_section_outline` 只把最终新叶作为 `queued_leaf_sections` 返回；父 Child 可以明确新叶职责，但不能提交它们的 Evidence。Host 合并这一代目录后，只为从非可写状态新变成的可写叶创建下一代独立任务，其他已完成任务不重跑。Repair 也走同一队列；目录复核同时指向祖先和后代时，Host 把问题归并到同一个最上层受影响子树，只并发互不相交的修复范围。
 
 每个完成任务把成功 `read_source` 返回的材料引用和成功 Web Snapshot 身份保存为 `research_candidates`。动态子任务只把这些记录作为检索入口；Host 不据标题、关键词或父任务判断生成 `local_materials` 或 `web_materials`，子任务仍须按自身 Requirement、Scoring、Response Point 和职责读取、判断并显式提交。私有 plan schema 为 v6，checkpoint schema 为 v8；正式 Evidence Map 维持 v10，S5 不读取 Mapping Task、代次或研究候选。
 
@@ -24,7 +24,7 @@ Initial 与 Repair Child 完成[研究充分性判断](../bug-fix/2026-09-11-s4-
 
 **拆分后由原 Child 顺便完成全部子叶 Evidence。** 这会在目录变细时重新形成多章节长任务，也无法证明父任务资料适用于每个新职责；原任务只产出结构与候选，新叶分别研究。
 
-**任一目录变化后重建并重跑全部 S4。** 全量重跑能规避增量合并，但会丢弃无关章节已完成的研究并降低并发收益；代次队列只调度真实新增或受影响叶子。
+**任一目录变化后重建并重跑全部 S4。** 全量重跑能规避增量合并，但会丢弃无关章节已完成的研究并降低并发收益；代次队列只调度新变成可写叶的 Section。
 
 **按固定目录层级或标题规则划分任务。** 不同招标书的层级和语义不稳定；可写叶子和 Section ID 是现有目录契约中足够的确定性边界。
 

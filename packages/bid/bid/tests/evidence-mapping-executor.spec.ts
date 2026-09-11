@@ -2057,10 +2057,18 @@ describe('evidence-mapping Agent executor', () => {
     expect(result.evidence).toEqual(JSON.parse(evidence))
   })
 
-  it('目录复核的具体结构问题只重开所属 Section，新子叶入队且不重跑已完成兄弟', async () => {
+  it('目录复核的重叠问题合并到同一 Section 子树，新子叶入队且不重跑兄弟', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-findings-')))
-    const fixture = mappingFixture(workspace, await writeInputs(workspace), false, {
-      'MAP-REPAIR-SEC-1': [{
+    const material = await writeInputs(workspace)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const root = { ...structuredClone(outline.sections[0]!), id: 'ROOT', parent_id: null, order: 1, level: 1,
+      title: '总体方案', purpose: '统筹两个技术主题。', writable: false, must_answer: [], requirement_ids: [], scoring_ids: [],
+      scoring_response_point_ids: [], scoring_response_points: [], summary: '说明总体实施安排。' }
+    outline.sections = [root, ...outline.sections.map(section => ({ ...section, parent_id: 'ROOT', level: 2 }))]
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const fixture = mappingFixture(workspace, material, false, {
+      'MAP-REPAIR-ROOT': [{
         type: 'split_section', section_id: 'SEC-1', children: [
           { title: '实施方法', purpose: '独立说明实施方法。', must_answer: ['如何实施？'] },
           { title: '质量控制', purpose: '独立说明质量控制。', must_answer: ['如何控制质量？'] },
@@ -2069,7 +2077,10 @@ describe('evidence-mapping Agent executor', () => {
     })
     fixture.serializeQuality.mockImplementationOnce(text => JSON.stringify({
       ...JSON.parse(text) as object,
-      blocking_issues: [{ section_id: 'SEC-1', reason: '研究已识别实施方法与质量控制两个独立主题，但仍只藏在写作维度中。' }],
+      blocking_issues: [
+        { section_id: 'ROOT', reason: '总体层级需要保持两个主题的边界。' },
+        { section_id: 'SEC-1', reason: '研究已识别实施方法与质量控制两个独立主题，但仍只藏在写作维度中。' },
+      ],
     }))
     const running = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
@@ -2079,8 +2090,8 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(5) })
     fixture.starts.slice(3).forEach((start) => { start.resolve() })
     await running
-    expect(fixture.starts.map(start => promptText(start.request.request)).filter(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-SEC-1"'))).toHaveLength(1)
-    expect(fixture.starts.map(start => promptText(start.request.request)).some(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-SEC-2"'))).toBe(false)
+    expect(fixture.starts.map(start => promptText(start.request.request)).filter(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-ROOT"'))).toHaveLength(1)
+    expect(fixture.starts.map(start => promptText(start.request.request)).some(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-SEC-1"'))).toBe(false)
     expect(fixture.outlineReviewPrompts).toHaveLength(2)
     expect(fixture.outlineReviewPrompts[0]).toContain('最终章节写作维度与研究用途：')
     expect(fixture.outlineReviewPrompts[0]).toContain('"material_usages":[{"usage":"reference","summary":"统一资料。"}]')
@@ -2093,10 +2104,10 @@ describe('evidence-mapping Agent executor', () => {
         research_assessment?: ReturnType<typeof branchResearchAssessment>
       }>
     }
-    const repairCheckpoint = checkpoint.tasks.find(item => item.task_id === 'MAP-REPAIR-SEC-1')
+    const repairCheckpoint = checkpoint.tasks.find(item => item.task_id === 'MAP-REPAIR-ROOT')
     expect(typeof repairCheckpoint?.refinement_conclusion).toBe('string')
     expect(repairCheckpoint?.research_assessment?.sufficient_for_outline_decision).toBe(true)
-    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-SEC-1')))
+    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-ROOT')))
       .toContain('prior_section_research_assessments：')
     expect(fixture.starts.filter(start => promptText(start.request.request).includes('Mapping Task：{"task_id":"MAP-INIT-SEC-2"'))).toHaveLength(1)
   })
