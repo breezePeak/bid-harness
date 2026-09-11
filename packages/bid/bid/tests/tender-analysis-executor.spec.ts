@@ -118,10 +118,11 @@ describe('tender-analysis Agent executor', () => {
     }
     let idle = 0
     let reviewRevision: number | undefined
+    const concludeTurn = vi.fn()
     const followup = vi.fn()
     const whenIdle = vi.fn(async () => {
       idle++
-      const exec = { agent, signal: new AbortController().signal } as ToolRunContext
+      const exec = { agent, signal: new AbortController().signal, concludeTurn } as unknown as ToolRunContext
       if (idle === 2) {
         await definitions.get('submit_project_fact')?.execute({
           field: 'project_name', value: '审计平台',
@@ -146,6 +147,7 @@ describe('tender-analysis Agent executor', () => {
     const review = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
     expect(review.content[0]?.text).toContain('Tender Analysis Quality Review')
     expect(review.content[0]?.text).toContain(`"revision":${String(reviewRevision)}`)
+    expect(concludeTurn).toHaveBeenCalledOnce()
     await expect(Promise.all(['project.json', 'requirements.json', 'scoring-origin.json', 'compliance.json']
       .map(name => readFile(join(workspace.projectRoot, 'analysis', name), 'utf8'))))
       .resolves.toHaveLength(4)

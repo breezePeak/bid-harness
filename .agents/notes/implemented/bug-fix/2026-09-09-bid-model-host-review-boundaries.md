@@ -8,7 +8,7 @@ S2 的确定性提交协议只能证明引用和结构合法，不能证明模�
 
 ## Decision
 
-S2 首次通过确定性校验的 finish 进入 `review_required`，只返回 staged revision，不持久化。执行器在同一 live Agent 的新轮次中注入完整 staged snapshot 和 tender locators，要求逐条重读来源并检查 Project、Requirement、Scoring、Compliance 的语义、边界和相邻记录串配。复核可继续用 runtime ref 覆盖记录；每次接受提交都递增 revision。只有 `reviewing` 阶段携带当前 `review_revision` 的 finish 才发布，旧 revision、初始轮重复 finish 和普通文字都不能完成。该强制轮次不占用原有缺项续修预算。
+S2 首次通过确定性校验的 finish 进入 `review_required`，只返回 staged revision，不持久化，并立即结束初始 Turn。`review_required` 冻结 staged 提交和重复 finish，只有执行器调用 `beginReview()` 后才在同一 live Agent 的新轮次中注入完整 staged snapshot 和 tender locators，要求逐条重读来源并检查 Project、Requirement、Scoring、Compliance 的语义、边界和相邻记录串配。复核可继续用 runtime ref 覆盖记录；每次接受提交都递增 revision。只有 `reviewing` 阶段携带当前 `review_revision` 的 finish 才发布，旧 revision 和普通文字都不能完成。该强制轮次不占用原有缺项续修预算。
 
 S3 Blueprint Quality Review 动态注册 `submit_outline_quality_review`，只接受 `issues=[{code,severity:"advisory",message}]`。参数错误作为工具参数错误留在当前模型轮次修正；未提交时只允许一次受预算约束的继续提交。若复核修改目录，Host 丢弃该次 issues 并要求对新目录重新完整复核。成功后 Host 为当前目录生成 schema version 4、scope、全部 checked IDs 和 reviewed section IDs，再写入正式质量报告；不存在兼容旧格式或候选文件的读取路径。
 

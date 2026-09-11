@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -228,6 +228,19 @@ const evidenceMappingExecutionLogSchema = z.object({
       }
     })),
     final_child_session_id: z.string().nullable(),
+    prompt_context_stats: z.object({
+      task_id: z.string().min(1),
+      scoped_section_count: z.number().int().nonnegative(),
+      global_index_section_count: z.number().int().nonnegative(),
+      candidate_material_count: z.number().int().nonnegative(),
+      prompt_char_count: z.number().int().nonnegative(),
+    }).strict().optional(),
+    review_progress: z.object({
+      review_total: z.number().int().nonnegative(),
+      review_reused: z.number().int().nonnegative(),
+      review_pending: z.number().int().nonnegative(),
+      review_invalidated: z.number().int().nonnegative(),
+    }).strict().optional(),
   }).strict()),
 }).strict()
 
@@ -240,6 +253,7 @@ interface MappingSubmission {
   taskOperations: SectionTaskChange[]
   outlineOperationBases: Array<z.infer<typeof taskBasisSchema>>
   reviewRecords: ReviewItem[]
+  reviewInvalidated: number
 }
 
 const taskBasisSchema = z.object({
@@ -262,6 +276,7 @@ const sectionTaskOperationSchema = z.object({
 type SectionTaskOperation = z.infer<typeof sectionTaskOperationSchema>
 type SectionTaskChange = { operation: SectionTaskOperation; before: PartialSectionMapping; after: PartialSectionMapping }
 type ReviewItem = {
+  review_key: string
   review_ref: string
   kind: 'task' | 'local_material' | 'web_material' | 'branch_summary'
   section_id: string
@@ -277,20 +292,22 @@ const taskChangeSchema = z.object({
   after: evidenceMappingPartialResultSchema.shape.section_mappings.element,
 }).strict()
 const reviewRecordSchema = z.object({
-  review_ref: z.string().min(1), kind: z.enum(['task', 'local_material', 'web_material', 'branch_summary']),
-  section_id: z.string().min(1), fingerprint: z.string(), material_index: z.number().int().nonnegative().optional(), value: z.unknown(),
+  review_key: z.string().min(1), review_ref: z.string().min(1), kind: z.enum(['task', 'local_material', 'web_material', 'branch_summary']),
+  section_id: z.string().min(1), fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  material_index: z.number().int().nonnegative().optional(), value: z.unknown(),
   conclusion: z.object({ decision: z.enum(['keep', 'block']), reason: z.string().min(1) }).strict().optional(),
 }).strict()
 const evidenceMappingCheckpointSchema = z.object({
-  schema_version: z.literal(4),
+  schema_version: z.literal(5),
   tasks: z.array(z.object({
-    task_id: z.string().min(1), result: evidenceMappingPartialResultSchema,
+    task_id: z.string().min(1), completed: z.boolean(), result: evidenceMappingPartialResultSchema,
     outline_operations: z.array(outlineEditOperationSchema).optional(),
     refinement_conclusion: z.string().trim().min(1).optional(),
     repair_base_outline: outlineArtifactSchema.optional(),
     task_operations: z.array(taskChangeSchema),
     outline_operation_bases: z.array(taskBasisSchema),
     review_records: z.array(reviewRecordSchema),
+    review_invalidated: z.number().int().nonnegative(),
   }).strict().superRefine((entry, context) => {
     if (entry.outline_operations !== undefined && entry.refinement_conclusion === undefined) {
       context.addIssue({ code: 'custom', path: ['refinement_conclusion'], message: 'branch refinement requires a saved conclusion' })
@@ -320,11 +337,13 @@ interface MappingSubmissionState {
   taskOperations: SectionTaskChange[]
   reviews: Map<string, ReviewItem>
   reviewSequence: number
+  reviewInvalidated: number
   assignedCoverage: {
     requirement_ids: Set<string>
     scoring_ids: Set<string>
     scoring_response_point_ids: Set<string>
   }
+  reviewInputs: EvidenceMappingInputs
   responsePoints: EvidenceMappingInputs['responsePoints']
   lastIncompleteIssues: StageValidationIssue[]
 }
@@ -482,22 +501,68 @@ function affectedSummarySections(outline: OutlineArtifact, task: EvidenceMapping
   return outline.sections.filter(section => !section.writable && affected.has(section.id))
 }
 
+function reviewFingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function sectionTaskSemanticState(mapping: PartialSectionMapping, reviewIssues: readonly string[] = []) {
+  return {
+    writing_brief: mapping.writing_brief,
+    writing_dimensions: mapping.writing_dimensions,
+    missing_topics: mapping.missing_topics,
+    ...(reviewIssues.length === 0 ? {} : { identified_issues: reviewIssues }),
+  }
+}
+
+function sectionTaskReviewContext(
+  state: MappingSubmissionState,
+  section: OutlineArtifact['sections'][number],
+  mapping: PartialSectionMapping,
+) {
+  const requirementIds = new Set(mapping.writing_brief.requirement_ids)
+  const scoringIds = new Set(mapping.writing_brief.scoring_ids)
+  const responsePointIds = new Set(mapping.writing_brief.scoring_response_point_ids)
+  const sectionContext = sectionEvidenceContext(state.stagedOutline, section)
+  const complianceIds = new Set(sectionContext.compliance_ids)
+  return {
+    title: section.title,
+    parent_id: section.parent_id,
+    heading_path: sectionContext.heading_path,
+    project: subagentTaskContext(state.reviewInputs.project),
+    requirements: state.reviewInputs.requirements.requirements.filter(item => requirementIds.has(item.id)),
+    scoring: state.reviewInputs.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
+    response_points: state.reviewInputs.responsePoints.points.filter(item => responsePointIds.has(item.id)),
+    compliance: state.reviewInputs.compliance.compliance_items.filter(item => complianceIds.has(item.id)),
+  }
+}
+
 function refreshReviewItems(state: MappingSubmissionState, task: EvidenceMappingTask): ReviewItem[] {
   const active = new Set<string>()
   const add = (key: string, item: Omit<ReviewItem, 'review_ref' | 'fingerprint'>, context: unknown) => {
     active.add(key)
-    const fingerprint = JSON.stringify([item.value, context])
-    if (state.reviews.get(key)?.fingerprint !== fingerprint) state.reviews.set(key, { ...item, fingerprint, review_ref: `R${++state.reviewSequence}` })
+    const fingerprint = reviewFingerprint([item.value, context])
+    const previous = state.reviews.get(key)
+    if (previous?.fingerprint !== fingerprint) {
+      if (previous?.conclusion !== undefined) state.reviewInvalidated++
+      state.reviews.set(key, { ...item, review_key: key, fingerprint, review_ref: `R${++state.reviewSequence}` })
+    } else {
+      state.reviews.set(key, { ...previous, ...item, review_key: key, fingerprint })
+    }
   }
   for (const section of mappingTaskSections(state.stagedOutline, task)) {
     const mapping = currentSectionMapping(state, task, section.id)
-    const value = { writing_brief: mapping.writing_brief, writing_dimensions: mapping.writing_dimensions,
-      missing_topics: mapping.missing_topics, ...(task.review_issues?.length ? { identified_issues: task.review_issues } : {}) }
-    add(`task:${section.id}`, { kind: 'task', section_id: section.id, value }, [section.title, section.parent_id])
-    for (const kind of ['local_material', 'web_material'] as const) {
-      const materials = kind === 'local_material' ? mapping.local_materials : mapping.web_materials
-      for (const [index, material] of materials.entries()) add(`${kind}:${section.id}:${index}`,
-        { kind, section_id: section.id, material_index: index, value: material }, value)
+    const value = sectionTaskSemanticState(mapping, task.review_issues ?? [])
+    const taskContext = sectionTaskReviewContext(state, section, mapping)
+    add(`task:${section.id}`, { review_key: `task:${section.id}`, kind: 'task', section_id: section.id, value }, taskContext)
+    const taskFingerprint = reviewFingerprint([value, taskContext])
+    for (const [index, material] of mapping.local_materials.entries()) {
+      const chunk = evidenceChunkId(material.chunk) ?? material.chunk
+      const key = `local_material:${section.id}:${material.file_id}:${chunk}`
+      add(key, { review_key: key, kind: 'local_material', section_id: section.id, material_index: index, value: material }, taskFingerprint)
+    }
+    for (const [index, material] of mapping.web_materials.entries()) {
+      const key = `web_material:${section.id}:${normalizeWebEvidenceUrl(material.url) ?? material.url}`
+      add(key, { review_key: key, kind: 'web_material', section_id: section.id, material_index: index, value: material }, taskFingerprint)
     }
   }
   for (const section of affectedSummarySections(state.stagedOutline, task)) {
@@ -506,22 +571,66 @@ function refreshReviewItems(state: MappingSubmissionState, task: EvidenceMapping
       id: item.id, parent_id: item.parent_id, title: item.title, purpose: item.purpose,
       task: item.writable ? (() => {
         const mapping = currentSectionMapping(state, task, item.id)
-        return [mapping.writing_brief, mapping.writing_dimensions, mapping.missing_topics]
+        const value = sectionTaskSemanticState(mapping)
+        return { value, fingerprint: reviewFingerprint([value, sectionTaskReviewContext(state, item, mapping)]) }
       })() : undefined,
       summary: item.id === section.id ? undefined : state.branchSummaries.get(item.id) ?? item.summary,
     }))
-    add(`summary:${section.id}`, { kind: 'branch_summary', section_id: section.id, value: state.branchSummaries.get(section.id) ?? null }, context)
+    const key = `summary:${section.id}`
+    add(key, { review_key: key, kind: 'branch_summary', section_id: section.id, value: state.branchSummaries.get(section.id) ?? null }, context)
   }
-  for (const key of state.reviews.keys()) if (!active.has(key)) state.reviews.delete(key)
+  for (const [key, item] of state.reviews) if (!active.has(key)) {
+    if (item.conclusion !== undefined) state.reviewInvalidated++
+    state.reviews.delete(key)
+  }
   return [...state.reviews.values()]
 }
 
 function pendingReviews(state: MappingSubmissionState, task: EvidenceMappingTask) {
   return refreshReviewItems(state, task).filter(item => item.conclusion?.decision !== 'keep')
-    .map(({ fingerprint: _fingerprint, ...item }) => ({ ...item,
-      ...(item.kind === 'local_material' ? { value: { ...item.value as LocalEvidenceMaterial,
-        ...modelLocalMaterials([item.value as LocalEvidenceMaterial], state.locations)[0] } } : {}),
+    .map(({ fingerprint: _fingerprint, review_key: _reviewKey, ...item }) => ({ ...item,
+      ...(item.kind === 'local_material' ? { value: modelLocalMaterials([item.value as LocalEvidenceMaterial], state.locations)[0] } : {}),
+      ...(item.kind === 'task' ? { value: { ...item.value as object,
+        mapping_present: state.mappings.has(item.section_id) || state.baselineMappings.has(item.section_id) } } : {}),
     }))
+}
+
+function reviewProgress(state: MappingSubmissionState, task: EvidenceMappingTask) {
+  const reviews = refreshReviewItems(state, task)
+  const reused = reviews.filter(item => item.conclusion?.decision === 'keep').length
+  return {
+    review_total: reviews.length,
+    review_reused: reused,
+    review_pending: reviews.length - reused,
+    review_invalidated: state.reviewInvalidated,
+  }
+}
+
+function mappingSubmissionSnapshot(state: MappingSubmissionState, task: EvidenceMappingTask): MappingSubmission {
+  const result = parseEvidenceMappingPartialResult({
+    task_id: task.task_id,
+    section_mappings: mappingTaskSections(state.stagedOutline, task).flatMap((section) => {
+      const mapping = state.mappings.get(section.id) ?? state.baselineMappings.get(section.id)
+      return mapping === undefined ? [] : [mapping]
+    }),
+    refinement_suggestions: [...state.suggestions],
+    ...(task.phase !== 'final_check' ? {} : {
+      branch_summaries: affectedSummarySections(state.stagedOutline, task).flatMap((section) => {
+        const summary = state.branchSummaries.get(section.id)
+        return summary === undefined ? [] : [{ section_id: section.id, summary }]
+      }),
+    }),
+  })
+  refreshReviewItems(state, task)
+  return {
+    result,
+    taskOperations: structuredClone(state.taskOperations),
+    outlineOperationBases: structuredClone(state.outlineOperationBases),
+    reviewRecords: structuredClone([...state.reviews.values()]),
+    reviewInvalidated: state.reviewInvalidated,
+    ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
+    ...(taskOwnsBranchRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
+  }
 }
 
 function outlineTaskDifferences(before: OutlineArtifact, after: OutlineArtifact) {
@@ -662,6 +771,7 @@ function attachMappingSubmissionRuntime(
   locations: readonly MappingCorpusLocation[],
   state: MappingSubmissionState,
   snapshots: () => readonly WebEvidenceSnapshot[],
+  persistProgress: (submission: MappingSubmission, completed: boolean) => Promise<void> = () => Promise.resolve(),
 ): () => void {
   const schema = sectionMappingSubmissionSchema(locations)
   const staged = new WeakMap<ToolExecution, { generation: number; value: MappingSubmission }>()
@@ -691,10 +801,15 @@ function attachMappingSubmissionRuntime(
     name: 'update_section_task',
     description: '独立记录或修改章节 Writing Brief、展开维度、职责内缺口或覆盖关联；初始分支研究可在锁定前保存草稿，材料仍须锁定后另行提交。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
     parameters: z.toJSONSchema(sectionTaskOperationSchema, { target: 'draft-7' }), output,
-    execute(args: unknown): Promise<unknown> {
+    async execute(args: unknown): Promise<unknown> {
       const change = applySectionTaskOperation(state, task, args)
-      return Promise.resolve({ applied: true, ...change,
-        ...(task.phase === 'final_check' ? { pending_items: pendingReviews(state, task) } : {}) })
+      if (task.phase === 'final_check') await persistProgress(mappingSubmissionSnapshot(state, task), false)
+      return {
+        applied: true,
+        operation: change.operation,
+        before: sectionTaskSemanticState(change.before),
+        after: sectionTaskSemanticState(change.after),
+        ...(task.phase === 'final_check' ? { pending_items: pendingReviews(state, task) } : {}) }
     },
   })
 
@@ -799,6 +914,7 @@ function attachMappingSubmissionRuntime(
         local_materials: uniqueMaterials(mapping.local_materials), web_materials: uniqueWebMaterials(mapping.web_materials) })
       state.submittedMappings.add(mapping.section_id)
       state.lastIncompleteIssues = []
+      if (task.phase === 'final_check') await persistProgress(mappingSubmissionSnapshot(state, task), false)
       const remaining = mappingTaskSections(state.stagedOutline, task)
         .map(section => section.id)
         .filter(id => !state.submittedMappings.has(id) && !state.baselineMappings.has(id))
@@ -810,7 +926,7 @@ function attachMappingSubmissionRuntime(
   if (task.phase === 'final_check') register({
     name: 'submit_branch_summary', description: '提交可直接用于正式技术标正文的章节总述。以投标人方案、措施和成果为主体，不复述采购要求，不显示系统内部编号，不解说目录或编写过程，也不增加未经确认的事实、能力和承诺。',
     parameters: closedObject({ section_id: { type: 'string' }, summary: { type: 'string' } }) as unknown as Record<string, unknown>, output,
-    execute(args: unknown): Promise<unknown> {
+    async execute(args: unknown): Promise<unknown> {
       const violations = validateJsonSchemaValue(closedObject({ section_id: { type: 'string' }, summary: { type: 'string' } }), args)
       if (violations.length > 0) throw new ToolArgsError(violations)
       const input = record(args)
@@ -822,7 +938,8 @@ function attachMappingSubmissionRuntime(
       if (summary.length === 0) throw new ToolArgsError(['summary: expected non-empty string'])
       assertCustomerFacingSummary(summary)
       state.branchSummaries.set(sectionId, summary)
-      return Promise.resolve({ recorded: true, section_id: sectionId, pending_items: pendingReviews(state, task) })
+      await persistProgress(mappingSubmissionSnapshot(state, task), false)
+      return { recorded: true, section_id: sectionId, pending_items: pendingReviews(state, task) }
     },
   })
 
@@ -910,6 +1027,8 @@ function attachMappingSubmissionRuntime(
         state.taskOperations = draft.taskOperations
         state.reviews = draft.reviews
         state.reviewSequence = draft.reviewSequence
+        state.reviewInvalidated = draft.reviewInvalidated
+        await persistProgress(mappingSubmissionSnapshot(state, task), false)
         return { recorded: true, pending_items: pendingReviews(state, task) }
       },
     })
@@ -964,16 +1083,19 @@ function attachMappingSubmissionRuntime(
           : { completed: false, missing_section_ids: [], issues: toolIssues(issues) }
       }
       state.lastIncompleteIssues = []
+      const submission: MappingSubmission = {
+        result,
+        taskOperations: structuredClone(state.taskOperations),
+        outlineOperationBases: structuredClone(state.outlineOperationBases),
+        reviewRecords: structuredClone([...state.reviews.values()]),
+        reviewInvalidated: state.reviewInvalidated,
+        ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
+        ...(taskOwnsBranchRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
+      }
+      await persistProgress(submission, true)
       staged.set(exec, {
         generation: state.generation,
-        value: {
-          result,
-          taskOperations: structuredClone(state.taskOperations),
-          outlineOperationBases: structuredClone(state.outlineOperationBases),
-          reviewRecords: structuredClone([...state.reviews.values()]),
-          ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
-          ...(taskOwnsBranchRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
-        },
+        value: submission,
       })
       exec.concludeTurn()
       return { completed: true }
@@ -1117,13 +1239,14 @@ export function renderEvidenceMappingSubagentTask(
   task: EvidenceMappingTask,
   inputs: EvidenceMappingInputs,
   locations: readonly MappingCorpusLocation[],
+  promptTask: EvidenceMappingTask = task,
 ): string {
-  const sections = task.section_ids.map((id) => {
+  const sections = promptTask.section_ids.map((id) => {
     const section = inputs.outline.sections.find(item => item.id === id)
     if (section === undefined) throw new Error('evidence-mapping-section-missing:' + id)
     return section
   })
-  const summaryContext = new Set((task.summary_section_ids ?? []).flatMap(id => [...branchSectionIds(inputs.outline, id)]))
+  const summaryContext = new Set((promptTask.summary_section_ids ?? []).flatMap(id => [...branchSectionIds(inputs.outline, id)]))
   const contextSections = [...sections, ...inputs.outline.sections.filter(section => summaryContext.has(section.id))]
   const requirementIds = new Set(contextSections.flatMap(section => section.requirement_ids))
   const scoringIds = new Set(contextSections.flatMap(section => section.scoring_ids))
@@ -1133,26 +1256,23 @@ export function renderEvidenceMappingSubagentTask(
   const scoring = inputs.scoring.scoring_items.filter(item => scoringIds.has(item.id))
   const responsePoints = inputs.responsePoints.points.filter(item => responsePointIds.has(item.id))
   const compliance = inputs.compliance.compliance_items.filter(item => complianceIds.has(item.id))
-  const branchId = taskOwnsBranchRefinement(task) ? mappingBranchId(task) : undefined
-  const editableBranch = taskOwnsBranchRefinement(task) ? taskEditableSectionIds(inputs.outline, task) : new Set<string>()
-  const branch = branchId === undefined
-    ? []
-    : inputs.outline.sections.filter(section => editableBranch.has(section.id) || section.id === branchId)
+  const currentScope = scopedSectionIds(inputs.outline, promptTask)
+  const currentBranch = inputs.outline.sections.filter(section => currentScope.has(section.id))
+    .map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }))
   const phaseTools = task.phase === 'final_check'
     ? FINAL_CHECK_TOOLS
     : taskOwnsBranchRefinement(task) ? INITIAL_MAPPING_TOOLS : REMAP_MAPPING_TOOLS
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
     `Mapping Task：${JSON.stringify({ task_id: task.task_id, phase: task.phase, section_ids: task.section_ids, title: task.title, heading_path: task.heading_path })}`,
-    `当前 Section Blueprints：${JSON.stringify(sections.map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path })))}`,
+    `current_branch：${JSON.stringify(currentBranch)}`,
+    `global_outline_index：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, title, purpose, writable }) => ({ id, parent_id, title, purpose, writable })))}`,
     ...(taskOwnsBranchRefinement(task) ? [
       `用户原始目录框架：${JSON.stringify(inputs.frameworks.map(({ name, headings }) => ({ name, headings: headings.map(({ title, level, order }) => ({ title, level, order })) })))}`,
-      `当前整本目录与章节职责：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, order, level, title, writable, purpose, must_answer }) => ({ id, parent_id, order, level, title, writable, purpose, must_answer })))}`,
       `参考旧标书完整目录：${JSON.stringify(locations.flatMap((location, index) => location.role === 'reference_bid' ? [{
         file_ref: `F${index + 1}`, name: location.name,
         headings: location.outline?.map(({ title, level, order }) => ({ title, level, order })),
       }] : []))}`,
-      `当前业务分支完整目录：${JSON.stringify(branch)}`,
       ...(task.review_issues?.length ? [
         `目录复核要求局部修复的问题：${JSON.stringify(task.review_issues)}`,
         '这是原业务分支的受控修复轮次。复用已有研究上下文和候选资料，只处理列出的具体结构问题；重新锁定并提交最终可写章节，未影响分支不在当前范围。',
@@ -1607,9 +1727,70 @@ function partialMappingsFromEvidence(
 
 type CandidateMapping = Pick<EvidenceMappingPartialResult['section_mappings'][number], 'section_id' | 'local_materials' | 'web_materials'>
 
-function candidateEvidencePool(mappings: readonly CandidateMapping[], locations: readonly MappingCorpusLocation[]) {
-  return mappings.map(mapping => ({ section_id: mapping.section_id,
-    local_materials: modelLocalMaterials(mapping.local_materials, locations), web_materials: mapping.web_materials,
+function sectionCoverage(section: OutlineArtifact['sections'][number] | undefined): Set<string> {
+  return new Set(section === undefined ? [] : [
+    ...section.requirement_ids,
+    ...section.scoring_ids,
+    ...(section.scoring_response_point_ids ?? []),
+  ])
+}
+
+function scopedSectionIds(outline: OutlineArtifact, task: EvidenceMappingTask): Set<string> {
+  if (taskOwnsBranchRefinement(task)) {
+    return new Set(mappingBranchSections(outline, task).map(section => section.section_id))
+  }
+  const ids = new Set(task.section_ids)
+  for (const section of affectedSummarySections(outline, task)) ids.add(section.id)
+  return ids
+}
+
+function scopedCandidateEvidenceRefs(
+  mappings: readonly CandidateMapping[],
+  locations: readonly MappingCorpusLocation[],
+  outline: OutlineArtifact,
+  baseline: OutlineArtifact,
+  task: EvidenceMappingTask,
+  snapshots: readonly WebEvidenceSnapshot[],
+) {
+  const scope = scopedSectionIds(outline, task)
+  const targetCoverage = new Set([...scope].flatMap(id => [
+    ...sectionCoverage(outline.sections.find(section => section.id === id)),
+    ...sectionCoverage(baseline.sections.find(section => section.id === id)),
+  ]))
+  const relevant = (mapping: CandidateMapping): boolean => {
+    if (scope.has(mapping.section_id)) return true
+    const source = outline.sections.find(section => section.id === mapping.section_id)
+      ?? baseline.sections.find(section => section.id === mapping.section_id)
+    return [...sectionCoverage(source)].some(id => targetCoverage.has(id))
+  }
+  const snapshotRef = (url: string): string | undefined => {
+    const normalized = normalizeWebEvidenceUrl(url)
+    const snapshot = snapshots.find(item => normalizeWebEvidenceUrl(item.source.final_url) === normalized
+      || normalizeWebEvidenceUrl(item.source.requested_url) === normalized)
+    return snapshot === undefined ? undefined : `W:${snapshot.source.source_id}`
+  }
+  const bySection = new Map<string, {
+    section_id: string
+    local_material_refs: Set<string>
+    web_material_refs: Map<string, { url: string; source_ref?: string }>
+  }>()
+  for (const mapping of mappings.filter(relevant)) {
+    const entry = bySection.get(mapping.section_id) ?? {
+      section_id: mapping.section_id, local_material_refs: new Set<string>(), web_material_refs: new Map(),
+    }
+    for (const material of modelLocalMaterials(mapping.local_materials, locations)) entry.local_material_refs.add(material.material_ref)
+    for (const material of mapping.web_materials) {
+      const ref = snapshotRef(material.url)
+      entry.web_material_refs.set(normalizeWebEvidenceUrl(material.url) ?? material.url, {
+        url: material.url, ...(ref === undefined ? {} : { source_ref: ref }),
+      })
+    }
+    bySection.set(mapping.section_id, entry)
+  }
+  return [...bySection.values()].map(entry => ({
+    section_id: entry.section_id,
+    local_material_refs: [...entry.local_material_refs],
+    web_material_refs: [...entry.web_material_refs.values()],
   }))
 }
 
@@ -1941,7 +2122,7 @@ async function executeEvidenceMappingRun(
   }
   let previous: EvidenceMapArtifact | undefined
   let previousWeb: WebEvidenceSourcesArtifact | undefined
-  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 4, tasks: [] }
+  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 5, tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
   if (!localRun) {
@@ -1955,16 +2136,18 @@ async function executeEvidenceMappingRun(
         if (JSON.stringify(savedInitial) !== JSON.stringify(expectedInitial)) throw new Error('evidence-mapping-resume-plan-mismatch')
         const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
         if (rawCheckpoint !== undefined) {
-          if (record(rawCheckpoint)?.schema_version !== 4) throw new BidStageExecutionError([{
+          if (record(rawCheckpoint)?.schema_version !== 5) throw new BidStageExecutionError([{
             code: 'EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED',
-            message: 'S4 检查点未保存当前分支粒度结论和提交事实，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
+            message: 'S4 检查点缺少稳定复核身份或增量 Final Check 进度，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
           }])
           checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
         }
-        const checkpointIds = new Set(checkpoint.tasks.map(item => item.task_id))
+        const savedCheckpoints = new Map(checkpoint.tasks.map(item => [item.task_id, item]))
         for (const item of savedLog.tasks) {
-          if (item.status === 'completed' && !checkpointIds.has(item.task_id)) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
-          if (item.status !== 'completed' || item.phase === 'final_check') item.status = 'pending'
+          const saved = savedCheckpoints.get(item.task_id)
+          if (item.status === 'completed') {
+            if (saved?.completed !== true) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
+          } else item.status = 'pending'
         }
         delete savedLog.failure
         savedLog.max_concurrency = maxConcurrency
@@ -2031,6 +2214,7 @@ async function executeEvidenceMappingRun(
     snapshots: readonly WebEvidenceSnapshot[],
     submission: MappingSubmission,
     repairBaseOutline?: OutlineArtifact,
+    completed = true,
   ): Promise<void> => {
     criticalStateWrites = criticalStateWrites.then(async () => {
       if (snapshots.length > 0) {
@@ -2042,15 +2226,17 @@ async function executeEvidenceMappingRun(
       }
       checkpointTasks.set(taskId, {
         task_id: taskId,
+        completed,
         result,
         task_operations: submission.taskOperations,
         outline_operation_bases: submission.outlineOperationBases,
         review_records: submission.reviewRecords,
+        review_invalidated: submission.reviewInvalidated,
         ...(submission.refinementConclusion === undefined ? {} : { refinement_conclusion: submission.refinementConclusion }),
         ...(repairBaseOutline === undefined ? {} : { repair_base_outline: repairBaseOutline }),
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
       })
-      checkpoint = { schema_version: 4, tasks: plan.tasks.flatMap((item) => {
+      checkpoint = { schema_version: 5, tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }
@@ -2105,6 +2291,7 @@ async function executeEvidenceMappingRun(
     task: EvidenceMappingTask
     inputs: EvidenceMappingInputs
     state: MappingSubmissionState
+    persistProgress(submission: MappingSubmission, completed: boolean): Promise<void>
   }>()
   const liftSubmissionSetup = subagents.registerContinuableSetup((childCtx) => {
     const child = childCtx.agent as Agent
@@ -2117,6 +2304,7 @@ async function executeEvidenceMappingRun(
         ...buildWebEvidenceSnapshots(capturedByChild.get(String(child.session.id))?.values() ?? []),
         ...availableSnapshots,
       ],
+      (submission, completed) => request.persistProgress(submission, completed),
     )
   })
   let activeTasks = 0
@@ -2155,10 +2343,29 @@ async function executeEvidenceMappingRun(
       }
       const assignedSections = mappingTask.section_ids.map(id => runInputs.outline.sections.find(section => section.id === id))
         .filter((section): section is OutlineArtifact['sections'][number] => section !== undefined)
+      const savedProgress = mappingTask.phase === 'final_check' ? checkpointTasks.get(mappingTask.task_id) : undefined
+      const restoredResult = savedProgress?.result
+      const restoredReviews = new Map((savedProgress?.review_records ?? []).map((item, index) => {
+        const review: ReviewItem = {
+          review_key: item.review_key,
+          review_ref: `R${String(index + 1)}`,
+          kind: item.kind,
+          section_id: item.section_id,
+          fingerprint: item.fingerprint,
+          value: structuredClone(item.value),
+          ...(item.material_index === undefined ? {} : { material_index: item.material_index }),
+          ...(item.conclusion === undefined ? {} : { conclusion: structuredClone(item.conclusion) }),
+        }
+        return [review.review_key, review] as const
+      }))
+      const restoredOutline = restoredResult === undefined
+        ? parseOutlineArtifact(structuredClone(runInputs.outline))
+        : applyResearchBriefs(parseOutlineArtifact(structuredClone(runInputs.outline)), [restoredResult], runInputs.responsePoints)
       const submissionRequest: {
         task: EvidenceMappingTask
         inputs: EvidenceMappingInputs
         state: MappingSubmissionState
+        persistProgress(submission: MappingSubmission, completed: boolean): Promise<void>
       } = {
         task: mappingTask,
         inputs: runInputs,
@@ -2166,53 +2373,139 @@ async function executeEvidenceMappingRun(
           generation: 1,
           captured: undefined,
           everInstalled: false,
-          stagedOutline: parseOutlineArtifact(structuredClone(runInputs.outline)),
+          stagedOutline: restoredOutline,
           acceptedOperations: [],
           locked: !taskOwnsBranchRefinement(mappingTask),
-          mappings: new Map<string, PartialSectionMapping>(),
-          submittedMappings: new Set<string>(),
+          mappings: new Map(restoredResult?.section_mappings.map(mapping => [mapping.section_id, mapping]) ?? []),
+          submittedMappings: new Set(restoredResult?.section_mappings.map(mapping => mapping.section_id) ?? []),
           refinementConclusion: undefined,
           suggestions: new Set<string>(),
-          branchSummaries: new Map<string, string>(),
+          branchSummaries: new Map(restoredResult?.branch_summaries?.map(summary => [summary.section_id, summary.summary]) ?? []),
           baselineMappings,
           locations,
-          taskOperations: [],
-          outlineOperationBases: [],
-          reviews: new Map(),
-          reviewSequence: 0,
+          taskOperations: structuredClone(savedProgress?.task_operations ?? []),
+          outlineOperationBases: structuredClone(savedProgress?.outline_operation_bases ?? []),
+          reviews: restoredReviews,
+          reviewSequence: restoredReviews.size,
+          reviewInvalidated: savedProgress?.review_invalidated ?? 0,
           assignedCoverage: {
             requirement_ids: new Set(assignedSections.flatMap(section => section.requirement_ids)),
             scoring_ids: new Set(assignedSections.flatMap(section => section.scoring_ids)),
             scoring_response_point_ids: new Set(assignedSections.flatMap(section => section.scoring_response_point_ids ?? [])),
           },
+          reviewInputs: runInputs,
           responsePoints: runInputs.responsePoints,
           lastIncompleteIssues: [],
         },
+        async persistProgress(submission, completed) {
+          if (mappingTask.phase !== 'final_check') return
+          const fetched = buildWebEvidenceSnapshots(capturedByChild.get(String(reservedChildId))?.values() ?? [])
+          await persistTaskCheckpoint(mappingTask.task_id, submission.result, submission.outlineOperations, fetched, submission,
+            undefined, completed)
+          log.review_progress = reviewProgress(submissionRequest.state, mappingTask)
+          await persistLog()
+        },
       }
       submissionRequests.set(String(reservedChildId), submissionRequest)
-      const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations),
-        `S3 已确认任务：${JSON.stringify(confirmedS3.sections)}`,
-        `当前完整目录与全书章节职责：${JSON.stringify(runInputs.outline.sections)}`,
-        `用户修改：${JSON.stringify({ outline_changes: userChanges, request: options.remap?.reason ?? null })}`,
-        `S4 相对 S3 的任务与结构差异：${JSON.stringify(outlineTaskDifferences(confirmedS3, runInputs.outline))}`,
-        `S4 独立章节任务操作及前后差异：${JSON.stringify([...checkpointTasks.values()].flatMap(saved => saved.task_operations))}`,
-        `S4 目录调整及业务依据：${JSON.stringify([...checkpointTasks.values()].flatMap(saved => (saved.outline_operations ?? []).map((operation, index) => ({ operation, basis: saved.outline_operation_bases[index] }))))}`,
-        ...(candidateMappings.length === 0 ? [] : [`全局候选资料池：${JSON.stringify(candidateEvidencePool(candidateMappings, locations))}`]),
+      const pendingItems = mappingTask.phase === 'final_check' ? pendingReviews(submissionRequest.state, mappingTask) : []
+      const pendingSummaryIds = new Set(pendingItems.filter(item => item.kind === 'branch_summary').map(item => item.section_id))
+      const promptTask = mappingTask.phase !== 'final_check' ? mappingTask : {
+        ...mappingTask,
+        section_ids: [...new Set(pendingItems.filter(item => item.kind !== 'branch_summary').map(item => item.section_id))],
+        summary_section_ids: [...pendingSummaryIds],
+      }
+      const promptScope = scopedSectionIds(runInputs.outline, promptTask)
+      const currentBranch = runInputs.outline.sections.filter(section => promptScope.has(section.id))
+      const promptCoverage = new Set(currentBranch.flatMap(section => [...sectionCoverage(section)]))
+      const sharesTaskCoverage = (section: OutlineArtifact['sections'][number]): boolean => [...sectionCoverage(section)]
+        .some(id => promptCoverage.has(id))
+      const branchBaseline = confirmedS3.sections.filter(section => promptScope.has(section.id) || sharesTaskCoverage(section))
+      const promptRelatedIds = new Set([...promptScope, ...branchBaseline.map(section => section.id)])
+      const scopedTaskOperations = [...checkpointTasks.values()].flatMap(saved => saved.task_operations)
+        .filter(change => promptRelatedIds.has(change.operation.section_id))
+        .map(change => ({
+          operation: change.operation,
+          before: sectionTaskSemanticState(change.before),
+          after: sectionTaskSemanticState(change.after),
+        }))
+      const scopedOutlineOperations = [...checkpointTasks.values()].flatMap((saved) => {
+        if (!saved.result.section_mappings.some(mapping => promptScope.has(mapping.section_id))) return []
+        return (saved.outline_operations ?? []).map((operation, index) => ({ operation, basis: saved.outline_operation_bases[index] }))
+      })
+      const scopedCandidates = scopedCandidateEvidenceRefs(
+        candidateMappings, locations, runInputs.outline, confirmedS3, promptTask, availableSnapshots,
+      )
+      const summaryDependencies = affectedSummarySections(runInputs.outline, mappingTask)
+        .filter(section => pendingSummaryIds.has(section.id))
+        .map(section => ({
+          section_id: section.id,
+          descendants: runInputs.outline.sections.filter(item => branchSectionIds(runInputs.outline, section.id).has(item.id))
+            .map(item => ({ id: item.id, parent_id: item.parent_id, title: item.title, purpose: item.purpose,
+              task: item.writable
+                ? sectionTaskSemanticState(currentSectionMapping(submissionRequest.state, mappingTask, item.id))
+                : undefined })),
+        }))
+      const pendingWebRefs = pendingItems.flatMap(item => item.kind !== 'web_material' ? [] : availableSnapshots.flatMap((snapshot) => {
+        const material = item.value as TransientWebEvidenceMaterial
+        const current = normalizeWebEvidenceUrl(material.url)
+        return current === normalizeWebEvidenceUrl(snapshot.source.final_url)
+          || current === normalizeWebEvidenceUrl(snapshot.source.requested_url)
+          ? [{ url: material.url, source_ref: `W:${snapshot.source.source_id}` }] : []
+      }))
+      const uniquePendingWebRefs = [...new Map(pendingWebRefs.map(item => [item.source_ref, item])).values()]
+      const currentBranchMapping = options.remap?.mode !== 'supplement' ? [] : mappingTaskSections(runInputs.outline, mappingTask).flatMap((section) => {
+        const mapping = submissionRequest.state.baselineMappings.get(section.id)
+        return mapping === undefined ? [] : [{
+          ...mapping,
+          local_materials: modelLocalMaterials(mapping.local_materials, locations),
+          web_materials: mapping.web_materials.map(material => ({
+            url: material.url,
+            usage: material.usage,
+            summary: material.summary,
+            supports: material.supports,
+          })),
+        }]
+      })
+      const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask),
+        `current_branch_baseline：${JSON.stringify(branchBaseline)}`,
+        `scoped_diffs：${JSON.stringify({
+          outline_changes: outlineTaskDifferences(confirmedS3, runInputs.outline)
+            .filter(change => promptRelatedIds.has(change.section_id)),
+          user_changes: userChanges.filter(change => promptRelatedIds.has(change.section_id)),
+          task_operations: scopedTaskOperations,
+          outline_operations: scopedOutlineOperations,
+          request: options.remap?.reason ?? null,
+        })}`,
+        `scoped_candidate_refs：${JSON.stringify(scopedCandidates)}`,
+        ...(currentBranchMapping.length === 0 ? [] : [`current_branch_mapping：${JSON.stringify(currentBranchMapping)}`]),
         ...(mappingTask.phase !== 'final_check' ? [] : [
           '当前任务是 Final Check，复核对象是最终准备发布的合并结果，包括保留的旧资料。先核对章节任务依据，再审材料用途；发现具体缺口时使用受控资料工具扩大范围，适合公开资料时可联网。',
-          '不改变的材料无需 replace_section_mapping，但每个任务、材料用途关联及受影响总述都要提交当前版本的复核结论。',
-          `当前章节资料与已知缺口：${JSON.stringify((currentEvidence?.section_mappings ?? []).filter(mapping => mappingTask.section_ids.includes(mapping.section_id)).map(mapping => ({ ...mapping, local_materials: modelLocalMaterials(mapping.local_materials, locations) })))}`,
-          `已登记 Web 正文引用：${JSON.stringify(availableSnapshots.map(snapshot => ({ url: snapshot.source.final_url, source_ref: `W:${snapshot.source.source_id}` })))}`,
-          `当前待审项：${JSON.stringify(pendingReviews(submissionRequest.state, mappingTask))}`,
-          `需提交总述的父节点：${JSON.stringify(affectedSummarySections(runInputs.outline, mappingTask))}`,
+          '指纹未变的已审项由 Host 复用，不再出现在待审输入中。只审查当前 pending 项；修正内容后审查新指纹。',
+          `pending_review_items：${JSON.stringify(pendingItems)}`,
+          `pending_web_refs：${JSON.stringify(uniquePendingWebRefs)}`,
+          `pending_summary_dependencies：${JSON.stringify(summaryDependencies)}`,
+          `需提交总述的父节点：${JSON.stringify(affectedSummarySections(runInputs.outline, mappingTask)
+            .filter(section => !submissionRequest.state.branchSummaries.has(section.id)))}`,
           '父节点 summary 是可以直接用于标书正文的章节总述。根据父节点职责、最终修正的子章节任务和已确认项目信息，用一小段自然正文直接说明我方或本方案的总体思路、实施措施和预期成果，衔接后文，不规定字数、不逐条复述目录。采购要求只可在理解方案所必需时用一句话概括，不得成为总述主体；不得写成需求解读、内部目录解说，也不得描述模型任务、生成过程或系统状态。',
           '总述及其中的表格不得出现 Requirement、Scoring、Compliance、Response Point、Section 或 Acceptance Criterion 的系统内部编号；需求对应关系使用招标文件原有条款编号、需求名称或简要原文。',
           '总述只在父节点层级概括，不展开子章节操作步骤，不引入其他分支实施细节，不新增未经确认的项目事实、企业能力或服务承诺。S5 尚未生成正文，不得声称已经总结或核验实际正文。子章节任务变化后，重新检查受影响的父节点总述。',
         ]), ...(options.remap === undefined ? [] : [
           `当前任务是局部 ${options.remap.mode} 资料映射，仅处理 Mapping Task.section_ids。`,
           `用户要求：${options.remap.reason ?? '重新研究选中章节的资料。'}`,
-          ...(options.remap.mode === 'supplement' ? [`已有资料：${JSON.stringify(previous?.section_mappings.filter(item => mappingTask.section_ids.includes(item.section_id)))}`] : []),
+          ...(options.remap.mode === 'supplement' ? ['已有资料通过 current_branch_mapping 和 scoped_candidate_refs 提供。'] : []),
         ])].join('\n')
+      log.prompt_context_stats = {
+        task_id: mappingTask.task_id,
+        scoped_section_count: currentBranch.length,
+        global_index_section_count: runInputs.outline.sections.length,
+        candidate_material_count: scopedCandidates.reduce(
+          (count, entry) => count + entry.local_material_refs.length + entry.web_material_refs.length,
+          0,
+        ),
+        prompt_char_count: basePrompt.length,
+      }
+      if (mappingTask.phase === 'final_check') log.review_progress = reviewProgress(submissionRequest.state, mappingTask)
+      await persistLog()
       let latestIssues: StageValidationIssue[] = []
       try {
         const started = await subagents.startContinuable({

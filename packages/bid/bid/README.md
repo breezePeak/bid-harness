@@ -65,7 +65,7 @@ S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度�
 
 ### S2–S5 quality control
 
-S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性并递增 staged revision；首次通过确定性校验的 `finish_tender_analysis({})` 不写文件，而是触发同一 Agent 的独立全量复核轮次。复核按 Host 提供的完整 staged snapshot 逐项重读来源，可用 runtime ref 原地修正；最终 finish 必须提交当前 `review_revision`，旧 revision 不能发布。Host 丢弃带 `parent_ref` 的误拆细则，按评分结构化内容去重并合并来源，补齐 schema version、空值、完整 tender 覆盖与正式 ID，把完整评分事实写入 `analysis/scoring-origin.json`，并初始化默认全选的 `analysis/tender-analysis-selection.json`。缺项续修使用配置预算，强制复核本身不消耗该预算，也不开放 `write`。最终 Validator 独立验证原始 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
+S2 在同一 live Agent 内逐项提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。每次提交都即时校验短文件引用、chunk 归属和 quote 唯一性并递增 staged revision；首次通过确定性校验的 `finish_tender_analysis({})` 不写文件，进入 `review_required` 后立即结束初始 Turn，并在 Host 启动独立全量复核前冻结全部 staged 提交和 finish。复核按 Host 提供的完整 staged snapshot 逐项重读来源，可用 runtime ref 原地修正；最终 finish 必须提交当前 `review_revision`，旧 revision 不能发布。Host 丢弃带 `parent_ref` 的误拆细则，按评分结构化内容去重并合并来源，补齐 schema version、空值、完整 tender 覆盖与正式 ID，把完整评分事实写入 `analysis/scoring-origin.json`，并初始化默认全选的 `analysis/tender-analysis-selection.json`。缺项续修使用配置预算，强制复核本身不消耗该预算，也不开放 `write`。最终 Validator 独立验证原始 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
 
 S2 审核页始终从 `scoring-origin.json` 展示完整评分事实，`must_answer` 与“是否纳入后续响应”分别编辑和显示；选择变更立即由 Host 写入确认草稿，刷新或换 Session 后仍可恢复。正式确认只把选中评分项及允许的规范化修改写入 `analysis/scoring.json`，未进行筛选时两份评分集合一致。S3、S4、S5 只读取 `scoring.json`；回退 S2 复用阶段重置清理 `analysis`、`outline`、`chapters` 和 `output`，不会保留依赖旧评分集合的下游产物。
 
@@ -73,7 +73,7 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，并可在锁定前按当前目录分别起草章节任务、显式提交材料用途；找到资料不会隐式占用材料提交状态。Host 校验结构范围、业务依据和 Section 身份，结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。初始研究按顶层业务分支分组；唯一根目录下的结构分支各成一批，直属可写叶子合为一批，保持 Host 并发上限。Initial Child 通过现有目录操作深化章节，并可在锁定前按当前目录分别起草章节任务、显式提交材料用途；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前分支职责、对应 S3 基线、局部差异和确定性筛选的候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关分支的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Host 校验结构范围、业务依据和 Section 身份，结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
@@ -81,9 +81,9 @@ S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVID
 
 `submit_section_mapping`、`replace_section_mapping` 只处理材料。模型提交绑定唯一文件与分块的 `material_ref`、usage 及 summary；程序回填真实身份，真实工具入口拒绝未知引用、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。找到相关资料本身不构成扩展任务的理由。
 
-目录深化与分支研究在同一 Child 内完成；目录操作通过共享结构校验后才更新分支状态，`lock_branch_outline` 也只锁定结构有效且带有非空对照结论的目录，失败时保持分支可编辑。合并后沿用现有独立目录复核与 Final Check，不新增常驻模型阶段。目录复核按每个最终可写叶节分别判断 Writing Brief、writing dimensions 和 missing topics 是否聚焦且充分，并提交具体 `section_id` 与原因；只有具体问题所在的原业务分支可进行至多一次局部研究和结构修复，再复核仍未解决则阻断，不能把结构问题交给 Final Check。Final Check 对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责审查任务与资料用途，不增删、移动、拆合章节或修改标题。`list_review_items` 返回每个可写章节任务、每条材料用途关联和受影响父节点总述，空材料章节也必须审查。`review_items` 按当前引用批量保留、移除、修正或阻断；任务变化使本章材料和祖先总述结论失效，用途或来源变化使该关联重新待审。correct 的新版本仍须复核。
+目录深化与分支研究在同一 Child 内完成；目录操作通过共享结构校验后才更新分支状态，`lock_branch_outline` 也只锁定结构有效且带有非空对照结论的目录，失败时保持分支可编辑。合并后沿用现有独立目录复核与 Final Check，不新增常驻模型阶段。目录复核按每个最终可写叶节分别判断 Writing Brief、writing dimensions 和 missing topics 是否聚焦且充分，并提交具体 `section_id` 与原因；只有具体问题所在的原业务分支可进行至多一次局部研究和结构修复，再复核仍未解决则阻断，不能把结构问题交给 Final Check。Final Check 对照 S3 已确认任务、S2 要求、用户修改、S4 差异和全书职责审查任务与资料用途，不增删、移动、拆合章节或修改标题。Host 为任务、材料和父节点总述计算稳定 `review_key` 与内容 fingerprint，运行内 `review_ref` 只作短引用；fingerprint 未变的 keep 继续有效，任务变化只使本章任务、材料和祖先总述失效，材料变化只使该关联重新待审。Final Check Prompt 只展开 pending 项、必要 summary 依赖和 Web 引用，已复用项仅进入计数。correct 的新版本仍须复核。
 
-无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v4 保存私有操作、复核记录、分支结构结论及局部修复基线，旧版本必须重置 S4，恢复不能复用旧目录或 Final Check 结论。日志 schema v3 区分 issues 与检索 warnings，技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
+无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v5 在每次成功的任务修改、材料替换、总述提交和批量复核后保存当前 mapping、操作、summary、稳定复核记录及完成状态；恢复时重算 fingerprint，只向新 Child 交付新增、变化和未审项，合法的已完成 Final Check 不再启动 Child。旧版本必须重置 S4，不能静默解释为增量状态。日志 schema v3 区分 issues 与检索 warnings，并记录每个任务的 `prompt_context_stats` 和 Final Check 的 `review_progress`，不保存完整 Prompt；技术错误不能写入业务缺口。关键写入失败、取消及权限故障仍中止阶段。
 
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 
@@ -120,11 +120,11 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### What the model sees
 
-调用方将 `messageInventory()` 持久化为用户消息，包含文件名、工作区相对源路径、解析正文与结构路径以及解析状态；文件字节和宿主绝对路径不进入这条清单。S4 研究任务另行携带旧标完整标题列表和本次目录职责。S5 Main Agent 从用户要求生成任务契约；Writer 获得当前章节的完整契约，Reviewer 获得确认目录职责、当前章节路径及逐项验收清单，整书审核获得有界章节摘要和既有审核结论。这些输入均进入相应会话记录。
+调用方将 `messageInventory()` 持久化为用户消息，包含文件名、工作区相对源路径、解析正文与结构路径以及解析状态；文件字节和宿主绝对路径不进入这条清单。S4 研究任务另行携带旧标完整标题列表、当前分支职责、局部基线与差异、候选引用及全书轻量索引。S5 Main Agent 从用户要求生成任务契约；Writer 获得当前章节的完整契约，Reviewer 获得确认目录职责、当前章节路径及逐项验收清单，整书审核获得有界章节摘要和既有审核结论。这些输入均进入相应会话记录。
 
 #### Token effect
 
-文件清单按每份导入文档增加固定字段；S4 目录上下文随旧标标题数和本次目录规模增长，S5 上下文随确认目录、适用任务条件和章节摘要增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；正文仍按需读取分块，整书验收也不再次注入完整正文。
+文件清单按每份导入文档增加固定字段；S4 当前分支上下文随该分支规模增长，全书部分只随轻量职责索引增长，Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节摘要增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；正文仍按需读取分块，整书验收也不再次注入完整正文。
 
 #### KV Cache effect
 

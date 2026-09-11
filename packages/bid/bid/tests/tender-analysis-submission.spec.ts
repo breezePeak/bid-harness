@@ -1,7 +1,7 @@
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
@@ -26,6 +26,7 @@ interface Fixture {
   agent: Agent
   tools: Map<string, ToolDefinition>
   runtime: Awaited<ReturnType<typeof attachTenderAnalysisSubmissionRuntime>>
+  concludeTurn: ReturnType<typeof vi.fn>
   call(name: string, args: unknown): Promise<unknown>
 }
 
@@ -62,12 +63,13 @@ async function fixture(): Promise<Fixture> {
   }
   const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name] } } as unknown as Agent
   const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest())
+  const concludeTurn = vi.fn()
   const call = async (name: string, args: unknown): Promise<unknown> => {
     const definition = definitions.get(name)
     if (definition === undefined) throw new Error(`missing tool ${name}`)
-    return definition.execute(args, { agent, signal: new AbortController().signal } as ToolRunContext)
+    return definition.execute(args, { agent, signal: new AbortController().signal, concludeTurn } as unknown as ToolRunContext)
   }
-  return { workspace, agent, tools: definitions, runtime, call }
+  return { workspace, agent, tools: definitions, runtime, concludeTurn, call }
 }
 
 function source(quote: string, chunk?: string, file_ref = 'T1') {
@@ -321,12 +323,16 @@ describe('tender-analysis staged submission runtime', () => {
       revision: initialRevision,
     })
     expect(value.runtime.phase).toBe('review_required')
+    expect(value.concludeTurn).toHaveBeenCalledOnce()
     await expect(readFile(join(value.workspace.projectRoot, 'analysis/project.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(value.call('finish_tender_analysis', {})).resolves.toMatchObject({
-      completed: false,
-      review_required: true,
-      revision: initialRevision,
-    })
+    await expect(value.call('finish_tender_analysis', {})).rejects.toThrow('当前初始分析已结束')
+    for (const [name, args] of [
+      ['submit_project_fact', { field: 'project_name', value: '不应写入', sources: [source(PROJECT_QUOTE)] }],
+      ['submit_requirement', { category: '功能要求', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '不应写入', mandatory: true, sources: [source(REQUIREMENT_QUOTE)] }],
+      ['submit_scoring_item', { parent_ref: null, group: '技术方案', title: '不应写入', raw_text: SCORING_QUOTE, criterion: '不应写入', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)] }],
+      ['submit_compliance_item', { type: '强制要求', raw_text: COMPLIANCE_QUOTE, normalized_rule: '不应写入', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] }],
+    ] as const) await expect(value.call(name, args)).rejects.toThrow('当前初始分析已结束')
+    expect(value.runtime.revision).toBe(initialRevision)
 
     const snapshot = value.runtime.reviewSnapshot() as { revision: number; scoring: Array<{ scoring_ref: string; title: string }> }
     expect(snapshot).toMatchObject({ revision: initialRevision })

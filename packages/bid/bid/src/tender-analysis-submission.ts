@@ -308,6 +308,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
   const ensureAgent = (exec: ToolRunContext): void => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
     if (phase === 'completed') throw new ToolArgsError(['value: tender analysis 已完成。'])
+    if (phase === 'review_required') throw new ToolArgsError(['value: 当前初始分析已结束，等待 Host 启动独立 Review。'])
   }
   const accepted = (): number => ++revision
   const output = {
@@ -488,9 +489,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
           code: 'TENDER_ANALYSIS_REVIEW_REQUIRED',
           message: '当前 staged 分析已通过确定性校验，必须在独立复核轮次确认同一版本后才能发布。',
         }]
-        return { completed: false, review_required: true, revision }
-      }
-      if (phase === 'review_required') {
+        exec.concludeTurn()
         return { completed: false, review_required: true, revision }
       }
       if (input.review_revision !== revision) {
