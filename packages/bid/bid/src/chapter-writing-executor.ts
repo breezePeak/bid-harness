@@ -133,7 +133,7 @@ export interface ChapterWritingExecutionOptions extends ModelStageExecutionOptio
   /** Maximum Chapter Subagents that may run simultaneously. */
   maxConcurrency: number
   /** Maximum Main-Agent-selected whole-document repair rounds. */
-  maxCompletionRepairRounds: number
+  maxCompletionRepairRounds?: number
   /** 只续用目标章节已保存的 Writer；其余章节保持原文。 */
   revision?: BidChapterRevisionRequest
   /** 当前 Host 操作的运行中计划及定向修订命令。 */
@@ -1447,8 +1447,9 @@ async function reviewWritingPlanCompletion(
       await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery)
       return completedArtifacts()
     }
-    if (recovery.rounds.length >= options.maxCompletionRepairRounds) {
-      return stop('round_limit', `正文和审核结果已保留；整书验收已达到 ${options.maxCompletionRepairRounds} 轮修订上限。`)
+    const maxCompletionRepairRounds = options.maxCompletionRepairRounds ?? DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS
+    if (recovery.rounds.length >= maxCompletionRepairRounds) {
+      return stop('round_limit', `正文和审核结果已保留；整书验收已达到 ${maxCompletionRepairRounds} 轮修订上限。`)
     }
     const selected = decision.sections ?? []
     const selectedRevisions = await Promise.all(selected.map(async (selected) => {

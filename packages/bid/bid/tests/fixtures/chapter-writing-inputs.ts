@@ -111,6 +111,7 @@ export function emptyChapterContext(section: ReturnType<typeof outlineFixture>['
     sectionWritingPlan: {
       section_id: section.id,
       task: `完成${section.title}。`,
+      user_message_refs: [],
       user_requirements: [],
       writing_instructions: [],
       acceptance_criteria: [{

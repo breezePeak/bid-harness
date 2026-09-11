@@ -78,7 +78,9 @@ describe('S5 通用写作任务契约', () => {
     ]
     for (const criterion of requirements) {
       const input = { ...inputFixture(), document_acceptance: [criterion] }
-      expect(stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input }).document_acceptance)
+      const parsed = stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input }) as
+        { document_acceptance: Array<{ description: string; priority: 'required' | 'preferred'; evaluator: { kind: 'semantic' | 'deterministic' } }> }
+      expect(parsed.document_acceptance)
         .toEqual([criterion])
     }
   })
@@ -114,7 +116,7 @@ describe('S5 通用写作任务契约', () => {
     input.sections = [
       { ...input.sections[0]!, section_id: 'STRUCT' },
       input.sections[1]!,
-    ]
+    ] as typeof input.sections
     expect(validateWritingPlanInput(input, outlineFixture())).toEqual(expect.arrayContaining([
       expect.stringContaining('不是已确认目录中的可写叶节'),
       expect.stringContaining('缺少可写叶节：SEC-1'),
