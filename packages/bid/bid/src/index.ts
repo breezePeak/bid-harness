@@ -979,7 +979,8 @@ export class BidHostRuntime extends TypertRemoteService {
       if (decision.kind === 'reject' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return decision
       const operation = this.inFlight.get(projectKey(agent.session))
       if (operation?.session !== agent.session) return decision
-      const messages = decision.messages.filter(message => message.source.kind !== 'subagent-settled')
+      const messages = decision.messages.filter(message =>
+        message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
       if (messages.length === decision.messages.length) return decision
       return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
     }, { global: true })

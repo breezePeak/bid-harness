@@ -1246,10 +1246,11 @@ export async function executeChapterWriting(
   },
 ): Promise<StageArtifact[]> {
   await options.scheduler?.waitUntilRunnable(options.signal)
-  const discardOwnedChildNotices = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
+  const discardOwnedChildMessages = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
     const decision = await next()
     if (subject !== agent || decision.kind === 'reject') return decision
-    const messages = decision.messages.filter(message => message.source.kind !== 'subagent-settled')
+    const messages = decision.messages.filter(message =>
+      message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
     if (messages.length === decision.messages.length) return decision
     return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
   })
@@ -1297,7 +1298,7 @@ export async function executeChapterWriting(
       throw error
     }
   } finally {
-    discardOwnedChildNotices()
+    discardOwnedChildMessages()
   }
 }
 

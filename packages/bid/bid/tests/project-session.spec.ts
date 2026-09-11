@@ -746,6 +746,36 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
+  it('Host 管理的 Child 报告不唤醒 Main Agent', async () => {
+    const { ctx, workspace, fresh, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('quiet-host-child-report')
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+
+    const onRequest = vi.fn()
+    adapter.onRequest = onRequest
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '内部研究结果。' }],
+      source: { kind: 'subagent-report', form: 'relay', senderSessionId: SessionId('mapping-child') },
+    }))
+    await agent.whenIdle()
+
+    expect(onRequest).not.toHaveBeenCalled()
+    stageGate.reject(new Error('模拟 S4 执行失败'))
+    await expect(retry).resolves.toMatchObject({ ok: true, value: {
+      stage: 'evidence_mapping', status: 'failed',
+    } })
+    expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
+      runtime: { stage: 'evidence_mapping', status: 'failed' },
+      allowedActions: ['retry_stage'],
+    })
+  })
+
   it('停止当前回复不取消 S4 operation 或后台任务', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)

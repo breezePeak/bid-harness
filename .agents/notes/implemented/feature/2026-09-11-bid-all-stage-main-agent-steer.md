@@ -14,7 +14,7 @@ S1–S5 和 `docx_export` 的运行态、全部完成态都允许 `send_message`
 
 运行态公开回合只看到阶段 scoped 工具。`bid_stage_inspect` 从项目文件与 Session Log 生成有界只读快照，不取得 mutation lock：S1 返回导入计数，S2 返回分析产物摘要，S3/S4 返回目录和 Mapping 进度，S5/S6 返回最多一百个章节的写作状态、最近问题及页数估算；最近公开事件最多六条且逐条截断。详细任务契约只在显式 `task_contract_context` 请求中返回，正文只按结构化引用读取。
 
-Child、Writer 和 Reviewer Promise 独立于公开回合。活跃项目的 `subagent-settled` 通知不进入 Main Agent 的公开批次，后台任务自行结算后仍由原调度器消费。普通消息只能由模型根据语义选择 inspect 或既有受控 mutation；发送方式、引用和关键词均不产生业务分支。
+Child、Writer 和 Reviewer Promise 独立于公开回合。活跃项目的 `subagent-report` 与 `subagent-settled` 通知不进入 Main Agent 的公开批次，后台任务的结构化结果仍由原调度器消费。普通消息只能由模型根据语义选择 inspect 或既有受控 mutation；发送方式、引用和关键词均不产生业务分支。
 
 聊天停止沿用 `Agent.cancel({ kind: 'user' }, { keepInbox: true })`，只取消当前 Main Agent 回合。每个阶段 operation 持有内存调度门；`bid_pause_stage` 关闭后续模型、Child、Writer 和 Reviewer 任务的启动入口，已经运行的任务继续收敛，`bid_resume_stage` 释放同一个 operation。运行态另公开 `stop_stage` 客户端动作和 `bid_stop_stage` 模型工具；Host 仅接受 operation 所属 Session 的显式调用，先记录可重试失败态，再中止阶段 controller。停止工具立即返回，不等待占用该工具回合的 Main Agent 变为 idle，因而不会形成自等待。
 
@@ -32,7 +32,7 @@ Child、Writer 和 Reviewer Promise 独立于公开回合。活跃项目的 `sub
 
 ## Verification
 
-真实 Agent Loop 回放固定内部工具链未完成，连续三条用户消息先按序进入无私有工具的公开请求，随后同一协议恢复并 finish。Host 测试固定 S2、S3 executor Promise 未完成，证明回复发生在阶段完成前、controller 未取消、项目检查点与 Artifact 不变，并验证另一 Session 被拒绝；S4 使用真实 in-process Mapping Child 固定模型请求，Main Agent 回复后 Child 仍存活并继续完成。真实 S5 Writer Promise 测试证明 Main Agent 回复先于 Writer release，Writer 随后继续通过校验。独立测试验证暂停保持当前 controller 并拦住模拟的后续调度，继续释放原调度门；停止回复不影响阶段 controller，显式停止工具只中止同 Session operation 并进入现有 retry 状态；浏览器测试固定运行态“停止任务”调用独立 Bid Remote。
+真实 Agent Loop 回放固定内部工具链未完成，连续三条用户消息先按序进入无私有工具的公开请求，随后同一协议恢复并 finish。Host 测试固定 S2、S3 executor Promise 未完成，证明回复发生在阶段完成前、controller 未取消、项目检查点与 Artifact 不变，并验证另一 Session 被拒绝；S4 使用真实 in-process Mapping Child 固定模型请求，Main Agent 回复后 Child 仍存活并继续完成。Host 管理的 Child 报告不会触发 Main Agent 模型请求，阶段失败仍发布带重试动作的 Projection。真实 S5 Writer Promise 测试证明 Main Agent 回复先于 Writer release，Writer 随后继续通过校验。独立测试验证暂停保持当前 controller 并拦住模拟的后续调度，继续释放原调度门；停止回复不影响阶段 controller，显式停止工具只中止同 Session operation 并进入现有 retry 状态；浏览器测试固定运行态“停止任务”调用独立 Bid Remote。
 
 ## Consequences
 
