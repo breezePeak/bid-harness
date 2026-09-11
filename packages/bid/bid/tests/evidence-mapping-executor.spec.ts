@@ -162,6 +162,7 @@ async function writeInputs(workspace: BidWorkspace) {
 function branchResearchAssessment(
   sufficient = true,
   unresolvedGaps: Array<{ topic: string; affects_outline_decision: boolean; writing_impact: string }> = [],
+  decision: 'adequate' | 'refinement_needed' | 'undetermined' = sufficient ? 'adequate' : 'undetermined',
 ) {
   return {
     sufficient_for_outline_decision: sufficient,
@@ -174,10 +175,20 @@ function branchResearchAssessment(
     key_findings: ['当前叶子职责与已研究技术主题的对应关系明确。'],
     unresolved_gaps: unresolvedGaps,
     outline_capacity: {
-      decision: sufficient ? 'adequate' : 'undetermined',
-      reason: sufficient ? '现有叶子可以承载已研究的独立主题。' : '仍需研究才能判断目录承载能力。',
+      decision,
+      reason: decision === 'refinement_needed'
+        ? '当前叶子包含需要独立论证的不同技术任务。'
+        : sufficient ? '现有叶子可以承载已研究的独立主题。' : '仍需研究才能判断目录承载能力。',
     },
   }
+}
+
+function submittedFindingRef(result: Readonly<ToolExecutionResult>): string {
+  if (result.isError) throw new Error(result.error.message)
+  const findings = (result.value as { key_findings?: Array<{ finding_ref?: unknown }> }).key_findings
+  const findingRef = findings?.[0]?.finding_ref
+  if (typeof findingRef !== 'string') throw new Error('Research Assessment did not return a finding_ref')
+  return findingRef
 }
 
 function mappingFixture(
@@ -410,11 +421,18 @@ function mappingFixture(
       const candidates = submissionCandidates(submissionArgs(parsed))
       const first = candidates[0] as Record<string, unknown> | undefined
       if (!preparedChildren.has(String(child.id)) && first !== undefined) {
+        const operations = (first.outline_operations as unknown[] | undefined) ?? []
+        const needsRefinement = operations.some(operation => (operation as { type?: unknown }).type !== 'update_section')
         const assessment = tools.get('submit_branch_research_assessment')
-        if (assessment !== undefined) await invokeSubmissionTool(child, assessment, branchResearchAssessment())
+        const assessmentResult = assessment === undefined ? undefined : await invokeSubmissionTool(
+          child, assessment, branchResearchAssessment(true, [], needsRefinement ? 'refinement_needed' : 'adequate'),
+        )
+        const findingRef = assessmentResult === undefined ? '' : submittedFindingRef(assessmentResult)
         const apply = tools.get('apply_branch_outline_edit')
-        if (apply !== undefined) for (const operation of first.outline_operations as unknown[] ?? []) {
-          if ((await invokeSubmissionTool(child, apply, { operation, basis: { kind: 'section_responsibility', explanation: '按已确认职责细化主题。', requirement_ids: [] } })).isError) break
+        if (apply !== undefined) for (const operation of operations) {
+          if ((await invokeSubmissionTool(child, apply, { operation, basis: {
+            kind: 'section_responsibility', explanation: '按已确认职责细化主题。', requirement_ids: [], finding_ref: findingRef,
+          } })).isError) break
         }
         const lock = tools.get('lock_branch_outline')
         if (lock !== undefined) await invokeSubmissionTool(child, lock, { comparison: '已对照旧标层级和整本职责；现有叶子各自响应独立技术主题，无需增加层级。' })
@@ -1148,19 +1166,43 @@ describe('evidence-mapping Agent executor', () => {
     await expectResearchBlocked('apply_branch_outline_edit', validEdit)
     await expect(fixture.invokeSubmissionTool(childId, 'search_sources', { scope_ref: 'ALL', keywords: ['实施'] }))
       .resolves.toMatchObject({ isError: false })
-    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap])))
-      .resolves.toMatchObject({ isError: false, value: { research_ready: true, unresolved_gaps: [unavailableGap] } })
+    const adequateAssessment = await fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap]),
+    )
+    expect(adequateAssessment).toMatchObject({
+      isError: false, value: { research_ready: true, unresolved_gaps: [unavailableGap] },
+    })
+    const findingRef = submittedFindingRef(adequateAssessment)
+    const repeatedAssessment = await fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [unavailableGap]),
+    )
+    expect(submittedFindingRef(repeatedAssessment)).toBe(findingRef)
     for (const args of [{}, { comparison: '' }, { comparison: ' \n\t' }]) {
       await expect(fixture.invokeSubmissionTool(childId, 'lock_branch_outline', args)).resolves.toMatchObject({ isError: true })
     }
+    for (const finding_ref of ['invalid', 'RF-0000000000000000']) {
+      await expect(fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+        operation: { type: 'update_section', section_id: 'SEC-1', purpose: '引用有效研究发现修正职责。' },
+        basis: { ...basis, finding_ref },
+      })).resolves.toMatchObject({ isError: true })
+    }
+    const adequateEdit = await fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+      operation: { type: 'add_section', parent_id: 'BRANCH', order: 4, writable: true,
+        title: '无必要深化', purpose: '验证 adequate 禁止结构深化。', must_answer: ['不得新增。'] },
+      basis: { ...basis, finding_ref: findingRef },
+    })
+    expect(adequateEdit).toMatchObject({ isError: true })
+    if (adequateEdit.isError) expect(adequateEdit.error.message).toContain('adequate')
+    await expect(fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+      operation: { type: 'update_section', section_id: 'SEC-1', purpose: '引用有效研究发现修正职责。' },
+      basis: { ...basis, finding_ref: findingRef },
+    })).resolves.toMatchObject({ isError: false })
     for (const [operation, code] of [
-      [{ type: 'add_section', parent_id: 'SEC-1', order: 1, writable: true,
-        title: '子任务', purpose: '说明子任务。', must_answer: ['如何完成子任务？'] }, 'OUTLINE_SHARED_WRITABLE_NOT_LEAF'],
       [{ type: 'update_section', section_id: 'SEC-2', title: outline.sections[1]!.title }, 'OUTLINE_SHARED_SECTION_TITLE_DUPLICATE'],
-      [{ type: 'add_section', parent_id: 'SEC-1', order: 1, writable: false,
-        title: '空容器', purpose: '组织后续任务。', summary: '汇总后续任务。' }, 'OUTLINE_SHARED_CONTAINER_EMPTY'],
     ] as const) {
-      const result = await fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', { operation, basis })
+      const result = await fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
+        operation, basis: { ...basis, finding_ref: findingRef },
+      })
       expect(result, code).toMatchObject({ isError: true })
       if (result.isError) expect(result.error.message).toContain(code)
     }
@@ -1237,13 +1279,20 @@ describe('evidence-mapping Agent executor', () => {
     expect(finalOutline.sections.find(section => section.id === 'SEC-1')?.purpose).toBe('锁前研究草稿一')
     expect(finalOutline.sections.find(section => section.id === 'BRANCH')?.summary).toBe('覆盖后的最终摘要。')
     expect(JSON.stringify({ map, finalOutline })).not.toContain('research_assessment')
+    expect(JSON.stringify({ map, finalOutline })).not.toContain('finding_ref')
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
       schema_version: number
-      tasks: Array<{ task_id: string; research_assessment?: ReturnType<typeof branchResearchAssessment> }>
+      tasks: Array<{
+        task_id: string
+        research_assessment?: ReturnType<typeof branchResearchAssessment>
+        outline_operation_bases: Array<{ finding_ref: string }>
+      }>
     }
-    expect(checkpoint.schema_version).toBe(6)
-    expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
+    expect(checkpoint.schema_version).toBe(7)
+    const initialCheckpoint = checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))
+    expect(initialCheckpoint?.research_assessment)
       .toMatchObject({ sufficient_for_outline_decision: true, unresolved_gaps: [unavailableGap] })
+    expect(initialCheckpoint?.outline_operation_bases).toEqual([{ ...basis, finding_ref: findingRef }])
     expect(fixture.outlineReviewPrompts[0]).toContain('分支研究充分性结论：')
     expect(fixture.outlineReviewPrompts[0]).toContain('设备现场清单尚未提供')
   })
@@ -1258,18 +1307,28 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const childId = start.request.childId!
-    await expect(fixture.invokeSubmissionTool(childId, 'submit_branch_research_assessment', branchResearchAssessment()))
-      .resolves.toMatchObject({ isError: false, value: { research_ready: true } })
+    const assessment = await fixture.invokeSubmissionTool(
+      childId, 'submit_branch_research_assessment', branchResearchAssessment(true, [], 'refinement_needed'),
+    )
+    expect(assessment).toMatchObject({ isError: false, value: { research_ready: true } })
+    const findingRef = submittedFindingRef(assessment)
     await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', {
       section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '记录拆分前研究草稿。', requirement_ids: [] },
       writing_dimensions: ['原章内的实施方法与质量控制'],
     })).resolves.toMatchObject({ isError: false })
     await expect(fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
       operation: { type: 'update_section', section_id: 'SEC-1', summary: '分别说明两个子任务。' },
-      basis: { kind: 'section_responsibility', explanation: '概括原章节的两个子任务。', requirement_ids: [] },
+      basis: {
+        kind: 'section_responsibility', explanation: '概括原章节的两个子任务。', requirement_ids: [], finding_ref: findingRef,
+      },
     })).resolves.toMatchObject({ isError: false, value: { created_section_ids: [] } })
+    await expect(fixture.invokeSubmissionTool(childId, 'lock_branch_outline', {
+      comparison: '只修正现有节点，尚未按研究结论调整结构。',
+    })).resolves.toMatchObject({ isError: true })
     const split = await fixture.invokeSubmissionTool(childId, 'apply_branch_outline_edit', {
-      basis: { kind: 'tender_requirement', explanation: '按 R-1 的两个子任务拆分。', requirement_ids: ['R-1'] },
+      basis: {
+        kind: 'tender_requirement', explanation: '按 R-1 的两个子任务拆分。', requirement_ids: ['R-1'], finding_ref: findingRef,
+      },
       operation: { type: 'split_section', section_id: 'SEC-1', children: [
         { title: '子任务甲', purpose: '说明子任务甲的实施方法。', must_answer: ['如何实施子任务甲？'] },
         { title: '子任务乙', purpose: '说明子任务乙的实施方法。', must_answer: ['如何实施子任务乙？'] },
@@ -1832,7 +1891,7 @@ describe('evidence-mapping Agent executor', () => {
       schema_version: number
       tasks: Array<{ task_id: string; refinement_conclusion?: string; research_assessment?: ReturnType<typeof branchResearchAssessment> }>
     }
-    expect(checkpoint.schema_version).toBe(6)
+    expect(checkpoint.schema_version).toBe(7)
     expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => Boolean(item.refinement_conclusion))).toBe(true)
     expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => item.research_assessment?.sufficient_for_outline_decision === true)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
@@ -1884,7 +1943,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(attempts[1]).toMatchObject({ accepted: true, issues: [], warnings: [] })
   })
 
-  it.each([1, 2, 3, 4, 5, 6])('重跑只接受 v6 checkpoint，当前版本为 %s', async (version) => {
+  it.each([1, 2, 3, 4, 5, 6, 7])('重跑只接受 v7 checkpoint，当前版本为 %s', async (version) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-resume-')))
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material)
@@ -1899,11 +1958,11 @@ describe('evidence-mapping Agent executor', () => {
 
     const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
     const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { schema_version: number }
-    expect(checkpoint.schema_version).toBe(6)
-    if (version !== 6) await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: version }))
+    expect(checkpoint.schema_version).toBe(7)
+    if (version !== 7) await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: version }))
     const resumed = mappingFixture(workspace, material)
     const completedRun = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0, maxConcurrency: 2 })
-    if (version !== 6) {
+    if (version !== 7) {
       await expect(completedRun).rejects.toThrow('EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED')
       expect(resumed.starts).toHaveLength(0)
       return

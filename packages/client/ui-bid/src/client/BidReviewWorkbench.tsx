@@ -72,7 +72,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, retryStage, actions, useStore,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection('bid.runtime')
@@ -237,10 +237,6 @@ export function BidReviewWorkbench({
 
       {error !== null && <div className={css.error}>{error}</div>}
       {projection.runtime.status === 'pending' && <p>等待开始章节写作。</p>}
-      {projection.runtime.status === 'failed' && <div role="alert" className={css.error}>
-        <p>章节写作失败：{projection.runtime.failureReason ?? '未知错误'}</p>
-        <Button variant="primary" disabled={retryStage === undefined} onClick={() => { void retryStage?.() }}>重试</Button>
-      </div>}
 
       {workbench !== null && workbench.global_compliance.status !== 'not_required' && (
         <section className={css.reviewSection} aria-label="文档级合规核验">

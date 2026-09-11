@@ -252,7 +252,7 @@ interface MappingSubmission {
   refinementConclusion?: string
   researchAssessment?: BranchResearchAssessment
   taskOperations: SectionTaskChange[]
-  outlineOperationBases: Array<z.infer<typeof taskBasisSchema>>
+  outlineOperationBases: Array<z.infer<typeof outlineOperationBasisSchema>>
   reviewRecords: ReviewItem[]
   reviewInvalidated: number
 }
@@ -262,7 +262,10 @@ const taskBasisSchema = z.object({
   explanation: z.string().trim().min(1),
   requirement_ids: z.array(z.string().min(1)),
 }).strict()
-const branchResearchAssessmentSchema = z.object({
+const outlineOperationBasisSchema = taskBasisSchema.extend({
+  finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
+}).strict()
+const branchResearchAssessmentFields = {
   sufficient_for_outline_decision: z.boolean(),
   diagnostics: z.object({
     tender_and_response_points: z.string().trim().min(1),
@@ -270,7 +273,6 @@ const branchResearchAssessmentSchema = z.object({
     evidence_and_inferences: z.string().trim().min(1),
     project_specific_quality_risks: z.string().trim().min(1),
   }).strict(),
-  key_findings: z.array(z.string().trim().min(1)).min(1),
   unresolved_gaps: z.array(z.object({
     topic: z.string().trim().min(1),
     affects_outline_decision: z.boolean(),
@@ -280,7 +282,15 @@ const branchResearchAssessmentSchema = z.object({
     decision: z.enum(['adequate', 'refinement_needed', 'undetermined']),
     reason: z.string().trim().min(1),
   }).strict(),
-}).strict().superRefine((assessment, context) => {
+} as const
+function addBranchResearchAssessmentIssues(
+  assessment: {
+    sufficient_for_outline_decision: boolean
+    unresolved_gaps: Array<{ affects_outline_decision: boolean }>
+    outline_capacity: { decision: 'adequate' | 'refinement_needed' | 'undetermined' }
+  },
+  context: z.RefinementCtx,
+): void {
   if (!assessment.sufficient_for_outline_decision) return
   if (assessment.outline_capacity.decision === 'undetermined') {
     context.addIssue({ code: 'custom', path: ['outline_capacity', 'decision'], message: '研究充分时必须形成目录承载判断' })
@@ -288,7 +298,18 @@ const branchResearchAssessmentSchema = z.object({
   for (const [index, gap] of assessment.unresolved_gaps.entries()) if (gap.affects_outline_decision) {
     context.addIssue({ code: 'custom', path: ['unresolved_gaps', index, 'affects_outline_decision'], message: '影响目录决策的缺口未解决时不能声明研究充分' })
   }
-})
+}
+const branchResearchAssessmentInputSchema = z.object({
+  ...branchResearchAssessmentFields,
+  key_findings: z.array(z.string().trim().min(1)).min(1),
+}).strict().superRefine(addBranchResearchAssessmentIssues)
+const branchResearchAssessmentSchema = z.object({
+  ...branchResearchAssessmentFields,
+  key_findings: z.array(z.object({
+    finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
+    finding: z.string().trim().min(1),
+  }).strict()).min(1),
+}).strict().superRefine(addBranchResearchAssessmentIssues)
 type BranchResearchAssessment = z.infer<typeof branchResearchAssessmentSchema>
 const sectionTaskOperationSchema = z.object({
   section_id: z.string().min(1),
@@ -327,7 +348,7 @@ const reviewRecordSchema = z.object({
   conclusion: z.object({ decision: z.enum(['keep', 'block']), reason: z.string().min(1) }).strict().optional(),
 }).strict()
 const evidenceMappingCheckpointSchema = z.object({
-  schema_version: z.literal(6),
+  schema_version: z.literal(7),
   tasks: z.array(z.object({
     task_id: z.string().min(1), completed: z.boolean(), result: evidenceMappingPartialResultSchema,
     outline_operations: z.array(outlineEditOperationSchema).optional(),
@@ -335,12 +356,15 @@ const evidenceMappingCheckpointSchema = z.object({
     research_assessment: branchResearchAssessmentSchema.optional(),
     repair_base_outline: outlineArtifactSchema.optional(),
     task_operations: z.array(taskChangeSchema),
-    outline_operation_bases: z.array(taskBasisSchema),
+    outline_operation_bases: z.array(outlineOperationBasisSchema),
     review_records: z.array(reviewRecordSchema),
     review_invalidated: z.number().int().nonnegative(),
   }).strict().superRefine((entry, context) => {
     if (entry.outline_operations !== undefined && entry.refinement_conclusion === undefined) {
       context.addIssue({ code: 'custom', path: ['refinement_conclusion'], message: 'branch refinement requires a saved conclusion' })
+    }
+    if ((entry.outline_operations?.length ?? 0) !== entry.outline_operation_bases.length) {
+      context.addIssue({ code: 'custom', path: ['outline_operation_bases'], message: 'every outline operation requires one research finding basis' })
     }
     if ((entry.task_id.startsWith('MAP-INIT-') || entry.task_id.startsWith('MAP-REPAIR-'))
       && entry.research_assessment?.sufficient_for_outline_decision !== true) {
@@ -359,9 +383,10 @@ interface MappingSubmissionState {
   everInstalled: boolean
   stagedOutline: OutlineArtifact
   acceptedOperations: OutlineEditOperation[]
-  outlineOperationBases: Array<z.infer<typeof taskBasisSchema>>
+  outlineOperationBases: Array<z.infer<typeof outlineOperationBasisSchema>>
   researchReady: boolean
   researchAssessment: BranchResearchAssessment | undefined
+  structuralRefinementApplied: boolean
   locked: boolean
   mappings: Map<string, PartialSectionMapping>
   submittedMappings: Set<string>
@@ -501,10 +526,20 @@ function applySectionTaskOperation(state: MappingSubmissionState, task: Evidence
   return change
 }
 
-function assertResearchReady(state: MappingSubmissionState): void {
-  if (!state.researchReady) {
+function assertResearchReady(
+  state: MappingSubmissionState,
+): asserts state is MappingSubmissionState & { researchAssessment: BranchResearchAssessment } {
+  if (!state.researchReady || state.researchAssessment?.sufficient_for_outline_decision !== true) {
     throw new ToolArgsError(['research_assessment: 必须先提交 sufficient_for_outline_decision=true 的分支研究充分性判断。'])
   }
+}
+
+function researchFindingRef(finding: string): string {
+  return `RF-${createHash('sha256').update(finding).digest('hex').slice(0, 16)}`
+}
+
+function outlineStructureSnapshot(outline: OutlineArtifact): string {
+  return JSON.stringify(outline.sections.map(({ id, parent_id, order, level, writable }) => ({ id, parent_id, order, level, writable })))
 }
 
 function invalidateChangedSectionDrafts(
@@ -843,13 +878,18 @@ function attachMappingSubmissionRuntime(
   for (const definition of createMappingSourceTools(locations, snapshots)) register(definition)
   if (taskOwnsBranchRefinement(task)) register({
     name: 'submit_branch_research_assessment',
-    description: '提交当前分支的多维研究充分性判断；不修改目录。结论不足时继续研究并可重新提交，只有充分结论才开放目录和 Writing Brief 操作。',
-    parameters: z.toJSONSchema(branchResearchAssessmentSchema, { target: 'draft-7' }), output,
+    description: '提交当前分支的多维研究充分性判断；Host 为 key_findings 返回稳定 finding_ref，但不修改目录。结论不足时继续研究并可重新提交，只有充分结论才开放目录和 Writing Brief 操作。',
+    parameters: z.toJSONSchema(branchResearchAssessmentInputSchema, { target: 'draft-7' }), output,
     execute(raw: unknown): Promise<unknown> {
       if (state.locked) throw new ToolArgsError(['research_assessment: 当前业务分支已经锁定。'])
-      const assessment = branchResearchAssessmentSchema.parse(raw)
+      const submitted = branchResearchAssessmentInputSchema.parse(raw)
+      const assessment = branchResearchAssessmentSchema.parse({
+        ...submitted,
+        key_findings: submitted.key_findings.map(finding => ({ finding_ref: researchFindingRef(finding), finding })),
+      })
       state.researchAssessment = assessment
       state.researchReady = assessment.sufficient_for_outline_decision
+      state.structuralRefinementApplied = false
       state.lastIncompleteIssues = assessment.sufficient_for_outline_decision ? [] : [{
         code: 'EVIDENCE_MAPPING_RESEARCH_NOT_READY',
         message: '当前研究仍不足以支持目录结构决策；请针对诊断与缺口继续检索、阅读并重新评估。',
@@ -857,6 +897,7 @@ function attachMappingSubmissionRuntime(
       return Promise.resolve({
         research_ready: state.researchReady,
         outline_capacity: assessment.outline_capacity,
+        key_findings: assessment.key_findings,
         unresolved_gaps: assessment.unresolved_gaps,
       })
     },
@@ -879,23 +920,28 @@ function attachMappingSubmissionRuntime(
 
   if (taskOwnsBranchRefinement(task)) {
     const editSchema = closedObject({ operation: z.toJSONSchema(outlineEditOperationSchema, { target: 'draft-7' }) as JsonSchemaNode,
-      basis: z.toJSONSchema(taskBasisSchema, { target: 'draft-7' }) as JsonSchemaNode })
+      basis: z.toJSONSchema(outlineOperationBasisSchema, { target: 'draft-7' }) as JsonSchemaNode })
     register({
-      name: 'apply_branch_outline_edit',
-      description: '对当前业务分支应用一个目录操作；Host 分配并返回新增 Section ID。锁定后不能再编辑。',
+      name: 'apply_branch_outline_edit', description: '按当前 Research Assessment 的 finding_ref 对业务分支应用一个目录操作；adequate 只允许 update_section，refinement_needed 的有效结构调整完成后才可锁定。Host 分配并返回新增 Section ID。',
       parameters: editSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
         if (state.locked) throw new ToolArgsError(['operation: 当前业务分支已经锁定。'])
         const violations = validateJsonSchemaValue(editSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
-        const basis = taskBasisSchema.parse(record(args)?.basis)
+        const basis = outlineOperationBasisSchema.parse(record(args)?.basis)
+        if (!state.researchAssessment.key_findings.some(finding => finding.finding_ref === basis.finding_ref)) {
+          throw new ToolArgsError([`basis.finding_ref: ${basis.finding_ref} 不属于当前 Research Assessment。`])
+        }
         if (basis.requirement_ids.some(id => !state.assignedCoverage.requirement_ids.has(id))
           || (basis.kind === 'tender_requirement' && basis.requirement_ids.length === 0)) throw new ToolArgsError(['basis: 必须引用当前任务的招标要求。'])
         let operation: OutlineEditOperation
         try { operation = outlineEditOperationSchema.parse(record(args)?.operation) as OutlineEditOperation } catch (error: unknown) {
           if (error instanceof ZodError) throw new ToolArgsError(submissionViolations(error))
           throw error
+        }
+        if (operation.type !== 'update_section' && state.researchAssessment.outline_capacity.decision === 'adequate') {
+          throw new ToolArgsError(['outline_capacity: 当前结论为 adequate，只允许 update_section；如需结构深化，请先重新提交 Research Assessment。'])
         }
         const beforeOutline = state.stagedOutline
         const before = new Set(beforeOutline.sections.map(section => section.id))
@@ -910,6 +956,8 @@ function attachMappingSubmissionRuntime(
         state.stagedOutline = candidate
         state.acceptedOperations.push(operation)
         state.outlineOperationBases.push(basis)
+        if (operation.type !== 'update_section'
+          && outlineStructureSnapshot(beforeOutline) !== outlineStructureSnapshot(candidate)) state.structuralRefinementApplied = true
         state.lastIncompleteIssues = []
         return Promise.resolve({
           applied: true,
@@ -924,10 +972,14 @@ function attachMappingSubmissionRuntime(
       description: '保存本轮粒度结论：列出研究识别的重要子主题及其独立成节、留在章内或排除的具体理由，并简述资料是否足以支持该判断。',
     } })
     register({
-      name: 'lock_branch_outline', description: '提交目录结构对照结论；共享目录结构有效时锁定当前分支，否则返回问题并保持可编辑。',
+      name: 'lock_branch_outline', description: '提交目录结构对照结论；refinement_needed 必须先完成有效结构调整，共享目录结构有效时才锁定当前分支。',
       parameters: lockSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
+        if (state.researchAssessment.outline_capacity.decision === 'refinement_needed'
+          && !state.structuralRefinementApplied) {
+          throw new ToolArgsError(['outline_capacity: 当前结论为 refinement_needed，必须先完成有效结构调整。'])
+        }
         const violations = validateJsonSchemaValue(lockSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
         const comparison = record(args)?.comparison
@@ -1346,10 +1398,10 @@ export function renderEvidenceMappingSubagentTask(
         '这是原业务分支的受控修复轮次。复用已有研究上下文和候选资料，只处理列出的具体结构问题；重新锁定并提交最终可写章节，未影响分支不在当前范围。',
       ] : []),
       '先理解 S3 已确认章节职责并列出影响写作深度和结构判断的研究问题，再阅读本地资料，按需检索 Web。以当前招标要求和用户原始框架为约束，旧标目录用于结构参照；不得机械照抄任意目录树，也不得把旧项目事实带入本项目。',
-      '研究后调用 submit_branch_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定分支或调用 update_section_task。',
+      '研究后调用 submit_branch_research_assessment，从招标要求与 Response Point、技术原理与实施路线、重要判断的依据与推断边界、项目特有信息及质量风险约束、当前叶子承载能力形成多维诊断。Host 为 key_findings 返回稳定 finding_ref。结论不足时继续检索和阅读并重新提交；在 research_ready=true 前不得编辑目录、锁定分支或调用 update_section_task。',
       'Research Ready 不按网页、资料或工具调用数量判断。招标信息本身足够时允许零联网；客观不可获得的信息只有在边界已确认且不影响当前层级结构判断时才可保留为 unresolved_gaps 并进入 Ready，禁止补写不存在的依据。',
       'Research Ready 后再判断当前叶子是否包含职责、目标、方法、输入输出或验证方式明显不同且值得在 S5 独立论证的主题，并检查与兄弟章节是否重复。独立主题必须通过目录操作落实，不得长期只塞入 writing_dimensions、must_answer 或 writing_notes；同一技术过程的连续步骤留在章内，不能把每个维度机械变成子目录。',
-      '目录深化遵循研究结论和输入文件的主题，不预设标题、固定层级或节点数量。已有叶子足够聚焦时允许零结构变化；须针对 key_findings 中的具体主题说明为何独立成节、适合合写、由现有其他章节承担或不适用，不能只说评分已经覆盖。',
+      '目录深化遵循研究结论和输入文件的主题，不预设标题、固定层级或节点数量。outline_capacity=adequate 时不得执行 add、split、merge、move、delete；确需改变结构时先重新评估为 refinement_needed。refinement_needed 必须完成有效结构调整后才能锁定。update_section 只修正现有节点，不算结构调整。',
     ] : []),
     `Project 摘要：${JSON.stringify(subagentTaskContext(inputs.project))}`,
     `相关 Requirements：${JSON.stringify(subagentTaskContext(requirements))}`,
@@ -1370,8 +1422,8 @@ export function renderEvidenceMappingSubagentTask(
     '研究充分性判断通过后，按研究结论完成必要的目录操作，再逐章形成可直接交给 S5 的 Writing Brief；结构变化后按工具返回的当前章节重新分配职责和覆盖，不把原章任务机械复制给每个子章。材料提交仍须目录锁定后另行完成。',
     '只通过 update_section_task 维护写作任务、writing_dimensions、职责内 missing_topics 和明确的 coverage_override；材料提交不能改变这些字段。每次调整说明招标要求、用户修改或章节职责依据。purpose 不能重复标题，must_answer 将评分转为具体写作任务；writing_dimensions 或 writing_notes 至少一项指导展开。找到相关资料不构成扩大本章任务的理由。',
     ...(taskOwnsBranchRefinement(task) ? [
-      '需要独立成节的主题逐次调用 apply_branch_outline_edit，提交一个目录操作及其业务依据 basis；不得编辑或移动其他分支。新增 ID 由程序返回，禁止自行预测 NEW-* ID。',
-      '目录判断完成后调用 lock_branch_outline(comparison)，保存 key_findings 中重要主题独立成节、留在章内或排除的具体理由。之后以它返回的最新 writable_sections 为准，逐章调用 submit_section_mapping；只更新任务不会从 remaining_section_ids 消失。',
+      '每次调用 apply_branch_outline_edit 都在 basis.finding_ref 引用当前 Research Assessment 返回的一个 key finding；Host 只校验引用归属，不替你判断操作是否符合发现。不得编辑或移动其他分支。新增 ID 由程序返回，禁止自行预测 NEW-* ID。',
+      '目录判断完成后调用 lock_branch_outline(comparison)，保存 key findings 中重要主题独立成节、留在章内或排除的具体理由。之后以它返回的最新 writable_sections 为准，逐章调用 submit_section_mapping；只更新任务不会从 remaining_section_ids 消失。',
       '覆盖关联默认为当前目录关联；需要调整时，在 update_section_task 中明确提交三类 coverage_override，只能引用当前任务可见 ID。必须修正任务越界，不能写入 add_mapping_suggestion 后当作已解决。',
       '所有章节完成后调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的章节，直到 completed=true。',
       '拆分可写叶子时，先用 update_section 为将成为结构节点的原章节补充 summary，再执行 split_section。',
@@ -2194,7 +2246,7 @@ async function executeEvidenceMappingRun(
   }
   let previous: EvidenceMapArtifact | undefined
   let previousWeb: WebEvidenceSourcesArtifact | undefined
-  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 6, tasks: [] }
+  let checkpoint: EvidenceMappingCheckpoint = { schema_version: 7, tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
   if (!localRun) {
@@ -2208,9 +2260,9 @@ async function executeEvidenceMappingRun(
         if (JSON.stringify(savedInitial) !== JSON.stringify(expectedInitial)) throw new Error('evidence-mapping-resume-plan-mismatch')
         const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
         if (rawCheckpoint !== undefined) {
-          if (record(rawCheckpoint)?.schema_version !== 6) throw new BidStageExecutionError([{
+          if (record(rawCheckpoint)?.schema_version !== 7) throw new BidStageExecutionError([{
             code: 'EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED',
-            message: 'S4 检查点缺少分支研究充分性结论或增量 Final Check 进度，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
+            message: 'S4 检查点缺少分支研究 finding 引用或增量 Final Check 进度，请重置 S4 后重新执行。', artifact: CHECKPOINT_PATH,
           }])
           checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
         }
@@ -2309,7 +2361,7 @@ async function executeEvidenceMappingRun(
         ...(repairBaseOutline === undefined ? {} : { repair_base_outline: repairBaseOutline }),
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
       })
-      checkpoint = { schema_version: 6, tasks: plan.tasks.flatMap((item) => {
+      checkpoint = { schema_version: 7, tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }
@@ -2451,6 +2503,7 @@ async function executeEvidenceMappingRun(
           acceptedOperations: [],
           researchReady: !taskOwnsBranchRefinement(mappingTask),
           researchAssessment: undefined,
+          structuralRefinementApplied: false,
           locked: !taskOwnsBranchRefinement(mappingTask),
           mappings: new Map(restoredResult?.section_mappings.map(mapping => [mapping.section_id, mapping]) ?? []),
           submittedMappings: new Set(restoredResult?.section_mappings.map(mapping => mapping.section_id) ?? []),

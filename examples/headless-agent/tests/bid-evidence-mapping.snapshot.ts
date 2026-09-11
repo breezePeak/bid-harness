@@ -46,7 +46,8 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('research-ready')
       expect(childLog).toContain('lock-without-comparison')
       expect(childLog).toContain('reject-invalid-outline-edit')
-      expect(childLog).toContain('OUTLINE_SHARED_CONTAINER_EMPTY')
+      expect(childLog).toContain('RF-ff8a1adbc819d315')
+      expect(childLog).toContain('当前结论为 adequate')
       expect(events.find(event => event.type === 'tool/result'
         && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'lock-before-research-ready'))
         .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
@@ -111,7 +112,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         schema_version: number
         tasks: Array<{ task_id: string; research_assessment?: { sufficient_for_outline_decision: boolean; unresolved_gaps: unknown[] } }>
       }
-      expect(checkpoint.schema_version).toBe(6)
+      expect(checkpoint.schema_version).toBe(7)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
           sufficient_for_outline_decision: true,

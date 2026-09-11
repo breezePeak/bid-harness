@@ -335,12 +335,10 @@ describe('BidReviewWorkbench', () => {
     await waitFor(() => { expect(getWorkbench.mock.calls.length).toBeGreaterThanOrEqual(3) })
   })
 
-  it('offers retry when S5 fails', async () => {
-    const retryStage = vi.fn(async () => {})
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }), retryStage })} />)
-    expect(screen.getByText('章节写作失败：writer failed')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '重试' }))
-    await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
+  it('S5 失败时不渲染顶部报错横幅与重试按钮', () => {
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }) })} />)
+    expect(screen.queryByText(/章节写作失败/)).toBeNull()
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
   })
 
   it('S5 完成后入口仅打开导出页，正文仍可查看', async () => {

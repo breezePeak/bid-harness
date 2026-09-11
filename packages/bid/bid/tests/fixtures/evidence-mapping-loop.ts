@@ -382,7 +382,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
           type: 'add_section', parent_id: 'SEC-SECURITY', order: 1, writable: false,
           title: '未完成的结构节点', purpose: '组织后续安全任务。', summary: '汇总后续安全任务。',
         },
-        basis: { kind: 'section_responsibility', explanation: '验证非法目录操作不污染待锁定目录。', requirement_ids: [] },
+        basis: {
+          kind: 'section_responsibility', explanation: '验证 adequate 结论禁止结构深化。', requirement_ids: [],
+          finding_ref: 'RF-ff8a1adbc819d315',
+        },
       }),
     ] : []),
     toolCall('lock-initial-outline', 'lock_branch_outline', {
