@@ -45,9 +45,24 @@ async function exportFixture() {
     })).reverse(),
   }
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await mkdir(join(workspace.projectRoot, 'chapters/sections'), { recursive: true })
   await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
   await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify(manifest))
+  await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [] }))
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify({ schema_version: 1, scoring_items: [] }))
+  await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify({ schema_version: 1, scope: 'technical_bid', scoring_sha256: 'a'.repeat(64), next_sequence: 1, points: [] }))
+  await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
+    schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
+    confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+    user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
+    user_requirements: ['按确认目录生成技术标。'], global_instructions: ['完整响应已确认的技术要求。'], document_acceptance: [],
+    sections: ['resource', 'delivery'].map(section_id => ({
+      section_id, task: '完成本章技术响应。', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [],
+    })),
+    revision: null,
+  }))
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n资源配置正文。\n\n## 内部措施\n\n保留正文。\n\n```txt\n# 原样井号\n```\n')
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '交付正文。')
   return { workspace, manifest, outline }
@@ -129,6 +144,25 @@ describe('Bid DOCX export', () => {
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toMatchObject({ ok: false })
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '')
     await expect(executeDocxExport(workspace)).rejects.toThrow('章节正文为空')
+  })
+
+  it('导出前拒绝系统编号，但保留招标文件自身的同名条款编号', async () => {
+    const { workspace } = await exportFixture()
+    const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
+    const contentPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const requirement = {
+      id: 'REQ-001', category: '技术', raw_text: '系统应提供审计功能。', normalized_requirement: '提供审计功能。',
+      mandatory: true, source_refs: [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }],
+    }
+    await writeFile(requirementsPath, JSON.stringify({ schema_version: 1, requirements: [requirement] }))
+    await writeFile(contentPath, '# 资源配置\n\n我方按 REQ-001 实施审计控制。')
+    await expect(executeDocxExport(workspace)).rejects.toThrow('DOCX_EXPORT_INTERNAL_ID_VISIBLE')
+
+    await writeFile(requirementsPath, JSON.stringify({
+      schema_version: 1,
+      requirements: [{ ...requirement, raw_text: '按采购方条款 REQ-001 提供审计功能。' }],
+    }))
+    await expect(executeDocxExport(workspace)).resolves.toHaveLength(1)
   })
 
   it('校验输出目录内的按需文件并拒绝路径逃逸', async () => {

@@ -271,7 +271,7 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 5, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 6, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
@@ -281,6 +281,7 @@ describe('Workspace 项目与独立 Session', () => {
       assignment_conflicts: [],
       claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
       quality_checks: {
+        bidder_response_voice: true,
         project_specific: false, structure_complete: true, legacy_project_pollution_free: true,
         placeholder_free: true, obvious_repetition_free: true,
       },

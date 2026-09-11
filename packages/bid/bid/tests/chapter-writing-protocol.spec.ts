@@ -40,6 +40,7 @@ const draft = (section_id: string, depends: string[] = [], related: string[] = [
   section_id, depends_on: depends.map(relation), related_sections: related.map(relation), planning_notes: [],
 })
 const quality = {
+  bidder_response_voice: true,
   project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
   placeholder_free: true, obvious_repetition_free: true,
 }

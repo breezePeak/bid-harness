@@ -639,8 +639,9 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
     const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const parentTitles: Record<string, string> = { ROOT: '总体方案', PARENT: '业务方案', OTHER: '配套方案' }
     const parent = (id: string, parent_id: string | null, order: number, level: number) => ({
-      ...structuredClone(outline.sections[0]!), id, parent_id, order, level, title: id, purpose: '概括项目业务范围及总体思路。',
+      ...structuredClone(outline.sections[0]!), id, parent_id, order, level, title: parentTitles[id]!, purpose: '概括项目业务范围及总体思路。',
       writable: false, must_answer: [], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [], summary: '项目方案明确业务内容及总体思路。',
     })
     outline.sections[0] = { ...outline.sections[0]!, parent_id: 'PARENT', level: 3 }
@@ -693,6 +694,8 @@ describe('evidence-mapping Agent executor', () => {
         .resolves.toMatchObject({ isError: true })
     }
     await expect(call('replace_section_mapping', { ...valid, local_materials: [{ ...valid.local_materials[0], material_ref: 'M999:chunk_9999' }] }))
+      .resolves.toMatchObject({ isError: true })
+    await expect(call('submit_branch_summary', { section_id: 'PARENT', summary: '本章响应 R-1 并落实 SEC-1。' }))
       .resolves.toMatchObject({ isError: true })
     for (const section_id of ['PARENT', 'ROOT']) await expect(call('submit_branch_summary', { section_id, summary: '本项目以业务需求和作业范围为基础，明确任务之间的关系，为实施方案提供依据。' }))
       .resolves.toMatchObject({ isError: false })
@@ -1064,7 +1067,9 @@ describe('evidence-mapping Agent executor', () => {
     const first = outline.sections[0]!
     const second = outline.sections[1]!
     const branch = (id: string, parent_id: string | null, order: number): OutlineSection => ({
-      ...first, id, parent_id, order, level: parent_id === null ? 1 : 2, title: id, writable: false,
+      ...first, id, parent_id, order, level: parent_id === null ? 1 : 2,
+      title: parent_id === null ? '总体实施方案' : `实施专题${order}`,
+      writable: false,
       must_answer: [], scoring_response_point_ids: [], scoring_response_points: [],
     })
     outline.sections = [branch('ROOT', null, 1), ...Array.from({ length: 9 }, (_, index) => {

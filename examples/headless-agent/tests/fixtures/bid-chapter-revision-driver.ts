@@ -63,7 +63,8 @@ try {
         items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
       }),
       toolCall('review-summary', 'set_review_summary', {
-        quality_checks: { project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
+        quality_checks: {
+          bidder_response_voice: true, project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
           placeholder_free: true, obvious_repetition_free: true },
         blocking_issues: [],
         assignment_conflicts: [],

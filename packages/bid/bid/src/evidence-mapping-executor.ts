@@ -61,6 +61,7 @@ import {
   parseTenderScoringArtifact,
 } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 import {
   WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   normalizeWebEvidenceUrl,
@@ -629,6 +630,23 @@ async function validateCompletedMappingState(
     ? applyBranchOutlineOperations(inputs.outline, task, state.acceptedOperations)
     : state.stagedOutline
   const researched = applyResearchBriefs(candidate, [result], inputs.responsePoints)
+  const customerTextContext = {
+    outline: researched,
+    requirements: inputs.requirements,
+    scoring: inputs.scoring,
+    compliance: inputs.compliance,
+    responsePoints: inputs.responsePoints,
+  }
+  for (const field of customerFacingOutlineText(researched)) {
+    const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
+    if (leaked.length > 0) {
+      issues.push({
+        code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE',
+        message: `${field.path} 包含系统内部编号 ${leaked.join('、')}；请改用招标文件原有编号或自然语言。`,
+        path: field.path,
+      })
+    }
+  }
   validateOutlineSharedStructure(researched.sections, issues)
   validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
   if (taskOwnsBranchRefinement(task)) await validateOutlineFrameworkRefs(workspace, researched, issues)
@@ -655,6 +673,18 @@ function attachMappingSubmissionRuntime(
   }
   const register = (definition: Parameters<typeof childCtx.tools.register>[0]): void => {
     disposers.push(childCtx.tools.register(definition))
+  }
+  const assertCustomerFacingSummary = (summary: string): void => {
+    const leaked = findBidInternalIdentifiers(summary, {
+      outline: state.stagedOutline,
+      requirements: inputs.requirements,
+      scoring: inputs.scoring,
+      compliance: inputs.compliance,
+      responsePoints: inputs.responsePoints,
+    })
+    if (leaked.length > 0) {
+      throw new ToolArgsError([`summary: 不得向甲方显示系统内部编号 ${leaked.join('、')}；请改用招标原文中的需求名称、原有条款编号或自然语言。`])
+    }
   }
   for (const definition of createMappingSourceTools(locations, snapshots)) register(definition)
   register({
@@ -778,7 +808,7 @@ function attachMappingSubmissionRuntime(
   })
 
   if (task.phase === 'final_check') register({
-    name: 'submit_branch_summary', description: '提交可直接用于正式技术标正文的章节总述。根据父节点职责、最终子章节任务及已确认项目信息自然概括业务内容与总体思路，不解说目录或编写过程，不展开操作步骤或增加未经确认的事实、能力和承诺。',
+    name: 'submit_branch_summary', description: '提交可直接用于正式技术标正文的章节总述。以投标人方案、措施和成果为主体，不复述采购要求，不显示系统内部编号，不解说目录或编写过程，也不增加未经确认的事实、能力和承诺。',
     parameters: closedObject({ section_id: { type: 'string' }, summary: { type: 'string' } }) as unknown as Record<string, unknown>, output,
     execute(args: unknown): Promise<unknown> {
       const violations = validateJsonSchemaValue(closedObject({ section_id: { type: 'string' }, summary: { type: 'string' } }), args)
@@ -790,6 +820,7 @@ function attachMappingSubmissionRuntime(
         throw new ToolArgsError([`section_id: ${sectionId || '(empty)'} 不是当前复核范围内的父节点。`])
       }
       if (summary.length === 0) throw new ToolArgsError(['summary: expected non-empty string'])
+      assertCustomerFacingSummary(summary)
       state.branchSummaries.set(sectionId, summary)
       return Promise.resolve({ recorded: true, section_id: sectionId, pending_items: pendingReviews(state, task) })
     },
@@ -841,6 +872,7 @@ function attachMappingSubmissionRuntime(
             applySectionTaskOperation(draft, task, correction.task)
           } else if (item.kind === 'branch_summary') {
             if (decision.decision === 'remove' || correction?.summary === undefined || Object.keys(correction).length !== 1) throw new ToolArgsError(['correction.summary: 只能修正父节点总述正文，不能删除父节点。'])
+            assertCustomerFacingSummary(correction.summary)
             draft.branchSummaries.set(item.section_id, correction.summary)
           } else {
             if (correction?.task !== undefined) throw new ToolArgsError(['correction.task: 材料结论不得夹带章节任务。'])
@@ -2173,7 +2205,8 @@ async function executeEvidenceMappingRun(
           `已登记 Web 正文引用：${JSON.stringify(availableSnapshots.map(snapshot => ({ url: snapshot.source.final_url, source_ref: `W:${snapshot.source.source_id}` })))}`,
           `当前待审项：${JSON.stringify(pendingReviews(submissionRequest.state, mappingTask))}`,
           `需提交总述的父节点：${JSON.stringify(affectedSummarySections(runInputs.outline, mappingTask))}`,
-          '父节点 summary 是可以直接用于标书正文的章节总述。根据父节点职责、最终修正的子章节任务和已确认项目信息，用一小段自然正文交代业务内容和总体思路，衔接后文，不规定字数、不逐条复述目录。以正式技术标口吻围绕项目需求或方案展开；可以自然使用“本章”，但不得写成内部目录解说，不描述模型任务、生成过程或系统状态。',
+          '父节点 summary 是可以直接用于标书正文的章节总述。根据父节点职责、最终修正的子章节任务和已确认项目信息，用一小段自然正文直接说明我方或本方案的总体思路、实施措施和预期成果，衔接后文，不规定字数、不逐条复述目录。采购要求只可在理解方案所必需时用一句话概括，不得成为总述主体；不得写成需求解读、内部目录解说，也不得描述模型任务、生成过程或系统状态。',
+          '总述及其中的表格不得出现 Requirement、Scoring、Compliance、Response Point、Section 或 Acceptance Criterion 的系统内部编号；需求对应关系使用招标文件原有条款编号、需求名称或简要原文。',
           '总述只在父节点层级概括，不展开子章节操作步骤，不引入其他分支实施细节，不新增未经确认的项目事实、企业能力或服务承诺。S5 尚未生成正文，不得声称已经总结或核验实际正文。子章节任务变化后，重新检查受影响的父节点总述。',
         ]), ...(options.remap === undefined ? [] : [
           `当前任务是局部 ${options.remap.mode} 资料映射，仅处理 Mapping Task.section_ids。`,

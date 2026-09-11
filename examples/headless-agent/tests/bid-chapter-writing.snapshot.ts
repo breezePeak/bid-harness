@@ -33,7 +33,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
       expect(calls.map(event => event.data.name)).toEqual([
-        'read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter',
+        'read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter',
       ])
       expect(writerLog).toContain('不能新增目录标题“补充服务方案”')
       expect(writerLog).toContain('Current Chapter Path：')
@@ -48,6 +48,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(writerLog).toContain('Hash')
       expect(writerLog).toContain('S4 已映射的公开审计资料。')
       expect(writerLog).toContain('未知 W1')
+      expect(writerLog).toContain('正文包含系统内部编号 REQ-1')
       expect(writerLog).toContain('S5 Chapter Child 不可读取 tender 或未入库资料。')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })
       expect(writerLog).not.toContain('需要访问控制与安全审计方案。')

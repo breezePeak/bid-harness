@@ -13,6 +13,7 @@ import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTe
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
+import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 
 const MAP_PATH = 'analysis/evidence-map.json'
 const WEB_PATH = 'analysis/web-evidence-sources.json'
@@ -138,6 +139,13 @@ export async function validateEvidenceMapping(
     const scoring = parseTenderScoringArtifact(scoringRaw)
     const compliance = parseTenderComplianceArtifact(complianceRaw)
     const catalog = parseScoringResponsePointCatalog(catalogRaw)
+    const customerTextContext = { outline, requirements, scoring, compliance, responsePoints: catalog }
+    for (const field of customerFacingOutlineText(outline)) {
+      const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
+      if (leaked.length > 0) {
+        reject(issues, 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE', `${field.path} 包含系统内部编号 ${leaked.join('、')}；标书标题和总述只能使用招标文件原有编号或自然语言。`, OUTLINE_PATH, field.path)
+      }
+    }
     if (!catalogMatchesScoring(catalog, scoring)) reject(issues, 'EVIDENCE_MAPPING_RESPONSE_POINT_CATALOG_MISMATCH', 'The response-point catalog does not match scoring.json.', 'analysis/scoring-response-points.json')
     validateOutlineSharedStructure(outline.sections, issues)
     validateOutlineSharedCoverage(outline, requirements, scoring, compliance, catalog, issues)

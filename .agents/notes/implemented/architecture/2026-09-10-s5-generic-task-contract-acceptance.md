@@ -42,6 +42,6 @@ Writer 接收完整章节任务契约及既有 Blueprint、Requirement、Scoring
 
 旧 writing-plan 磁盘格式被拒绝，首次发布前不提供兼容转换。条件 ID 与计划版本由 Host 稳定生成，但语义条件质量、优先级和影响范围仍取决于 Main Agent；无密钥回放只能证明协议、隔离、版本和持久化，不能证明任意自然语言要求的判断正确。
 
-章节报告 schema v5、完成账本 schema v2、执行计划和执行日志 schema v3 记录动态验收与输入身份。确定性能力只有显式注册的 metric；新增 metric 需要定义可重现输入、不可用语义和边界测试，但不需要增加需求关键词分支。
+章节报告 schema v6、完成账本 schema v2、执行计划和执行日志 schema v3 记录动态验收、投标人直接作答质量与输入身份；客户正文质量规则由[标书内部追踪身份与客户正文分离](../bug-fix/2026-09-11-bid-customer-facing-prose-boundary.md)拥有。确定性能力只有显式注册的 metric；新增 metric 需要定义可重现输入、不可用语义和边界测试，但不需要增加需求关键词分支。
 
 测试使用篇幅、章节详略、表格偏好、证据约束和风险重点等不同文本通过同一写作计划 Schema，固定条件描述不会选择 deterministic 路径。协议测试固定 negative semantic、required/preferred 分流和 section 权威边界；章节执行测试固定 patch 影响范围、计划版本失效、上游 handoff 变化、动态失败回到原 Writer、无关章节继续和修订后整书复核；项目会话测试通过真实 Main Agent 工具循环固定多轮消息引用、运行中普通问答不停止写作，并覆盖完成态任务上下文读取。

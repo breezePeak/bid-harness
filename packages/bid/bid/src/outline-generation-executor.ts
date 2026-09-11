@@ -40,6 +40,7 @@ import { applyOutlineRepair, outlineRepairOperationSchema, outlineAssociationRep
 import { inspectOutlineCandidate, applyOutlineCandidateRepair, outlineCandidateRepairSchema, parseOutlineFormatRepair } from './outline-candidate-repair.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
@@ -179,6 +180,7 @@ export function renderOutlineGenerationTask(
       `<outline-framework-structures>\n${JSON.stringify(frameworks)}\n</outline-framework-structures>`,
     ]),
     '根据 Project、Requirements、Scoring、Compliance 和稳定评分响应点目录设计技术标详细写作 Blueprint。此阶段不读取或推断证据映射。',
+    '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果。投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 放入 global_compliance_ids，不得为复述或解释这类要求单独创建可写章节；与技术任务混合时，章节只承担可作答的技术部分。',
     `本轮初稿唯一输出：${root}/${OUTLINE_ARTIFACT}。Host 随后会强制发送一次 Blueprint Quality Review。`,
     `文件严格包含 schema_version=${OUTLINE_GENERATION_SCHEMA_VERSION}、scope="technical_bid"、document_title、global_compliance_ids、sections。不得写 content、body、markdown 或任何正文。`,
     'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
@@ -211,7 +213,7 @@ function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace,
     ...task.inputs.map(path => `- ${root}/${path}`),
     `- ${root}/${OUTLINE_ARTIFACT}`,
     `本阶段只允许调用：${task.allowedTools.join(', ')}、${QUALITY_REPORT_TOOL}。不得 Web Search、bash 或重新进行全库资料映射。`,
-    '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适的可写叶子章节；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。存在 Framework 时还要检查主要骨架、顺序和关键技术章节是否合理继承，框架过粗处是否按 RP 扩展，是否产生重复主题，framework_refs 与 origin 是否符合实际来源，旧项目污染是否清理。',
+    '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适位置；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 必须留在 global_compliance_ids，不得单独形成正文页；发现此类章节时删除或合并其技术内容。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。存在 Framework 时还要检查主要骨架、顺序和关键技术章节是否合理继承，框架过粗处是否按 RP 扩展，是否产生重复主题，framework_refs 与 origin 是否符合实际来源，旧项目污染是否清理。',
     '发现章节过粗、多个明显技术主题混在一节、评分项未真实拆解、must_answer 过泛、结构与可写职责混淆或其他问题时，先修改 outline/outline.json；保留原有严格 JSON 字段和全部引用覆盖。',
     `修正后调用 ${QUALITY_REPORT_TOOL}，只提交 issues=[{code,severity:"advisory",message}]。code 使用大写下划线标识，issues 可以记录仍需用户判断的非阻断语义建议；阻断问题必须先修复目录。`,
     `Host 为当前复核目录生成 schema_version=${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}、scope、checked_* 和 reviewed_section_ids 并写入正式质量报告。工具返回 submitted=true 后停止；Host 会独立校验报告集合、树结构和引用覆盖。`,
@@ -422,6 +424,17 @@ export async function executeOutlineGeneration(
     }
     const validate = async (outline: OutlineArtifact): Promise<StageValidationIssue[]> => {
       const issues: StageValidationIssue[] = []
+      const customerTextContext = { outline, requirements, scoring, compliance, responsePoints: formalCatalog }
+      for (const field of customerFacingOutlineText(outline)) {
+        const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
+        if (leaked.length > 0) {
+          issues.push({
+            code: 'OUTLINE_GENERATION_INTERNAL_ID_VISIBLE',
+            message: `${field.path} 包含系统内部编号 ${leaked.join('、')}；请改用招标文件原有编号或自然语言。`,
+            path: field.path,
+          })
+        }
+      }
       validateOutlineSharedStructure(outline.sections, issues)
       validateOutlineSharedCoverage(outline, requirements, scoring, compliance, formalCatalog, issues)
       await validateOutlineFrameworkRefs(workspace, outline, issues)

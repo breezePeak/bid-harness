@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 5 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 6 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -68,6 +68,7 @@ export const chapterReviewSchema = z.object({
   assignment_conflicts: z.array(assignmentConflictSchema),
   claim_checks: z.array(claimCheckSchema),
   quality_checks: z.object({
+    bidder_response_voice: z.boolean(),
     project_specific: z.boolean(),
     structure_complete: z.boolean(),
     legacy_project_pollution_free: z.boolean(),

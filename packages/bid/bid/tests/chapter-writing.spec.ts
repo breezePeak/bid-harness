@@ -130,12 +130,13 @@ function candidateFrom(request: SubagentStartRequest, _valid = true, withWebEvid
   if (line === undefined) throw new Error('missing blueprint')
   const section = JSON.parse(line.slice('Current Chapter Blueprint：'.length)) as {
     id: string
+    title: string
     must_answer: string[]
     scoring_response_point_ids: string[]
     scoring_response_points: Array<{ scoring_id: string; response_point: string }>
   }
   return {
-    markdown: `# ${section.id}\n\n正文`,
+    markdown: `# ${section.title}\n\n正文`,
     metadata: {
       local_materials_used: [], web_materials_used: [],
       additional_web_materials: withWebEvidence ? [{
@@ -172,7 +173,7 @@ function reviewFrom(request: SubagentStartRequest) {
   const quote = Object.entries(quoteOptions).find(([, text]) => candidate.markdown.includes(text) && !text.startsWith('#'))![0]
   const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: [quote], issue: null })
   return {
-    schema_version: 5 as const, section_id: section.id, verdict: 'pass' as const,
+    schema_version: 6 as const, section_id: section.id, verdict: 'pass' as const,
     must_answer_coverage: section.must_answer.map(coverage),
     requirement_coverage: section.requirement_ids.map(requirement_id => ({ requirement_id, ...coverage(requirement_id) })),
     response_point_coverage: section.scoring_response_point_ids.map(response_point_id => (
@@ -194,6 +195,7 @@ function reviewFrom(request: SubagentStartRequest) {
     assignment_conflicts: [],
     claim_checks: [],
     quality_checks: {
+      bidder_response_voice: true,
       project_specific: true, structure_complete: true,
       legacy_project_pollution_free: true, placeholder_free: true, obvious_repetition_free: true,
     },
@@ -1431,6 +1433,28 @@ describe('chapter-writing executor', () => {
     await expect(execution).resolves.toHaveLength(5)
   })
 
+  it('Reviewer 判定正文不是投标人直接作答时回到同一 Writer 修订', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-bidder-voice-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true)
+    fixture.reviewerResult.mockImplementationOnce((request) => {
+      const review = reviewFrom(request)
+      return {
+        ...review,
+        quality_checks: { ...review.quality_checks, bidder_response_voice: false },
+      }
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1,
+      maxConcurrency: 1,
+    })
+
+    expect(fixture.starts).toHaveLength(4)
+    expect(fixture.starts[1]?.run.id).toBe(fixture.starts[0]?.run.id)
+    expect(promptText(fixture.starts[1]!.request)).toContain('质量检查未通过：bidder_response_voice')
+  })
+
   it.each([
     ['non-completed stop reason', (): SubagentResult => ({ stopReason: 'error', output: [], diagnostic: '模型服务没有可用认证。' }), 'CHAPTER_SUBAGENT_STOP_REASON_INVALID'],
     ['missing structured result', (): SubagentResult => ({ stopReason: 'completed', output: [] }), 'CHAPTER_SUBAGENT_STRUCTURED_MISSING'],
@@ -1853,5 +1877,40 @@ describe('chapter-writing executor', () => {
 
     expect((await validateChapterCandidate(workspace, context, candidate, childASnapshots)).map(issue => issue.code))
       .toContain('CHAPTER_WRITING_WEB_MATERIAL_UNVERIFIED')
+  })
+
+  it('在 Reviewer 前拒绝章节正文中的系统内部编号', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-internal-id-')))
+    await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
+      schema_version: 2, stage: 'evidence_mapping', sources: [],
+    }))
+    const section = outlineFixture().sections[1]!
+    const context = emptyChapterContext(section)
+    const candidate: ChapterCandidate = {
+      section_id: section.id,
+      markdown: `# ${section.title}\n\n我方按 REQ-1 组织实施。`,
+      metadata: {
+        section_id: section.id,
+        covered_must_answer: section.must_answer,
+        covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+        covered_scoring_response_points: section.scoring_response_points,
+        local_materials_used: [],
+        web_materials_used: [],
+        additional_web_materials: [],
+        unresolved_topics: [],
+        handoff: emptyHandoff(section.id),
+      },
+    }
+    context.requirements = parseTenderRequirementsArtifact({
+      schema_version: 1,
+      requirements: [{
+        id: 'REQ-1', category: '技术', raw_text: '建立项目组织。', normalized_requirement: '建立项目组织。',
+        mandatory: true, source_refs: source,
+      }],
+    }).requirements
+
+    expect((await validateChapterCandidate(workspace, context, candidate, [])).map(issue => issue.code))
+      .toContain('CHAPTER_WRITING_INTERNAL_ID_VISIBLE')
   })
 })

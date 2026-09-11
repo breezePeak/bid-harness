@@ -11,6 +11,7 @@ function text(text: string): StreamChunk[] {
 }
 
 const quality = {
+  bidder_response_voice: true,
   project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
   placeholder_free: true, obvious_repetition_free: true,
 }

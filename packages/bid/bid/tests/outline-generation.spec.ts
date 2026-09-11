@@ -439,6 +439,24 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(task).toContain('id、parent_id、order、level、title、purpose、writable、must_answer')
     expect(task).toContain('目录模式：无人工框架')
     expect(task).toContain('评分响应点和评分项为主要拆分依据')
+    expect(task).toContain('投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 放入 global_compliance_ids')
+    expect(task).toContain('不得为复述或解释这类要求单独创建可写章节')
+  })
+
+  it('拒绝目录标题和总述中的系统内部编号', async () => {
+    const workspace = await fixture()
+    const outline = structuredClone(reviewedOutline)
+    outline.document_title = 'REQ-ORG 技术标'
+    outline.sections[0]!.summary = '我方按 SEC-SCHEDULE 组织实施。'
+    await publishOutline(workspace, outline)
+
+    const result = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('系统内部编号未被拒绝')
+    expect(result.issues.some(issue => issue.code === 'OUTLINE_GENERATION_INTERNAL_ID_VISIBLE'
+      && issue.message.includes('REQ-ORG'))).toBe(true)
+    expect(result.issues.some(issue => issue.code === 'OUTLINE_GENERATION_INTERNAL_ID_VISIBLE'
+      && issue.message.includes('SEC-SCHEDULE'))).toBe(true)
   })
 
   it('injects successful outline-framework headings without S3 source mappings', async () => {

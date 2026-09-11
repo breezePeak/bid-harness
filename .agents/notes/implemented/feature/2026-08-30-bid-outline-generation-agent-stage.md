@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先产生候选评分响应点，再以独立语义复核检查完整评分场景；Host 随后分配稳定 `RP-*`。存在成功解析的 `outline_framework` 时，Host 把 manifest 顺序下的标题树注入任务，Agent 明确选择主框架、补充框架和无关框架，并按保留、扩展、调整或排除适配；没有框架时按评分响应点、评分项、Requirements 和 Compliance 自主生成完整目录。
+Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先产生候选评分响应点，再以独立语义复核检查完整评分场景；Host 随后分配稳定 `RP-*`。存在成功解析的 `outline_framework` 时，Host 把 manifest 顺序下的标题树注入任务，Agent 明确选择主框架、补充框架和无关框架，并按保留、扩展、调整或排除适配；没有框架时按评分响应点、评分项、Requirements 和需要技术作答的 Compliance 自主生成完整目录。纯资格与行政递交事项只保留为全局合规，客户正文边界由[标书内部追踪身份与客户正文分离](../bug-fix/2026-09-11-bid-customer-facing-prose-boundary.md)约束。
 
 严格 Outline Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、purpose、是否写作、Requirement/Scoring/Compliance/Response Point 引用、结构来源、精确 `framework_refs` 和写作指引。`origin` 只取 `framework`、`generated` 或 `mixed`；结构节点必须有子节点，可写节点必须是叶子并具有具体 `must_answer`。
 

@@ -29,7 +29,7 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
       const events = writerLog.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
       expect(events.filter(event => event.type === 'turn/start')).toHaveLength(4)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.filter(event => event.data.name === 'submit_chapter')).toHaveLength(9)
+      expect(calls.filter(event => event.data.name === 'submit_chapter')).toHaveLength(10)
       const outsideCall = calls.find(event => event.data.callId === 'reject-outside-selection')
       expect(outsideCall).toBeDefined()
       expect(events.find(event => event.type === 'tool/result' && event.data.message.source.callId === outsideCall?.data.callId))

@@ -14,6 +14,9 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
+import { findBidInternalIdentifiers } from './customer-facing-prose.ts'
+import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -53,8 +56,15 @@ export async function executeDocxExport(
  */
 export async function collectDocxMarkdown(workspace: BidWorkspace, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted()
-  const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
-  const manifest = parseChapterWritingManifest(JSON.parse(await readProjectFile(workspace, 'chapters/manifest.json')))
+  const [outline, manifest, requirements, scoring, compliance, responsePoints, writingPlan] = await Promise.all([
+    readProjectFile(workspace, 'outline/confirmed-outline.json').then(value => parseConfirmedOutlineArtifact(JSON.parse(value))),
+    readProjectFile(workspace, 'chapters/manifest.json').then(value => parseChapterWritingManifest(JSON.parse(value))),
+    readProjectFile(workspace, 'analysis/requirements.json').then(value => parseTenderRequirementsArtifact(JSON.parse(value))),
+    readProjectFile(workspace, 'analysis/scoring.json').then(value => parseTenderScoringArtifact(JSON.parse(value))),
+    readProjectFile(workspace, 'analysis/compliance.json').then(value => parseTenderComplianceArtifact(JSON.parse(value))),
+    readProjectFile(workspace, 'analysis/scoring-response-points.json').then(value => parseScoringResponsePointCatalog(JSON.parse(value))),
+    readProjectFile(workspace, 'chapters/writing-plan.json').then(value => parseWritingPlan(JSON.parse(value))),
+  ])
   if (manifest.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) {
     throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_OUTLINE_MISMATCH', message: '章节记录与当前确认目录不匹配。', artifact: 'chapters/manifest.json' }])
   }
@@ -76,7 +86,21 @@ export async function collectDocxMarkdown(workspace: BidWorkspace, signal?: Abor
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
     parts.push(collectDocxChapterBody(markdown, section.title, section.id, number, headingDepth))
   }
-  return `${parts.join('\n\n')}\n`
+  const markdown = `${parts.join('\n\n')}\n`
+  const leaked = findBidInternalIdentifiers(markdown, {
+    outline, requirements, scoring, compliance, responsePoints,
+    acceptanceCriterionIds: [
+      ...writingPlan.document_acceptance.map(item => item.id),
+      ...writingPlan.sections.flatMap(section => section.acceptance_criteria.map(item => item.id)),
+    ],
+  })
+  if (leaked.length > 0) {
+    throw new BidStageExecutionError([{
+      code: 'DOCX_EXPORT_INTERNAL_ID_VISIBLE',
+      message: `标书客户可见内容包含系统内部编号 ${leaked.join('、')}；请先修订对应标题、总述或正文。`,
+    }])
+  }
+  return markdown
 }
 
 /**

@@ -8,6 +8,7 @@ import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '.
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 
 const ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT = 'outline/quality-report.json'
@@ -83,6 +84,13 @@ export async function validateOutlineGeneration(
     const scoring = parseTenderScoringArtifact(scoringRaw)
     const compliance = parseTenderComplianceArtifact(complianceRaw)
     const catalog = parseScoringResponsePointCatalog(catalogRaw)
+    const customerTextContext = { outline, requirements, scoring, compliance, responsePoints: catalog }
+    for (const field of customerFacingOutlineText(outline)) {
+      const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
+      if (leaked.length > 0) {
+        reject(issues, 'OUTLINE_GENERATION_INTERNAL_ID_VISIBLE', `${field.path} 包含系统内部编号 ${leaked.join('、')}；标书标题和总述只能使用招标文件原有编号或自然语言。`)
+      }
+    }
     if (!catalogMatchesScoring(catalog, scoring)) {
       reject(issues, 'OUTLINE_RESPONSE_POINT_CATALOG_INVALID', 'The response-point catalog does not belong to the current scoring Artifact.', 'analysis/scoring-response-points.json')
     }

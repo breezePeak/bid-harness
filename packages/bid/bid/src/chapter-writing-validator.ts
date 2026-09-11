@@ -19,6 +19,7 @@ import { parseWritingPlan, validateWritingPlan } from './writing-requirements.ts
 import { parseChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { chapterContentSha256 } from './chapter-revision.ts'
+import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 import {
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
@@ -165,6 +166,23 @@ export async function validateChapterWriting(
     return { ok: false, issues }
   }
   const outlineHash = outlineArtifactSha256(outline)
+  const customerTextContext = {
+    outline,
+    requirements,
+    scoring,
+    compliance,
+    responsePoints: catalog,
+    acceptanceCriterionIds: [
+      ...writingPlan.document_acceptance.map(item => item.id),
+      ...writingPlan.sections.flatMap(section => section.acceptance_criteria.map(item => item.id)),
+    ],
+  }
+  for (const field of customerFacingOutlineText(outline)) {
+    const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
+    if (leaked.length > 0) {
+      reject(issues, 'CHAPTER_WRITING_INTERNAL_ID_VISIBLE', `${field.path} 包含系统内部编号 ${leaked.join('、')}。`, 'outline/confirmed-outline.json')
+    }
+  }
   if (writingPlan.confirmed_outline_sha256 !== outlineHash) {
     reject(issues, 'CHAPTER_WRITING_PLAN_OUTLINE_MISMATCH', 'The writing plan does not match the confirmed outline.', 'chapters/writing-plan.json')
   }
@@ -245,6 +263,10 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
+      const leaked = findBidInternalIdentifiers(markdown, customerTextContext)
+      if (leaked.length > 0) {
+        reject(issues, 'CHAPTER_WRITING_INTERNAL_ID_VISIBLE', `正文包含系统内部编号 ${leaked.join('、')}。`, chapter.content_path)
+      }
       globalChapters.push({ section_id: section.id, title: section.title, markdown, candidate_sha256: chapterCandidateSha256(markdown) })
       if (!(await lstat(body)).isFile() || markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim())) throw new Error('empty')
       for (const message of validateChapterHeadings(markdown, section.title, section.id)) {

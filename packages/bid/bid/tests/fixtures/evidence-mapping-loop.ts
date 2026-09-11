@@ -502,6 +502,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const coverage = { status: 'covered', evidence_quote_refs: ['Q2'], issue: null }
   const summary = {
     quality_checks: {
+      bidder_response_voice: true,
       project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
       placeholder_free: true, obvious_repetition_free: true,
     },
@@ -529,8 +530,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
     toolCall('reject-bad-reference', 'submit_chapter', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
     toolCall('reject-bad-web-reference', 'submit_chapter', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
-    toolCall('reject-new-atx-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n## 补充服务方案\n\n不属于确认目录的目录层级。` }),
+    toolCall('reject-new-atx-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n## 补充服务方案\n\n我方组织访问控制实施。` }),
     toolCall('reject-new-setext-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n补充服务方案\n---\n\n不属于确认目录的目录层级。` }),
+    toolCall('reject-internal-id', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n我方按 REQ-1 组织访问控制实施。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
@@ -578,7 +580,10 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
   outline.sections.push(untouched)
   const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
-  candidate.sections[0] = { ...candidate.sections[0]!, scoring_response_point_ids: [...pointIds.slice(0, 10), 'RP-999999'], scoring_ids: ['SCORE-UNKNOWN'], requirement_ids: [] }
+  candidate.sections[0] = {
+    ...candidate.sections[0]!, title: 'REQ-1 安全方案',
+    scoring_response_point_ids: [...pointIds.slice(0, 10), 'RP-999999'], scoring_ids: ['SCORE-UNKNOWN'], requirement_ids: [],
+  }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript = [
@@ -615,6 +620,10 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
       { type: 'update_section', section_id: section.id, requirement_ids: section.requirement_ids },
     ]) }),
     finalText('将招标要求关联至现有安全方案章节。'),
+    toolCall('customer-text-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
+      type: 'update_section', section_id: section.id, title: section.title,
+    }]) }),
+    finalText('已用客户可理解的自然语言替换内部编号标题。'),
     toolCall('local-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
       type: 'update_section', section_id: section.id, scoring_response_point_ids: pointIds,
       must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
@@ -623,7 +632,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     toolCall('quality-review', 'submit_outline_quality_review', { issues: [] }),
     finalText('逐项复核章节归属和写作指导已完成。'),
   )
-  maxRepairAttempts = 3
+  maxRepairAttempts = 4
   const outcome = await orchestrator.retry()
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown

@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`chapter_writing` 从 `outline/confirmed-outline.json` 按父节点和顺序确定工作清单。主 Agent 只生成章节关系计划，Host 按强依赖 DAG 和并发上限启动每章独立 Writer Child；每章任务携带紧凑项目上下文、当前 Blueprint、关联 Requirement、Scoring、Response Point、Compliance、缺失主题、写作维度和 S4 Section Evidence。Host 还按当前 Section 的 `framework_refs` 解析精确框架正文分块；这些分块可保留、适配或改写，但不证明当前项目事实。Writer 通过结构化输出返回候选，只有 Host 写入章节正文、Metadata sidecar 和 `chapters/manifest.json`。
+`chapter_writing` 从 `outline/confirmed-outline.json` 按父节点和顺序确定工作清单。主 Agent 只生成章节关系计划，Host 按强依赖 DAG 和并发上限启动每章独立 Writer Child；每章任务携带紧凑项目上下文、当前 Blueprint、关联 Requirement、Scoring、Response Point、Compliance、缺失主题、写作维度和 S4 Section Evidence。Host 还按当前 Section 的 `framework_refs` 解析精确框架正文分块；这些分块可保留、适配或改写，但不证明当前项目事实。Writer 通过结构化输出返回候选，只有 Host 写入章节正文、Metadata sidecar 和 `chapters/manifest.json`；投标人作答口吻与内部身份隔离由[标书内部追踪身份与客户正文分离](../bug-fix/2026-09-11-bid-customer-facing-prose-boundary.md)约束。
 
 S5 Stage Policy 允许 `grep`、`read`、`write`、`web_search` 和 `web_fetch`，Executor 按角色收窄为主 Agent 的 `read`、`write`、Writer 的 `grep`、`read`、`web_search`、`web_fetch` 和 Reviewer 的空工具集。Writer 可读取 manifest 中成功解析的 `reference`、`reference_bid` 及 Host 为当前 Section 解析的 `outline_framework` Chunk，也可读取来源账本登记的 `analysis/web-sources/WEB-*.md`；Read Guard 明确拒绝 tender。普通 `reference` 只支持事实与技术参考，`reference_bid` 允许按 usage 复用或适配，但正文必须清理旧项目事实。
 
