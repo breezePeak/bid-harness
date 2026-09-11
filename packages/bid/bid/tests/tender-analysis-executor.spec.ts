@@ -42,8 +42,9 @@ describe('tender-analysis Agent executor', () => {
     const liftRestriction = vi.fn()
     const liftGuard = vi.fn()
     const restrict = vi.fn(() => liftRestriction)
-    let policy: (exec: { name: string }) => string | undefined = () => undefined
-    const guard = vi.fn((next: typeof policy) => { policy = next; return liftGuard })
+    const policies: Array<(exec: { name: string }) => string | undefined> = []
+    const policy = (exec: { name: string }): string | undefined => policies.map(next => next(exec)).find(value => value !== undefined)
+    const guard = vi.fn((next: typeof policy) => { policies.push(next); return liftGuard })
     const register = vi.fn((definition: ToolDefinition) => {
       definitions.set(definition.name, definition)
       return () => { definitions.delete(definition.name) }
@@ -55,7 +56,8 @@ describe('tender-analysis Agent executor', () => {
     const followup = vi.fn()
     const agent = {
       id: 'session',
-      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
+      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+      inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] },
       followup,
       whenIdle: vi.fn(async () => {}),
     } as unknown as Agent
@@ -82,7 +84,7 @@ describe('tender-analysis Agent executor', () => {
     expect(result.map(value => value.path)).toEqual(task.requiredArtifacts)
     expect(register).toHaveBeenCalledTimes(5)
     expect(definitions.size).toBe(0)
-    expect(liftGuard).toHaveBeenCalledOnce()
+    expect(liftGuard).toHaveBeenCalledTimes(3)
     expect(liftRestriction).toHaveBeenCalledOnce()
   })
 
@@ -136,7 +138,8 @@ describe('tender-analysis Agent executor', () => {
     })
     const agent = {
       id: 'session',
-      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() },
+      ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+      inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] },
       followup,
       whenIdle,
     } as unknown as Agent

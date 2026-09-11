@@ -263,6 +263,8 @@ export interface TenderAnalysisSubmissionRuntime {
   reviewSnapshot(): unknown
   /** Admit the mandatory review turn after the initial model turn has ended. */
   beginReview(): void
+  /** 在下一次请求组装前挂载或卸载 S2 私有提交工具。 */
+  setToolsEnabled(enabled: boolean): void
   /** Remove every execution-local tool registration. */
   dispose(): void
 }
@@ -297,7 +299,10 @@ export async function attachTenderAnalysisSubmissionRuntime(
   const requirements = new Map<string, RequirementDraft>()
   const scoring = new Map<string, ScoringDraft>()
   const compliance = new Map<string, ComplianceDraft>()
-  const disposers: Array<() => void> = []
+  let toolDisposers: Array<() => void> = []
+  const definitions: ToolDefinition[] = []
+  let toolsEnabled = true
+  let disposed = false
   let phase: TenderAnalysisSubmissionRuntime['phase'] = 'collecting'
   let revision = 0
   let lastIssues: StageValidationIssue[] = []
@@ -316,11 +321,23 @@ export async function attachTenderAnalysisSubmissionRuntime(
     render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
   }
   const register = (definition: Omit<ToolDefinition, 'output'>): void => {
-    disposers.push(tools.register({
+    const registered: ToolDefinition = {
       ...definition,
       output,
       presentCall: () => ({ card: 'generic', title: definition.name }),
-    }))
+    }
+    definitions.push(registered)
+    if (toolsEnabled) toolDisposers.push(tools.register(registered))
+  }
+  const setToolsEnabled = (enabled: boolean): void => {
+    if (disposed || toolsEnabled === enabled) return
+    toolsEnabled = enabled
+    if (!enabled) {
+      for (const dispose of toolDisposers.reverse()) dispose()
+      toolDisposers = []
+      return
+    }
+    toolDisposers = definitions.map(definition => tools.register(definition))
   }
 
   register({
@@ -550,6 +567,11 @@ export async function attachTenderAnalysisSubmissionRuntime(
       phase = 'reviewing'
       lastIssues = []
     },
-    dispose() { for (const dispose of disposers.reverse()) dispose() },
+    setToolsEnabled,
+    dispose() {
+      disposed = true
+      for (const dispose of toolDisposers.reverse()) dispose()
+      toolDisposers = []
+    },
   }
 }

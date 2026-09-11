@@ -8,7 +8,7 @@ S5 的消息准入曾在读取用户语义前取消写作并重开要求确认�
 
 ## Decision
 
-[`chapter_writing` 的首次整体要求门禁](../feature/2026-09-09-bid-s5-writing-requirements-gate.md)保持不变。`session/prompt-admission` 只校验 Bid 会话、项目占用和客户端可接收状态。S5 运行中与完成后的普通消息进入原主 Agent，不取消写作、不创建询问标记，也不改变计划版本或完成状态；另一会话不能借消息取消当前项目所有者。主 Agent 在用户消息前接收可回放的 S5 交互规则，并通过运行态 `bid_stage_inspect` 读取有界的章节编号、真实 ID、执行状态、Writer/Reviewer 尝试、最近问题和正文篇幅快照。只有模型判断用户明确改变整体要求并调用 `bid_confirm_writing_plan` 时，Host 才进入既有版本化恢复路径。
+[`chapter_writing` 的首次整体要求门禁](../feature/2026-09-09-bid-s5-writing-requirements-gate.md)保持不变。[全阶段 Main Agent 实时交错](../feature/2026-09-11-bid-all-stage-main-agent-steer.md)现统一拥有消息准入、私有协议切换和取消边界；本记录继续拥有 S5 计划 mutation 与正文页数校验。S5 运行中与完成后的普通消息进入原主 Agent，不取消写作、不创建询问标记，也不改变计划版本或完成状态；另一会话不能借消息取消当前项目所有者。主 Agent 在用户消息前接收可回放的 S5 交互规则，并通过运行态 `bid_stage_inspect` 读取有界的章节编号、真实 ID、执行状态、Writer/Reviewer 尝试、最近问题和正文篇幅快照。只有模型判断用户明确改变整体要求并调用 `bid_confirm_writing_plan` 时，Host 才进入既有版本化恢复路径。
 
 正文工作台、运行态 inspect 和显式 `estimated_pages` 条件共用 `estimateChapterWritingPages()`。该入口按正式导出顺序统计确认目录标题、父节点概述和已有叶节正文，并读取当前 `word-export/config.json` 的生效值；缺失正文保持为空，审核记录和聊天内容不参与计数。条件比较使用未取整值且不增加业务容差；测算异常产生 unavailable 结果，不能当作零页或达标。是否建立该条件及其优先级由 Main Agent 判断，Host 不从条件描述或用户原话推断。
 

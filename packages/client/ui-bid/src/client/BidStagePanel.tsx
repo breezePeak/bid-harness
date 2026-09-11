@@ -27,7 +27,7 @@ export type BidStagePanelProps =
   & InjectFace<BidStagePanelInjected>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'start' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
+type PendingAction = 'upload' | 'start' | 'stop' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -141,6 +141,7 @@ export function BidStagePanel({
   setDetailsAvailable,
   uploadFiles,
   startStage,
+  stopStage,
   retryStage,
   confirmOutline,
   regenerateOutline,
@@ -336,6 +337,7 @@ export function BidStagePanel({
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const canStart = projection.allowedActions.includes('start_stage')
+  const canStop = projection.allowedActions.includes('stop_stage')
   const canRetry = projection.allowedActions.includes('retry_stage')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
@@ -879,6 +881,18 @@ export function BidStagePanel({
               onClick={() => { invoke('retry', retryStage) }}
             >
               {t('action.retry')}
+            </Button>
+          )}
+          {canStop && (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<IconCloseOutline16 />}
+              disabled={requestPending !== null || stopStage === undefined}
+              title={stopStage === undefined ? t('action.unavailable') : t('action.stop_stage_hint')}
+              onClick={() => { invoke('stop', stopStage) }}
+            >
+              {requestPending === 'stop' ? t('action.stopping_stage') : t('action.stop_stage')}
             </Button>
           )}
           {canStart && (

@@ -185,6 +185,20 @@ describe('BidStagePanel', () => {
     await waitFor(() => { expect(startStage).toHaveBeenCalledOnce() })
   })
 
+  it('运行中单独显示停止任务，并调用阶段控制而不是聊天取消', async () => {
+    const stopStage = vi.fn(async () => {})
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'running' },
+      allowedActions: ['send_message', 'stop_stage'],
+      composer: { enabled: true },
+    }), { stopStage })} />)
+
+    const button = screen.getByRole('button', { name: '停止任务' })
+    expect(button.getAttribute('title')).toContain('“停止回复”仅停止聊天回复')
+    fireEvent.click(button)
+    await waitFor(() => { expect(stopStage).toHaveBeenCalledOnce() })
+  })
+
   it('stays absent for a non-Bid session even when a projection is available', () => {
     const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
       selector({ byId: { session_bid: { agentPreset: 'standard' } } })
@@ -668,11 +682,16 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'waiting_user' as const } },
       })
+    const remoteStop = vi.fn<(_sessionId: string) => Promise<unknown>>()
+      .mockResolvedValue({
+        ok: true as const,
+        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'failed' as const } },
+      })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
-      remote: { bid: { retryStage: remoteRetry, startStage: remoteStart } },
+      remote: { bid: { retryStage: remoteRetry, startStage: remoteStart, stopStage: remoteStop } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
         register,
@@ -691,6 +710,7 @@ describe('ui-bid browser plugin', () => {
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
         retryStage: () => Promise<void>
         startStage: () => Promise<void>
+        stopStage: () => Promise<void>
       }
     }
     const injected = options.inject('session_bid')
@@ -752,6 +772,8 @@ describe('ui-bid browser plugin', () => {
     expect(remoteRetry).toHaveBeenCalledWith('session_bid')
     await injected.startStage()
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
+    await injected.stopStage()
+    expect(remoteStop).toHaveBeenCalledWith('session_bid')
   })
 
   it('supports direct editing of the selected S2 review item and submits the change', async () => {

@@ -10,7 +10,7 @@ Status: implemented
 
 目录编辑的发布时机与最终确认复核由[章节研究与 Blueprint](2026-09-03-bid-section-research-blueprint.md)规定：连续修改只保存 Draft，确认前完成受影响章节复核。本记录保留受控工具、CAS 和生命周期的设计依据。
 
-S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按实时阶段仅注册给 Bid Main Agent；执行入口重新检查身份、阶段、CAS 和项目锁。`bid_stage_inspect` 返回当前编号树、实际 ID、业务引用、材料缺口和映射任务；模型负责自然语言定位，Host 不把展示编号当内部 ID。
+S2/S3/S4 的等待态开放 Composer 和受控 mutation；[全阶段 Main Agent 实时交错](2026-09-11-bid-all-stage-main-agent-steer.md)另使运行态与完成态开放普通消息，但不把等待态 mutation 工具扩展到不安全的阶段边界。工具按实时阶段仅注册给 Bid Main Agent；执行入口重新检查身份、阶段、CAS 和项目锁。`bid_stage_inspect` 返回当前编号树、实际 ID、业务引用、材料缺口和映射任务；模型负责自然语言定位，Host 不把展示编号当内部 ID。
 
 目录编辑复用 `mutateOutlineDraft`；局部重生成与整本重生成共用反馈要求，独立无工具 Child 只返回编辑操作，Host 验证范围后走同一 Draft mutation。初始 S4 与 targeted remap 共用映射执行器，仅任务范围、Evidence 合并方式和是否深化目录不同。`replace` 不保留目标旧证据，`supplement` 按本地文件/分块或 Web source ID 去重；无关章节不重新运行。
 
@@ -32,6 +32,6 @@ S2/S3/S4 的等待态开放 Composer，运行态拒绝普通消息。工具按�
 
 修改可连续执行，但每次均须基于最新 CAS；Evidence-only 修改也提升 revision，旧确认请求不能接受新资料。回滚覆盖目录、Draft、质量报告、Evidence、Web ledger、映射计划和日志；新建但尚未采用的 Web 快照不作为正式证据。快照内容按 URL 与正文哈希命名，保留其他章节引用的正文。
 
-本记录部分扩展[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)：保留自动 reconcile 不强制补映射的决定，同时提供用户主动要求的局部研究。它也部分替代[Host 准入](../bug-fix/2026-08-29-bid-host-runtime-admission.md)中禁用全部普通消息的规则，保留 Host 决策和单一投影的依据；这两份记录仍有独立决策价值。
+本记录部分扩展[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)：保留自动 reconcile 不强制补映射的决定，同时提供用户主动要求的局部研究。它也部分替代[Host 准入](../bug-fix/2026-08-29-bid-host-runtime-admission.md)中禁用全部普通消息的规则，保留 Host 决策和单一投影的依据；[全阶段 Main Agent 实时交错](2026-09-11-bid-all-stage-main-agent-steer.md)继续替代本记录的运行态拒绝范围，但保留这里的等待态 mutation 设计。这些记录仍有独立决策价值。
 
 真实 Main Agent 与源码 Loader 回放覆盖普通咨询、否认隐式确认、裸写拒绝、拆分、局部重生成、单节 remap、并发拒绝、失败恢复和工具释放；Host 测试覆盖 replace/supplement 与未选中证据保留，UI 测试覆盖自动刷新和最新 revision 确认。自然语言理解的质量仍取决于模型，脚本模型测试证明控制链路而不证明真实模型的目标理解准确率。

@@ -17,6 +17,7 @@ import {
   type TenderLocator,
 } from './tender-analysis-submission.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { installMainAgentInterleave } from './main-agent-interleave.ts'
 
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/project.json': 'tender_project',
@@ -176,23 +177,37 @@ export async function executeTenderAnalysis(
     liftGuard = tools.guard(exec => allowed.has(exec.name)
       ? undefined
       : `Bid stage ${task.stage} allows only ${allowedTools.join(', ')}`)
+    const run = async (prompt: string, isComplete: () => boolean): Promise<void> => {
+      await options.scheduler?.waitUntilRunnable(options.signal)
+      const message = createUserMessage({
+        content: [{ type: 'text', text: prompt }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+      })
+      const interleave = installMainAgentInterleave(agent, {
+        privateTools: TENDER_ANALYSIS_SUBMISSION_TOOLS,
+        internalTools: allowedTools,
+        setPrivateToolsEnabled: (enabled) => { runtime.setToolsEnabled(enabled) },
+        resumePrompt: '继续当前 S2 内部分析任务。保留已提交记录，只完成尚未结束的读取、修正或 finish；不要重复已经完成的工作。',
+        isInternalComplete: isComplete,
+        label: 'S2 Tender Analysis',
+      })
+      interleave.own(message)
+      try {
+        agent.followup(message)
+        await waitForModelStageIdle(agent, options.signal)
+      } finally {
+        interleave.dispose()
+      }
+    }
     options.signal?.throwIfAborted()
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: renderTenderAnalysisTask(agent, workspace, task, runtime.locators) }],
-      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-    }))
-    await waitForModelStageIdle(agent, options.signal)
+    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators), () => runtime.phase !== 'collecting')
     let attempts = 0
     while (!runtime.completed) {
       options.signal?.throwIfAborted()
       if (runtime.phase === 'review_required') {
         const snapshot = runtime.reviewSnapshot()
         runtime.beginReview()
-        agent.followup(createUserMessage({
-          content: [{ type: 'text', text: renderTenderAnalysisQualityReviewTask(agent, workspace, task, snapshot, runtime.locators) }],
-          source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-        }))
-        await waitForModelStageIdle(agent, options.signal)
+        await run(renderTenderAnalysisQualityReviewTask(agent, workspace, task, snapshot, runtime.locators), () => runtime.completed)
         continue
       }
       if (attempts++ >= options.maxRepairAttempts) break
@@ -200,11 +215,7 @@ export async function executeTenderAnalysis(
         code: 'TENDER_ANALYSIS_FINISH_REQUIRED',
         message: '必须调用 finish_tender_analysis 并处理其返回问题；普通回复不能完成 S2。',
       }]
-      agent.followup(createUserMessage({
-        content: [{ type: 'text', text: renderTenderAnalysisRepairTask(agent, workspace, task, issues) }],
-        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-      }))
-      await waitForModelStageIdle(agent, options.signal)
+      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues), () => runtime.completed || runtime.phase === 'review_required')
     }
     await waitForModelStageIdle(agent, options.signal)
     return artifacts

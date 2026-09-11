@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
+  BID_STAGES,
   BID_RUNTIME_PROJECTION_KEY,
   getBidClientProjection,
   registerBidRuntimeProjection,
@@ -102,16 +103,13 @@ describe('Bid client projection', () => {
       allowedActions: ['start_stage'],
       composer: { enabled: false, reason: 'bid.stage_start_required' },
     })
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'running' })).toEqual({
-      runtime: { stage: 'tender_analysis', status: 'running' },
-      allowedActions: [],
-      composer: { enabled: false, reason: 'bid.stage_running' },
-    })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'running' })).toEqual({
-      runtime: { stage: 'chapter_writing', status: 'running' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
+    for (const stage of BID_STAGES) {
+      expect(getBidClientProjection({ stage, status: 'running' })).toEqual({
+        runtime: { stage, status: 'running' },
+        allowedActions: ['send_message', 'stop_stage'],
+        composer: { enabled: true },
+      })
+    }
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toEqual({
       runtime: { stage: 'tender_analysis', status: 'waiting_user' },
       allowedActions: ['confirm_tender_analysis', 'send_message'],
@@ -151,12 +149,14 @@ describe('Bid client projection', () => {
       allowedActions: ['retry_stage'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'completed' })).toEqual({
-      runtime: { stage: 'chapter_writing', status: 'completed' },
-      allowedActions: ['export_docx', 'revise_chapter'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'docx_export', status: 'completed' }).allowedActions).toEqual(['export_docx', 'revise_chapter'])
+    for (const stage of BID_STAGES) {
+      expect(getBidClientProjection({ stage, status: 'completed' })).toEqual({
+        runtime: { stage, status: 'completed' },
+        allowedActions: stage === 'chapter_writing' || stage === 'docx_export'
+          ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
+        composer: { enabled: true },
+      })
+    }
   })
 
   it('registers bid.runtime as a whole-value DSH session projection', async () => {
@@ -185,8 +185,8 @@ describe('Bid client projection', () => {
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
       runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: [],
-      composer: { enabled: false, reason: 'bid.stage_running' },
+      allowedActions: ['send_message', 'stop_stage'],
+      composer: { enabled: true },
     })
 
     session.append('bid.stage.failed', {
@@ -211,7 +211,7 @@ describe('Bid client projection', () => {
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: [],
+      allowedActions: ['send_message', 'stop_stage'],
     })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
       'runtime.failureReason',

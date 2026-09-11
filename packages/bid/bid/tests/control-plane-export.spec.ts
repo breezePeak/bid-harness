@@ -31,6 +31,7 @@ describe('browser-safe Bid control-plane export', () => {
     expect(controlPlane.BID_CLIENT_ACTIONS).toEqual([
       'upload_files',
       'start_stage',
+      'stop_stage',
       'retry_stage',
       'export_docx',
       'revise_chapter',

@@ -2810,6 +2810,7 @@ async function executeEvidenceMappingRun(
     const workers = Array.from({ length: Math.min(maxConcurrency, tasks.length) }, async () => {
       while (true) {
         signal.throwIfAborted()
+        await options.scheduler?.waitUntilRunnable(signal)
         const mappingTask = tasks[nextTask++]
         if (mappingTask === undefined) return
         completed.set(mappingTask.task_id, await runTask(mappingTask, runInputs))

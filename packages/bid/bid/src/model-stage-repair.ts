@@ -4,12 +4,22 @@ import type { StageValidationIssue } from './control-plane-contract.ts'
 /** Default number of Validator-guided repair turns for one model-produced Bid stage. */
 export const DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS = 3
 
+/** Operation-local gate that pauses only future stage task scheduling. */
+export interface StageSchedulerControl {
+  /** Whether the Host currently holds new stage work. */
+  paused(): boolean
+  /** Wait until scheduling resumes or the owning operation is cancelled. */
+  waitUntilRunnable(signal?: AbortSignal): Promise<void>
+}
+
 /** Host-owned repair limit shared by model-produced Bid stages. */
 export interface ModelStageExecutionOptions {
   /** Maximum Validator-guided repair turns after the initial model output. */
   maxRepairAttempts: number
   /** Host operation cancellation for reset-to-stage recovery. */
   signal?: AbortSignal | undefined
+  /** Operation-local pause gate checked before starting later model or Child work. */
+  scheduler?: StageSchedulerControl | undefined
 }
 
 /**

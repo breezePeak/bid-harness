@@ -25,9 +25,18 @@ export class ChapterAdapter extends LlmAdapter {
   omitRepairSubmission = false
   reviewPreamble = true
   onReview?: () => void
+  writerGate?: Promise<void>
+  onWriterStart?: () => void
+  readonly publicRequestTools: string[][] = []
   constructor(private readonly cancelWriter?: () => void, private readonly omitReviewFinish = false) { super() }
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model }) }
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const lastUser = options.messages.findLast(message => message.role === 'user')
+    if (lastUser?.source.kind === 'user') {
+      this.publicRequestTools.push((options.tools ?? []).map(tool => tool.name).sort())
+      yield* text('章节仍在后台写作，任务没有停止。')
+      return
+    }
     const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     const globalReview = prompt.includes('Document Global Compliance Review')
     const completionReview = prompt.includes('Final Document Review')
@@ -84,6 +93,8 @@ export class ChapterAdapter extends LlmAdapter {
     const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string }
     entry.sectionId = section.id
     if (role === 'writer') {
+      this.onWriterStart?.()
+      await this.writerGate
       this.cancelWriter?.()
       if (section.id === 'SEC-1' && step === this.failWriterStep) throw new Error('暂时的模型传输错误')
       if (this.omitRepairSubmission && step >= 2) { yield* text('已完成修改。'); return }

@@ -58,7 +58,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     if (session !== agent.session || event.type !== 'bid.stage.started') return
     concurrent.push(ctx.serial('session/prompt-admission', { session, mode: 'steer', content: [{ type: 'text', text: 'test' }] })
       .then((rejection) => {
-        if (rejection === undefined) throw new Error('阶段执行期间接受了普通消息')
+        if (rejection !== undefined) throw new Error(`阶段执行期间拒绝了普通消息：${rejection.reason}`)
         return ctx.bid.applyOutlineDraftOperations(session, { expected_revision: 1, expected_draft_sha256: 'a'.repeat(64), operations: [] })
       })
       .then(() => 'unexpected success', (error: unknown) => error instanceof BidOrchestratorError ? error.code : String(error)))

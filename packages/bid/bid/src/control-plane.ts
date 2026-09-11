@@ -50,6 +50,8 @@ export type {
   BidRetryResult,
   BidStageStartErrorCode,
   BidStageStartResult,
+  BidStageStopErrorCode,
+  BidStageStopResult,
   BidReviewChapterView,
   BidPageEstimate,
   BidPageTargetStatus,

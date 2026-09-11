@@ -172,7 +172,8 @@ function modelAgent(
   })
   const services = { tools: { restrict: vi.fn(() => () => {}), guard, register } }
   const agent = { id: 'session', session: { events, header: { cwd: workspace.root } },
-    ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn() }, followup, whenIdle } as unknown as Agent
+    ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+    inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] }, followup, whenIdle } as unknown as Agent
   return { agent, followup, whenIdle, guard, register }
 }
 

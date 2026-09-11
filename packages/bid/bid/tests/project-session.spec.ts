@@ -9,15 +9,16 @@ import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
   BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
-  checkpointBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
+  buildBidStageTask, checkpointBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
   outlineArtifactSha256,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
-  type BidStageExecutorPort, type BidStageValidatorPort,
+  type BidStage, type BidStageExecutorPort, type BidStageValidatorPort, type StageSchedulerControl,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
@@ -46,12 +47,25 @@ function answer(text: string): StreamChunk[] {
 
 class ProjectSessionAdapter extends LlmAdapter {
   readonly script: StreamChunk[][] = []
+  readonly mainSessionIds = new Set<string>()
+  requestGate?: Promise<void>
+  onRequest?: () => void
+  childGate?: Promise<void>
+  onChildRequest?: () => void
 
   override resolveModel(provider: string, model: string) {
     return Promise.resolve({ provider, id: model, name: model })
   }
 
-  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (!this.mainSessionIds.has(String(options.sessionId))) {
+      this.onChildRequest?.()
+      await this.childGate
+      yield* answer('S4 Mapping Child 已完成。')
+      return
+    }
+    this.onRequest?.()
+    await this.requestGate
     const response = this.script.shift()
     if (response === undefined) throw new Error('Project Session 模型脚本已耗尽')
     yield* response
@@ -81,6 +95,7 @@ async function fixture() {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
+  await ctx.plugin(spawn, { providerName: 'spawn' })
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(BidHostRuntime)
   const workspace = new BidWorkspace(root)
@@ -88,10 +103,20 @@ async function fixture() {
   const executeStage = vi.fn(async () => [])
   const executor: BidStageExecutorPort = { canExecute: () => false, execute: executeStage }
   const validator: BidStageValidatorPort = { validate: async () => ({ ok: true, issues: [] }) }
-  host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, executor, {
+  host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, {
+    canExecute: stage => executor.canExecute(stage),
+    execute: async (task) => {
+      const active = [...host.inFlight.values()].find(value => (value as { session?: Session }).session === agent.session) as {
+        stageControl?: StageSchedulerControl
+      } | undefined
+      await active?.stageControl?.waitUntilRunnable(signal)
+      return executor.execute(task)
+    },
+  }, {
     validate: (stage, artifacts) => stage === 'tender_analysis' ? validateTenderAnalysis(current, stage, artifacts) : validator.validate(stage, artifacts),
   }, signal, (fromStage, toStage) => prepareBidStageContextTransition(agent.session, current, fromStage, toStage))
   const fresh = async (id: string, cwd = root, waitForIdle = true) => {
+    adapter.mainSessionIds.add(id)
     const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId(id), agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd, agentPreset: 'bid' } })
     await vi.waitFor(() => {
       expect(handle.agent.session.events.some(event => event.type === 'bid.project.resumed'), `${id} 应完成项目恢复`).toBe(true)
@@ -430,7 +455,7 @@ describe('Workspace 项目与独立 Session', () => {
     const b = await fresh('session-b')
     expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
     expect(executor.execute).not.toHaveBeenCalled()
-    expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual(['export_docx', 'revise_chapter'])
+    expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual(['send_message', 'export_docx', 'revise_chapter'])
     expect(await ctx.bid.exportDocx(b.session)).toMatchObject({ ok: true })
     expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
   })
@@ -590,6 +615,195 @@ describe('Workspace 项目与独立 Session', () => {
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'chapter_writing')).toBe(true)
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['tender_analysis', 'outline_generation'] as const)(
+    '%s 运行任务未完成时同 Session 先回答，另一 Session 不能 steer',
+    async (stage: BidStage) => {
+      const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+      await seedProjectArtifacts(workspace)
+      await checkpointBidProjectState(workspace, { stage, status: 'failed' })
+      const agent = await fresh(`live-${stage}`)
+      const gate = Promise.withResolvers<never[]>()
+      executor.canExecute = candidate => candidate === stage
+      executeStage.mockImplementationOnce(() => gate.promise)
+      const retry = ctx.bid.retryStage(agent.session)
+      await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage, status: 'running' }) })
+      await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
+      const artifactBefore = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
+      const projectBefore = await readBidProjectState(workspace)
+
+      await expect(ctx.serial('session/prompt-admission', {
+        session: agent.session, mode: 'steer', content: [{ type: 'text', text: '现在做到哪了？' }],
+      })).resolves.toBeUndefined()
+      const other = await fresh(`other-${stage}`, workspace.root, false)
+      await expect(ctx.serial('session/prompt-admission', {
+        session: other.session, mode: 'steer', content: [{ type: 'text', text: '查看进度' }],
+      })).resolves.toMatchObject({ reason: 'bid.stage_running' })
+
+      adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('当前阶段仍在执行，后台任务未停止。'))
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在做到哪了？' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect(agent.session.deriveMessages().at(-1)?.content)
+        .toContainEqual({ type: 'text', text: '当前阶段仍在执行，后台任务未停止。' })
+      expect(runtime(agent.session)).toEqual({ stage, status: 'running' })
+      expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+      expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(artifactBefore)
+      expect(await readBidProjectState(workspace)).toEqual(projectBefore)
+      gate.resolve([])
+      await retry
+    },
+  )
+
+  it('暂停阶段只拦住 operation 调度门，继续不取消当前任务', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'failed' })
+    const agent = await fresh('pause-stage-scheduling')
+    const tenderArtifacts = buildBidStageTask('tender_analysis').requiredArtifacts.map((path, index) => ({
+      stage: 'tender_analysis' as const, type: `artifact-${String(index)}`, path,
+    }))
+    const tenderGate = Promise.withResolvers<typeof tenderArtifacts>()
+    executor.canExecute = stage => stage === 'tender_analysis'
+    executeStage.mockImplementationOnce(() => tenderGate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'tender_analysis', status: 'running' }) })
+
+    adapter.script.push(toolCall('bid_pause_stage', {}), answer('已暂停后续任务调度；当前任务继续安全收敛。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '暂停当前阶段' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    const active = host.inFlight.values().next().value as {
+      controller: AbortController
+      stageControl: StageSchedulerControl
+    }
+    expect(active.stageControl.paused()).toBe(true)
+    expect(active.controller.signal.aborted).toBe(false)
+    let laterTaskAdmitted = false
+    const laterTask = active.stageControl.waitUntilRunnable(active.controller.signal).then(() => { laterTaskAdmitted = true })
+    await Promise.resolve()
+    expect(laterTaskAdmitted).toBe(false)
+
+    adapter.script.push(toolCall('bid_resume_stage', {}), answer('已继续当前阶段。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    await laterTask
+    expect(laterTaskAdmitted).toBe(true)
+    expect(active.stageControl.paused()).toBe(false)
+    tenderGate.resolve(tenderArtifacts)
+    const retryResult = await retry
+    expect(retryResult).toEqual({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
+    expect(executeStage.mock.calls).toHaveLength(1)
+    expect(active.controller.signal.aborted).toBe(false)
+  })
+
+  it('S4 Mapping Child 未完成时 Main Agent 先回复，Child 与阶段随后继续', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('live-evidence-child')
+    const childReady = Promise.withResolvers<SessionId>()
+    const childStarted = Promise.withResolvers<undefined>()
+    const releaseChild = Promise.withResolvers<undefined>()
+    adapter.childGate = releaseChild.promise
+    adapter.onChildRequest = () => { childStarted.resolve(undefined) }
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(async () => {
+      const operation = host.inFlight.values().next().value as { controller: AbortController }
+      const run = await ctx.subagents.start('spawn', {
+        parent: agent,
+        prompt: [{ type: 'text', text: '执行 S4 Mapping 子任务。' }],
+        signal: operation.controller.signal,
+      })
+      childReady.resolve(run.id)
+      try {
+        await run.result
+        return []
+      } finally {
+        await run.dispose()
+      }
+    })
+    const retry = ctx.bid.retryStage(agent.session)
+    try {
+      const childId = await childReady.promise
+      await childStarted.promise
+      expect(ctx.agents.get(childId)).toBeDefined()
+
+      adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('Mapping Child 仍在后台执行。'))
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在查到哪里了？' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect(agent.session.deriveMessages().at(-1)?.content)
+        .toContainEqual({ type: 'text', text: 'Mapping Child 仍在后台执行。' })
+      expect(ctx.agents.get(childId)).toBeDefined()
+      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
+      expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+      releaseChild.resolve(undefined)
+      await retry
+      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
+    } finally {
+      releaseChild.resolve(undefined)
+    }
+  })
+
+  it('停止当前回复不取消 S4 operation 或后台任务', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('cancel-public-reply')
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+
+    const requestStarted = Promise.withResolvers<undefined>()
+    const responseGate = Promise.withResolvers<undefined>()
+    adapter.onRequest = () => { requestStarted.resolve(undefined) }
+    adapter.requestGate = responseGate.promise
+    adapter.script.push(answer('这条回复不应完成。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '查看当前进度' }], source: { kind: 'user' } }))
+    await requestStarted.promise
+    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    responseGate.resolve(undefined)
+    await agent.whenIdle()
+
+    expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
+    expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+    stageGate.resolve([])
+    await retry
+  })
+
+  it('停止任务只取消同 Session 的阶段 controller，并进入现有重试状态', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('stop-stage')
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+
+    const other = await fresh('stop-stage-other', workspace.root, false)
+    await expect(ctx.bid.stopStage(other.session)).resolves.toMatchObject({
+      ok: false, error: { code: 'BID_STAGE_OWNED_BY_ANOTHER_SESSION' },
+    })
+    adapter.script.push(toolCall('bid_stop_stage', {}), answer('已停止当前阶段任务；当前聊天仍可继续。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '请停止当前阶段' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(runtime(agent.session)).toMatchObject({
+      stage: 'evidence_mapping', status: 'failed', failureReason: '用户已明确停止当前阶段；可从该阶段重试。',
+    })
+    expect(agent.session.events.some(event => event.type === 'tool/call' && event.data.name === 'bid_stop_stage')).toBe(true)
+    expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: true } } })
+    stageGate.resolve([])
+    const stopped = await retry
+    expect(stopped.ok).toBe(true)
+    if (!stopped.ok) throw new Error('停止阶段后重试应返回失败状态')
+    expect(stopped.value).toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
+    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
   })
 
   it('旧 Session 日志落盘失败不会让新聊天以 S1 覆盖已有 S4 项目', async () => {

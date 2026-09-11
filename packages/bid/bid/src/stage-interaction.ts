@@ -1,4 +1,4 @@
-/** 等待确认期间的 Main Agent 工具、可回放提示与当前阶段资料读取。 */
+/** Main Agent 全阶段对话工具、可回放提示与当前阶段资料读取。 */
 import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -39,6 +39,9 @@ export const stageInteractionSchema = z.union([
     view: z.enum(['summary', 'task_contract_context']).optional(),
     reference: chapterRevisionReferenceSchema.optional(),
   }).strict(),
+  z.object({ action: z.literal('bid_pause_stage') }).strict(),
+  z.object({ action: z.literal('bid_resume_stage') }).strict(),
+  z.object({ action: z.literal('bid_stop_stage') }).strict(),
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
@@ -47,8 +50,21 @@ export const stageInteractionSchema = z.union([
   chapterRevisionRequestSchema.extend({ action: z.literal('bid_revise_chapter') }).strict(),
 ])
 
-const names = ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap', 'bid_confirm_writing_plan', 'bid_revise_chapter'] as const
+const names = [
+  'bid_stage_inspect',
+  'bid_outline_apply_operations',
+  'bid_outline_regenerate_scope',
+  'bid_evidence_remap',
+  'bid_confirm_writing_plan',
+  'bid_revise_chapter',
+  'bid_pause_stage',
+  'bid_resume_stage',
+  'bid_stop_stage',
+] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
+const MAX_INSPECT_SECTIONS = 100
+const MAX_PUBLIC_EVENTS = 6
+const MAX_PUBLIC_EVENT_CHARS = 500
 
 /**
  * 判断会话是否拥有 Bid 阶段交互。
@@ -71,6 +87,54 @@ export async function readStageJson(workspace: BidWorkspace, path: string): Prom
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
+async function readOptionalStageJson<T>(
+  workspace: BidWorkspace,
+  path: string,
+  parse: (value: unknown) => T,
+): Promise<T | null> {
+  try {
+    return parse(await readStageJson(workspace, path))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function latestPublicEvents(session: Session): Array<{
+  seq: number
+  role: 'user' | 'assistant'
+  text: string
+  truncated: boolean
+}> {
+  const recent = session.events.slice(-400)
+  const publicTurns = new Set<number>()
+  let currentTurn: number | undefined
+  for (const event of recent) {
+    if (event.type === 'turn/start') currentTurn = event.data.turn
+    else if (event.type === 'turn/end' && event.data.turn === currentTurn) currentTurn = undefined
+    else if (event.type === 'user/message' && event.data.source.kind === 'user' && currentTurn !== undefined) {
+      publicTurns.add(currentTurn)
+    }
+  }
+  return recent.flatMap<{
+    seq: number
+    role: 'user' | 'assistant'
+    text: string
+    truncated: boolean
+  }>((event) => {
+    if (event.type === 'user/message' && event.data.source.kind === 'user') {
+      const text = event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      return [{ seq: event.seq, role: 'user' as const, text: text.slice(0, MAX_PUBLIC_EVENT_CHARS), truncated: text.length > MAX_PUBLIC_EVENT_CHARS }]
+    }
+    if (event.type === 'assistant/message' && publicTurns.has(event.data.turn)) {
+      const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      if (text.length === 0) return []
+      return [{ seq: event.seq, role: 'assistant' as const, text: text.slice(0, MAX_PUBLIC_EVENT_CHARS), truncated: text.length > MAX_PUBLIC_EVENT_CHARS }]
+    }
+    return []
+  }).slice(-MAX_PUBLIC_EVENTS)
+}
+
 async function inspectBidStageValue(
   workspace: BidWorkspace,
   session: Session,
@@ -78,26 +142,61 @@ async function inspectBidStageValue(
   view: 'summary' | 'task_contract_context' = 'summary',
 ) {
   const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+  const started = session.events.findLast(event => event.type === 'bid.stage.started' && event.data.stage === runtime.stage)
+  const base = {
+    runtime,
+    started_at: started === undefined ? null : new Date(started.time).toISOString(),
+    latest_public_events: latestPublicEvents(session),
+  }
+  if (runtime.stage === 'file_intake') {
+    const manifest = await workspace.readManifest()
+    const files = manifest.files
+    return {
+      ...base,
+      progress_summary: {
+        files: files.length,
+        parsed: files.filter(file => file.parseStatus === 'success').length,
+        failed: files.filter(file => file.parseStatus === 'failed').length,
+      },
+      current_artifacts_summary: { manifest: files.length === 0 ? 'pending' as const : 'available' as const },
+    }
+  }
   const scoringPath = runtime.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
   const [project, requirements, scoring, compliance] = await Promise.all([
-    readStageJson(workspace, 'analysis/project.json').then(parseTenderProjectArtifact),
-    readStageJson(workspace, 'analysis/requirements.json').then(parseTenderRequirementsArtifact),
-    readStageJson(workspace, scoringPath).then(parseTenderScoringArtifact),
-    readStageJson(workspace, 'analysis/compliance.json').then(parseTenderComplianceArtifact),
+    readOptionalStageJson(workspace, 'analysis/project.json', parseTenderProjectArtifact),
+    readOptionalStageJson(workspace, 'analysis/requirements.json', parseTenderRequirementsArtifact),
+    readOptionalStageJson(workspace, scoringPath, parseTenderScoringArtifact),
+    readOptionalStageJson(workspace, 'analysis/compliance.json', parseTenderComplianceArtifact),
   ])
   if (runtime.stage === 'tender_analysis') {
-    const selection = parseTenderScoringSelection(await readStageJson(workspace, 'analysis/tender-analysis-selection.json'), scoring)
-    return { runtime, project, requirements, scoring, selected_scoring_ids: selection.selected_scoring_ids, compliance }
+    const selection = scoring === null ? null : await readOptionalStageJson(
+      workspace, 'analysis/tender-analysis-selection.json', value => parseTenderScoringSelection(value, scoring),
+    )
+    const summary = {
+      project: project === null ? 'pending' as const : 'available' as const,
+      requirements: requirements?.requirements.length ?? 0,
+      scoring_items: scoring?.scoring_items.length ?? 0,
+      compliance_items: compliance?.compliance_items.length ?? 0,
+    }
+    return view === 'task_contract_context' || runtime.status === 'waiting_user'
+      ? { ...base, project, requirements, scoring, selected_scoring_ids: selection?.selected_scoring_ids ?? [], compliance,
+        progress_summary: summary, current_artifacts_summary: summary }
+      : { ...base, progress_summary: summary, current_artifacts_summary: summary }
   }
   if (runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export') {
-    const outline = parseOutlineArtifact(await readStageJson(workspace, 'outline/confirmed-outline.json'))
+    const outline = await readOptionalStageJson(workspace, 'outline/confirmed-outline.json', parseOutlineArtifact)
+    if (outline === null) return {
+      ...base,
+      progress_summary: { completed_tasks: 0, running_tasks: 0, pending_tasks: 0, failed_tasks: 0 },
+      current_artifacts_summary: { outline: 'pending' as const, writing_plan: 'pending' as const, execution_log: 'pending' as const },
+    }
     const taskContext = view === 'task_contract_context'
       ? {
         requirements,
         scoring,
         compliance,
         blueprint: outline,
-        evidence: parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json')),
+        evidence: await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact),
         user_messages: session.events.slice(-200).flatMap(event => event.type === 'user/message'
           && event.data.source.kind === 'user'
           ? [{
@@ -117,7 +216,7 @@ async function inspectBidStageValue(
     }
     const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
     const writing_progress = {
-      sections: outline.sections.filter(section => section.writable).map((section) => {
+      sections: outline.sections.filter(section => section.writable).slice(0, MAX_INSPECT_SECTIONS).map((section) => {
         const entry = execution_log?.sections.find(item => item.section_id === section.id)
         return {
           section_id: section.id,
@@ -138,6 +237,14 @@ async function inspectBidStageValue(
         }),
       }), (error: unknown) => ({ status: 'unavailable' as const, reason: error instanceof Error ? error.message : String(error) })),
     }
+    const statuses = execution_log?.sections ?? []
+    const progress = {
+      completed_tasks: statuses.filter(item => item.status === 'completed').length,
+      running_tasks: statuses.filter(item => item.status === 'running').length,
+      pending_tasks: statuses.filter(item => item.status === 'pending').length,
+      failed_tasks: statuses.filter(item => item.status === 'failed').length,
+      total_tasks: outline.sections.filter(section => section.writable).length,
+    }
     let chapter = null
     if (reference !== undefined) {
       const index = buildWritableSectionWorklist(outline).findIndex(section => section.id === reference.section_id)
@@ -153,35 +260,71 @@ async function inspectBidStageValue(
       }
     }
     return {
-      runtime,
-      project,
-      outline: outline.sections.map(section => ({
+      ...base,
+      progress_summary: progress,
+      current_artifacts_summary: {
+        outline_sections: outline.sections.length,
+        writing_plan_version: writing_plan?.plan_version ?? null,
+        execution_log: execution_log === null ? 'pending' as const : 'available' as const,
+      },
+      ...(view === 'task_contract_context' ? { project } : {}),
+      outline: outline.sections.slice(0, MAX_INSPECT_SECTIONS).map(section => ({
         id: section.id,
         parent_id: section.parent_id,
         title: section.title,
         writable: section.writable,
       })),
-      writing_plan,
+      ...(view === 'task_contract_context' ? { writing_plan } : {}),
       writing_progress,
       chapter,
       ...(taskContext === undefined ? {} : { task_contract_context: taskContext }),
     }
   }
-  const draft = await getOrCreateOutlineDraft(workspace, false)
-  const response_points = parseScoringResponsePointCatalog(await readStageJson(workspace, 'analysis/scoring-response-points.json'))
-  const evidence = runtime.stage === 'evidence_mapping' ? parseEvidenceMapArtifact(await readStageJson(workspace, 'analysis/evidence-map.json')) : null
+  const draft = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
+    .then(async outline => outline === null ? null : getOrCreateOutlineDraft(workspace, false))
+  const response_points = await readOptionalStageJson(workspace, 'analysis/scoring-response-points.json', parseScoringResponsePointCatalog)
+  const evidence = runtime.stage === 'evidence_mapping'
+    ? await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) : null
   const mappings = new Map(evidence?.section_mappings.map(item => [item.section_id, item]))
+  const mappingPlan = runtime.stage === 'evidence_mapping'
+    ? await readOptionalStageJson(workspace, 'analysis/evidence-mapping-plan.json', parseEvidenceMappingPlan) : null
+  const mappingProgress = runtime.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
+  const mappingTasks = runtime.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
+  const sections = draft?.outline.sections ?? []
+  const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
+    evidence: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappings.get(item.section.id) ?? null : undefined,
+    local_material_count: mappings.get(item.section.id)?.local_materials.length ?? 0,
+    web_material_count: mappings.get(item.section.id)?.web_materials.length ?? 0,
+  }))
+  const progress = mappingProgress === null
+    ? { completed_tasks: 0, running_tasks: 0, pending_tasks: sections.length, failed_tasks: 0 }
+    : {
+      completed_tasks: mappingProgress.completed,
+      running_tasks: mappingProgress.running,
+      pending_tasks: mappingProgress.not_started,
+      failed_tasks: mappingProgress.failed,
+    }
   return {
-    runtime, project, requirements, scoring, compliance, response_points, draft,
-    sections: buildOutlineView(draft.outline.sections).map(item => ({ ...item,
-      evidence: mappings.get(item.section.id) ?? null,
-      local_material_count: mappings.get(item.section.id)?.local_materials.length ?? 0,
-      web_material_count: mappings.get(item.section.id)?.web_materials.length ?? 0,
-    })),
-    writable_section_ids: draft.outline.sections.filter(item => item.writable).map(item => item.id),
-    mapping_plan: runtime.stage === 'evidence_mapping' ? parseEvidenceMappingPlan(await readStageJson(workspace, 'analysis/evidence-mapping-plan.json')) : null,
-    mapping_progress: runtime.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null,
-    mapping_tasks: runtime.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : [],
+    ...base,
+    progress_summary: progress,
+    current_artifacts_summary: {
+      project: project === null ? 'pending' as const : 'available' as const,
+      requirements: requirements?.requirements.length ?? 0,
+      scoring_items: scoring?.scoring_items.length ?? 0,
+      compliance_items: compliance?.compliance_items.length ?? 0,
+      response_points: response_points?.points.length ?? 0,
+      outline_sections: sections.length,
+      evidence_mappings: evidence?.section_mappings.length ?? 0,
+    },
+    ...(view === 'task_contract_context' || runtime.status === 'waiting_user'
+      ? { project, requirements, scoring, compliance, response_points, draft } : {}),
+    sections: sectionSummary,
+    writable_section_ids: sections.filter(item => item.writable)
+      .slice(0, view === 'task_contract_context' || runtime.status === 'waiting_user' ? sections.length : MAX_INSPECT_SECTIONS)
+      .map(item => item.id),
+    mapping_plan: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappingPlan : undefined,
+    mapping_progress: mappingProgress,
+    mapping_tasks: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappingTasks.slice(-MAX_INSPECT_SECTIONS) : undefined,
   }
 }
 
@@ -245,6 +388,26 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'atten
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
+    status === 'running'
+      ? '用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已经运行的 Writer/Reviewer 自然收敛。只有用户明确要求停止当前阶段任务时才调用 bid_stop_stage。停止回复由聊天界面单独控制。'
+      : '当前阶段没有运行中的任务，不得调用 pause、resume 或 stop 阶段工具。',
+  ].join('\n')
+}
+
+/**
+ * 渲染非写作阶段运行中或完成后的公开用户回合规则。
+ * @param stage 当前 Bid 阶段。
+ * @param status 当前运行或完成状态。
+ * @returns 只允许有界检查和语义回答的模型规则。
+ */
+export function renderLiveStageInteractionPrompt(stage: string, status: 'running' | 'completed'): string {
+  return [
+    `当前 Bid 阶段：${stage}；当前状态：${status}。`,
+    '你正在处理公开用户消息，后台阶段任务与 Child/Subagent 继续运行。先判断用户是在询问、解释现状，还是明确要求改变任务；不得按关键词、引用或发送方式判断意图。',
+    '进度、资料范围和设计原因只调用 bid_stage_inspect 读取有界 Host 快照并回答；不得直接读写 Artifact、停止阶段、重启阶段或创建新的阶段请求。',
+    status === 'completed'
+      ? '阶段产物保持完成态。普通问答不得重开阶段或修改产物；当前没有受控修改工具时，应说明可用的正式重置或后续阶段入口。'
+      : '普通消息不拥有阶段生命周期，也不取消当前模型任务或已启动的 Child。当前没有受控修改工具时，应说明修改需要等待现有阶段到达正式交互边界。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。只有用户明确要求停止当前阶段任务时才调用 bid_stop_stage；停止回复由聊天界面单独控制。',
   ].join('\n')
 }
 
@@ -264,9 +427,8 @@ export function installStageInteractionTools(
     const sync = (agent: Agent): void => {
       const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
       const stage = isBidMainSession(agent.session)
-        && (runtime.status === 'waiting_user'
-          || runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'attention_required' || runtime.status === 'completed')
-          || runtime.stage === 'docx_export' && runtime.status === 'completed')
+        && (runtime.status === 'waiting_user' || runtime.status === 'running'
+          || runtime.status === 'completed' || runtime.status === 'attention_required')
         ? runtime.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${runtime.status}`
       const existing = mounted.get(agent)
@@ -277,7 +439,9 @@ export function installStageInteractionTools(
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
       const available = runtime.status !== 'waiting_user'
-        ? runtime.stage === 'docx_export' ? [names[0], names[5]] : [names[0], names[4], names[5]]
+        ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6) : [])]
+          : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]
+            : runtime.status === 'running' ? [names[0], ...names.slice(6)] : [names[0]]
         : stage === 'tender_analysis' ? names.slice(0, 1)
           : stage === 'outline_generation' ? names.slice(0, 3)
             : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
@@ -288,7 +452,9 @@ export function installStageInteractionTools(
       try {
         if (runtime.status === 'waiting_user') disposers.push(tools.restrict({ allow: [] }))
         for (const name of available) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan' || name === 'bid_revise_chapter' ? {} : { ...cas }
+          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
+            || name === 'bid_revise_chapter' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
+            || name === 'bid_stop_stage' ? {} : { ...cas }
           const required = Object.keys(properties)
           let parameters: JsonSchemaNode | undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
@@ -382,11 +548,14 @@ export function installStageInteractionTools(
           const definition: ToolDefinition = {
             name,
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
-              : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                  : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                    : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                      : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+              : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
+                : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
+                  : name === 'bid_stop_stage' ? '仅在用户明确要求停止当前阶段任务时终止阶段及其后台子任务；不得用于停止当前聊天回复。'
+                    : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                      : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                        : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                          : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                            : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
@@ -403,19 +572,50 @@ export function installStageInteractionTools(
       }
       mounted.set(agent, { scope: `${stage}:${runtime.status}`, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
     }
+    const publicRestrictions = new Map<Agent, () => void>()
+    const claimState = new Map<Agent, { boundary: string; hasUser: boolean }>()
+    const releasePublic = (agent: Agent): void => {
+      publicRestrictions.get(agent)?.()
+      publicRestrictions.delete(agent)
+    }
     toolCtx.effect(() => toolCtx.tools.guard((exec) => {
-      const session = exec.agent?.session
-      if (session === undefined || !isBidMainSession(session)) return
+      const subject = exec.agent
+      const session = subject?.session
+      if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      if ((runtime.status === 'waiting_user' || interacting(session)) && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
+      if ((runtime.status === 'waiting_user' || interacting(session) || publicRestrictions.has(subject))
+        && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
     }))
+    toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+      if (!isBidMainSession(agent.session)) return
+      const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      if (runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required') return
+      const previous = claimState.get(agent)
+      const prior = agent.session.events.findLast(event => event.type === 'step/end' && event.data.turn === turn)
+      const priorStep = prior?.type === 'step/end' ? prior.data.step : 0
+      const boundary = `${String(turn)}:${String(priorStep)}`
+      const state = previous?.boundary === boundary ? previous : { boundary, hasUser: false }
+      if (message.source.kind === 'user') {
+        state.hasUser = true
+        const tools = agent.ctx.get('tools')
+        if (tools === undefined) throw new Error('Bid stage interaction requires tools')
+        if (!publicRestrictions.has(agent)) publicRestrictions.set(agent, tools.restrict({ allow: [] }))
+      } else if (!state.hasUser) releasePublic(agent)
+      claimState.set(agent, state)
+    }, { global: true })
     toolCtx.on('agent/session-start', ({ agent }) => { sync(agent) }, { global: true })
     toolCtx.on('session/event', (session, event) => {
       if (!event.type.startsWith('bid.')) return
       const agent = ctx.agents.get(session.id)
       if (agent !== undefined) sync(agent)
     }, { global: true })
-    toolCtx.on('agent/disposed', ({ agent }) => { mounted.get(agent)?.dispose(); mounted.delete(agent) }, { global: true })
+    toolCtx.on('agent/status', ({ agent, status }) => { if (status === 'idle') releasePublic(agent) }, { global: true })
+    toolCtx.on('agent/disposed', ({ agent }) => {
+      releasePublic(agent)
+      claimState.delete(agent)
+      mounted.get(agent)?.dispose()
+      mounted.delete(agent)
+    }, { global: true })
     toolCtx.on('agent/pre-step', async ({ agent, messages }, next) => {
       const decision = await next()
       const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
@@ -423,11 +623,18 @@ export function installStageInteractionTools(
       const prompt = runtime.status === 'waiting_user' ? renderStageInteractionPrompt(runtime.stage)
         : (runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'attention_required' || runtime.status === 'completed')
           || runtime.stage === 'docx_export' && runtime.status === 'completed')
-          ? renderChapterWritingInteractionPrompt(runtime.status, runtime.stage) : undefined
+          ? renderChapterWritingInteractionPrompt(runtime.status, runtime.stage)
+          : runtime.status === 'running' || runtime.status === 'completed'
+            ? renderLiveStageInteractionPrompt(runtime.stage, runtime.status) : undefined
       if (prompt === undefined) return decision
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)
-    toolCtx.effect(() => () => { for (const value of mounted.values()) value.dispose(); mounted.clear() })
+    toolCtx.effect(() => () => {
+      for (const agent of publicRestrictions.keys()) releasePublic(agent)
+      claimState.clear()
+      for (const value of mounted.values()) value.dispose()
+      mounted.clear()
+    })
   })
 }

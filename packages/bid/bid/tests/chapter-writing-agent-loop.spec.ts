@@ -4,14 +4,14 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, buildBidStageTask, executeChapterWriting, parseChapterExecutionLog, parseChapterReviewArtifact, validateChapterWriting } from '@deepseek-ai/dsh-bid'
 import { CHAPTER_REVIEW_TOOLS } from '../src/chapter-writing-review.ts'
 import { CHAPTER_PLAN_TOOLS } from '../src/chapter-writing-planning.ts'
@@ -46,6 +46,39 @@ async function fixture(cancelWriter?: () => void, omitReviewFinish = false) {
 }
 
 describe('S5 真实 DSH Child 接入', () => {
+  it('Writer Promise 未完成时 Main Agent 先回复，随后原 Writer 继续完成', async () => {
+    const { ctx, workspace, adapter, agent } = await fixture()
+    const writerStarted = Promise.withResolvers<undefined>()
+    const releaseWriters = Promise.withResolvers<undefined>()
+    adapter.onWriterStart = () => { writerStarted.resolve(undefined) }
+    adapter.writerGate = releaseWriters.promise
+    let settled = false
+    try {
+      const execution = executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxConcurrency: 3, maxCompletionRepairRounds: 1,
+      }).finally(() => { settled = true })
+      await writerStarted.promise
+
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在写到哪里了？' }], source: { kind: 'user' } }))
+      await vi.waitFor(() => {
+        expect(agent.session.events.some(event => event.type === 'assistant/message'
+          && event.data.message.content.some(block => block.type === 'text' && block.text.includes('章节仍在后台写作')))).toBe(true)
+      })
+
+      expect(settled).toBe(false)
+      expect(adapter.publicRequestTools).toHaveLength(1)
+      expect(adapter.publicRequestTools[0]).not.toEqual(expect.arrayContaining([...CHAPTER_PLAN_TOOLS]))
+      releaseWriters.resolve(undefined)
+      const artifacts = await execution
+      await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections.every(section => section.status === 'completed')).toBe(true)
+    } finally {
+      releaseWriters.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  }, 30_000)
+
   it('连续两轮语义修复后通过：Writer 会话不变，其他独立章节并发完成', async () => {
     const { ctx, workspace, adapter, agent } = await fixture()
     adapter.repairReviews = 2

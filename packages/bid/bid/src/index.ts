@@ -82,7 +82,7 @@ import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
-import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
+import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type StageSchedulerControl } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, reduceBidRuntimeState } from './runtime-state.ts'
@@ -117,6 +117,8 @@ import type {
   BidRetryResult,
   BidStageStartErrorCode,
   BidStageStartResult,
+  BidStageStopErrorCode,
+  BidStageStopResult,
   BidReviewWorkbenchView,
   BidReviewChapterView,
   BidReviewIssueView,
@@ -161,6 +163,8 @@ export type {
   BidRetryResult,
   BidStageStartErrorCode,
   BidStageStartResult,
+  BidStageStopErrorCode,
+  BidStageStopResult,
   BidReviewWorkbenchView,
   BidPageEstimate,
   BidPageTargetStatus,
@@ -201,7 +205,7 @@ export * from './tender-analysis-submission.ts'
 export * from './scoring-response-point-artifacts.ts'
 export { executeTenderAnalysis, renderTenderAnalysisRepairTask, renderTenderAnalysisTask } from './tender-analysis-executor.ts'
 export { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS } from './model-stage-repair.ts'
-export type { ModelStageExecutionOptions } from './model-stage-repair.ts'
+export type { ModelStageExecutionOptions, StageSchedulerControl } from './model-stage-repair.ts'
 export { validateTenderAnalysis, validateTenderAnalysisDraft } from './tender-analysis-validator.ts'
 export type { TenderAnalysisArtifacts } from './tender-analysis-validator.ts'
 export * from './evidence-mapping-artifacts.ts'
@@ -459,6 +463,17 @@ function stageStartResult(
     : Object.freeze({ ok: false, error: Object.freeze({ code: result.code, message: result.message }) })
 }
 
+/** Build one immutable explicit-stage-stop result. */
+function stageStopResult(
+  result: { readonly ok: true; readonly value: BidRuntimeState }
+    | { readonly ok: false; readonly code: BidStageStopErrorCode; readonly message: string },
+): BidStageStopResult {
+  if (!result.ok) {
+    return Object.freeze({ ok: false, error: Object.freeze({ code: result.code, message: result.message }) })
+  }
+  return Object.freeze({ ok: true, value: Object.freeze({ ...result.value }) })
+}
+
 /** Minimal webserver registration face used only when the web carrier is composed. */
 interface BidBinaryUploadWebServer {
   register(route: {
@@ -675,7 +690,45 @@ interface ActiveBidOperation {
   readonly settle: () => void
   reservedForReset: boolean
   interaction?: boolean
+  readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
+}
+
+/** In-memory pause gate owned by one active stage operation. */
+class HostStageSchedulerControl implements StageSchedulerControl {
+  private held = false
+  private gate = Promise.withResolvers<undefined>()
+
+  constructor() { this.gate.resolve(undefined) }
+
+  paused(): boolean { return this.held }
+
+  pause(): boolean {
+    if (this.held) return false
+    this.held = true
+    this.gate = Promise.withResolvers<undefined>()
+    return true
+  }
+
+  resume(): boolean {
+    if (!this.held) return false
+    this.held = false
+    this.gate.resolve(undefined)
+    return true
+  }
+
+  async waitUntilRunnable(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    while (this.held) {
+      const aborted = Promise.withResolvers<never>()
+      const abort = (): void => { aborted.reject(signal?.reason ?? new Error('Bid stage operation cancelled')) }
+      signal?.addEventListener('abort', abort, { once: true })
+      try { await Promise.race([this.gate.promise, aborted.promise]) } finally {
+        signal?.removeEventListener('abort', abort)
+      }
+      signal?.throwIfAborted()
+    }
+  }
 }
 
 /** In-memory wakeable command queue owned by one locked Bid operation. */
@@ -813,6 +866,7 @@ export class BidHostRuntime extends TypertRemoteService {
       done: settled.promise,
       settle: settled.resolve,
       reservedForReset: false,
+      stageControl: new HostStageSchedulerControl(),
       writingControl: new HostChapterWritingControl(),
     }
     this.inFlight.set(key, operation)
@@ -902,14 +956,9 @@ export class BidHostRuntime extends TypertRemoteService {
         const key = projectKey(session)
         const active = this.inFlight.get(key)
         if (active !== undefined) {
-          const activeRuntime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-          if (activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
-            return { reason: 'bid.stage_running', message: '当前阶段操作尚未完成。' }
-          }
           if (active.session !== session) {
-            return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行写作。' }
+            return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行阶段任务。' }
           }
-          return
         }
       }
       if (projection.composer.enabled) return
@@ -922,6 +971,15 @@ export class BidHostRuntime extends TypertRemoteService {
     installStageInteractionTools(ctx,
       (agent, request, signal) => this.executeStageInteraction(agent, request, signal),
       session => session.header.cwd !== undefined && this.inFlight.get(projectKey(session))?.interaction === true)
+    ctx.on('agent/pre-step', async ({ agent }, next) => {
+      const decision = await next()
+      if (decision.kind === 'reject' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return decision
+      const operation = this.inFlight.get(projectKey(agent.session))
+      if (operation?.session !== agent.session) return decision
+      const messages = decision.messages.filter(message => message.source.kind !== 'subagent-settled')
+      if (messages.length === decision.messages.length) return decision
+      return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
+    }, { global: true })
     ctx.inject(['tools'], (toolCtx) => {
       toolCtx.effect(() => toolCtx.tools.guard((execution) => {
         const session = execution.agent?.session
@@ -1031,11 +1089,17 @@ export class BidHostRuntime extends TypertRemoteService {
     const request = stageInteractionSchema.parse(input)
     if (!isBidMainSession(session) || session.header.cwd === undefined) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
     const key = projectKey(session)
+    if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
+    if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
+    if (request.action === 'bid_stop_stage') return this.stopStage(session)
     const active = this.inFlight.get(key)
     if (request.action === 'bid_stage_inspect') {
       if (active !== undefined && active.session !== session) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正由另一会话执行写作。')
       const workspace = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
-      return inspectBidStage(workspace, session, request.reference, request.view)
+      return {
+        ...await inspectBidStage(workspace, session, request.reference, request.view),
+        scheduling_paused: active?.stageControl.paused() ?? false,
+      }
     }
     if (active !== undefined) {
       const activeRuntime = active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
@@ -1207,24 +1271,32 @@ export class BidHostRuntime extends TypertRemoteService {
         canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: async (task) => {
           const operation = this.inFlight.get(projectKey(agent.session))
-          if (operation !== undefined) await this.checkpoint(operation)
+          if (operation !== undefined) {
+            await operation.stageControl.waitUntilRunnable(signal)
+            await this.checkpoint(operation)
+          }
+          const scheduler = operation?.stageControl
           if (task.stage === 'docx_export') return executeDocxExport(workspace, signal)
           return task.stage === 'tender_analysis'
-            ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
+            ? executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal, scheduler })
             : task.stage === 'evidence_mapping'
               ? executeEvidenceMapping(agent, workspace, task, {
                 maxRepairAttempts: this.config.modelStageRepairAttempts,
                 maxConcurrency: this.config.evidenceMappingMaxConcurrency,
                 signal,
+                scheduler,
               })
               : task.stage === 'outline_generation'
-                ? executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: this.config.modelStageRepairAttempts, signal })
+                ? executeOutlineGeneration(agent, workspace, task, {
+                  maxRepairAttempts: this.config.modelStageRepairAttempts, signal, scheduler,
+                })
                 : task.stage === 'chapter_writing'
                   ? executeChapterWriting(agent, workspace, task, {
                     maxRepairAttempts: this.config.modelStageRepairAttempts,
                     maxConcurrency: this.config.chapterWritingMaxConcurrency,
                     maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
                     signal,
+                    scheduler,
                     ...(operation === undefined ? {} : { control: operation.writingControl }),
                   })
                   : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`))
@@ -1243,6 +1315,33 @@ export class BidHostRuntime extends TypertRemoteService {
       signal,
       (fromStage, toStage) => prepareBidStageContextTransition(agent.session, workspace, fromStage, toStage),
     )
+  }
+
+  /**
+   * Pause or resume only future task starts in the active stage operation.
+   * @param session Main Agent Session that owns the active project operation.
+   * @param paused whether later stage tasks should wait.
+   * @returns the current scheduling gate state or a stable rejection.
+   */
+  private setStagePaused(session: Session, paused: boolean): {
+    readonly ok: boolean
+    readonly scheduling_paused?: boolean
+    readonly changed?: boolean
+    readonly error?: { readonly code: string; readonly message: string }
+  } {
+    const operation = this.inFlight.get(projectKey(session))
+    if (operation === undefined) {
+      return { ok: false, error: { code: 'BID_STAGE_CONTROL_NOT_ALLOWED', message: '当前没有正在运行的阶段任务。' } }
+    }
+    if (operation.session !== session) {
+      return { ok: false, error: { code: 'BID_STAGE_OWNED_BY_ANOTHER_SESSION', message: '当前阶段任务由另一会话持有。' } }
+    }
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.status !== 'running') {
+      return { ok: false, error: { code: 'BID_STAGE_CONTROL_NOT_ALLOWED', message: '当前阶段不处于运行状态。' } }
+    }
+    const changed = paused ? operation.stageControl.pause() : operation.stageControl.resume()
+    return { ok: true, scheduling_paused: operation.stageControl.paused(), changed }
   }
 
   /**
@@ -1372,6 +1471,37 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * Stop only the active Bid stage operation owned by this Session.
+   * @param session Host-resolved Bid Session that explicitly requested the stop.
+   * @returns the durable failed state used by the existing retry path, or a stable rejection.
+   */
+  @Remote('stopStage')
+  async stopStage(session: Session): Promise<BidStageStopResult> {
+    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      return stageStopResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: '停止阶段需要当前 Bid 项目会话。' })
+    }
+    const operation = this.inFlight.get(projectKey(session))
+    if (operation === undefined) {
+      return stageStopResult({ ok: false, code: 'BID_STAGE_STOP_NOT_ALLOWED', message: '当前没有正在运行的阶段任务。' })
+    }
+    if (operation.session !== session) {
+      return stageStopResult({ ok: false, code: 'BID_STAGE_OWNED_BY_ANOTHER_SESSION', message: '当前阶段任务由另一会话持有。' })
+    }
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+    if (runtime.status !== 'running') {
+      return stageStopResult({ ok: false, code: 'BID_STAGE_STOP_NOT_ALLOWED', message: '当前阶段不处于运行状态。' })
+    }
+    session.append('bid.stage.failed', {
+      stage: runtime.stage,
+      status: 'failed',
+      reason: '用户已明确停止当前阶段；可从该阶段重试。',
+    })
+    operation.controller.abort(new Error('用户停止当前 Bid 阶段。'))
+    await this.ctx.sessions.flush(session)
+    return stageStopResult({ ok: true, value: { stage: runtime.stage, status: 'failed' } })
+  }
+
+  /**
    * Import and validate one browser-selected file batch for the current Bid stage.
    * @param session - Host-resolved live Session; only its header supplies workspace identity.
    * @param files - Browser file metadata and canonical base64 bytes.
@@ -1431,6 +1561,7 @@ export class BidHostRuntime extends TypertRemoteService {
         {
           canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
           execute: async (task) => {
+            await operation.stageControl.waitUntilRunnable(operation.controller.signal)
             await this.checkpoint(operation)
             if (task.stage === 'file_intake') {
               try {
@@ -1445,7 +1576,11 @@ export class BidHostRuntime extends TypertRemoteService {
               return [artifact]
             }
             if (task.stage === 'docx_export') return executeDocxExport(workspace, operation.controller.signal)
-            const repair = { maxRepairAttempts: this.config.modelStageRepairAttempts, signal: operation.controller.signal }
+            const repair = {
+              maxRepairAttempts: this.config.modelStageRepairAttempts,
+              signal: operation.controller.signal,
+              scheduler: operation.stageControl,
+            }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
               ...repair,

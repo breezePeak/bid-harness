@@ -5,7 +5,6 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-fs'
-import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
@@ -85,6 +84,7 @@ import {
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
 import { parseWritingPlan, validateWritingPlan, type WritingPlan } from './writing-requirements.ts'
+import { runMainAgentProtocol } from './main-agent-interleave.ts'
 import {
   attachChapterWritingCompletionReview,
   CHAPTER_WRITING_COMPLETION_TOOLS,
@@ -1068,85 +1068,6 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
-/** Run one private Main-Agent protocol while ordinary user turns temporarily regain their stage tools. */
-async function runMainAgentProtocol<T>(
-  agent: Agent,
-  prompt: string,
-  privateTools: readonly string[],
-  runtime: ChapterProtocol<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  signal?.throwIfAborted()
-  const tools = agent.ctx.get('tools')
-  if (tools === undefined) throw new Error('S5 Main Agent protocol requires tools service')
-  const message = createUserMessage({
-    content: [{ type: 'text', text: prompt }],
-    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-  })
-  const privateNames = new Set(privateTools)
-  let mode: 'internal' | 'user' | undefined
-  const settled = Promise.withResolvers<T>()
-  let finished = false
-  const finish = (value: T): void => {
-    if (finished) return
-    finished = true
-    settled.resolve(value)
-  }
-  const fail = (error: unknown): void => {
-    if (finished) return
-    finished = true
-    settled.reject(error)
-  }
-  const inspect = (): void => {
-    const value = runtime.captured()
-    if (value !== undefined) finish(value)
-  }
-  const disposers = [
-    tools.guard(exec => exec.agent !== agent ? undefined
-      : privateNames.has(exec.name)
-        ? mode === 'internal' ? undefined : 'S5 私有提交工具只允许内部任务轮次调用。'
-        : mode === 'internal' ? 'S5 内部任务轮次只允许本次私有提交工具。' : undefined),
-    agent.ctx.on('agent/pre-step', async (payload, next) => {
-      const decision = await next()
-      if (payload.agent !== agent || decision.kind === 'reject') return decision
-      const privateMessages = decision.messages.filter(item => item.id === message.id || runtime.ownsMessage(item))
-      if (decision.messages.some(item => item.source.kind === 'user')) {
-        mode = 'user'
-        if (privateMessages.length > 0) {
-          for (const deferred of privateMessages.reverse()) agent.inbox.prepend('next-turn', deferred)
-          return { kind: 'enter', messages: decision.messages.filter(item => !privateMessages.includes(item)) }
-        }
-      } else if (privateMessages.length > 0) mode = 'internal'
-      return decision
-    }),
-    agent.ctx.on('tools/result', (exec) => { if (exec.agent === agent) queueMicrotask(inspect) }),
-    agent.ctx.on('agent/status', ({ agent: subject, status }) => {
-      if (subject === agent && status === 'idle') {
-        queueMicrotask(() => {
-          inspect()
-          const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-            .some(item => item.id === message.id || runtime.ownsMessage(item))
-          if (!finished && !queued) {
-            fail(new Error('S5 Main Agent 私有任务未成功提交。'))
-          }
-        })
-      }
-    }),
-  ]
-  const abort = (): void => {
-    fail(signal?.reason instanceof Error ? signal.reason : new Error('S5 Main Agent 私有任务已取消。'))
-  }
-  signal?.addEventListener('abort', abort, { once: true })
-  try {
-    agent.followup(message)
-    void agent.whenIdle().catch(fail)
-    return await settled.promise
-  } finally {
-    signal?.removeEventListener('abort', abort)
-    for (const dispose of disposers.reverse()) dispose()
-  }
-}
-
 async function loadValidPlan(
   agent: Agent,
   workspace: BidWorkspace,
@@ -1324,6 +1245,7 @@ export async function executeChapterWriting(
     maxCompletionRepairRounds: DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   },
 ): Promise<StageArtifact[]> {
+  await options.scheduler?.waitUntilRunnable(options.signal)
   const discardOwnedChildNotices = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
     const decision = await next()
     if (subject !== agent || decision.kind === 'reject') return decision
@@ -2395,6 +2317,7 @@ async function runChapterWriting(
   try {
     while (true) {
       signal.throwIfAborted()
+      await options.scheduler?.waitUntilRunnable(signal)
       await applyCommands()
       for (const section of worklist) {
         if (running.size >= options.maxConcurrency) break

@@ -33,6 +33,8 @@ export interface ChapterProtocol<T> {
    * @param definition 本次执行私有的工具定义。
    */
   register(definition: Omit<ToolDefinition, 'output'>): void
+  /** 在下一次请求组装前挂载或卸载当前协议的私有工具。 */
+  setToolsEnabled(enabled: boolean): void
   /**
    * 暂存完整结果并请求结束当前回合。
    * @param exec 本次 finish 的真实调用。
@@ -40,7 +42,7 @@ export interface ChapterProtocol<T> {
    * @returns 待权威结果确认的完成回执。
    */
   finish(exec: ToolRunContext, value: T): { completed: true }
-  /** 清除本轮提交并开始下一轮；旧调用不能提交到新轮次，已释放注册不会重新启用。 */
+  /** 清除本轮提交并开始下一轮；旧调用不能提交到新轮次。 */
   nextRound(): void
   /** 释放全部注册，并禁止尚未完成的工具发布结果。 */
   dispose(): void
@@ -63,8 +65,11 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
   let captured: T | undefined
   let disposed = false
   let continuations = 0
-  const ownedMessages = new WeakSet<UserMessage>()
+  const ownedMessages = new Set<string>()
   const disposers: Array<() => void> = []
+  const definitions: ToolDefinition[] = []
+  let toolDisposers: Array<() => void> = []
+  let toolsEnabled = true
   const ensureOpen = (exec: ToolRunContext): void => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
     exec.signal.throwIfAborted()
@@ -94,14 +99,24 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
       content: [{ type: 'text', text: `尚未完成 ${finishName}。已接受的记录仍保留；请补齐缺项、修正具体错误并调用 ${finishName}。普通文本不能完成提交。` }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
     })
-    ownedMessages.add(message)
+    ownedMessages.add(String(message.id))
     agent.inject(message)
   }))
+  const setToolsEnabled = (enabled: boolean): void => {
+    if (disposed || toolsEnabled === enabled) return
+    toolsEnabled = enabled
+    if (!enabled) {
+      for (const dispose of toolDisposers.reverse()) dispose()
+      toolDisposers = []
+      return
+    }
+    toolDisposers = definitions.map(definition => tools.register(definition))
+  }
   return {
     captured: () => captured,
-    ownsMessage: message => ownedMessages.has(message),
+    ownsMessage: message => ownedMessages.has(String(message.id)),
     register(definition) {
-      disposers.push(tools.register({
+      const registered: ToolDefinition = {
         ...definition,
         output: {
           schema: { type: 'object' },
@@ -113,8 +128,11 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
           executionRounds.set(exec, round)
           return definition.execute(args, exec)
         },
-      }))
+      }
+      definitions.push(registered)
+      if (toolsEnabled) toolDisposers.push(tools.register(registered))
     },
+    setToolsEnabled,
     finish(exec, value) {
       ensureOpen(exec)
       if (executionRounds.get(exec) !== round) throw new ToolArgsError(['该调用所属的提交轮次已结束。'])
@@ -132,6 +150,8 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
     dispose() {
       disposed = true
       pending = undefined
+      for (const dispose of toolDisposers.reverse()) dispose()
+      toolDisposers = []
       for (const dispose of disposers.reverse()) dispose()
       disposers.length = 0
     },

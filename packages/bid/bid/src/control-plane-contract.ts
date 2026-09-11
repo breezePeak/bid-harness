@@ -62,6 +62,7 @@ export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
   'start_stage',
+  'stop_stage',
   'retry_stage',
   'export_docx',
   'revise_chapter',
@@ -315,6 +316,17 @@ export type BidStageStartErrorCode =
 export type BidStageStartResult =
   | { readonly ok: true; readonly value: BidRuntimeState }
   | { readonly ok: false; readonly error: { readonly code: BidStageStartErrorCode; readonly message: string } }
+
+/** Stable business rejection codes returned by the explicit running-stage stop action. */
+export type BidStageStopErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_STAGE_STOP_NOT_ALLOWED'
+  | 'BID_STAGE_OWNED_BY_ANOTHER_SESSION'
+
+/** Result returned after an explicit stop request has cancelled the active stage operation. */
+export type BidStageStopResult =
+  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: false; readonly error: { readonly code: BidStageStopErrorCode; readonly message: string } }
 
 /** Stable business rejection codes returned by an on-demand DOCX export. */
 export type BidDocxExportErrorCode =

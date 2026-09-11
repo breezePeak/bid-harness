@@ -214,14 +214,14 @@ export function getBidClientProjection(
     composer: { enabled: true }, ...fileView,
   }
   if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
-  if (runtime.status === 'running') return runtime.stage === 'chapter_writing'
-    ? { runtime: { ...runtime }, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
-    : { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_running' }, ...fileView }
+  if (runtime.status === 'running') return {
+    runtime: { ...runtime }, allowedActions: ['send_message', 'stop_stage'], composer: { enabled: true }, ...fileView,
+  }
   if (runtime.status === 'completed') return {
     runtime: { ...runtime },
-    allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export' ? ['export_docx', 'revise_chapter'] : [],
-    composer: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
-      ? { enabled: true } : { enabled: false, reason: 'bid.completed' },
+    allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
+      ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
+    composer: { enabled: true },
     ...fileView,
   }
   if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }

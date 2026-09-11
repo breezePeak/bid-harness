@@ -5,7 +5,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
-import { ToolArgsError, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
@@ -40,6 +40,7 @@ import { applyOutlineRepair, outlineRepairOperationSchema, outlineAssociationRep
 import { inspectOutlineCandidate, applyOutlineCandidateRepair, outlineCandidateRepairSchema, parseOutlineFormatRepair } from './outline-candidate-repair.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { installMainAgentInterleave } from './main-agent-interleave.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
@@ -348,12 +349,34 @@ export async function executeOutlineGeneration(
     }
     return undefined
   })
-  const run = async (prompt: string, outputs: string[]): Promise<void> => {
+  const run = async (
+    prompt: string,
+    outputs: string[],
+    privateTask?: {
+      readonly names: readonly string[]
+      readonly setEnabled: (enabled: boolean) => void
+      readonly complete: () => boolean
+    },
+  ): Promise<void> => {
     options.signal?.throwIfAborted()
+    await options.scheduler?.waitUntilRunnable(options.signal)
     writablePaths = outputs
     const eventStart = agent.session.events.length
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }))
-    await waitForModelStageIdle(agent, options.signal)
+    const message = createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
+    const interleave = installMainAgentInterleave(agent, {
+      privateTools: privateTask?.names ?? [],
+      setPrivateToolsEnabled: privateTask?.setEnabled,
+      isInternalComplete: privateTask?.complete,
+      resumePrompt: '继续当前 S3 内部目录任务。先检查已写候选，只完成尚未结束的读取、局部写入或质量提交；不要重复已经完成的工作。',
+      label: 'S3 Outline Generation',
+    })
+    interleave.own(message)
+    try {
+      agent.followup(message)
+      await waitForModelStageIdle(agent, options.signal)
+    } finally {
+      interleave.dispose()
+    }
     const end = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
     if (end?.data.reason.kind !== 'completed') {
       const reason = end?.data.reason.kind === 'error' ? end.data.reason.error.message : end?.data.reason.kind ?? '没有完成记录'
@@ -364,7 +387,7 @@ export async function executeOutlineGeneration(
   let qualityIssues: OutlineQualityIssue[] | undefined
   const runQualityReview = async (prompt: string): Promise<void> => {
     qualityIssues = undefined
-    const dispose = tools.register({
+    const definition = {
       name: QUALITY_REPORT_TOOL,
       description: '提交当前 Blueprint Quality Review 的非阻断语义建议；Host 生成并持久化正式质量报告。',
       parameters: z.toJSONSchema(qualityReportSubmissionSchema, { target: 'draft-7' }),
@@ -382,11 +405,23 @@ export async function executeOutlineGeneration(
         qualityIssues = parsed.data.issues
         return Promise.resolve({ submitted: true, issue_count: qualityIssues.length })
       },
-    })
+    } satisfies ToolDefinition
+    let enabled = true
+    let dispose: (() => void) | undefined = tools.register(definition)
+    const setEnabled = (next: boolean): void => {
+      if (enabled === next) return
+      enabled = next
+      if (next) dispose = tools.register(definition)
+      else { dispose?.(); dispose = undefined }
+    }
     try {
-      await run(prompt, [OUTLINE_ARTIFACT])
+      await run(prompt, [OUTLINE_ARTIFACT], {
+        names: [QUALITY_REPORT_TOOL],
+        setEnabled,
+        complete: () => qualityIssues !== undefined,
+      })
     } finally {
-      dispose()
+      setEnabled(false)
     }
   }
   let completed = false
