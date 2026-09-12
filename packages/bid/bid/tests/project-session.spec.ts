@@ -478,6 +478,57 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
   })
 
+  it('S5 运行中同 Session 可导出已完成章节且不停止写作', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await rm(join(workspace.projectRoot, 'chapters/manifest.json'))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
+    const agent = await fresh('running-partial-export')
+    const gate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'chapter_writing'
+    executeStage.mockImplementationOnce(() => gate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => {
+      expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+      expect(host.inFlight.size).toBe(1)
+    })
+
+    expect(getBidClientProjection(runtime(agent.session)).allowedActions).toContain('export_docx')
+    const preview = await ctx.bid.previewDocx(agent.session)
+    expect(typeof preview.previewHtml).toBe('string')
+    const other = await fresh('running-partial-export-other', workspace.root, false)
+    await expect(ctx.bid.exportDocx(other.session)).resolves.toMatchObject({
+      ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS' },
+    })
+    const exported = await ctx.bid.exportDocx(agent.session)
+
+    if (!exported.ok) throw new Error('Partial DOCX export failed')
+    expect(exported.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
+    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_PARTIAL_SNAPSHOT')
+    expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文')
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+    expect(host.inFlight.size).toBe(1)
+    expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+    gate.resolve([])
+    await retry
+  })
+
+  it('S5 失败后可导出已保存章节且保持失败态', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await rm(join(workspace.projectRoot, 'chapters/manifest.json'))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' })
+    const agent = await fresh('failed-partial-export')
+
+    const exported = await ctx.bid.exportDocx(agent.session)
+
+    expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_PARTIAL_SNAPSHOT' }] } })
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' })
+    expect(await readBidProjectState(workspace)).toMatchObject({
+      runtime: { stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' },
+    })
+  })
+
   it('S5 完成后普通消息保持完成态，由主 Agent 判断是否需要调整计划', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)

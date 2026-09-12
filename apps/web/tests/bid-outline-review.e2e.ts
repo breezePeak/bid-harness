@@ -229,6 +229,43 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
   }
 })
 
+it('S5 运行中可打开 Word 导出并提示仅导出已保存章节', async () => {
+  const scaffold = await launchWebScaffold({
+    agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'bid' },
+  })
+  const browser = await chromium.launch()
+  const page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
+  try {
+    await page.goto(scaffold.baseUrl)
+    await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
+    await page.getByRole('region', { name: '技术标生成' }).waitFor()
+    const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
+    if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
+    const workspace = new BidWorkspace(agent.session.header.cwd)
+    await seedProjectArtifacts(workspace)
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '查看当前正文' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
+    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+
+    await page.getByRole('tab', { name: '正文详情', exact: true }).click()
+    const exportButton = page.getByRole('button', { name: '导出 Word', exact: true })
+    await exportButton.waitFor()
+    expect(await exportButton.isEnabled()).toBe(true)
+    await exportButton.click()
+
+    await page.getByRole('region', { name: '导出 Word', exact: true }).waitFor()
+    await page.getByText('当前导出仅包含已完成并保存的章节。', { exact: true }).waitFor()
+  } catch (error) {
+    await saveFailureShot(page, 'bid-running-word-export-failure')
+    throw error
+  } finally {
+    await browser.close()
+    await scaffold.close()
+  }
+})
+
 it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复三列及关联内容', async () => {
   const scaffold = await launchWebScaffold({
     agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'bid' },

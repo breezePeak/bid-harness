@@ -1,10 +1,11 @@
-/** S6 按确认目录组合已完成章节；项目锁和阶段 checkpoint 由 Host 持有。 */
+/** 按确认目录组合完整正文或已完成章节快照；项目 operation 和阶段 checkpoint 由 Host 持有。 */
 import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
 import { readDocxXml } from './docx-template.ts'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { collectDocxChapterBody } from './docx-content.ts'
 import { parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
+import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationIssue, type StageValidationResult } from './control-plane-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
@@ -31,14 +32,16 @@ export { collectDocxChapterBody } from './docx-content.ts'
  * @param workspace 已由 Host 锁定的项目。
  * @param signal 本次阶段操作的取消信号。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
+ * @param contentScope 完整 Manifest，或当前已完成章节的稳定快照。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
 export async function executeDocxExport(
   workspace: BidWorkspace,
   signal?: AbortSignal,
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
+  contentScope: 'complete' | 'completed_chapters' = 'complete',
 ): Promise<StageArtifact[]> {
-  const markdown = await collectDocxMarkdown(workspace, signal)
+  const markdown = await collectDocxMarkdown(workspace, signal, contentScope)
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
   const source = destination.slice(0, -'.docx'.length) + '.md'
   const absolute = within(workspace.projectRoot, source)
@@ -49,40 +52,98 @@ export async function executeDocxExport(
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 
-/** 读取确认目录和全部章节为固定 Markdown 快照；不修改源章节。
+/** 读取确认目录和完整章节或当前已完成章节为固定 Markdown 快照；不修改源章节。
  * @param workspace 当前项目。
  * @param signal 取消信号。
- * @returns 完整文档 Markdown。
+ * @param contentScope 完整 Manifest，或 execution-log 中前后身份稳定的已完成章节。
+ * @returns 当前导出范围的文档 Markdown。
  */
-export async function collectDocxMarkdown(workspace: BidWorkspace, signal?: AbortSignal): Promise<string> {
+export async function collectDocxMarkdown(
+  workspace: BidWorkspace,
+  signal?: AbortSignal,
+  contentScope: 'complete' | 'completed_chapters' = 'complete',
+): Promise<string> {
   signal?.throwIfAborted()
-  const [outline, manifest, requirements, scoring, compliance, responsePoints, writingPlan] = await Promise.all([
+  const [outline, requirements, scoring, compliance, responsePoints, writingPlan] = await Promise.all([
     readProjectFile(workspace, 'outline/confirmed-outline.json').then(value => parseConfirmedOutlineArtifact(JSON.parse(value))),
-    readProjectFile(workspace, 'chapters/manifest.json').then(value => parseChapterWritingManifest(JSON.parse(value))),
     readProjectFile(workspace, 'analysis/requirements.json').then(value => parseTenderRequirementsArtifact(JSON.parse(value))),
     readProjectFile(workspace, 'analysis/scoring.json').then(value => parseTenderScoringArtifact(JSON.parse(value))),
     readProjectFile(workspace, 'analysis/compliance.json').then(value => parseTenderComplianceArtifact(JSON.parse(value))),
     readProjectFile(workspace, 'analysis/scoring-response-points.json').then(value => parseScoringResponsePointCatalog(JSON.parse(value))),
     readProjectFile(workspace, 'chapters/writing-plan.json').then(value => parseWritingPlan(JSON.parse(value))),
   ])
-  if (manifest.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) {
-    throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_OUTLINE_MISMATCH', message: '章节记录与当前确认目录不匹配。', artifact: 'chapters/manifest.json' }])
-  }
   const worklist = buildWritableSectionWorklist(outline)
-  const chapters = new Map(manifest.chapters.map(chapter => [chapter.section_id, chapter]))
-  if (chapters.size !== manifest.chapters.length || chapters.size !== worklist.length
-    || worklist.some((section, index) => chapters.get(section.id)?.content_path !== `chapters/sections/${String(index + 1).padStart(4, '0')}.md`)) {
-    throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CHAPTER_SET_INVALID', message: '章节记录必须完整对应确认目录中的可写章节及正文路径。', artifact: 'chapters/manifest.json' }])
+  const chapters = new Map<string, { content_path: string; markdown?: string }>()
+  if (contentScope === 'complete') {
+    const manifest = parseChapterWritingManifest(JSON.parse(await readProjectFile(workspace, 'chapters/manifest.json')))
+    if (manifest.confirmed_outline_sha256 !== outlineArtifactSha256(outline)) {
+      throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_OUTLINE_MISMATCH', message: '章节记录与当前确认目录不匹配。', artifact: 'chapters/manifest.json' }])
+    }
+    for (const chapter of manifest.chapters) chapters.set(chapter.section_id, chapter)
+    if (chapters.size !== manifest.chapters.length || chapters.size !== worklist.length
+      || worklist.some((section, index) => chapters.get(section.id)?.content_path !== `chapters/sections/${String(index + 1).padStart(4, '0')}.md`)) {
+      throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CHAPTER_SET_INVALID', message: '章节记录必须完整对应确认目录中的可写章节及正文路径。', artifact: 'chapters/manifest.json' }])
+    }
+  } else {
+    const outlineHash = outlineArtifactSha256(outline)
+    const matchesCurrentPlan = (log: ReturnType<typeof parseChapterExecutionLog>): boolean =>
+      log.confirmed_outline_sha256 === outlineHash
+      && log.writing_plan_version === writingPlan.plan_version
+      && log.sections.length === worklist.length
+      && worklist.every((section, index) => log.sections[index]?.section_id === section.id)
+    const before = parseChapterExecutionLog(JSON.parse(await readProjectFile(workspace, 'chapters/execution-log.json')))
+    if (!matchesCurrentPlan(before)) {
+      throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_EXECUTION_LOG_INVALID', message: '章节执行记录与当前确认目录或写作计划不匹配。', artifact: 'chapters/execution-log.json' }])
+    }
+    for (const [index, section] of worklist.entries()) {
+      const execution = before.sections[index]
+      if (execution?.status !== 'completed') continue
+      if (execution.final_writer_child_session_id === null || execution.final_reviewer_child_session_id === null) {
+        throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_EXECUTION_LOG_INVALID', message: `章节 ${section.id} 缺少完成身份。`, artifact: 'chapters/execution-log.json' }])
+      }
+      const content_path = `chapters/sections/${String(index + 1).padStart(4, '0')}.md`
+      chapters.set(section.id, { content_path, markdown: await readProjectFile(workspace, content_path) })
+    }
+    if (chapters.size === 0) {
+      throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_NO_COMPLETED_CHAPTERS', message: '当前还没有已完成并保存的章节。', artifact: 'chapters/execution-log.json' }])
+    }
+    const after = parseChapterExecutionLog(JSON.parse(await readProjectFile(workspace, 'chapters/execution-log.json')))
+    if (!matchesCurrentPlan(after)) {
+      throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_SNAPSHOT_CHANGED', message: '章节执行记录在导出快照期间发生变化，请重新导出。', artifact: 'chapters/execution-log.json' }])
+    }
+    for (const [index, section] of worklist.entries()) {
+      if (!chapters.has(section.id)) continue
+      const left = before.sections[index]
+      const right = after.sections[index]
+      if (left?.status !== 'completed' || right?.status !== 'completed'
+        || left.epoch !== right.epoch
+        || left.final_writer_child_session_id !== right.final_writer_child_session_id
+        || left.final_reviewer_child_session_id !== right.final_reviewer_child_session_id) {
+        throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_SNAPSHOT_CHANGED', message: `章节 ${section.id} 在导出快照期间发生变化，请重新导出。`, artifact: 'chapters/execution-log.json' }])
+      }
+    }
+  }
+  const included = new Set(chapters.keys())
+  if (contentScope === 'completed_chapters') {
+    const byId = new Map(outline.sections.map(section => [section.id, section]))
+    for (const sectionId of [...included]) {
+      let parentId = byId.get(sectionId)?.parent_id ?? null
+      while (parentId !== null) {
+        included.add(parentId)
+        parentId = byId.get(parentId)?.parent_id ?? null
+      }
+    }
   }
   const parts = [`# ${outline.document_title}`]
   for (const { section, number, depth } of buildOutlineView(outline.sections)) {
     signal?.throwIfAborted()
+    if (contentScope === 'completed_chapters' && !included.has(section.id)) continue
     const headingDepth = Math.min(6, depth)
     parts.push(`${'#'.repeat(headingDepth)} ${number} ${section.title}`)
     if (!section.writable && section.summary !== undefined) parts.push(section.summary)
     const chapter = chapters.get(section.id)
     if (chapter === undefined) continue
-    const markdown = await readProjectFile(workspace, chapter.content_path)
+    const markdown = chapter.markdown ?? await readProjectFile(workspace, chapter.content_path)
     if (markdown.trim().length === 0) throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_CONTENT_EMPTY', message: '章节正文为空，不能导出。', artifact: chapter.content_path }])
     parts.push(collectDocxChapterBody(markdown, section.title, section.id, number, headingDepth))
   }

@@ -1935,13 +1935,11 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('previewDocx')
   async previewDocx(session: Session): Promise<DocxFormatView> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 预览需要标书项目会话。')
-    const operation = this.beginOperation(session)
-    try {
-      const view = await readDocxFormat(operation.workspace)
-      const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
-      const rendered = await renderDocx(operation.workspace, markdown, view.state.resolved)
-      return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
-    } finally { await this.finishOperation(session, operation, false) }
+    const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
+    const view = await readDocxFormat(workspace)
+    const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
+    const rendered = await renderDocx(workspace, markdown, view.state.resolved)
+    return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
   }
 
   /** 生成待确认的格式建议，不修改模板、正文或生效配置。
@@ -1979,45 +1977,66 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * Generate a fresh Word file from completed S5 artifacts without leaving the review stage.
-   * @param session Bid Session whose completed chapter artifacts are exported.
-   * @returns Export result containing either the generated file metadata or a stable rejection.
+   * 从完整 S5 产物或运行中已完成章节生成 Word，不暂停写作，也不离开审核阶段。
+   * @param session 当前 Bid 会话；运行中导出只允许持有项目操作的 Session。
+   * @returns 新文件信息，或稳定的拒绝结果。
    */
   @Remote('exportDocx')
   async exportDocx(session: Session): Promise<BidDocxExportResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
     }
-    if (this.inFlight.has(projectKey(session))) {
-      return docxExportRejected('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
-    }
-    const operation = this.beginOperation(session)
-    try {
-      const runtime = await this.prepareOperation(operation)
-      if (!getBidClientProjection(runtime).allowedActions.includes('export_docx')) {
-        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '正文编写完成后才能生成 Word。')
+    const failure = (error: unknown): BidDocxExportResult => {
+      if (error instanceof BidStageExecutionError) {
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '当前已完成章节无法导出，请检查正文完整性。', error.issues)
       }
-      const destination = `${operation.workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const artifacts = await executeDocxExport(operation.workspace, operation.controller.signal, destination)
-      const validation = await validateDocxExport(operation.workspace, 'docx_export', artifacts)
+      return docxExportRejected('BID_DOCX_EXPORT_FAILED', error instanceof Error ? error.message : 'Word 生成失败，请重试。')
+    }
+    const generate = async (
+      workspace: BidWorkspace,
+      runtime: BidRuntimeState,
+      signal?: AbortSignal,
+      operation?: ActiveBidOperation,
+    ): Promise<BidDocxExportResult> => {
+      if (!getBidClientProjection(runtime).allowedActions.includes('export_docx')) {
+        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
+      }
+      const partial = runtime.stage === 'chapter_writing'
+        && (runtime.status === 'running' || runtime.status === 'failed')
+      const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
+      const artifacts = await executeDocxExport(
+        workspace, signal, destination, partial ? 'completed_chapters' : 'complete',
+      )
+      const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) {
         return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
       }
-      if (runtime.stage === 'docx_export' && runtime.status !== 'completed') {
+      if (operation !== undefined && runtime.stage === 'docx_export' && runtime.status !== 'completed') {
         session.append('bid.stage.started', { stage: 'docx_export', status: 'running' })
         session.append('bid.stage.completed', { stage: 'docx_export', status: 'completed', artifacts })
         await this.checkpoint(operation)
       }
-      const warnings = await assessDocxExportPageTarget(operation.workspace)
+      const warnings = partial ? [{
+        code: 'DOCX_EXPORT_PARTIAL_SNAPSHOT',
+        message: 'Word 已生成，仅包含点击导出时已完成并保存的章节。',
+        artifact: 'chapters/execution-log.json',
+      }] : await assessDocxExportPageTarget(workspace)
       return { ok: true, value: { path: destination, ...(warnings.length === 0 ? {} : { warnings }) } }
-    } catch (error: unknown) {
-      if (error instanceof BidStageExecutionError) {
-        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '已完成章节无法导出，请检查正文完整性。', error.issues)
-      }
-      return docxExportRejected('BID_DOCX_EXPORT_FAILED', error instanceof Error ? error.message : 'Word 生成失败，请重试。')
-    } finally {
-      await this.finishOperation(session, operation, false)
     }
+    const active = this.inFlight.get(projectKey(session))
+    if (active !== undefined) {
+      if (active.session !== session) {
+        return docxExportRejected('BID_OPERATION_IN_PROGRESS', '当前项目正在另一会话中执行。')
+      }
+      try {
+        const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+        return await generate(active.workspace, runtime)
+      } catch (error: unknown) { return failure(error) }
+    }
+    const operation = this.beginOperation(session)
+    try { return await generate(operation.workspace, await this.prepareOperation(operation), operation.controller.signal, operation) }
+    catch (error: unknown) { return failure(error) }
+    finally { await this.finishOperation(session, operation, false) }
   }
 
   /**

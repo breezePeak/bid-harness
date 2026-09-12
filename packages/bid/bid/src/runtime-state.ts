@@ -208,14 +208,24 @@ export function getBidClientProjection(
   const fileView = fileLimits.allowedExtensions === undefined ? { ...fileLimits }
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (runtime.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { runtime: { ...runtime }, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
-  if (runtime.status === 'failed') return { runtime: { ...runtime }, allowedActions: runtime.stage === 'file_intake' ? ['upload_files'] : ['retry_stage'], composer: { enabled: false, reason: 'bid.stage_failed' }, ...fileView }
+  if (runtime.status === 'failed') return {
+    runtime: { ...runtime },
+    allowedActions: runtime.stage === 'file_intake' ? ['upload_files']
+      : runtime.stage === 'chapter_writing' ? ['retry_stage', 'export_docx'] : ['retry_stage'],
+    composer: { enabled: false, reason: 'bid.stage_failed' },
+    ...fileView,
+  }
   if (runtime.stage === 'chapter_writing' && runtime.status === 'attention_required') return {
     runtime: { ...runtime }, allowedActions: ['send_message', 'retry_stage', 'export_docx', 'revise_chapter'],
     composer: { enabled: true }, ...fileView,
   }
   if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
   if (runtime.status === 'running') return {
-    runtime: { ...runtime }, allowedActions: ['send_message', 'stop_stage'], composer: { enabled: true }, ...fileView,
+    runtime: { ...runtime },
+    allowedActions: runtime.stage === 'chapter_writing'
+      ? ['send_message', 'stop_stage', 'export_docx'] : ['send_message', 'stop_stage'],
+    composer: { enabled: true },
+    ...fileView,
   }
   if (runtime.status === 'completed') return {
     runtime: { ...runtime },

@@ -106,7 +106,8 @@ describe('Bid client projection', () => {
     for (const stage of BID_STAGES) {
       expect(getBidClientProjection({ stage, status: 'running' })).toEqual({
         runtime: { stage, status: 'running' },
-        allowedActions: ['send_message', 'stop_stage'],
+        allowedActions: stage === 'chapter_writing'
+          ? ['send_message', 'stop_stage', 'export_docx'] : ['send_message', 'stop_stage'],
         composer: { enabled: true },
       })
     }
@@ -146,7 +147,7 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toEqual({
       runtime: { stage: 'chapter_writing', status: 'failed' },
-      allowedActions: ['retry_stage'],
+      allowedActions: ['retry_stage', 'export_docx'],
       composer: { enabled: false, reason: 'bid.stage_failed' },
     })
     for (const stage of BID_STAGES) {

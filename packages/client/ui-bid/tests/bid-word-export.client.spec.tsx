@@ -154,6 +154,22 @@ describe('Word 导出页面', () => {
     expect(actions.download).toHaveBeenCalledOnce()
   })
 
+  it('S5 运行中开放当前已完成章节导出并说明范围', async () => {
+    const { props, actions } = fixture()
+    render(<BidWordExport {...props} useProjection={() => ({
+      allowedActions: ['send_message', 'stop_stage', 'export_docx'],
+      runtime: { stage: 'chapter_writing', status: 'running' },
+    })}/>)
+    await screen.findByTitle('Word 效果预览')
+    expect(screen.getByRole('status')).toHaveProperty('textContent', '当前导出仅包含已完成并保存的章节。')
+    const button = screen.getByRole('button', { name: '导出 Word' })
+    expect(button).toHaveProperty('disabled', false)
+    fireEvent.click(button)
+    await screen.findByText('Word 导出完成')
+    expect(actions.generate).toHaveBeenCalledOnce()
+    expect(actions.download).toHaveBeenCalledOnce()
+  })
+
   it('模板文件仍通过独立二进制请求发送', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const ctx = { effect: (factory: () => unknown) => factory(), locale: { register: vi.fn(() => () => {}) },

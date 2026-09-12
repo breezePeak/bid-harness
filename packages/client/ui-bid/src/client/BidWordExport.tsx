@@ -61,6 +61,8 @@ export function BidWordExport({ sessionId,
   const firstConflict = useRef<HTMLButtonElement | null>(null)
   const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.runtime.status === 'completed' && ['chapter_writing',
     'docx_export'].includes(projection.runtime.stage))
+  const partial = projection?.runtime.stage === 'chapter_writing'
+    && (projection.runtime.status === 'running' || projection.runtime.status === 'failed')
 
   const loadPreview = async (): Promise<void> => {
     const next = await preview()
@@ -123,7 +125,7 @@ export function BidWordExport({ sessionId,
           }}/>
           {view?.state.template && <span>{view.state.template.name}</span>}
         </label>
-        <p role="status" className={css.status}>{busy || status}</p>
+        <p role="status" className={css.status}>{busy || status || (partial ? '当前导出仅包含已完成并保存的章节。' : '')}</p>
         {error && <p role="alert" className={css.error}>{error}</p>}
         {view && <table className={css.summary}>
           <caption>模板主要格式</caption>

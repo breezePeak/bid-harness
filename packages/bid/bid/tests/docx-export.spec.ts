@@ -96,6 +96,39 @@ describe('Bid DOCX export', () => {
     expect(html).toContain('<h2><strong>交付</strong></h2>')
   })
 
+  it('S5 快照只导出执行记录中已完成的章节及其目录祖先', async () => {
+    const { workspace, outline } = await exportFixture()
+    await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), '{}')
+    const executionLog = {
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+      writing_plan_version: 1, max_concurrency: 2, observed_max_concurrency: 2,
+      sections: [
+        { section_id: 'resource', depends_on: [], related_sections: [], epoch: 0, status: 'completed', attempts: [],
+          final_writer_child_session_id: 'writer-resource', final_reviewer_child_session_id: 'reviewer-resource' },
+        { section_id: 'delivery', depends_on: [], related_sections: [], epoch: 0, status: 'running', attempts: [],
+          final_writer_child_session_id: null, final_reviewer_child_session_id: null },
+      ],
+    }
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog))
+
+    const artifacts = await executeDocxExport(workspace, undefined, 'deliverables/partial.docx', 'completed_chapters')
+
+    await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
+    const markdown = await readFile(join(workspace.outputRoot, 'partial.md'), 'utf8')
+    expect(markdown).toContain('# 1 实施方案')
+    expect(markdown).toContain('## 1.1 部署安排')
+    expect(markdown).toContain('### 1.1.1 资源配置')
+    expect(markdown).toContain('资源配置正文。')
+    expect(markdown).not.toContain('## 1.2 交付')
+    expect(markdown).not.toContain('交付正文。')
+
+    executionLog.sections[0] = { ...executionLog.sections[0]!, status: 'pending',
+      final_writer_child_session_id: null, final_reviewer_child_session_id: null }
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog))
+    await expect(executeDocxExport(workspace, undefined, 'deliverables/empty.docx', 'completed_chapters'))
+      .rejects.toThrow('DOCX_EXPORT_NO_COMPLETED_CHAPTERS')
+  })
+
   it('DOCX 可读取但正文低于已确认下限时仍生成文件并单独报告篇幅', async () => {
     const { workspace, outline } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)
