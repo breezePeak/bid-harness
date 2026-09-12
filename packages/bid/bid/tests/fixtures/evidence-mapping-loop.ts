@@ -310,29 +310,23 @@ function sectionSubmission(url: string) {
   }
 }
 
-function researchAssessment(sufficient: boolean, affectsOutlineDecision: boolean) {
+function researchAssessment(sufficient: boolean, affectsBlueprint: boolean) {
   return {
-    sufficient_for_outline_decision: sufficient,
+    sufficient_for_blueprint: sufficient,
     diagnostics: {
       tender_and_response_points: '已理解访问控制与安全审计要求及评分响应点。',
       technical_approach: '已研究身份鉴别、权限控制和安全审计的技术路线。',
       evidence_and_inferences: '本地资料支持实施组织，公开标准用于技术背景，未把参考项目写成本项目事实。',
       project_specific_quality_risks: '已检查访问控制验证、审计完整性和项目资料边界。',
     },
-    key_findings: ['访问控制与安全审计属于同一安全技术过程，可在当前叶子内按写作维度展开。'],
+    key_findings: [{ finding: '访问控制的授权操作需要通过审计记录验证。',
+      explanation: '从身份鉴别、权限授予到操作记录，明确权限执行和追溯验证的方法。',
+      nature: 'professional_design', basis: [{ kind: 'requirement', ref: 'REQ-1' }],
+      evidence_boundary: '授权与审计安排是本方案设计，不声称项目已有账号规模或系统能力。' }],
     unresolved_gaps: [{
       topic: '当前项目的既有账号与权限清单未提供',
-      affects_outline_decision: affectsOutlineDecision,
+      affects_blueprint: affectsBlueprint,
       writing_impact: '不虚构具体账号规模，S5 按已确认边界编写核查方法。',
-    }],
-    outline_capacity: {
-      decision: sufficient ? 'adequate' : 'undetermined',
-      reason: sufficient ? '当前叶子可承载统一安全过程，不需要机械拆节。' : '需要确认资料边界是否影响章节结构。',
-    },
-    topic_dispositions: [{
-      topic: '访问控制与安全审计', placement: 'within_section',
-      reason: '身份鉴别、权限控制和审计记录属于统一安全技术过程，在当前章节内连续论证。',
-      basis: [{ kind: 'requirement', ref: 'REQ-1' }],
     }],
   }
 }
@@ -368,6 +362,17 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const framework = manifest.files.find(file => file.role === 'outline_framework')!
   if (corpus === undefined || tender.chunksPath === null || framework.chunksPath === null) throw new Error('missing mapping corpus')
   const parsedQuality = JSON.parse(quality) as Record<string, unknown>
+  const blueprint = {
+    section_id: 'SEC-SECURITY', basis: { kind: 'tender_requirement', explanation: '招标要求访问控制方案与安全审计，明确已有安全任务的组织方式。', requirement_ids: ['REQ-1'] },
+    writing_brief: (({ requirement_ids: _requirements, scoring_ids: _scores, scoring_response_point_ids: _points, ...brief }) => brief)(
+      partialResult(sourceUrl).section_mappings[0]!.writing_brief,
+    ),
+    writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
+  }
+  const structure = { decision: 'keep', reason: '本章聚焦权限执行与追溯验证，不同操作通过同一权限记录闭环说明。',
+    navigation_analysis: '读者通过访问控制与安全审计标题可定位本项安全任务；账号核验、授权、记录属于同一方法的普通步骤，无需独立成果章节。',
+    hidden_heading_pressure: false, topic_dispositions: [{ finding_index: 1, placement: 'within_section', reason: '段落和角色权限表可完整表达授权与追溯关系，无需隐藏正式子标题。' }],
+  }
   const childScript: ScriptStep[] = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('read-forbidden-framework', 'read', { file_path: `${workspacePath}/${framework.chunksPath}/chunk_0001.md` }),
@@ -383,7 +388,15 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('research-not-ready', 'submit_section_research_assessment', researchAssessment(false, true)),
     toolCall('search-research-gap', 'search_sources', { scope_ref: 'ALL', keywords: ['权限', '审计'] }),
+    toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
+    toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
+    ...(!repair ? [
+      toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
+      toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
+    ] : []),
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
+    toolCall('update-task', 'update_section_task', blueprint),
+    toolCall('assess-structure', 'submit_section_structure_assessment', structure),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_section_outline', {}),
     ] : []),
@@ -395,21 +408,15 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       local_materials: [{ material_ref: 'M1:chunk_0001', usage: 'reference_bid', summary: '非法枚举回放。' }],
       web_materials: [],
     }),
-    toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
-    ...(repair ? [toolCall('submit-before-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl))] : []),
-    toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
-    ...(!repair ? [
-      toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
-      toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
-    ] : []),
+    ...(repair ? [toolCall('submit-before-fetch', 'submit_section_mapping', sectionSubmission(unusedSourceUrl))] : []),
     toolCall('submit-after-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl)),
-    toolCall('update-task', 'update_section_task', {
-      section_id: 'SEC-SECURITY', basis: { kind: 'tender_requirement', explanation: '招标要求访问控制方案与安全审计，明确已有安全任务的组织方式。', requirement_ids: ['REQ-1'] },
-      writing_brief: (({ requirement_ids: _requirements, scoring_ids: _scores, scoring_response_point_ids: _points, ...brief }) => brief)(
-        partialResult(sourceUrl).section_mappings[0]!.writing_brief,
-      ),
-      writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
-    }),
+    ...(repair ? [
+      toolCall('revise-blueprint', 'update_section_task', { ...blueprint, writing_dimensions: ['授权方法与条件', '安全审计'] }),
+      toolCall('reject-stale-lock', 'lock_section_outline', { comparison: '必须重新核对新 Blueprint。' }),
+      toolCall('restore-blueprint', 'update_section_task', blueprint),
+      toolCall('reassess-current-structure', 'submit_section_structure_assessment', structure),
+      toolCall('lock-current-structure', 'lock_section_outline', { comparison: '当前 Blueprint 的目录承载判断有效。' }),
+    ] : []),
     toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
     ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
       ...parsedQuality, checked_requirement_ids: [],
