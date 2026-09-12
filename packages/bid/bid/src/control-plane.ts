@@ -27,6 +27,7 @@ export type {
   BidDetailsView,
   BidClientAction,
   BidChapterReviewStatus,
+  BidChapterIndicatorStatus,
   BidChapterWritingStatus,
   BidChapterRevisionReference,
   BidChapterRevisionRequest,

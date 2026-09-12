@@ -25,6 +25,16 @@ describe('bid control-plane public contract', () => {
     expect(() => parseBidReviewWorkbenchView({ ...view, summary: { ...view.summary, page_estimate: { status: 'available', pages: 0 } } })).toThrow()
   })
 
+  it('接受可选的章节状态指标并保留旧响应兼容性', () => {
+    const view = parseBidReviewWorkbenchView({
+      schema_version: 3,
+      outline: [{ section_id: 'leaf', parent_id: null, order: 1, title: '方案', writable: true, writing_status: 'writing', review_status: 'not_started', chapter_indicator: { status: 'writing', tooltip: '正在编写' }, content_available: false }],
+      summary: { chapter_count: 1, content_count: 0, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'unavailable' }, page_target: { status: 'not_set' } },
+      global_compliance: { status: 'not_required', reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
+    })
+    expect(view.outline[0]?.chapter_indicator).toEqual({ status: 'writing', tooltip: '正在编写' })
+  })
+
   it('exports the fixed stage, status, and event names', () => {
     expect(BID_STAGES).toEqual([
       'file_intake',

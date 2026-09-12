@@ -229,11 +229,11 @@
 }
 
 .statusDot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
   display: inline-block;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 
 .treeRow:hover .statusDot {
@@ -241,8 +241,15 @@
 }
 
 .statusDotGray {
-  background: var(--dsw-alias-label-tertiary, #9ca3af);
-  opacity: 0.55;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-label-tertiary, #9ca3af);
+  background: transparent;
+  opacity: 0.8;
+}
+
+.statusDotQueued {
+  background: #7892ad;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #7892ad 22%, transparent);
 }
 
 .statusDotBlue {
@@ -265,8 +272,17 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 25%, transparent);
 }
 
+.statusDotOrange {
+  background: #f97316;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f97316 25%, transparent);
+}
+
 .statusDotPulsing {
   animation: dotPulse 1.8s infinite ease-in-out;
+}
+
+.statusDotWeakPulsing {
+  animation: dotPulse 2.4s infinite ease-in-out;
 }
 
 @keyframes dotPulse {
@@ -277,6 +293,19 @@
   50% {
     opacity: 0.55;
     transform: scale(0.85);
+  }
+}
+
+.overviewIndicator {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-12);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statusDotPulsing,
+  .statusDotWeakPulsing {
+    animation: none;
   }
 }
 

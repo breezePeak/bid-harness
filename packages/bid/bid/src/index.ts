@@ -148,6 +148,7 @@ export type {
   BidChapterRevisionResult,
   BidChapterWritingGateErrorCode,
   BidChapterWritingGateResult,
+  BidChapterIndicatorStatus,
   BidClientAction,
   BidDocumentRole,
   BidEvidenceMappingProgress,
@@ -2154,6 +2155,17 @@ export class BidHostRuntime extends TypertRemoteService {
       const writingStatus: BidReviewWorkbenchView['outline'][number]['writing_status'] = !section.writable || execution === undefined || execution.status === 'pending'
         ? 'not_started'
         : execution.status === 'running' ? contentAvailable ? 'content_ready' : 'writing' : execution.status
+      let chapterIndicator: BidReviewWorkbenchView['outline'][number]['chapter_indicator']
+      if (!section.writable) chapterIndicator = undefined
+      else if (execution?.status === 'pending') chapterIndicator = { status: 'queued', tooltip: '等待编写' }
+      else if (writingStatus === 'failed' || reviewStatus === 'failed') chapterIndicator = { status: 'failed', tooltip: '章节执行失败' }
+      else if (reviewStatus === 'needs_attention') chapterIndicator = { status: 'needs_attention', tooltip: '正文需要修复' }
+      else if (reviewStatus === 'needs_input') chapterIndicator = { status: 'needs_input', tooltip: '缺少项目资料，正文无需重写' }
+      else if (reviewStatus === 'reviewing') chapterIndicator = { status: 'reviewing', tooltip: '正在审核' }
+      else if (reviewStatus === 'pass') chapterIndicator = { status: 'passed', tooltip: '审核通过' }
+      else if (writingStatus === 'writing') chapterIndicator = { status: 'writing', tooltip: '正在编写' }
+      else if (writingStatus === 'content_ready' || writingStatus === 'completed') chapterIndicator = { status: 'content_ready', tooltip: '正文已编写' }
+      else chapterIndicator = { status: 'not_started', tooltip: '未编写' }
       return { markdown, row: {
         section_id: section.id,
         parent_id: section.parent_id,
@@ -2163,6 +2175,7 @@ export class BidHostRuntime extends TypertRemoteService {
         writable: section.writable,
         writing_status: writingStatus,
         review_status: reviewStatus,
+        ...(chapterIndicator === undefined ? {} : { chapter_indicator: chapterIndicator }),
         content_available: contentAvailable,
       } }
     }))

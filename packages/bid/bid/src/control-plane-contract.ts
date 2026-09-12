@@ -363,6 +363,9 @@ export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready
 /** Per-section review state exposed by the S5 workbench. */
 export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_input' | 'needs_attention' | 'failed'
 
+/** Stable visual status vocabulary for a writable chapter in the review workbench. */
+export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'content_ready' | 'reviewing' | 'needs_input' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
+
 /** Page-estimate state that never turns an unavailable calculation into a zero-page result. */
 export type BidPageEstimate =
   | { readonly status: 'available'; readonly pages: number }
@@ -402,6 +405,7 @@ export interface BidReviewWorkbenchView {
     readonly writable: boolean
     readonly writing_status: BidChapterWritingStatus
     readonly review_status: BidChapterReviewStatus
+    readonly chapter_indicator?: { readonly status: BidChapterIndicatorStatus; readonly tooltip: string }
     readonly content_available: boolean
     /** Non-leaf section estimate; omitted for a leaf whose status dot remains interactive. */
     readonly page_estimate?: (BidPageEstimate & { readonly incomplete?: boolean }) | undefined
@@ -463,7 +467,12 @@ const reviewWorkbenchSchema = z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
     writing_status: z.enum(['not_started', 'writing', 'content_ready', 'completed', 'failed']),
-    review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_input', 'needs_attention', 'failed']), content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
+    review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_input', 'needs_attention', 'failed']),
+    chapter_indicator: z.strictObject({
+      status: z.enum(['queued', 'writing', 'content_ready', 'reviewing', 'needs_input', 'needs_attention', 'passed', 'failed', 'not_started']),
+      tooltip: z.string(),
+    }).optional(),
+    content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
   })),
   summary: z.strictObject({
     chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),

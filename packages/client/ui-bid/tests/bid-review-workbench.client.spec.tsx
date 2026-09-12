@@ -69,6 +69,18 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByText('暂不可用')).toBeTruthy()
   })
 
+  it('优先使用服务端提供的章节状态指标', async () => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench,
+      outline: workbench.outline.map(section => section.writable
+        ? { ...section, chapter_indicator: { status: 'queued' as const, tooltip: '等待编写' } }
+        : section),
+    }) })} />)
+    const leaf = await screen.findByRole('button', { name: '1.1 实施方案' })
+    expect(leaf.querySelector('[class*="statusDotQueued"]')).toBeTruthy()
+    expect(leaf.querySelector('[title]')?.getAttribute('title')).toContain('实施方案：等待编写')
+  })
+
   it('分开显示页数目标、正文估算和未达差额', async () => {
     render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
       ...workbench,
