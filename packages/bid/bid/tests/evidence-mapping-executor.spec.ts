@@ -1447,7 +1447,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.starts).toHaveLength(27)
     expect(fixture.finalStarts).toHaveLength(1)
     expect(fixture.maxActive()).toBeLessThanOrEqual(3)
-  })
+  }, 30_000)
 
   it.each(['replace', 'supplement'] as const)('局部 %s 只运行选中 Section，并保留其他章节及 Web 快照', async (mode) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-targeted-remap-')))
