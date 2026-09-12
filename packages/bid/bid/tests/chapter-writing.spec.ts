@@ -606,6 +606,28 @@ describe('chapter-writing executor', () => {
     expect(await Promise.all(['sections/0004.md', 'meta/0004.json', 'reviews/0004.json'].map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))).toEqual(retained)
   })
 
+  it('v3 执行日志只重新调度中断章节并保留其他完成章节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-v3-log-')))
+    const outline = await writeInputs(workspace)
+    await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const current = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    const legacy = {
+      ...current,
+      schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION,
+      sections: current.sections.map(({ phase: _phase, failure_phase: _failurePhase, ...section }) => ({
+        ...section,
+        status: section.section_id === 'SEC-1' ? 'running' as const : 'completed' as const,
+      })),
+    }
+    await writeFile(logPath, JSON.stringify(legacy))
+    const resumed = fixtureAgent(workspace, outline)
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'))
+    expect(resumed.starts.some(start => start.request.label?.includes('章节1'))).toBe(true)
+    expect(resumed.starts.some(start => start.request.label?.includes('章节2') || start.request.label?.includes('章节3'))).toBe(false)
+    expect(parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.every(section => section.status === 'completed')).toBe(true)
+  })
+
   it.each(['正文写入中', 'metadata 写入后', 'review 写入后', '提交成功后'])('最终落盘取消：%s', async (point) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-final-abort-')))
     const outline = await writeInputs(workspace)

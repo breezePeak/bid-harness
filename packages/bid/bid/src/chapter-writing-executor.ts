@@ -43,7 +43,7 @@ import {
 } from './chapter-writing-review-artifacts.ts'
 import {
   CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
-  parseChapterExecutionLog,
+  parseOrMigrateChapterExecutionLog,
   parseChapterExecutionPlan,
   validateChapterExecutionPlan,
   type ChapterExecutionAttempt,
@@ -954,7 +954,7 @@ async function loadChapterCheckpoint(
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
     if (validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion).length > 0) return undefined
-    const executionLog = parseChapterExecutionLog(await readJson(workspace, LOG_PATH))
+    const executionLog = parseOrMigrateChapterExecutionLog(await readJson(workspace, LOG_PATH))
     if (executionLog.confirmed_outline_sha256 !== outlineHash
       || executionLog.writing_plan_version !== writingPlanVersion) return undefined
     const worklist = buildChapterWorklist(outline)

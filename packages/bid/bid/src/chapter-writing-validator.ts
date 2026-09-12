@@ -3,7 +3,7 @@ import type { BidManifest, BidWorkspace } from './index.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
-import { parseChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
+import { parseOrMigrateChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
@@ -152,7 +152,7 @@ export async function validateChapterWriting(
   try {
     chapters = parseChapterWritingManifest(manifestRaw)
     plan = parseChapterExecutionPlan(planRaw)
-    executionLog = parseChapterExecutionLog(logRaw)
+    executionLog = parseOrMigrateChapterExecutionLog(logRaw)
     outline = parseConfirmedOutlineArtifact(outlineRaw)
     scoring = parseTenderScoringArtifact(scoringRaw)
     catalog = parseScoringResponsePointCatalog(catalogRaw)

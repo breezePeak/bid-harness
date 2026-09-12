@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-工作台 schema v4 将 `chapter_indicator` 设为必填。Host 根据执行日志、正文和审核报告生成状态及 tooltip；浏览器只映射该字段，不从 `writing_status` 或 `review_status` 推导状态。`needs_input` 映射为 `needs_attention` 并保留“缺少项目资料，正文无需重写”的 tooltip，正文需要修复使用橙色状态，执行失败使用红色状态；章节概述继续使用文字指标而不是叶节状态点。执行日志的 phase 与失败记录由[章节状态灯生命周期投影](../bug-fix/2026-09-12-bid-s5-chapter-indicator-lifecycle.md)约束。
+工作台 schema v5 将 `chapter_indicator` 设为必填。Host 根据执行日志、正文和审核报告生成状态及 tooltip；浏览器只映射该字段，不从 `writing_status` 或 `review_status` 推导状态。`repairing` 保留为独立蓝色呼吸状态，`needs_input` 保留为独立黄色常亮状态并使用“缺少项目资料，正文无需重写”的 tooltip，正文需要修复使用橙色状态，执行失败使用红色状态；章节概述继续使用文字指标而不是叶节状态点。执行日志的 phase 与失败记录由[章节状态灯生命周期投影](../bug-fix/2026-09-12-bid-s5-chapter-indicator-lifecycle.md)约束。
 
 ## Alternatives considered
 

@@ -365,7 +365,7 @@ export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready
 export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_input' | 'needs_attention' | 'failed'
 
 /** Stable visual status vocabulary for a writable chapter in the review workbench. */
-export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'content_ready' | 'reviewing' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
+export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'repairing' | 'content_ready' | 'reviewing' | 'needs_input' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
 
 /** 一次页数结果使用的排版基准和统计方法。 */
 export interface BidPageEstimateBasis {
@@ -490,7 +490,7 @@ const reviewWorkbenchSchema = z.strictObject({
     writing_status: z.enum(['not_started', 'writing', 'content_ready', 'completed', 'failed']),
     review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_input', 'needs_attention', 'failed']),
     chapter_indicator: z.strictObject({
-      status: z.enum(['queued', 'writing', 'content_ready', 'reviewing', 'needs_attention', 'passed', 'failed', 'not_started']),
+      status: z.enum(['queued', 'writing', 'repairing', 'content_ready', 'reviewing', 'needs_input', 'needs_attention', 'passed', 'failed', 'not_started']),
       tooltip: z.string().min(1),
     }),
     content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),

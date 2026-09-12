@@ -23,7 +23,7 @@ import {
   writingPlanPatchInputSchema,
 } from './writing-requirements.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
-import { parseChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
@@ -210,8 +210,8 @@ async function inspectBidStageValue(
     try { writing_plan = parseWritingPlan(await readStageJson(workspace, 'chapters/writing-plan.json')) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    let execution_log: ReturnType<typeof parseChapterExecutionLog> | null = null
-    try { execution_log = parseChapterExecutionLog(await readStageJson(workspace, 'chapters/execution-log.json')) } catch (error) {
+    let execution_log: ReturnType<typeof parseOrMigrateChapterExecutionLog> | null = null
+    try { execution_log = parseOrMigrateChapterExecutionLog(await readStageJson(workspace, 'chapters/execution-log.json')) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
     const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))

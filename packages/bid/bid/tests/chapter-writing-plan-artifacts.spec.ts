@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   parseChapterExecutionLog,
+  parseOrMigrateChapterExecutionLog,
   parseChapterExecutionPlan,
   validateChapterExecutionPlan,
   type ChapterExecutionPlan,
@@ -81,5 +82,27 @@ describe('chapter execution plan', () => {
     expect(parseChapterExecutionLog(log).sections[0]?.phase).toBe('writing')
     expect(() => parseChapterExecutionLog({ ...log, schema_version: 3 })).toThrow()
     expect(() => parseChapterExecutionLog({ ...log, sections: [{ ...log.sections[0]!, phase: undefined }] })).toThrow()
+  })
+
+  it('迁移 v3 执行日志并只让运行中的章节重新排队', () => {
+    const base = {
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: hash,
+      writing_plan_version: 7, max_concurrency: 1, observed_max_concurrency: 1,
+      sections: [
+        { section_id: 'A', depends_on: [], related_sections: [], epoch: 0, status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' },
+        { section_id: 'B', depends_on: [], related_sections: [], epoch: 0, status: 'pending', attempts: [], final_writer_child_session_id: null, final_reviewer_child_session_id: null },
+        { section_id: 'C', depends_on: [], related_sections: [], epoch: 0, status: 'running', attempts: [], final_writer_child_session_id: 'writer-c', final_reviewer_child_session_id: null },
+        { section_id: 'D', depends_on: [], related_sections: [], epoch: 0, status: 'failed', attempts: [{
+          role: 'reviewer', attempt: 1, child_session_id: 'reviewer-d', label: 'S5 审核',
+          started_at: '2026-09-09T00:00:00.000Z', ended_at: '2026-09-09T00:00:01.000Z', stop_reason: 'error', accepted: false,
+          issues: [], input: { plan_version: 7, section_epoch: 0, dependencies: [] },
+        }], final_writer_child_session_id: 'writer-d', final_reviewer_child_session_id: null },
+      ],
+    }
+    const migrated = parseOrMigrateChapterExecutionLog(base)
+    expect(migrated.schema_version).toBe(4)
+    expect(migrated.sections.map(section => [section.status, section.phase, section.failure_phase])).toEqual([
+      ['completed', null, null], ['pending', 'queued', null], ['pending', 'queued', null], ['failed', null, 'reviewing'],
+    ])
   })
 })

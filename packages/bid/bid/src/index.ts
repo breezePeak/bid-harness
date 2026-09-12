@@ -76,7 +76,7 @@ import {
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateId, DocxTemplateLibraryView, DocxTemplateUploadResult } from './docx-format-contract.ts'
 import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
 import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-estimate.ts'
-import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
@@ -2147,7 +2147,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const logPath = within(operation.workspace.projectRoot, 'chapters/execution-log.json')
       await assertNoLinkedPath(operation.workspace.root, logPath)
-      const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+      const log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
       const writerId = log.sections.find(section => section.section_id === parsed.data.reference.section_id)?.final_writer_child_session_id
       if (writerId == null) return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '该章节缺少原编写会话，无法保留上下文继续修订。')
       const persistence = this.ctx.get('sessionPersistence')
@@ -2205,8 +2205,8 @@ export class BidHostRuntime extends TypertRemoteService {
     await Promise.all([assertNoLinkedPath(workspace.root, outlinePath), assertNoLinkedPath(workspace.root, logPath)])
     const outlineRaw = await readFile(outlinePath, 'utf8')
     const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
-    let log: ReturnType<typeof parseChapterExecutionLog> | undefined
-    try { log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))) } catch { log = undefined }
+    let log: ReturnType<typeof parseOrMigrateChapterExecutionLog> | undefined
+    try { log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))) } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
     const rowContents = await Promise.all(outline.sections.map(async (section) => {
       const index = worklist.findIndex(item => item.id === section.id)
@@ -2409,7 +2409,7 @@ export class BidHostRuntime extends TypertRemoteService {
     await assertNoLinkedPath(workspace.root, logPath)
     let execution: ChapterExecutionLog['sections'][number] | undefined
     try {
-      execution = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.find(item => item.section_id === section.id)
+      execution = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.find(item => item.section_id === section.id)
     } catch { /* S5 初始化时执行日志可能尚不可用。 */ }
     let artifact: ChapterReviewArtifact | undefined
     try {
@@ -3110,22 +3110,25 @@ function projectChapterIndicator(
 ): BidReviewWorkbenchView['outline'][number]['chapter_indicator'] {
   if (execution?.status === 'failed') {
     switch (execution.failure_phase) {
+      case 'queued': return { status: 'failed', tooltip: '章节启动或调度失败' }
       case 'reviewing': return { status: 'failed', tooltip: '章节审核执行失败' }
       case 'repairing': return { status: 'failed', tooltip: '章节修复执行失败' }
       case 'blocked': return { status: 'failed', tooltip: '前置章节执行失败' }
-      default: return { status: 'failed', tooltip: '章节编写执行失败' }
+      case 'writing': return { status: 'failed', tooltip: '章节编写执行失败' }
+      case null: return { status: 'failed', tooltip: '章节执行失败' }
+      default: return { status: 'failed', tooltip: '章节执行失败' }
     }
   }
+  if (execution?.phase === 'queued') return { status: 'queued', tooltip: waitingForDependency ? '等待前置章节完成' : '等待执行' }
   if (execution?.phase === 'writing') return { status: 'writing', tooltip: '正在编写' }
-  if (execution?.phase === 'repairing') return { status: 'writing', tooltip: '正在修复' }
+  if (execution?.phase === 'repairing') return { status: 'repairing', tooltip: '正在修复' }
   if (execution?.phase === 'reviewing') return { status: 'reviewing', tooltip: '正在审核' }
   if (review.status === 'needs_attention') {
     return { status: 'needs_attention', tooltip: review.issues.length === 0 ? '正文需要修复' : `正文需要修复：${review.issues.length} 个问题` }
   }
-  if (review.status === 'needs_input') return { status: 'needs_attention', tooltip: '缺少项目资料，正文无需重写' }
+  if (review.status === 'needs_input') return { status: 'needs_input', tooltip: '缺少项目资料，正文无需重写' }
   if (review.status === 'pass') return { status: 'passed', tooltip: '审核通过' }
   if (contentAvailable) return { status: 'content_ready', tooltip: '正文已编写，等待审核' }
-  if (execution?.phase === 'queued') return { status: 'queued', tooltip: waitingForDependency ? '等待前置章节完成' : '等待执行' }
   return { status: 'not_started', tooltip: '未开始' }
 }
 

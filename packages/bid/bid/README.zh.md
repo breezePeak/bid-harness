@@ -49,7 +49,7 @@ DOCX 模板通过独立同源二进制请求上传，请求头只携带 Session�
 
 S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题回到同一 Writer 会话，按 `modelStageRepairAttempts` 自动修复（默认 3 次，含初稿共最多 4 轮），最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
 
-S5 将 `execution-plan.json` 和 schema v4 `execution-log.json` 绑定当前 Writing Plan 版本，并以日志作为章节级检查点。日志在排队、编写、审核和修复期间记录当前 phase，失败时保留失败 phase；Host 据此生成审核工作台的章节状态。每次 Writer 和 Reviewer 尝试都绑定计划版本、section epoch，以及全部强依赖章节的正文和 handoff 身份；正文、审核、文件写入与完成日志提交前都会重新核对。计划、章节或上游交接变化会使迟到结果记为 `stale-input` 和 `accepted=false`，不能覆盖正文或成为最终审核。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试严格校验关系计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留仍绑定当前契约的 completed 章节，只重新排队失效、failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
+S5 将 `execution-plan.json` 和 schema v4 `execution-log.json` 绑定当前 Writing Plan 版本，并以日志作为章节级检查点。日志在排队、编写、审核和修复期间记录当前 phase，失败时保留失败 phase；Host 据此生成审核工作台的章节状态。Host 读取 schema v3 日志时会确定性迁移为 v4，已完成章节保持完成，待执行和中断运行章节仅重新排队，失败章节按可确认的最后失败角色保留失败语义。每次 Writer 和 Reviewer 尝试都绑定计划版本、section epoch，以及全部强依赖章节的正文和 handoff 身份；正文、审核、文件写入与完成日志提交前都会重新核对。计划、章节或上游交接变化会使迟到结果记为 `stale-input` 和 `accepted=false`，不能覆盖正文或成为最终审核。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。阶段重试严格校验关系计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留仍绑定当前契约的 completed 章节，只重新排队失效、failed、running 和 pending 章节。重试不会删除章节文件；显式阶段重置才执行清理。
 
 Writer 使用私有 `submit_chapter` 提交完整候选，工具参数错误在当前回合纠正；每轮语义修复保留 Writer 身份并启动独立 Reviewer，引用和报告按当前候选重新生成。正文标题在审查前按确认目录统一编号；页面读取同一正文，Word 保留相同编号并调整文档标题层级。
 

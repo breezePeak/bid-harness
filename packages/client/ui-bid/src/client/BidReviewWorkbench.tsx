@@ -585,8 +585,10 @@ function getChapterDotInfo(
   switch (status) {
     case 'queued': return { className: classes(css.statusDot, css.statusDotQueued, css.statusDotWeakPulsing), title: tooltip }
     case 'writing': return { className: classes(css.statusDot, css.statusDotBlue, css.statusDotPulsing), title: tooltip }
+    case 'repairing': return { className: classes(css.statusDot, css.statusDotBlue, css.statusDotPulsing), title: tooltip }
     case 'content_ready': return { className: classes(css.statusDot, css.statusDotBlue), title: tooltip }
     case 'reviewing': return { className: classes(css.statusDot, css.statusDotYellow, css.statusDotPulsing), title: tooltip }
+    case 'needs_input': return { className: classes(css.statusDot, css.statusDotYellow), title: tooltip }
     case 'needs_attention': return { className: classes(css.statusDot, css.statusDotOrange), title: tooltip }
     case 'passed': return { className: classes(css.statusDot, css.statusDotGreen), title: tooltip }
     case 'failed': return { className: classes(css.statusDot, css.statusDotRed), title: tooltip }

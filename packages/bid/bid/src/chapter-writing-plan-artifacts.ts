@@ -50,6 +50,25 @@ const executionAttemptSchema = z.object({
   }).strict(),
 }).strict()
 
+const legacyChapterExecutionLogSchema = z.object({
+  schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
+  scope: z.literal('technical_bid'),
+  confirmed_outline_sha256: sha256Schema,
+  writing_plan_version: z.number().int().positive(),
+  max_concurrency: z.number().int().min(1).max(8),
+  observed_max_concurrency: z.number().int().min(0).max(8),
+  sections: z.array(z.object({
+    section_id: z.string().min(1),
+    depends_on: z.array(z.string().min(1)),
+    related_sections: z.array(z.string().min(1)),
+    epoch: z.number().int().nonnegative(),
+    status: z.enum(['pending', 'running', 'completed', 'failed']),
+    attempts: z.array(executionAttemptSchema),
+    final_writer_child_session_id: z.string().min(1).nullable(),
+    final_reviewer_child_session_id: z.string().min(1).nullable(),
+  }).strict()),
+}).strict()
+
 /** Host-owned record of the Child Sessions that produced each chapter. */
 export const chapterExecutionLogSchema = z.object({
   schema_version: z.literal(CHAPTER_EXECUTION_LOG_SCHEMA_VERSION),
@@ -95,6 +114,37 @@ export function parseChapterExecutionPlan(value: unknown): ChapterExecutionPlan 
  */
 export function parseChapterExecutionLog(value: unknown): ChapterExecutionLog {
   return chapterExecutionLogSchema.parse(value)
+}
+
+/**
+ * Read a current execution log or deterministically upgrade the v3 format.
+ * @param value - decoded execution-log value read from a project workspace.
+ * @returns strict current-version execution log.
+ */
+export function parseOrMigrateChapterExecutionLog(value: unknown): ChapterExecutionLog {
+  try {
+    return parseChapterExecutionLog(value)
+  } catch {
+    const legacy = legacyChapterExecutionLogSchema.parse(value)
+    return {
+      ...legacy,
+      schema_version: CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
+      sections: legacy.sections.map((section) => {
+        const failedAttempt = section.status === 'failed'
+          ? section.attempts.findLast(attempt => !attempt.accepted)
+          : undefined
+        return {
+          ...section,
+          status: section.status === 'running' ? 'pending' as const : section.status,
+          phase: section.status === 'pending' || section.status === 'running' ? 'queued' as const : null,
+          failure_phase: section.status === 'failed'
+            ? failedAttempt?.role === 'writer' ? 'writing' as const
+              : failedAttempt?.role === 'reviewer' ? 'reviewing' as const : null
+            : null,
+        }
+      }),
+    }
+  }
 }
 
 function issue(code: string, message: string, path?: string): StageValidationIssue {
