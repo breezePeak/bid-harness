@@ -364,7 +364,7 @@ export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready
 export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_input' | 'needs_attention' | 'failed'
 
 /** Stable visual status vocabulary for a writable chapter in the review workbench. */
-export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'content_ready' | 'reviewing' | 'needs_input' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
+export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'content_ready' | 'reviewing' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
 
 /** Page-estimate state that never turns an unavailable calculation into a zero-page result. */
 export type BidPageEstimate =
@@ -395,7 +395,7 @@ export type BidPageTargetStatus =
 
 /** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 3
+  readonly schema_version: 4
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -405,7 +405,7 @@ export interface BidReviewWorkbenchView {
     readonly writable: boolean
     readonly writing_status: BidChapterWritingStatus
     readonly review_status: BidChapterReviewStatus
-    readonly chapter_indicator?: { readonly status: BidChapterIndicatorStatus; readonly tooltip: string }
+    readonly chapter_indicator: { readonly status: BidChapterIndicatorStatus; readonly tooltip: string }
     readonly content_available: boolean
     /** Non-leaf section estimate; omitted for a leaf whose status dot remains interactive. */
     readonly page_estimate?: (BidPageEstimate & { readonly incomplete?: boolean }) | undefined
@@ -462,16 +462,16 @@ const pageTargetStatusSchema = z.discriminatedUnion('status', [
   }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(3),
+  schema_version: z.literal(4),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
     writing_status: z.enum(['not_started', 'writing', 'content_ready', 'completed', 'failed']),
     review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_input', 'needs_attention', 'failed']),
     chapter_indicator: z.strictObject({
-      status: z.enum(['queued', 'writing', 'content_ready', 'reviewing', 'needs_input', 'needs_attention', 'passed', 'failed', 'not_started']),
-      tooltip: z.string(),
-    }).optional(),
+      status: z.enum(['queued', 'writing', 'content_ready', 'reviewing', 'needs_attention', 'passed', 'failed', 'not_started']),
+      tooltip: z.string().min(1),
+    }),
     content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
   })),
   summary: z.strictObject({

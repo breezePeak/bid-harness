@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  parseChapterExecutionLog,
   parseChapterExecutionPlan,
   validateChapterExecutionPlan,
   type ChapterExecutionPlan,
@@ -65,5 +66,20 @@ describe('chapter execution plan', () => {
     const plan = validPlan()
     plan.sections[1]!.depends_on[0]!.reason = ' '
     expect(() => parseChapterExecutionPlan(plan)).toThrow()
+  })
+
+  it('requires phase fields in the current execution log', () => {
+    const log = {
+      schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: hash,
+      writing_plan_version: 7, max_concurrency: 1, observed_max_concurrency: 1,
+      sections: [{
+        section_id: 'A', depends_on: [], related_sections: [], epoch: 0, status: 'running',
+        phase: 'writing', failure_phase: null, attempts: [],
+        final_writer_child_session_id: null, final_reviewer_child_session_id: null,
+      }],
+    }
+    expect(parseChapterExecutionLog(log).sections[0]?.phase).toBe('writing')
+    expect(() => parseChapterExecutionLog({ ...log, schema_version: 3 })).toThrow()
+    expect(() => parseChapterExecutionLog({ ...log, sections: [{ ...log.sections[0]!, phase: undefined }] })).toThrow()
   })
 })

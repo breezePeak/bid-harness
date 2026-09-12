@@ -111,12 +111,12 @@ describe('Bid DOCX export', () => {
     const { workspace, outline } = await exportFixture()
     await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), '{}')
     const executionLog = {
-      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
+      schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(parseConfirmedOutlineArtifact(outline)),
       writing_plan_version: 1, max_concurrency: 2, observed_max_concurrency: 2,
       sections: [
-        { section_id: 'resource', depends_on: [], related_sections: [], epoch: 0, status: 'completed', attempts: [],
+        { section_id: 'resource', depends_on: [], related_sections: [], epoch: 0, status: 'completed', phase: null, failure_phase: null, attempts: [],
           final_writer_child_session_id: 'writer-resource', final_reviewer_child_session_id: 'reviewer-resource' },
-        { section_id: 'delivery', depends_on: [], related_sections: [], epoch: 0, status: 'running', attempts: [],
+        { section_id: 'delivery', depends_on: [], related_sections: [], epoch: 0, status: 'running', phase: 'writing', failure_phase: null, attempts: [],
           final_writer_child_session_id: null, final_reviewer_child_session_id: null },
       ],
     }
@@ -133,7 +133,7 @@ describe('Bid DOCX export', () => {
     expect(markdown).toContain('## 1.2 交付')
     expect(markdown).toContain('交付正文。')
 
-    executionLog.sections[0] = { ...executionLog.sections[0]!, status: 'pending',
+    executionLog.sections[0] = { ...executionLog.sections[0]!, status: 'pending', phase: 'queued', failure_phase: null,
       final_writer_child_session_id: null, final_reviewer_child_session_id: null }
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog))
     await rm(join(workspace.projectRoot, 'chapters/sections/0002.md'))
@@ -164,10 +164,10 @@ describe('Bid DOCX export', () => {
     await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({ ...plan,
       confirmed_outline_sha256: hash, sections: [{ ...plan.sections[0]!, section_id: 'deviation' }, ...plan.sections] }))
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
-      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: hash,
+      schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: hash,
       writing_plan_version: 1, max_concurrency: 2, observed_max_concurrency: 2,
       sections: ['deviation', 'resource', 'delivery'].map(section_id => ({
-        section_id, depends_on: [], related_sections: [], epoch: 0, status: 'failed', attempts: [],
+        section_id, depends_on: [], related_sections: [], epoch: 0, status: 'failed', phase: null, failure_phase: 'writing', attempts: [],
         final_writer_child_session_id: null, final_reviewer_child_session_id: null,
       })),
     }))

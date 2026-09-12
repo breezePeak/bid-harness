@@ -317,13 +317,47 @@ describe('Workspace 项目与独立 Session', () => {
     }))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('review-projection')
+    const phaseLogPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const completedLog = await readFile(phaseLogPath, 'utf8')
+    const setPhase = async (
+      status: 'pending' | 'running' | 'failed',
+      phase: 'queued' | 'writing' | 'reviewing' | 'repairing' | null,
+      failurePhase: 'writing' | 'reviewing' | 'repairing' | 'blocked' | null,
+    ): Promise<void> => {
+      const executionLog = JSON.parse(await readFile(phaseLogPath, 'utf8')) as { sections: Array<Record<string, unknown>> }
+      executionLog.sections[0] = { ...executionLog.sections[0]!, status, phase, failure_phase: failurePhase }
+      await writeFile(phaseLogPath, `${JSON.stringify(executionLog)}\n`)
+    }
+    for (const [phase, status, tooltip] of [
+      ['writing', 'writing', '正在编写'],
+      ['repairing', 'writing', '正在修复'],
+      ['reviewing', 'reviewing', '正在审核'],
+    ] as const) {
+      await setPhase('running', phase, null)
+      expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+        chapter_indicator: { status, tooltip },
+      })
+    }
+    await setPhase('failed', null, 'repairing')
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+      chapter_indicator: { status: 'failed', tooltip: '章节修复执行失败' },
+    })
+    await setPhase('pending', 'queued', null)
+    await rm(join(workspace.projectRoot, 'chapters/sections/0001.md'))
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+      chapter_indicator: { status: 'queued', tooltip: '等待执行' },
+    })
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n已有正文。\n')
+    await writeFile(phaseLogPath, completedLog)
 
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
       ...JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')),
       section_id: 'SEC-2',
     }))
-    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'reviewing' })
-    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'reviewing', issues: [] })
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+      review_status: 'not_started', chapter_indicator: { status: 'content_ready', tooltip: '正文已编写，等待审核' },
+    })
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'not_started', issues: [] })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
       ...JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')),
       section_id: 'SEC-1',
@@ -369,14 +403,16 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify(repairReport))
 
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n修订后的正文。\n')
-    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.review_status).toBe('reviewing')
-    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'reviewing', issues: [] })
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+      review_status: 'not_started', chapter_indicator: { status: 'content_ready', tooltip: '正文已编写，等待审核' },
+    })
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toEqual({ status: 'not_started', issues: [] })
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n已有正文。\n')
 
     const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
     const log = JSON.parse(await readFile(logPath, 'utf8')) as { sections: Array<Record<string, unknown>> }
     log.sections[0] = {
-      ...log.sections[0], status: 'failed', attempts: [{
+      ...log.sections[0], status: 'failed', phase: null, failure_phase: 'reviewing', attempts: [{
         role: 'reviewer', attempt: 1, child_session_id: 'reviewer-b', label: 'S5 审核',
         started_at: '2026-09-09T00:00:00.000Z', ended_at: '2026-09-09T00:00:01.000Z', stop_reason: 'error', accepted: false,
         issues: [{ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: 'Chapter Reviewer 未正常完成：error。' }],
@@ -386,7 +422,10 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(logPath, `${JSON.stringify(log)}\n`)
     await rm(join(workspace.projectRoot, 'chapters/sections/0001.md'))
 
-    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ writing_status: 'failed', review_status: 'failed', content_available: false })
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({
+      writing_status: 'failed', review_status: 'failed', content_available: false,
+      chapter_indicator: { status: 'failed', tooltip: '章节审核执行失败' },
+    })
     expect((await ctx.bid.getReviewWorkbench(agent.session)).summary.needs_attention_count).toBe(1)
     expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review).toMatchObject({
       status: 'failed', issues: expect.arrayContaining([expect.objectContaining({
@@ -605,6 +644,8 @@ describe('Workspace 项目与独立 Session', () => {
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     for (const section of log.sections) {
       section.status = 'pending'
+      section.phase = 'queued'
+      section.failure_phase = null
       section.final_writer_child_session_id = null
       section.final_reviewer_child_session_id = null
     }

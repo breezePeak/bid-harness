@@ -32,6 +32,8 @@ try {
   const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
   for (const section of log.sections) {
     section.status = 'pending'
+    section.phase = 'queued'
+    section.failure_phase = null
     section.final_writer_child_session_id = null
     section.final_reviewer_child_session_id = null
   }

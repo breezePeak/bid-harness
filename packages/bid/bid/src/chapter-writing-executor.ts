@@ -42,7 +42,7 @@ import {
   type ChapterReview,
 } from './chapter-writing-review-artifacts.ts'
 import {
-  CHAPTER_EXECUTION_SCHEMA_VERSION,
+  CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
   parseChapterExecutionLog,
   parseChapterExecutionPlan,
   validateChapterExecutionPlan,
@@ -977,6 +977,8 @@ async function loadChapterCheckpoint(
       }
       if (log.status !== 'completed') {
         log.status = 'pending'
+        log.phase = 'queued'
+        log.failure_phase = null
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
         continue
@@ -1024,11 +1026,15 @@ async function loadChapterCheckpoint(
         } catch {
           if (candidateBytesChanged) throw new Error('checkpoint-candidate-changed')
           log.status = 'pending'
+          log.phase = 'queued'
+          log.failure_phase = null
           log.final_reviewer_child_session_id = null
         }
       } catch { /* 无法恢复的章节及其强依赖下游需要重跑，历史尝试仍保留。 */
         drafts.delete(section.id)
         log.status = 'pending'
+        log.phase = 'queued'
+        log.failure_phase = null
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
       }
@@ -1073,6 +1079,8 @@ async function loadChapterCheckpoint(
       drafts.delete(log.section_id)
       if (planAffected.has(log.section_id)) log.epoch += 1
       log.status = 'pending'
+      log.phase = 'queued'
+      log.failure_phase = null
       log.final_writer_child_session_id = null
       log.final_reviewer_child_session_id = null
     }
@@ -1712,6 +1720,8 @@ async function runChapterWriting(
         checkpoint.drafts.delete(sectionId)
         if (currentArtifact) log.epoch += 1
         log.status = 'pending'
+        log.phase = 'queued'
+        log.failure_phase = null
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
       }
@@ -1731,7 +1741,7 @@ async function runChapterWriting(
   options.signal?.throwIfAborted()
   let planSections = new Map(plan.sections.map(section => [section.section_id, section]))
   const executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
-    schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION,
+    schema_version: CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
     scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash,
     writing_plan_version: writingPlan.plan_version,
@@ -1743,6 +1753,8 @@ async function runChapterWriting(
       related_sections: planSections.get(section.id)?.related_sections.map(item => item.section_id) ?? [],
       epoch: 0,
       status: 'pending',
+      phase: 'queued',
+      failure_phase: null,
       attempts: [],
       final_writer_child_session_id: null,
       final_reviewer_child_session_id: null,
@@ -1831,6 +1843,8 @@ async function runChapterWriting(
     checkpoint?.drafts.delete(sectionId)
     pending.add(sectionId)
     log.status = 'pending'
+    log.phase = 'queued'
+    log.failure_phase = null
     log.final_writer_child_session_id = null
     log.final_reviewer_child_session_id = null
   }
@@ -1932,6 +1946,8 @@ async function runChapterWriting(
     const log = executionLog.sections.find(section => section.section_id === sectionId)
     if (context === undefined || planned === undefined || log === undefined) throw new Error(`Bid chapter scheduler lost section ${sectionId}`)
     log.status = 'running'
+    log.phase = 'queued'
+    log.failure_phase = null
     await persistLog()
     try {
       const dependencies: DependencyChapterContext[] = planned.depends_on.map((dependency) => {
@@ -2028,7 +2044,7 @@ async function runChapterWriting(
           signal.throwIfAborted()
           assertCurrentInput()
           const committed = {
-            ...log, status: 'completed' as const,
+            ...log, status: 'completed' as const, phase: null, failure_phase: null,
             final_writer_child_session_id: writerChildSessionId,
             final_reviewer_child_session_id: reviewerChildSessionId,
           }
@@ -2076,6 +2092,8 @@ async function runChapterWriting(
           const reviewAttempt = log.attempts.filter(item => item.role === 'reviewer').length + 1
           const reviewLabel = `${number} - 审查`
           const reviewStartedAt = new Date().toISOString()
+          log.phase = 'reviewing'
+          await persistLog()
           let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
           childSetups.set(reviewLabel, (child) => {
             reviewRuntime = attachChapterReview(child, context, quotes, evidencePack, options.maxRepairAttempts, hostAcceptanceResults)
@@ -2185,6 +2203,8 @@ async function runChapterWriting(
           : `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
         const prompt = attempt === 0 ? basePrompt : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues)
         const startedAt = new Date().toISOString()
+        log.phase = attempt === 0 ? 'writing' : 'repairing'
+        await persistLog()
         let retryInfrastructure = false
         let stopAfterReview = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
@@ -2349,6 +2369,8 @@ async function runChapterWriting(
     } catch (error: unknown) {
       if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
       log.status = 'failed'
+      log.failure_phase = log.phase ?? 'queued'
+      log.phase = null
       await persistLog()
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
       throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`)
@@ -2386,7 +2408,11 @@ async function runChapterWriting(
           const error = new Error(`Bid chapter ${sectionId} cannot run because dependencies failed: ${failedDependencies.join(', ')}`)
           failures.set(sectionId, error)
           const log = executionLog.sections.find(item => item.section_id === sectionId)
-          if (log !== undefined) log.status = 'failed'
+          if (log !== undefined) {
+            log.status = 'failed'
+            log.phase = null
+            log.failure_phase = 'blocked'
+          }
         }
         pending.clear()
         await persistLog()

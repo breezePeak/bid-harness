@@ -1,18 +1,18 @@
-# Agent Note: Bid 章节状态指标兼容契约
+# Agent Note: Bid 章节状态指标投影
 
 Status: implemented
 
 ## Problem
 
-审核工作台需要把排队、编写、审核、资料缺口、正文问题和完成状态区分为稳定的目录指示器，但旧响应只提供 Writer 和 Reviewer 的两个内部状态字段。客户端直接依赖新字段会让旧缓存、测试数据和未同步的 Host 响应在渲染时崩溃。
+审核工作台需要把排队、编写、审核、资料缺口、正文问题和完成状态区分为稳定的目录指示器，但 Writer 和 Reviewer 的两个内部状态字段不足以表达这些状态。
 
 ## Decision
 
-工作台响应以可选的 `chapter_indicator` 提供稳定状态和 tooltip。Host 投影根据执行日志、正文是否存在和审核报告生成该字段；浏览器在字段存在时使用它，在字段缺失时从既有 `writing_status` 与 `review_status` 保留兼容推导。`needs_input` 继续使用黄色状态，正文需要修复使用橙色状态，执行失败使用红色状态；章节概述继续使用文字指标而不是叶节状态点。
+工作台 schema v4 将 `chapter_indicator` 设为必填。Host 根据执行日志、正文和审核报告生成状态及 tooltip；浏览器只映射该字段，不从 `writing_status` 或 `review_status` 推导状态。`needs_input` 映射为 `needs_attention` 并保留“缺少项目资料，正文无需重写”的 tooltip，正文需要修复使用橙色状态，执行失败使用红色状态；章节概述继续使用文字指标而不是叶节状态点。执行日志的 phase 与失败记录由[章节状态灯生命周期投影](../bug-fix/2026-09-12-bid-s5-chapter-indicator-lifecycle.md)约束。
 
 ## Alternatives considered
 
-**立即把 `chapter_indicator` 设为必填并提升工作台 schema 版本。** 不采用；当前响应可能来自尚未同步的 Host、旧缓存或独立测试 fixture，强制迁移会把一个展示字段变成不必要的全量发布门槛。
+**保留可选字段和客户端兼容推导。** 不采用；当前没有外部消费者，旧响应无法表示 Host 已知的排队、修复和失败阶段，兼容分支会让目录与权威投影分叉。
 
 **只在客户端从旧字段推导状态。** 不采用；排队状态和更具体的 tooltip 只有 Host 能从执行日志与审核产物可靠判断，重复推导会使目录与权威投影逐渐分叉。
 
@@ -20,4 +20,4 @@ Status: implemented
 
 ## Consequences
 
-Host 和客户端可以独立发布状态指标的视觉扩展，旧响应仍可渲染。新增状态必须同时更新控制面 schema、Host 投影和客户端分支；状态 tooltip 属于响应契约，不能由客户端根据不完整的内部字段臆造内容。
+工作台只接受当前 schema，新增状态必须同时更新控制面 schema、Host 投影和客户端分支；状态 tooltip 属于响应契约，不能由客户端根据不完整的内部字段臆造内容。

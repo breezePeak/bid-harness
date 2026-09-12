@@ -77,7 +77,7 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
       }],
       revision: null,
     },
-    'chapters/execution-log.json': { schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'completed', attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
+    'chapters/execution-log.json': { schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'completed', phase: null, failure_phase: null, attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
     'chapters/manifest.json': { schema_version: 6, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), chapters: [{
       section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [],
       covered_must_answer: ['按期交付'], covered_scoring_response_point_ids: ['RP-000001'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],

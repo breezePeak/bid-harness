@@ -537,30 +537,17 @@ function getChapterDotInfo(
     label: section.content_available ? '概述' : '待补充',
     title: section.content_available ? '章节概述' : '概述待补充',
   }
-  if (section.chapter_indicator !== undefined) {
-    const { status, tooltip } = section.chapter_indicator
-    switch (status) {
-      case 'queued': return { className: classes(css.statusDot, css.statusDotQueued, css.statusDotWeakPulsing), title: tooltip }
-      case 'writing': return { className: classes(css.statusDot, css.statusDotBlue, css.statusDotPulsing), title: tooltip }
-      case 'content_ready': return { className: classes(css.statusDot, css.statusDotBlue), title: tooltip }
-      case 'reviewing': return { className: classes(css.statusDot, css.statusDotYellow, css.statusDotPulsing), title: tooltip }
-      case 'needs_input': return { className: classes(css.statusDot, css.statusDotYellow), title: tooltip }
-      case 'needs_attention': return { className: classes(css.statusDot, css.statusDotOrange), title: tooltip }
-      case 'passed': return { className: classes(css.statusDot, css.statusDotGreen), title: tooltip }
-      case 'failed': return { className: classes(css.statusDot, css.statusDotRed), title: tooltip }
-      case 'not_started': return { className: classes(css.statusDot, css.statusDotGray), title: tooltip }
-    }
+  const { status, tooltip } = section.chapter_indicator
+  switch (status) {
+    case 'queued': return { className: classes(css.statusDot, css.statusDotQueued, css.statusDotWeakPulsing), title: tooltip }
+    case 'writing': return { className: classes(css.statusDot, css.statusDotBlue, css.statusDotPulsing), title: tooltip }
+    case 'content_ready': return { className: classes(css.statusDot, css.statusDotBlue), title: tooltip }
+    case 'reviewing': return { className: classes(css.statusDot, css.statusDotYellow, css.statusDotPulsing), title: tooltip }
+    case 'needs_attention': return { className: classes(css.statusDot, css.statusDotOrange), title: tooltip }
+    case 'passed': return { className: classes(css.statusDot, css.statusDotGreen), title: tooltip }
+    case 'failed': return { className: classes(css.statusDot, css.statusDotRed), title: tooltip }
+    case 'not_started': return { className: classes(css.statusDot, css.statusDotGray), title: tooltip }
   }
-  const { writing_status: writingStatus, review_status: reviewStatus } = section
-  if (writingStatus === 'failed') return { className: classes(css.statusDot, css.statusDotRed), title: '章节编写执行失败' }
-  if (reviewStatus === 'failed') return { className: classes(css.statusDot, css.statusDotRed), title: '章节审核执行失败' }
-  if (reviewStatus === 'needs_attention') return { className: classes(css.statusDot, css.statusDotRed), title: '正文需要修复' }
-  if (reviewStatus === 'needs_input') return { className: classes(css.statusDot, css.statusDotYellow), title: '缺少项目资料，正文无需重写' }
-  if (reviewStatus === 'pass') return { className: classes(css.statusDot, css.statusDotGreen), title: '审核通过' }
-  if (writingStatus === 'writing' || writingStatus === 'content_ready' || writingStatus === 'completed') {
-    return { className: classes(css.statusDot, css.statusDotBlue, writingStatus === 'writing' && css.statusDotPulsing), title: writingStatus === 'writing' ? '正在编写' : '正文已编写' }
-  }
-  return { className: classes(css.statusDot, css.statusDotGray), title: '未编写' }
 }
 
 function isChapterSelectable(section: BidReviewWorkbenchView['outline'][number]): boolean {

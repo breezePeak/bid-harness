@@ -2137,7 +2137,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const execution = log?.sections.find(item => item.section_id === section.id)
       let contentAvailable = !section.writable && section.summary !== undefined
       let markdown = !section.writable ? section.summary ?? '' : ''
-      let reviewStatus: BidReviewWorkbenchView['outline'][number]['review_status'] = 'not_started'
+      let review: BidReviewChapterView['review'] = { status: 'not_started', issues: [] }
       if (section.writable && index >= 0) {
         try {
           markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
@@ -2150,22 +2150,22 @@ export class BidHostRuntime extends TypertRemoteService {
         if (artifact !== undefined && (!contentAvailable || !chapterReviewMatches(section.id, markdown, artifact))) {
           artifact = undefined
         }
-        reviewStatus = projectChapterReview(section.id, contentAvailable, artifact, execution).status
+        review = projectChapterReview(section.id, artifact, execution)
       }
       const writingStatus: BidReviewWorkbenchView['outline'][number]['writing_status'] = !section.writable || execution === undefined || execution.status === 'pending'
         ? 'not_started'
-        : execution.status === 'running' ? contentAvailable ? 'content_ready' : 'writing' : execution.status
-      let chapterIndicator: BidReviewWorkbenchView['outline'][number]['chapter_indicator']
-      if (!section.writable) chapterIndicator = undefined
-      else if (execution?.status === 'pending') chapterIndicator = { status: 'queued', tooltip: '等待编写' }
-      else if (writingStatus === 'failed' || reviewStatus === 'failed') chapterIndicator = { status: 'failed', tooltip: '章节执行失败' }
-      else if (reviewStatus === 'needs_attention') chapterIndicator = { status: 'needs_attention', tooltip: '正文需要修复' }
-      else if (reviewStatus === 'needs_input') chapterIndicator = { status: 'needs_input', tooltip: '缺少项目资料，正文无需重写' }
-      else if (reviewStatus === 'reviewing') chapterIndicator = { status: 'reviewing', tooltip: '正在审核' }
-      else if (reviewStatus === 'pass') chapterIndicator = { status: 'passed', tooltip: '审核通过' }
-      else if (writingStatus === 'writing') chapterIndicator = { status: 'writing', tooltip: '正在编写' }
-      else if (writingStatus === 'content_ready' || writingStatus === 'completed') chapterIndicator = { status: 'content_ready', tooltip: '正文已编写' }
-      else chapterIndicator = { status: 'not_started', tooltip: '未编写' }
+        : execution.status === 'running'
+          ? execution.phase === 'writing' || execution.phase === 'repairing' ? 'writing'
+            : contentAvailable ? 'content_ready' : 'not_started'
+          : execution.status
+      const chapterIndicator = !section.writable
+        ? { status: 'not_started' as const, tooltip: section.summary === undefined ? '概述待补充' : '章节概述' }
+        : projectChapterIndicator(
+          contentAvailable,
+          review,
+          execution,
+          execution?.depends_on.some(sectionId => log?.sections.find(item => item.section_id === sectionId)?.status !== 'completed') ?? false,
+        )
       return { markdown, row: {
         section_id: section.id,
         parent_id: section.parent_id,
@@ -2174,8 +2174,8 @@ export class BidHostRuntime extends TypertRemoteService {
         ...(section.summary === undefined ? {} : { summary: section.summary }),
         writable: section.writable,
         writing_status: writingStatus,
-        review_status: reviewStatus,
-        ...(chapterIndicator === undefined ? {} : { chapter_indicator: chapterIndicator }),
+        review_status: review.status,
+        chapter_indicator: chapterIndicator,
         content_available: contentAvailable,
       } }
     }))
@@ -2273,7 +2273,7 @@ export class BidHostRuntime extends TypertRemoteService {
       } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
     }
     return {
-      schema_version: 3,
+      schema_version: 4,
       outline: rows,
       summary: {
         chapter_count: writable.length,
@@ -2324,7 +2324,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (artifact !== undefined && (markdown === null || !chapterReviewMatches(section.id, markdown, artifact))) {
       artifact = undefined
     }
-    const review = projectChapterReview(section.id, markdown?.trim().length === 0 ? false : markdown !== null, artifact, execution)
+    const review = projectChapterReview(section.id, artifact, execution)
     let evidenceStatus: BidReviewChapterView['evidence_status'] = 'missing'
     let materials: BidReviewMaterialView[] = []
     try {
@@ -2992,7 +2992,6 @@ function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutio
 
 function projectChapterReview(
   sectionId: string,
-  contentAvailable: boolean,
   artifact: ChapterReviewArtifact | undefined,
   execution: ChapterExecutionLog['sections'][number] | undefined,
 ): BidReviewChapterView['review'] {
@@ -3000,12 +2999,40 @@ function projectChapterReview(
   if (execution?.status === 'failed') {
     return { status: 'failed', issues: [...reviewIssuesFromExecution(sectionId, execution), ...reportIssues] }
   }
+  if (execution?.phase === 'reviewing') return { status: 'reviewing', issues: [] }
   if (artifact !== undefined) return {
     status: artifact.verdict === 'pass' ? 'pass'
       : artifact.verdict === 'attention' && artifact.external_input_gaps.length > 0 ? 'needs_input' : 'needs_attention',
     issues: reportIssues,
   }
-  return { status: contentAvailable ? 'reviewing' : 'not_started', issues: [] }
+  return { status: 'not_started', issues: [] }
+}
+
+function projectChapterIndicator(
+  contentAvailable: boolean,
+  review: BidReviewChapterView['review'],
+  execution: ChapterExecutionLog['sections'][number] | undefined,
+  waitingForDependency: boolean,
+): BidReviewWorkbenchView['outline'][number]['chapter_indicator'] {
+  if (execution?.status === 'failed') {
+    switch (execution.failure_phase) {
+      case 'reviewing': return { status: 'failed', tooltip: '章节审核执行失败' }
+      case 'repairing': return { status: 'failed', tooltip: '章节修复执行失败' }
+      case 'blocked': return { status: 'failed', tooltip: '前置章节执行失败' }
+      default: return { status: 'failed', tooltip: '章节编写执行失败' }
+    }
+  }
+  if (execution?.phase === 'writing') return { status: 'writing', tooltip: '正在编写' }
+  if (execution?.phase === 'repairing') return { status: 'writing', tooltip: '正在修复' }
+  if (execution?.phase === 'reviewing') return { status: 'reviewing', tooltip: '正在审核' }
+  if (review.status === 'needs_attention') {
+    return { status: 'needs_attention', tooltip: review.issues.length === 0 ? '正文需要修复' : `正文需要修复：${review.issues.length} 个问题` }
+  }
+  if (review.status === 'needs_input') return { status: 'needs_attention', tooltip: '缺少项目资料，正文无需重写' }
+  if (review.status === 'pass') return { status: 'passed', tooltip: '审核通过' }
+  if (contentAvailable) return { status: 'content_ready', tooltip: '正文已编写，等待审核' }
+  if (execution?.phase === 'queued') return { status: 'queued', tooltip: waitingForDependency ? '等待前置章节完成' : '等待执行' }
+  return { status: 'not_started', tooltip: '未开始' }
 }
 
 /** Durable manifest entry for one imported file. */

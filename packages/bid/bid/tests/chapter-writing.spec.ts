@@ -1599,6 +1599,8 @@ describe('chapter-writing executor', () => {
     const priorLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     const failed = priorLog.sections.find(section => section.section_id === 'SEC-3')!
     failed.status = 'failed'
+    failed.phase = null
+    failed.failure_phase = 'writing'
     failed.final_writer_child_session_id = null
     failed.final_reviewer_child_session_id = null
     await writeFile(logPath, `${JSON.stringify(priorLog)}\n`)

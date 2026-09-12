@@ -4,6 +4,8 @@ import type { StageValidationIssue } from './control-plane-contract.ts'
 
 /** Durable S6 relation-plan and execution-log format version. */
 export const CHAPTER_EXECUTION_SCHEMA_VERSION = 3 as const
+/** Durable Host-owned execution-log format version. */
+export const CHAPTER_EXECUTION_LOG_SCHEMA_VERSION = 4 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 
@@ -50,7 +52,7 @@ const executionAttemptSchema = z.object({
 
 /** Host-owned record of the Child Sessions that produced each chapter. */
 export const chapterExecutionLogSchema = z.object({
-  schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
+  schema_version: z.literal(CHAPTER_EXECUTION_LOG_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   writing_plan_version: z.number().int().positive(),
@@ -62,6 +64,8 @@ export const chapterExecutionLogSchema = z.object({
     related_sections: z.array(z.string().min(1)),
     epoch: z.number().int().nonnegative(),
     status: z.enum(['pending', 'running', 'completed', 'failed']),
+    phase: z.enum(['queued', 'writing', 'reviewing', 'repairing']).nullable(),
+    failure_phase: z.enum(['queued', 'writing', 'reviewing', 'repairing', 'blocked']).nullable(),
     attempts: z.array(executionAttemptSchema),
     final_writer_child_session_id: z.string().min(1).nullable(),
     final_reviewer_child_session_id: z.string().min(1).nullable(),

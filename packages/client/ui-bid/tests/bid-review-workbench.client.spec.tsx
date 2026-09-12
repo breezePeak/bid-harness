@@ -8,10 +8,10 @@ import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 afterEach(cleanup)
 
 const workbench = {
-  schema_version: 3 as const,
+  schema_version: 4 as const,
   outline: [
-    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
-    { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
+    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, chapter_indicator: { status: 'not_started' as const, tooltip: '章节概述' }, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
+    { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, chapter_indicator: { status: 'reviewing' as const, tooltip: '正在审核' }, content_available: true },
   ],
   summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 }, page_target: { status: 'not_required' as const } },
   global_compliance: { status: 'not_required' as const, reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
@@ -79,6 +79,44 @@ describe('BidReviewWorkbench', () => {
     const leaf = await screen.findByRole('button', { name: '1.1 实施方案' })
     expect(leaf.querySelector('[class*="statusDotQueued"]')).toBeTruthy()
     expect(leaf.querySelector('[title]')?.getAttribute('title')).toContain('实施方案：等待编写')
+  })
+
+  it.each([
+    ['not_started', '未开始', 'statusDotGray'],
+    ['queued', '等待执行', 'statusDotQueued'],
+    ['writing', '正在编写', 'statusDotBlue'],
+    ['content_ready', '正文已编写，等待审核', 'statusDotBlue'],
+    ['reviewing', '正在审核', 'statusDotYellow'],
+    ['needs_attention', '正文需要修复：2 个问题', 'statusDotOrange'],
+    ['passed', '审核通过', 'statusDotGreen'],
+    ['failed', '章节编写执行失败', 'statusDotRed'],
+    ['failed', '章节审核执行失败', 'statusDotRed'],
+    ['failed', '章节修复执行失败', 'statusDotRed'],
+  ] as const)('按 Host 状态 %s 显示 %s', async (status, tooltip, className) => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench,
+      outline: [workbench.outline[0]!, {
+        ...workbench.outline[1]!,
+        chapter_indicator: { status, tooltip },
+      }],
+    }) })} />)
+    const leaf = await screen.findByRole('button', { name: '1.1 实施方案' })
+    expect(leaf.querySelector(`[class*="${className}"]`)).toBeTruthy()
+    expect(screen.getByTitle(`1.1 实施方案：${tooltip}`)).toBeTruthy()
+  })
+
+  it('当前审核阶段覆盖旧的待修复结论', async () => {
+    render(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
+      ...workbench,
+      outline: [workbench.outline[0]!, {
+        ...workbench.outline[1]!, review_status: 'needs_attention' as const,
+        chapter_indicator: { status: 'reviewing' as const, tooltip: '正在审核' },
+      }],
+    }) })} />)
+    const leaf = await screen.findByRole('button', { name: '1.1 实施方案' })
+    expect(leaf.querySelector('[class*="statusDotYellow"]')).toBeTruthy()
+    expect(leaf.querySelector('[class*="statusDotOrange"]')).toBeNull()
+    expect(screen.getByTitle('1.1 实施方案：正在审核')).toBeTruthy()
   })
 
   it('分开显示页数目标、正文估算和未达差额', async () => {
@@ -205,6 +243,7 @@ describe('BidReviewWorkbench', () => {
   it('缺少资质资料时显示黄色状态并说明正文无需重写', async () => {
     const pendingInput = {
       ...workbench.outline[1]!, review_status: 'needs_input' as const,
+      chapter_indicator: { status: 'needs_attention' as const, tooltip: '缺少项目资料，正文无需重写' },
     }
     render(<BidReviewWorkbench {...props({
       getWorkbench: async () => ({
