@@ -243,6 +243,69 @@ interface EvidenceMappingInputs {
 
 type EvidenceMappingExecutionLog = z.infer<typeof evidenceMappingExecutionLogSchema>
 
+/** Aggregated calls for one S4 research tool in an acceptance report. */
+export interface EvidenceMappingAcceptanceToolStats {
+  calls: number
+  succeeded: number
+  failed: number
+  hits: number
+  failure_reasons: string[]
+}
+
+/** Deterministic post-run comparison assembled from the existing S4 log and artifacts. */
+export interface EvidenceMappingAcceptanceReport {
+  schema_version: 1
+  selection: { requested_section_ids: string[]; reported_section_ids: string[] }
+  summary: {
+    initial_leaf_count: number
+    final_leaf_count: number
+    research_findings_count: number
+    keep_count: number
+    refine_count: number
+    structure_stale_count: number
+    operations: { total: number; added: number; split: number; moved: number; deleted: number }
+    outline_review_blocking_issues: Array<{ code: string; section_id: string; reason: string }>
+    repair_count: number
+    repairs_with_structure_changes: number
+    tools: Record<'read_source' | 'search_sources' | 'web_search' | 'web_fetch', EvidenceMappingAcceptanceToolStats>
+  }
+  structure_diff: Array<{
+    section_id: string
+    before: { id: string; parent_id: string | null; order: number; level: number; title: string; writable: boolean } | null
+    after: { id: string; parent_id: string | null; order: number; level: number; title: string; writable: boolean } | null
+  }>
+  sections: Array<{
+    original_section_id: string
+    original_title: string
+    research_findings_count: number
+    research_findings: SectionResearchAssessment['key_findings']
+    final_blueprints: Array<{
+      section_id: string
+      title: string
+      purpose: string
+      must_answer: string[]
+      writing_notes: string[]
+      writing_dimensions: string[]
+      missing_topics: string[]
+    }>
+    structure_decision: 'keep' | 'refine' | null
+    structure_reason: string | null
+    hidden_heading_pressure: boolean | null
+    structure_stale_count: number
+    actual_structure_operations: Array<{
+      task_id: string
+      operation: z.infer<typeof outlineEditOperationSchema>
+      finding_refs: string[]
+      target_section_ids: string[]
+    }>
+    outline_review_blocking_issues: Array<{ code: string; section_id: string; reason: string }>
+    review_overturned_initial_judgment: boolean
+    repair_changed_structure: boolean
+    tools: Record<'read_source' | 'search_sources' | 'web_search' | 'web_fetch', EvidenceMappingAcceptanceToolStats>
+    final_corresponding_sections: Array<{ section_id: string; title: string }>
+  }>
+}
+
 const researchToolStatsSchema = z.object({
   calls: z.number().int().nonnegative(), succeeded: z.number().int().nonnegative(), failed: z.number().int().nonnegative(),
   hits: z.number().int().nonnegative(), failure_reasons: z.array(z.string()),
@@ -397,7 +460,8 @@ const sectionResearchAssessmentSchema = z.object({
     finding_ref: z.string().regex(/^RF-[a-f0-9]{16}$/u),
   }).strict()).min(1),
 }).strict().superRefine(addSectionResearchAssessmentIssues)
-type SectionResearchAssessment = z.infer<typeof sectionResearchAssessmentSchema>
+/** Host-validated research result retained for one S4 task. */
+export type SectionResearchAssessment = z.infer<typeof sectionResearchAssessmentSchema>
 const sectionStructureAssessmentInputSchema = z.object({
   decision: z.enum(['keep', 'refine']),
   reason: z.string().trim().min(1),
@@ -409,7 +473,8 @@ const sectionStructureAssessmentSchema = sectionStructureAssessmentInputSchema.e
   blueprint_fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
   stale: z.boolean(),
 })
-type SectionStructureAssessment = z.infer<typeof sectionStructureAssessmentSchema>
+/** Structure decision bound to the exact current S4 Blueprint fingerprint. */
+export type SectionStructureAssessment = z.infer<typeof sectionStructureAssessmentSchema>
 const sectionTaskOperationSchema = z.object({
   section_id: z.string().min(1),
   basis: taskBasisSchema,
@@ -694,7 +759,7 @@ function assertWebResearchAvailable(captured: Iterable<CapturedWebResult>): void
     return calls.map(({ result }) => `${name}: ${result.isError ? result.error.message : '未取得可读取的网页正文'}`)
   })
   if (failures.length > 0) throw new ToolArgsError([
-    `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED：已选择的联网研究尚未成功：${uniqueStrings(failures).join('；')}。请配置 web.searchProvider 使用已安装的独立搜索服务，或设置 web-search-deepseek.provider 使用支持搜索的 Provider，并重试；不能将失败视为研究充分。`,
+    `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED：已选择的联网研究尚未成功：${uniqueStrings(failures).join('；')}。请配置 web.searchProvider 指向已安装且凭据可用的独立搜索服务，并重试；不能将失败视为研究充分。`,
   ])
 }
 
@@ -1279,8 +1344,8 @@ function attachMappingSubmissionRuntime(
       description: '完整 Blueprint 后判断目录承载能力。假设 S5 不得自建正式标题，分析业务对象、方法、成果责任和评审定位，说明 Hidden Heading Pressure。逐项引用 finding_index 决定归位；新增章节目标由结构操作自动绑定，无需回填。Host 绑定当前 Blueprint 指纹。',
       parameters: z.toJSONSchema(sectionStructureAssessmentInputSchema, { target: 'draft-7' }), output,
       execute(raw: unknown): Promise<unknown> {
-        assertResearchReady(state)
         assertWebResearchAvailable(captured())
+        assertResearchReady(state)
         assertBlueprintReady(state, task)
         const submitted = sectionStructureAssessmentInputSchema.parse(raw)
         const indices = new Set(submitted.topic_dispositions.map(item => item.finding_index))
@@ -1306,7 +1371,7 @@ function attachMappingSubmissionRuntime(
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
         assertWebResearchAvailable(captured())
-        if (state.structureAssessment === undefined) throw new ToolArgsError(['structure_assessment: 必须先基于完整 Blueprint 判断结构。'])
+        assertStructureCurrent(state, task)
         if (state.locked) throw new ToolArgsError(['operation: 当前 Section 子树已经锁定。'])
         const violations = validateJsonSchemaValue(editSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
@@ -1752,6 +1817,151 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
   }
   return { total: log.tasks.length, initial: log.tasks.filter(task => task.phase === 'initial').length,
     supplemental: log.tasks.filter(task => task.phase === 'final_check').length, completed, running, not_started: notStarted, failed }
+}
+
+/**
+ * 读取已完成 S4 的现有日志、检查点和目录，生成可筛选的结构化验收报告。
+ * @param workspace 已完成本次 S4 回放的隔离工作区。
+ * @param requestedSectionIds 只展开这些 S3 原始叶节的逐节记录；汇总和结构 diff 始终覆盖全书。
+ * @returns S3→S4 结构、研究、工具和复核对比；不进行新的模型判断。
+ */
+export async function buildEvidenceMappingAcceptanceReport(
+  workspace: BidWorkspace,
+  requestedSectionIds: readonly string[] = [],
+): Promise<EvidenceMappingAcceptanceReport> {
+  const [log, initial, current, plan, checkpoint, evidence] = await Promise.all([
+    readEvidenceMappingLog(workspace),
+    readJson(workspace, 'outline/initial-confirmed-outline.json').then(parseOutlineArtifact),
+    readJson(workspace, OUTLINE_PATH).then(parseOutlineArtifact),
+    readJson(workspace, PLAN_PATH).then(parseEvidenceMappingPlan),
+    readJson(workspace, CHECKPOINT_PATH).then(value => evidenceMappingCheckpointSchema.parse(value)),
+    readJson(workspace, 'analysis/evidence-map.json').then(parseEvidenceMapArtifact),
+  ])
+  if (log === null || log.statistics === undefined) throw new Error('EVIDENCE_MAPPING_ACCEPTANCE_LOG_INCOMPLETE')
+  const initialLeaves = buildWritableSectionWorklist(initial)
+  const known = new Set(initialLeaves.map(section => section.id))
+  const requested = uniqueStrings(requestedSectionIds)
+  const unknown = requested.filter(id => !known.has(id))
+  if (unknown.length > 0) throw new Error(`BID_SECTION_SCOPE_INVALID:${unknown.join(',')}`)
+  const selected = requested.length === 0 ? initialLeaves : initialLeaves.filter(section => requested.includes(section.id))
+  const checkpointByTask = new Map(checkpoint.tasks.map(task => [task.task_id, task]))
+  const logByTask = new Map(log.tasks.map(task => [task.task_id, task]))
+  const evidenceBySection = new Map(evidence.section_mappings.map(mapping => [mapping.section_id, mapping]))
+  const currentById = new Map(current.sections.map(section => [section.id, section]))
+  const toolNames = [...SOURCE_TOOLS, ...MAPPING_AGENT_TOOLS]
+  const aggregateTools = (taskIds: ReadonlySet<string>) => Object.fromEntries(toolNames.map((name) => {
+    const values = [...taskIds].flatMap(id => logByTask.get(id)?.research_stats?.tools[name] ?? [])
+    return [name, {
+      calls: values.reduce((total, value) => total + value.calls, 0),
+      succeeded: values.reduce((total, value) => total + value.succeeded, 0),
+      failed: values.reduce((total, value) => total + value.failed, 0),
+      hits: values.reduce((total, value) => total + value.hits, 0),
+      failure_reasons: uniqueStrings(values.flatMap(value => value.failure_reasons)),
+    }]
+  })) as EvidenceMappingAcceptanceReport['summary']['tools']
+  const isDescendantOf = (sectionId: string, rootId: string): boolean => {
+    let currentId: string | null = sectionId
+    const visited = new Set<string>()
+    while (currentId !== null && !visited.has(currentId)) {
+      if (currentId === rootId) return true
+      visited.add(currentId)
+      currentId = currentById.get(currentId)?.parent_id ?? null
+    }
+    return false
+  }
+  const operationSectionIds = (operation: z.infer<typeof outlineEditOperationSchema>): string[] => {
+    if (operation.type === 'add_section') return operation.parent_id === null ? [] : [operation.parent_id]
+    if (operation.type === 'merge_sections') return operation.section_ids
+    return [operation.section_id]
+  }
+  const allReviewIssues = log.outline_reviews?.flatMap(review => review.blocking_issues) ?? []
+  const sections = selected.map((original): EvidenceMappingAcceptanceReport['sections'][number] => {
+    const taskIds = new Set([`MAP-INIT-${original.id}`])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const task of plan.tasks) {
+        if (task.phase !== 'initial' || taskIds.has(task.task_id)) continue
+        if (task.outline_edit_scope_id === original.id
+          || task.research_candidate_task_ids?.some(id => taskIds.has(id)) === true) {
+          taskIds.add(task.task_id)
+          changed = true
+        }
+      }
+    }
+    const savedTasks = [...taskIds].flatMap(id => checkpointByTask.get(id) ?? [])
+    const researchFindings = [...new Map(savedTasks.flatMap(task => task.research_assessment?.key_findings ?? [])
+      .map(finding => [finding.finding_ref, finding])).values()]
+    const initialAssessment = checkpointByTask.get(`MAP-INIT-${original.id}`)?.structure_assessment
+      ?? savedTasks.find(task => task.structure_assessment !== undefined)?.structure_assessment
+    const lineageIds = new Set([original.id])
+    const actualOperations: EvidenceMappingAcceptanceReport['sections'][number]['actual_structure_operations'] = []
+    for (const task of savedTasks) for (const [index, operation] of (task.outline_operations ?? []).entries()) {
+      const basis = task.outline_operation_bases[index]
+      if (basis === undefined) throw new Error(`EVIDENCE_MAPPING_ACCEPTANCE_BASIS_MISSING:${task.task_id}:${index}`)
+      const related = [...operationSectionIds(operation), ...basis.target_section_ids]
+        .some(id => lineageIds.has(id) || isDescendantOf(id, original.id))
+      if (!related) continue
+      for (const id of basis.target_section_ids) lineageIds.add(id)
+      if (operation.type === 'merge_sections' && operation.section_ids[0] !== undefined) {
+        lineageIds.add(operation.section_ids[0])
+      }
+      actualOperations.push({ task_id: task.task_id, operation, finding_refs: basis.finding_refs,
+        target_section_ids: basis.target_section_ids })
+    }
+    const finalSections = buildWritableSectionWorklist(current).filter(section =>
+      [...lineageIds].some(id => isDescendantOf(section.id, id)))
+    const finalIds = new Set(finalSections.map(section => section.id))
+    const repairChangedStructure = actualOperations.some(item => item.task_id.startsWith('MAP-REPAIR-')
+      && item.operation.type !== 'update_section')
+    const reviewIssues = allReviewIssues.filter(issue => lineageIds.has(issue.section_id)
+      || finalIds.has(issue.section_id) || isDescendantOf(issue.section_id, original.id)
+      || (repairChangedStructure && isDescendantOf(original.id, issue.section_id)))
+    return {
+      original_section_id: original.id,
+      original_title: original.title,
+      research_findings_count: researchFindings.length,
+      research_findings: researchFindings,
+      final_blueprints: finalSections.map(section => ({
+        section_id: section.id, title: section.title, purpose: section.purpose, must_answer: section.must_answer,
+        writing_notes: section.writing_notes,
+        writing_dimensions: evidenceBySection.get(section.id)?.writing_dimensions ?? [],
+        missing_topics: evidenceBySection.get(section.id)?.missing_topics ?? [],
+      })),
+      structure_decision: initialAssessment?.decision ?? null,
+      structure_reason: initialAssessment?.reason ?? null,
+      hidden_heading_pressure: initialAssessment?.hidden_heading_pressure ?? null,
+      structure_stale_count: [...taskIds].reduce((total, id) =>
+        total + (logByTask.get(id)?.research_stats?.structure_stale_count ?? 0), 0),
+      actual_structure_operations: actualOperations,
+      outline_review_blocking_issues: reviewIssues,
+      review_overturned_initial_judgment: repairChangedStructure,
+      repair_changed_structure: repairChangedStructure,
+      tools: aggregateTools(taskIds),
+      final_corresponding_sections: finalSections.map(section => ({ section_id: section.id, title: section.title })),
+    }
+  })
+  const statistics = log.statistics
+  return {
+    schema_version: 1,
+    selection: { requested_section_ids: requested, reported_section_ids: sections.map(section => section.original_section_id) },
+    summary: {
+      initial_leaf_count: statistics.initial_leaf_count,
+      final_leaf_count: statistics.leaf_count,
+      research_findings_count: statistics.research_findings_count,
+      keep_count: statistics.keep_count,
+      refine_count: statistics.refine_count,
+      structure_stale_count: statistics.structure_stale_count,
+      operations: { total: statistics.structure_operation_count, added: statistics.sections_added,
+        split: statistics.sections_split, moved: statistics.sections_moved, deleted: statistics.sections_deleted },
+      outline_review_blocking_issues: allReviewIssues,
+      repair_count: statistics.repair_count,
+      repairs_with_structure_changes: statistics.repairs_with_structure_changes,
+      tools: statistics.tools,
+    },
+    structure_diff: outlineStructureDifferences(initial, current),
+    sections,
+  }
 }
 
 function subagentTaskContext(value: unknown): unknown {

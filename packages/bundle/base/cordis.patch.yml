@@ -397,20 +397,22 @@
         argumentsPreviewChars: 500
 
     # Web providers stay on the Host plane while model-facing tools are mounted
-    # globally or by an Agent preset. Hosted search follows the task's model
-    # Provider unless the search policy selects another capable route. Search is a
-    # full auxiliary model request with server-side retrieval, so this shipped
-    # route gets 60s while the provider-neutral tool default remains 30s. The
-    # anonymous HTTP fetch provider retains its own transport and size defaults;
-    # deployments must account for its documented private-network limitation.
+    # globally or by an Agent preset. The shipped search route is independent of
+    # the task's chat Provider; its credential is resolved by web-search-tavily.
+    # The anonymous HTTP fetch provider retains its own transport and size
+    # defaults; deployments must account for its documented private-network
+    # limitation.
     - id: web
       name: '@deepseek-ai/dsh-web'
       config:
-        searchProvider: deepseek-official
+        searchProvider: tavily
         fetchProvider: http
 
     - id: web-search-deepseek
       name: '@deepseek-ai/dsh-web-search-deepseek'
+
+    - id: web-search-tavily
+      name: '@deepseek-ai/dsh-web-search-tavily'
 
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'

@@ -226,11 +226,16 @@ export {
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
   executeEvidenceMappingFinalCheck,
+  buildEvidenceMappingAcceptanceReport,
   mergeEvidenceMappingPartialResults,
   readEvidenceMappingProgress,
   renderEvidenceMappingSubagentTask,
   buildEvidenceMappingPlan,
   type MergedEvidenceMappingResults,
+  type EvidenceMappingAcceptanceReport,
+  type EvidenceMappingAcceptanceToolStats,
+  type SectionResearchAssessment,
+  type SectionStructureAssessment,
 } from './evidence-mapping-executor.ts'
 export type { EvidenceMappingExecutionOptions } from './evidence-mapping-executor.ts'
 export { validateEvidenceMapping } from './evidence-mapping-validator.ts'
@@ -3259,7 +3264,7 @@ export function validateBidFileBatch(files: readonly IncomingFile[], config: Bid
  * @param candidate - Relative path supplied by the caller.
  * @returns The resolved absolute path inside root.
  */
-export { within } from './workspace-path.ts'
+export { assertNoLinkedPath, within } from './workspace-path.ts'
 
 function validateConfig(config: BidConfig): void {
   if (!config.projectDirectory || !config.outputDirectory || config.maxFileBytes <= 0

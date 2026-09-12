@@ -4,7 +4,7 @@ Status: implemented
 
 English | [中文](2026-07-31-web-default-search.zh.md)
 
-搜索连接与凭据由模型 Provider 管理，搜索卡只编辑 Provider 选择与预算；详见 [统一模型 Provider](../architecture/2026-09-03-unified-model-providers.md)。本文的默认工具启用、分层配置与显式保存决策继续适用。
+默认搜索 Provider、凭据归属和 fetch 启用状态由[默认独立 Tavily Web Search](2026-09-12-independent-tavily-web-search.md)取代；本文的显式 Provider 选择、工具启用、Host Plane 所有权和网络权限边界继续适用。
 
 ## Problem
 

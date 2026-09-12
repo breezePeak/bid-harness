@@ -25,6 +25,7 @@ import {
   type Config,
   buildBidStageTask,
   buildWebEvidenceSnapshots,
+  buildEvidenceMappingAcceptanceReport,
   applyOutlineEdits,
   createScoringResponsePointCatalog,
   executeEvidenceMapping,
@@ -426,12 +427,13 @@ function mappingFixture(
       const first = candidates[0] as Record<string, unknown> | undefined
       if (!preparedChildren.has(String(child.id)) && first !== undefined) {
         const operations = (first.outline_operations as unknown[] | undefined) ?? []
+        let scopedSections: OutlineSection[] = []
         const assessment = tools.get('submit_section_research_assessment')
         if (assessment !== undefined) {
           await invokeSubmissionTool(child, assessment, branchResearchAssessment())
-          const sections = JSON.parse(promptText(request.request).split('\n')
+          scopedSections = JSON.parse(promptText(request.request).split('\n')
             .find(line => line.startsWith('current_section_scope：'))!.slice('current_section_scope：'.length)) as OutlineSection[]
-          for (const section of sections.filter(item => item.writable)) {
+          for (const section of scopedSections.filter(item => item.writable)) {
             await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
               writing_dimensions: ['技术响应'], missing_topics: [], writing_brief: {
                 purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
@@ -443,10 +445,24 @@ function mappingFixture(
           await invokeSubmissionTool(child, tools.get('submit_section_structure_assessment')!, structureAssessment())
         }
         const apply = tools.get('apply_section_outline_edit')
-        if (apply !== undefined) for (const operation of operations) {
+        if (apply !== undefined) for (const [index, operation] of operations.entries()) {
           if ((await invokeSubmissionTool(child, apply, { operation, basis: {
             explanation: '按已确认职责细化主题。', finding_indices: [1],
           } })).isError) break
+          if (index < operations.length - 1) {
+            for (const section of scopedSections.filter(item => item.writable)) {
+              await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
+                writing_dimensions: ['技术响应'], missing_topics: [], writing_brief: {
+                  purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
+                  suggested_tables: section.suggested_tables, suggested_figures: section.suggested_figures,
+                  requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
+                  scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+                } }))
+            }
+            const assessment = structureAssessment('refine')
+            assessment.topic_dispositions[0]!.placement = 'separate_section'
+            await invokeSubmissionTool(child, tools.get('submit_section_structure_assessment')!, assessment)
+          }
         }
         preparedChildren.add(String(child.id))
       }
@@ -1263,6 +1279,21 @@ describe('evidence-mapping Agent executor', () => {
     })
     const structure = { ...structureAssessment('refine'), topic_dispositions: [{ finding_index: 1, placement: 'separate_section', reason: '具有不同技术方法和成果责任。' }] }
     await invoke('submit_section_structure_assessment', structure)
+    expect(await invoke('update_section_task', {
+      section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '将研究落实到任务。', requirement_ids: [] },
+      writing_brief: { purpose: '明确实施与验收的不同责任。', must_answer: ['说明实施方法', '说明成果验收'], writing_notes: ['比较不同方法和成果责任'], suggested_tables: [], suggested_figures: [] },
+      writing_dimensions: ['实施', '验收'], missing_topics: [],
+    })).toMatchObject({ isError: false, value: { structure_assessment_stale: false } })
+    expect(await invoke('update_section_task', {
+      section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '将研究落实到任务。', requirement_ids: [] },
+      writing_brief: { purpose: '明确实施、质量控制与验收的不同责任。', must_answer: ['说明实施方法', '说明质量控制', '说明成果验收'], writing_notes: ['比较不同方法和成果责任'], suggested_tables: [], suggested_figures: [] },
+      writing_dimensions: ['实施', '质量控制', '验收'], missing_topics: [],
+    })).toMatchObject({ isError: false, value: { structure_assessment_stale: true } })
+    const staleEdit = await invoke('apply_section_outline_edit', edit)
+    expect(staleEdit.isError).toBe(true)
+    if (staleEdit.isError) expect(staleEdit.error.message).toContain('stale')
+    expect((await invoke('lock_section_outline', { comparison: 'Blueprint 已变化' })).isError).toBe(true)
+    await invoke('submit_section_structure_assessment', structure)
     expect((await invoke('lock_section_outline', { comparison: '尚未落实' })).isError).toBe(true)
     expect((await invoke('apply_section_outline_edit', { ...edit, basis: { ...edit.basis, finding_indices: [999] } })).isError).toBe(true)
     const split = await invoke('apply_section_outline_edit', edit)
@@ -1297,8 +1328,27 @@ describe('evidence-mapping Agent executor', () => {
       }
     }
     expect(log.statistics).toMatchObject({
-      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 1,
+      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 2,
     })
+    const report = await buildEvidenceMappingAcceptanceReport(workspace, ['SEC-1'])
+    expect(report).toMatchObject({
+      schema_version: 1,
+      selection: { requested_section_ids: ['SEC-1'], reported_section_ids: ['SEC-1'] },
+      summary: {
+        initial_leaf_count: 2, final_leaf_count: 3, refine_count: 1, structure_stale_count: 2,
+        operations: { added: 2, split: 1, moved: 0, deleted: 0 },
+      },
+      sections: [{
+        original_section_id: 'SEC-1', structure_decision: 'refine', hidden_heading_pressure: false,
+        review_overturned_initial_judgment: false,
+        final_corresponding_sections: createdIds.map(section_id => ({ section_id })),
+      }],
+    })
+    expect(report.sections[0]!.research_findings).toHaveLength(1)
+    expect(report.sections[0]!.actual_structure_operations.map(item => item.operation.type)).toEqual(['split_section'])
+    expect(report.sections[0]!.final_blueprints).toHaveLength(2)
+    await expect(buildEvidenceMappingAcceptanceReport(workspace, ['SEC-UNKNOWN']))
+      .rejects.toThrow('BID_SECTION_SCOPE_INVALID:SEC-UNKNOWN')
   })
 
   it('选择联网后搜索失败不得声明研究充分，成功重试并读取正文后才解除阻断', async () => {
@@ -1314,6 +1364,9 @@ describe('evidence-mapping Agent executor', () => {
     const rejected = await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', branchResearchAssessment())
     expect(rejected.isError).toBe(true)
     if (rejected.isError) expect(rejected.error.message).toContain('EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED')
+    const blockedStructure = await fixture.invokeSubmissionTool(childId, 'submit_section_structure_assessment', structureAssessment())
+    expect(blockedStructure.isError).toBe(true)
+    if (blockedStructure.isError) expect(blockedStructure.error.message).toContain('EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED')
     const research = branchResearchAssessment()
     research.key_findings[0]!.basis = [{ kind: 'web_material', ref: webUrl }]
     fixture.emitWeb(child, [webResearch('retry').search])
@@ -2097,6 +2150,14 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-ROOT')))
       .toContain('prior_research_findings：')
     expect(fixture.starts.filter(start => promptText(start.request.request).includes('Mapping Task：{"task_id":"MAP-INIT-SEC-2"'))).toHaveLength(1)
+    const report = await buildEvidenceMappingAcceptanceReport(workspace, ['SEC-1', 'SEC-2'])
+    const first = report.sections.find(section => section.original_section_id === 'SEC-1')
+    const second = report.sections.find(section => section.original_section_id === 'SEC-2')
+    expect(first).toMatchObject({ research_findings_count: 1, review_overturned_initial_judgment: true,
+      repair_changed_structure: true })
+    expect(first?.actual_structure_operations.map(item => item.operation.type)).toEqual(['split_section'])
+    expect(second).toMatchObject({ research_findings_count: 1, review_overturned_initial_judgment: false,
+      repair_changed_structure: false, actual_structure_operations: [] })
   })
 
   it('目录复核拒绝字符串建议并接受正式 advisory 记录', async () => {

@@ -95,6 +95,8 @@ Section Child 通过 `submit_section_research_assessment` 只记录研究充分�
 
 无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。提示只展开一次当前待审对象；后续修改、复核和未完成 finish 只返回固定大小的 `review_progress`，模型仅在修正产生新版本或引用过期时通过 `list_review_items` 刷新，避免把剩余对象反复写入同一 Child 上下文。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v10 保存研究发现、带 fingerprint/stale 的结构判断、失效次数、目录操作及 Host 绑定、任务与资料版本和完成状态；旧版本必须重置 S4。正式 Outline v3、Evidence Map v10 和 S5 输入不变。日志 schema v3 的 statistics 和各任务 research_stats 记录叶子数、研究充分性、搜索次数与命中、Web 成败及原因、findings、KEEP/REFINE、stale、结构操作、全书复核问题和 Repair 结果，不保存完整 Prompt。
 
+开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、通用 `web_search`/`web_fetch` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
+
 S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
 
 S4 是否联网由模型决定；调用沿用 Web 服务的 searchProvider/fetchProvider 配置。某类已调用 Web 研究工具全部失败时，Host 拒绝 Research Ready、结构判断及锁定，报告 `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED`；修复搜索配置或重试成功后仍须重新提交研究判断。聊天 Provider 不支持 hosted search 且未配置独立搜索 Provider 时不能静默视为研究充分。

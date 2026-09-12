@@ -1,21 +1,22 @@
 /**
  * Integration: the real fetch backend (`dsh-web-fetch-http`) + a real search provider
- * (`dsh-web-search-exa`) + the real seam (`dsh-web`) + the model tool (`dsh-tool-web`) + the
+ * (`dsh-web-search-tavily`) + the real seam (`dsh-web`) + the model tool (`dsh-tool-web`) + the
  * tool-call timeout policy (`dsh-tool-call-timeout-policy`), exercised through `ctx.tools.execute()` —
  * nothing bypasses the tool registry. Fetch verifies world effects against loopback HTTP; search
- * uses the real Exa provider with only its network boundary stubbed.
+ * uses the real Tavily provider with only its network boundary stubbed.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import * as WebFetchLocal from '@deepseek-ai/dsh-web-fetch-http'
-import * as WebSearchExa from '@deepseek-ai/dsh-web-search-exa'
+import * as WebSearchTavily from '@deepseek-ai/dsh-web-search-tavily'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 
@@ -28,6 +29,13 @@ let base: string
 let handler: Handler
 let ctx: Context
 let fiber: Awaited<ReturnType<Context['plugin']>>
+let previousTavilyApiKey: string | undefined
+
+class ChatOnlyAdapter extends LlmAdapter {
+  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    throw new Error('chat is not exercised by this web tool integration')
+  }
+}
 
 beforeEach(async () => {
   handler = (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<h1>Hello</h1><p>World</p>') }
@@ -36,11 +44,15 @@ beforeEach(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 
   ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  ctx.llm.registerAdapter(['chat-only'], new ChatOnlyAdapter())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  await ctx.plugin(WebRuntime, { searchProvider: WebSearchExa.EXA_PROVIDER_ID, fetchProvider: WebFetchLocal.LOCAL_FETCH_PROVIDER_ID })
+  await ctx.plugin(WebRuntime, { searchProvider: WebSearchTavily.TAVILY_PROVIDER_ID, fetchProvider: WebFetchLocal.LOCAL_FETCH_PROVIDER_ID })
   await ctx.plugin(WebFetchLocal, {})
-  await ctx.plugin(WebSearchExa, { apiKey: 'exa-key', baseURL: 'https://api.exa.test' })
+  previousTavilyApiKey = process.env.TAVILY_API_KEY
+  process.env.TAVILY_API_KEY = 'tavily-key'
+  await ctx.plugin(WebSearchTavily, { baseURL: 'https://api.tavily.test' })
   // The shipped deployment shape: the tool-call budget is declared by tool-web
   // config (default 30s, attached as ToolDefinition.timeoutMs) and enforced by
   // the zero-config timeout-policy plugin, set above the provider backstop so the
@@ -52,6 +64,8 @@ beforeEach(async () => {
 afterEach(async () => {
   await fiber.dispose()
   vi.unstubAllGlobals()
+  if (previousTavilyApiKey === undefined) delete process.env.TAVILY_API_KEY
+  else process.env.TAVILY_API_KEY = previousTavilyApiKey
   await new Promise<void>(resolve => server.close(() => { resolve() }))
 })
 
@@ -91,13 +105,14 @@ describe('web_fetch integration over the real backend', () => {
   })
 })
 
-describe('web_search integration over the real Exa provider', () => {
-  it('runs web_search end-to-end and formats the provider result', async () => {
+describe('web_search integration over the independent Tavily provider', () => {
+  it('works when the chat provider has no hosted-search capability', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ results: [{ url: 'https://result.test', title: 'Result', highlights: ['a highlight'] }] }),
+      JSON.stringify({ results: [{ url: 'https://result.test', title: 'Result', content: 'a snippet' }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     )))
-    const out = await call('web_search', { queries: ['deepseek-official'] })
+    expect(ctx.llm.supports('chat-only', 'web_search')).toBe(false)
+    const out = await call('web_search', { queries: ['independent search'] })
     expect(out.isError).toBe(false)
     expect(out.content.map(b => b.type === 'text' ? b.text : '').join('')).toContain('[Result](https://result.test)')
   })
