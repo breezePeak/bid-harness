@@ -2541,6 +2541,33 @@ describe('S4 Host 准入与最终确认', () => {
     expect(log.tasks.some(task => task.status === 'failed')).toBe(true)
   })
 
+  it('限流基础设施失败由 Host 自动退避重试，不把任务交给用户手动恢复', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-retry-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.subagents.startContinuable.mockRejectedValueOnce(new Error('429: rpm exhausted'))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, maxInfrastructureRetryAttempts: 1,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    fixture.finalStarts[0]!.resolve()
+    await execution
+
+    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      tasks: Array<{ status: string; attempts: Array<{ accepted: boolean; issues: Array<{ code: string }> }> }>
+    }
+    expect(fixture.subagents.startContinuable).toHaveBeenCalledTimes(4)
+    expect(log.tasks.every(task => task.status === 'completed')).toBe(true)
+    expect(log.tasks[0]!.attempts).toHaveLength(2)
+    expect(log.tasks[0]!.attempts[0]).toMatchObject({ accepted: false, issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR' }] })
+    expect(log.tasks[0]!.attempts[1]!.accepted).toBe(true)
+    expect((await readEvidenceMappingProgress(workspace))!.failed).toBe(0)
+  })
+
   it('空 Evidence 合法，本地 chunk 不需要 Child read 日志证明', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-empty-evidence-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))

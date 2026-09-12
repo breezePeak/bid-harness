@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { DocxTemplateId } from './docx-format-contract.ts'
 
 /** The ordered Bid Harness stages owned by the control plane. */
 export const BID_STAGES = [
@@ -366,11 +367,18 @@ export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'nee
 /** Stable visual status vocabulary for a writable chapter in the review workbench. */
 export type BidChapterIndicatorStatus = 'queued' | 'writing' | 'content_ready' | 'reviewing' | 'needs_attention' | 'passed' | 'failed' | 'not_started'
 
-/** Page-estimate state that never turns an unavailable calculation into a zero-page result. */
+/** 一次页数结果使用的排版基准和统计方法。 */
+export interface BidPageEstimateBasis {
+  readonly source: 'default' | 'template'
+  readonly method: 'fast' | 'rendered'
+  readonly template: { readonly id: DocxTemplateId; readonly name: string; readonly revision: number } | null
+}
+
+/** 页数状态不会把不可用的计算伪装成零页结果。 */
 export type BidPageEstimate =
-  | { readonly status: 'available'; readonly pages: number }
-  | { readonly status: 'empty' }
-  | { readonly status: 'unavailable' }
+  | ({ readonly status: 'available'; readonly pages: number } & BidPageEstimateBasis)
+  | ({ readonly status: 'empty' } & BidPageEstimateBasis)
+  | { readonly status: 'unavailable'; readonly basis?: BidPageEstimateBasis }
 
 type BidPageTarget = {
   readonly kind: 'approximate' | 'minimum' | 'maximum' | 'range'
@@ -391,11 +399,13 @@ export type BidPageTargetStatus =
     readonly difference: number
     readonly format_revision: number
     readonly format_source: 'default' | 'template'
+    readonly format_template_id: DocxTemplateId | null
+    readonly estimate_method: 'fast' | 'rendered'
   }
 
-/** Browser-safe outline and live chapter summary used by the S5 workbench. */
+/** S5 工作台使用的浏览器安全目录及实时章节摘要。 */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 4
+  readonly schema_version: 5
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -436,15 +446,25 @@ export interface BidGlobalComplianceIssueView {
   readonly affected_section_ids: readonly string[]
 }
 
+const docxTemplateIdSchema = z.string().regex(/^[a-f\d]{64}$/u) as unknown as z.ZodType<DocxTemplateId>
+const pageEstimateBasisShape = {
+  source: z.enum(['default', 'template']),
+  method: z.enum(['fast', 'rendered']),
+  template: z.strictObject({
+    id: docxTemplateIdSchema,
+    name: z.string(),
+    revision: z.number().int().nonnegative(),
+  }).nullable(),
+}
 const pageEstimateSchema = z.discriminatedUnion('status', [
-  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive() }),
-  z.strictObject({ status: z.literal('empty') }),
-  z.strictObject({ status: z.literal('unavailable') }),
+  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive(), ...pageEstimateBasisShape }),
+  z.strictObject({ status: z.literal('empty'), ...pageEstimateBasisShape }),
+  z.strictObject({ status: z.literal('unavailable'), basis: z.strictObject(pageEstimateBasisShape).optional() }),
 ])
 const chapterPageEstimateSchema = z.discriminatedUnion('status', [
-  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive(), incomplete: z.boolean().optional() }),
-  z.strictObject({ status: z.literal('empty') }),
-  z.strictObject({ status: z.literal('unavailable') }),
+  z.strictObject({ status: z.literal('available'), pages: z.number().int().positive(), incomplete: z.boolean().optional(), ...pageEstimateBasisShape }),
+  z.strictObject({ status: z.literal('empty'), ...pageEstimateBasisShape }),
+  z.strictObject({ status: z.literal('unavailable'), basis: z.strictObject(pageEstimateBasisShape).optional() }),
 ])
 const pageTargetSchema = z.strictObject({
   kind: z.enum(['approximate', 'minimum', 'maximum', 'range']),
@@ -459,10 +479,11 @@ const pageTargetStatusSchema = z.discriminatedUnion('status', [
     status: z.enum(['met', 'below', 'above']), target: pageTargetSchema,
     estimated_pages: z.number().nonnegative(), difference: z.number(),
     format_revision: z.number().int().nonnegative(), format_source: z.enum(['default', 'template']),
+    format_template_id: docxTemplateIdSchema.nullable(), estimate_method: z.enum(['fast', 'rendered']),
   }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(4),
+  schema_version: z.literal(5),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),

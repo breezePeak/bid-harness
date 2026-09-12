@@ -10,7 +10,7 @@ export {
   DOCX_TEMPLATE_SIZE_HEADER,
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
-export type { DocxFormatSuggestion, DocxFormatRequest, DocxFormatView, DocxFormatState, DocxTemplateUploadResult, FormatField, FormatValues, FormatCandidate, FormatConflict, FormatEvidence, FormatEvidenceSource, FormatRole, FormatValue } from './docx-format-contract.ts'
+export type { DocxFormatSuggestion, DocxFormatRequest, DocxFormatView, DocxFormatState, DocxTemplateId, DocxTemplateLibraryView, DocxTemplateRecord, DocxTemplateSummary, DocxTemplateUploadResult, FormatField, FormatValues, FormatCandidate, FormatConflict, FormatEvidence, FormatEvidenceSource, FormatRole, FormatValue } from './docx-format-contract.ts'
 
 /** Browser-safe Bid control-plane constants and types. */
 export {

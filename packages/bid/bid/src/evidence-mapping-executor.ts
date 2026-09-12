@@ -116,14 +116,67 @@ export function buildEvidenceMappingPlan(outline: OutlineArtifact): EvidenceMapp
 /** Default Host limit for simultaneous S4 Mapping Subagents. */
 export const DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY = 3
 
+/** Default number of automatic retries for transient S4 Mapping Subagent failures. */
+export const DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS = 2
+
+const MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS = 500
+const MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS = 60_000
+
 /** Host-owned S4 planning, Mapping Task retry, and concurrency limits. */
 export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOptions {
   /** Maximum Mapping Subagents that may run simultaneously. */
   maxConcurrency?: number
+  /** Maximum automatic retries for a transient Mapping Subagent infrastructure failure. */
+  maxInfrastructureRetryAttempts?: number
   /** 交互映射只调度选中范围，不等待调用中的 Main Agent，也不深化整本目录。 */
   remap?: { section_ids: readonly string[]; mode: 'replace' | 'supplement'; reason?: string; previous_outline?: OutlineArtifact }
   /** 仅总述修改时可独立复核父节点，不重新研究其全部叶子。 */
   summarySectionIds?: readonly string[]
+}
+
+class MappingSubagentInfrastructureError extends BidStageExecutionError {
+  constructor(
+    issues: readonly StageValidationIssue[],
+    readonly retryable: boolean,
+    readonly retryAfterMs?: number,
+  ) {
+    super(issues)
+    this.name = 'MappingSubagentInfrastructureError'
+  }
+}
+
+function isRetryableMappingInfrastructureError(error: unknown): boolean {
+  const details = record(error)
+  if (details?.code === 'RATE_LIMIT') return true
+  if (details?.status === 429 && details.code !== 'QUOTA') return true
+  const text = error instanceof BidStageExecutionError
+    ? error.issues.map(issue => `${issue.code} ${issue.message}`).join('\n')
+    : error instanceof Error ? error.message : String(error)
+  return /\brpm[\s_-]+exhausted\b|\brate[\s_-]?limit(?:ed|ing)?\b|\btoo many requests\b|\b429\b/i.test(text)
+}
+
+function retryAfterMs(error: unknown): number | undefined {
+  const value = record(error)?.providerRetryAfterMs
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+async function waitForMappingInfrastructureRetry(signal: AbortSignal, attempt: number, retryAfter?: number): Promise<void> {
+  signal.throwIfAborted()
+  const delay = Math.min(
+    MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS,
+    retryAfter ?? MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+  )
+  let onAbort!: () => void
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    onAbort = () => { reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason))) }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    await Promise.race([new Promise<void>(resolve => setTimeout(resolve, delay)), cancelled])
+    signal.throwIfAborted()
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }
 
 async function removeAttemptPath(path: string): Promise<void> {
@@ -1834,7 +1887,7 @@ function throwForFailedTurn(agent: Agent, eventStart: number): void {
   const end = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
   if (end === undefined) return
   switch (end.data.reason.kind) {
-    case 'error': throw new Error(end.data.reason.error.message)
+    case 'error': throw Object.assign(new Error(end.data.reason.error.message), end.data.reason.error)
     case 'aborted':
     case 'blocked':
     case 'interrupted': throw new Error(`evidence-mapping-agent-turn-${end.data.reason.kind}`)
@@ -2642,8 +2695,13 @@ async function executeEvidenceMappingRun(
 ): Promise<{ artifacts: StageArtifact[]; outline: OutlineArtifact; evidence: EvidenceMapArtifact }> {
   if (task.stage !== 'evidence_mapping') throw new Error('evidence-mapping-executor-stage-invalid')
   const maxConcurrency = options.maxConcurrency ?? DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY
+  const maxInfrastructureRetryAttempts = options.maxInfrastructureRetryAttempts
+    ?? DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) {
     throw new Error('evidence-mapping-max-concurrency-invalid')
+  }
+  if (!Number.isSafeInteger(maxInfrastructureRetryAttempts) || maxInfrastructureRetryAttempts < 0 || maxInfrastructureRetryAttempts > 8) {
+    throw new Error('evidence-mapping-infrastructure-retry-attempts-invalid')
   }
   const localRun = options.remap !== undefined || finalCheck !== undefined
   if (!localRun) await waitForModelStageIdle(agent, options.signal)
@@ -2934,7 +2992,7 @@ async function executeEvidenceMappingRun(
   let activeTasks = 0
 
   const maxMappingRepairs = Math.min(1, options.maxRepairAttempts)
-  const runTask = async (
+  const runTaskAttempt = async (
     mappingTask: EvidenceMappingTask,
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
@@ -3289,7 +3347,7 @@ async function executeEvidenceMappingRun(
               log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
               log.status = 'failed'
               await persistLog()
-              throw new BidStageExecutionError(latestIssues)
+              throw new MappingSubagentInfrastructureError(latestIssues, isRetryableMappingInfrastructureError(error), retryAfterMs(error))
             }
             if (attempt < maxMappingRepairs) {
               outputEventStart = child.session.events.length
@@ -3310,6 +3368,10 @@ async function executeEvidenceMappingRun(
         throw new BidStageExecutionError(latestIssues)
       } catch (error) {
         log.status = 'failed'
+        if (error instanceof MappingSubagentInfrastructureError) {
+          await persistLog()
+          throw error
+        }
         if (log.attempts.length === attemptBase) log.attempts.push({
           child_session_id: null, attempt: attemptBase + 1, stop_reason: 'infrastructure-error', accepted: false,
           issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }],
@@ -3317,19 +3379,32 @@ async function executeEvidenceMappingRun(
         })
         await persistLog()
         if (signal.aborted) throw error
-        if (taskOwnsOutlineRefinement(mappingTask) || mappingTask.phase === 'final_check' || options.remap !== undefined) throw error
-        return {
-          task: mappingTask,
-          result: emptyMappingResult(mappingTask, runInputs.outline),
-          taskOperations: [],
-          researchCandidates: { local_material_refs: [], web_source_ids: [] },
-          snapshots: [],
-          fetchedSnapshots: [],
-        }
+        if (error instanceof BidStageExecutionError) throw error
+        const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }]
+        throw new MappingSubagentInfrastructureError(issues, isRetryableMappingInfrastructureError(error), retryAfterMs(error))
       }
     } finally {
       submissionRequests.delete(String(reservedChildId))
       activeTasks--
+    }
+  }
+
+  const runTask = async (
+    mappingTask: EvidenceMappingTask,
+    runInputs: EvidenceMappingInputs,
+  ): Promise<CompletedMappingTask> => {
+    for (let retry = 0; ; retry++) {
+      try {
+        return await runTaskAttempt(mappingTask, runInputs)
+      } catch (error) {
+        if (!(error instanceof MappingSubagentInfrastructureError) || !error.retryable
+          || retry >= maxInfrastructureRetryAttempts || signal.aborted) throw error
+        const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
+        if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
+        log.status = 'running'
+        await persistLog()
+        await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
+      }
     }
   }
 
@@ -3547,7 +3622,7 @@ async function executeEvidenceMappingRun(
  * @param workspace - 会话工作区。
  * @param outline - 用户待确认目录，结构在复核中保持不变。
  * @param sectionIds - 需要复核的可写章节 ID。
- * @param options - 有限修复、并发和取消设置。
+ * @param options - 有限模型修复、基础设施重试、并发和取消设置。
  * @returns 完整目录和 Evidence Map；复核失败时拒绝确认。
  */
 export async function executeEvidenceMappingFinalCheck(
@@ -3570,7 +3645,7 @@ export async function executeEvidenceMappingFinalCheck(
  * @param agent - 当前父 Agent。
  * @param workspace - 项目工作区。
  * @param task - S4 阶段任务。
- * @param options - 并发、有限模型修复及取消信号。
+ * @param options - 并发、有限模型修复、基础设施重试及取消信号。
  * @returns 已通过校验的阶段 Artifact。
  */
 export async function executeEvidenceMapping(

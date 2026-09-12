@@ -14,6 +14,7 @@ import { Document, Packer, Paragraph } from 'docx'
 import * as XLSX from 'xlsx'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG, parseBidDocument, safeFileName, within } from '../src/index.ts'
+import { readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
 const signal = new AbortController().signal
@@ -298,5 +299,32 @@ describe('BidWorkspace', () => {
 
     const disabled = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, enableDocxExport: false })
     await expect(disabled.exportDocx('draft.md')).rejects.toThrow('bid-docx-export-disabled')
+  })
+
+  it('按明确模板导出，并保持 S5 基准与普通资料清单不变', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, maxFiles: 1 })
+    await mkdir(join(bid.projectRoot, 'drafts'), { recursive: true })
+    await writeFile(join(bid.projectRoot, 'drafts', '技术标.md'), '# 技术标\n\n正文内容。\n')
+    const makeTemplate = (name: string) => Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph(name)] }] }))
+    const first = await saveDocxTemplate(bid, { revision: 0, name: '模板 A.docx', bytes: await makeTemplate('A') })
+    const second = await saveDocxTemplate(bid, { revision: first.library.revision, name: '模板 B.docx', bytes: await makeTemplate('B') })
+    if (first.templateId === null || second.templateId === null) throw new Error('模板上传未返回模板 ID。')
+    await expect(access(bid.corpusRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(second.library.templates).toHaveLength(2)
+    await writeDocxFormat(bid, first.templateId, { ...first.state, conflicts: [],
+      resolved: { ...first.state.resolved, 'body.size': 10 } })
+    await writeDocxFormat(bid, second.templateId, { ...second.state, conflicts: [],
+      resolved: { ...second.state.resolved, 'body.size': 20 } })
+
+    await bid.exportDocx('drafts/技术标.md', 'output/a.docx', first.templateId)
+    await bid.exportDocx('drafts/技术标.md', 'output/b.docx', second.templateId)
+
+    expect(await readFile(join(bid.projectRoot, 'output/a.docx')))
+      .not.toEqual(await readFile(join(bid.projectRoot, 'output/b.docx')))
+    expect((await readDocxFormat(bid, first.templateId)).state.lastExport?.path).toBe('output/a.docx')
+    expect((await readDocxFormat(bid, second.templateId)).state.lastExport?.path).toBe('output/b.docx')
+    expect((await readDocxTemplateLibrary(bid)).estimateTemplateId).toBe(first.templateId)
+    expect((await bid.readManifest()).files).toEqual([])
   })
 })

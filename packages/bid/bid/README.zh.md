@@ -70,7 +70,7 @@ S3 先按评分语义产生候选响应点，再由独立语义复核回看评�
 
 S3 初稿、复核修改及失败重试共用候选修复入口。JSON 格式修复保留原文且只允许序列化标点与空白变化；字段错误只修改定位范围，未知 RP 或评分由模型重新选择合法关联。RP 覆盖、需求/合规/框架引用与结构问题分流至有相应字段权限的局部操作，成功进展保留，非法操作不覆盖候选。所有修复共享次数上限和取消机制，完整语义复核前不发布质量报告；正式输入损坏或版本变化要求通过阶段重置处理。
 
-S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
+S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。可识别的请求限流由 Host 在单个 Mapping Task 内有限退避并自动重试，期间任务保持运行；自动预算耗尽或其他不可重试基础设施错误才使阶段失败。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
 
 S5 Main Agent 从最近的有界用户消息清单中选择稳定的 Session、Message 和 Seq 引用，Host 回查 Session Log 原文并生成 `writing-plan.json` schema v3。首次提交包含完整 Task Contract；后续只能基于当前版本提交 patch，分别更新全书指令、document acceptance、section task、section acceptance 和删除项。Host 保留未修改章节及其 `AC-*`，把实际提交 section patch 自动并入影响范围，并校验 AC 全局唯一及 scope 与容器一致。普通进度询问可以不引用，因此不会修改 Task Contract 或停止 Writer；没有额外动态要求时 section 和 document criteria 可以为空。
 

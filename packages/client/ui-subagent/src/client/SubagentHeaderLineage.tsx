@@ -344,6 +344,49 @@ function CatalogFeedback({
   )
 }
 
+function resolveRowPresentation(
+  rawLabel: string,
+  summaryTitle: string | undefined,
+  path: readonly string[],
+  mode: string,
+): { displayLabel: string; secondary: string } {
+  const fullMatch = rawLabel.match(/^S5\s*·\s*\d+\s*·\s*([\d.]+\s*-\s*编写(?: · 修复 \d+| · 运行重试 \d+)*)\s*·\s*(.+)$/)
+  if (fullMatch && fullMatch[1] !== undefined && fullMatch[2] !== undefined) {
+    return {
+      displayLabel: fullMatch[1],
+      secondary: fullMatch[2].trim(),
+    }
+  }
+
+  const oldMatch = rawLabel.match(/^S5\s*·\s*(\d+(?:\.\d+)*)\s*(?:·\s*(修复\s*\d+|运行重试\s*\d+))*\s*·\s*(.+)$/)
+  if (oldMatch && oldMatch[1] !== undefined && oldMatch[3] !== undefined) {
+    const chapterNo = oldMatch[1].includes('.') ? oldMatch[1] : (oldMatch[1].replace(/^0+/, '') || '0')
+    const retryOrRepair = oldMatch[2] ? ` · ${oldMatch[2]}` : ''
+    const chapterTitle = oldMatch[3].trim()
+    return {
+      displayLabel: `${chapterNo} - 编写${retryOrRepair}`,
+      secondary: chapterTitle,
+    }
+  }
+
+  if (/^[\d.]+\s*-\s*(?:编写|审查)/.test(rawLabel)) {
+    const isPromptFallback = summaryTitle !== undefined && /^(?:你是|prompt|You are)/i.test(summaryTitle)
+    const chapterTitle = !isPromptFallback && summaryTitle ? summaryTitle : ''
+    return {
+      displayLabel: rawLabel,
+      secondary: chapterTitle,
+    }
+  }
+
+  const secondary = [...path, summaryTitle, mode]
+    .filter((value): value is string => value !== undefined && value !== '')
+    .join(' · ')
+  return {
+    displayLabel: rawLabel,
+    secondary,
+  }
+}
+
 /** One status-grouped catalog row, reused by both sections. */
 function CatalogRow({
   node, reserveDisclosure, currentSessionId, catalogs, summaries, expanded, level, now,
@@ -357,12 +400,9 @@ function CatalogRow({
   const childLoading = childCatalog === undefined
     || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
   const summary = summaries[entry.id]
-  const label = entry.label ?? entry.id
+  const rawLabel = entry.label ?? entry.id
   const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-  const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-  const secondary = [...path, summary?.title, mode]
-    .filter((value): value is string => value !== undefined)
-    .join(' · ')
+  const { displayLabel, secondary } = resolveRowPresentation(rawLabel, summary?.title, path, mode)
   const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
   const durationMs = activityDuration(summary, entry.activity, now)
   const tokenMetric = totalTokens === undefined ? undefined : `${formatTokens(totalTokens)} tok`
@@ -400,7 +440,7 @@ function CatalogRow({
         tabIndex={0}
         aria-level={level}
         aria-current={isCurrent || undefined}
-        aria-label={[label, secondary, activity, metrics].filter(value => value !== '').join(' ')}
+        aria-label={[displayLabel, secondary, metrics].filter(value => value !== '').join(' ')}
         {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
         className={css.row}
         onClick={open}
@@ -413,7 +453,7 @@ function CatalogRow({
               type="button"
               tabIndex={-1}
               className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
-              aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
+              aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label: displayLabel })}
               onClick={toggle}
             >
               <IconChevronRightOutline14 />
@@ -422,11 +462,8 @@ function CatalogRow({
         <div className={css.clickarea}>
           <StateDot state={entry.activity === 'running' ? 'ongoing' : 'done'} />
           <span className={css.content}>
-            <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
+            <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{displayLabel}</span>
             {secondary !== '' && <span className={css.summary}>{secondary}</span>}
-          </span>
-          <span className={`${css.activity} ${entry.activity === 'running' ? css.runningActivity : ''}`}>
-            {activity}
           </span>
           {metrics !== '' && (
             <span className={css.metrics}>
@@ -865,28 +902,26 @@ function CatalogDropdown({
           onMouseEnter={cancelHoverClose}
           onMouseLeave={scheduleHoverClose}
         >
-          <section className={`${css.section} ${css.runningSection} ${runningCount === 0 ? css.emptySection : ''}`}>
-            <h2 className={css.sectionTitle}>{t('section.running', { count: runningCount })}</h2>
-            <div className={css.sectionBody}>
-              {runningCount === 0
-                ? <div className={css.notice}>{t('section.running.empty')}</div>
-                : (
-                  <CatalogSectionRows
-                    nodes={runningNodes}
-                    currentSessionId={currentSessionId}
-                    catalogs={catalogs}
-                    summaries={summaries}
-                    expanded={expanded}
-                    now={now}
-                    openChild={openChild}
-                    refresh={refresh}
-                    toggleBranch={toggleBranch}
-                    closeCatalog={() => { changeOpen(false) }}
-                    t={t}
-                  />
-                )}
-            </div>
-          </section>
+          {runningCount > 0 && (
+            <section className={`${css.section} ${css.runningSection}`}>
+              <h2 className={css.sectionTitle}>{t('section.running', { count: runningCount })}</h2>
+              <div className={css.sectionBody}>
+                <CatalogSectionRows
+                  nodes={runningNodes}
+                  currentSessionId={currentSessionId}
+                  catalogs={catalogs}
+                  summaries={summaries}
+                  expanded={expanded}
+                  now={now}
+                  openChild={openChild}
+                  refresh={refresh}
+                  toggleBranch={toggleBranch}
+                  closeCatalog={() => { changeOpen(false) }}
+                  t={t}
+                />
+              </div>
+            </section>
+          )}
           <section className={`${css.section} ${css.historySection}`}>
             <h2 className={css.sectionTitle}>{t('section.history', { count: historyCount })}</h2>
             <div className={css.sectionBody}>

@@ -101,6 +101,7 @@
     "completion": {
       "plan_version": 1,
       "format_revision": 0,
+      "format_template_id": null,
       "pages": 0.2908768841953244,
       "document_sha256": "14fbfde5eff7e5e58f978e22bd01ae3ef288bd703671d0388b6c546ff4e49260",
       "reason": "章节与整书 required 条件均已满足。",

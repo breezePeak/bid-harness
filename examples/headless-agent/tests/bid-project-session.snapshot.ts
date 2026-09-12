@@ -55,7 +55,7 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       expect(JSON.parse(await readFile(join(exported, 'project-state.json'), 'utf8'))).toMatchObject({
         runtime: { stage: 'docx_export', status: 'completed' },
       })
-      const format = JSON.parse(await readFile(join(exported, 'word-export/config.json'), 'utf8')) as { lastExport: { path: string } }
+      const format = JSON.parse(await readFile(join(exported, 'word-export/default.config.json'), 'utf8')) as { lastExport: { path: string } }
       expect((await readFile(join(exported, format.lastExport.path))).subarray(0, 2).toString()).toBe('PK')
     },
   })

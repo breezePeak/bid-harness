@@ -1436,13 +1436,16 @@ async function reviewWritingPlanCompletion(
   try {
     const saved = parseChapterWritingCompletionState(await readJson(workspace, COMPLETION_REVIEW_PATH))
     const formatRevision = measured.estimate?.format.revision ?? null
+    const formatTemplateId = measured.estimate?.format.template_id ?? null
     if (saved.completion?.plan_version === writingPlan.plan_version
       && saved.completion.format_revision === formatRevision
+      && saved.completion.format_template_id === formatTemplateId
       && saved.completion.document_sha256 === current.documentSha256) return completedArtifacts()
     const last = saved.rounds.at(-1)
     if (saved.confirmed_outline_sha256 === outlineHash
       && (last === undefined || last.plan_version === writingPlan.plan_version
-        && last.format_revision === formatRevision && last.after_document_sha256 === current.documentSha256)) {
+        && last.format_revision === formatRevision && last.format_template_id === formatTemplateId
+        && last.after_document_sha256 === current.documentSha256)) {
       recovery = saved
     }
   } catch (error) {
@@ -1458,6 +1461,7 @@ async function reviewWritingPlanCompletion(
       completion: {
         plan_version: writingPlan.plan_version,
         format_revision: measured.estimate?.format.revision ?? null,
+        format_template_id: measured.estimate?.format.template_id ?? null,
         pages: measured.estimate?.total ?? null,
         document_sha256: current.documentSha256,
         reason: decision.reason,
@@ -1555,6 +1559,7 @@ async function reviewWritingPlanCompletion(
     recovery = { ...recovery, rounds: [...recovery.rounds, {
       plan_version: writingPlan.plan_version,
       format_revision: measured.estimate?.format.revision ?? null,
+      format_template_id: measured.estimate?.format.template_id ?? null,
       before_pages: measured.estimate?.total ?? null,
       before_document_sha256: current.documentSha256,
       reason: decision.reason,
@@ -2096,6 +2101,18 @@ async function runChapterWriting(
           await persistLog()
           let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
           childSetups.set(reviewLabel, (child) => {
+            const titles = agent.ctx.get('sessionTitle')
+            if (titles !== undefined) {
+              try { titles.rename(child.session, context.section.title) } catch {}
+            } else {
+              try {
+                child.session.append('session/title', {
+                  title: context.section.title,
+                  messageSeqs: [],
+                  source: { kind: 'user' },
+                })
+              } catch {}
+            }
             reviewRuntime = attachChapterReview(child, context, quotes, evidencePack, options.maxRepairAttempts, hostAcceptanceResults)
           })
           const reviewer = await subagents.start('spawn', {
@@ -2194,7 +2211,7 @@ async function runChapterWriting(
         const writerAttempt = log.attempts.filter(item => item.role === 'writer').length + 1
         const semanticLabel = attempt === 0 ? '' : ` · 修复 ${attempt}`
         const retryLabel = infrastructureRetries === 0 ? '' : ` · 运行重试 ${infrastructureRetries}`
-        const label = `S5 · ${serial}${semanticLabel}${retryLabel} · ${context.section.title}`
+        const label = `S5 · ${serial} · ${number} - 编写${semanticLabel}${retryLabel} · ${context.section.title}`
         await appendChapterWebReferences(workspace, references, [...durableWebSources.values()])
         const contextPrompt = renderChapterSubagentTask(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
@@ -2224,7 +2241,7 @@ async function runChapterWriting(
               `${normalizeChapterHeadings(parsed.markdown, context.section.title, sectionId, number).trim()}\n`,
             )
           }
-        }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId))
+        }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId), context.section.title)
         const run = writer
         activeWriterIds.set(sectionId, String(run.id))
         let candidate: AcceptedChapterCandidate | undefined

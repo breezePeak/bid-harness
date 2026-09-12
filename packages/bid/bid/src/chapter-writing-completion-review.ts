@@ -7,6 +7,7 @@ import { registerCompletedChapterReader } from './chapter-reading.ts'
 import type { WritingPlan } from './writing-requirements.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import type { ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import type { DocxTemplateId } from './docx-format-contract.ts'
 
 const revisionSchema = z.object({
   section_id: z.string().min(1),
@@ -57,6 +58,7 @@ export const CHAPTER_WRITING_COMPLETION_TOOLS = ['read_completed_chapter', 'subm
 export interface ChapterWritingCompletionRound {
   readonly plan_version: number
   readonly format_revision: number | null
+  readonly format_template_id: DocxTemplateId | null
   readonly before_pages: number | null
   readonly before_document_sha256: string
   readonly reason: string
@@ -79,6 +81,7 @@ export interface ChapterWritingCompletionState {
   readonly completion?: {
     readonly plan_version: number
     readonly format_revision: number | null
+    readonly format_template_id: DocxTemplateId | null
     readonly pages: number | null
     readonly document_sha256: string
     readonly reason: string
@@ -88,9 +91,11 @@ export interface ChapterWritingCompletionState {
 }
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
+const docxTemplateIdSchema = hash as unknown as z.ZodType<DocxTemplateId>
 const roundSchema = z.object({
   plan_version: z.number().int().positive(),
   format_revision: z.number().int().nonnegative().nullable(),
+  format_template_id: docxTemplateIdSchema.nullable().default(null),
   before_pages: z.number().nonnegative().nullable(),
   before_document_sha256: hash,
   reason: z.string().min(1),
@@ -110,6 +115,7 @@ const stateSchema = z.object({
   completion: z.object({
     plan_version: z.number().int().positive(),
     format_revision: z.number().int().nonnegative().nullable(),
+    format_template_id: docxTemplateIdSchema.nullable().default(null),
     pages: z.number().nonnegative().nullable(),
     document_sha256: hash,
     reason: z.string().min(1),

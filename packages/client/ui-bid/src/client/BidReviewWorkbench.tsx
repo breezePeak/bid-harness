@@ -9,6 +9,7 @@ import {
   IconRefreshOutline14,
   IconThinkOutline14,
   MarkdownText,
+  Modal,
   Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidReviewWorkbench.module.css'
@@ -19,7 +20,10 @@ function classes(...parts: Array<string | undefined | false | null>): string {
   return parts.filter(Boolean).join(' ')
 }
 
-function pageTargetInfo(value: BidReviewWorkbenchView['summary']['page_target'] | undefined): {
+function pageTargetInfo(
+  value: BidReviewWorkbenchView['summary']['page_target'] | undefined,
+  estimate: BidReviewWorkbenchView['summary']['page_estimate'] | undefined,
+): {
   label: string
   title: string
   warning: boolean
@@ -41,7 +45,7 @@ function pageTargetInfo(value: BidReviewWorkbenchView['summary']['page_target'] 
       : `超出 ${Math.abs(value.difference).toFixed(2)} 页`
   return {
     label: `目标 ${bounds} · ${result}`,
-    title: `当前正文估算 ${value.estimated_pages.toFixed(2)} 页；${value.target.estimate_basis}`,
+    title: `当前正文估算 ${value.estimated_pages.toFixed(2)} 页；${pageEstimateBasis(estimate)}；${value.target.estimate_basis}`,
     warning: value.status !== 'met',
   }
 }
@@ -81,6 +85,7 @@ export function BidReviewWorkbench({
   const [chapter, setChapter] = useState<BidReviewChapterView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
+  const [complianceModalOpen, setComplianceModalOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
   const requestVersion = useRef(0)
@@ -190,7 +195,7 @@ export function BidReviewWorkbench({
     workbench?.summary.page_estimate,
     (workbench?.summary.content_count ?? 0) >= (workbench?.summary.chapter_count ?? 1),
   )
-  const targetInfo = pageTargetInfo(workbench?.summary.page_target)
+  const targetInfo = pageTargetInfo(workbench?.summary.page_target, workbench?.summary.page_estimate)
 
   const exportWord = (): void => {
     if (!exportReady || exporting || openWordExport === undefined) return
@@ -223,6 +228,24 @@ export function BidReviewWorkbench({
             <Pill className={classes(css.statPill, targetInfo.warning && css.statPillWarning)}>
               <span title={targetInfo.title}>{targetInfo.label}</span>
             </Pill>
+            {workbench !== null && (
+              <Pill
+                className={classes(
+                  css.statPill,
+                  css.compliancePill,
+                  workbench.global_compliance.document_issues.length > 0 && css.compliancePillWarning,
+                )}
+                onClick={() => { setComplianceModalOpen(true) }}
+                title="点击查看文档级合规检查详情"
+              >
+                <span>文档级合规检查</span>
+                {workbench.global_compliance.document_issues.length > 0 && (
+                  <span className={css.complianceBadge}>
+                    {workbench.global_compliance.document_issues.length}
+                  </span>
+                )}
+              </Pill>
+            )}
           </div>
         </div>
         <div className={css.headerStats}>
@@ -238,41 +261,70 @@ export function BidReviewWorkbench({
       {error !== null && <div className={css.error}>{error}</div>}
       {projection.runtime.status === 'pending' && <p>等待开始章节写作。</p>}
 
-      {workbench !== null && workbench.global_compliance.status !== 'not_required' && (
-        <section className={css.reviewSection} aria-label="文档级合规核验">
-          <div className={css.reviewHeader}>
-            <h2>文档级合规核验</h2>
-            <span className={classes(css.miniTag, workbench.global_compliance.status === 'pass' ? css.miniTagSuccess
-              : workbench.global_compliance.status === 'needs_attention' ? css.miniTagWarning : css.miniTagWriting)}>
-              {getGlobalComplianceStatusLabel(workbench.global_compliance.status)}
-            </span>
-          </div>
-          <span className={css.fieldLabel}>
-            已记录 {workbench.global_compliance.reviewed_count}/{workbench.global_compliance.total_count} 项
-          </span>
-          {workbench.global_compliance.document_issues.length > 0 && <>
-            <h3 className={css.fieldLabel}>文档级问题</h3>
-            <ul className={css.issuesList}>{workbench.global_compliance.document_issues.map(issue => (
-              <li key={issue.compliance_id} className={css.issueCard} data-severity="high">
-                <div className={css.issueHeader}><span className={css.issueTitle}>{issue.compliance_id}</span><span className={css.miniTag}>{issue.status === 'pending' ? '待核验' : '高风险'}</span></div>
-                <p className={css.issueDetail}>{issue.detail}</p>
-                {issue.affected_section_ids.length > 0 && <p className={css.issueDetail}>受影响章节：{issue.affected_section_ids.join('、')}</p>}
-              </li>
-            ))}</ul>
-          </>}
-          {workbench.global_compliance.delivery_todos.length > 0 && <>
-            <h3 className={css.fieldLabel}>项目／交付待办</h3>
-            <ul className={css.issuesList}>{workbench.global_compliance.delivery_todos.map(issue => (
-              <li key={issue.compliance_id} className={css.card}>
-                <div className={css.issueHeader}>
-                  <span className={css.issueTitle}>{issue.compliance_id}</span>
-                  <span className={css.miniTag}>待确认</span>
+      {workbench !== null && (
+        <Modal
+          open={complianceModalOpen}
+          onClose={() => { setComplianceModalOpen(false) }}
+          title="文档级合规核验"
+          closeLabel="关闭"
+          className={css.complianceModal ?? ''}
+          contentClassName={css.complianceModalContent ?? ''}
+        >
+          <div className={css.complianceModalBody}>
+            {(() => {
+              const allIssues = [
+                ...workbench.global_compliance.document_issues.map(issue => ({ ...issue, kind: 'document' as const })),
+                ...workbench.global_compliance.delivery_todos.map(todo => ({ ...todo, kind: 'delivery' as const })),
+              ]
+              if (allIssues.length === 0) {
+                return (
+                  <div className={css.complianceEmpty}>
+                    暂无文档级合规问题
+                  </div>
+                )
+              }
+              return (
+                <div className={css.tableWrapper}>
+                  <table className={css.complianceTable}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: '120px' }}>编号</th>
+                        <th style={{ width: '90px' }}>状态</th>
+                        <th>问题详情</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allIssues.map(issue => (
+                        <tr key={issue.compliance_id}>
+                          <td className={css.tableCellCode}>{issue.compliance_id}</td>
+                          <td>
+                            <span className={classes(
+                              css.cellTag,
+                              issue.status === 'fail' ? css.cellTagError
+                                : issue.kind === 'delivery' ? css.cellTagInfo
+                                  : css.cellTagPending,
+                            )}>
+                              {issue.kind === 'delivery' ? '待确认'
+                                : issue.status === 'pending' ? '待核验' : '高风险'}
+                            </span>
+                          </td>
+                          <td className={css.tableCellDetail}>
+                            <div className={css.detailText}>{issue.detail}</div>
+                            {issue.affected_section_ids.length > 0 && (
+                              <div className={css.affectedSections}>
+                                受影响章节：{issue.affected_section_ids.join('、')}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                <p className={css.issueDetail}>{issue.detail}</p>
-              </li>
-            ))}</ul>
-          </>}
-        </section>
+              )
+            })()}
+          </div>
+        </Modal>
       )}
 
       <div className={css.columns}>
@@ -516,14 +568,6 @@ export function BidReviewWorkbench({
   )
 }
 
-function getGlobalComplianceStatusLabel(status: BidReviewWorkbenchView['global_compliance']['status']): string {
-  switch (status) {
-    case 'not_required': return '无全局要求'
-    case 'reviewing': return '待核验'
-    case 'pass': return '核验通过'
-    case 'needs_attention': return '存在未决事项'
-  }
-}
 
 function titleRowClass(_num?: string): string {
   return css.titleRow ?? ''
@@ -583,15 +627,23 @@ function getSeverityLabel(severity: BidReviewChapterView['review']['issues'][num
   return '低风险'
 }
 
-const PAGE_ESTIMATE_BASIS = '按当前 Word 导出格式估算，实际分页以 Word 为准'
+function pageEstimateBasis(estimate: BidReviewWorkbenchView['summary']['page_estimate'] | undefined): string {
+  const basis = estimate?.status === 'unavailable' ? estimate.basis : estimate
+  if (basis === undefined) return '页数基准与统计方式暂不可用'
+  const template = basis.template?.name ?? '系统默认格式'
+  const method = basis.method === 'rendered'
+    ? 'LibreOffice 渲染分页，结果更接近当前导出文件'
+    : '快速排版估算，实际分页以 Word 为准'
+  return `页数基准：${template}；统计方式：${method}`
+}
 
 function getSectionPageInfo(estimate: BidReviewWorkbenchView['outline'][number]['page_estimate']): { label: string; title: string } {
   if (estimate?.status === 'available') return {
     label: `约 ${estimate.pages} 页`,
-    title: `${PAGE_ESTIMATE_BASIS}${estimate.incomplete ? '；仅统计已生成内容' : ''}`,
+    title: `${pageEstimateBasis(estimate)}${estimate.incomplete ? '；仅统计已生成内容' : ''}`,
   }
-  if (estimate?.status === 'empty') return { label: '—', title: `${PAGE_ESTIMATE_BASIS}；正文尚未生成` }
-  return { label: '暂不可用', title: PAGE_ESTIMATE_BASIS }
+  if (estimate?.status === 'empty') return { label: '—', title: `${pageEstimateBasis(estimate)}；正文尚未生成` }
+  return { label: '暂不可用', title: pageEstimateBasis(estimate) }
 }
 
 function getDocumentPageInfo(
@@ -599,8 +651,11 @@ function getDocumentPageInfo(
   complete: boolean,
 ): { label: string; title: string } {
   if (estimate?.status === 'available') return {
-    label: `${complete ? '正文共' : '已生成正文'}约 ${estimate.pages} 页`, title: PAGE_ESTIMATE_BASIS,
+    label: estimate.method === 'rendered'
+      ? `${complete ? '' : '已生成正文'}预计导出 ${estimate.pages} 页`
+      : `${complete ? '正文共' : '已生成正文'}约 ${estimate.pages} 页`,
+    title: pageEstimateBasis(estimate),
   }
-  if (estimate?.status === 'empty') return { label: '正文尚未生成', title: `${PAGE_ESTIMATE_BASIS}；正文尚未生成` }
-  return { label: '页数暂不可用', title: PAGE_ESTIMATE_BASIS }
+  if (estimate?.status === 'empty') return { label: '正文尚未生成', title: `${pageEstimateBasis(estimate)}；正文尚未生成` }
+  return { label: '页数暂不可用', title: pageEstimateBasis(estimate) }
 }

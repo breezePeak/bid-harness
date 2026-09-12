@@ -2,18 +2,22 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { DocxTemplateId } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
 import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 
 afterEach(cleanup)
 
+const pageBasis = { source: 'template' as const, method: 'fast' as const,
+  template: { id: 'a'.repeat(64) as DocxTemplateId, name: '项目技术标模板.docx', revision: 2 } }
+
 const workbench = {
-  schema_version: 4 as const,
+  schema_version: 5 as const,
   outline: [
-    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, chapter_indicator: { status: 'not_started' as const, tooltip: '章节概述' }, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
+    { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, chapter_indicator: { status: 'not_started' as const, tooltip: '章节概述' }, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true, ...pageBasis } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, chapter_indicator: { status: 'reviewing' as const, tooltip: '正在审核' }, content_available: true },
   ],
-  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3 }, page_target: { status: 'not_required' as const } },
+  summary: { chapter_count: 1, content_count: 1, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'available' as const, pages: 3, ...pageBasis }, page_target: { status: 'not_required' as const } },
   global_compliance: { status: 'not_required' as const, reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
 }
 
@@ -41,7 +45,7 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 
 describe('BidReviewWorkbench', () => {
   it('仅为完整目录中的非叶节显示页数，折叠不改变叶节状态点', async () => {
-    const branch = { ...workbench.outline[0]!, section_id: 'BRANCH', parent_id: 'ROOT', order: 1, title: '实施安排', page_estimate: { status: 'empty' as const } }
+    const branch = { ...workbench.outline[0]!, section_id: 'BRANCH', parent_id: 'ROOT', order: 1, title: '实施安排', page_estimate: { status: 'empty' as const, ...pageBasis } }
     const leaf = { ...workbench.outline[1]!, parent_id: 'BRANCH', order: 1 }
     render(
       <BidReviewWorkbench
@@ -62,7 +66,7 @@ describe('BidReviewWorkbench', () => {
     expect(await screen.findByText('正文共约 3 页')).toBeTruthy()
     expect(screen.getByText('无页数目标')).toBeTruthy()
     rerender(<BidReviewWorkbench {...props({ getWorkbench: async () => ({
-      ...workbench, summary: { ...workbench.summary, content_count: 0, page_estimate: { status: 'empty' as const } },
+      ...workbench, summary: { ...workbench.summary, content_count: 0, page_estimate: { status: 'empty' as const, ...pageBasis } },
       outline: workbench.outline.map(section => section.section_id === 'ROOT' ? { ...section, page_estimate: { status: 'unavailable' as const } } : section),
     }) })} />)
     expect(await screen.findByText('正文尚未生成')).toBeTruthy()
@@ -126,6 +130,7 @@ describe('BidReviewWorkbench', () => {
         status: 'below',
         target: { kind: 'minimum', min_pages: 200, max_pages: null, estimate_basis: '按当前 Word 格式估算。' },
         estimated_pages: 150.25, difference: 49.75, format_revision: 2, format_source: 'template',
+        format_template_id: pageBasis.template.id, estimate_method: 'fast',
       } },
     }) })} />)
     const status = await screen.findByText('目标 至少 200 页 · 尚差 49.75 页')
@@ -211,12 +216,23 @@ describe('BidReviewWorkbench', () => {
         delivery_todos: [{ compliance_id: 'GLOBAL-UPLOAD', status: 'pending' as const, detail: '尚无实际上传执行证据。', affected_section_ids: [] }],
       },
     }) })} />)
+    const complianceBtn = await screen.findByRole('button', { name: /文档级合规检查/ })
+    expect(complianceBtn).toBeTruthy()
+    expect(complianceBtn.textContent).toContain('1')
+    expect(screen.queryByRole('heading', { name: '文档级合规核验' })).toBeNull()
+
+    fireEvent.click(complianceBtn)
     expect(await screen.findByRole('heading', { name: '文档级合规核验' })).toBeTruthy()
-    expect(screen.getByText('文档级问题')).toBeTruthy()
+    expect(screen.getByText('GLOBAL-CONTENT')).toBeTruthy()
+    expect(screen.getByText('高风险')).toBeTruthy()
     expect(screen.getByText('缺少整份文档必须具备的证明材料。')).toBeTruthy()
-    expect(screen.getByText('项目／交付待办')).toBeTruthy()
+    expect(screen.getByText('GLOBAL-UPLOAD')).toBeTruthy()
+    expect(screen.getByText('待确认')).toBeTruthy()
     expect(screen.getByText('尚无实际上传执行证据。')).toBeTruthy()
     expect(screen.getByText('需关注 0')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('heading', { name: '文档级合规核验' })).toBeNull()
   })
 
   it('选择需修复章节时默认展示已保存审核问题的详情、严重程度和建议', async () => {
@@ -389,7 +405,7 @@ describe('BidReviewWorkbench', () => {
       ...workbench, outline: workbench.outline.map(section => section.writable
         ? section : (() => {
           const { summary: _summary, ...withoutSummary } = section
-          return { ...withoutSummary, content_available: false, page_estimate: { status: 'empty' as const } }
+          return { ...withoutSummary, content_available: false, page_estimate: { status: 'empty' as const, ...pageBasis } }
         })()),
     }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()

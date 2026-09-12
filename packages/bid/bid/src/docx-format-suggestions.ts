@@ -4,7 +4,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, deepFreeze, type Message } from '@deepseek-ai/dsh-llm'
 import { z } from 'zod'
 import { FORMAT_ROLES, validateFormatValues } from './docx-format.ts'
-import type { DocxFormatSuggestion, DocxFormatView, FormatEvidence, FormatRole, FormatValues } from './docx-format-contract.ts'
+import type { DocxFormatCoreView, DocxFormatSuggestion, FormatEvidence, FormatRole, FormatValues } from './docx-format-contract.ts'
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -31,7 +31,7 @@ declare module '@deepseek-ai/dsh-session/types' {
  * @param view 程序提取的字段、模板正文和候选。
  * @returns 可以参与证据合并的模板解释。
  */
-export function validateFormatSuggestion(value: unknown, view: DocxFormatView): DocxFormatSuggestion {
+export function validateFormatSuggestion(value: unknown, view: DocxFormatCoreView): DocxFormatSuggestion {
   const parsed = z.strictObject({ rules: z.array(z.strictObject({ key: z.string(),
     value: z.union([z.string(), z.number(), z.boolean()]),
     evidence: z.string().min(1) })).max(200),
@@ -75,7 +75,7 @@ export function validateFormatSuggestion(value: unknown, view: DocxFormatView): 
  */
 export async function suggestDocxFormat(ctx: Context,
   session: Session,
-  view: DocxFormatView,
+  view: DocxFormatCoreView,
   signal: AbortSignal,
   maxTokens: number): Promise<DocxFormatSuggestion> {
   const llm = ctx.get('llm')

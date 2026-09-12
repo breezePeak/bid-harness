@@ -16,18 +16,19 @@ import type { BidEvidenceMappingProgress } from '@deepseek-ai/dsh-bid/control-pl
 describe('bid control-plane public contract', () => {
   it('校验工作台页数返回，拒绝把异常估算伪装成零页', () => {
     const view = parseBidReviewWorkbenchView({
-      schema_version: 4,
-      outline: [{ section_id: 'root', parent_id: null, order: 1, title: '方案', writable: false, writing_status: 'not_started', review_status: 'not_started', chapter_indicator: { status: 'not_started', tooltip: '概述待补充' }, content_available: false, page_estimate: { status: 'empty' } }],
+      schema_version: 5,
+      outline: [{ section_id: 'root', parent_id: null, order: 1, title: '方案', writable: false, writing_status: 'not_started', review_status: 'not_started', chapter_indicator: { status: 'not_started', tooltip: '概述待补充' }, content_available: false, page_estimate: { status: 'empty', source: 'default', method: 'fast', template: null } }],
       summary: { chapter_count: 0, content_count: 0, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'unavailable' }, page_target: { status: 'not_set' } },
       global_compliance: { status: 'not_required', reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },
     })
     expect(view.summary.page_estimate.status).toBe('unavailable')
-    expect(() => parseBidReviewWorkbenchView({ ...view, summary: { ...view.summary, page_estimate: { status: 'available', pages: 0 } } })).toThrow()
+    expect(() => parseBidReviewWorkbenchView({ ...view, summary: { ...view.summary,
+      page_estimate: { status: 'available', pages: 0, source: 'default', method: 'fast', template: null } } })).toThrow()
   })
 
   it('要求 Host 提供规范化的章节状态指标', () => {
     const view = parseBidReviewWorkbenchView({
-      schema_version: 4,
+      schema_version: 5,
       outline: [{ section_id: 'leaf', parent_id: null, order: 1, title: '方案', writable: true, writing_status: 'writing', review_status: 'not_started', chapter_indicator: { status: 'writing', tooltip: '正在编写' }, content_available: false }],
       summary: { chapter_count: 1, content_count: 0, reviewed_count: 0, needs_attention_count: 0, page_estimate: { status: 'unavailable' }, page_target: { status: 'not_set' } },
       global_compliance: { status: 'not_required', reviewed_count: 0, total_count: 0, document_issues: [], delivery_todos: [] },

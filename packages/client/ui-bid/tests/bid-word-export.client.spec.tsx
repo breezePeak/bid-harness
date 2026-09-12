@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { DocxFormatRequest, DocxFormatView, FormatConflict, FormatValue, FormatValues } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidPageEstimate, DocxFormatRequest, DocxFormatView, DocxTemplateId, DocxTemplateLibraryView, FormatConflict, FormatValue, FormatValues } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidWordExport, type BidWordExportInjected } from '../src/client/BidWordExport.tsx'
 import { apply } from '../src/client/index.ts'
 
@@ -20,27 +20,44 @@ const resolved: FormatValues = Object.fromEntries<FormatValue>(['heading1', 'hea
 ]))
 
 function fixture(conflicts: FormatConflict[] = []) {
+  const templateId = 'a'.repeat(64) as DocxTemplateId
+  let library: DocxTemplateLibraryView = {
+    version: 1,
+    revision: 1,
+    estimateTemplateId: templateId,
+    templateMaxBytes: 300 * 1024 * 1024,
+    templates: [{ id: templateId, hash: templateId, name: '模板.docx', parserVersion: 4,
+      createdAt: '2026-09-12T00:00:00.000Z', formatRevision: 0, conflictCount: conflicts.length }],
+  }
   let view: DocxFormatView = {
     state: { version: 2,
       revision: 0,
       opened: true,
-      template: { parserVersion: 4, hash: 'a'.repeat(64), name: '模板.docx' },
+      template: { parserVersion: 4, hash: templateId, name: '模板.docx' },
       extracted: { values: {}, candidates: [], paragraphs: [], evidence: [], warnings: [] },
       modelInterpreted: { values: {}, mapping: {}, evidence: [] },
       conflicts,
       resolved: { ...resolved },
       userConfirmed: {} },
-    templateMaxBytes: 300 * 1024 * 1024,
+    templateId,
+    library,
+    templateMaxBytes: library.templateMaxBytes,
     fields: [{ key: 'tableCaption.size', group: '表格与图表说明', label: '表题字号（磅）', value: 12 }],
     values: { ...resolved }, warnings: [], fingerprint: 'current',
   }
   const actions: BidWordExportInjected = {
-    getFormat: vi.fn(async () => view),
-    saveFormat: vi.fn(async (request: DocxFormatRequest) => {
+    getLibrary: vi.fn(async () => library),
+    getFormat: vi.fn(async (selectedId: DocxTemplateId | null): Promise<DocxFormatView> => selectedId === null
+      ? { ...view, templateId: null, library, state: { ...view.state, template: undefined } }
+      : { ...view, templateId: selectedId, library }),
+    saveFormat: vi.fn(async (selectedId: DocxTemplateId | null, request: DocxFormatRequest): Promise<DocxFormatView> => {
       const nextConflicts = view.state.conflicts.map(conflict => request.userConfirmed[conflict.key] === undefined ? conflict : {
         ...conflict, status: 'confirmed' as const, resolvedValue: request.userConfirmed[conflict.key]!,
       })
-      view = { ...view, state: { ...view.state,
+      library = { ...library, templates: library.templates.map(template => template.id === selectedId
+        ? { ...template, formatRevision: request.revision + 1, conflictCount: nextConflicts.filter(item => item.status === 'conflict').length }
+        : template) }
+      view = { ...view, templateId: selectedId, library, state: { ...view.state,
         revision: request.revision + 1,
         userConfirmed: request.userConfirmed,
         conflicts: nextConflicts,
@@ -49,11 +66,24 @@ function fixture(conflicts: FormatConflict[] = []) {
       return view
     }),
     uploadTemplate: vi.fn(async (_file: File, revision: number) => {
-      view = { ...view, state: { ...view.state, revision: revision + 1,
-        template: { parserVersion: 4, hash: 'b'.repeat(64), name: '新模板.docx' } } }
+      const id = 'b'.repeat(64) as DocxTemplateId
+      library = { ...library, revision: revision + 1, templates: [...library.templates,
+        { id, hash: id, name: '新模板.docx', parserVersion: 4, createdAt: '2026-09-12T01:00:00.000Z', formatRevision: 1, conflictCount: 0 }] }
+      view = { ...view, templateId: id, library, state: { ...view.state, revision: 1,
+        template: { parserVersion: 4, hash: id, name: '新模板.docx' } } }
       return view
     }),
-    preview: vi.fn(async () => ({ ...view, previewHtml: '<h1>文档标题</h1><p>正文示例</p>' })),
+    preview: vi.fn(async (selectedId: DocxTemplateId | null): Promise<DocxFormatView> => (
+      { ...view, templateId: selectedId, library, previewHtml: '<h1>文档标题</h1><p>正文示例</p>' }
+    )),
+    estimatePages: vi.fn(async (selectedId: DocxTemplateId | null): Promise<BidPageEstimate> => ({
+      status: 'available', pages: selectedId === null ? 180 : 188,
+      source: selectedId === null ? 'default' : 'template', method: 'rendered',
+      template: selectedId === null ? null : { id: selectedId, name: selectedId === templateId ? '模板.docx' : '新模板.docx', revision: 1 } })),
+    setEstimateTemplate: vi.fn(async (selectedId: DocxTemplateId | null, revision: number): Promise<DocxTemplateLibraryView> => {
+      library = { ...library, revision: revision + 1, estimateTemplateId: selectedId }
+      return library
+    }),
     generate: vi.fn(async () => ({ path: 'output/bid.docx' })),
     download: vi.fn(async () => {}),
   }
@@ -62,7 +92,7 @@ function fixture(conflicts: FormatConflict[] = []) {
     useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     ...actions,
   } as ConvViewProps & BidWordExportInjected
-  return { props, actions, getView: () => view }
+  return { props, actions, getView: () => view, getLibrary: () => library, templateId }
 }
 
 describe('Word 导出页面', () => {
@@ -71,7 +101,7 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByLabelText('上传 Word 模板')).toBeDefined()
-    expect(screen.getByRole('table', { name: '模板主要格式' })).toBeDefined()
+    expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
     expect(screen.getAllByText('三号（16pt）')).toHaveLength(2)
     expect(screen.getAllByText('小四（12pt）')).toHaveLength(3)
     const exportButton = screen.getByRole('button', { name: '导出 Word' })
@@ -91,9 +121,9 @@ describe('Word 导出页面', () => {
     const file = new File([Uint8Array.of(1, 2, 3)], '新模板.docx')
     fireEvent.change(screen.getByLabelText('上传 Word 模板'), { target: { files: [file] } })
     expect(await screen.findByRole('status')).toHaveProperty('textContent', '正在解析模板…')
-    finishUpload(await actions.getFormat())
-    expect(await screen.findByRole('status')).toHaveProperty('textContent', '模板解析完成')
-    expect(actions.uploadTemplate).toHaveBeenCalledWith(file, 0)
+    finishUpload(await actions.getFormat('b'.repeat(64) as DocxTemplateId))
+    expect(await screen.findByRole('status')).toHaveProperty('textContent', '模板已加入项目模板库')
+    expect(actions.uploadTemplate).toHaveBeenCalledWith(file, 1)
     expect(actions.preview).toHaveBeenCalledTimes(2)
   })
 
@@ -107,7 +137,7 @@ describe('Word 导出页面', () => {
       target: { files: [new File([Uint8Array.of(1)], '模板.docx')] },
     })
     expect(await screen.findByRole('status')).toHaveProperty('textContent', warning)
-    expect(screen.getByRole('table', { name: '模板主要格式' })).toBeDefined()
+    expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
   })
 
   it('冲突单元格标红并只允许选择证据中的值', async () => {
@@ -126,7 +156,7 @@ describe('Word 导出页面', () => {
     fireEvent.click(within(dialog).getByRole('radio', { name: /16/u }))
     fireEvent.click(within(dialog).getByRole('button', { name: '确认' }))
     await screen.findByText('格式已确认')
-    expect(actions.saveFormat).toHaveBeenCalledWith({ revision: 0, userConfirmed: { 'tableCaption.size': 16 } })
+    expect(actions.saveFormat).toHaveBeenCalledWith('a'.repeat(64), { revision: 0, userConfirmed: { 'tableCaption.size': 16 } })
     expect(screen.queryByText('待确认')).toBeNull()
     expect(actions.preview).toHaveBeenCalledTimes(2)
   })
@@ -171,6 +201,34 @@ describe('Word 导出页面', () => {
     expect(actions.download).toHaveBeenCalledOnce()
   })
 
+  it('切换导出模板时把同一模板 ID 传给预览、测算和导出且不改变 S5 基准', async () => {
+    const { props, actions, templateId, getView } = fixture()
+    const secondId = 'b'.repeat(64) as DocxTemplateId
+    const library = await actions.getLibrary()
+    const secondLibrary = { ...library, templates: [...library.templates, {
+      id: secondId, hash: secondId, name: '公司标准模板.docx', parserVersion: 4,
+      createdAt: '2026-09-12T01:00:00.000Z', formatRevision: 3, conflictCount: 0,
+    }] }
+    vi.mocked(actions.getLibrary).mockResolvedValueOnce(secondLibrary)
+    vi.mocked(actions.getFormat).mockImplementation(async selectedId => ({ ...getView(),
+      templateId: selectedId, library: secondLibrary }))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    fireEvent.click(screen.getByRole('radio', { name: /公司标准模板\.docx/u }))
+    await waitFor(() => {
+      expect(actions.getFormat).toHaveBeenCalledWith(secondId)
+      expect(actions.preview).toHaveBeenCalledWith(secondId)
+      expect(actions.estimatePages).toHaveBeenCalledWith(secondId)
+    })
+    fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
+    await screen.findByText('Word 导出完成')
+    expect(actions.generate).toHaveBeenLastCalledWith(secondId)
+    expect(actions.download).toHaveBeenLastCalledWith(secondId)
+    expect(actions.setEstimateTemplate).not.toHaveBeenCalled()
+    expect((await actions.getLibrary()).estimateTemplateId).toBe(templateId)
+  })
+
   it('S5 运行中导出已保存正文，并显示后端返回的内容范围', async () => {
     const { props, actions } = fixture()
     const message = 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。'
@@ -180,7 +238,7 @@ describe('Word 导出页面', () => {
       runtime: { stage: 'chapter_writing', status: 'running' },
     })}/>)
     await screen.findByTitle('Word 效果预览')
-    expect(screen.getByRole('status')).toHaveProperty('textContent', '按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。')
+    expect(screen.getByRole('status').textContent).toContain('按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。')
     const button = screen.getByRole('button', { name: '导出 Word' })
     expect(button).toHaveProperty('disabled', false)
     fireEvent.click(button)
@@ -199,7 +257,7 @@ describe('Word 导出页面', () => {
     const registration = register.mock.calls.find(([definition]) => (definition as { id: string }).id === 'bid-word-export')
     if (!registration) throw new Error('Word export registration is unavailable')
     const injected = (registration[0] as { inject: (sessionId: string) => BidWordExportInjected }).inject('session_bid')
-    const view = await fixture().actions.getFormat()
+    const view = await fixture().actions.getFormat('a'.repeat(64) as DocxTemplateId)
     const uploadFetch = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true, value: view }), { status: 200,
       headers: { 'content-type': 'application/json' } }))
     vi.stubGlobal('fetch', uploadFetch)
@@ -223,7 +281,7 @@ describe('Word 导出页面', () => {
     await waitFor(() => { expect(actions.uploadTemplate).not.toHaveBeenCalled() })
   })
 
-  it('模板上传失败后不把上传前格式显示成本次识别结果', async () => {
+  it('模板上传失败后保留此前选择和格式结果', async () => {
     const conflict: FormatConflict = { key: 'heading3.bold', resolvedValue: true, status: 'conflict', evidence: [
       { key: 'heading3.bold', value: true, source: 'direct_format' },
       { key: 'heading3.bold', value: false, source: 'named_style' },
@@ -236,11 +294,10 @@ describe('Word 导出页面', () => {
     const file = new File([Uint8Array.of(1, 2, 3)], '失败模板.docx')
     fireEvent.change(screen.getByLabelText('上传 Word 模板'), { target: { files: [file] } })
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '格式配置无效：body.size')
-    expect(screen.queryByText('模板.docx')).toBeNull()
-    expect(screen.queryByRole('table', { name: '模板主要格式' })).toBeNull()
-    expect(screen.queryByLabelText('其他格式冲突')).toBeNull()
-    expect(screen.queryByTitle('Word 效果预览')).toBeNull()
-    expect(screen.getByText('尚无本次模板识别结果。')).toBeDefined()
-    expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', true)
+    expect(screen.getByText('模板.docx')).toBeDefined()
+    expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
+    expect(screen.getByLabelText('其他格式冲突')).toBeDefined()
+    expect(screen.getByTitle('Word 效果预览')).toBeDefined()
+    expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', false)
   })
 })

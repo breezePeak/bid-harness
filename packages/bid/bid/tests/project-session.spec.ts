@@ -515,6 +515,9 @@ describe('Workspace 项目与独立 Session', () => {
     const agent = await fresh('page-estimate-failure')
     const workbench = await ctx.bid.getReviewWorkbench(agent.session)
     expect(workbench.summary.page_estimate).toEqual({ status: 'unavailable' })
+    expect(await ctx.bid.estimateDocxPages(agent.session, null)).toEqual({
+      status: 'unavailable', basis: { source: 'default', method: 'fast', template: null },
+    })
     expect(await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).toMatchObject({ markdown: '![远程图](https://example.com/image.png)' })
   })
 
@@ -527,7 +530,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
     expect(executor.execute).not.toHaveBeenCalled()
     expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual(['send_message', 'export_docx', 'revise_chapter'])
-    expect(await ctx.bid.exportDocx(b.session)).toMatchObject({ ok: true })
+    expect(await ctx.bid.exportDocx(b.session, null)).toMatchObject({ ok: true })
     expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
   })
 
@@ -539,8 +542,8 @@ describe('Workspace 项目与独立 Session', () => {
     const projectBefore = await readBidProjectState(workspace)
     const stageReservation = vi.spyOn(host.inFlight, 'set')
 
-    const first = await ctx.bid.exportDocx(agent.session)
-    const second = await ctx.bid.exportDocx(agent.session)
+    const first = await ctx.bid.exportDocx(agent.session, null)
+    const second = await ctx.bid.exportDocx(agent.session, null)
 
     expect(first).toMatchObject({ ok: true, value: { path: expect.stringMatching(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u) } })
     expect(second).toMatchObject({ ok: true })
@@ -581,24 +584,24 @@ describe('Workspace 项目与独立 Session', () => {
     })
 
     expect(getBidClientProjection(runtime(agent.session)).allowedActions).toContain('export_docx')
-    const preview = await ctx.bid.previewDocx(agent.session)
+    const preview = await ctx.bid.previewDocx(agent.session, null)
     expect(typeof preview.previewHtml).toBe('string')
-    const format = await ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} })
+    const format = await ctx.bid.saveDocxFormat(agent.session, null, { revision: 0, userConfirmed: {} })
     expect(format.state.revision).toBe(1)
     expect(host.inFlight.size).toBe(1)
     host.docxInFlight.add(key)
     try {
-      await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 1, userConfirmed: {} }))
+      await expect(ctx.bid.saveDocxFormat(agent.session, null, { revision: 1, userConfirmed: {} }))
         .rejects.toMatchObject({ code: 'BID_OPERATION_IN_PROGRESS' })
     } finally { host.docxInFlight.delete(key) }
     const other = await fresh('running-partial-export-other', workspace.root, false)
     const projectBefore = await readBidProjectState(workspace)
-    await expect(ctx.bid.saveDocxFormat(other.session, { revision: 1, userConfirmed: {} }))
+    await expect(ctx.bid.saveDocxFormat(other.session, null, { revision: 1, userConfirmed: {} }))
       .resolves.toMatchObject({ state: { revision: 2 } })
-    await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 1, userConfirmed: {} }))
+    await expect(ctx.bid.saveDocxFormat(agent.session, null, { revision: 1, userConfirmed: {} }))
       .rejects.toThrow('配置已在其他页面修改')
-    expect((await ctx.bid.previewDocx(other.session)).previewHtml).toBeTypeOf('string')
-    const exported = await ctx.bid.exportDocx(other.session)
+    expect((await ctx.bid.previewDocx(other.session, null)).previewHtml).toBeTypeOf('string')
+    const exported = await ctx.bid.exportDocx(other.session, null)
 
     if (!exported.ok) throw new Error('Partial DOCX export failed')
     expect(exported.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
@@ -625,14 +628,14 @@ describe('Workspace 项目与独立 Session', () => {
     const reset = ctx.bid.resetStage(agent, 'chapter_writing')
     try {
       expect(host.inFlight.values().next().value).toMatchObject({ reservedForReset: true })
-      await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} }))
+      await expect(ctx.bid.saveDocxFormat(agent.session, null, { revision: 0, userConfirmed: {} }))
         .rejects.toThrow('当前项目正在重置阶段')
-      const exported = await ctx.bid.exportDocx(agent.session)
+      const exported = await ctx.bid.exportDocx(agent.session, null)
       expect(exported.ok).toBe(false)
       if (exported.ok) throw new Error('重置期间不能导出')
       expect(exported.error.message).toContain('当前项目正在重置阶段')
     } finally { gate.resolve([]); await retry; await reset }
-    await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} }))
+    await expect(ctx.bid.saveDocxFormat(agent.session, null, { revision: 0, userConfirmed: {} }))
       .resolves.toMatchObject({ state: { revision: 1 } })
   })
 
@@ -653,7 +656,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' })
     const agent = await fresh('failed-partial-export')
 
-    const exported = await ctx.bid.exportDocx(agent.session)
+    const exported = await ctx.bid.exportDocx(agent.session, null)
 
     expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT' }] } })
     if (!exported.ok) throw new Error('已有正文应可导出')

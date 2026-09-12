@@ -378,4 +378,121 @@ describe('S4 稳定章节对应与业务差异', () => {
       expect(screen.getByLabelText(label).querySelector('[aria-current]')?.getAttribute('data-section-id')).toBe('SEC-003')
     }
   })
+
+  it('hideStats 为 true 时隐藏指标卡片', () => {
+    render(
+      <OutlineConfirmationReview
+        outline={testOutline}
+        stage="evidence_mapping"
+        displayMode="final_candidate"
+        readOnly
+        hideStats
+        reviewContext={{ baseline: testOutline, requirements: { schema_version: 1, requirements: [] },
+          scoring: { schema_version: 1, scoring_items: [] }, evidence: null }}
+        onUpdateSection={vi.fn()}
+        onStructureOperation={vi.fn()}
+        onIndentSection={vi.fn()}
+        onOutdentSection={vi.fn()}
+        t={t as never}
+      />,
+    )
+    expect(screen.queryByText('章节总数')).toBeNull()
+    expect(screen.queryByText('正文编写章节')).toBeNull()
+    expect(screen.queryByText('覆盖招标要求')).toBeNull()
+  })
+
+  it('右侧新增目录时左侧留白对应，徽章紧随章节名称后渲染', () => {
+    const current = structuredClone(testOutline)
+    // 增加编写要求，产生“编写要求更新”徽章
+    current.sections[0]!.purpose = '更新后的目的'
+    // 新增一个章节
+    current.sections.push({
+      id: 'SEC-NEW-999',
+      parent_id: null,
+      order: 3,
+      level: 1,
+      title: '新增服务保障',
+      purpose: '说明服务',
+      writable: true,
+      must_answer: [],
+      requirement_ids: [],
+      scoring_ids: [],
+      compliance_ids: [],
+      origin: 'generated',
+      scoring_response_points: [],
+      suggested_tables: [],
+      suggested_figures: [],
+      writing_notes: [],
+    })
+
+    renderComparison(current)
+    const baselinePanel = screen.getByLabelText('S3 已确认目录')
+
+    // 左侧应有留白 spacer 对应右侧新增的章节
+    const leftSpacers = baselinePanel.querySelectorAll('._treeRowSpacer_86b93f, [class*="treeRowSpacer"]')
+    expect(leftSpacers.length).toBeGreaterThanOrEqual(1)
+
+    // 右侧新增章节正常显示并带有标题
+    expect(screen.getByLabelText('SEC-NEW-999 标题')).toBeTruthy()
+    expect((screen.getByLabelText('SEC-NEW-999 标题') as HTMLInputElement).value).toBe('新增服务保障')
+
+    // “编写要求更新” 徽章位于 .rowMain 内部，紧随章节标题
+    const writingBadge = screen.getAllByText('✎ 编写要求更新')[0]!
+    expect(writingBadge).toBeTruthy()
+    const rowMain = writingBadge.closest('._rowMain_86b93f, [class*="rowMain"]')
+    expect(rowMain).toBeTruthy()
+    expect(rowMain?.textContent).toContain('总体技术方案')
+  })
+
+  it('左右目录容器双向同步滚动', () => {
+    const current = structuredClone(testOutline)
+    renderComparison(current)
+
+    const baselinePanel = screen.getByLabelText('S3 已确认目录')
+    const currentPanel = screen.getByLabelText('技术标目录')
+    const baselineScroll = baselinePanel.querySelector('._treeContainer_86b93f, [class*="treeContainer"]') as HTMLDivElement
+    const currentScroll = currentPanel.querySelector('._treeContainer_86b93f, [class*="treeContainer"]') as HTMLDivElement
+
+    expect(baselineScroll).toBeTruthy()
+    expect(currentScroll).toBeTruthy()
+
+    // 触发 baseline 滚动
+    baselineScroll.scrollTop = 120
+    fireEvent.scroll(baselineScroll)
+    expect(currentScroll.scrollTop).toBe(120)
+
+    // 触发 current 滚动
+    currentScroll.scrollTop = 240
+    fireEvent.scroll(currentScroll)
+    expect(baselineScroll.scrollTop).toBe(240)
+  })
+
+  it('在顶部右侧渲染确认操作区，且统计指标横向栅格排布', () => {
+    const confirmButton = <button type="button">使用该目录</button>
+    render(
+      <OutlineConfirmationReview
+        outline={testOutline}
+        confirmation={confirmButton}
+        onUpdateSection={vi.fn()}
+        onStructureOperation={vi.fn()}
+        onIndentSection={vi.fn()}
+        onOutdentSection={vi.fn()}
+        t={t as never}
+      />,
+    )
+
+    const btn = screen.getByRole('button', { name: '使用该目录' })
+    expect(btn).toBeTruthy()
+    // 确认按钮应置于 headerActions 区域内，与保存状态并列
+    const headerActions = btn.closest('[class*="headerActions"]')
+    expect(headerActions).toBeTruthy()
+
+    // 统计指标卡片容器存在且包裹 4 个指标
+    const statsGrid = document.querySelector('[class*="statsGrid"]')
+    expect(statsGrid).toBeTruthy()
+    expect(screen.getByText('章节总数')).toBeTruthy()
+    expect(screen.getByText('正文编写章节')).toBeTruthy()
+    expect(screen.getByText('覆盖招标要求')).toBeTruthy()
+    expect(screen.getByText('覆盖评分响应点')).toBeTruthy()
+  })
 })

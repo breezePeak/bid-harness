@@ -3,7 +3,7 @@ import JSZip from 'jszip'
 import { xml2js } from 'xml-js'
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from './docx-format-contract.ts'
+import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION, DocxTemplateId } from './docx-format-contract.ts'
 import type { FormatCandidate, FormatEvidence, FormatEvidenceSource, FormatRole, FormatValues, ParsedDocxTemplate } from './docx-format-contract.ts'
 interface XmlNode {
   type?: string
@@ -530,7 +530,7 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
   const paragraphTexts = bodyParagraphs.map(node => text(node).trim()).filter(Boolean)
   if (paragraphTexts.length > 2000) warnings.push('模板正文超过 2000 段；模型只读取前 2000 段格式说明。')
   return { parserVersion: DOCX_TEMPLATE_PARSER_VERSION,
-    hash: createHash('sha256').update(bytes).digest('hex'),
+    hash: DocxTemplateId(createHash('sha256').update(bytes).digest('hex')),
     name,
     extracted: {
       candidates,

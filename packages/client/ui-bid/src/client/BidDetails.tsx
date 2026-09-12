@@ -57,6 +57,7 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
   return (
     <section className={css.confirmationContainer} aria-label="目录详情">
       <OutlineConfirmationReview key={`${sessionId}:${presentation.source}`} outline={details.outline} readOnly
+        hideStats
         stage={projection.runtime.stage}
         displayMode={presentation.source === 'initial_confirmed' ? 'initial' : presentation.source}
         notice={presentation.errors.map(message => <p role="alert" key={message}>{message}</p>)}

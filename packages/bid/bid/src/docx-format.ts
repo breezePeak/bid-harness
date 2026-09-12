@@ -1,7 +1,7 @@
 /** Word 样式字段与合并；DOCX 和浏览器预览读取同一组生效值。 */
 import { z } from 'zod'
 import { DOCX_TEMPLATE_MAX_BYTES } from './docx-format-contract.ts'
-import type { DocxFormatState, DocxFormatView, FormatEvidence, FormatField, FormatRole, FormatValue, FormatValues } from './docx-format-contract.ts'
+import type { DocxFormatCoreView, DocxFormatState, FormatEvidence, FormatField, FormatRole, FormatValue, FormatValues } from './docx-format-contract.ts'
 /** 当前标书内容可映射的独立格式角色。 */
 export const FORMAT_ROLES: FormatRole[] = ['title',
   'heading1',
@@ -335,7 +335,11 @@ function candidateEvidence(candidate: DocxFormatState['extracted']['candidates']
  * @param templateMaxBytes 当前部署允许的模板原始字节数。
  * @returns 保存和展示使用的完整视图；values 与 state.resolved 是同一结果。
  */
-export function resolveFormat(state: DocxFormatState, fields: FormatField[], templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES): DocxFormatView {
+export function resolveFormat(
+  state: DocxFormatState,
+  fields: FormatField[],
+  templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES,
+): DocxFormatCoreView {
   const evidence = new Map<string, FormatEvidence[]>()
   const add = (item: FormatEvidence): void => {
     const entries = evidence.get(item.key) ?? []
@@ -411,7 +415,7 @@ export function viewResolvedFormat(
   state: DocxFormatState,
   fields: FormatField[],
   templateMaxBytes = DOCX_TEMPLATE_MAX_BYTES,
-): DocxFormatView {
+): DocxFormatCoreView {
   const resolved = validateFormatValues(state.resolved, fields)
   if (Object.keys(resolved).length !== fields.length)
     throw new Error('保存的 Word 格式缺少最终确认字段，请重新上传模板。')

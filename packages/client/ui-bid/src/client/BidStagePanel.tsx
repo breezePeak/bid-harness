@@ -47,6 +47,7 @@ type SelectedFile = BidSelectedFile & {
   status: 'selected' | 'encoding' | 'uploading' | 'completed' | 'failed'
   error: string | undefined
 }
+type SelectedTemplate = Omit<SelectedFile, 'role'> & { role: 'docx_template' }
 
 /** Select manual or automatic confirmation for the current Bid Session. */
 export function BidConfirmationModeControl({ sessionId, useSessions, useStore, actions, t }: BidConfirmationModeControlProps) {
@@ -186,6 +187,8 @@ export function BidStagePanel({
   getDetails,
   setDetailsAvailable,
   uploadFiles,
+  getDocxLibrary,
+  uploadDocxTemplate,
   startStage,
   stopStage,
   retryStage,
@@ -207,6 +210,9 @@ export function BidStagePanel({
   const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
+  const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate | null>(null)
+  const [docxLibrary, setDocxLibrary] = useState<Awaited<ReturnType<typeof getDocxLibrary>> | null>(null)
+  const [docxTemplateMessage, setDocxTemplateMessage] = useState('')
   const [requestPending, setRequestPending] = useState<PendingAction | null>(null)
   const [requestError, setRequestError] = useState<RequestError | null>(null)
   const [reviewContext, setReviewContext] = useState<OutlineReviewContext | null>(null)
@@ -219,7 +225,9 @@ export function BidStagePanel({
   const frameworkFileInput = useRef<HTMLInputElement>(null)
   const referenceBidFileInput = useRef<HTMLInputElement>(null)
   const referenceFileInput = useRef<HTMLInputElement>(null)
+  const docxTemplateInput = useRef<HTMLInputElement>(null)
   const selectedFilesRef = useRef<readonly SelectedFile[]>([])
+  const selectedTemplateRef = useRef<SelectedTemplate | null>(null)
   const selectedFilesSessionId = useRef(sessionId)
   const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
@@ -346,8 +354,20 @@ export function BidStagePanel({
     if (projection?.runtime.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
     selectedFilesSessionId.current = sessionId
     selectedFilesRef.current = []
+    selectedTemplateRef.current = null
     setSelectedFiles([])
+    setSelectedTemplate(null)
+    setDocxTemplateMessage('')
   }, [projection?.runtime.stage, sessionId])
+
+  useEffect(() => {
+    if (!isBidSession || projection?.runtime.stage !== 'file_intake') { setDocxLibrary(null); return }
+    let active = true
+    void getDocxLibrary().then((value) => { if (active) setDocxLibrary(value) }, (reason: unknown) => {
+      if (active) setDocxTemplateMessage(reason instanceof Error ? reason.message : 'Word 模板库读取失败。')
+    })
+    return () => { active = false }
+  }, [getDocxLibrary, isBidSession, projection?.runtime.stage, sessionId])
 
   useEffect(() => {
     setOutlineFeedback('')
@@ -468,6 +488,12 @@ export function BidStagePanel({
     setSelectedFiles(next)
   }
 
+  const updateSelectedTemplate = (update: (file: SelectedTemplate | null) => SelectedTemplate | null): void => {
+    const next = update(selectedTemplateRef.current)
+    selectedTemplateRef.current = next
+    setSelectedTemplate(next)
+  }
+
   const applyFileResults = (results: readonly BidFileIntakeFileResult[]): void => {
     const remaining = [...results]
     updateSelectedFiles(files => files.map((file) => {
@@ -482,9 +508,26 @@ export function BidStagePanel({
 
   const uploadSelectedFiles = async (): Promise<void> => {
     const files = selectedFilesRef.current
-    if (!files.some(file => file.role === 'tender')) {
+    const template = selectedTemplateRef.current
+    if (files.length > 0 && !files.some(file => file.role === 'tender')) {
       throw new BidActionError('BID_TENDER_REQUIRED', t('error.tender_required'))
     }
+    if (template !== null) {
+      if (docxLibrary === null) throw new Error('Word 模板库尚未就绪。')
+      updateSelectedTemplate(file => file === null ? null : { ...file, progress: 50, status: 'uploading', error: undefined })
+      setDocxTemplateMessage('正在解析 Word 模板…')
+      try {
+        const view = await uploadDocxTemplate(template.file, docxLibrary.revision)
+        updateSelectedTemplate(file => file === null ? null : { ...file, progress: 100, status: 'completed', error: undefined })
+        setDocxLibrary(view.library)
+        setDocxTemplateMessage(view.warnings.find(warning => warning.startsWith('模板解析完成；自动格式解释未应用'))
+          ?? '模板已加入项目模板库')
+      } catch (reason: unknown) {
+        updateSelectedTemplate(file => file === null ? null : { ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })
+        throw reason
+      }
+    }
+    if (files.length === 0) return
     updateSelectedFiles(current => current.map(file => ({ ...file, progress: 5, status: 'encoding', error: undefined })))
     try {
       const results = await uploadFiles(
@@ -531,6 +574,28 @@ export function BidStagePanel({
     setSelectedFiles(next)
     setRequestError(null)
     event.currentTarget.value = ''
+  }
+
+  const selectedDocxTemplate = (event: ChangeEvent<HTMLInputElement>): void => {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file || !docxLibrary) return
+    if (file.size > docxLibrary.templateMaxBytes) {
+      setDocxTemplateMessage(`模板文件不能超过 ${String(Math.floor(docxLibrary.templateMaxBytes / 1024 / 1024))} MiB。`)
+      return
+    }
+    const next: SelectedTemplate = {
+      file,
+      role: 'docx_template',
+      id: ++nextFileId.current,
+      progress: 0,
+      status: 'selected',
+      error: undefined,
+    }
+    selectedTemplateRef.current = next
+    setSelectedTemplate(next)
+    setDocxTemplateMessage('')
+    setRequestError(null)
   }
 
   const hostFailureReason = projection.runtime.status === 'failed'
@@ -615,6 +680,7 @@ export function BidStagePanel({
   const errorNotice = requestError === null ? null : (<div className={css.error} role="alert"><p>{requestError.message}</p>{requestError.issues.map((issue, index) => <p key={`${String(index)}:${issue.code}:${issue.message}`}>{issue.artifact === undefined && issue.path === undefined ? `${issue.code}: ${issue.message}` : [issue.artifact, issue.path, issue.message].filter(Boolean).join(' · ')}</p>)}</div>)
   const outlineConfirmation = canConfirm ? (
     <>
+      <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
       <Button
         size="sm"
         variant="primary"
@@ -630,7 +696,6 @@ export function BidStagePanel({
       >
         {requestPending === 'confirm' ? t('outline.accept.pending') : t('outline.accept.action')}
       </Button>
-      <span className={css.decisionHint}>{t('outline.accept.hint')}</span>
     </>
   ) : null
   const outlineRevision = canRegenerate ? (
@@ -676,6 +741,9 @@ export function BidStagePanel({
   const mappingPercent = mappingProgress !== null && mappingProgress.total > 0
     ? Math.min(100, Math.round((mappingProgress.completed / mappingProgress.total) * 100))
     : 0
+  const queuedFiles: readonly (SelectedFile | SelectedTemplate)[] = selectedTemplate === null
+    ? selectedFiles
+    : [...selectedFiles, selectedTemplate]
 
   return (
     <section className={css.root} aria-label={t('title')}>
@@ -841,9 +909,9 @@ export function BidStagePanel({
           </div>
         </Portal>}
 
-        {projection.runtime.stage === 'file_intake' && selectedFiles.length > 0 && (
+        {projection.runtime.stage === 'file_intake' && queuedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
-            {selectedFiles.map(({ file, role, id, progress, status, error }, index) => {
+            {queuedFiles.map(({ file, role, id, progress, status, error }) => {
               const sizeText = formatFileSize(file.size)
               return (
                 <li
@@ -869,7 +937,7 @@ export function BidStagePanel({
                     </div>
                   </div>
                   <span className={`${css.roleBadge} ${css[`role_${role}`]}`}>
-                    {t(`file.role.${role}`)}
+                    {role === 'docx_template' ? t('action.upload_docx_template') : t(`file.role.${role}`)}
                   </span>
                   <button
                     type="button"
@@ -877,7 +945,8 @@ export function BidStagePanel({
                     aria-label={`${t('file.remove')}: ${file.name}`}
                     disabled={requestPending !== null}
                     onClick={() => {
-                      updateSelectedFiles(files => files.filter((_, itemIndex) => itemIndex !== index))
+                      if (role === 'docx_template') updateSelectedTemplate(() => null)
+                      else updateSelectedFiles(files => files.filter(item => item.id !== id))
                       setRequestError(null)
                     }}
                   >
@@ -890,6 +959,13 @@ export function BidStagePanel({
               )
             })}
           </ul>
+        )}
+
+        {projection.runtime.stage === 'file_intake' && (
+          <div aria-label="Word 模板">
+            <input ref={docxTemplateInput} className={css.fileInput} type="file" accept=".docx" onChange={selectedDocxTemplate}/>
+            {docxTemplateMessage && <p className={css.docxTemplateMessage} role="status">{docxTemplateMessage}</p>}
+          </div>
         )}
 
         <div className={css.actions}>
@@ -965,10 +1041,24 @@ export function BidStagePanel({
               </Button>
               <Button
                 size="sm"
+                variant="outline"
+                icon={<IconPaperclipOutline16 />}
+                disabled={requestPending !== null || docxLibrary === null}
+                title={
+                  docxLibrary?.estimateTemplateId
+                    ? `当前页数基准模板：${docxLibrary.templates.find(t => t.id === docxLibrary.estimateTemplateId)?.name ?? '已配置'}（点击更换）`
+                    : '用于正文页数估算与排版；模板不会进入招标资料库'
+                }
+                onClick={() => { docxTemplateInput.current?.click() }}
+              >
+                {t('action.upload_docx_template')}
+              </Button>
+              <Button
+                size="sm"
                 variant="primary"
                 disabled={
                   requestPending !== null
-                  || selectedFiles.length === 0
+                  || (selectedFiles.length === 0 && selectedTemplate === null)
                 }
                 onClick={() => { invoke('upload', uploadSelectedFiles) }}
               >

@@ -329,7 +329,9 @@ export async function validateChapterWriting(
     }
   }
   if (estimate !== undefined && completion !== undefined
-    && (completion.format_revision !== estimate.format.revision || completion.pages !== estimate.total)) {
+    && (completion.format_revision !== estimate.format.revision
+      || completion.format_template_id !== estimate.format.template_id
+      || completion.pages !== estimate.total)) {
     reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID',
       'The completion review must be rerun after the effective Word format or measured page result changes.', COMPLETION_REVIEW)
   }

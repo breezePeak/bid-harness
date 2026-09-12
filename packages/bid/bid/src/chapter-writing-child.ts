@@ -64,6 +64,7 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
 export function createChapterWriterChild(
   parent: Agent, label: string, maxContinuations: number,
   validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
+  chapterTitle?: string,
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
@@ -76,6 +77,20 @@ export function createChapterWriterChild(
     runtime?.dispose()
     child = agent
     eventStart = agent.session.events.length
+    if (chapterTitle) {
+      const titles = parent.ctx.get('sessionTitle')
+      if (titles !== undefined) {
+        try { titles.rename(agent.session, chapterTitle) } catch {}
+      } else {
+        try {
+          agent.session.append('session/title', {
+            title: chapterTitle,
+            messageSeqs: [],
+            source: { kind: 'user' },
+          })
+        } catch {}
+      }
+    }
     const round = createChapterProtocol<unknown>(agent, 'submit_chapter', maxContinuations)
     runtime = round
     round.register({

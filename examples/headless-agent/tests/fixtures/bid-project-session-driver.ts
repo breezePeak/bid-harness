@@ -43,16 +43,16 @@ try {
   await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'pending' })
   const exporting = await createFresh('export-session-a', exportRoot)
   const automaticExport = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
-  const startingFormat = await ctx.bid.getDocxFormat(exporting)
-  const preview = await ctx.bid.previewDocx(exporting)
+  const startingFormat = await ctx.bid.getDocxFormat(exporting, null)
+  const preview = await ctx.bid.previewDocx(exporting, null)
   const beforeGenerate = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
-  const generated = await ctx.bid.exportDocx(exporting)
+  const generated = await ctx.bid.exportDocx(exporting, null)
   if (!generated.ok) throw new Error(generated.error.message)
   const docx = await readFile(join(exportWorkspace.projectRoot, generated.value.path))
   const exportedState = await readFile(exportWorkspace.projectStatePath, 'utf8')
   const completed = await createFresh('export-session-b', exportRoot)
   const completedDetails = await ctx.bid.getDetails(completed)
-  const restoredFormat = await ctx.bid.getDocxFormat(completed)
+  const restoredFormat = await ctx.bid.getDocxFormat(completed, null)
   process.stdout.write(`${JSON.stringify({
     runtime: b.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
     messages: b.deriveMessages(), nodes: b.surface.nodes,

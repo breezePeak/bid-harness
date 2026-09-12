@@ -3,9 +3,142 @@
 .columns { display: grid; grid-template-columns: minmax(520px, 48%) minmax(360px, 1fr); min-height: 0; flex: 1; }
 .left, .preview { padding: 16px; overflow: auto; }
 .left { border-right: 1px solid var(--dsw-alias-border-l1); }
-.upload { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 20px; border: 1px dashed var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); cursor: pointer; }
-.upload span { color: var(--dsw-alias-label-secondary); }
-.status { min-height: 20px; color: var(--dsw-alias-label-secondary); }
+.templateLibrary { display: flex; flex-direction: column; gap: 8px; }
+.templateLibrary h2 { margin: 0; font: var(--dsw-font-sm-14); font-weight: 600; color: var(--dsw-alias-label-primary); }
+.templateLibrary > p { margin: 0 0 4px 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
+.templateOption {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.templateOption:hover {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.templateOptionSelected {
+  border-color: var(--dsw-alias-state-business-primary, #185abd);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #185abd) 4%, var(--dsw-alias-bg-base));
+  box-shadow: 0 0 0 1px var(--dsw-alias-state-business-primary, #185abd);
+}
+.templateOption input[type="radio"] {
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary, #185abd);
+  cursor: pointer;
+}
+.templateInfo { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.templateTitleRow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.templateName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.benchmarkBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--dsw-alias-state-business-primary, #185abd);
+  background: var(--dsw-alias-state-business-tertiary);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #185abd) 25%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.templateMeta {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+.conflictText {
+  color: var(--dsw-alias-state-error-primary);
+  font-weight: 500;
+}
+.noConflictText {
+  color: var(--dsw-alias-label-tertiary);
+}
+.templateActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+.actionGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.uploadTrigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+.uploadTrigger:hover {
+  border-color: var(--dsw-alias-state-business-primary, #185abd);
+  color: var(--dsw-alias-state-business-primary, #185abd);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.uploadTrigger strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.uploadIcon {
+  flex-shrink: 0;
+}
+.hiddenFileInput {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.uploadHint {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.status {
+  margin: 6px 0 10px 0;
+  min-height: 20px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+.error {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+}
 .error, .pending { color: var(--dsw-alias-state-error-primary); }
 .summary { width: 100%; border-collapse: collapse; font-size: 12px; }
 .summary caption { padding: 12px 0; text-align: left; font-weight: 600; font-size: 14px; }

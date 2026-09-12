@@ -25,10 +25,11 @@ try {
   session.append('request/header', { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }, reason: 'initial' })
   const bytes = Buffer.from(TEMPLATE, 'base64')
   const extracted = await saveDocxTemplate(workspace, { revision: 0, name: '格式说明.docx', bytes })
+  if (extracted.templateId === null) throw new Error('模板上传未返回模板 ID。')
   const chapter = join(workspace.projectRoot, 'chapters/sections/0001.md')
   const original = await readFile(chapter, 'utf8')
-  const suggestion = await ctx.bid.suggestDocxFormat(session)
-  const unchanged = await ctx.bid.getDocxFormat(session)
+  const suggestion = await ctx.bid.suggestDocxFormat(session, extracted.templateId)
+  const unchanged = await ctx.bid.getDocxFormat(session, extracted.templateId)
   process.stdout.write(`${JSON.stringify({ suggestion,
     extractedText: extracted.state.extracted.paragraphs,
     configuredSize: unchanged.values['body.size'],

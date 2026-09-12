@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import { TenderAnalysisReview } from '../src/client/TenderAnalysisReview.tsx'
@@ -31,12 +31,12 @@ it('单独持久化是否纳入响应，不修改 must_answer，并在确认时�
   />)
 
   fireEvent.click(screen.getByRole('button', { name: /技术评分要点/ }))
-  fireEvent.click(screen.getByText('实施方案'))
-  fireEvent.click(screen.getByRole('checkbox', { name: /已纳入后续响应/ }))
+  const row = screen.getByText('实施方案').closest('tr')!
+  fireEvent.click(within(row).getByRole('checkbox', { name: /已纳入后续响应/ }))
 
   await waitFor(() => { expect(saveSelection).toHaveBeenCalledWith('SC-2', false) })
-  expect(screen.getByRole('checkbox', { name: /未纳入后续响应/ })).toHaveProperty('checked', false)
-  expect(screen.getByRole('checkbox', { name: /必答评分点/ })).toHaveProperty('checked', true)
+  expect(within(row).getByRole('checkbox', { name: /未纳入后续响应/ })).toHaveProperty('checked', false)
+  expect(within(row).getByRole('checkbox', { name: /必答评分点/ })).toHaveProperty('checked', true)
   fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
   expect(confirm).toHaveBeenCalledWith([])
 })
@@ -59,4 +59,17 @@ it('切换自动确认时提交当前已编辑内容而不是空操作', async (
       { type: 'update_project', fields: { project_name: '自动确认后的项目名称' } },
     ])
   })
+})
+
+it('默认选中项目整体情况，并以表格形式展示 11 项要素', () => {
+  render(<TenderAnalysisReview
+    value={value} pending={false}
+    onConfirm={vi.fn()} t={key => zh[key]}
+  />)
+
+  const projectTab = screen.getByRole('button', { name: /项目整体情况/ })
+  expect(projectTab.getAttribute('aria-pressed')).toBe('true')
+  expect(screen.getByText('项目整体情况要素表')).toBeTruthy()
+  expect(screen.getByLabelText('项目名称')).toBeTruthy()
+  expect(screen.getByLabelText('项目背景')).toBeTruthy()
 })

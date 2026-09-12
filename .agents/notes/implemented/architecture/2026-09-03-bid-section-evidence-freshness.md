@@ -16,9 +16,9 @@ S4 与 S5 共用可写叶子的树遍历。Host plan v4 保存唯一 Section ID�
 
 Evidence Map v9 保存 Host 计算的 section_fingerprint。指纹使用固定字段序列化与 SHA-256，包含祖先标题路径、purpose、must_answer、业务引用、全局及本章合规要求、writing_notes 和表图建议。Section 的排序与展示属性不参与指纹。目录深化和用户最终编辑都使用同一指纹规则选择补充任务；已删或变为 structural 的 Section 不进入最终 Evidence Map。最终 Validator 与 S5 准入检查集合相等、无重复及指纹相等。
 
-Corpus 预检仅处理成功解析的 reference/reference_bid，验证项目内归属、符号链接、索引 Schema 和登记分块是否存在。绝对路径同时用于 Prompt、Guard 和材料校验。grep 授权分块根目录或登记分块，read 授权索引或登记分块；本地引用还必须对应当前 Child 成功 read 的日志。损坏 Corpus 在任何 Child 启动前以 EVIDENCE_MAPPING_CORPUS_INVALID 失败并写入具体文件诊断。
+Corpus 预检仅处理成功解析的 reference/reference_bid，验证项目内归属、符号链接、索引 Schema 和登记分块是否存在。绝对路径同时用于 Prompt、Guard 和材料校验。grep 授权分块根目录或登记分块，read 授权索引或登记分块；本地引用还必须对应当前 Child 成功 read 的日志。损坏 Corpus 在任何 Child 启动前以 EVIDENCE_MAPPING_CORPUS_INVALID 失败并写入具体文件诊断。可识别的请求限流按[S4 限流基础设施错误自动恢复](../bug-fix/2026-09-12-s4-transient-infrastructure-retry.md)由 Host 有限退避重试；其他 Provider、Guard 和 Web 结果关联异常仍立即使任务及阶段失败。
 
-材料为空可以正常完成；模型 JSON、Schema、Section 归属、未读分块和 Web 来源不完整允许同 Child 有限修复。grep 使用 `result.error.info.code` 区分搜索条件错误与基础设施故障：无效表达式、原始输出溢出和协作取消允许当前 Child 调整查询，`SEARCH_FAILED` 中止 batch；合法路径本身不能证明失败来自文件系统。预检资料在 read 期间不可用、Host、Provider、Guard 和 Web 结果关联异常立即使任务及阶段失败。
+材料为空可以正常完成；模型 JSON、Schema、Section 归属、未读分块和 Web 来源不完整允许同 Child 有限修复。grep 使用 `result.error.info.code` 区分搜索条件错误与基础设施故障：无效表达式、原始输出溢出和协作取消允许当前 Child 调整查询，`SEARCH_FAILED` 中止 batch；合法路径本身不能证明失败来自文件系统。预检资料在 read 期间不可用、Host、Provider、Guard 和 Web 结果关联异常立即使任务及阶段失败，但明确的请求限流属于独立的 Host 自动恢复路径。
 
 Outline Refinement 的候选生成与复核产物共用 `maxRepairAttempts`，JSON、Schema、目录结构、覆盖和质量问题由 Validator 引导 Main Agent 修复；已完成的 Mapping Child 不重跑。文件读取与 Host 输入校验异常不进入模型产物解析的 catch，避免把基础设施故障误交给模型。修复耗尽保留具体产物错误码。Web search→fetch、同会话跨轮来源、Snapshot 与哈希校验保持完整；每次 ledger 替换清理旧快照，最终确认即使无补充任务也按实际引用裁剪来源，避免被删章节的资料遗留在最终产物中。确认文件仍在补映射和验证完成后发布。
 

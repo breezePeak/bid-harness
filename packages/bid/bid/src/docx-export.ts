@@ -13,6 +13,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
+import type { DocxTemplateId } from './docx-format-contract.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -34,12 +35,14 @@ export { collectDocxChapterBody } from './docx-content.ts'
  * @param workspace 已由 Host 锁定的项目。
  * @param signal 本次阶段操作的取消信号。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
+ * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认格式。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
 export async function executeDocxExport(
   workspace: BidWorkspace,
   signal?: AbortSignal,
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
+  templateId?: DocxTemplateId | null,
 ): Promise<StageArtifact[]> {
   const markdown = await collectDocxMarkdown(workspace, signal)
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
@@ -48,7 +51,7 @@ export async function executeDocxExport(
   await assertNoLinkedPath(workspace.root, absolute)
   signal?.throwIfAborted()
   await writeFileAtomic(absolute, markdown, { mode: 0o600, dirMode: 0o700 })
-  await workspace.exportDocx(source, destination)
+  await workspace.exportDocx(source, destination, templateId)
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 
@@ -129,11 +132,15 @@ export async function validateDocxExport(
 }
 
 /**
- * Independently report the confirmed page target for an already valid DOCX export.
- * @param workspace Current project whose canonical chapter Markdown was exported.
- * @returns Warnings that describe an unmet or unavailable estimate without invalidating the file.
+ * 独立核验已生成 DOCX 对应的页数目标，不改变文件有效性。
+ * @param workspace 已导出规范章节 Markdown 的当前项目。
+ * @param templateId 本次导出模板；省略时使用 S5 页数基准。
+ * @returns 未满足或无法测算页数目标时的警告。
  */
-export async function assessDocxExportPageTarget(workspace: BidWorkspace): Promise<StageValidationIssue[]> {
+export async function assessDocxExportPageTarget(
+  workspace: BidWorkspace,
+  templateId?: DocxTemplateId | null,
+): Promise<StageValidationIssue[]> {
   try {
     const outline = parseConfirmedOutlineArtifact(JSON.parse(await readProjectFile(workspace, 'outline/confirmed-outline.json')))
     let writingPlan: ReturnType<typeof parseWritingPlan>
@@ -150,23 +157,26 @@ export async function assessDocxExportPageTarget(workspace: BidWorkspace): Promi
       .filter(item => item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
       .map(item => ({ section_id: section.section_id, criterion: item })))
     if (documentCriteria.length === 0 && sectionCriteria.length === 0) return []
-    const estimate = await estimateChapterWritingPages(workspace, outline)
+    const estimate = await estimateChapterWritingPages(workspace, outline, {
+      method: 'rendered',
+      ...(templateId === undefined ? {} : { templateId }),
+    })
     const measured = [
-      ...documentCriteria.map(criterion => ({ criterion, value: estimate.total })),
+      ...documentCriteria.map(criterion => ({ criterion, value: estimate.total, method: estimate.method })),
       ...sectionCriteria.flatMap(({ section_id, criterion }) => {
         const value = estimate.sections.get(section_id)?.pages
-        return value === undefined ? [] : [{ criterion, value }]
+        return value === undefined ? [] : [{ criterion, value, method: 'fast' as const }]
       }),
     ]
-    return measured.flatMap(({ criterion, value }): StageValidationIssue[] => {
+    return measured.flatMap(({ criterion, value, method }): StageValidationIssue[] => {
       if (criterion.evaluator.kind !== 'deterministic') return []
       const assessment = assessBoundedMetric(criterion.evaluator.min, criterion.evaluator.max, value)
       if (assessment.status === 'met') return []
       return [{
         code: assessment.status === 'below' ? 'DOCX_EXPORT_PAGE_TARGET_BELOW' : 'DOCX_EXPORT_PAGE_TARGET_ABOVE',
         message: assessment.status === 'below'
-          ? `Word 已生成；${criterion.id} 当前格式估算 ${value.toFixed(2)} 页，低于下限，尚差 ${assessment.difference.toFixed(2)} 页，实际分页尚未核验。`
-          : `Word 已生成；${criterion.id} 当前格式估算 ${value.toFixed(2)} 页，高于上限，超出 ${assessment.difference.toFixed(2)} 页，实际分页尚未核验。`,
+          ? `Word 已生成；${criterion.id} 按${method === 'rendered' ? '渲染分页' : '快速算法'}统计 ${value.toFixed(2)} 页，低于下限，尚差 ${assessment.difference.toFixed(2)} 页。`
+          : `Word 已生成；${criterion.id} 按${method === 'rendered' ? '渲染分页' : '快速算法'}统计 ${value.toFixed(2)} 页，高于上限，超出 ${assessment.difference.toFixed(2)} 页。`,
         artifact: 'chapters/writing-plan.json',
       }]
     })

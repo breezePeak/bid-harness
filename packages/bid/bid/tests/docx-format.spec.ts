@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
@@ -9,7 +9,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { BidWorkspace } from '../src/index.ts'
 import { defaultDocxFormatState, formatFields, resolveFormat, validateFormatValues } from '../src/docx-format.ts'
-import { readDocxFormat, saveDocxFormat, saveDocxFormatInterpretation, saveDocxTemplate } from '../src/docx-format-store.ts'
+import { readDocxFormat, readDocxTemplateLibrary, readDocxTemplateRegistry, saveDocxFormat, saveDocxFormatInterpretation, saveDocxTemplate,
+  setEstimateDocxTemplate } from '../src/docx-format-store.ts'
 import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from '../src/docx-format-contract.ts'
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
@@ -34,6 +35,13 @@ async function template(): Promise<Buffer> {
     new Paragraph({ style: 'Caption', children: [new TextRun({ text: '图1 图片标题', size: 26 })] }),
     new Paragraph({ style: 'Caption', children: [new TextRun({ text: '表1 表格标题', size: 26 })] }),
   ] }] }))
+}
+
+async function templateVariant(label: string): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(await template())
+  const document = await zip.file('word/document.xml')!.async('string')
+  zip.file('word/document.xml', document.replace('第一章 标题', `${label} 标题`))
+  return zip.generateAsync({ type: 'nodebuffer' })
 }
 
 describe('项目 Word 格式链路', () => {
@@ -65,6 +73,7 @@ describe('项目 Word 格式链路', () => {
   it('模型只把模板正文中的明确格式说明写入 modelInterpreted', async () => {
     const project = await workspace()
     const extracted = await saveDocxTemplate(project, { revision: 0, name: '说明模板.docx', bytes: await template() })
+    if (extracted.templateId === null) throw new Error('模板上传未返回模板 ID。')
     const suggestion = validateFormatSuggestion({ rules: [
       { key: 'body.font', value: '宋体', evidence: '正文小四宋体' },
       { key: 'body.size', value: '小四', evidence: '正文小四宋体' },
@@ -72,7 +81,7 @@ describe('项目 Word 格式链路', () => {
       { key: 'body.firstLine', value: '2字符', evidence: '首行缩进 2 字符' },
       { key: 'body.line', value: '1.5倍', evidence: '1.5 倍行距' },
     ], mapping: { body: 'Normal' } }, extracted)
-    const saved = await saveDocxFormatInterpretation(project, extracted.state.revision, suggestion)
+    const saved = await saveDocxFormatInterpretation(project, extracted.templateId, extracted.state.revision, suggestion)
     expect(saved.state.modelInterpreted.values).toMatchObject({ 'body.font': '宋体', 'body.latinFont': 'Times New Roman',
       'body.size': 12, 'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.line': 1.5, 'body.lineRule': 'auto' })
     expect(saved.state.modelInterpreted.evidence.find(item => item.key === 'body.size')?.value).toBe(12)
@@ -190,22 +199,75 @@ describe('项目 Word 格式链路', () => {
     expect(conflict).toMatchObject({ resolvedValue: 14, status: 'conflict' })
   })
 
-  it('用户确认冲突后只更新 userConfirmed 和 resolved', async () => {
+  it('用户确认只更新所属模板，新模板保留旧模板及其确认', async () => {
     const project = await workspace()
     const extracted = await saveDocxTemplate(project, { revision: 0, name: '冲突模板.docx', bytes: await template() })
-    const confirmed = await saveDocxFormat(project, { revision: extracted.state.revision,
+    const confirmed = await saveDocxFormat(project, extracted.templateId, { revision: extracted.state.revision,
       userConfirmed: { 'heading1.size': 20 } })
     expect(confirmed.state.extracted).toEqual(extracted.state.extracted)
     expect(confirmed.state.modelInterpreted).toEqual(extracted.state.modelInterpreted)
     expect(confirmed.state.userConfirmed).toEqual({ 'heading1.size': 20 })
     expect(confirmed.state.resolved['heading1.size']).toBe(20)
     expect(confirmed.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('confirmed')
-    await expect(saveDocxFormat(project, { revision: confirmed.state.revision,
+    await expect(saveDocxFormat(project, extracted.templateId, { revision: confirmed.state.revision,
       userConfirmed: { 'heading1.size': 21 } })).rejects.toThrow('候选')
-    const replaced = await saveDocxTemplate(project, { revision: confirmed.state.revision,
-      name: '替换模板.docx', bytes: await template() })
-    expect(replaced.state.userConfirmed).toEqual({})
-    expect(replaced.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
+    const zip = await JSZip.loadAsync(await template())
+    const document = await zip.file('word/document.xml')!.async('string')
+    zip.file('word/document.xml', document.replace('第一章 标题', '第二章 标题'))
+    const added = await saveDocxTemplate(project, { revision: confirmed.library.revision,
+      name: '新模板.docx', bytes: await zip.generateAsync({ type: 'nodebuffer' }) })
+    expect(added.templateId).not.toBe(extracted.templateId)
+    expect(added.state.userConfirmed).toEqual({})
+    expect(added.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
+    expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 20 })
+    expect((await readDocxTemplateLibrary(project)).estimateTemplateId).toBe(extracted.templateId)
+  })
+
+  it('模板 Registry 追加模板并只在首次上传时自动选择页数基准', async () => {
+    const project = await workspace()
+    const first = await saveDocxTemplate(project, { revision: 0, name: '模板 A.docx', bytes: await templateVariant('A') })
+    const second = await saveDocxTemplate(project, { revision: first.library.revision, name: '模板 B.docx', bytes: await templateVariant('B') })
+    expect(second.library.templates.map(item => item.name)).toEqual(['模板 A.docx', '模板 B.docx'])
+    expect(second.library.estimateTemplateId).toBe(first.templateId)
+
+    const selected = await setEstimateDocxTemplate(project, second.templateId, second.library.revision)
+    expect(selected.estimateTemplateId).toBe(second.templateId)
+    const defaulted = await setEstimateDocxTemplate(project, null, selected.revision)
+    const thirdBytes = await templateVariant('C')
+    const third = await saveDocxTemplate(project, { revision: defaulted.revision, name: '模板 C.docx', bytes: thirdBytes })
+    expect(third.library.estimateTemplateId).toBeNull()
+    expect(third.library.templates).toHaveLength(3)
+
+    const duplicate = await saveDocxTemplate(project, { revision: third.library.revision,
+      name: '模板 C 的重复文件.docx', bytes: thirdBytes })
+    expect(duplicate.templateId).toBe(third.templateId)
+    expect(duplicate.library.templates).toHaveLength(3)
+    expect(duplicate.library.revision).toBe(third.library.revision)
+  })
+
+  it('旧单模板配置一次迁移为页数基准，旧默认配置迁移后仍使用系统默认格式', async () => {
+    const bytes = await templateVariant('旧')
+    const parsed = await parseDocxTemplate(bytes, '旧模板.docx')
+    const fields = formatFields(defaults)
+    const legacy = resolveFormat({ ...defaultDocxFormatState(fields), revision: 3, opened: true,
+      template: { parserVersion: parsed.parserVersion, hash: parsed.hash, name: parsed.name },
+      extracted: parsed.extracted }, fields).state
+    const templated = await workspace()
+    await mkdir(join(templated.projectRoot, 'word-export/templates'), { recursive: true })
+    await writeFile(join(templated.projectRoot, 'word-export/config.json'), `${JSON.stringify(legacy)}\n`)
+    await writeFile(join(templated.projectRoot, `word-export/templates/${parsed.hash}.docx`), bytes)
+
+    const migrated = await readDocxTemplateRegistry(templated)
+    expect(migrated).toMatchObject({ version: 1, revision: 1, estimateTemplateId: parsed.hash,
+      templates: [{ id: parsed.hash, name: '旧模板.docx' }] })
+    expect((await readDocxFormat(templated)).state.userConfirmed).toEqual(legacy.userConfirmed)
+    expect(JSON.parse(await readFile(join(templated.projectRoot, 'word-export/templates.json'), 'utf8'))).toMatchObject(migrated)
+
+    const defaultOnly = await workspace()
+    await mkdir(join(defaultOnly.projectRoot, 'word-export'), { recursive: true })
+    await writeFile(join(defaultOnly.projectRoot, 'word-export/config.json'), `${JSON.stringify(defaultDocxFormatState(fields))}\n`)
+    expect(await readDocxTemplateRegistry(defaultOnly)).toMatchObject({ revision: 1, estimateTemplateId: null, templates: [] })
+    expect((await readDocxFormat(defaultOnly)).templateId).toBeNull()
   })
 
   it('浏览器 HTML 与最终 DOCX 使用同一份 resolved 格式和原生图表编号', async () => {
@@ -326,9 +388,10 @@ describe('项目 Word 格式链路', () => {
     const bytes = await template()
     const saved = await saveDocxTemplate(project, { revision: 0, name: '模板.docx', bytes })
     expect(saved.state.template?.parserVersion).toBe(DOCX_TEMPLATE_PARSER_VERSION)
-    const config = join(project.projectRoot, 'word-export/config.json')
+    if (saved.templateId === null) throw new Error('模板上传未返回模板 ID。')
+    const config = join(project.projectRoot, `word-export/templates/${saved.templateId}.config.json`)
     await writeFile(config, `${JSON.stringify({ ...saved.state, version: 1 })}\n`)
-    await expect(readDocxFormat(project)).rejects.toThrow('版本过旧')
+    await expect(readDocxFormat(project, saved.templateId)).rejects.toThrow('版本过旧')
   })
 
   it('拒绝无效 DOCX、DTD、循环样式、危险路径和超限 XML', async () => {
@@ -403,7 +466,9 @@ describe('项目 Word 格式链路', () => {
   it('配置指纹只读取 resolved 而不重新猜测模板', async () => {
     const project = await workspace()
     const view = await saveDocxTemplate(project, { revision: 0, name: '模板.docx', bytes: await template() })
-    const persisted = JSON.parse(await readFile(join(project.projectRoot, 'word-export/config.json'), 'utf8')) as { resolved: unknown }
+    if (view.templateId === null) throw new Error('模板上传未返回模板 ID。')
+    const persisted = JSON.parse(await readFile(join(project.projectRoot,
+      `word-export/templates/${view.templateId}.config.json`), 'utf8')) as { resolved: unknown }
     expect(persisted.resolved).toEqual(view.state.resolved)
     expect((await readDocxFormat(project)).values).toBeDefined()
   })

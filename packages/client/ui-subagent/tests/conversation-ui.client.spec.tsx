@@ -159,8 +159,8 @@ describe('SubagentHeaderLineage', () => {
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
     expect(screen.getByText('正在扫描项目文件 · 可继续')).toBeTruthy()
     expect(screen.getByText('一次性')).toBeTruthy()
-    expect(screen.getByText('正在运行')).toBeTruthy()
-    expect(screen.getByText('当前未运行')).toBeTruthy()
+    expect(screen.queryByText('正在运行')).toBeNull()
+    expect(screen.queryByText('当前未运行')).toBeNull()
     const diagnostic = screen.getByRole('treeitem', { name: /会话记录损坏/ })
     expect(diagnostic.getAttribute('aria-disabled')).toBe('true')
     expect(screen.getByRole('button', { name: '展开 worker 的下级子代理' })).toBeTruthy()
@@ -182,10 +182,10 @@ describe('SubagentHeaderLineage', () => {
     render(<SubagentHeaderLineage {...input} />)
     hoverCatalog(screen.getByRole('button', { name: /1 个子代理/ }))
 
-    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
-    expect(screen.getByText('当前没有正在运行的子代理')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /运行中/ })).toBeNull()
+    expect(screen.queryByText('当前没有正在运行的子代理')).toBeNull()
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
-    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
   })
 
   it('moves a single catalog row between sections as activity changes without duplicates', () => {
@@ -200,7 +200,7 @@ describe('SubagentHeaderLineage', () => {
 
     const inactive = catalog({ entries: [{ ...activeEntry, activity: 'inactive' }] })
     view.rerender(<SubagentHeaderLineage {...props(inactive)} />)
-    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /运行中/ })).toBeNull()
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
     expect(screen.getAllByRole('treeitem', { name: /worker/ })).toHaveLength(1)
 
@@ -225,7 +225,7 @@ describe('SubagentHeaderLineage', () => {
       [CHILD]: summary(CHILD, 1),
     })} />)
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
-    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
   })
 
   it('keeps a running descendant visible when its inactive parent is in history', () => {
@@ -243,9 +243,9 @@ describe('SubagentHeaderLineage', () => {
 
     expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
-    const runningDescendant = screen.getByRole('treeitem', { name: /indexer.*worker.*正在运行/ })
+    const runningDescendant = screen.getByRole('treeitem', { name: /indexer.*worker/ })
     expect(runningDescendant.getAttribute('aria-level')).toBe('1')
-    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /^worker/ })).toBeTruthy()
   })
 
   it('derives activity again when an open catalog is reopened after a reconnect snapshot', () => {
@@ -264,8 +264,32 @@ describe('SubagentHeaderLineage', () => {
       ...activeEntry, activity: 'inactive',
     }] }))} />)
     hoverCatalog(trigger)
-    expect(screen.getByRole('heading', { name: '运行中（0）' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /运行中/ })).toBeNull()
     expect(screen.getByRole('heading', { name: '历史记录（1）' })).toBeTruthy()
+  })
+
+  it('formats chapter subagent title and subtitle for current and legacy records', () => {
+    const input = props(catalog({ entries: [
+      {
+        kind: 'child', id: CHILD, mode: 'continuable', label: '3.1 - 编写',
+        activity: 'inactive', hasChildren: false,
+      },
+      {
+        kind: 'child', id: GRANDCHILD, mode: 'continuable', label: 'S5 · 0003 · 历年卫片执法违...',
+        activity: 'inactive', hasChildren: false,
+      },
+    ] }), {}, {
+      [CHILD]: { ...summary(CHILD, 1), title: '项目目标' },
+      [GRANDCHILD]: { ...summary(GRANDCHILD, 2), title: '你是 S5 Chapter Subagent, 按...' },
+    })
+    render(<SubagentHeaderLineage {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: /2 个子代理/ }))
+
+    expect(screen.getByText('3.1 - 编写')).toBeTruthy()
+    expect(screen.getByText('项目目标')).toBeTruthy()
+    expect(screen.getByText('3 - 编写')).toBeTruthy()
+    expect(screen.getByText('历年卫片执法违...')).toBeTruthy()
+    expect(screen.queryByText(/你是 S5 Chapter Subagent/)).toBeNull()
   })
 
   it('keeps the running section ahead of a long history list', () => {

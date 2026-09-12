@@ -6,7 +6,7 @@
  * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -62,6 +62,9 @@ export interface BidStagePanelInjected {
     files: readonly BidSelectedFile[],
     onProgress?: (file: BidSelectedFile, progress: number) => void,
   ) => Promise<readonly BidFileIntakeFileResult[]>
+  /** S1 独立读取和上传 Word 导出模板，不进入普通资料批次。 */
+  getDocxLibrary: () => Promise<DocxTemplateLibraryView>
+  uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   /** Host retry action, installed when the Bid action API is composed. */
   retryStage?: () => Promise<void>
   /** Start the current stage after a reset has finished and the user confirms. */
@@ -170,7 +173,7 @@ export function apply(ctx: ClientContext): void {
         conversation?.setViewAvailable('bid-tender', confirmingTender || details?.tender != null)
         conversation?.setViewAvailable('bid-outline', details?.outline != null)
         conversation?.setViewAvailable('bid-confirmation', confirmingOutline)
-        if (details) void wordRemote(sessionId).getFormat().then((view) => { conversation?.setViewAvailable('bid-word-export', view.state.opened) }).catch(() => {
+        if (details) void wordRemote(sessionId).getLibrary().then((library) => { conversation?.setViewAvailable('bid-word-export', library.templates.length > 0) }).catch(() => {
           // 配置损坏时仍保留入口，由 Word 页面展示读取错误。
           conversation?.setViewAvailable('bid-word-export', true)
         })
@@ -317,6 +320,8 @@ export function apply(ctx: ClientContext): void {
         }
         return fileResults
       },
+      getDocxLibrary: () => wordRemote(sessionId).getLibrary(),
+      uploadDocxTemplate: (file, revision) => wordRemote(sessionId).uploadTemplate(file, revision),
     }),
   }, BidStagePanel))
   const wordRemote = (sessionId: SessionId): BidWordExportInjected => {
@@ -324,8 +329,9 @@ export function apply(ctx: ClientContext): void {
     const remote = ctx.remote.bid
     const unwrap = <T>(result: Result<T>): T => { if (!result.ok) throw actionFailure(result.error); return result.value }
     return {
-      getFormat: async () => unwrap(await remote.getDocxFormat(sessionId)),
-      saveFormat: async request => unwrap(await remote.saveDocxFormat(sessionId, request)),
+      getLibrary: async () => unwrap(await remote.getDocxTemplateLibrary(sessionId)),
+      getFormat: async templateId => unwrap(await remote.getDocxFormat(sessionId, templateId)),
+      saveFormat: async (templateId, request) => unwrap(await remote.saveDocxFormat(sessionId, templateId, request)),
       uploadTemplate: async (file, revision) => {
         const response = await fetch(new URL(DOCX_TEMPLATE_UPLOAD_PATH, window.location.href), {
           method: 'POST',
@@ -341,10 +347,12 @@ export function apply(ctx: ClientContext): void {
         if (!response.ok) throw new Error(`BID_DOCX_TEMPLATE_UPLOAD_HTTP_${String(response.status)}`)
         return unwrap(await response.json() as DocxTemplateUploadResult)
       },
-      preview: async () => unwrap(await remote.previewDocx(sessionId)),
-      generate: async () => unwrap(unwrap(await remote.exportDocx(sessionId))),
-      download: async () => {
-        const file = unwrap(await remote.downloadDocx(sessionId))
+      preview: async templateId => unwrap(await remote.previewDocx(sessionId, templateId)),
+      estimatePages: async templateId => unwrap<BidPageEstimate>(await remote.estimateDocxPages(sessionId, templateId)),
+      setEstimateTemplate: async (templateId, revision) => unwrap(await remote.setEstimateDocxTemplate(sessionId, templateId, revision)),
+      generate: async templateId => unwrap(unwrap(await remote.exportDocx(sessionId, templateId))),
+      download: async (templateId) => {
+        const file = unwrap(await remote.downloadDocx(sessionId, templateId))
         const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(file.data), c => c.charCodeAt(0))], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }))
         const link = document.createElement('a'); link.href = url; link.download = file.name; link.click()
         window.setTimeout(() => { URL.revokeObjectURL(url) }, 1000)

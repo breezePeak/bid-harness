@@ -64,7 +64,8 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
-import { readDocxFormat, saveDocxFormat, saveDocxTemplate, saveDocxFormatInterpretation, writeDocxFormat, docxFingerprint } from './docx-format-store.ts'
+import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
+  saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
   DOCX_TEMPLATE_NAME_HEADER,
@@ -72,9 +73,9 @@ import {
   DOCX_TEMPLATE_SIZE_HEADER,
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
-import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateUploadResult } from './docx-format-contract.ts'
+import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateId, DocxTemplateLibraryView, DocxTemplateUploadResult } from './docx-format-contract.ts'
 import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
-import { estimateChapterWritingPages } from './page-estimate.ts'
+import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-estimate.ts'
 import { parseChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
@@ -173,6 +174,7 @@ export type {
   BidStageStopResult,
   BidReviewWorkbenchView,
   BidPageEstimate,
+  BidPageEstimateBasis,
   BidPageTargetStatus,
   BidReviewChapterView,
   BidReviewMaterialView,
@@ -220,6 +222,7 @@ export * from './evidence-mapping-corpus.ts'
 export * from './web-evidence-source-artifacts.ts'
 export * from './web-evidence-snapshot.ts'
 export {
+  DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS,
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
   executeEvidenceMapping,
   executeEvidenceMappingFinalCheck,
@@ -1824,6 +1827,11 @@ export class BidHostRuntime extends TypertRemoteService {
           name: decodeURIComponent(nameHeader),
           bytes,
         })
+        const interpretation = view.state.modelInterpreted
+        if (view.library.revision === revision && (Object.keys(interpretation.values).length > 0
+          || Object.keys(interpretation.mapping).length > 0 || interpretation.evidence.length > 0)) {
+          return { ok: true, value: view }
+        }
         let suggestion: DocxFormatSuggestion
         try {
           suggestion = await suggestDocxFormat(
@@ -1843,7 +1851,8 @@ export class BidHostRuntime extends TypertRemoteService {
             },
           }
         }
-        view = await saveDocxFormatInterpretation(workspace, view.state.revision, suggestion)
+        if (view.templateId === null) throw new Error('模板上传未返回模板 ID。')
+        view = await saveDocxFormatInterpretation(workspace, view.templateId, view.state.revision, suggestion)
         return { ok: true, value: view }
       })
     } catch (error) {
@@ -1924,15 +1933,26 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  /** 读取项目 Word 配置，不解析模板或生成文件。
+  /** 读取项目 Word 模板列表，不解析模板或生成文件。
    * @param session 当前标书会话。
+   * @returns 模板身份、页数基准和各模板格式摘要。
+   */
+  @Remote('getDocxTemplateLibrary')
+  async getDocxTemplateLibrary(session: Session): Promise<DocxTemplateLibraryView> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 模板库需要标书项目会话。')
+    return readDocxTemplateLibrary(new BidWorkspace(projectKey(session), workspaceConfig(this.config)))
+  }
+
+  /** 读取一份明确的项目 Word 配置，不解析模板或生成文件。
+   * @param session 当前标书会话。
+   * @param templateId 模板 ID；null 明确选择系统默认格式。
    * @returns 已保存格式与来源。
    */
   @Remote('getDocxFormat')
-  async getDocxFormat(session: Session): Promise<DocxFormatView> {
+  async getDocxFormat(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
-    const view = await readDocxFormat(workspace)
+    const view = await readDocxFormat(workspace, templateId)
     const project = await readBidProjectState(workspace)
     if (project?.runtime.stage === 'docx_export' && project.runtime.status !== 'running' || project?.runtime.stage === 'chapter_writing' && project.runtime.status === 'completed') {
       return collectDocxMarkdown(workspace).then(async markdown => ({
@@ -1944,26 +1964,39 @@ export class BidHostRuntime extends TypertRemoteService {
     return view
   }
 
-  /** 保存项目格式，独立于 S1—S5 的资料与阶段状态。
+  /** 保存一份模板的项目格式，独立于 S1—S5 的资料与阶段状态。
    * @param session 当前标书会话。
+   * @param templateId 模板 ID；null 表示系统默认格式。
    * @param request 包含版本及用户配置的请求；模板字节使用独立二进制端点。
    * @returns 保存后的格式。
    */
   @Remote('saveDocxFormat')
-  async saveDocxFormat(session: Session, request: DocxFormatRequest): Promise<DocxFormatView> {
+  async saveDocxFormat(session: Session, templateId: DocxTemplateId | null, request: DocxFormatRequest): Promise<DocxFormatView> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
-    return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, request))
+    return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, templateId, request))
+  }
+
+  /** 修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。 */
+  @Remote('setEstimateDocxTemplate')
+  async setEstimateDocxTemplate(
+    session: Session,
+    templateId: DocxTemplateId | null,
+    revision: number,
+  ): Promise<DocxTemplateLibraryView> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 模板选择需要标书项目会话。')
+    return this.withDocxOperation(session, workspace => setEstimateDocxTemplate(workspace, templateId, revision))
   }
 
   /** 使用已保存配置和固定正文快照生成浏览器预览，不完成 S6。
    * @param session 当前标书会话。
+   * @param templateId 模板 ID；null 表示系统默认格式。
    * @returns 带内容标识的样式预览。
    */
   @Remote('previewDocx')
-  async previewDocx(session: Session): Promise<DocxFormatView> {
+  async previewDocx(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 预览需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
-    const view = await readDocxFormat(workspace)
+    const view = await readDocxFormat(workspace, templateId)
     const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
     const rendered = await renderDocx(workspace, markdown, view.state.resolved)
     return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
@@ -1971,13 +2004,14 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 生成待确认的格式建议，不修改模板、正文或生效配置。
    * @param session 当前标书会话。
+   * @param templateId 模板 ID；系统默认格式不需要模型建议。
    * @returns 带来源原文的建议。
    */
   @Remote('suggestDocxFormat')
-  async suggestDocxFormat(session: Session): Promise<DocxFormatSuggestion> {
+  async suggestDocxFormat(session: Session, templateId: DocxTemplateId): Promise<DocxFormatSuggestion> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('格式建议需要标书项目会话。')
     return this.withDocxOperation(session, async workspace => suggestDocxFormat(
-      this.ctx, session, await readDocxFormat(workspace),
+      this.ctx, session, await readDocxFormat(workspace, templateId),
       AbortSignal.timeout(this.config.wordFormatTimeoutMs),
       this.config.wordFormatMaxTokens,
     ))
@@ -1985,13 +2019,14 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 下载当前项目最近一次成功的 Word，不接受浏览器文件路径。
    * @param session 当前标书会话。
+   * @param templateId 本次导出使用的模板 ID；null 表示系统默认格式。
    * @returns 下载名称和文件字节。
    */
   @Remote('downloadDocx')
-  async downloadDocx(session: Session): Promise<{ data: string; name: string }> {
+  async downloadDocx(session: Session, templateId: DocxTemplateId | null): Promise<{ data: string; name: string }> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('下载需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
-    const view = await readDocxFormat(workspace)
+    const view = await readDocxFormat(workspace, templateId)
     if (!view.state.lastExport) throw new Error('请先生成 Word。')
     const path = within(workspace.projectRoot, view.state.lastExport.path)
     if (!path.startsWith(workspace.outputRoot + sep)) throw new Error('Word 文件不在输出目录中。')
@@ -2002,10 +2037,11 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * 按完整目录和已保存正文生成 Word，不暂停写作，也不离开审核阶段；导出不代表审核通过。
    * @param session 当前项目的 Bid 会话，无需持有阶段操作。
+   * @param templateId 本次导出使用的模板 ID；null 表示系统默认格式。
    * @returns 新文件信息，或稳定的拒绝结果。
    */
   @Remote('exportDocx')
-  async exportDocx(session: Session): Promise<BidDocxExportResult> {
+  async exportDocx(session: Session, templateId: DocxTemplateId | null): Promise<BidDocxExportResult> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
     }
@@ -2023,7 +2059,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const artifacts = await executeDocxExport(workspace, undefined, destination)
+      const artifacts = await executeDocxExport(workspace, undefined, destination, templateId)
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) {
         return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
@@ -2031,7 +2067,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
         message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
-      }, ...await assessDocxExportPageTarget(workspace)]
+      }, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
     try {
@@ -2045,6 +2081,46 @@ export class BidHostRuntime extends TypertRemoteService {
       })
     }
     catch (error: unknown) { return failure(error) }
+  }
+
+  /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
+  @Remote('estimateDocxPages')
+  async estimateDocxPages(session: Session, templateId: DocxTemplateId | null): Promise<import('./control-plane-contract.ts').BidPageEstimate> {
+    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 页数测算需要标书项目会话。')
+    const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
+    const currentBasis = async (): Promise<import('./control-plane-contract.ts').BidPageEstimateBasis> => {
+      const view = await readDocxFormat(workspace, templateId)
+      return {
+        source: view.templateId === null ? 'default' : 'template',
+        method: 'fast',
+        template: view.templateId === null ? null : {
+          id: view.templateId,
+          name: view.state.template?.name ?? view.templateId,
+          revision: view.state.revision,
+        },
+      }
+    }
+    let markdown: string
+    try { markdown = await collectDocxMarkdown(workspace) } catch (error) {
+      const basis = await currentBasis()
+      return error instanceof BidStageExecutionError
+        && error.issues.some(issue => issue.code === 'DOCX_EXPORT_NO_SAVED_CHAPTERS')
+        ? { status: 'empty', ...basis }
+        : { status: 'unavailable', basis }
+    }
+    try {
+      const estimate = await estimateDocxMarkdownPages(workspace, markdown, templateId)
+      const basis = {
+        source: estimate.format.source,
+        method: estimate.method,
+        template: estimate.format.template_id === null ? null : {
+          id: estimate.format.template_id,
+          name: estimate.format.template_name ?? estimate.format.template_id,
+          revision: estimate.format.revision,
+        },
+      } as const
+      return estimate.pages > 0 ? { status: 'available', pages: Math.ceil(estimate.pages), ...basis } : { status: 'empty', ...basis }
+    } catch { return { status: 'unavailable', basis: await currentBasis() } }
   }
 
   /**
@@ -2123,6 +2199,7 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('getReviewWorkbench')
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
     const workspace = this.requireReviewWorkspace(session)
+    const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
     const outlinePath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await Promise.all([assertNoLinkedPath(workspace.root, outlinePath), assertNoLinkedPath(workspace.root, logPath)])
@@ -2201,8 +2278,21 @@ export class BidHostRuntime extends TypertRemoteService {
       pageTarget = { status: 'unavailable', target: null, reason: `写作计划无法读取：${error instanceof Error ? error.message : String(error)}` }
     }
     try {
-      const estimate = await estimateChapterWritingPages(workspace, outline)
-      pageEstimate = estimate.total > 0 ? { status: 'available', pages: Math.ceil(estimate.total) } : { status: 'empty' }
+      const estimate = await estimateChapterWritingPages(workspace, outline, {
+        method: runtime.status === 'running' ? 'fast' : 'rendered',
+      })
+      const basis = {
+        source: estimate.format.source,
+        method: estimate.method,
+        template: estimate.format.template_id === null ? null : {
+          id: estimate.format.template_id,
+          name: estimate.format.template_name ?? estimate.format.template_id,
+          revision: estimate.format.revision,
+        },
+      } as const
+      pageEstimate = estimate.total > 0
+        ? { status: 'available', pages: Math.ceil(estimate.total), ...basis }
+        : { status: 'empty', ...basis }
       const criterion = writingPlan?.document_acceptance.find(item =>
         item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
       if (criterion?.evaluator.kind === 'deterministic') {
@@ -2221,14 +2311,18 @@ export class BidHostRuntime extends TypertRemoteService {
           difference: assessment.difference,
           format_revision: estimate.format.revision,
           format_source: estimate.format.source,
+          format_template_id: estimate.format.template_id,
+          estimate_method: estimate.method,
         }
       }
       const children = new Set(outline.sections.flatMap(section => section.parent_id === null ? [] : [section.parent_id]))
       rows = rows.map((row) => {
         if (!children.has(row.section_id)) return row
         const section = estimate.sections.get(row.section_id)
-        if (section === undefined || !section.hasContent) return { ...row, page_estimate: { status: 'empty' as const } }
-        return { ...row, page_estimate: { status: 'available' as const, pages: Math.ceil(section.pages), ...(section.incomplete ? { incomplete: true } : {}) } }
+        const sectionBasis = { ...basis, method: 'fast' as const }
+        if (section === undefined || !section.hasContent) return { ...row, page_estimate: { status: 'empty' as const, ...sectionBasis } }
+        return { ...row, page_estimate: { status: 'available' as const, pages: Math.ceil(section.pages),
+          ...sectionBasis, ...(section.incomplete ? { incomplete: true } : {}) } }
       })
     } catch { rows = rows.map(row => ({
       ...row,
@@ -2273,7 +2367,7 @@ export class BidHostRuntime extends TypertRemoteService {
       } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
     }
     return {
-      schema_version: 4,
+      schema_version: 5,
       outline: rows,
       summary: {
         chapter_count: writable.length,
@@ -3370,12 +3464,17 @@ export class BidWorkspace {
   }
 
   /**
-   * Export a project-local Markdown file to the output directory only.
-   * @param source - Project-relative Markdown source path.
-   * @param destination - Project-relative DOCX destination below the output directory.
-   * @returns The workspace-relative path exposed to the caller.
+   * 将项目内 Markdown 导出到项目输出目录。
+   * @param source 项目相对 Markdown 源路径。
+   * @param destination 输出目录下的项目相对 DOCX 路径。
+   * @param templateId 明确的导出模板；仅内部阶段导出可省略并使用 S5 基准。
+   * @returns 向调用方公开的工作区相对路径。
    */
-  async exportDocx(source: string, destination = `${this.config.outputDirectory}/技术标.docx`): Promise<string> {
+  async exportDocx(
+    source: string,
+    destination = `${this.config.outputDirectory}/技术标.docx`,
+    templateId?: DocxTemplateId | null,
+  ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const sourcePath = within(this.projectRoot, source)
     if (!source.endsWith('.md')) throw new Error('bid-source-must-be-markdown')
@@ -3383,13 +3482,13 @@ export class BidWorkspace {
     if (!destinationPath.startsWith(`${this.outputRoot}${sep}`)) throw new Error('bid-output-path-required')
     await assertNoLinkedPath(this.root, sourcePath)
     const markdown = await readFile(sourcePath, 'utf8')
-    const view = await readDocxFormat(this)
+    const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
     const rendered = await renderDocx(this, markdown, view.state.resolved)
     await readDocxXml(rendered.bytes)
     await atomicBytes(this.root, destinationPath, rendered.bytes)
-    await writeDocxFormat(this, { ...view.state,
+    await writeDocxFormat(this, view.templateId, { ...view.state,
       lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, rendered.assetHash) },
     })
     return this.relative(destination)

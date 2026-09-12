@@ -122,3 +122,82 @@ export function outlineDropOperation(outline: OutlineArtifact, sourceId: string,
   }
   return operation
 }
+
+export interface AlignedOutlineRow<T> {
+  left?: T | undefined
+  right?: T | undefined
+  key: string
+}
+
+/**
+ * Align S3 baseline sections with S4 current sections using Longest Common Subsequence (LCS).
+ * Preserves horizontal alignment for identical sections and inserts spacers for added/deleted items.
+ */
+export function alignOutlineRows<T extends { section: { id: string } }>(
+  leftList: T[],
+  rightList: T[],
+): Array<AlignedOutlineRow<T>> {
+  const m = leftList.length
+  const n = rightList.length
+  if (m === 0 && n === 0) return []
+  if (m === 0) return rightList.map(r => ({ right: r, key: `right-${r.section.id}` }))
+  if (n === 0) return leftList.map(l => ({ left: l, key: `left-${l.section.id}` }))
+
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array.from({ length: n + 1 }, () => 0))
+  for (let i = 0; i < m; i++) {
+    const leftItem = leftList[i]
+    const dpI = dp[i]
+    const dpNext = dp[i + 1]
+    if (leftItem === undefined || dpI === undefined || dpNext === undefined) continue
+    for (let j = 0; j < n; j++) {
+      const rightItem = rightList[j]
+      if (rightItem === undefined) continue
+      const prevVal = dpI[j] ?? 0
+      const upVal = dpI[j + 1] ?? 0
+      const leftVal = dpNext[j] ?? 0
+      if (leftItem.section.id === rightItem.section.id) {
+        dpNext[j + 1] = prevVal + 1
+      } else {
+        dpNext[j + 1] = Math.max(upVal, leftVal)
+      }
+    }
+  }
+
+  const result: Array<AlignedOutlineRow<T>> = []
+  let i = m
+  let j = n
+  while (i > 0 || j > 0) {
+    const leftItem = i > 0 ? leftList[i - 1] : undefined
+    const rightItem = j > 0 ? rightList[j - 1] : undefined
+    const currentDpI = dp[i]
+    const prevDpI = dp[i - 1]
+    const valLeft = currentDpI !== undefined && j > 0 ? (currentDpI[j - 1] ?? 0) : 0
+    const valUp = prevDpI !== undefined ? (prevDpI[j] ?? 0) : 0
+
+    if (i > 0 && j > 0 && leftItem !== undefined && rightItem !== undefined && leftItem.section.id === rightItem.section.id) {
+      result.push({
+        left: leftItem,
+        right: rightItem,
+        key: `match-${leftItem.section.id}`,
+      })
+      i--
+      j--
+    } else if (j > 0 && rightItem !== undefined && (i === 0 || valLeft >= valUp)) {
+      result.push({
+        right: rightItem,
+        key: `right-${rightItem.section.id}`,
+      })
+      j--
+    } else if (i > 0 && leftItem !== undefined && (j === 0 || valLeft < valUp)) {
+      result.push({
+        left: leftItem,
+        key: `left-${leftItem.section.id}`,
+      })
+      i--
+    } else {
+      break
+    }
+  }
+
+  return result.reverse()
+}

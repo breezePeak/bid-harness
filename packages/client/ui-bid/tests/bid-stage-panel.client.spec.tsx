@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -46,6 +46,9 @@ function props(
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
     getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null })),
+    getDocxLibrary: vi.fn(async () => ({ version: 1, revision: 0, estimateTemplateId: null,
+      templateMaxBytes: 300 * 1024 * 1024, templates: [] })),
+    uploadDocxTemplate: vi.fn(async () => { throw new Error('unexpected template upload') }),
     setDetailsAvailable: vi.fn(),
     selectReviewView: vi.fn(),
     reviewSurface: { host: () => document.body, subscribe: () => () => {} },
@@ -60,6 +63,11 @@ function props(
     t,
     ...patch,
   } as unknown as BidStagePanelProps
+}
+
+function corpusFileInputs(container: HTMLElement): HTMLInputElement[] {
+  return [...container.querySelectorAll<HTMLInputElement>('input[type="file"]')]
+    .filter(input => input.closest('[aria-label="Word 模板"]') === null)
 }
 
 function confirmationStore(mode: 'manual' | 'automatic' = 'manual') {
@@ -344,17 +352,18 @@ describe('BidStagePanel', () => {
       allowedExtensions: ['.pdf', '.docx'],
       maxFiles: 4,
     }), { uploadFiles: vi.fn(async () => []) })} />)
-    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传人工框架 / 半成品标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传参考旧标书' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '上传其他技术资料' })).toBeTruthy()
-    const inputs = view.container.querySelectorAll('input[type="file"]')
+    expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '人工框架' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '参考旧标书' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '其他技术资料' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '导入模板' })).toBeTruthy()
+    const inputs = corpusFileInputs(view.container)
     expect(inputs).toHaveLength(4)
     fireEvent.change(inputs[0]!, {
       target: { files: [new File(['bid'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
-    expect(screen.getAllByText('招标文件')).toHaveLength(1)
+    expect(screen.getAllByText('招标文件')).toHaveLength(2)
     expect(screen.getByRole('button', { name: '上传并解析' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '上传并解析' })).toHaveProperty('disabled', false)
     fireEvent.change(inputs[1]!, {
@@ -380,11 +389,46 @@ describe('BidStagePanel', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('请至少选择一个招标文件')
   })
 
+  it('S1 Word 模板进入统一待处理列表，但使用独立接口和版本', async () => {
+    const templateId = 'a'.repeat(64) as DocxTemplateId
+    const library = { version: 1 as const, revision: 1, estimateTemplateId: templateId,
+      templateMaxBytes: 300 * 1024 * 1024, templates: [{ id: templateId, hash: templateId, name: '项目技术标模板.docx',
+        parserVersion: 4, createdAt: '2026-09-12T00:00:00.000Z', formatRevision: 1, conflictCount: 0 }] }
+    const uploadFiles = vi.fn(async () => [])
+    const uploadedId = 'b'.repeat(64) as DocxTemplateId
+    const uploadedLibrary = { ...library, revision: 2,
+      templates: [...library.templates, { ...library.templates[0]!, id: uploadedId, hash: uploadedId, name: '公司模板.docx' }] }
+    const uploaded: DocxFormatView = {
+      templateId: uploadedId, library: uploadedLibrary, templateMaxBytes: uploadedLibrary.templateMaxBytes,
+      state: { version: 2, revision: 0, opened: true,
+        template: { parserVersion: 4, hash: uploadedId, name: '公司模板.docx' },
+        extracted: { values: {}, candidates: [], paragraphs: [], evidence: [], warnings: [] },
+        modelInterpreted: { values: {}, mapping: {}, evidence: [] },
+        conflicts: [], resolved: {}, userConfirmed: {} },
+      fields: [], values: {}, warnings: [],
+    }
+    const uploadDocxTemplate = vi.fn(async () => uploaded)
+    const view = render(<BidStagePanel {...props(projection({ allowedActions: ['upload_files'], allowedExtensions: ['.docx'], maxFiles: 1 }), {
+      getDocxLibrary: vi.fn(async () => library), uploadDocxTemplate, uploadFiles,
+    })}/>)
+    const button = await screen.findByTitle(/当前页数基准模板：项目技术标模板\.docx/)
+    expect(button).toBeTruthy()
+    const file = new File(['template'], '公司模板.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    fireEvent.change(view.container.querySelector('div[aria-label="Word 模板"] input')!, { target: { files: [file] } })
+    expect(uploadDocxTemplate).not.toHaveBeenCalled()
+    expect(screen.getByText('公司模板.docx')).toBeTruthy()
+    expect(screen.getAllByText('导入模板')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
+    await waitFor(() => { expect(uploadDocxTemplate).toHaveBeenCalledWith(file, 1) })
+    expect(uploadFiles).not.toHaveBeenCalled()
+    expect(await screen.findByText('模板已加入项目模板库')).toBeTruthy()
+  })
+
   it('clears the browser upload queue when file intake advances to tender analysis', () => {
     const view = render(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
     }), { uploadFiles: vi.fn(async () => []) })} />)
-    const inputs = view.container.querySelectorAll('input[type="file"]')
+    const inputs = corpusFileInputs(view.container)
     fireEvent.change(inputs[0]!, {
       target: { files: [new File(['tender'], '招标文件.pdf', { type: 'application/pdf' })] },
     })
@@ -393,8 +437,9 @@ describe('BidStagePanel', () => {
     })
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
     expect(screen.getByText('项目资料.pdf')).toBeTruthy()
-    expect(screen.getByText('招标文件')).toBeTruthy()
-    expect(screen.getByText('其他技术资料')).toBeTruthy()
+    const list = screen.getByRole('list', { name: '已选择文件' })
+    expect(within(list).getByText('招标文件')).toBeTruthy()
+    expect(within(list).getByText('其他技术资料')).toBeTruthy()
     expect(screen.getByRole('button', { name: '移除文件: 招标文件.pdf' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '移除文件: 项目资料.pdf' })).toBeTruthy()
 
@@ -434,7 +479,7 @@ describe('BidStagePanel', () => {
       error: { code: 'BID_FILE_TYPE_UNSUPPORTED' as const, message: '文件类型不受支持' },
     }])
     const view = render(<BidStagePanel {...props(projection({ allowedActions: ['upload_files'] }), { uploadFiles })} />)
-    const inputs = view.container.querySelectorAll('input[type="file"]')
+    const inputs = corpusFileInputs(view.container)
     fireEvent.change(inputs[0]!, { target: { files: [new File(['tender'], '招标文件.pdf', { type: 'application/pdf' })] } })
     fireEvent.change(inputs[2]!, { target: { files: [new File(['reference'], '旧标书.pdf', { type: 'application/pdf' })] } })
     fireEvent.click(screen.getByRole('button', { name: '上传并解析' }))
@@ -461,7 +506,7 @@ describe('BidStagePanel', () => {
     const view = render(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
     }), { uploadFiles: vi.fn(async () => []), useSessions })} />)
-    const inputs = view.container.querySelectorAll('input[type="file"]')
+    const inputs = corpusFileInputs(view.container)
     fireEvent.change(inputs[0]!, {
       target: { files: [new File(['tender'], '上一会话标书.pdf', { type: 'application/pdf' })] },
     })
@@ -485,7 +530,7 @@ describe('BidStagePanel', () => {
       maxFiles: 1,
     }), { uploadFiles })} />)
     const file = new File(['# 招标要求'], 'requirements.md', { type: 'text/markdown' })
-    const inputs = view.container.querySelectorAll('input[type="file"]')
+    const inputs = corpusFileInputs(view.container)
     fireEvent.change(inputs[0]!, {
       target: { files: [file] },
     })
@@ -495,7 +540,7 @@ describe('BidStagePanel', () => {
       { file, role: 'tender' },
     ], expect.any(Function))
     expect(screen.getByRole('button', { name: '正在上传…' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '上传招标文件' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '招标文件' })).toHaveProperty('disabled', true)
     expect(screen.getByText('请添加本项目资料')).toBeTruthy()
 
     act(() => { first.reject(new Error('BID_FILE_INTAKE_NOT_ALLOWED')) })
@@ -516,7 +561,7 @@ describe('BidStagePanel', () => {
 
     expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
-    expect(screen.getByRole('button', { name: '上传招标文件' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
   })
 
   it('shows every structured S2 validation issue and keeps retry available', () => {
@@ -672,7 +717,7 @@ describe('BidStagePanel', () => {
     })} />)
 
     expect(await screen.findByLabelText('技术标分析结果')).toBeTruthy()
-    // 双栏工作台在左侧保留全量索引，右侧只编辑当前选中项。
+    // 各分析板块保留完整条目，并允许直接编辑规范化内容。
     fireEvent.click(screen.getByRole('button', { name: /项目整体情况/ }))
     fireEvent.click(screen.getByText('项目技术重点'))
     fireEvent.change(screen.getByLabelText('项目技术重点'), { target: { value: '安全架构\n兼容既有系统' } })
@@ -683,7 +728,10 @@ describe('BidStagePanel', () => {
     expect(screen.getByDisplayValue('实施方案')).toBeTruthy()
     fireEvent.click(screen.getByText('总体方案'))
     expect(screen.getByText('总体方案完整合理得 10 分')).toBeTruthy()
-    fireEvent.change(screen.getAllByLabelText('评分目标理解')[0]!, { target: { value: '总体方案完整、合理且可实施' } })
+    const scoringRow = screen.getByDisplayValue('总体方案').closest('tr')
+    const scoringCriterion = scoringRow?.querySelector('textarea')
+    expect(scoringCriterion).toBeTruthy()
+    fireEvent.change(scoringCriterion!, { target: { value: '总体方案完整、合理且可实施' } })
     fireEvent.click(screen.getByRole('button', { name: '确认技术标分析' }))
     expect(screen.getByRole('button', { name: '正在确认…' })).toHaveProperty('disabled', true)
     await waitFor(() => {
@@ -989,7 +1037,7 @@ describe('ui-bid browser plugin', () => {
     expect(screen.queryByText('产品、平台、案例、公司能力和通用技术资料。')).toBeNull()
 
     // 2. 模拟用户选择了文件
-    const fileInputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]')
+    const fileInputs = corpusFileInputs(container)
     expect(fileInputs.length).toBe(4)
     const tenderInput = fileInputs[0]!
     const frameworkInput = fileInputs[1]!
@@ -1003,8 +1051,9 @@ describe('ui-bid browser plugin', () => {
     // 3. 验证卡片展示：文件名、角色胶囊、文件大小
     expect(screen.getByText('招标文件-2026年项目.docx')).toBeTruthy()
     expect(screen.getByText('人工框架-CW.docx')).toBeTruthy()
-    expect(screen.getByText('招标文件')).toBeTruthy()
-    expect(screen.getByText('人工框架')).toBeTruthy()
+    const fileList = screen.getByRole('list', { name: '已选择文件' })
+    expect(within(fileList).getByText('招标文件')).toBeTruthy()
+    expect(within(fileList).getByText('人工框架')).toBeTruthy()
     expect(screen.getByText('1.8 KB')).toBeTruthy()
     expect(screen.getByText('8.3 KB')).toBeTruthy()
 
