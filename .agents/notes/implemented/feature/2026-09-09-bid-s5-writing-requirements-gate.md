@@ -16,7 +16,7 @@ Main Agent 通过 `bid_stage_inspect` 读取确认目录、招标要求与资料
 
 章节关系规划接收完整确认计划并把关系 Artifact 绑定计划版本。Writer 接收全书指令和当前章节任务契约；Chapter Reviewer 保留既有审核并作为当前章节动态条件的唯一权威。最终 Main Agent 只判断整书 semantic 条件并消费章节审核事实。
 
-运行中或已完成的 S5 接受普通消息，由 Main Agent 区分问答与新任务；公开回合与私有协议的安全切换由[全阶段 Main Agent 实时交错](2026-09-11-bid-all-stage-main-agent-steer.md)统一负责。问答不改变阶段或 Subagent；新任务只提交基于当前版本的真实 patch，Host 保留未修改章节并把新计划送入同一调度器。未开始章节自然采用新计划，已完成或运行中的受影响章节定向失效，其他 Writer 与 Reviewer 继续执行。计划版本、section epoch 和强依赖正文及 handoff 身份共同阻止旧结果提交，`chapters/applied-writing-plan.json` 记录执行日志采用的版本。
+运行中或已完成的 S5 接受普通消息，由 Main Agent 区分问答与新任务；公开回合与私有协议的安全切换由[全阶段 Main Agent 实时交错](2026-09-11-bid-all-stage-main-agent-steer.md)统一负责。问答不改变阶段或 Subagent；新任务只提交基于当前版本的真实 patch，Host 保留未修改章节并把新计划送入同一调度器。未开始章节自然采用新计划，已完成或运行中的受影响章节定向失效，其他 Writer 与 Reviewer 继续执行。单章修订先只让目标章失效；目标章完整提交后，Host 仅在 handoff 变化时逐级传递失效强依赖下游，未变化或修订失败均不提前重启下游。计划版本、section epoch 和强依赖 handoff 身份共同阻止旧结果提交，执行日志仍保存依赖正文哈希用于追溯；`chapters/applied-writing-plan.json` 记录执行日志采用的版本。
 
 ## Alternatives considered
 

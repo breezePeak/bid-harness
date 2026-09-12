@@ -1789,23 +1789,22 @@ async function runChapterWriting(
     const previous = priorHandoffs.get(sectionId)
     priorHandoffs.delete(sectionId)
     if (previous === undefined || previous === JSON.stringify(chapter.candidate.metadata.handoff)) return
-    const affected = new Set([sectionId])
-    for (const id of affected) {
-      for (const dependent of plan.sections.filter(item => item.depends_on.some(dependency => dependency.section_id === id))) {
-        if (affected.has(dependent.section_id)) continue
-        affected.add(dependent.section_id)
-        const context = contexts.get(dependent.section_id)
-        if (context === undefined || (!completed.has(dependent.section_id) && !running.has(dependent.section_id))) continue
-        if (completed.has(dependent.section_id)) {
-          const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
-          pendingRevisions.set(dependent.section_id, {
-            instruction: `强依赖章节 ${sectionId} 的交接决策已经变化；只调整受该新交接影响的内容，其他正文保持不变。`,
-            reference: { scope: 'chapter', section_id: dependent.section_id, content_sha256: chapterContentSha256(markdown) },
-          })
-        }
-        invalidateSection(dependent.section_id)
+    let invalidated = false
+    for (const dependent of plan.sections.filter(item =>
+      item.depends_on.some(dependency => dependency.section_id === sectionId))) {
+      const context = contexts.get(dependent.section_id)
+      if (context === undefined || (!completed.has(dependent.section_id) && !running.has(dependent.section_id))) continue
+      if (completed.has(dependent.section_id)) {
+        const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+        pendingRevisions.set(dependent.section_id, {
+          instruction: `强依赖章节 ${sectionId} 的交接决策已经变化；只调整受该新交接影响的内容，其他正文保持不变。`,
+          reference: { scope: 'chapter', section_id: dependent.section_id, content_sha256: chapterContentSha256(markdown) },
+        })
       }
+      invalidateSection(dependent.section_id)
+      invalidated = true
     }
+    if (invalidated) await persistLog()
   }
 
   const applyCommands = async (): Promise<void> => {
@@ -1819,10 +1818,7 @@ async function runChapterWriting(
         if (context === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
         validateChapterRevisionReference(request, await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
         pendingRevisions.set(request.reference.section_id, request)
-        const affected = new Set([request.reference.section_id])
-        for (const id of affected) for (const dependent of plan.sections.filter(section =>
-          section.depends_on.some(dependency => dependency.section_id === id))) affected.add(dependent.section_id)
-        for (const sectionId of affected) invalidateSection(sectionId)
+        invalidateSection(request.reference.section_id)
         continue
       }
       const next = parseWritingPlan(command.plan)
@@ -1931,9 +1927,14 @@ async function runChapterWriting(
             handoff_sha256: chapterCandidateSha256(JSON.stringify(prior.candidate.metadata.handoff)),
           }]
         })
+        const handoffsMatch = currentDependencies.length === inputIdentity.dependencies.length
+          && currentDependencies.every((dependency, index) => {
+            const input = inputIdentity.dependencies[index]
+            return input?.section_id === dependency.section_id && input.handoff_sha256 === dependency.handoff_sha256
+          })
         if (writingPlan.plan_version !== inputIdentity.plan_version
           || sectionEpochs.get(sectionId) !== inputIdentity.section_epoch
-          || JSON.stringify(currentDependencies) !== JSON.stringify(inputIdentity.dependencies)) {
+          || !handoffsMatch) {
           throw new Error('BID_CHAPTER_INPUT_STALE')
         }
       }
@@ -2217,7 +2218,7 @@ async function runChapterWriting(
             signal.throwIfAborted()
             await appendChapterWebReferences(workspace, references, [...durableWebSources.values()])
             rejectedCandidate = projectChapterWriterCandidate(candidate, references)
-            if (revision === undefined) {
+            if (effectiveRevision === undefined) {
               assertCurrentInput()
               await writeFileAtomic(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`, { mode: 0o600, dirMode: 0o700 })
               assertCurrentInput()

@@ -1689,7 +1689,7 @@ describe('chapter-writing executor', () => {
       return {
         stopReason: 'completed', output: [], structured: {
           ...candidate,
-          markdown: `${candidate.markdown}\n\n${newDependency ? '新依赖候选' : '旧依赖候选'}`,
+          markdown: `${candidate.markdown}\n\n${newDependency ? '新依赖候选' : '旧依赖候选'}${revisedUpstream ? '\n\n新上游正文' : ''}`,
           metadata: {
             ...candidate.metadata,
             handoff: { decisions: [revisedUpstream ? '新交接决策' : '旧交接决策'] },
@@ -1698,7 +1698,7 @@ describe('chapter-writing executor', () => {
       }
     })
     const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 0, maxConcurrency: 2, control,
+      maxRepairAttempts: 0, maxConcurrency: 3, control,
     })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
@@ -1720,14 +1720,18 @@ describe('chapter-writing executor', () => {
     for (const listener of listeners) listener()
     await vi.waitFor(async () => {
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
-      expect(log.sections.find(section => section.section_id === 'SEC-2')?.epoch).toBe(1)
+      expect(log.sections.find(section => section.section_id === 'SEC-1')?.epoch).toBe(1)
+      expect(log.sections.find(section => section.section_id === 'SEC-2')).toMatchObject({ epoch: 0, status: 'running' })
     })
-
-    staleDependent.resolve()
     await vi.waitFor(() => {
       expect(fixture.starts.filter(run => run.request.label?.endsWith('章节1'))).toHaveLength(2)
     })
     fixture.starts.filter(run => run.request.label?.endsWith('章节1')).at(-1)!.resolve()
+    await vi.waitFor(async () => {
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections.find(section => section.section_id === 'SEC-2')?.epoch).toBe(1)
+    })
+    staleDependent.resolve()
     await vi.waitFor(() => {
       expect(fixture.starts.filter(run => run.request.label?.endsWith('章节2'))).toHaveLength(2)
     })
@@ -1746,6 +1750,146 @@ describe('chapter-writing executor', () => {
       expect.objectContaining({ accepted: true, stop_reason: 'completed' }),
     ])
     expect(attempts[0]!.input.dependencies[0]).not.toEqual(attempts[1]!.input.dependencies[0])
+  })
+
+  it('上游修订未改变交接时不重启下游 Writer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-handoff-stable-live-revision-')))
+    const outline = await writeInputs(workspace)
+    const commands: ChapterWritingCommand[] = []
+    const listeners = new Set<() => void>()
+    const control: ChapterWritingControl = {
+      drain: () => commands.splice(0),
+      pending: () => commands.length > 0,
+      subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    }
+    const fixture = fixtureAgent(workspace, outline, { 'SEC-2': ['SEC-1'] }, false, () => true, (_attempt, request) => {
+      const candidate = candidateFrom(request)
+      if (!('metadata' in candidate)) throw new Error('expected writer candidate')
+      const revisedUpstream = request.label?.endsWith('章节1') === true
+        && promptText(request).includes('更新上游正文')
+      return {
+        stopReason: 'completed', output: [], structured: {
+          ...candidate,
+          markdown: `${candidate.markdown}${revisedUpstream ? '\n\n修订后上游正文' : ''}`,
+          metadata: { ...candidate.metadata, handoff: { decisions: ['稳定交接决策'] } },
+        },
+      }
+    })
+    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 3, control,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.find(run => run.request.label?.endsWith('章节1'))!.resolve()
+    await vi.waitFor(() => {
+      expect(fixture.starts.filter(run => run.request.label?.endsWith('章节2'))).toHaveLength(1)
+    })
+    const upstreamPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const upstream = await readFile(upstreamPath, 'utf8')
+    commands.push({
+      kind: 'revision',
+      request: {
+        instruction: '更新上游正文，保持原交接决策。',
+        reference: { scope: 'chapter', section_id: 'SEC-1', content_sha256: chapterContentSha256(upstream) },
+      },
+    })
+    for (const listener of listeners) listener()
+    await vi.waitFor(() => {
+      expect(fixture.starts.filter(run => run.request.label?.endsWith('章节1'))).toHaveLength(2)
+    })
+    fixture.starts.filter(run => run.request.label?.endsWith('章节1')).at(-1)!.resolve()
+    await vi.waitFor(async () => {
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections.find(section => section.section_id === 'SEC-1')).toMatchObject({ epoch: 1, status: 'completed' })
+      expect(log.sections.find(section => section.section_id === 'SEC-2')).toMatchObject({ epoch: 0, status: 'running' })
+    })
+    for (const run of fixture.starts) run.resolve()
+    await execution
+
+    expect(fixture.starts.filter(run => run.request.label?.endsWith('章节2'))).toHaveLength(1)
+    await expect(readFile(upstreamPath, 'utf8')).resolves.toContain('修订后上游正文')
+  })
+
+  it('上游交接变化逐级传播，中间交接不变时保留更下游 Writer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-handoff-transitive-live-revision-')))
+    const outline = await writeInputs(workspace)
+    const commands: ChapterWritingCommand[] = []
+    const listeners = new Set<() => void>()
+    const control: ChapterWritingControl = {
+      drain: () => commands.splice(0),
+      pending: () => commands.length > 0,
+      subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    }
+    const fixture = fixtureAgent(
+      workspace,
+      outline,
+      { 'SEC-2': ['SEC-1'], 'SEC-3': ['SEC-2'] },
+      false,
+      () => true,
+      (_attempt, request) => {
+        const candidate = candidateFrom(request)
+        if (!('metadata' in candidate)) throw new Error('expected writer candidate')
+        const revisedUpstream = request.label?.endsWith('章节1') === true
+          && promptText(request).includes('更新上游交接决策')
+        const decisions = request.label?.endsWith('章节1') === true
+          ? [revisedUpstream ? '新交接决策' : '旧交接决策']
+          : ['稳定中间交接决策']
+        return {
+          stopReason: 'completed', output: [], structured: {
+            ...candidate,
+            markdown: `${candidate.markdown}${revisedUpstream ? '\n\n修订后上游正文' : ''}`,
+            metadata: { ...candidate.metadata, handoff: { decisions } },
+          },
+        }
+      },
+    )
+    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 3, control,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    const downstream = fixture.starts[2]!
+    const upstreamPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const upstream = await readFile(upstreamPath, 'utf8')
+    commands.push({
+      kind: 'revision',
+      request: {
+        instruction: '更新上游交接决策，其他内容保持不变。',
+        reference: { scope: 'chapter', section_id: 'SEC-1', content_sha256: chapterContentSha256(upstream) },
+      },
+    })
+    for (const listener of listeners) listener()
+    await vi.waitFor(() => {
+      expect(fixture.starts.filter(run => run.request.label?.endsWith('章节1'))).toHaveLength(2)
+    })
+    fixture.starts.filter(run => run.request.label?.endsWith('章节1')).at(-1)!.resolve()
+    await vi.waitFor(() => {
+      expect(fixture.starts.filter(run => run.request.label?.endsWith('章节2'))).toHaveLength(2)
+    })
+    await vi.waitFor(async () => {
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections.find(section => section.section_id === 'SEC-3')).toMatchObject({ epoch: 0, status: 'running' })
+    })
+    fixture.starts.filter(run => run.request.label?.endsWith('章节2')).at(-1)!.resolve()
+    await vi.waitFor(async () => {
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      expect(log.sections.find(section => section.section_id === 'SEC-2')?.status).toBe('completed')
+      expect(log.sections.find(section => section.section_id === 'SEC-3')).toMatchObject({ epoch: 0, status: 'running' })
+    })
+    downstream.resolve()
+    await execution
+
+    expect(fixture.starts.filter(run => run.request.label?.endsWith('章节3'))).toHaveLength(1)
+    const downstreamAttempts = parseChapterExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'),
+    )).sections.find(section => section.section_id === 'SEC-3')!.attempts
+    expect(downstreamAttempts.filter(attempt => attempt.role === 'writer')).toEqual([
+      expect.objectContaining({ accepted: true, stop_reason: 'completed' }),
+    ])
   })
 
   it('仅有合法 plan、没有 log 时复用计划，不再次请求 Relation Planning', async () => {
