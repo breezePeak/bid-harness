@@ -1258,7 +1258,7 @@ function attachMappingSubmissionRuntime(
         const violations = validateJsonSchemaValue(editSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
         const { basis: submittedBasis } = args as { basis: { explanation: string; finding_indices: number[] } }
-        const findingRefs = (submittedBasis.finding_indices as number[]).map((index) => {
+        const findingRefs = submittedBasis.finding_indices.map((index) => {
           const finding = state.researchAssessment.key_findings[index - 1]
           if (finding === undefined) throw new ToolArgsError([`basis.finding_indices: 未知研究发现 ${index}。`])
           return finding.finding_ref

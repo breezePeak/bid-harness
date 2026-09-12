@@ -1146,7 +1146,7 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxConcurrency: 1, maxRepairAttempts: 0 })
-    await vi.waitFor(() => expect(fixture.starts).toHaveLength(1))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const id = start.request.childId!
     const invoke = (name: string, args: unknown) => fixture.invokeSubmissionTool(id, name, args)
@@ -1214,10 +1214,18 @@ describe('evidence-mapping Agent executor', () => {
     await invoke('submit_section_mapping', { section_id: 'SEC-1', local_materials: [], web_materials: [] })
     expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
     start.complete()
-    await vi.waitFor(() => expect(fixture.starts).toHaveLength(2))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts[1]!.resolve()
     await execution
-    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8'))
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      schema_version: number
+      tasks: Array<{
+        task_id: string
+        structure_assessment: unknown
+        structure_invalidated: number
+        research_assessment: Record<string, unknown>
+      }>
+    }
     const saved = checkpoint.tasks.find((task: { task_id: string }) => task.task_id === 'MAP-INIT-SEC-1')
     expect(checkpoint.schema_version).toBe(10)
     expect(saved.structure_assessment).toMatchObject({ stale: false, decision: 'keep' })
@@ -1234,7 +1242,7 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxConcurrency: 1, maxRepairAttempts: 0 })
-    await vi.waitFor(() => expect(fixture.starts).toHaveLength(1))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const id = start.request.childId!
     const invoke = (name: string, args: unknown) => fixture.invokeSubmissionTool(id, name, args)
@@ -1273,12 +1281,21 @@ describe('evidence-mapping Agent executor', () => {
     expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
     start.complete()
     for (let count = 2; count <= createdIds.length + 2; count++) {
-      await vi.waitFor(() => expect(fixture.starts).toHaveLength(count))
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(count) })
       fixture.starts[count - 1]!.resolve()
     }
     await execution
     expect(promptText(fixture.starts[2]!.request.request)).toContain(`"local_material_refs":["M1:${material.chunk}"]`)
-    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'))
+    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      statistics: {
+        initial_leaf_count: number
+        leaf_count: number
+        refine_count: number
+        sections_added: number
+        sections_split: number
+        structure_stale_count: number
+      }
+    }
     expect(log.statistics).toMatchObject({
       initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 1,
     })
@@ -1289,7 +1306,7 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxConcurrency: 1, maxRepairAttempts: 0 })
-    await vi.waitFor(() => expect(fixture.starts).toHaveLength(1))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     const start = fixture.starts[0]!
     const childId = start.request.childId!
     const child = fixture.children.get(String(childId))!
@@ -1304,10 +1321,17 @@ describe('evidence-mapping Agent executor', () => {
     fixture.emitWeb(child, [webResearch('retry').fetch])
     expect((await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', research)).isError).toBe(false)
     start.resolve()
-    await vi.waitFor(() => expect(fixture.starts).toHaveLength(2))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts[1]!.resolve()
     await execution
-    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'))
+    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      statistics: {
+        tools: {
+          web_search: Record<string, unknown>
+          web_fetch: Record<string, unknown>
+        }
+      }
+    }
     expect(log.statistics.tools.web_search).toMatchObject({ calls: 2, succeeded: 1, failed: 1, failure_reasons: ['failed'] })
     expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 1, succeeded: 1, failed: 0 })
   })
@@ -1952,16 +1976,16 @@ describe('evidence-mapping Agent executor', () => {
     const execution = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
     const rejected = expect(execution).rejects.toBeInstanceOf(Error)
     await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
-    first.starts.forEach(start => start.resolve())
+    first.starts.forEach((start) => { start.resolve() })
     await vi.waitFor(() => { expect(first.starts).toHaveLength(4) })
-    first.starts.slice(2).forEach(start => start.resolve())
+    first.starts.slice(2).forEach((start) => { start.resolve() })
     await rejected
     const planPath = join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json')
     const before = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
     const resumed = mappingFixture(workspace, material)
     const completion = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(2) })
-    resumed.starts.forEach(start => start.resolve())
+    resumed.starts.forEach((start) => { start.resolve() })
     await completion
     expect(resumed.starts).toHaveLength(2)
     const after = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
@@ -2084,11 +2108,11 @@ describe('evidence-mapping Agent executor', () => {
       .mockImplementationOnce(text => JSON.stringify({ ...JSON.parse(text) as object, issues: [advisory] }))
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => start.resolve())
+    fixture.starts.forEach((start) => { start.resolve() })
     await execution
     expect(fixture.outlineReviewPrompts).toHaveLength(2)
     expect(fixture.outlineReviewPrompts[1]).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
-    const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8'))
+    const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as { issues: unknown[] }
     expect(quality.issues).toEqual([advisory])
   })
 
