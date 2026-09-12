@@ -68,11 +68,13 @@ export class ChapterAdapter extends LlmAdapter {
         const pendingLine = prompt.split('\n').find(line => line.startsWith('Pending Global Compliance：'))!
         const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ id: string }>
         const globalStep = step - 2
-        if (globalStep < pending.length) {
+        if (globalStep === 0) {
+          yield* call('read_completed_chapter', { section_id: 'SEC-1', start: 0, length: 12_000 })
+        } else if (globalStep <= pending.length) {
           yield* call('review_global_compliance', {
-            compliance_id: pending[globalStep]!.id,
+            compliance_id: pending[globalStep - 1]!.id,
             category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-            status: 'pass', checked_section_ids: ['SEC-1'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+            status: 'pass', checked_section_ids: ['SEC-1'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
           })
         } else yield* call('finish_global_compliance_review', {})
         return
@@ -119,7 +121,7 @@ export class ChapterAdapter extends LlmAdapter {
         })) })
         break
       }
-      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [] }); break
+      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false }); break
       case 7: yield* call('finish_chapter_review', {}); break
       default: throw new Error('Reviewer finish did not conclude the turn')
     }

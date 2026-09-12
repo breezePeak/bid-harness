@@ -202,6 +202,7 @@ export async function runMainAgentProtocol<T>(
     if (value !== undefined) finish(value)
   }
   const disposers = [
+    agent.ctx.on('agent/error', ({ agent: subject, error }) => { if (subject === agent) fail(error) }),
     agent.ctx.on('tools/result', (exec) => { if (exec.agent === agent) queueMicrotask(inspect) }),
     agent.ctx.on('agent/status', ({ agent: subject, status }) => {
       if (subject !== agent || status !== 'idle') return

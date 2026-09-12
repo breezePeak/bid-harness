@@ -78,6 +78,51 @@ describe('项目 Word 格式链路', () => {
     expect(saved.state.modelInterpreted.evidence.find(item => item.key === 'body.size')?.value).toBe(12)
     expect(saved.state.resolved['body.font']).toBe('宋体')
     expect(() => validateFormatSuggestion({ rules: [{ key: 'body.size', value: 15, evidence: '模板里没有这句话' }], mapping: {} }, extracted)).toThrow('模板原文')
+    expect(() => validateFormatSuggestion({ rules: [{ key: 'heading.font', value: '宋体', evidence: '正文小四宋体' }], mapping: {} }, extracted))
+      .toThrow('未知字段：heading.font')
+  })
+
+  it('模型选定候选后只采用该候选的有效格式', () => {
+    const fields = formatFields(defaults)
+    const state = defaultDocxFormatState(fields)
+    state.extracted.candidates = [
+      { id: 'Caption', name: 'Caption', roles: ['figureCaption', 'tableCaption'], samples: ['图 1 xx', '表 1 xx'],
+        values: { alignment: 'center', firstLineUnit: 'chars', firstLine: 0 }, evidence: [] },
+      { id: 'direct-instruction', name: 'Caption（直接格式）', roles: ['figureCaption', 'tableCaption'], samples: ['格式说明'],
+        values: { alignment: 'both', firstLineUnit: 'mm', firstLine: 8.466666666666665 }, evidence: [
+          { key: 'alignment', value: 'center', source: 'named_style', text: 'Caption' },
+          { key: 'firstLineUnit', value: 'chars', source: 'named_style', text: 'Caption' },
+          { key: 'firstLine', value: 0, source: 'named_style', text: 'Caption' },
+          { key: 'alignment', value: 'both', source: 'direct_format', text: '格式说明' },
+          { key: 'firstLineUnit', value: 'mm', source: 'direct_format', text: '格式说明' },
+          { key: 'firstLine', value: 8.466666666666665, source: 'direct_format', text: '格式说明' },
+        ] },
+    ]
+    state.modelInterpreted.mapping = { figureCaption: 'Caption', tableCaption: 'Caption' }
+
+    const resolved = resolveFormat(state, fields)
+
+    expect(resolved.values).toMatchObject({
+      'figureCaption.alignment': 'center',
+      'figureCaption.firstLine': 0,
+      'tableCaption.alignment': 'center',
+      'tableCaption.firstLine': 0,
+    })
+    expect(resolved.state.conflicts.map(conflict => conflict.key)).not.toEqual(expect.arrayContaining([
+      'figureCaption.alignment', 'figureCaption.firstLine', 'tableCaption.alignment', 'tableCaption.firstLine',
+    ]))
+
+    state.modelInterpreted.mapping = { figureCaption: 'direct-instruction', tableCaption: 'direct-instruction' }
+    const direct = resolveFormat(state, fields)
+    expect(direct.values).toMatchObject({
+      'figureCaption.alignment': 'both',
+      'figureCaption.firstLine': 8.466666666666665,
+      'tableCaption.alignment': 'both',
+      'tableCaption.firstLine': 8.466666666666665,
+    })
+    expect(direct.state.conflicts.map(conflict => conflict.key)).not.toEqual(expect.arrayContaining([
+      'figureCaption.alignment', 'figureCaption.firstLine', 'tableCaption.alignment', 'tableCaption.firstLine',
+    ]))
   })
 
   it('在严格字段校验前统一转换模板说明中的字号、行距和缩进', () => {
@@ -127,7 +172,7 @@ describe('项目 Word 格式链路', () => {
     })
   })
 
-  it('同一字段保存所有相异证据及优先级选出的 resolvedValue', async () => {
+  it('候选只提交级联有效值并保留语义冲突', async () => {
     const fields = formatFields(defaults)
     const state = defaultDocxFormatState(fields)
     state.extracted.candidates = [{ id: 'caption', name: 'Caption', roles: ['tableCaption'], samples: ['表1'],
@@ -140,7 +185,8 @@ describe('项目 Word 格式链路', () => {
     ] }
     const view = resolveFormat(state, fields)
     const conflict = view.state.conflicts.find(item => item.key === 'tableCaption.size')
-    expect(conflict?.evidence.map(item => item.value)).toEqual(expect.arrayContaining([12, 16, 14]))
+    expect(conflict?.evidence.map(item => item.value)).toEqual(expect.arrayContaining([16, 14]))
+    expect(conflict?.evidence.map(item => item.value)).not.toContain(12)
     expect(conflict).toMatchObject({ resolvedValue: 14, status: 'conflict' })
   })
 
@@ -183,6 +229,71 @@ describe('项目 Word 格式链路', () => {
     expect(document).not.toContain('图 图片标题')
   })
 
+  it('无题注表格补入表头名称，已有题注兼容空格和自定义前缀且不重复', async () => {
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    values['tableCaption.numbering.prefix'] = '表格'
+    values['tableCaption.numbering.prefixIndexSeparator'] = ' '
+    values['tableCaption.alignment'] = 'center'
+    const table = '| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 资料接收 | 接收日期 |'
+    const rendered = await renderDocx(project, `${table}\n\n说明。\n\n**表1 既有名称**\n\n${table}\n\n说明。\n\n${table}\n\n表 2 后置名称`, values)
+    expect(rendered.html).toContain('表格 1 管理事项、台账记录内容</p><table')
+    expect(rendered.html).toContain('表格 2 <strong>既有名称</strong></p><table')
+    expect(rendered.html).toContain('表格 3 后置名称</p>')
+    const zip = await JSZip.loadAsync(rendered.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    expect(document.match(/<w:numPr>/gu)).toHaveLength(3)
+    expect(document).toContain('管理事项、台账记录内容')
+    expect(document).toContain('<w:keepNext/>')
+    expect(document).toContain('<w:jc w:val="center"/>')
+  })
+
+  it('正文小标题保留原文，部分章节保留确认目录编号且仍使用 Word 标题样式', async () => {
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    const rendered = await renderDocx(await workspace(), '# 文档\n\n# 1 实施\n\n## 1.2 交付\n\n### 内部措施\n\n### 1.1 原文编号\n\n## 1.3 验收\n\n# 2 保障\n\n## 2.1 人员', values)
+    expect(rendered.html).toContain('>1.2 交付</h3>')
+    expect(rendered.html).toContain('>内部措施</h4>')
+    expect(rendered.html).toContain('>1.1 原文编号</h4>')
+    expect(rendered.html).toContain('>1.3 验收</h3>')
+    const zip = await JSZip.loadAsync(rendered.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    const styles = await zip.file('word/styles.xml')!.async('string')
+    const numbering = await zip.file('word/numbering.xml')!.async('string')
+    expect(document).toMatch(/<w:pStyle w:val="Heading3"\/>[^]*?<w:numId w:val="0"\/>/u)
+    expect(styles).not.toContain('<w:numPr>')
+    expect(numbering).toMatch(/<w:lvl w:ilvl="1"[^>]*><w:start w:val="2"\/>/u)
+    expect(numbering).toMatch(/<w:lvl w:ilvl="0"[^>]*><w:start w:val="2"\/>/u)
+    const paragraphs = document.match(/<w:p>[^]*?<\/w:p>/gu) ?? []
+    const numberId = (title: string): string | undefined => /<w:numId w:val="(\d+)"\/>/u.exec(
+      paragraphs.find(paragraph => paragraph.includes(`>${title}</w:t>`)) ?? '',
+    )?.[1]
+    expect(numberId('交付')).toBe(numberId('验收'))
+    expect(numberId('保障')).not.toBe(numberId('验收'))
+    expect(numberId('保障')).toBe(numberId('人员'))
+    expect(document).toContain('1.1 原文编号')
+  })
+
+  it('技术偏离表标题可处于任意层级，所在节使用横向页面并在同级标题恢复原方向', async () => {
+    const rendered = await renderDocx(await workspace(), '# 文档\n\n# 1 实施方案\n\n实施正文。\n\n## 1.1 技术偏离表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 全部响应 | 无偏离 |\n\n## 1.2 交付方案\n\n交付正文。',
+      defaultDocxFormatState(formatFields(defaults)).resolved)
+    const zip = await JSZip.loadAsync(rendered.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    const sections = [...document.matchAll(/<w:sectPr>([^]*?)<\/w:sectPr>/gu)].map(match => match[1])
+    expect(sections).toHaveLength(3)
+    expect(sections[0]).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>')
+    expect(sections[1]).toContain('<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>')
+    expect(sections[2]).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>')
+  })
+
+  it('相邻两表之间的题注归属后表，代码块内题注示例保留原文', async () => {
+    const table = '| 内容 |\n| --- |\n| 说明 |'
+    const rendered = await renderDocx(await workspace(), `${table}\n\n表 9 后表\n\n${table}\n\n\`\`\`text\n表 1 原样代码\n\`\`\``,
+      defaultDocxFormatState(formatFields(defaults)).resolved)
+    expect(rendered.html).toContain('表1 内容</p><table')
+    expect(rendered.html).toContain('表2 后表</p><table')
+    expect(rendered.html).toContain('>表 1 原样代码</pre>')
+  })
+
   it('自动模型请求包含实际模板正文和多角色候选并记录到会话', async () => {
     const project = await workspace()
     const view = await saveDocxTemplate(project, { revision: 0, name: '模型模板.docx', bytes: await template() })
@@ -198,13 +309,14 @@ describe('项目 Word 格式链路', () => {
     const input = JSON.parse(block.text) as { templateParagraphs: string[]; candidateColumns: string[] }
     expect(input.templateParagraphs.join('')).toContain('正文小四宋体')
     expect(input.candidateColumns).toEqual(['id', 'name', 'roles', 'samples'])
+    expect(request.system).toContain('必须逐字选择 fields 第一列中的一个完整字段键')
     expect(append.mock.calls[0]![0]).toBe('bid.word-format.request')
   })
 
   it('标题及图表编号在浏览器预览中独立计数', () => {
     const values = defaultDocxFormatState(formatFields(defaults)).resolved
     const heading = createHeadingNumberer(values)
-    expect([1, 2, 1].map(heading)).toEqual(['1', '1.1', '2'])
+    expect([1, 2, 1].map(level => heading(level))).toEqual(['1', '1.1', '2'])
     const caption = createCaptionNumberer(values)
     expect([caption('figureCaption'), caption('tableCaption'), caption('figureCaption')]).toEqual(['图1 ', '表1 ', '图2 '])
   })
@@ -241,7 +353,7 @@ describe('项目 Word 格式链路', () => {
 
   it('字段校验拒绝未知键、越界值和无效编号', () => {
     const fields = formatFields(defaults)
-    expect(() => validateFormatValues({ '../path': 'x' }, fields)).toThrow('配置无效')
+    expect(() => validateFormatValues({ '../path': 'x' }, fields)).toThrow('格式配置无效：../path')
     expect(() => validateFormatValues({ 'body.size': -1 }, fields)).toThrow('配置无效')
     expect(() => validateFormatValues({ 'numbering.1.text': '%2' }, fields)).toThrow('不能引用下级')
   })

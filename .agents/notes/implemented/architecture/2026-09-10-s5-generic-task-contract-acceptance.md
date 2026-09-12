@@ -20,7 +20,7 @@ Writer 接收完整章节任务契约及既有 Blueprint、Requirement、Scoring
 
 `execution-plan.json` schema v3 绑定确认目录 Hash 和 Writing Plan 版本。Writing Plan 更新后，Main Agent 重新判断受影响范围的 `depends_on`、`related_sections`、`planning_notes` 和 `global_consistency_notes`，Host 只负责校验 DAG 和执行。Host 在一个运行中的 S5 调度器内接收版本化计划命令；已完成或正在运行的受影响章节递增 section epoch 并重新排队，未受影响任务继续运行。
 
-每次 Writer 和 Reviewer 尝试绑定当前计划版本、section epoch，以及全部强依赖章节的候选正文 Hash 与 handoff Hash。正文处理、Reviewer 返回、候选文件写入和完成日志提交都重新核对该身份。计划、章节或上游 handoff 变化后，迟到结果统一记录为 `stale-input`、`accepted=false`，不能覆盖正文、成为最终 Reviewer 或归类为基础设施失败。Host 沿实际强依赖关系传播失效。
+每次 Writer 和 Reviewer 尝试记录当前计划版本、section epoch，以及全部强依赖章节的候选正文 Hash 与 handoff Hash；候选正文 Hash 用于追溯，实际输入有效性由计划版本、section epoch 和传给下游的 handoff Hash 决定。正文处理、Reviewer 返回、候选文件写入和完成日志提交都重新核对输入有效性。计划、章节或上游 handoff 变化后，迟到结果统一记录为 `stale-input`、`accepted=false`，不能覆盖正文、成为最终 Reviewer 或归类为基础设施失败；只有候选正文变化且 handoff 不变时，下游仍可复用。Host 沿实际强依赖关系传播失效。
 
 最终 Validator 独立校验 execution plan/log 与当前 Writing Plan 的绑定、每个 section criterion 的最新 Chapter Reviewer 结果、document criterion 的最终整书结果、deterministic 结果与 Host 当前事实，以及最终 Writer/Reviewer 尝试的全部输入身份；未满足结论作为风险保存，不要求 required 结论为 met。Final Main Agent 不承担章节结果的二次确认。
 

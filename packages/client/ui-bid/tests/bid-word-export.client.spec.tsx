@@ -72,6 +72,10 @@ describe('Word 导出页面', () => {
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByLabelText('上传 Word 模板')).toBeDefined()
     expect(screen.getByRole('table', { name: '模板主要格式' })).toBeDefined()
+    expect(screen.getAllByText('三号（16pt）')).toHaveLength(2)
+    expect(screen.getAllByText('小四（12pt）')).toHaveLength(3)
+    const exportButton = screen.getByRole('button', { name: '导出 Word' })
+    expect(exportButton.closest('header')).not.toBeNull()
     expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['导出 Word'])
     expect(screen.queryByText('格式描述')).toBeNull()
     expect(screen.queryByText('页面设置')).toBeNull()
@@ -93,6 +97,19 @@ describe('Word 导出页面', () => {
     expect(actions.preview).toHaveBeenCalledTimes(2)
   })
 
+  it('模型解释失败时告知用户确定性模板解析仍已保留', async () => {
+    const { props, actions, getView } = fixture()
+    const warning = '模板解析完成；自动格式解释未应用（模型格式解释包含未知字段：heading.font。），可重新上传模板重试。'
+    vi.mocked(actions.uploadTemplate).mockImplementationOnce(async () => ({ ...getView(), warnings: [warning] }))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+    fireEvent.change(screen.getByLabelText('上传 Word 模板'), {
+      target: { files: [new File([Uint8Array.of(1)], '模板.docx')] },
+    })
+    expect(await screen.findByRole('status')).toHaveProperty('textContent', warning)
+    expect(screen.getByRole('table', { name: '模板主要格式' })).toBeDefined()
+  })
+
   it('冲突单元格标红并只允许选择证据中的值', async () => {
     const conflict: FormatConflict = { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
       { key: 'tableCaption.size', value: 12, source: 'template_instruction', text: '表题 12 磅' },
@@ -102,7 +119,7 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByText('待确认')).toBeDefined()
-    fireEvent.click(screen.getByRole('button', { name: '12pt' }))
+    fireEvent.click(screen.getByRole('button', { name: '小四（12pt）' }))
     const dialog = screen.getByRole('dialog')
     expect(within(dialog).getByText('表题字号（磅）存在冲突')).toBeDefined()
     expect(within(dialog).getByText('来源：模板格式说明')).toBeDefined()
@@ -154,18 +171,20 @@ describe('Word 导出页面', () => {
     expect(actions.download).toHaveBeenCalledOnce()
   })
 
-  it('S5 运行中开放当前已完成章节导出并说明范围', async () => {
+  it('S5 运行中导出已保存正文，并显示后端返回的内容范围', async () => {
     const { props, actions } = fixture()
+    const message = 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。'
+    vi.mocked(actions.generate).mockResolvedValue({ path: 'output/bid.docx', warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT', message }] })
     render(<BidWordExport {...props} useProjection={() => ({
       allowedActions: ['send_message', 'stop_stage', 'export_docx'],
       runtime: { stage: 'chapter_writing', status: 'running' },
     })}/>)
     await screen.findByTitle('Word 效果预览')
-    expect(screen.getByRole('status')).toHaveProperty('textContent', '当前导出仅包含已完成并保存的章节。')
+    expect(screen.getByRole('status')).toHaveProperty('textContent', '按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。')
     const button = screen.getByRole('button', { name: '导出 Word' })
     expect(button).toHaveProperty('disabled', false)
     fireEvent.click(button)
-    await screen.findByText('Word 导出完成')
+    await screen.findByText(message)
     expect(actions.generate).toHaveBeenCalledOnce()
     expect(actions.download).toHaveBeenCalledOnce()
   })
@@ -187,7 +206,7 @@ describe('Word 导出页面', () => {
     const file = new File([Uint8Array.of(1, 2, 3, 4)], '公司 模板.docx')
     await expect(injected.uploadTemplate(file, 7)).resolves.toEqual(view)
     const [url, init] = uploadFetch.mock.calls[0]!
-    expect(new URL(String(url)).pathname).toBe('/api/bid-docx-template')
+    expect(new URL(url instanceof Request ? url.url : url).pathname).toBe('/api/bid-docx-template')
     expect(init?.body).toBe(file)
     expect(init?.headers).toMatchObject({ 'x-dsh-bid-session-id': 'session_bid',
       'x-dsh-bid-docx-name': encodeURIComponent(file.name), 'x-dsh-bid-docx-size': '4', 'x-dsh-bid-docx-revision': '7' })

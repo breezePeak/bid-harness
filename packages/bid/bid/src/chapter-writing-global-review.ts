@@ -4,6 +4,7 @@ import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { BidManifest } from './index.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
+import { registerCompletedChapterReader } from './chapter-reading.ts'
 import {
   GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
   parseGlobalComplianceReviewArtifact,
@@ -15,7 +16,7 @@ import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 
 /** Main Agent 可用于提交文档级核验的私有工具。 */
-export const GLOBAL_COMPLIANCE_REVIEW_TOOLS = ['review_global_compliance', 'finish_global_compliance_review'] as const
+export const GLOBAL_COMPLIANCE_REVIEW_TOOLS = ['read_completed_chapter', 'review_global_compliance', 'finish_global_compliance_review'] as const
 
 /** Current chapter bytes made available to the document-level review. */
 export interface GlobalComplianceChapter {
@@ -180,6 +181,9 @@ export function attachGlobalComplianceReview(
   const canonical = new Map(compliance.compliance_items.map(item => [item.id, item]))
   const items = new Map(retained.map(item => [item.compliance_id, item]))
   try {
+    const quoteRefs = registerCompletedChapterReader(runtime, new Map(chapters.map(chapter => [chapter.section_id, {
+      markdown: chapter.markdown, content_sha256: chapter.candidate_sha256,
+    }])))
     runtime.register({
       name: 'review_global_compliance',
       description: '记录全局要求的核验性质、责任归属、结论与当前依据；合法 fail/pending 可保存。',
@@ -215,6 +219,8 @@ export function attachGlobalComplianceReview(
           return { kind: owner.kind }
         })
         const selected = input.evidence_refs.map((ref) => {
+          const quote = quoteRefs.get(ref)
+          if (quote !== undefined) return { kind: 'chapter_quote' as const, ...quote }
           const value = evidenceByRef.get(ref)
           if (value === undefined) throw new ToolArgsError([`evidence_refs: 未知当前依据 ${ref}。`])
           const { evidence_ref: _ref, ...durable } = value

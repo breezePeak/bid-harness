@@ -117,6 +117,8 @@ const globalCheckInput = z.object({
 const acceptanceInput = semanticAcceptanceSubmissionSchema
 const summaryInput = chapterReviewSchema.pick({
   quality_checks: true, blocking_issues: true, assignment_conflicts: true, external_input_gaps: true,
+}).extend({
+  external_input_only: z.boolean(),
 })
 const stringParameter = { type: 'string' }
 const nullableText = { oneOf: [stringParameter, { type: 'null' }] }
@@ -254,7 +256,7 @@ export function attachChapterReview(
       }),
     })
     runtime.register({
-      name: 'set_review_summary', description: '整体替换质量检查、正文修复问题、任务冲突和外部资料缺口；可用空数组撤销误判。',
+      name: 'set_review_summary', description: '整体替换质量检查、正文修复问题、任务冲突和外部资料缺口；明确全部失败是否只能由外部输入解决。',
       parameters: {
         type: 'object', properties: {
           quality_checks: { type: 'object', properties: qualityParameters, required: Object.keys(qualityParameters), additionalProperties: false },
@@ -266,7 +268,8 @@ export function attachChapterReview(
           external_input_gaps: { type: 'array', items: { type: 'object', properties: {
             item_ref: stringParameter, required_material: stringParameter, reason: stringParameter,
           }, required: ['item_ref', 'required_material', 'reason'], additionalProperties: false } },
-        }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts', 'external_input_gaps'], additionalProperties: false,
+          external_input_only: { type: 'boolean' },
+        }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts', 'external_input_gaps', 'external_input_only'], additionalProperties: false,
       },
       execute(args) {
         summary = chapterToolArgs(summaryInput, args)
@@ -283,6 +286,9 @@ export function attachChapterReview(
           if (coverage.get(gap.item_ref)?.status !== 'missing') {
             throw new ToolArgsError([`external_input_gaps: ${gap.item_ref} 必须已经记录为 missing。`])
           }
+        }
+        if (summary.external_input_only && summary.external_input_gaps.length === 0) {
+          throw new ToolArgsError(['external_input_only=true 必须至少记录一项 external_input_gaps。'])
         }
         return Promise.resolve({ recorded: true })
       },
@@ -320,7 +326,7 @@ export function attachChapterReview(
           claim_quote: quote(item.claim_quote_ref), kind: item.kind, status: item.status,
           source_reference: evidence.find(source => source.source_ref === item.source_reference)?.locator ?? null, issue: item.issue,
         }))
-        const blocking = [...new Set([
+        const blocking = completedSummary.external_input_only ? [] : [...new Set([
           ...completedSummary.blocking_issues,
           ...entries.filter(entry => entry.result.status === 'missing')
             .filter(entry => !completedSummary.external_input_gaps.some(gap => gap.item_ref === entry.item.item_ref))
@@ -370,7 +376,7 @@ export function attachChapterReview(
         })
         const review = parseChapterReview({
           schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
-          verdict: blocking.length > 0 ? 'repair'
+          verdict: completedSummary.external_input_only ? 'attention' : blocking.length > 0 ? 'repair'
             : completedSummary.assignment_conflicts.length > 0 || completedSummary.external_input_gaps.length > 0 ? 'attention' : 'pass',
           must_answer_coverage: entries.filter(entry => entry.item.kind === 'must_answer').map(entry => entry.value),
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),

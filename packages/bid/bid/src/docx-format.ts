@@ -238,8 +238,14 @@ export function validateFormatValues(values: unknown, fields: FormatField[]): Fo
     formatValueSchemas.set(fields, schema)
   }
   const parsed = schema.safeParse(normalizeFormatValues(values, fields))
-  if (!parsed.success)
-    throw new Error(`格式配置无效：${parsed.error.issues.map(issue => issue.path.join('.')).join('、')}`)
+  if (!parsed.success) {
+    const locations = parsed.error.issues.flatMap((issue) => {
+      if (issue.path.length > 0) return [issue.path.map(String).join('.')]
+      if (issue.code === 'unrecognized_keys') return issue.keys
+      return ['根对象']
+    })
+    throw new Error(`格式配置无效：${[...new Set(locations)].join('、')}`)
+  }
   const result = parsed.data as FormatValues
   for (const [key, value] of Object.entries(result))
     if (/\.(?:font|latinFont)$/u.test(key) && !/^[^<>;"{}\\\r\n]{1,100}$/u.test(String(value)))
@@ -316,7 +322,7 @@ function candidateEvidence(candidate: DocxFormatState['extracted']['candidates']
   const values = validateFormatValues(Object.fromEntries(Object.entries(candidate.values).map(([key, value]) => [`${role}.${key}`, value])), fields)
   return Object.entries(values).flatMap(([fullKey, value]) => {
     const key = fullKey.slice(role.length + 1)
-    const evidence = byKey.get(key)
+    const evidence = byKey.get(key)?.filter(item => evidenceValue(item.value) === evidenceValue(value))
     if (evidence?.length) return evidence.map(item => ({ ...normalizeEvidence(item, fullKey, fields), candidateId: candidate.id }))
     return [{ key: fullKey, value, source: 'named_style' as const, text: candidate.name, candidateId: candidate.id }]
   })
@@ -347,8 +353,7 @@ export function resolveFormat(state: DocxFormatState, fields: FormatField[], tem
   for (const role of FORMAT_ROLES) {
     const mapped = state.modelInterpreted.mapping[role]
     const candidates = mapped
-      ? normalizedCandidates.filter(candidate => candidate.id === mapped
-        || candidate.id.startsWith('direct-') && candidate.roles.includes(role))
+      ? normalizedCandidates.filter(candidate => candidate.id === mapped)
       : normalizedCandidates.filter(candidate => candidate.roles.includes(role))
     for (const candidate of candidates)
       for (const item of candidateEvidence(candidate, role, fields)) add(item)

@@ -16,6 +16,7 @@ import { Document,
   TextRun,
   ImageRun,
   ExternalHyperlink,
+  SectionType,
   WidthType,
   type ParagraphChild,
   type IParagraphOptions,
@@ -49,6 +50,32 @@ const escape = (value: string): string => value.replaceAll('&',
   '&#39;')
 const content = (node: Node): string => node.value ?? (node.children ?? []).map(content).join('')
 const mm = (value: number): number => Math.round(value * 1440 / 25.4)
+const isTechnicalDeviationTableHeading = (node: Node): boolean => node.type === 'heading'
+  && content(node).replace(/^\s*\d+(?:\.\d+)*\s+/u, '').trim() === '技术偏离表'
+
+function splitDocumentSections(nodes: Node[]): Array<{ landscape: boolean; nodes: Node[] }> {
+  const sections: Array<{ landscape: boolean; nodes: Node[] }> = []
+  let technicalDeviationDepth: number | undefined
+  let current: Node[] = []
+  const flush = (): void => {
+    if (current.length > 0) sections.push({ landscape: technicalDeviationDepth !== undefined, nodes: current })
+    current = []
+  }
+  for (const node of nodes) {
+    if (isTechnicalDeviationTableHeading(node)) {
+      if (technicalDeviationDepth === undefined) {
+        flush()
+        technicalDeviationDepth = node.depth
+      }
+    } else if (technicalDeviationDepth !== undefined && node.type === 'heading' && (node.depth ?? 0) <= technicalDeviationDepth) {
+      flush()
+      technicalDeviationDepth = undefined
+    }
+    current.push(node)
+  }
+  flush()
+  return sections
+}
 function withoutLeadingText(nodes: Node[], marker: RegExp): Node[] {
   let remaining = marker.exec(nodes.map(content).join(''))?.[0].length ?? 0
   const visit = (items: Node[]): Node[] => items.map((node) => {
@@ -153,7 +180,10 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const headingLevels = resolveHeadingNumbering(values)
   const captionLevels = resolveCaptionNumbering(values)
   const headingReference = 'dsh-headings'
-  const headingNumbering = (level: number): NonNullable<IParagraphOptions['numbering']> => ({ reference: headingReference, level })
+  const headingConfigs = [{ reference: headingReference, levels: headingLevels }]
+  let currentHeadingReference = headingReference
+  let headingRestartDepth = 0
+  const headingNumbering = (level: number): NonNullable<IParagraphOptions['numbering']> => ({ reference: currentHeadingReference, level })
   const definitions = new Map(root.children.filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const num = (key: string): number => Number(values[key])
   const str = (key: string): string => String(values[key])
@@ -162,11 +192,12 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     const prefix = escaped(str(`${role}.numbering.prefix`))
     const prefixSeparator = str(`${role}.numbering.prefixIndexSeparator`)
     const titleSeparator = str(`${role}.numbering.indexTitleSeparator`)
-    const beforeNumber = prefixSeparator ? escaped(prefixSeparator) : '\\s*'
-    const afterNumber = titleSeparator ? escaped(titleSeparator) : '\\s*'
+    const beforeNumber = prefixSeparator.trim() ? escaped(prefixSeparator) : '\\s*'
+    const afterNumber = titleSeparator.trim() ? escaped(titleSeparator) : '\\s*'
     const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
     const withoutNumber = titleSeparator ? `${prefix}${escaped(titleSeparator)}` : `${prefix}\\s+`
-    return new RegExp(`^\\s*(?:${prefix}${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
+    const markers = [prefix, role === 'tableCaption' ? '表' : '图'].filter(Boolean).join('|')
+    return new RegExp(`^\\s*(?:(?:${markers})${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
   }
   const captionRole = (value: string): 'figureCaption' | 'tableCaption' | undefined =>
     captionLevels.find(({ role }) => {
@@ -263,9 +294,22 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
       if (node.type === 'definition')
         continue
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
-        const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}` : captionRole(content(node)) ?? 'body'
+        const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}`
+          : node.type === 'paragraph' ? captionRole(content(node)) ?? 'body' : 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
-        const numberedHeading = node.type === 'heading' && role !== 'title'
+        const sourceNumber = /^(\d+(?:\.\d+)*)\s+/u.exec(content(node))?.[1]
+        const numberedHeading = node.type === 'heading' && role !== 'title' && sourceNumber?.split('.').length === node.depth
+        const nextHeadingNumber = numberedHeading ? numberHeading(node.depth ?? 1) : ''
+        const headingPrefix = numberedHeading && values['numbering.mode'] === 'decimal' ? sourceNumber ?? nextHeadingNumber : nextHeadingNumber
+        if (numberedHeading && values['numbering.mode'] === 'decimal'
+          && (headingPrefix !== nextHeadingNumber || (node.depth ?? 1) < headingRestartDepth)) {
+          const starts = headingPrefix.split('.').map(Number)
+          numberHeading(node.depth ?? 1, starts)
+          headingRestartDepth = node.depth ?? 1
+          currentHeadingReference = `${headingReference}-${headingConfigs.length}`
+          headingConfigs.push({ reference: currentHeadingReference,
+            levels: headingLevels.map(level => ({ ...level, start: starts[level.level] ?? 1 })) })
+        }
         if (numberedHeading)
           contents = withoutLeadingText(contents, /^\d+(?:\.\d+)*\s+/u)
         const numberedCaption = role === 'figureCaption' || role === 'tableCaption'
@@ -275,13 +319,14 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
         doc.push(new Paragraph({ ...paragraph(role),
           ...(level > 0 ? { indent: { left: mm(level * 6) } } : {}),
           ...(node.type === 'heading' ? { heading: role === 'title' ? 'Title' : `Heading${role.slice(7)}` as 'Heading1' } : {}),
+          ...(node.type === 'heading' && !numberedHeading ? { numbering: false } : {}),
           ...(numberedHeading && headingLevels.length ? { numbering: headingNumbering((node.depth ?? 1) - 1) } : {}),
-          ...(numberedCaption ? { numbering: { reference: `dsh-${role}`, level: 0 } } : {}),
+          ...(numberedCaption ? { numbering: { reference: `dsh-${role}`, level: 0 },
+            ...(role === 'tableCaption' && nodes[index + 1]?.type === 'table' ? { keepNext: true } : {}) } : {}),
           children: [...(prefix ? [new TextRun({ ...run(role),
             text: prefix })] : []),
           ...rendered.runs] }))
         const tag = role === 'title' ? 'h1' : node.type === 'heading' ? `h${Math.min(6, Number(role.slice(7)) + 1)}` : node.type === 'code' ? 'pre' : 'p'
-        const headingPrefix = numberedHeading ? numberHeading(node.depth ?? 1) : ''
         const captionPrefix = numberedCaption ? numberCaption(role) : ''
         html.push(`<${tag} style="${style(role)}">${escape(prefix)}${headingPrefix ? `${escape(headingPrefix)} ` : ''}${escape(captionPrefix)}${rendered.html}</${tag}>`)
         continue
@@ -307,6 +352,16 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
         continue
       }
       if (node.type === 'table') {
+        const previous = nodes[index - 1], next = nodes[index + 1]
+        const hasCaption = previous?.type === 'paragraph' && captionRole(content(previous)) === 'tableCaption'
+          || next?.type === 'paragraph' && captionRole(content(next)) === 'tableCaption' && nodes[index + 2]?.type !== 'table'
+        if (!hasCaption) {
+          const title = (node.children?.[0]?.children ?? []).map(content).filter(Boolean).join('、')
+          const caption = await inline([{ type: 'text', value: title }], 'tableCaption')
+          doc.push(new Paragraph({ ...paragraph('tableCaption'), keepNext: true,
+            numbering: { reference: 'dsh-tableCaption', level: 0 }, children: caption.runs }))
+          html.push(`<p style="${style('tableCaption')};break-after:avoid">${escape(numberCaption('tableCaption'))}${caption.html}</p>`)
+        }
         const rows: TableRow[] = [], htmlRows: string[] = []
         for (const [rowIndex, row] of (node.children ?? []).entries()) {
           const cells: TableCell[] = [], htmlCells: string[] = []
@@ -338,7 +393,10 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     }
     return { doc, html: html.join('') }
   }
-  const body = await blocks(root.children)
+  const renderedSections: Array<{ landscape: boolean; doc: (Paragraph | Table)[]; html: string }> = []
+  for (const section of splitDocumentSections(root.children))
+    renderedSections.push({ landscape: section.landscape, ...await blocks(section.nodes) })
+  let html = renderedSections.map(section => section.html).join('')
   if (preview) {
     const all: Node[] = []
     const visit = (node: Node): void => { all.push(node); for (const nested of node.children ?? [])
@@ -363,29 +421,31 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     const sample = await blocks(samples)
     const imageSample = all.some(node => node.type === 'image' || node.type === 'imageReference') ? '' : '<figure><svg role="img" aria-label="图片占位示例，非正文" width="320" height="100" viewBox="0 0 320 100" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="318" height="98" fill="none" stroke="currentColor"/><text x="35" y="55">图片占位示例（非正文）</text></svg></figure>'
     if (samples.length || imageSample)
-      body.html += `<hr><p>以下为缺失内容的排版样例，不写入正文或导出文件。</p>${sample.html}${imageSample}`
+      html += `<hr><p>以下为缺失内容的排版样例，不写入正文或导出文件。</p>${sample.html}${imageSample}`
   }
   const title = root.children[0]?.type === 'heading' ? content(root.children[0]) : ''
   const headerText = str('header.text') || title, footerText = str('footer.text')
   const pageNumber = str('footer.pageNumber')
   const page = values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
-  const document = new Document({ numbering: { config: [...(headingLevels.length ? [{ reference: headingReference,
-    levels: headingLevels.map(level => ({ ...level, style: { ...level.style, run: run(`heading${level.level + 1}`) } })),
-  }] : []), ...captionLevels.map(({ role, reference, level }) => ({ reference,
+  const document = new Document({ numbering: { config: [...(headingLevels.length ? headingConfigs.map(({ reference, levels }) => ({
+    reference,
+    levels: levels.map(level => ({ ...level,
+      style: { ...level.style, run: run(`heading${level.level + 1}`) } })),
+  })) : []), ...captionLevels.map(({ role, reference, level }) => ({ reference,
     levels: [{ ...level, style: { run: run(role), paragraph: paragraph(role) } }] }))] }, styles: { default: {
     document: { run: run('body') },
     ...Object.fromEntries(['title', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6']
       .map(role => [role, { basedOn: 'DshHeadingBase', run: run(role), paragraph: { ...paragraph(role),
         ...(role === 'title' ? {} : { outlineLevel: Number(role.slice(7)) - 1,
-          ...(headingLevels.length ? { numbering: headingNumbering(Number(role.slice(7)) - 1) } : {}) }),
+        }),
       } }])),
   }, paragraphStyles: [
     { id: 'Normal', name: 'Normal', run: run('body'), paragraph: paragraph('body') },
     { id: 'DshHeadingBase', name: '标题基准', run: run('body') },
-  ] }, sections: [{
-    properties: { page: { size: { width: mm(page[0] as number),
+  ] }, sections: renderedSections.map((section, index) => ({
+    properties: { ...(index === 0 ? {} : { type: SectionType.NEXT_PAGE }), page: { size: { width: mm(page[0] as number),
       height: mm(page[1] as number),
-      orientation: str('page.orientation') as 'portrait' | 'landscape' },
+      orientation: section.landscape ? 'landscape' : str('page.orientation') as 'portrait' | 'landscape' },
     margin: Object.fromEntries(['top',
       'bottom',
       'left',
@@ -405,9 +465,9 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
           ...(pageNumber === 'total' ? [' / ',
             PageNumber.TOTAL_PAGES] : []),
           ' 页'] })])] })] }) },
-    children: body.doc,
-  }] })
+    children: section.doc,
+  })) })
   return { bytes: await applyHeadingRestartRules(await Packer.toBuffer(document), values),
     assetHash: hashAssets(assets),
-    html: `<!doctype html><html lang="zh"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><body style="margin:0;padding:${num('page.top')}mm ${num('page.right')}mm ${num('page.bottom')}mm ${num('page.left')}mm;background:white;color:black"><header style="${style('header')}">${escape(headerText)}</header>${body.html}<footer style="${style('footer')}">${escape(footerText)}${pageNumber === 'none' ? '' : ' 第 1 页（示例页码）'}</footer></body></html>` }
+    html: `<!doctype html><html lang="zh"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><body style="margin:0;padding:${num('page.top')}mm ${num('page.right')}mm ${num('page.bottom')}mm ${num('page.left')}mm;background:white;color:black"><header style="${style('header')}">${escape(headerText)}</header>${html}<footer style="${style('footer')}">${escape(footerText)}${pageNumber === 'none' ? '' : ' 第 1 页（示例页码）'}</footer></body></html>` }
 }

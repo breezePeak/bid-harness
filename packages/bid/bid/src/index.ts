@@ -46,7 +46,7 @@ import { executeOutlineGeneration, generateScopedOutlineOperations } from './out
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { inspectBidStage, installStageInteractionTools, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
-import { prepareBidStageContextTransition, resetBidStageContext } from './stage-context.ts'
+import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
@@ -845,13 +845,32 @@ function resolveWritingRequirementMessages(
   })
 }
 
-/** Host-owned Bid RPC runtime that serializes project mutations and publishes durable stage state. */
+/** Host-owned Bid RPC runtime that serializes stage mutations and publishes durable stage state. */
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
   static Config = Config
 
   private readonly config: Config
   private readonly inFlight = new Map<BidProjectKey, ActiveBidOperation>()
+  private readonly docxInFlight = new Set<BidProjectKey>()
+
+  /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
+  private async withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T> {
+    const key = projectKey(session)
+    const active = this.inFlight.get(key)
+    if (active?.reservedForReset) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正在重置阶段，请稍后重试 Word 操作。')
+    }
+    if (this.docxInFlight.has(key)) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Word 操作正在执行。')
+    }
+    this.docxInFlight.add(key)
+    try {
+      return await execute(active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config)))
+    } finally {
+      this.docxInFlight.delete(key)
+    }
+  }
 
   /** 在第一次异步操作前占用项目，直到落盘和所有执行器完成。 */
   private beginOperation(session: Session): ActiveBidOperation {
@@ -1362,6 +1381,9 @@ export class BidHostRuntime extends TypertRemoteService {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
     }
     const key = projectKey(session)
+    if (this.docxInFlight.has(key)) {
+      throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Word 操作正在执行，请完成后重置阶段。')
+    }
     const prior = this.inFlight.get(key)
     if (prior !== undefined) {
       if (prior.reservedForReset || prior.session !== session) {
@@ -1795,29 +1817,34 @@ export class BidHostRuntime extends TypertRemoteService {
         throw new Error('Word 模板需要标书项目会话。')
       }
       const bytes = await readExactRequestBody(req, size, 'DOCX 模板内容与声明大小不一致。')
-      const operation = this.beginOperation(session)
-      try {
-        const previous = await readDocxFormat(operation.workspace)
-        let view = await saveDocxTemplate(operation.workspace, {
+      result = await this.withDocxOperation<DocxTemplateUploadResult>(session, async (workspace) => {
+        let view = await saveDocxTemplate(workspace, {
           revision,
           name: decodeURIComponent(nameHeader),
           bytes,
         })
+        let suggestion: DocxFormatSuggestion
         try {
-          const suggestion = await suggestDocxFormat(
+          suggestion = await suggestDocxFormat(
             this.ctx,
             session,
             view,
-            AbortSignal.any([operation.controller.signal, AbortSignal.timeout(this.config.wordFormatTimeoutMs)]),
+            AbortSignal.timeout(this.config.wordFormatTimeoutMs),
             this.config.wordFormatMaxTokens,
           )
-          view = await saveDocxFormatInterpretation(operation.workspace, view.state.revision, suggestion)
         } catch (error) {
-          await writeDocxFormat(operation.workspace, previous.state)
-          throw error
+          const reason = error instanceof Error ? error.message : '未知错误。'
+          return {
+            ok: true,
+            value: {
+              ...view,
+              warnings: [...view.warnings, `模板解析完成；自动格式解释未应用（${reason}），可重新上传模板重试。`],
+            },
+          }
         }
-        result = { ok: true, value: view }
-      } finally { await this.finishOperation(session, operation, false) }
+        view = await saveDocxFormatInterpretation(workspace, view.state.revision, suggestion)
+        return { ok: true, value: view }
+      })
     } catch (error) {
       result = docxTemplateUploadFailure(error)
     }
@@ -1878,6 +1905,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const agent = this.ctx.agents.get(session.id)
       if (agent === undefined) return retryRejected('BID_RETRY_FAILED', 'Bid Session has no live Agent.')
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+      if (runtime.stage === 'chapter_writing') recoverOverflowedBidStageContext(session, runtime.stage)
       const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
       const next = await orchestrator.retry(runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace))
       await this.ctx.sessions.flush(session)
@@ -1923,9 +1951,7 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('saveDocxFormat')
   async saveDocxFormat(session: Session, request: DocxFormatRequest): Promise<DocxFormatView> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
-    const operation = this.beginOperation(session)
-    try { return await saveDocxFormat(operation.workspace, request) }
-    finally { await this.finishOperation(session, operation, false) }
+    return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, request))
   }
 
   /** 使用已保存配置和固定正文快照生成浏览器预览，不完成 S6。
@@ -1949,15 +1975,11 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('suggestDocxFormat')
   async suggestDocxFormat(session: Session): Promise<DocxFormatSuggestion> {
     if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('格式建议需要标书项目会话。')
-    const operation = this.beginOperation(session)
-    try {
-      return await suggestDocxFormat(
-        this.ctx, session, await readDocxFormat(operation.workspace),
-        AbortSignal.any([operation.controller.signal, AbortSignal.timeout(this.config.wordFormatTimeoutMs)]),
-        this.config.wordFormatMaxTokens,
-      )
-    }
-    finally { await this.finishOperation(session, operation, false) }
+    return this.withDocxOperation(session, async workspace => suggestDocxFormat(
+      this.ctx, session, await readDocxFormat(workspace),
+      AbortSignal.timeout(this.config.wordFormatTimeoutMs),
+      this.config.wordFormatMaxTokens,
+    ))
   }
 
   /** 下载当前项目最近一次成功的 Word，不接受浏览器文件路径。
@@ -1977,8 +1999,8 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * 从完整 S5 产物或运行中已完成章节生成 Word，不暂停写作，也不离开审核阶段。
-   * @param session 当前 Bid 会话；运行中导出只允许持有项目操作的 Session。
+   * 按完整目录和已保存正文生成 Word，不暂停写作，也不离开审核阶段；导出不代表审核通过。
+   * @param session 当前项目的 Bid 会话，无需持有阶段操作。
    * @returns 新文件信息，或稳定的拒绝结果。
    */
   @Remote('exportDocx')
@@ -1988,55 +2010,40 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     const failure = (error: unknown): BidDocxExportResult => {
       if (error instanceof BidStageExecutionError) {
-        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '当前已完成章节无法导出，请检查正文完整性。', error.issues)
+        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '当前已保存正文无法导出，请检查正文完整性。', error.issues)
       }
       return docxExportRejected('BID_DOCX_EXPORT_FAILED', error instanceof Error ? error.message : 'Word 生成失败，请重试。')
     }
     const generate = async (
       workspace: BidWorkspace,
       runtime: BidRuntimeState,
-      signal?: AbortSignal,
-      operation?: ActiveBidOperation,
     ): Promise<BidDocxExportResult> => {
       if (!getBidClientProjection(runtime).allowedActions.includes('export_docx')) {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
-      const partial = runtime.stage === 'chapter_writing'
-        && (runtime.status === 'running' || runtime.status === 'failed')
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const artifacts = await executeDocxExport(
-        workspace, signal, destination, partial ? 'completed_chapters' : 'complete',
-      )
+      const artifacts = await executeDocxExport(workspace, undefined, destination)
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) {
         return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
       }
-      if (operation !== undefined && runtime.stage === 'docx_export' && runtime.status !== 'completed') {
-        session.append('bid.stage.started', { stage: 'docx_export', status: 'running' })
-        session.append('bid.stage.completed', { stage: 'docx_export', status: 'completed', artifacts })
-        await this.checkpoint(operation)
-      }
-      const warnings = partial ? [{
-        code: 'DOCX_EXPORT_PARTIAL_SNAPSHOT',
-        message: 'Word 已生成，仅包含点击导出时已完成并保存的章节。',
-        artifact: 'chapters/execution-log.json',
-      }] : await assessDocxExportPageTarget(workspace)
-      return { ok: true, value: { path: destination, ...(warnings.length === 0 ? {} : { warnings }) } }
+      const warnings = [{
+        code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
+        message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
+      }, ...await assessDocxExportPageTarget(workspace)]
+      return { ok: true, value: { path: destination, warnings } }
     }
-    const active = this.inFlight.get(projectKey(session))
-    if (active !== undefined) {
-      if (active.session !== session) {
-        return docxExportRejected('BID_OPERATION_IN_PROGRESS', '当前项目正在另一会话中执行。')
-      }
-      try {
-        const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-        return await generate(active.workspace, runtime)
-      } catch (error: unknown) { return failure(error) }
+    try {
+      return await this.withDocxOperation(session, async (workspace) => {
+        const saved = await readBidProjectState(workspace)
+        const active = this.inFlight.get(projectKey(session))
+        const runtime = active === undefined
+          ? saved?.runtime ?? session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+          : active.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+        return generate(workspace, runtime)
+      })
     }
-    const operation = this.beginOperation(session)
-    try { return await generate(operation.workspace, await this.prepareOperation(operation), operation.controller.signal, operation) }
     catch (error: unknown) { return failure(error) }
-    finally { await this.finishOperation(session, operation, false) }
   }
 
   /**

@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DOCX_TEMPLATE_MAX_BYTES } from '@deepseek-ai/dsh-bid/control-plane'
-import type { DocxFormatRequest, DocxFormatView, FormatConflict, FormatEvidenceSource, FormatRole, FormatValue } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDocxExportResult, DocxFormatRequest, DocxFormatView, FormatConflict, FormatEvidenceSource, FormatRole, FormatValue } from '@deepseek-ai/dsh-bid/control-plane'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
 
@@ -24,6 +24,10 @@ const SOURCE_LABELS: Record<FormatEvidenceSource, string> = {
   user_confirmed: '用户确认',
 }
 const ALIGNMENT_LABELS: Record<string, string> = { left: '左对齐', center: '居中', right: '右对齐', both: '两端对齐' }
+const CHINESE_SIZE_LABELS: Record<string, string> = {
+  42: '初号', 36: '小初', 26: '一号', 24: '小一', 22: '二号', 18: '小二', 16: '三号', 15: '小三',
+  14: '四号', 12: '小四', 10.5: '五号', 9: '小五', 7.5: '六号', 6.5: '小六', 5.5: '七号', 5: '八号',
+}
 const SUMMARY_KEYS = new Set(ROWS.flatMap(({ role }) => ['font', 'latinFont', 'size', 'alignment', 'line', 'lineRule',
   'firstLine', 'firstLineUnit'].map(key => `${role}.${key}`)))
 
@@ -32,12 +36,17 @@ export interface BidWordExportInjected {
   saveFormat: (request: DocxFormatRequest) => Promise<DocxFormatView>
   uploadTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   preview: () => Promise<DocxFormatView>
-  generate: () => Promise<{ path: string }>
+  generate: () => Promise<Extract<BidDocxExportResult, { ok: true }>['value']>
   download: () => Promise<void>
 }
 
 const sameValue = (left: FormatValue, right: FormatValue): boolean => typeof left === typeof right && left === right
 const displayValue = (value: FormatValue): string => typeof value === 'boolean' ? value ? '是' : '否' : String(value)
+const displaySize = (value: FormatValue): string => {
+  const points = displayValue(value)
+  const named = CHINESE_SIZE_LABELS[points]
+  return named ? `${named}（${points}pt）` : `${points}pt`
+}
 
 /** 项目级模板上传、冲突确认和样式预览。 */
 export function BidWordExport({ sessionId,
@@ -62,8 +71,6 @@ export function BidWordExport({ sessionId,
   const firstConflict = useRef<HTMLButtonElement | null>(null)
   const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.runtime.status === 'completed' && ['chapter_writing',
     'docx_export'].includes(projection.runtime.stage))
-  const partial = projection?.runtime.stage === 'chapter_writing'
-    && (projection.runtime.status === 'running' || projection.runtime.status === 'failed')
 
   const loadPreview = async (): Promise<void> => {
     const next = await preview()
@@ -109,7 +116,21 @@ export function BidWordExport({ sessionId,
   }
 
   return <section className={css.root} aria-label="导出 Word" data-conversation-composer-overlay="">
-    <header className={css.header}><strong>导出 Word</strong></header>
+    <header className={css.header}><strong>导出 Word</strong>
+      <Button variant="primary" size="sm" disabled={!ready || !view || !formatVisible || Boolean(busy)} onClick={() => {
+        if (unresolved.length) {
+          setError(`当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`)
+          firstConflict.current?.focus()
+          return
+        }
+        perform('正在导出 Word…', async () => {
+          const result = await generate()
+          await download()
+          setView(await getFormat())
+          setStatus(result.warnings?.map(warning => warning.message).join('；') || 'Word 导出完成')
+        })
+      }}>导出 Word</Button>
+    </header>
     <div className={css.columns}>
       <div className={css.left}>
         <label className={css.upload}>
@@ -127,12 +148,13 @@ export function BidWordExport({ sessionId,
               setView(next)
               await loadPreview()
               setFormatVisible(true)
-              setStatus('模板解析完成')
+              setStatus(next.warnings.find(warning => warning.startsWith('模板解析完成；自动格式解释未应用'))
+                ?? '模板解析完成')
             })
           }}/>
           {formatVisible && view?.state.template && <span>{view.state.template.name}</span>}
         </label>
-        <p role="status" className={css.status}>{busy || status || (partial ? '当前导出仅包含已完成并保存的章节。' : '')}</p>
+        <p role="status" className={css.status}>{busy || status || '按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。'}</p>
         {error && <p role="alert" className={css.error}>{error}</p>}
         {formatVisible && view && <table className={css.summary}>
           <caption>模板主要格式</caption>
@@ -142,7 +164,7 @@ export function BidWordExport({ sessionId,
             return <tr key={role} className={roleConflicts.length ? css.conflictRow : undefined}>
               <th scope="row">{label}</th>
               {cell([`${role}.font`, `${role}.latinFont`], `${displayValue(value(`${role}.font`))} / ${displayValue(value(`${role}.latinFont`))}`)}
-              {cell([`${role}.size`], `${displayValue(value(`${role}.size`))}pt`)}
+              {cell([`${role}.size`], displaySize(value(`${role}.size`)))}
               {cell([`${role}.alignment`], ALIGNMENT_LABELS[String(value(`${role}.alignment`))] ?? displayValue(value(`${role}.alignment`)))}
               {cell([`${role}.line`, `${role}.lineRule`], displayValue(value(`${role}.line`)))}
               {cell([`${role}.firstLine`, `${role}.firstLineUnit`], Number(value(`${role}.firstLine`)) === 0 ? '0' : `${displayValue(value(`${role}.firstLine`))}${value(`${role}.firstLineUnit`) === 'chars' ? '字符' : 'mm'}`)}
@@ -165,21 +187,6 @@ export function BidWordExport({ sessionId,
           : <p>尚无本次模板识别结果。</p>}
       </div>
     </div>
-    <footer className={css.footer}>
-      <Button variant="primary" disabled={!ready || !view || !formatVisible || Boolean(busy)} onClick={() => {
-        if (unresolved.length) {
-          setError(`当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`)
-          firstConflict.current?.focus()
-          return
-        }
-        perform('正在导出 Word…', async () => {
-          await generate()
-          await download()
-          setView(await getFormat())
-          setStatus('Word 导出完成')
-        })
-      }}>导出 Word</Button>
-    </footer>
     {activeConflict && <div className={css.backdrop}>
       <div role="dialog" aria-modal="true" aria-labelledby="word-conflict-title" className={css.dialog}>
         <h2 id="word-conflict-title">{view?.fields.find(field => field.key === activeConflict.key)?.label ?? activeConflict.key}存在冲突</h2>

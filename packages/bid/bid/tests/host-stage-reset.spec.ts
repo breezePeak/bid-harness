@@ -87,6 +87,7 @@ describe('Bid Host stage reset', () => {
         wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,
       inFlight: new Map([[key, operation]]),
+      docxInFlight: new Set(),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 
@@ -154,6 +155,7 @@ describe('Bid Host stage reset', () => {
         wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [],
       } satisfies Config,
       inFlight: new Map(),
+      docxInFlight: new Set(),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 

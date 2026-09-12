@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
+import { registerCompletedChapterReader } from './chapter-reading.ts'
 import type { WritingPlan } from './writing-requirements.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import type { ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -154,33 +155,8 @@ export function attachChapterWritingCompletionReview(
   const semantic = plan.document_acceptance.filter(criterion => criterion.evaluator.kind === 'semantic')
   const allowedSections = new Set(plan.sections.map(section => section.section_id))
   const settledRiskSections = new Set(sections.flatMap(section => section.review.verdict === 'pass' ? [] : [section.section_id]))
-  const quoteRefs = new Map<string, { section_id: string; quote: string }>()
   const runtime = createChapterProtocol<ChapterWritingCompletionDecision>(agent, 'submit_chapter_writing_completion_review', maxContinuations)
-  runtime.register({
-    name: 'read_completed_chapter',
-    description: '按 section_id 读取当前已完成章节的有界正文片段；只读，不修改 Artifact。',
-    parameters: {
-      type: 'object', properties: {
-        section_id: { type: 'string' }, start: { type: 'integer' }, length: { type: 'integer' },
-      }, required: ['section_id', 'start', 'length'], additionalProperties: false,
-    },
-    execute(args) {
-      const input = chapterToolArgs(z.object({
-        section_id: z.string().min(1), start: z.number().int().nonnegative(), length: z.number().int().min(1).max(12_000),
-      }).strict(), args)
-      const chapter = chapterBodies.get(input.section_id)
-      if (chapter === undefined) throw new ToolArgsError([`section_id: 未知或未完成章节 ${input.section_id}。`])
-      const quote = chapter.markdown.slice(input.start, input.start + input.length)
-      if (quote.length === 0) throw new ToolArgsError(['start: 超出当前章节正文。'])
-      const ref = `DQ${quoteRefs.size + 1}`
-      quoteRefs.set(ref, { section_id: input.section_id, quote })
-      return Promise.resolve({
-        quote_ref: ref, section_id: input.section_id, content_sha256: chapter.content_sha256,
-        start: input.start, end: input.start + quote.length, markdown: quote,
-        truncated: input.start + quote.length < chapter.markdown.length,
-      })
-    },
-  })
+  const quoteRefs = registerCompletedChapterReader(runtime, chapterBodies)
   runtime.register({
     name: 'submit_chapter_writing_completion_review',
     description: '提交 document acceptance 结论；章节 acceptance 只消费 Chapter Reviewer 权威结果。',

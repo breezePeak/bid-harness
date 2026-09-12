@@ -740,7 +740,7 @@ function renderChapterReviewerTask(
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
     '明确作为本次拟采用方案提出的实施方法、职责分工、台账字段和质量控制措施，不因采购原文未逐项列出而成为 unsupported claim。审查其是否符合采购要求、是否自洽和可执行；合理方案设计不登记为需要来源证明的既有事实。若方案冒充既有人员设备或企业能力、违反采购要求、迁入旧项目条件或作出缺少支撑的硬承诺，应说明具体问题并要求修复。',
-    'set_review_summary 整体替换质量判断、正文修复问题、任务冲突和 external_input_gaps，可撤销误判。只有 Writer 能通过修改正文解决的问题才写入 blocking_issues。缺少必须由用户或项目资料提供的企业资质、证书、业绩证明、人员证件等信息时，将对应 R 记录为 missing，并在 external_input_gaps 中填写 item_ref、required_material 和 reason；不得要求 Writer 虚构、改写或反复处理。未登记为 external_input_gaps 的固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外正文问题得到 repair；preferred 动态条件失败必须如实记录但不自动修订。finish 收集完整报告即可成功，不需要为结束而改成通过。',
+    'set_review_summary 整体替换质量判断、正文修复问题、任务冲突和 external_input_gaps，可撤销误判。只有 Writer 能通过修改正文解决的问题才写入 blocking_issues。缺少必须由用户或项目资料提供的企业资质、证书、业绩证明、人员证件等信息时，将对应 R 记录为 missing，并在 external_input_gaps 中填写 item_ref、required_material 和 reason；不得要求 Writer 虚构、改写或反复处理。若所有未通过项都只能由这些外部输入解决，external_input_only 必须为 true；Host 会保留 attention 并跳过 Writer 修订。只要还存在任一 Writer 可修复问题，external_input_only 必须为 false。未登记为 external_input_gaps 的固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外正文问题得到 repair；preferred 动态条件失败必须如实记录但不自动修订。finish 收集完整报告即可成功，不需要为结束而改成通过。',
     `Project：${JSON.stringify(modelContext(context.project))}`,
     renderChapterOutlineContext(context),
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
@@ -1041,9 +1041,13 @@ async function loadChapterCheckpoint(
         downstream.set(dependency.section_id, dependents)
       }
     }
+    const planAffected = new Set(writingPlanInvalidations)
+    for (const sectionId of planAffected) {
+      for (const dependent of downstream.get(sectionId) ?? []) planAffected.add(dependent)
+    }
     const invalid = new Set([
       ...worklist.filter(section => !completed.has(section.id) && !drafts.has(section.id)).map(section => section.id),
-      ...writingPlanInvalidations,
+      ...planAffected,
     ])
     // Set 迭代包含新加入的节点，依赖闭包不受目录显示顺序影响。
     for (const sectionId of invalid) for (const dependent of downstream.get(sectionId) ?? []) invalid.add(dependent)
@@ -1067,6 +1071,7 @@ async function loadChapterCheckpoint(
       }
       completed.delete(log.section_id)
       drafts.delete(log.section_id)
+      if (planAffected.has(log.section_id)) log.epoch += 1
       log.status = 'pending'
       log.final_writer_child_session_id = null
       log.final_reviewer_child_session_id = null
@@ -1122,6 +1127,37 @@ async function loadValidPlan(
     return plan
   } finally {
     runtime.dispose()
+  }
+}
+
+function scopedPlanUpdate(
+  previous: ChapterExecutionPlan,
+  proposed: ChapterExecutionPlan,
+  seeds: ReadonlySet<string>,
+): { plan: ChapterExecutionPlan; affected: Set<string> } {
+  const previousById = new Map(previous.sections.map(section => [section.section_id, section]))
+  const affected = new Set(seeds)
+  for (const sectionId of affected) {
+    for (const section of proposed.sections) {
+      if (affected.has(section.section_id)) continue
+      const prior = previousById.get(section.section_id)
+      const dependsOnChanged = section.depends_on.some(item => item.section_id === sectionId)
+        || prior?.depends_on.some(item => item.section_id === sectionId) === true
+      if (dependsOnChanged) affected.add(section.section_id)
+    }
+  }
+  const allAffected = affected.size === proposed.sections.length
+  return {
+    affected,
+    plan: {
+      ...proposed,
+      global_consistency_notes: allAffected
+        ? proposed.global_consistency_notes
+        : previous.global_consistency_notes,
+      sections: proposed.sections.map(section => affected.has(section.section_id)
+        ? section
+        : previousById.get(section.section_id) ?? section),
+    },
   }
 }
 
@@ -1185,7 +1221,7 @@ export function renderGlobalComplianceReviewTask(
     '你是现有 S5 Main Agent，负责整份文档的全局合规收口；不得创建新的审核 Agent、修改确认目录或生成正文。只使用 review_global_compliance 和 finish_global_compliance_review。',
     '结合招标条款原文、确认目录职责、当前全部正文和材料身份，逐项判断核验性质与责任归属。不得按关键词、章节编号或项目名称硬编码分类。允许多个章节共同负责同一要求。',
     'cross_chapter_constraint 检查适用正文是否违反约束及章节之间是否矛盾，不要求每章重复条款。document_requirement 必须核对实际正文、材料或有效关联位置，不能把“未发现违规”当作内容齐全。delivery_requirement 需要实际执行证据；S5 无法观察上传、截止或递交操作时必须 pending，生成文件不等于已经递交。',
-    '区分 pass、fail、pending 和 not_applicable。pass 必须选择当前 D 依据；缺少内容可 fail 且说明缺口，缺少外部材料或人工确认应 pending。不得编造正文、材料或执行证据。',
+    '区分 pass、fail、pending 和 not_applicable。pass 必须选择当前依据；缺少内容可 fail 且说明缺口，缺少外部材料或人工确认应 pending。不得编造正文、材料或执行证据。',
     'checked_section_ids 只列实际检查的正文；chapter owner 表示正文责任，document 表示全书收口责任，delivery 表示项目递交责任。affected_section_ids 只列存在可执行正文问题的章节；外部待办和无归属冲突不得复制到所有章节。',
     `Confirmed Outline Responsibilities：${JSON.stringify(outline.sections.map(({ id, parent_id, title, purpose, must_answer, compliance_ids }) => ({ id, parent_id, title, purpose, must_answer, compliance_ids })))}`,
     `Pending Global Compliance：${JSON.stringify(modelContext(pending))}`,
@@ -1195,8 +1231,9 @@ export function renderGlobalComplianceReviewTask(
       '动态验收由所属 Reviewer 在对应协议中处理；本轮只核验固定的全局 Compliance。',
     ]),
     `Current Chapters：${JSON.stringify(chapters.map(({ section_id, title, candidate_sha256 }) => ({ section_id, title, candidate_sha256 })))}`,
-    `Evidence Options：${JSON.stringify(evidence)}`,
-    '只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
+    `Material Evidence Options：${JSON.stringify(evidence.filter(item => item.kind === 'material'))}`,
+    '正文核验调用 read_completed_chapter 按 section_id 分段读取；返回的 DQ 引用可作为当前正文依据。',
+    '只使用 read_completed_chapter、review_global_compliance 和 finish_global_compliance_review。只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
   ].join('\n')
 }
 
@@ -1627,6 +1664,11 @@ async function runChapterWriting(
   let checkpoint = await loadChapterCheckpoint(
     workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations, checkpointVersion,
   )
+  if (checkpoint === undefined && checkpointVersion !== writingPlan.plan_version) {
+    checkpoint = await loadChapterCheckpoint(
+      workspace, outline, outlineHash, contexts, options.maxConcurrency, new Set(), writingPlan.plan_version,
+    )
+  }
   const originalWriterId = revision === undefined ? undefined
     : checkpoint?.executionLog.sections.find(section => section.section_id === revision.request.reference.section_id)
       ?.final_writer_child_session_id
@@ -1649,20 +1691,14 @@ async function runChapterWriting(
       options.signal,
     )
     if (checkpoint !== undefined && previousPlan !== undefined) {
-      const previousRelations = new Map(previousPlan.sections.map(section => [section.section_id, section]))
-      const relationInvalidations = new Set(plan.sections.filter(section =>
-        JSON.stringify(previousRelations.get(section.section_id)) !== JSON.stringify(section),
-      ).map(section => section.section_id))
-      for (const sectionId of relationInvalidations) {
-        for (const dependent of plan.sections.filter(section =>
-          section.depends_on.some(dependency => dependency.section_id === sectionId))) {
-          relationInvalidations.add(dependent.section_id)
-        }
-      }
-      for (const sectionId of relationInvalidations) {
+      const update = scopedPlanUpdate(previousPlan, plan, writingPlanInvalidations)
+      plan = update.plan
+      await writeJson(join(workspace.projectRoot, PLAN_PATH), plan)
+      for (const sectionId of update.affected) {
         const log = checkpoint.executionLog.sections.find(section => section.section_id === sectionId)
         const context = contexts.get(sectionId)
         if (log === undefined || context === undefined) continue
+        const currentArtifact = checkpoint.completed.has(sectionId) || checkpoint.drafts.has(sectionId)
         const writerId = log.final_writer_child_session_id ?? checkpoint.drafts.get(sectionId)?.writerChildSessionId
         if (writerId !== undefined && checkpoint.completed.has(sectionId)) {
           const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
@@ -1674,6 +1710,7 @@ async function runChapterWriting(
         }
         checkpoint.completed.delete(sectionId)
         checkpoint.drafts.delete(sectionId)
+        if (currentArtifact) log.epoch += 1
         log.status = 'pending'
         log.final_writer_child_session_id = null
         log.final_reviewer_child_session_id = null
@@ -1852,24 +1889,20 @@ async function runChapterWriting(
         agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan },
         options.maxRepairAttempts, signal,
       )
+      const update = scopedPlanUpdate(
+        previousPlan, plan,
+        new Set(next.revision?.affected_section_ids ?? worklist.map(section => section.id)),
+      )
+      plan = update.plan
+      await writeJson(join(workspace.projectRoot, PLAN_PATH), plan)
       planSections = new Map(plan.sections.map(section => [section.section_id, section]))
-      const previousRelations = new Map(previousPlan.sections.map(section => [section.section_id, section]))
-      const affected = new Set(next.revision?.affected_section_ids ?? worklist.map(section => section.id))
-      for (const relation of plan.sections) {
-        if (JSON.stringify(previousRelations.get(relation.section_id)) !== JSON.stringify(relation)) affected.add(relation.section_id)
-      }
-      for (const id of affected) {
-        for (const dependent of plan.sections.filter(section => section.depends_on.some(dependency => dependency.section_id === id))) {
-          affected.add(dependent.section_id)
-        }
-      }
       executionLog.writing_plan_version = next.plan_version
       for (const log of executionLog.sections) {
         const relation = planSections.get(log.section_id)
         log.depends_on = relation?.depends_on.map(item => item.section_id) ?? []
         log.related_sections = relation?.related_sections.map(item => item.section_id) ?? []
       }
-      for (const sectionId of affected) {
+      for (const sectionId of update.affected) {
         if (completed.has(sectionId) || pendingRevisions.has(sectionId)) {
           const context = contexts.get(sectionId)
           if (context === undefined) throw new Error(`Bid chapter scheduler lost section ${sectionId}`)
@@ -1945,8 +1978,7 @@ async function runChapterWriting(
             const input = inputIdentity.dependencies[index]
             return input?.section_id === dependency.section_id && input.handoff_sha256 === dependency.handoff_sha256
           })
-        if (writingPlan.plan_version !== inputIdentity.plan_version
-          || sectionEpochs.get(sectionId) !== inputIdentity.section_epoch
+        if (sectionEpochs.get(sectionId) !== inputIdentity.section_epoch
           || !handoffsMatch) {
           throw new Error('BID_CHAPTER_INPUT_STALE')
         }

@@ -145,12 +145,12 @@ export function createCaptionNumberer(values: FormatValues): (role: 'figureCapti
 /**
  * 创建浏览器预览独占的计数器；Word 文件由原生编号自行计数。
  * @param values 生效编号格式。
- * @returns 接受标题级别并返回显示文字的函数。
+ * @returns 接受标题级别及可选的目录各级序号，返回显示文字的函数。
  */
-export function createHeadingNumberer(values: FormatValues): (level: number) => string {
+export function createHeadingNumberer(values: FormatValues): (level: number, ordinals?: readonly number[]) => string {
   const counts = [0, 0, 0, 0, 0, 0]
   const levels = resolveHeadingNumbering(values)
-  return (level) => {
+  return (level, ordinals) => {
     if (!levels.length)
       return ''
     if (level > 6)
@@ -158,6 +158,7 @@ export function createHeadingNumberer(values: FormatValues): (level: number) => 
     for (let parent = 0; parent < level - 1; parent++)
       if (!counts[parent]) counts[parent] = levels[parent]?.start ?? 1
     counts[level - 1] = (counts[level - 1] as number) ? (counts[level - 1] as number) + 1 : levels[level - 1]?.start ?? 1
+    if (ordinals) counts.splice(0, level, ...ordinals)
     for (let child = level + 1; child <= 6; child++)
       if (levels[child - 1]?.restart)
         counts[child - 1] = 0

@@ -236,7 +236,9 @@ function fixtureAgent(
   const children = new Map<SessionId, ReturnType<typeof createChild> & { request: SubagentStartRequest; cleanup: Array<() => void> }>()
   const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
   const definitions = new Map<string, ToolDefinition>()
-  const reviewerResult = vi.fn<(request: SubagentStartRequest) => ChapterReview>(request => reviewFrom(request))
+  const reviewerResult = vi.fn<(request: SubagentStartRequest) => ChapterReview & {
+    external_input_only?: boolean
+  }>(request => reviewFrom(request))
   const call = async (
     owner: Agent, registry: Map<string, ToolDefinition>, events: Map<string, (...args: unknown[]) => void>,
     name: string, args: unknown,
@@ -409,6 +411,7 @@ function fixtureAgent(
           await call(localAgent, registry, events, 'set_review_summary', {
             quality_checks: review.quality_checks, blocking_issues: review.blocking_issues,
             assignment_conflicts: review.assignment_conflicts, external_input_gaps: review.external_input_gaps,
+            external_input_only: review.external_input_only ?? false,
           })
           await call(localAgent, registry, events, 'finish_chapter_review', {})
           return { stopReason: 'completed', output: [] }
@@ -506,7 +509,7 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
-  it('外部资质资料缺口只审核一次并保留黄色关注结论', async () => {
+  it('外部资质是唯一原因时跳过 Writer 修订并保留黄色关注结论', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-external-input-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
@@ -514,11 +517,14 @@ describe('chapter-writing executor', () => {
       const review = reviewFrom(request)
       return {
         ...review,
-        verdict: 'attention',
+        verdict: 'repair',
         must_answer_coverage: review.must_answer_coverage.map((item, index) => index === 0
           ? { ...item, status: 'missing', evidence_quotes: [], issue: '未提供企业资质证书。' }
           : item),
+        quality_checks: { ...review.quality_checks, placeholder_free: false },
+        blocking_issues: ['企业资质证书及其装订位置未提供。'],
         external_input_gaps: [{ item_ref: 'R1', required_material: '企业资质证书', reason: '当前项目资料未提供。' }],
+        external_input_only: true,
       }
     })
 
@@ -535,7 +541,7 @@ describe('chapter-writing executor', () => {
     ])
     expect(parseChapterReviewArtifact(JSON.parse(await readFile(
       join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8',
-    ))).verdict).toBe('attention')
+    )))).toMatchObject({ verdict: 'attention', blocking_issues: [] })
   })
 
   it.each(['损坏', '未完成'])('恢复按强依赖传递失效，%s 前置章节时保留弱关联章节', async (damage) => {
@@ -1614,7 +1620,13 @@ describe('chapter-writing executor', () => {
   it('写作计划升级只重写模型判定受影响的已完成章节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-plan-revision-')))
     const outline = await writeInputs(workspace)
-    const first = fixtureAgent(workspace, outline)
+    const writerResult = (_attempt: number, request: SubagentStartRequest): SubagentResult => ({
+      stopReason: 'completed', output: [], structured: {
+        ...candidateFrom(request),
+        markdown: '本章按确认职责说明技术措施、责任接口和成果核验方法，形成完整且可追溯的执行记录。',
+      },
+    })
+    const first = fixtureAgent(workspace, outline, {}, true, () => true, writerResult)
     await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 2,
@@ -1632,8 +1644,9 @@ describe('chapter-writing executor', () => {
       revision: { base_plan_version: 1, summary: '只调整第二章的表达形式。', affected_section_ids: ['SEC-2'] },
     })}\n`)
 
-    const resumed = fixtureAgent(workspace, outline)
-    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+    // 第二次关系规划故意让未受影响的第三章漂移；补丁范围仍必须只含第二章。
+    const resumed = fixtureAgent(workspace, outline, { 'SEC-3': ['SEC-1'] }, true, () => true, writerResult)
+    const artifacts = await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 2,
     })
@@ -1642,11 +1655,71 @@ describe('chapter-writing executor', () => {
     expect(resumed.starts).toHaveLength(1)
     expect(resumed.starts[0]?.request.label).toContain('章节2')
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toBe(retainedBody)
+    expect(parseChapterExecutionPlan(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-plan.json'), 'utf8',
+    ))).sections.find(section => section.section_id === 'SEC-3')?.depends_on).toEqual([])
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8',
+    )))
+    expect(log.sections.map(section => [section.section_id, section.epoch])).toEqual([
+      ['SEC-1', 0], ['SEC-2', 1], ['SEC-3', 0],
+    ])
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/applied-writing-plan.json'), 'utf8')))
       .toEqual({ schema_version: 1, plan_version: 2 })
   })
 
-  it('运行中计划升级使旧 plan_version 输入失效，迟到 Writer 结果不能覆盖新计划', async () => {
+  it('写作计划升级的 Writer 失败后仅重试未完成章节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-plan-retry-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+    const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const previous = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+    await writeFile(planPath, `${JSON.stringify({
+      ...previous,
+      plan_version: 2,
+      user_requirements: [...previous.user_requirements, '第二章增加表格，其他章节保持不变。'],
+      sections: previous.sections.map(section => section.section_id === 'SEC-2'
+        ? { ...section, writing_instructions: ['使用表格归纳实施责任。'] }
+        : section),
+      revision: { base_plan_version: 1, summary: '只调整第二章的表达形式。', affected_section_ids: ['SEC-2'] },
+    })}\n`)
+
+    const failed = fixtureAgent(workspace, outline)
+    failed.subagents.followup.mockRejectedValueOnce(new Error('writer session unavailable'))
+    await expect(executeChapterWriting(failed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })).rejects.toThrow('infrastructure failed for SEC-2')
+    const failedLog = parseChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8',
+    )))
+    expect(failedLog.sections.map(section => [section.section_id, section.status])).toEqual([
+      ['SEC-1', 'completed'], ['SEC-2', 'failed'], ['SEC-3', 'completed'],
+    ])
+
+    const retry = fixtureAgent(workspace, outline)
+    await executeChapterWriting(retry.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0,
+      maxConcurrency: 2,
+    })
+
+    expect(retry.starts).toHaveLength(1)
+    expect(retry.starts[0]?.request.label).toContain('章节2')
+    expect(retry.subagents.startContinuable).toHaveBeenCalledTimes(1)
+    expect(retry.subagents.followup).not.toHaveBeenCalled()
+    const finalLog = parseChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8',
+    )))
+    expect(finalLog.sections.every(section => section.status === 'completed')).toBe(true)
+    expect(finalLog.sections.map(section => section.attempts.length)).toEqual([2, 5, 2])
+  })
+
+  it('运行中计划升级仅使受影响章节的旧输入失效', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-plan-live-revision-')))
     const outline = await writeInputs(workspace)
     const commands: ChapterWritingCommand[] = []
@@ -1697,15 +1770,13 @@ describe('chapter-writing executor', () => {
     expect(newSecond.run.id).toBe(oldSecond.run.id)
     expect(promptText(newSecond.request)).toContain('使用表格归纳实施责任')
     for (const run of fixture.starts) run.resolve()
-    await vi.waitFor(() => { expect(fixture.starts.length).toBeGreaterThanOrEqual(6) })
-    for (const run of fixture.starts) run.resolve()
     await execution
 
     const secondBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
     expect(secondBody).toContain('新计划候选')
     expect(secondBody).not.toContain('旧计划候选')
-    expect(fixture.starts.filter(run => run.request.label?.includes('章节1'))).toHaveLength(2)
-    expect(fixture.starts.filter(run => run.request.label?.includes('章节3'))).toHaveLength(2)
+    expect(fixture.starts.filter(run => run.request.label?.includes('章节1'))).toHaveLength(1)
+    expect(fixture.starts.filter(run => run.request.label?.includes('章节3'))).toHaveLength(1)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
     expect(log.sections.flatMap(section => section.attempts)
       .filter(attempt => attempt.role === 'writer' && attempt.input.plan_version === 1))
@@ -1852,6 +1923,81 @@ describe('chapter-writing executor', () => {
 
     expect(fixture.starts.filter(run => run.request.label?.endsWith('章节2'))).toHaveLength(1)
     await expect(readFile(upstreamPath, 'utf8')).resolves.toContain('修订后上游正文')
+  })
+
+  it('最终校验保留 handoff 未变时记录的依赖正文 Hash', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-handoff-stable-identity-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed',
+      output: [],
+      structured: {
+        ...candidateFrom(request),
+        markdown: '本章按确认职责说明技术措施、责任接口和成果核验方法，形成完整且可追溯的执行记录。',
+      },
+    }))
+    const artifacts = await executeChapterWriting(
+      fixture.agent,
+      workspace,
+      buildBidStageTask('chapter_writing'),
+      { maxRepairAttempts: 0, maxConcurrency: 3 },
+    )
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    const planPath = join(workspace.projectRoot, 'chapters/execution-plan.json')
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const plan = JSON.parse(await readFile(planPath, 'utf8')) as {
+      sections: Array<{
+        section_id: string
+        depends_on: Array<{ section_id: string; reason: string }>
+      }>
+    }
+    const log = JSON.parse(await readFile(logPath, 'utf8')) as {
+      sections: Array<{
+        section_id: string
+        depends_on: string[]
+        attempts: Array<{
+          accepted: boolean
+          input: {
+            dependencies: Array<{ section_id: string; candidate_sha256: string; handoff_sha256: string }>
+          }
+        }>
+      }>
+    }
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/manifest.json'),
+      'utf8',
+    )))
+    const upstream = manifest.chapters.find(chapter => chapter.section_id === 'SEC-1')!
+    const dependency = {
+      section_id: 'SEC-1',
+      candidate_sha256: chapterCandidateSha256(await readFile(
+        join(workspace.projectRoot, upstream.content_path),
+        'utf8',
+      )),
+      handoff_sha256: chapterCandidateSha256(JSON.stringify(upstream.handoff)),
+    }
+    plan.sections.find(section => section.section_id === 'SEC-2')!.depends_on = [{
+      section_id: 'SEC-1',
+      reason: '下游消费上游交接。',
+    }]
+    const dependent = log.sections.find(section => section.section_id === 'SEC-2')!
+    dependent.depends_on = ['SEC-1']
+    for (const attempt of dependent.attempts.filter(item => item.accepted)) {
+      attempt.input.dependencies = [{ ...dependency, candidate_sha256: '0'.repeat(64) }]
+    }
+    await writeFile(planPath, JSON.stringify(plan))
+    await writeFile(logPath, JSON.stringify(log))
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+
+    dependent.attempts.find(item => item.accepted)!.input.dependencies[0]!.handoff_sha256 = '0'.repeat(64)
+    await writeFile(logPath, JSON.stringify(log))
+    const invalid = await validateChapterWriting(workspace, 'chapter_writing', artifacts)
+    expect(invalid.ok).toBe(false)
+    if (invalid.ok) throw new Error('失效的 handoff 身份未被拒绝')
+    expect(invalid.issues).toContainEqual(expect.objectContaining({
+      code: 'CHAPTER_WRITING_INPUT_IDENTITY_INVALID',
+      artifact: 'chapters/execution-log.json',
+    }))
   })
 
   it('上游交接变化逐级传播，中间交接不变时保留更下游 Writer', async () => {

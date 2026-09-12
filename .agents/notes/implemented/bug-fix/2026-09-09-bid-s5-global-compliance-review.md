@@ -10,7 +10,7 @@ S2 的全局 Compliance 被复制进每章的 canonical Checklist 和 manifest�
 
 S5 将局部 Compliance 和全局 Compliance 分开。局部项继续进入章节 canonical Checklist、章节覆盖报告和 manifest；全局项只作为 Reviewer 的独立核验集合，用于发现当前正文中可直接确认的违反或不适用情形，不计入章节覆盖索引。Reviewer 把目录或章节职责分配错误记录为 `assignment_conflicts`，Host 在没有正文修复问题时将 verdict 设为 `attention`，不触发 Writer 重写；当前正文违反全局约束时仍为可修订的 `repair`。两类审核结论都按[风险不阻断规则](2026-09-12-bid-s5-advisory-review-risk.md)保存并允许阶段完成。
 
-全部章节提交后，现有 Main Agent 通过独立私有协议对完整章节集合执行一次文档级审核，Host 写入 `chapters/global-compliance-review.json`。每个全局项明确分类为跨章节约束、文档内容要求或交付要求，并归属于 chapter、document 或 delivery；跨章节和文档结论必须引用当前章节原文或已登记材料，交付要求没有真实执行证据时只能为 `pending`。报告记录确认目录 Hash、逐项检查的章节正文 Hash、受影响章节和证据引用，最终 Validator 重新校验这些关系。没有全局项时 Host 直接生成空报告。
+全部章节提交后，现有 Main Agent 通过独立私有协议对完整章节集合执行一次文档级审核，Host 写入 `chapters/global-compliance-review.json`。审核任务只注入章节身份、材料依据和待核验条目；正文通过 `read_completed_chapter` 按 Section 分段读取，单次最多 12000 个字符，返回的本轮 `DQ` 引用在提交时绑定原文。每个全局项明确分类为跨章节约束、文档内容要求或交付要求，并归属于 chapter、document 或 delivery；跨章节和文档结论必须引用当前章节原文或已登记材料，交付要求没有真实执行证据时只能为 `pending`。报告记录确认目录 Hash、逐项检查的章节正文 Hash、受影响章节和证据引用，最终 Validator 重新校验这些关系。没有全局项时 Host 直接生成空报告。
 
 恢复时，正文和 metadata 合法但章节报告缺失或协议过期的章节先只重新审核，不重新运行 Writer，也不使强依赖下游失效；Reviewer 明确要求修订时才回到 Writer。文档级报告按每项引用的章节 Hash 和材料证据复用未变化结果，其余项目重新审核。章节 manifest 只保存局部 Compliance，文档级报告作为 S5 第四项必需产物，并与 manifest 一同纳入修订备份和运行时投影。
 

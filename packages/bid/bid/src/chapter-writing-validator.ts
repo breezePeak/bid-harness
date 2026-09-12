@@ -395,9 +395,14 @@ export async function validateChapterWriting(
     for (const role of ['writer', 'reviewer'] as const) {
       const childId = role === 'writer' ? sectionLog.final_writer_child_session_id : sectionLog.final_reviewer_child_session_id
       const attempt = sectionLog.attempts.findLast(item => item.role === role && item.child_session_id === childId && item.accepted)
-      if (attempt === undefined || attempt.input.plan_version !== writingPlan.plan_version
+      if (attempt === undefined || attempt.input.plan_version > writingPlan.plan_version
         || attempt.input.section_epoch !== sectionLog.epoch
-        || JSON.stringify(attempt.input.dependencies) !== JSON.stringify(expectedDependencies)) {
+        || attempt.input.dependencies.length !== expectedDependencies.length
+        || attempt.input.dependencies.some((dependency, index) => {
+          const expected = expectedDependencies[index]
+          return dependency.section_id !== expected?.section_id
+            || dependency.handoff_sha256 !== expected.handoff_sha256
+        })) {
         reject(issues, 'CHAPTER_WRITING_INPUT_IDENTITY_INVALID', `${sectionLog.section_id} 的最终 ${role} 输入身份已失效。`, LOG)
       }
     }

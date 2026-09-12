@@ -69,13 +69,17 @@ try {
         blocking_issues: [],
         assignment_conflicts: [],
         external_input_gaps: [],
+        external_input_only: false,
       }),
       toolCall('finish-review', 'finish_chapter_review', {}),
     )
     parentScript.push(
+      toolCall(`read-global-chapter-${revisionNumber}`, 'read_completed_chapter', {
+        section_id: 'SEC-SECURITY', start: 0, length: 12_000,
+      }),
       toolCall(`review-global-${revisionNumber}`, 'review_global_compliance', {
         compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-        status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+        status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
       }),
       toolCall(`finish-global-review-${revisionNumber}`, 'finish_global_compliance_review', {}),
       toolCall(`finish-writing-plan-${revisionNumber}`, 'submit_chapter_writing_completion_review', {
@@ -91,7 +95,7 @@ try {
     assert.equal(persisted, markdown)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     assert.equal(log.sections[0]!.final_writer_child_session_id, writerId)
-    assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount + revisionNumber * 3)
+    assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount + revisionNumber * 4)
     assert.equal(requests.filter(request => request.sessionId === user.id).length, 0)
     return persisted
   }

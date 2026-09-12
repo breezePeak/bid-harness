@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import mammoth from 'mammoth'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
 import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
@@ -10,6 +10,17 @@ import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/out
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
+
+const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...fs, readFile: async (...args: Parameters<typeof fs.readFile>) => {
+    const value = await fs.readFile(...args)
+    if (typeof args[0] === 'string') await reads.afterRead?.(args[0])
+    return value
+  } }
+})
+afterEach(() => { reads.afterRead = undefined })
 
 async function exportFixture() {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-export-')), { ...DEFAULT_BID_CONFIG, outputDirectory: 'deliverables' })
@@ -96,7 +107,7 @@ describe('Bid DOCX export', () => {
     expect(html).toContain('<h2><strong>交付</strong></h2>')
   })
 
-  it('S5 快照只导出执行记录中已完成的章节及其目录祖先', async () => {
+  it('S5 快照保留执行中和待执行章节的已保存正文，缺失正文时保留目录并标注', async () => {
     const { workspace, outline } = await exportFixture()
     await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), '{}')
     const executionLog = {
@@ -111,7 +122,7 @@ describe('Bid DOCX export', () => {
     }
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog))
 
-    const artifacts = await executeDocxExport(workspace, undefined, 'deliverables/partial.docx', 'completed_chapters')
+    const artifacts = await executeDocxExport(workspace, undefined, 'deliverables/partial.docx')
 
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
     const markdown = await readFile(join(workspace.outputRoot, 'partial.md'), 'utf8')
@@ -119,14 +130,83 @@ describe('Bid DOCX export', () => {
     expect(markdown).toContain('## 1.1 部署安排')
     expect(markdown).toContain('### 1.1.1 资源配置')
     expect(markdown).toContain('资源配置正文。')
-    expect(markdown).not.toContain('## 1.2 交付')
-    expect(markdown).not.toContain('交付正文。')
+    expect(markdown).toContain('## 1.2 交付')
+    expect(markdown).toContain('交付正文。')
 
     executionLog.sections[0] = { ...executionLog.sections[0]!, status: 'pending',
       final_writer_child_session_id: null, final_reviewer_child_session_id: null }
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog))
-    await expect(executeDocxExport(workspace, undefined, 'deliverables/empty.docx', 'completed_chapters'))
-      .rejects.toThrow('DOCX_EXPORT_NO_COMPLETED_CHAPTERS')
+    await rm(join(workspace.projectRoot, 'chapters/sections/0002.md'))
+    await executeDocxExport(workspace, undefined, 'deliverables/pending.docx')
+    const pending = await readFile(join(workspace.outputRoot, 'pending.md'), 'utf8')
+    expect(pending).toContain('资源配置正文。')
+    expect(pending).toContain('## 1.2 交付\n\n（本节尚无已保存正文。）')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '  \n')
+    await executeDocxExport(workspace, undefined, 'deliverables/summary.docx')
+    expect(await readFile(join(workspace.outputRoot, 'summary.md'), 'utf8')).toContain('本章介绍部署安排与交付要求')
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify({ ...outline,
+      sections: outline.sections.filter(section => section.writable)
+        .map((section, index) => ({ ...section, parent_id: null, order: index + 1, level: 1 })) }))
+    await expect(executeDocxExport(workspace, undefined, 'deliverables/empty.docx'))
+      .rejects.toThrow('DOCX_EXPORT_NO_SAVED_CHAPTERS')
+  })
+
+  it('技术偏离表审核失败时仍导出表格及后续章节，保留确认目录编号', async () => {
+    const { workspace, outline } = await exportFixture()
+    const resource = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const nextOutline = { ...outline, sections: [
+      { ...outline.sections[0]!, id: 'deviation', parent_id: null, order: 1, level: 1, title: '技术偏离表' },
+      ...outline.sections.map(section => section.id === 'root' ? { ...section, order: 2 } : section),
+    ] }
+    const hash = outlineArtifactSha256(parseConfirmedOutlineArtifact(nextOutline))
+    const plan = parseWritingPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')))
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(nextOutline))
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({ ...plan,
+      confirmed_outline_sha256: hash, sections: [{ ...plan.sections[0]!, section_id: 'deviation' }, ...plan.sections] }))
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: hash,
+      writing_plan_version: 1, max_concurrency: 2, observed_max_concurrency: 2,
+      sections: ['deviation', 'resource', 'delivery'].map(section_id => ({
+        section_id, depends_on: [], related_sections: [], epoch: 0, status: 'failed', attempts: [],
+        final_writer_child_session_id: null, final_reviewer_child_session_id: null,
+      })),
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 1 技术偏离表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 全部响应 | 无偏离 |\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), resource)
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), '交付正文。')
+
+    await executeDocxExport(workspace, undefined, 'deliverables/deviation.docx')
+
+    const markdown = await readFile(join(workspace.outputRoot, 'deviation.md'), 'utf8')
+    expect(markdown).toContain('# 1 技术偏离表')
+    expect(markdown).toContain('# 2 实施方案')
+    expect(markdown).toContain('### 2.1.1 资源配置')
+    expect(markdown).toContain('## 2.2 交付')
+    const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'deviation.docx')) })
+    expect(html).toContain('<h1><strong>技术偏离表</strong></h1>')
+    expect(html).toContain('无偏离')
+    expect(html).toContain('<table>')
+    expect(html).toContain('资源配置正文。')
+    expect(html).toContain('交付正文。')
+  })
+
+  it.each(['正文', '确认目录'])('快照读取期间%s变化时拒绝导出，保留上次成功文件', async (changed) => {
+    const { workspace, outline } = await exportFixture()
+    await executeDocxExport(workspace)
+    const previous = await readFile(join(workspace.outputRoot, 'bid.docx'))
+    const saved = await readDocxFormat(workspace)
+    const chapterPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    reads.afterRead = async (path) => {
+      if (path !== chapterPath) return
+      reads.afterRead = undefined
+      if (changed === '正文') await writeFile(chapterPath, '修订后的正文。')
+      else await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify({ ...outline, document_title: '修改后的技术标' }))
+    }
+
+    await expect(executeDocxExport(workspace, undefined, 'deliverables/bid.docx'))
+      .rejects.toThrow('DOCX_EXPORT_SNAPSHOT_CHANGED')
+    expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)
+    expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
   })
 
   it('DOCX 可读取但正文低于已确认下限时仍生成文件并单独报告篇幅', async () => {
@@ -159,27 +239,30 @@ describe('Bid DOCX export', () => {
     await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).resolves.not.toHaveLength(0)
   })
 
-  it.each(['hash', 'missing', 'duplicate', 'unknown', 'path'] as const)('拒绝 %s 不匹配的章节记录', async (invalid) => {
-    const { workspace, manifest } = await exportFixture()
-    if (invalid === 'hash') manifest.confirmed_outline_sha256 = 'b'.repeat(64)
-    if (invalid === 'missing') manifest.chapters.pop()
-    if (invalid === 'duplicate') manifest.chapters.push(manifest.chapters[0]!)
-    if (invalid === 'unknown') manifest.chapters[0]!.section_id = 'unknown'
-    if (invalid === 'path') manifest.chapters[0]!.content_path = 'chapters/sections/0001.md'
-    await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify(manifest))
-    await expect(executeDocxExport(workspace)).rejects.toThrow(invalid === 'hash' ? 'DOCX_EXPORT_OUTLINE_MISMATCH' : 'DOCX_EXPORT_CHAPTER_SET_INVALID')
-    await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).rejects.toMatchObject({ code: 'ENOENT' })
+  it.each(['缺失', '损坏'])('审核和执行产物%s不阻止已有正文导出', async (state) => {
+    const { workspace } = await exportFixture()
+    for (const path of ['chapters/manifest.json', 'chapters/execution-log.json', 'chapters/writing-plan.json',
+      'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json', 'analysis/scoring-response-points.json']) {
+      const absolute = join(workspace.projectRoot, path)
+      if (state === '缺失') await rm(absolute, { force: true })
+      else await writeFile(absolute, 'invalid-json')
+    }
+    await expect(executeDocxExport(workspace)).resolves.toHaveLength(1)
+    const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
+    expect(markdown).toContain('资源配置正文。')
+    expect(markdown).toContain('交付正文。')
   })
 
-  it('拒绝空正文及未保存的 DOCX', async () => {
+  it('空章节保留目录标注，未保存的 DOCX 校验失败', async () => {
     const { workspace } = await exportFixture()
     const artifacts = [{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }] as const
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toMatchObject({ ok: false })
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '')
-    await expect(executeDocxExport(workspace)).rejects.toThrow('章节正文为空')
+    await expect(executeDocxExport(workspace)).resolves.toHaveLength(1)
+    expect(await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')).toContain('### 1.1.1 资源配置\n\n（本节尚无已保存正文。）')
   })
 
-  it('导出前拒绝系统编号，但保留招标文件自身的同名条款编号', async () => {
+  it('导出不审查或修改已保存正文中的编号', async () => {
     const { workspace } = await exportFixture()
     const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
     const contentPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
@@ -189,13 +272,8 @@ describe('Bid DOCX export', () => {
     }
     await writeFile(requirementsPath, JSON.stringify({ schema_version: 1, requirements: [requirement] }))
     await writeFile(contentPath, '# 资源配置\n\n我方按 REQ-001 实施审计控制。')
-    await expect(executeDocxExport(workspace)).rejects.toThrow('DOCX_EXPORT_INTERNAL_ID_VISIBLE')
-
-    await writeFile(requirementsPath, JSON.stringify({
-      schema_version: 1,
-      requirements: [{ ...requirement, raw_text: '按采购方条款 REQ-001 提供审计功能。' }],
-    }))
     await expect(executeDocxExport(workspace)).resolves.toHaveLength(1)
+    expect(await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')).toContain('我方按 REQ-001 实施审计控制。')
   })
 
   it('校验输出目录内的按需文件并拒绝路径逃逸', async () => {

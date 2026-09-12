@@ -10,6 +10,7 @@ import {
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
+import { readDocxXml } from '../../../packages/bid/bid/src/docx-template.ts'
 
 const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', import.meta.url))
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
@@ -66,6 +67,14 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)
       const markdown = await readFile(join(projectRoot, manifest.chapters[0]!.content_path), 'utf8')
+      const exported = await readDocxXml(await readFile(join(projectRoot, 'output/bid.docx')))
+      const savedExport = await readDocxXml(await readFile(join(projectRoot, 'output/saved.docx')))
+      expect(savedExport['word/document.xml']).toEqual(exported['word/document.xml'])
+      expect(await readFile(join(projectRoot, 'output/saved.md'), 'utf8')).toBe(await readFile(join(projectRoot, 'output/bid.md'), 'utf8'))
+      const exportSnapshot = JSON.stringify(exported['word/document.xml'], null, 2) + '\n'
+      expect(exportSnapshot).toContain('管理事项、台账记录内容')
+      expect(exportSnapshot).toContain('w:numPr')
+      expect(await readFile(join(projectRoot, 'output/bid.md'), 'utf8')).toContain(markdown.trim())
       const globalReview = parseGlobalComplianceReviewArtifact(JSON.parse(
         await readFile(join(projectRoot, 'chapters/global-compliance-review.json'), 'utf8'),
       ))
@@ -78,6 +87,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
       const expected = {
+        'export.expected.json': exportSnapshot,
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),

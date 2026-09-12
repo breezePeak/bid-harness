@@ -6,7 +6,7 @@ Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversati
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
-面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。运行或失败时开放当前已完成章节的 Word 导出，完成后导出完整标书。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
+面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
 After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, keeps the composer disabled, and exposes one “Start this stage” action backed by `bid/startStage`. Reset itself never starts model execution.
 
@@ -14,7 +14,7 @@ After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, 
 
 ## Word 导出页面
 
-正文工作台的“导出 Word”打开同级详情页签，正文详情仍可切换。页签首次打开后随项目保存，新会话和刷新可恢复已保存配置。S5 运行或失败时，页面说明当前文件只包含已完成并保存的章节；固定样式预览和导出不暂停正在执行的 Writer 或 Reviewer。上传、保存和预览不完成 S6，切换页签不重复解析或生成。修改配置后提示预览及文件需要更新，生成失败保留上一份下载。
+正文工作台的“导出 Word”打开同级详情页签，正文详情仍可切换。页签首次打开后随项目保存，新会话和刷新可恢复已保存配置。S5 运行或失败时，页面说明当前文件只包含已完成并保存的章节；同项目任意会话均可上传模板、确认格式、预览和导出，不暂停正在执行的 Writer 或 Reviewer，也不阻止 S5 启动。上传、保存和预览不完成 S6，切换页签不重复解析或生成。修改配置后提示预览及文件需要更新，生成失败保留上一份下载。
 
 预览标注“样式预览，分页以 Word 为准”，缺失的标题、列表、表格、图片与题注采用明确标记的样例，不写入正文。样式映射按用途筛选候选，首行缩进可选择字符或毫米，文字颜色和正斜体可逐组编辑。生成按钮旁显示进度、错误和待确认角色；用户选择模板样式或点击“未确认项使用默认方案”后才能生成。模型建议必须由用户应用；模型不可用时仍能手动编辑并生成。
 

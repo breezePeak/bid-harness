@@ -524,7 +524,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   if (corpus === undefined || tender.chunksPath === null) throw new Error('缺少 S5 回放资料')
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
   const candidate = {
-    markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。',
+    markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |',
     metadata: {
       local_materials_used: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
     },
@@ -539,13 +539,15 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     blocking_issues: [],
     assignment_conflicts: [],
     external_input_gaps: [],
+    external_input_only: false,
   }
   const parentScript = [
     toolCall('add-plan-note', 'add_global_consistency_note', { note: '统一使用访问控制项目名称和权限审计术语。' }),
     toolCall('finish-plan', 'finish_chapter_plan', {}),
+    toolCall('read-global-chapter', 'read_completed_chapter', { section_id: 'SEC-SECURITY', start: 0, length: 12_000 }),
     toolCall('review-global', 'review_global_compliance', {
       compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-      status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['D1'], affected_section_ids: [], issue: null,
+      status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
     }),
     toolCall('finish-global-review', 'finish_global_compliance_review', {}),
     toolCall('finish-writing-plan', 'submit_chapter_writing_completion_review', {

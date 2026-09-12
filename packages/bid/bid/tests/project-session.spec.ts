@@ -22,10 +22,12 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
+import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
+  readonly docxInFlight: Set<string>
   automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
 }
 
@@ -491,10 +493,12 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('S5 完成后可重复导出独立 Word 文件且不改变审核阶段', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+    const { ctx, workspace, fresh, host } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('session-export')
+    const projectBefore = await readBidProjectState(workspace)
+    const stageReservation = vi.spyOn(host.inFlight, 'set')
 
     const first = await ctx.bid.exportDocx(agent.session)
     const second = await ctx.bid.exportDocx(agent.session)
@@ -505,10 +509,11 @@ describe('Workspace 项目与独立 Session', () => {
     expect(second.value.path).not.toBe(first.value.path)
     expect((await readFile(join(workspace.projectRoot, first.value.path))).readUInt32LE(0)).toBe(0x04034b50)
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
-    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+    expect(await readBidProjectState(workspace)).toEqual(projectBefore)
+    expect(stageReservation).not.toHaveBeenCalled()
   })
 
-  it('S5 运行中同 Session 可导出已完成章节且不停止写作', async () => {
+  it('Word 操作与 S5 启动及运行并行，同项目其他会话可配置和导出', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
     await seedProjectArtifacts(workspace)
     await rm(join(workspace.projectRoot, 'chapters/manifest.json'))
@@ -517,7 +522,20 @@ describe('Workspace 项目与独立 Session', () => {
     const gate = Promise.withResolvers<never[]>()
     executor.canExecute = stage => stage === 'chapter_writing'
     executeStage.mockImplementationOnce(() => gate.promise)
+    const key = process.platform === 'win32' ? workspace.root.toLowerCase() : workspace.root
+    host.docxInFlight.add(key)
     const retry = ctx.bid.retryStage(agent.session)
+    try {
+      await vi.waitFor(() => {
+        expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+        expect(executeStage).toHaveBeenCalledOnce()
+      })
+      const active = host.inFlight.get(key)
+      await expect(ctx.bid.resetStage(agent, 'chapter_writing'))
+        .rejects.toMatchObject({ code: 'BID_OPERATION_IN_PROGRESS' })
+      expect(host.inFlight.get(key)).toBe(active)
+      expect(active).toMatchObject({ controller: { signal: { aborted: false } } })
+    } finally { host.docxInFlight.delete(key) }
     await vi.waitFor(() => {
       expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
       expect(host.inFlight.size).toBe(1)
@@ -526,33 +544,79 @@ describe('Workspace 项目与独立 Session', () => {
     expect(getBidClientProjection(runtime(agent.session)).allowedActions).toContain('export_docx')
     const preview = await ctx.bid.previewDocx(agent.session)
     expect(typeof preview.previewHtml).toBe('string')
+    const format = await ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} })
+    expect(format.state.revision).toBe(1)
+    expect(host.inFlight.size).toBe(1)
+    host.docxInFlight.add(key)
+    try {
+      await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 1, userConfirmed: {} }))
+        .rejects.toMatchObject({ code: 'BID_OPERATION_IN_PROGRESS' })
+    } finally { host.docxInFlight.delete(key) }
     const other = await fresh('running-partial-export-other', workspace.root, false)
-    await expect(ctx.bid.exportDocx(other.session)).resolves.toMatchObject({
-      ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS' },
-    })
-    const exported = await ctx.bid.exportDocx(agent.session)
+    const projectBefore = await readBidProjectState(workspace)
+    await expect(ctx.bid.saveDocxFormat(other.session, { revision: 1, userConfirmed: {} }))
+      .resolves.toMatchObject({ state: { revision: 2 } })
+    await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 1, userConfirmed: {} }))
+      .rejects.toThrow('配置已在其他页面修改')
+    expect((await ctx.bid.previewDocx(other.session)).previewHtml).toBeTypeOf('string')
+    const exported = await ctx.bid.exportDocx(other.session)
 
     if (!exported.ok) throw new Error('Partial DOCX export failed')
     expect(exported.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
-    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_PARTIAL_SNAPSHOT')
+    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_CONTENT_SNAPSHOT')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文')
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.size).toBe(1)
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+    expect(await readBidProjectState(workspace)).toEqual(projectBefore)
     gate.resolve([])
     await retry
   })
 
-  it('S5 失败后可导出已保存章节且保持失败态', async () => {
+  it('阶段重置等待执行器结束期间拒绝 Word 写入，重置结束后恢复', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
+    const agent = await fresh('reset-with-word')
+    const gate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'chapter_writing'
+    executeStage.mockImplementationOnce(() => gate.promise)
+    const retry = ctx.bid.retryStage(agent.session)
+    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
+    const reset = ctx.bid.resetStage(agent, 'chapter_writing')
+    try {
+      expect(host.inFlight.values().next().value).toMatchObject({ reservedForReset: true })
+      await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} }))
+        .rejects.toThrow('当前项目正在重置阶段')
+      const exported = await ctx.bid.exportDocx(agent.session)
+      expect(exported.ok).toBe(false)
+      if (exported.ok) throw new Error('重置期间不能导出')
+      expect(exported.error.message).toContain('当前项目正在重置阶段')
+    } finally { gate.resolve([]); await retry; await reset }
+    await expect(ctx.bid.saveDocxFormat(agent.session, { revision: 0, userConfirmed: {} }))
+      .resolves.toMatchObject({ state: { revision: 1 } })
+  })
+
+  it('S5 失败且章节回到待执行时仍导出已保存正文，保持失败态', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
     await rm(join(workspace.projectRoot, 'chapters/manifest.json'))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    for (const section of log.sections) {
+      section.status = 'pending'
+      section.final_writer_child_session_id = null
+      section.final_reviewer_child_session_id = null
+    }
+    await writeFile(logPath, JSON.stringify(log))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' })
     const agent = await fresh('failed-partial-export')
 
     const exported = await ctx.bid.exportDocx(agent.session)
 
-    expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_PARTIAL_SNAPSHOT' }] } })
+    expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT' }] } })
+    if (!exported.ok) throw new Error('已有正文应可导出')
+    expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文。')
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' })
     expect(await readBidProjectState(workspace)).toMatchObject({
       runtime: { stage: 'chapter_writing', status: 'failed', failureReason: '部分章节失败' },

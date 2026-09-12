@@ -60,7 +60,7 @@
       "unresolved_topics": []
     }
   },
-  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n",
+  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n",
   "globalReview": {
     "schema_version": 1,
     "scope": "technical_bid",
@@ -79,14 +79,14 @@
         "checked_chapters": [
           {
             "section_id": "SEC-SECURITY",
-            "candidate_sha256": "94ef4b82a4c8a33876d90b2340338d845bd29ce2efe4ca902d5afe2dd02310e0"
+            "candidate_sha256": "031862c6779dbc5e0298b9e96797a28dddf6e3f095f13007d6f326f37c3ecf42"
           }
         ],
         "evidence": [
           {
             "kind": "chapter_quote",
             "section_id": "SEC-SECURITY",
-            "quote": "# 1 访问控制与安全审计"
+            "quote": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |"
           }
         ],
         "affected_section_ids": [],
@@ -101,8 +101,8 @@
     "completion": {
       "plan_version": 1,
       "format_revision": 0,
-      "pages": 0.15045356079068506,
-      "document_sha256": "e9373460cd816ea91317883395b1120e77656b88cdf29863ae846c722d2aee9d",
+      "pages": 0.2908768841953244,
+      "document_sha256": "14fbfde5eff7e5e58f978e22bd01ae3ef288bd703671d0388b6c546ff4e49260",
       "reason": "章节与整书 required 条件均已满足。",
       "document_acceptance_results": [
         {

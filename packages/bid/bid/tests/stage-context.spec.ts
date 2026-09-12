@@ -12,7 +12,7 @@ import {
   type BidStage,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it } from 'vitest'
-import { prepareBidStageContextTransition } from '../src/stage-context.ts'
+import { prepareBidStageContextTransition, recoverOverflowedBidStageContext } from '../src/stage-context.ts'
 
 const disposals: Array<() => Promise<void>> = []
 
@@ -97,5 +97,39 @@ describe('Bid Stage Context Boundary', () => {
     const visible = JSON.stringify(session.deriveMessages())
     expect(visible).toContain('S3 当前候选与修复意见')
     expect(visible).not.toContain('SC-009')
+  })
+
+  it('S5 上下文超限重试删除旧私有轮次并原样保留用户消息', async () => {
+    const { session } = await fixture('chapter_writing')
+    session.append('bid.stage.completed', { stage: 'evidence_mapping', status: 'completed', artifacts: [] })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '超大私有审核提示' }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+    }), { surfaceOp: 'append' })
+    appendVisible(session, '只保留用户填写要求')
+    session.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    session.append('turn/end', {
+      turn: 1, reason: { kind: 'error', error: { code: 'CONTEXT_WINDOW_EXCEEDED', message: '请求超过模型上下文' } },
+    })
+    session.append('bid.stage.failed', { stage: 'chapter_writing', status: 'failed', reason: '模型上下文超限' })
+
+    expect(recoverOverflowedBidStageContext(session, 'chapter_writing')).toBe(true)
+
+    const visible = JSON.stringify(session.deriveMessages())
+    expect(visible).not.toContain('超大私有审核提示')
+    expect(visible).toContain('只保留用户填写要求')
+    expect(visible).toContain('当前 Artifact 检查点恢复')
+    expect(JSON.stringify(session.events)).toContain('超大私有审核提示')
+  })
+
+  it('普通失败重试不改变当前阶段上下文', async () => {
+    const { session } = await fixture('chapter_writing')
+    appendVisible(session, '普通失败上下文')
+    session.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    session.append('bid.stage.failed', { stage: 'chapter_writing', status: 'failed', reason: '普通失败' })
+    const before = session.deriveMessages()
+
+    expect(recoverOverflowedBidStageContext(session, 'chapter_writing')).toBe(false)
+    expect(session.deriveMessages()).toEqual(before)
   })
 })

@@ -115,7 +115,7 @@ async function withTenderWarnings(workspace: BidWorkspace, view: DocxFormatView)
 }
 
 /**
- * 在调用方项目锁内原子保存配置。
+ * 在调用方 Word 操作锁内原子保存配置。
  * @param workspace 项目工作区。
  * @param state 已确认的完整配置。
  */
@@ -133,7 +133,7 @@ async function resolveAndWrite(workspace: BidWorkspace, state: DocxFormatState):
 
 /**
  * 校验版本和证据选项后保存用户的完整冲突确认集合。
- * @param workspace 已持项目锁的工作区。
+ * @param workspace 已持 Word 操作锁的工作区。
  * @param request 用户确认值及读取版本。
  * @returns 保存后的 resolved 格式。
  */
@@ -158,7 +158,7 @@ const sameValue = (left: FormatValue, right: FormatValue): boolean => typeof lef
 
 /**
  * 保存独立二进制请求中的 DOCX 模板并清空旧模型解释。
- * @param workspace 已持项目锁的工作区。
+ * @param workspace 已持 Word 操作锁的工作区。
  * @param upload 读取版本、显示名称和原始 DOCX 字节。
  * @returns 确定性提取后的 resolved 格式。
  */
@@ -197,7 +197,7 @@ export async function saveDocxTemplate(
 
 /**
  * 校验并保存一次模型模板解释；正文和提取结果保持不变。
- * @param workspace 已持项目锁的工作区。
+ * @param workspace 已持 Word 操作锁的工作区。
  * @param revision 解释所依据的配置版本。
  * @param suggestion 已通过模型输出校验的解释。
  * @returns 重新合并冲突后的 resolved 格式。

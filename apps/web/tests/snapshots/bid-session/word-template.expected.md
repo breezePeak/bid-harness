@@ -1,5 +1,6 @@
 - region "导出 Word":
   - strong: 导出 Word
+  - button "导出 Word" [disabled]
   - strong: 上传 Word 模板
   - text: 选择 .docx 文件（最多 300 MiB）
   - button "上传 Word 模板"
@@ -17,18 +18,18 @@
         - columnheader "缩进"
         - columnheader "状态"
     - rowgroup:
-      - row "一级标题 Microsoft YaHei / Times New Roman 16pt 左对齐 1.5 0 正常":
+      - row "一级标题 Microsoft YaHei / Times New Roman 三号（16pt） 左对齐 1.5 0 正常":
         - rowheader "一级标题"
         - cell "Microsoft YaHei / Times New Roman"
-        - cell "16pt"
+        - cell "三号（16pt）"
         - cell "左对齐"
         - cell "1.5"
         - cell "0"
         - cell "正常"
-      - row "二级标题 Microsoft YaHei / Times New Roman 16pt 左对齐 1.5 0 正常":
+      - row "二级标题 Microsoft YaHei / Times New Roman 三号（16pt） 左对齐 1.5 0 正常":
         - rowheader "二级标题"
         - cell "Microsoft YaHei / Times New Roman"
-        - cell "16pt"
+        - cell "三号（16pt）"
         - cell "左对齐"
         - cell "1.5"
         - cell "0"
@@ -58,4 +59,3 @@
         - cell "0"
         - cell "正常"
   - iframe
-  - button "导出 Word" [disabled]

@@ -8,7 +8,7 @@ Word 格式页把 DOCX 模板编码为 base64 后放入配置 Remote 的 JSON。
 
 ## Decision
 
-浏览器把 DOCX `File` 直接交给独立同源二进制端点，请求头携带 Session、显示文件名、原始长度和配置 revision。Host 复用 [S1 二进制上传](2026-09-01-file-intake-batch-completeness.md) 的来源校验与精确长度读取，在项目锁内完成[模板证据解析与确认](../feature/2026-09-10-word-template-evidence-resolution.md)；配置 Remote 只保存冲突确认。模板解释失败会恢复上传前配置，已写入的内容摘要缓存可供同一文件重试。
+浏览器把 DOCX `File` 直接交给独立同源二进制端点，请求头携带 Session、显示文件名、原始长度和配置 revision。Host 复用 [S1 二进制上传](2026-09-01-file-intake-batch-completeness.md) 的来源校验与精确长度读取，在项目级 Word 操作锁内完成[模板证据解析与确认](../feature/2026-09-10-word-template-evidence-resolution.md)；配置 Remote 只保存冲突确认。模板上传、冲突确认、独立格式建议和导出共用这把锁，原子读取可与之并行；该锁不取得或释放 S1—S5 阶段 operation，同项目各 Session 均可配置和导出 Word，与阶段启动和执行并行；阶段重置互斥由[Word 与 S5 并行规则](2026-09-12-word-export-parallel-stage-operations.md)定义。确定性 DOCX 解析成功后立即成为新配置；后续模型解释失败时返回该结果和可重试提示，不把有效模板误报为上传失败。
 
 `docxTemplateMaxBytes` 是 Host 配置，默认 300 MiB，并通过 `DocxFormatView.templateMaxBytes` 返回浏览器。浏览器预检负责即时反馈，Host 的相同限制负责最终准入。DOCX ZIP 解析仍需要随机访问，因此 Host 在长度准入后把二进制请求体缓冲一次；传输过程中不创建 base64 字符串。
 
@@ -22,4 +22,4 @@ Word 格式页把 DOCX 模板编码为 base64 后放入配置 Remote 的 JSON。
 
 ## Consequences
 
-模板请求不会经过 Typert Remote，也不会把文件字节写入 JSON。前后端定向测试固定 300 MiB 默认值、超限拒绝和原始 `File` 请求体；Web 浏览器回放及可访问性快照固定二进制请求、模板文件落盘和页面呈现的真实链路。Host 峰值内存仍受模板原始字节上限与 32 MiB 解压内容上限约束；若需要在解析期间避免完整原始文件驻留，需要更换支持文件或流式 ZIP 读取的解析器。
+模板请求不会经过 Typert Remote，也不会把文件字节写入 JSON。前后端定向测试固定 300 MiB 默认值、超限拒绝、原始 `File` 请求体及模型解释失败后的确定性结果；Web 浏览器回放及可访问性快照固定二进制请求、模板文件落盘和页面呈现的真实链路。Host 峰值内存仍受模板原始字节上限与 32 MiB 解压内容上限约束；若需要在解析期间避免完整原始文件驻留，需要更换支持文件或流式 ZIP 读取的解析器。

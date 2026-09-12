@@ -9,7 +9,8 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { strToU8, zipSync } from 'fflate'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
-import type {} from '@deepseek-ai/dsh-bid'
+import { BidWorkspace } from '@deepseek-ai/dsh-bid'
+import type { DocxTemplateUploadResult } from '@deepseek-ai/dsh-bid/control-plane'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk, ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -60,6 +61,7 @@ class BidAnalysisAdapter extends LlmAdapter {
   readonly toolNames: string[] = []
   private call = 0
   private failFirstAnalysis = false
+  private failNextWordFormat = false
   private session: { cwd: string; id: string } | undefined
   private source: AnalysisSource | undefined
 
@@ -67,8 +69,13 @@ class BidAnalysisAdapter extends LlmAdapter {
     this.session = { cwd, id }
     this.call = 0
     this.failFirstAnalysis = failFirstAnalysis
+    this.failNextWordFormat = false
     this.source = undefined
     this.toolNames.length = 0
+  }
+
+  rejectNextWordFormatSuggestion(): void {
+    this.failNextWordFormat = true
   }
 
   private *toolCalls(calls: Array<{ name: string; args: Record<string, unknown> }>): Generator<StreamChunk> {
@@ -116,7 +123,10 @@ class BidAnalysisAdapter extends LlmAdapter {
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.system?.includes('你只解释给定 DOCX 模板')) {
-      const text = '{"rules":[],"mapping":{"body":"Normal"}}'
+      const text = this.failNextWordFormat
+        ? '{"rules":[{"key":"heading.font","value":"宋体","evidence":"旧模板正文"}],"mapping":{}}'
+        : '{"rules":[],"mapping":{"body":"Normal"}}'
+      this.failNextWordFormat = false
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -428,7 +438,7 @@ describe('web e2e: Bid file intake', () => {
     expect(tripwire.warnings).toEqual([])
   }, 120_000)
 
-  it('uploads a DOCX format template as bounded binary bytes', async () => {
+  it('其他会话执行 S5 时，当前会话可上传 Word 模板并恢复格式页', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-docx-template'))
     let sessions = await listedSessions(scaffold.baseUrl)
     if (sessions.length === 0) {
@@ -463,19 +473,37 @@ describe('web e2e: Bid file intake', () => {
       expect(await intake.json()).toMatchObject({ ok: true })
     }
     const bytes = docxTemplateBytes()
-    const response = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/vnd.dsh.bid-docx-template',
-        'x-dsh-bid-session-id': bid.sessionId,
-        'x-dsh-bid-docx-name': encodeURIComponent('公司 模板.docx'),
-        'x-dsh-bid-docx-size': String(bytes.byteLength),
-        'x-dsh-bid-docx-revision': '0',
-      },
-      body: new Blob([bytes.buffer as ArrayBuffer]),
-    })
+    const workspace = new BidWorkspace(cwd)
+    const host = scaffold.ctx.bid as unknown as { inFlight: Map<string, unknown> }
+    const key = process.platform === 'win32' ? workspace.root.toLowerCase() : workspace.root
+    expect(host.inFlight.size).toBe(0)
+    const writer = scaffold.ctx.sessions.create(SessionId('word-parallel-s5'), { meta: { cwd, agentPreset: 'bid' } })
+    writer.append('bid.stage.started', { stage: 'chapter_writing', status: 'running' })
+    const active = { session: writer, workspace, controller: new AbortController() }
+    host.inFlight.set(key, active)
+    let response: Response
+    try {
+      response = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/vnd.dsh.bid-docx-template',
+          'x-dsh-bid-session-id': bid.sessionId,
+          'x-dsh-bid-docx-name': encodeURIComponent('公司 模板.docx'),
+          'x-dsh-bid-docx-size': String(bytes.byteLength),
+          'x-dsh-bid-docx-revision': '0',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      })
+      expect(host.inFlight.get(key)).toBe(active)
+      expect(active.controller.signal.aborted).toBe(false)
+      expect(writer.events.filter(event => event.type.startsWith('bid.stage.')).map(event => event.type))
+        .toEqual(['bid.stage.started'])
+    } finally {
+      if (host.inFlight.get(key) === active) host.inFlight.delete(key)
+    }
     expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({
+    const uploadResult = await response.json() as unknown
+    expect(uploadResult, JSON.stringify(uploadResult)).toMatchObject({
       ok: true,
       value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 2, template: { name: '公司 模板.docx' } } },
     })
@@ -502,6 +530,7 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('status').getByText('模板解析完成').waitFor()
     await page.getByText('界面模板.docx', { exact: true }).waitFor()
     expect(await templateInput.inputValue()).toContain('界面模板.docx')
+    expect(await page.getByText('三号（16pt）', { exact: true }).count()).toBe(2)
 
     await templateInput.setInputFiles({
       name: '无效模板.docx',
@@ -561,6 +590,30 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('tab', { name: '导出 Word' }).click()
     await page.getByText('复杂模板.docx', { exact: true }).waitFor()
     expect(await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)).not.toContain('格式样本239')
+
+    analysisAdapter.rejectNextWordFormatSuggestion()
+    const fallbackResponse = page.waitForResponse(response => (
+      response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/bid-docx-template'
+    ))
+    await templateInput.setInputFiles({
+      name: '解释失败模板.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: Buffer.from(bytes),
+    })
+    const fallbackResult = await (await fallbackResponse).json() as DocxTemplateUploadResult
+    expect(fallbackResult, JSON.stringify(fallbackResult)).toMatchObject({ ok: true })
+    if (!fallbackResult.ok) throw new Error(fallbackResult.error.message)
+    expect(fallbackResult.value.warnings).toContainEqual(
+      expect.stringMatching(/模板解析完成；自动格式解释未应用/u),
+    )
+    await page.getByText('解释失败模板.docx', { exact: true }).waitFor()
+    const fallback = JSON.parse(await readFile(join(cwd, '.bid-harness/word-export/config.json'), 'utf8')) as {
+      template?: { name: string }
+      modelInterpreted: { values: Record<string, unknown> }
+    }
+    expect(fallback.template?.name).toBe('解释失败模板.docx')
+    expect(fallback.modelInterpreted.values).toEqual({})
   }, 60_000)
 
   it('shows an S2 failure and retries it through the Host without starting S3', async () => {
