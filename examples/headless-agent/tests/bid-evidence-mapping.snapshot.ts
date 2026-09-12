@@ -45,7 +45,11 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('research-not-ready')
       expect(childLog).toContain('research-ready')
       expect(childLog).toContain('lock-without-comparison')
-      expect(childLog).toContain('RF-ff8a1adbc819d315')
+      expect(childLog).toContain('submit_section_structure_assessment')
+      expect(childLog).toContain('reject-stale-lock')
+      expect(events.find(event => event.type === 'tool/result'
+        && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'reject-stale-lock'))
+        .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
       expect(events.find(event => event.type === 'tool/result'
         && event.data.message.source.kind === 'tool' && event.data.message.source.callId === 'lock-before-research-ready'))
         .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
@@ -105,14 +109,21 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       const checkpoint = JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
         schema_version: number
-        tasks: Array<{ task_id: string; research_assessment?: { sufficient_for_outline_decision: boolean; unresolved_gaps: unknown[] } }>
+        tasks: Array<{
+          task_id: string
+          research_assessment?: { sufficient_for_blueprint: boolean; unresolved_gaps: unknown[] }
+          structure_assessment?: { stale: boolean }
+          structure_invalidated: number
+        }>
       }
-      expect(checkpoint.schema_version).toBe(9)
+      expect(checkpoint.schema_version).toBe(10)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
-          sufficient_for_outline_decision: true,
-          unresolved_gaps: [expect.objectContaining({ affects_outline_decision: false })],
+          sufficient_for_blueprint: true,
+          unresolved_gaps: [expect.objectContaining({ affects_blueprint: false })],
         })
+      expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-')))
+        .toMatchObject({ structure_assessment: { stale: false }, structure_invalidated: 1 })
       const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
       expect(ledger.sources).toHaveLength(1)
       expect(map.section_mappings[0]!.web_materials[0]).toMatchObject({
