@@ -203,4 +203,25 @@ describe('Word 导出页面', () => {
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '模板文件不能超过 300 MiB。')
     await waitFor(() => { expect(actions.uploadTemplate).not.toHaveBeenCalled() })
   })
+
+  it('模板上传失败后不把上传前格式显示成本次识别结果', async () => {
+    const conflict: FormatConflict = { key: 'heading3.bold', resolvedValue: true, status: 'conflict', evidence: [
+      { key: 'heading3.bold', value: true, source: 'direct_format' },
+      { key: 'heading3.bold', value: false, source: 'named_style' },
+    ] }
+    const { props, actions } = fixture([conflict])
+    vi.mocked(actions.uploadTemplate).mockRejectedValueOnce(new Error('格式配置无效：body.size'))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+    expect(screen.getByText('模板.docx')).toBeDefined()
+    const file = new File([Uint8Array.of(1, 2, 3)], '失败模板.docx')
+    fireEvent.change(screen.getByLabelText('上传 Word 模板'), { target: { files: [file] } })
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '格式配置无效：body.size')
+    expect(screen.queryByText('模板.docx')).toBeNull()
+    expect(screen.queryByRole('table', { name: '模板主要格式' })).toBeNull()
+    expect(screen.queryByLabelText('其他格式冲突')).toBeNull()
+    expect(screen.queryByTitle('Word 效果预览')).toBeNull()
+    expect(screen.getByText('尚无本次模板识别结果。')).toBeDefined()
+    expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', true)
+  })
 })

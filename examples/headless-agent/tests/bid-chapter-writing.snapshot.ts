@@ -94,7 +94,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
     evidence_unchanged: true,
     waiting: { stage: 'chapter_writing', status: 'waiting_user' },
     runtime: { stage: 'chapter_writing', status: 'completed' },
-    allowed_actions: ['export_docx', 'revise_chapter'],
+    allowed_actions: ['send_message', 'export_docx', 'revise_chapter'],
     artifacts: [
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },
       { stage: 'chapter_writing', type: 'chapter_execution_log', path: 'chapters/execution-log.json' },

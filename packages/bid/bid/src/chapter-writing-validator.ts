@@ -346,18 +346,13 @@ export async function validateChapterWriting(
       ...(pages === undefined ? {} : { estimatedPages: pages }),
     })
   })
-  const hostResults = [...documentHostResults, ...sectionHostResults]
-  for (const result of hostResults) if (result.status !== 'met'
-    && allCriteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required') {
-    reject(issues, 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNMET', `${result.criterion_id}: ${result.message}`, COMPLETION_REVIEW)
-  }
   for (const section of writingPlan.sections) {
     const review = chapterReviews.get(section.section_id)
     if (review === undefined) continue
     for (const criterion of section.acceptance_criteria) {
       const result = review.acceptance_criteria_results.find(item => item.criterion_id === criterion.id)
-      if (result === undefined || criterion.priority === 'required' && result.status !== 'met') {
-        reject(issues, 'CHAPTER_WRITING_SECTION_ACCEPTANCE_UNMET', `${section.section_id}/${criterion.id} 缺少当前 Chapter Reviewer 的 required met 结论。`, review.section_id)
+      if (result === undefined) {
+        reject(issues, 'CHAPTER_WRITING_SECTION_ACCEPTANCE_MISSING', `${section.section_id}/${criterion.id} 缺少当前 Chapter Reviewer 结论。`, review.section_id)
       }
       const host = sectionHostResults.find(item => item.criterion_id === criterion.id)
       if (criterion.evaluator.kind === 'deterministic' && (host === undefined || result === undefined
@@ -368,9 +363,8 @@ export async function validateChapterWriting(
   }
   if (completion !== undefined) for (const criterion of writingPlan.document_acceptance) {
     const result = completion.document_acceptance_results.find(item => item.criterion_id === criterion.id)
-    if (result === undefined || result.evaluator !== criterion.evaluator.kind
-      || criterion.priority === 'required' && result.status !== 'met') {
-      reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_UNMET', `${criterion.id} 缺少当前整书验收的 required met 结论。`, COMPLETION_REVIEW)
+    if (result === undefined || result.evaluator !== criterion.evaluator.kind) {
+      reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_MISSING', `${criterion.id} 缺少当前整书验收结论。`, COMPLETION_REVIEW)
       continue
     }
     for (const evidence of result.evidence_quotes) {

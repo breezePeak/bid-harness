@@ -361,7 +361,7 @@ export type BidDocxExportResult =
 export type BidChapterWritingStatus = 'not_started' | 'writing' | 'content_ready' | 'completed' | 'failed'
 
 /** Per-section review state exposed by the S5 workbench. */
-export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_attention' | 'failed'
+export type BidChapterReviewStatus = 'not_started' | 'reviewing' | 'pass' | 'needs_input' | 'needs_attention' | 'failed'
 
 /** Page-estimate state that never turns an unavailable calculation into a zero-page result. */
 export type BidPageEstimate =
@@ -392,7 +392,7 @@ export type BidPageTargetStatus =
 
 /** Browser-safe outline and live chapter summary used by the S5 workbench. */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 2
+  readonly schema_version: 3
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -458,12 +458,12 @@ const pageTargetStatusSchema = z.discriminatedUnion('status', [
   }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(2),
+  schema_version: z.literal(3),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
     writing_status: z.enum(['not_started', 'writing', 'content_ready', 'completed', 'failed']),
-    review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_attention', 'failed']), content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
+    review_status: z.enum(['not_started', 'reviewing', 'pass', 'needs_input', 'needs_attention', 'failed']), content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
   })),
   summary: z.strictObject({
     chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),
@@ -499,7 +499,7 @@ export interface BidReviewIssueView {
   /** 说明问题来自已保存的审核报告，还是 Writer / Reviewer 的执行记录。 */
   readonly source: 'review' | 'writing_execution' | 'review_execution'
   readonly category: string
-  readonly severity: 'blocking' | 'warning' | 'info'
+  readonly severity: 'high' | 'medium' | 'low'
   readonly status: 'open' | 'resolved' | 'dismissed'
   readonly title: string
   readonly detail: string

@@ -46,12 +46,18 @@ export function validateFormatSuggestion(value: unknown, view: DocxFormatView): 
       throw new Error('模型格式解释没有对应的模板原文。')
     if (rule.key in values) throw new Error('模型格式解释包含重复字段。')
     values[rule.key] = rule.value
-    evidence.push({ key: rule.key, value: rule.value, source: 'template_instruction', text: rule.evidence })
   }
   for (const id of Object.values(parsed.data.mapping))
     if (!view.state.extracted.candidates.some(item => item.id === id))
       throw new Error('模型引用了不存在的模板样式。')
-  return { values: validateFormatValues(values, view.fields),
+  const normalized = validateFormatValues(values, view.fields)
+  for (const [key, normalizedValue] of Object.entries(normalized)) {
+    const sourceKey = key.endsWith('.firstLineUnit') ? key.replace(/\.firstLineUnit$/u, '.firstLine')
+      : key.endsWith('.lineRule') ? key.replace(/\.lineRule$/u, '.line') : key
+    const rule = parsed.data.rules.find(item => item.key === key) ?? parsed.data.rules.find(item => item.key === sourceKey)
+    evidence.push({ key, value: normalizedValue, source: 'template_instruction', ...(rule ? { text: rule.evidence } : {}) })
+  }
+  return { values: normalized,
     evidence,
     mapping: parsed.data.mapping }
 }

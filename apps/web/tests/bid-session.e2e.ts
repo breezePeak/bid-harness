@@ -503,6 +503,16 @@ describe('web e2e: Bid file intake', () => {
     await page.getByText('界面模板.docx', { exact: true }).waitFor()
     expect(await templateInput.inputValue()).toContain('界面模板.docx')
 
+    await templateInput.setInputFiles({
+      name: '无效模板.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: Buffer.from('not a docx'),
+    })
+    await page.getByRole('alert').getByText('文件不是有效的 DOCX ZIP。').waitFor()
+    await page.getByText('尚无本次模板识别结果。', { exact: true }).waitFor()
+    expect(await page.getByRole('table', { name: '模板主要格式' }).count()).toBe(0)
+    expect(await page.getByText('界面模板.docx', { exact: true }).count()).toBe(0)
+
     const mismatched = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
       method: 'POST',
       headers: {

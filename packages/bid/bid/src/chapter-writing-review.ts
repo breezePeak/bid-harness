@@ -39,7 +39,9 @@ export interface ChapterReviewEvidence {
  * @param context 当前章节的 canonical 必答输入。
  * @returns 保留每个原始条目的 R1…Rn。
  */
-export function buildChapterReviewChecklist(context: ChapterContext): ChapterReviewItem[] {
+export function buildChapterReviewChecklist(
+  context: Pick<ChapterContext, 'section' | 'requirements' | 'responsePoints' | 'compliance'>,
+): ChapterReviewItem[] {
   const items: Omit<ChapterReviewItem, 'item_ref'>[] = [
     ...context.section.must_answer.map(text => ({ kind: 'must_answer' as const, id: null, text })),
     ...context.requirements.map(value => ({ kind: 'requirement' as const, id: value.id, text: value.normalized_requirement })),
@@ -113,7 +115,9 @@ const globalCheckInput = z.object({
   issue: text.nullable(),
 }).strict()
 const acceptanceInput = semanticAcceptanceSubmissionSchema
-const summaryInput = chapterReviewSchema.pick({ quality_checks: true, blocking_issues: true, assignment_conflicts: true })
+const summaryInput = chapterReviewSchema.pick({
+  quality_checks: true, blocking_issues: true, assignment_conflicts: true, external_input_gaps: true,
+})
 const stringParameter = { type: 'string' }
 const nullableText = { oneOf: [stringParameter, { type: 'null' }] }
 const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.shape.quality_checks.shape).map(key => [key, { type: 'boolean' }]))
@@ -250,7 +254,7 @@ export function attachChapterReview(
       }),
     })
     runtime.register({
-      name: 'set_review_summary', description: '整体替换质量检查和额外阻断问题；可用空 blocking_issues 撤销误判。',
+      name: 'set_review_summary', description: '整体替换质量检查、正文修复问题、任务冲突和外部资料缺口；可用空数组撤销误判。',
       parameters: {
         type: 'object', properties: {
           quality_checks: { type: 'object', properties: qualityParameters, required: Object.keys(qualityParameters), additionalProperties: false },
@@ -259,7 +263,10 @@ export function attachChapterReview(
             task: stringParameter, basis: stringParameter,
             related_section_ids: { type: 'array', items: stringParameter },
           }, required: ['task', 'basis', 'related_section_ids'], additionalProperties: false } },
-        }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts'], additionalProperties: false,
+          external_input_gaps: { type: 'array', items: { type: 'object', properties: {
+            item_ref: stringParameter, required_material: stringParameter, reason: stringParameter,
+          }, required: ['item_ref', 'required_material', 'reason'], additionalProperties: false } },
+        }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts', 'external_input_gaps'], additionalProperties: false,
       },
       execute(args) {
         summary = chapterToolArgs(summaryInput, args)
@@ -267,11 +274,21 @@ export function attachChapterReview(
         for (const conflict of summary.assignment_conflicts) for (const sectionId of conflict.related_section_ids) {
           if (!context.outlineSections.some(section => section.id === sectionId)) throw new ToolArgsError([`assignment_conflicts: 未知章节 ${sectionId}。`])
         }
+        const gapRefs = new Set<string>()
+        for (const gap of summary.external_input_gaps) {
+          const item = checklist.find(entry => entry.item_ref === gap.item_ref)
+          if (item === undefined) throw new ToolArgsError([`external_input_gaps: 未知审核项 ${gap.item_ref}。`])
+          if (gapRefs.has(gap.item_ref)) throw new ToolArgsError([`external_input_gaps: 重复审核项 ${gap.item_ref}。`])
+          gapRefs.add(gap.item_ref)
+          if (coverage.get(gap.item_ref)?.status !== 'missing') {
+            throw new ToolArgsError([`external_input_gaps: ${gap.item_ref} 必须已经记录为 missing。`])
+          }
+        }
         return Promise.resolve({ recorded: true })
       },
     })
     runtime.register({
-      name: 'finish_chapter_review', description: '检查是否记录全部 R、全局约束与质量总结，再生成报告并结束；repair 或 blocked 也可正常提交。',
+      name: 'finish_chapter_review', description: '检查是否记录全部 R、全局约束与质量总结，再生成报告并结束；repair 或 attention 也可正常提交。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       execute(args, exec) {
         chapterToolArgs(z.object({}).strict(), args)
@@ -288,6 +305,7 @@ export function attachChapterReview(
             missing_summary: summary === undefined,
           })
         }
+        const completedSummary = summary
         const entries = checklist.map((item) => {
           const result = coverage.get(item.item_ref)
           if (result === undefined) throw new Error(`S5 review lost coverage ${item.item_ref}`)
@@ -303,13 +321,14 @@ export function attachChapterReview(
           source_reference: evidence.find(source => source.source_ref === item.source_reference)?.locator ?? null, issue: item.issue,
         }))
         const blocking = [...new Set([
-          ...summary.blocking_issues,
+          ...completedSummary.blocking_issues,
           ...entries.filter(entry => entry.result.status === 'missing')
+            .filter(entry => !completedSummary.external_input_gaps.some(gap => gap.item_ref === entry.item.item_ref))
             .map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
           ...context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic'
             && item.priority === 'required' && acceptance.get(item.id)?.status === 'unmet')
             .map(item => `动态验收未通过：${item.description}；${acceptance.get(item.id)?.reason}`),
-          ...Object.entries(summary.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
+          ...Object.entries(completedSummary.quality_checks).filter(([, value]) => !value).map(([key]) => `质量检查未通过：${key}`),
           ...claimChecks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
           ...[...globalChecks.values()].filter(item => item.status === 'violates')
             .map(item => `违反全局约束：${context.globalCompliance.find(value => value.id === item.compliance_id)?.normalized_rule}；${item.issue}`),
@@ -351,15 +370,17 @@ export function attachChapterReview(
         })
         const review = parseChapterReview({
           schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
-          verdict: summary.assignment_conflicts.length > 0 ? 'blocked' : blocking.length === 0 ? 'pass' : 'repair',
+          verdict: blocking.length > 0 ? 'repair'
+            : completedSummary.assignment_conflicts.length > 0 || completedSummary.external_input_gaps.length > 0 ? 'attention' : 'pass',
           must_answer_coverage: entries.filter(entry => entry.item.kind === 'must_answer').map(entry => entry.value),
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),
           response_point_coverage: entries.filter(entry => entry.item.kind === 'response_point').map(entry => ({ ...entry.value, response_point_id: entry.item.id })),
           compliance_coverage: entries.filter(entry => entry.item.kind === 'compliance').map(entry => ({ ...entry.value, compliance_id: entry.item.id })),
           acceptance_criteria_results: acceptanceCriteriaResults,
           global_compliance_checks: globalComplianceChecks,
-          assignment_conflicts: summary.assignment_conflicts,
-          claim_checks: claimChecks, quality_checks: summary.quality_checks, blocking_issues: blocking,
+          assignment_conflicts: completedSummary.assignment_conflicts,
+          external_input_gaps: completedSummary.external_input_gaps,
+          claim_checks: claimChecks, quality_checks: completedSummary.quality_checks, blocking_issues: blocking,
         })
         return Promise.resolve(runtime.finish(exec, review))
       },

@@ -15,7 +15,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
   BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   buildBidStageTask, checkpointBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
-  outlineArtifactSha256,
+  outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState, reduceBidRuntimeState, validateTenderAnalysis,
   type BidStage, type BidStageExecutorPort, type BidStageValidatorPort, type StageSchedulerControl,
@@ -296,7 +296,7 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 6, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 7, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
@@ -304,6 +304,7 @@ describe('Workspace 项目与独立 Session', () => {
       acceptance_criteria_results: [],
       global_compliance_checks: [],
       assignment_conflicts: [],
+      external_input_gaps: [],
       claim_checks: [{ claim_quote: '按期交付', kind: 'commitment', status: 'unsupported', source_reference: null, issue: '未说明保障措施。' }],
       quality_checks: {
         bidder_response_voice: true,
@@ -335,6 +336,35 @@ describe('Workspace 项目与独立 Session', () => {
         expect.objectContaining({ category: 'quality_checks', detail: 'project_specific：false' }),
       ]),
     })
+
+    const repairReport = parseChapterReviewArtifact(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8'),
+    ))
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      ...repairReport,
+      verdict: 'attention',
+      claim_checks: [],
+      quality_checks: { ...repairReport.quality_checks, project_specific: true },
+      blocking_issues: [],
+      external_input_gaps: [{ item_ref: 'R1', required_material: '企业资质证书', reason: '当前项目资料未提供。' }],
+    }))
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'needs_input' })
+    const externalReview = (await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).review
+    expect(externalReview.status).toBe('needs_input')
+    expect(externalReview.issues.some(issue => issue.category === 'external_input_gaps'
+      && issue.severity === 'medium' && issue.title === '待补项目资料：企业资质证书')).toBe(true)
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      ...repairReport,
+      verdict: 'attention',
+      must_answer_coverage: [{ item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
+      claim_checks: [],
+      quality_checks: { ...repairReport.quality_checks, project_specific: true },
+      blocking_issues: [],
+      assignment_conflicts: [{ task: '扩写商务资质', basis: '该任务不属于技术方案。', related_section_ids: ['SEC-1'] }],
+      external_input_gaps: [],
+    }))
+    expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]).toMatchObject({ review_status: 'needs_attention' })
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify(repairReport))
 
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n修订后的正文。\n')
     expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.review_status).toBe('reviewing')

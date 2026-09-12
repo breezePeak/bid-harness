@@ -8,7 +8,7 @@ S2 的全局 Compliance 被复制进每章的 canonical Checklist 和 manifest�
 
 ## Decision
 
-S5 将局部 Compliance 和全局 Compliance 分开。局部项继续进入章节 canonical Checklist、章节覆盖报告和 manifest；全局项只作为 Reviewer 的独立核验集合，用于发现当前正文中可直接确认的违反或不适用情形，不计入章节覆盖索引。Reviewer 把目录或章节职责分配错误记录为 `assignment_conflicts`，Host 将 verdict 设为 `blocked`，不触发 Writer 重写；当前正文违反全局约束时仍为可修订的 `repair`。
+S5 将局部 Compliance 和全局 Compliance 分开。局部项继续进入章节 canonical Checklist、章节覆盖报告和 manifest；全局项只作为 Reviewer 的独立核验集合，用于发现当前正文中可直接确认的违反或不适用情形，不计入章节覆盖索引。Reviewer 把目录或章节职责分配错误记录为 `assignment_conflicts`，Host 在没有正文修复问题时将 verdict 设为 `attention`，不触发 Writer 重写；当前正文违反全局约束时仍为可修订的 `repair`。两类审核结论都按[风险不阻断规则](2026-09-12-bid-s5-advisory-review-risk.md)保存并允许阶段完成。
 
 全部章节提交后，现有 Main Agent 通过独立私有协议对完整章节集合执行一次文档级审核，Host 写入 `chapters/global-compliance-review.json`。每个全局项明确分类为跨章节约束、文档内容要求或交付要求，并归属于 chapter、document 或 delivery；跨章节和文档结论必须引用当前章节原文或已登记材料，交付要求没有真实执行证据时只能为 `pending`。报告记录确认目录 Hash、逐项检查的章节正文 Hash、受影响章节和证据引用，最终 Validator 重新校验这些关系。没有全局项时 Host 直接生成空报告。
 

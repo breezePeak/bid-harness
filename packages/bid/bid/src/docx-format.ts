@@ -18,6 +18,93 @@ export const FORMAT_ROLES: FormatRole[] = ['title',
   'header',
   'footer'] as const
 const roleLabels = ['文档标题', '一级标题', '二级标题', '三级标题', '四级标题', '五级标题', '六级标题', '正文', '表头', '单元格', '图题', '表题', '页眉', '页脚']
+const CHINESE_SIZE_PT: Readonly<Record<string, number>> = {
+  初号: 42,
+  小初: 36,
+  一号: 26,
+  小一: 24,
+  二号: 22,
+  小二: 18,
+  三号: 16,
+  小三: 15,
+  四号: 14,
+  小四: 12,
+  五号: 10.5,
+  小五: 9,
+  六号: 7.5,
+  小六: 6.5,
+  七号: 5.5,
+  八号: 5,
+}
+type FormatNumberUnit = 'pt' | 'mm' | 'chars' | 'multiple' | 'lines' | 'percent'
+interface NormalizedFormatNumber {
+  value: number
+  unit?: FormatNumberUnit
+}
+const numericValue = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(pt|磅|mm|毫米|字符|字|倍|行|%)?$/iu
+const formatValueSchemas = new WeakMap<FormatField[], z.ZodType>()
+
+function normalizeFormatNumber(key: string, value: unknown): NormalizedFormatNumber | undefined {
+  if (typeof value === 'number') return { value }
+  if (typeof value !== 'string') return undefined
+  const source = value.trim()
+  if (key.endsWith('.size')) {
+    const withoutSuffix = source.endsWith('字') ? source.slice(0, -1) : source
+    const named = CHINESE_SIZE_PT[withoutSuffix] ?? CHINESE_SIZE_PT[withoutSuffix.endsWith('号') ? withoutSuffix.slice(0, -1) : withoutSuffix]
+    if (named !== undefined) return { value: named, unit: 'pt' }
+  }
+  const match = numericValue.exec(source)
+  if (!match) return undefined
+  const number = Number(match[1])
+  if (!Number.isFinite(number)) return undefined
+  const unit = match[2]?.toLowerCase()
+  if (unit === undefined) return { value: number }
+  if ((unit === 'pt' || unit === '磅') && (key.endsWith('.size') || key.endsWith('.before')
+    || key.endsWith('.after') || key === 'table.borderSize' || key.endsWith('.line')))
+    return { value: number, unit: 'pt' }
+  if ((unit === 'mm' || unit === '毫米') && (key.startsWith('page.') || key.endsWith('.firstLine')))
+    return { value: number, unit: 'mm' }
+  if ((unit === '字符' || unit === '字') && key.endsWith('.firstLine')) return { value: number, unit: 'chars' }
+  if (unit === '倍' && key.endsWith('.line')) return { value: number, unit: 'multiple' }
+  if (unit === '行' && key.endsWith('.line')) return { value: number, unit: 'lines' }
+  if (unit === '行' && number === 0 && (key.endsWith('.before') || key.endsWith('.after'))) return { value: 0 }
+  if (unit === '%' && key === 'table.width') return { value: number, unit: 'percent' }
+  return undefined
+}
+
+/**
+ * 把所有格式来源的数值表达转换为字段 Schema 使用的数值和单位枚举。
+ * @param values 浏览器、模型、DOCX 提取结果或磁盘配置中的字段对象。
+ * @param fields 当前部署的格式定义。
+ * @returns 保留未知字段、但已转换已知数值字段的对象；严格校验仍由 validateFormatValues 完成。
+ */
+export function normalizeFormatValues(values: unknown, fields: FormatField[]): unknown {
+  if (values === null || typeof values !== 'object' || Array.isArray(values)) return values
+  const definitions = new Map(fields.map(field => [field.key, field]))
+  const normalized: Record<string, unknown> = {}
+  const inferred = new Map<string, string>()
+  for (const [key, value] of Object.entries(values)) {
+    const field = definitions.get(key)
+    if (field === undefined || typeof field.value !== 'number') {
+      normalized[key] = value
+      continue
+    }
+    const number = normalizeFormatNumber(key, value)
+    normalized[key] = number?.value ?? value
+    if ((number?.unit === 'chars' || number?.unit === 'mm') && key.endsWith('.firstLine'))
+      inferred.set(key.replace(/\.firstLine$/u, '.firstLineUnit'), number.unit)
+    else if (number?.unit === 'pt') {
+      if (key.endsWith('.line')) inferred.set(key.replace(/\.line$/u, '.lineRule'), 'exact')
+    } else if (number?.unit === 'multiple' || number?.unit === 'lines') {
+      inferred.set(key.replace(/\.line$/u, '.lineRule'), 'auto')
+    }
+  }
+  for (const [key, value] of inferred) {
+    if (normalized[key] === undefined) normalized[key] = value
+    else if (normalized[key] !== value) throw new Error(`格式配置无效：${key}`)
+  }
+  return normalized
+}
 /**
  * 建立导出支持的字段与默认值。
  * @param defaults 项目原有字体及半磅字号配置。
@@ -137,15 +224,20 @@ export function formatFields(defaults: {
  * @returns 合法字段；未知字段及越界值会抛出中文错误。
  */
 export function validateFormatValues(values: unknown, fields: FormatField[]): FormatValues {
-  const schemas = Object.fromEntries(fields.map(field => [field.key,
-    typeof field.value === 'number' ? z.number().min(field.min ?? 0).max(field.max ?? 1000).optional()
-      : typeof field.value === 'boolean' ? z.boolean().optional()
-        : (field.options ? z.enum(field.options as [
-          string,
-          ...string[],
-        ]) : z.string().max(200)).optional(),
-  ]))
-  const parsed = z.strictObject(schemas).safeParse(values)
+  let schema = formatValueSchemas.get(fields)
+  if (schema === undefined) {
+    const schemas = Object.fromEntries(fields.map(field => [field.key,
+      typeof field.value === 'number' ? z.number().min(field.min ?? 0).max(field.max ?? 1000).optional()
+        : typeof field.value === 'boolean' ? z.boolean().optional()
+          : (field.options ? z.enum(field.options as [
+            string,
+            ...string[],
+          ]) : z.string().max(200)).optional(),
+    ]))
+    schema = z.strictObject(schemas)
+    formatValueSchemas.set(fields, schema)
+  }
+  const parsed = schema.safeParse(normalizeFormatValues(values, fields))
   if (!parsed.success)
     throw new Error(`格式配置无效：${parsed.error.issues.map(issue => issue.path.join('.')).join('、')}`)
   const result = parsed.data as FormatValues
@@ -196,17 +288,37 @@ export function defaultDocxFormatState(fields: FormatField[]): DocxFormatState {
   }
 }
 
-function candidateEvidence(candidate: DocxFormatState['extracted']['candidates'][number], role: FormatRole): FormatEvidence[] {
+function normalizeEvidence(item: FormatEvidence, key: string, fields: FormatField[]): FormatEvidence {
+  const value = validateFormatValues({ [key]: item.value }, fields)[key]
+  if (value === undefined) throw new Error(`格式配置无效：${key}`)
+  return { ...item, key, value }
+}
+
+function normalizeCandidate(candidate: DocxFormatState['extracted']['candidates'][number], fields: FormatField[]): DocxFormatState['extracted']['candidates'][number] {
+  const role = candidate.roles[0] ?? 'body'
+  const values = Object.fromEntries(Object.entries(validateFormatValues(Object.fromEntries(
+    Object.entries(candidate.values).map(([key, value]) => [`${role}.${key}`, value]),
+  ), fields)).map(([key, value]) => [key.slice(role.length + 1), value]))
+  const evidence = candidate.evidence.map((item) => {
+    const normalized = normalizeEvidence(item, `${role}.${item.key}`, fields)
+    return { ...normalized, key: item.key }
+  })
+  return { ...candidate, values, evidence }
+}
+
+function candidateEvidence(candidate: DocxFormatState['extracted']['candidates'][number], role: FormatRole, fields: FormatField[]): FormatEvidence[] {
   const byKey = new Map<string, FormatEvidence[]>()
   for (const evidence of candidate.evidence) {
     const entries = byKey.get(evidence.key) ?? []
     entries.push(evidence)
     byKey.set(evidence.key, entries)
   }
-  return Object.entries(candidate.values).flatMap(([key, value]) => {
+  const values = validateFormatValues(Object.fromEntries(Object.entries(candidate.values).map(([key, value]) => [`${role}.${key}`, value])), fields)
+  return Object.entries(values).flatMap(([fullKey, value]) => {
+    const key = fullKey.slice(role.length + 1)
     const evidence = byKey.get(key)
-    if (evidence?.length) return evidence.map(item => ({ ...item, key: `${role}.${key}`, candidateId: candidate.id }))
-    return [{ key: `${role}.${key}`, value, source: 'named_style' as const, text: candidate.name, candidateId: candidate.id }]
+    if (evidence?.length) return evidence.map(item => ({ ...normalizeEvidence(item, fullKey, fields), candidateId: candidate.id }))
+    return [{ key: fullKey, value, source: 'named_style' as const, text: candidate.name, candidateId: candidate.id }]
   })
 }
 
@@ -225,20 +337,27 @@ export function resolveFormat(state: DocxFormatState, fields: FormatField[], tem
     evidence.set(item.key, entries)
   }
   for (const field of fields) add({ key: field.key, value: field.value, source: 'system_default' })
-  for (const [key, value] of Object.entries(validateFormatValues(state.extracted.values, fields)))
-    add(state.extracted.evidence.find(item => item.key === key && evidenceValue(item.value) === evidenceValue(value))
+  const extractedValues = validateFormatValues(state.extracted.values, fields)
+  const extractedEvidence = state.extracted.evidence.map(item => normalizeEvidence(item, item.key, fields))
+  const normalizedCandidates = state.extracted.candidates.map(candidate => normalizeCandidate(candidate, fields))
+  for (const [key, value] of Object.entries(extractedValues))
+    add(extractedEvidence.filter(item => item.key === key)
+      .find(item => evidenceValue(item.value) === evidenceValue(value))
       ?? { key, value, source: 'direct_format' })
   for (const role of FORMAT_ROLES) {
     const mapped = state.modelInterpreted.mapping[role]
     const candidates = mapped
-      ? state.extracted.candidates.filter(candidate => candidate.id === mapped
+      ? normalizedCandidates.filter(candidate => candidate.id === mapped
         || candidate.id.startsWith('direct-') && candidate.roles.includes(role))
-      : state.extracted.candidates.filter(candidate => candidate.roles.includes(role))
+      : normalizedCandidates.filter(candidate => candidate.roles.includes(role))
     for (const candidate of candidates)
-      for (const item of candidateEvidence(candidate, role)) add(item)
+      for (const item of candidateEvidence(candidate, role, fields)) add(item)
   }
-  for (const [key, value] of Object.entries(validateFormatValues(state.modelInterpreted.values, fields)))
-    add(state.modelInterpreted.evidence.find(item => item.key === key && evidenceValue(item.value) === evidenceValue(value))
+  const interpretedValues = validateFormatValues(state.modelInterpreted.values, fields)
+  const interpretedEvidence = state.modelInterpreted.evidence.map(item => normalizeEvidence(item, item.key, fields))
+  for (const [key, value] of Object.entries(interpretedValues))
+    add(interpretedEvidence.filter(item => item.key === key)
+      .find(item => evidenceValue(item.value) === evidenceValue(value))
       ?? { key, value, source: 'template_instruction' })
   const confirmed = validateFormatValues(state.userConfirmed, fields)
   for (const [key, value] of Object.entries(confirmed)) add({ key, value, source: 'user_confirmed' })
@@ -263,7 +382,12 @@ export function resolveFormat(state: DocxFormatState, fields: FormatField[], tem
   const pageWidth = resolved['page.orientation'] === 'landscape' ? longEdge : shortEdge
   if (Number(resolved['page.left']) + Number(resolved['page.right']) >= pageWidth)
     throw new Error('左右页边距过大，请缩小边距。')
-  const nextState = { ...state, resolved, conflicts }
+  const nextState = { ...state,
+    extracted: { ...state.extracted, values: extractedValues, candidates: normalizedCandidates, evidence: extractedEvidence },
+    modelInterpreted: { ...state.modelInterpreted, values: interpretedValues, evidence: interpretedEvidence },
+    userConfirmed: confirmed,
+    resolved,
+    conflicts }
   return { state: nextState,
     templateMaxBytes,
     fields,
@@ -286,6 +410,7 @@ export function viewResolvedFormat(
   const resolved = validateFormatValues(state.resolved, fields)
   if (Object.keys(resolved).length !== fields.length)
     throw new Error('保存的 Word 格式缺少最终确认字段，请重新上传模板。')
-  return { state, templateMaxBytes, fields, values: state.resolved,
+  const nextState = { ...state, resolved }
+  return { state: nextState, templateMaxBytes, fields, values: resolved,
     warnings: ['样式预览，分页以 Word 为准；浏览器和 Word 的字体可用性可能不同。', ...state.extracted.warnings] }
 }

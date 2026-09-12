@@ -253,8 +253,8 @@ export function BidReviewWorkbench({
           {workbench.global_compliance.document_issues.length > 0 && <>
             <h3 className={css.fieldLabel}>文档级问题</h3>
             <ul className={css.issuesList}>{workbench.global_compliance.document_issues.map(issue => (
-              <li key={issue.compliance_id} className={css.issueCard} data-severity="blocking">
-                <div className={css.issueHeader}><span className={css.issueTitle}>{issue.compliance_id}</span><span className={css.miniTag}>{issue.status === 'pending' ? '待核验' : '未通过'}</span></div>
+              <li key={issue.compliance_id} className={css.issueCard} data-severity="high">
+                <div className={css.issueHeader}><span className={css.issueTitle}>{issue.compliance_id}</span><span className={css.miniTag}>{issue.status === 'pending' ? '待核验' : '高风险'}</span></div>
                 <p className={css.issueDetail}>{issue.detail}</p>
                 {issue.affected_section_ids.length > 0 && <p className={css.issueDetail}>受影响章节：{issue.affected_section_ids.join('、')}</p>}
               </li>
@@ -551,6 +551,12 @@ function getChapterDotInfo(
       title: '正文需要修复',
     }
   }
+  if (reviewStatus === 'needs_input') {
+    return {
+      className: classes(css.statusDot, css.statusDotYellow),
+      title: '缺少项目资料，正文无需重写',
+    }
+  }
 
   if (reviewStatus === 'pass') {
     return {
@@ -573,12 +579,14 @@ function getChapterDotInfo(
 }
 
 function isChapterSelectable(section: BidReviewWorkbenchView['outline'][number]): boolean {
-  return section.content_available || section.writing_status === 'failed' || section.review_status === 'failed' || section.review_status === 'needs_attention'
+  return section.content_available || section.writing_status === 'failed' || section.review_status === 'failed'
+    || section.review_status === 'needs_input' || section.review_status === 'needs_attention'
 }
 
 function getReviewStatusInfo(review: BidReviewChapterView['review']): { label: string; className: string | undefined } {
   switch (review.status) {
     case 'pass': return { label: '审核通过', className: css.miniTagSuccess }
+    case 'needs_input': return { label: '待补项目资料', className: css.miniTagWarning }
     case 'needs_attention': return { label: '正文需要修复', className: css.miniTagWarning }
     case 'failed': return { label: '审核执行失败', className: css.miniTagError }
     case 'reviewing': return { label: '审核中', className: css.miniTagWriting }
@@ -589,6 +597,7 @@ function getReviewStatusInfo(review: BidReviewChapterView['review']): { label: s
 function getReviewEmptyMessage(status: BidReviewChapterView['review']['status']): string {
   switch (status) {
     case 'pass': return '本次已保存的审核报告未列出问题。'
+    case 'needs_input': return '审核发现需要补充项目资料，正文无需重新编写。'
     case 'needs_attention': return '审核标记为正文需要修复，但未取得具体原因。请重新加载章节状态。'
     case 'reviewing': return '审核尚在进行中，暂未产生已保存的审核结果。'
     case 'not_started': return '等待正文和审核结果；当前没有已保存的审核报告。'
@@ -597,9 +606,9 @@ function getReviewEmptyMessage(status: BidReviewChapterView['review']['status'])
 }
 
 function getSeverityLabel(severity: BidReviewChapterView['review']['issues'][number]['severity']): string {
-  if (severity === 'blocking') return '阻断'
-  if (severity === 'warning') return '警告'
-  return '提示'
+  if (severity === 'high') return '高风险'
+  if (severity === 'medium') return '中风险'
+  return '低风险'
 }
 
 const PAGE_ESTIMATE_BASIS = '按当前 Word 导出格式估算，实际分页以 Word 为准'

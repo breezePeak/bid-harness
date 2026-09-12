@@ -56,20 +56,11 @@ export class ChapterAdapter extends LlmAdapter {
           id: string
           evaluator: { kind: 'semantic' | 'deterministic' }
         }>
-        const sectionsLine = prompt.split('\n').find(line => line.startsWith('章节摘要、正文身份与 Chapter Reviewer 权威结果：'))!
-        const sections = JSON.parse(sectionsLine.slice('章节摘要、正文身份与 Chapter Reviewer 权威结果：'.length)) as Array<{
-          section_id: string
-          review: { verdict: 'pass' | 'repair' | 'blocked' }
-        }>
-        const failed = sections.filter(section => section.review.verdict !== 'pass')
         yield* call('submit_chapter_writing_completion_review', {
-          action: failed.length === 0 ? 'complete' : 'revise', reason: '已消费章节权威审核并完成文档验收。',
+          action: 'complete', reason: '已消费章节权威审核并完成文档验收；章节风险保留为最终结果。',
           document_acceptance: criteria.filter(item => item.evaluator.kind === 'semantic').map(item => ({
             criterion_id: item.id, status: 'met', evidence_quote_refs: [], reason: '章节审核与摘要足以判断。',
           })),
-          ...(failed.length === 0 ? {} : { sections: failed.map(section => ({
-            section_id: section.section_id, instruction: '修复 Chapter Reviewer 记录的未满足项。',
-          })) }),
         })
         return
       }
@@ -128,7 +119,7 @@ export class ChapterAdapter extends LlmAdapter {
         })) })
         break
       }
-      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [] }); break
+      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [] }); break
       case 7: yield* call('finish_chapter_review', {}); break
       default: throw new Error('Reviewer finish did not conclude the turn')
     }

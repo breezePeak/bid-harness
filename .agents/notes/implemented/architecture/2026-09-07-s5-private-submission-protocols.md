@@ -14,7 +14,7 @@ S5 分别拥有 planning 草稿、Writer 语义输入、Reviewer Checklist 协�
 
 Evidence Pack 只包含相关 S2 确认事实、当前候选实际使用的本地 chunk 与 Hash 验证后的 Web 原文，以及允许的前置 handoff。来源身份与允许的声明种类由 Host 校验，适用性与语义支持由 Reviewer 判断；旧标书、Web 和 handoff 不能自动证明本项目企业事实。
 
-既有 canonical 项 missing、适用的全局约束违反、quality=false、unsupported claim、额外阻断或 required 动态条件未满足生成 `repair`；preferred 动态条件未满足只保留 coverage，章节职责冲突生成 `blocked`。成功 finish 表示报告完整，不表示正文通过。正文在审核前可读，完整候选语义修复按 `modelStageRepairAttempts` 回到同一 Writer，见[可续写 Writer](2026-09-07-s5-continuable-writer.md)；blocked、后续仍为 repair 或遭遇持续传输错误时保留合法已审候选和真实报告。独立合法 plan 可以在没有 execution-log 时复用；章节恢复验证真实资料、正文、报告、Hash 和 Child 身份，报告失效时保留合法正文只重新审核，正文或当前任务契约失效时才重排章节，无关 completed 继续复用。
+既有 canonical 项 missing、适用的全局约束违反、quality=false、unsupported claim、额外正文问题或 required 动态条件未满足在 Writer 可修复时生成 `repair`；preferred 动态条件未满足只保留 coverage，[外部资料缺口](../bug-fix/2026-09-12-bid-s5-advisory-review-risk.md)和章节职责冲突在没有正文修复问题时生成 `attention`。成功 finish 表示报告完整，不表示正文通过。正文在审核前可读，完整候选语义修复按 `modelStageRepairAttempts` 回到同一 Writer，见[可续写 Writer](2026-09-07-s5-continuable-writer.md)；attention、后续仍为 repair 或遭遇持续传输错误时保留合法已审候选和真实报告。独立合法 plan 可以在没有 execution-log 时复用；章节恢复验证真实资料、正文、报告、Hash 和 Child 身份，报告失效时保留合法正文只重新审核，正文或当前任务契约失效时才重排章节，无关 completed 继续复用。
 
 `review_sha256` 与 `review.candidate_sha256` 都绑定章节正文的 `chapterCandidateSha256()`；短引用只存在于当前执行协议。章节报告记录全局核验和职责冲突，章节 manifest 只记录局部 Compliance；独立文档级报告记录完整全局结论。最终 Validator 与正常提交共用覆盖集合、引句、证据 Hash 及 verdict 一致性检查，不增加所有章节必须 pass 的阶段完成或导出条件。
 

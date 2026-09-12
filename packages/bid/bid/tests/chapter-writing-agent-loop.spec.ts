@@ -12,7 +12,10 @@ import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
-import { BidWorkspace, buildBidStageTask, executeChapterWriting, parseChapterExecutionLog, parseChapterReviewArtifact, validateChapterWriting } from '@deepseek-ai/dsh-bid'
+import {
+  BidWorkspace, buildBidStageTask, executeChapterWriting, parseChapterExecutionLog,
+  parseChapterReviewArtifact, parseChapterWritingCompletionState, validateChapterWriting,
+} from '@deepseek-ai/dsh-bid'
 import { CHAPTER_REVIEW_TOOLS } from '../src/chapter-writing-review.ts'
 import { CHAPTER_PLAN_TOOLS } from '../src/chapter-writing-planning.ts'
 import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
@@ -106,9 +109,10 @@ describe('S5 真实 DSH Child 接入', () => {
     adapter.reviewPreamble = false
     adapter.repairReviews = Infinity
     try {
-      await expect(executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
-        maxRepairAttempts, maxCompletionRepairRounds: 0, maxConcurrency: 3,
-      })).rejects.toThrow('CHAPTER_WRITING_COMPLETION_ROUND_LIMIT')
+      const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts, maxConcurrency: 3,
+      })
+      await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       const writers = log.sections[0]!.attempts.filter(attempt => attempt.role === 'writer')
       expect(writers).toHaveLength(maxRepairAttempts + 1)
@@ -116,6 +120,11 @@ describe('S5 真实 DSH Child 接入', () => {
       const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
       expect(review.verdict).toBe('repair')
       expect(review.writer_child_session_id).toBe(writers.at(-1)!.child_session_id)
+      const completion = parseChapterWritingCompletionState(JSON.parse(await readFile(
+        join(workspace.projectRoot, 'chapters/completion-review.json'), 'utf8',
+      )))
+      expect(completion.completion).toBeDefined()
+      expect(completion.stopped_reason).toBeUndefined()
     } finally { await ctx.fiber.dispose() }
   })
 
@@ -139,15 +148,21 @@ describe('S5 真实 DSH Child 接入', () => {
     adapter.omitRepairSubmission = true
     adapter.repairReviews = Infinity
     try {
-      await expect(executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
-        maxRepairAttempts: 1, maxCompletionRepairRounds: 0, maxConcurrency: 3,
-      })).rejects.toThrow('CHAPTER_WRITING_COMPLETION_ROUND_LIMIT')
+      const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxConcurrency: 3,
+      })
+      await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       const writers = log.sections[0]!.attempts.filter(attempt => attempt.role === 'writer')
       expect(writers.map(attempt => attempt.accepted)).toEqual([true, false])
       expect(writers[1]!.issues).toContainEqual(expect.objectContaining({ code: 'CHAPTER_SUBAGENT_STRUCTURED_MISSING' }))
       expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('首次候选')
       expect(log.sections[0]!.attempts.filter(attempt => attempt.role === 'reviewer')).toHaveLength(1)
+      const completion = parseChapterWritingCompletionState(JSON.parse(await readFile(
+        join(workspace.projectRoot, 'chapters/completion-review.json'), 'utf8',
+      )))
+      expect(completion.completion).toBeDefined()
+      expect(completion.stopped_reason).toBeUndefined()
     } finally { await ctx.fiber.dispose() }
   })
 

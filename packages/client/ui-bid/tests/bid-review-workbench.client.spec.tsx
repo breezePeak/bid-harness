@@ -8,7 +8,7 @@ import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 afterEach(cleanup)
 
 const workbench = {
-  schema_version: 2 as const,
+  schema_version: 3 as const,
   outline: [
     { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, content_available: true },
@@ -171,7 +171,7 @@ describe('BidReviewWorkbench', () => {
 
   it('选择需修复章节时默认展示已保存审核问题的详情、严重程度和建议', async () => {
     const issue = {
-      issue_id: 'SEC-1-review-1', section_id: 'SEC-1', source: 'review' as const, category: 'blocking_issues', severity: 'blocking' as const,
+      issue_id: 'SEC-1-review-1', section_id: 'SEC-1', source: 'review' as const, category: 'blocking_issues', severity: 'high' as const,
       status: 'open' as const, title: '审核结论', detail: '缺少与交付节点对应的实施措施。', suggestion: '补充交付节点和责任分工。',
     }
     render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'needs_attention', issues: [issue] } }) })} />)
@@ -179,7 +179,7 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getAllByText('正文需要修复')).toHaveLength(2)
     expect(screen.getByText('问题数量')).toBeTruthy()
     expect(screen.getByText('问题详情：缺少与交付节点对应的实施措施。')).toBeTruthy()
-    expect(screen.getByText('严重程度：阻断')).toBeTruthy()
+    expect(screen.getByText('严重程度：高风险')).toBeTruthy()
     expect(screen.getByText('修改建议：补充交付节点和责任分工。')).toBeTruthy()
     expect(screen.getByText('参考资料')).toBeTruthy()
   })
@@ -188,6 +188,28 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'pass', issues: [] } }) })} />)
     expect((await screen.findAllByText('审核通过')).length).toBeGreaterThanOrEqual(2)
     expect(screen.getByText('本次已保存的审核报告未列出问题。')).toBeTruthy()
+  })
+
+  it('缺少资质资料时显示黄色状态并说明正文无需重写', async () => {
+    const pendingInput = {
+      ...workbench.outline[1]!, review_status: 'needs_input' as const,
+    }
+    render(<BidReviewWorkbench {...props({
+      getWorkbench: async () => ({
+        ...workbench,
+        outline: [workbench.outline[0]!, pendingInput],
+        summary: { ...workbench.summary, reviewed_count: 1, needs_attention_count: 1 },
+      }),
+      getChapter: async () => ({ ...chapter, review: { status: 'needs_input' as const, issues: [{
+        issue_id: 'SEC-1-external-input-1', section_id: 'SEC-1', source: 'review' as const,
+        category: 'external_input_gaps', severity: 'medium' as const, status: 'open' as const,
+        title: '待补项目资料：企业资质证书', detail: '当前项目资料未提供。',
+      }] } }),
+    })} />)
+
+    expect(await screen.findByTitle('1.1 实施方案：缺少项目资料，正文无需重写')).toBeTruthy()
+    expect(screen.getAllByText('待补项目资料')).toHaveLength(2)
+    expect(screen.getByText('严重程度：中风险')).toBeTruthy()
   })
 
   it('没有正文的失败章节仍可选择并显示执行记录中的失败原因', async () => {
@@ -205,7 +227,7 @@ describe('BidReviewWorkbench', () => {
         review: { status: 'failed', issues: [{
           issue_id: 'SEC-1-writing_execution-1', section_id: 'SEC-1', source: 'writing_execution',
           category: 'CHAPTER_SUBAGENT_STOP_REASON_INVALID',
-          severity: 'blocking', status: 'open', title: '章节编写执行失败', detail: 'Chapter Subagent 未正常完成：error。',
+          severity: 'high', status: 'open', title: '章节编写执行失败', detail: 'Chapter Subagent 未正常完成：error。',
         }] },
       }) : chapter,
     })} />)
@@ -236,7 +258,7 @@ describe('BidReviewWorkbench', () => {
     const getChapter = vi.fn(async (sectionId: string) => sectionId === 'SEC-2' ? ({
       ...chapter, section_id: 'SEC-2', title: '质量保障', number: '1.2', heading_path: ['技术方案', '质量保障'],
       review: repaired ? { status: 'pass' as const, issues: [] } : { status: 'needs_attention' as const, issues: [{
-        issue_id: 'SEC-2-review-1', section_id: 'SEC-2', source: 'review' as const, category: 'blocking_issues', severity: 'blocking' as const,
+        issue_id: 'SEC-2-review-1', section_id: 'SEC-2', source: 'review' as const, category: 'blocking_issues', severity: 'high' as const,
         status: 'open' as const, title: '审核结论', detail: '旧问题。',
       }] },
     }) : chapter)

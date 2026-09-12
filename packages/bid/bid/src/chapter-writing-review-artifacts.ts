@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 6 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 7 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -46,6 +46,12 @@ const assignmentConflictSchema = z.object({
   related_section_ids: z.array(z.string().min(1)),
 }).strict()
 
+const externalInputGapSchema = z.object({
+  item_ref: z.string().trim().min(1),
+  required_material: z.string().trim().min(1),
+  reason: z.string().trim().min(1),
+}).strict()
+
 const claimCheckSchema = z.object({
   claim_quote: z.string().trim().min(1),
   kind: z.enum(['project_fact', 'technical_fact', 'commitment']),
@@ -58,7 +64,7 @@ const claimCheckSchema = z.object({
 export const chapterReviewSchema = z.object({
   schema_version: z.literal(CHAPTER_REVIEW_SCHEMA_VERSION),
   section_id: z.string().min(1),
-  verdict: z.enum(['pass', 'repair', 'blocked']),
+  verdict: z.enum(['pass', 'repair', 'attention']),
   must_answer_coverage: z.array(coverageSchema),
   requirement_coverage: z.array(identifiedCoverageSchema),
   response_point_coverage: z.array(responsePointCoverageSchema),
@@ -66,6 +72,7 @@ export const chapterReviewSchema = z.object({
   acceptance_criteria_results: z.array(acceptanceCriterionResultSchema),
   global_compliance_checks: z.array(globalComplianceCheckSchema),
   assignment_conflicts: z.array(assignmentConflictSchema),
+  external_input_gaps: z.array(externalInputGapSchema),
   claim_checks: z.array(claimCheckSchema),
   quality_checks: z.object({
     bidder_response_voice: z.boolean(),

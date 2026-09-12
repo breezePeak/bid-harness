@@ -67,16 +67,49 @@ describe('项目 Word 格式链路', () => {
     const extracted = await saveDocxTemplate(project, { revision: 0, name: '说明模板.docx', bytes: await template() })
     const suggestion = validateFormatSuggestion({ rules: [
       { key: 'body.font', value: '宋体', evidence: '正文小四宋体' },
+      { key: 'body.size', value: '小四', evidence: '正文小四宋体' },
       { key: 'body.latinFont', value: 'Times New Roman', evidence: '英文及数字 Times New Roman' },
-      { key: 'body.firstLine', value: 2, evidence: '首行缩进 2 字符' },
-      { key: 'body.firstLineUnit', value: 'chars', evidence: '首行缩进 2 字符' },
-      { key: 'body.line', value: 1.5, evidence: '1.5 倍行距' },
+      { key: 'body.firstLine', value: '2字符', evidence: '首行缩进 2 字符' },
+      { key: 'body.line', value: '1.5倍', evidence: '1.5 倍行距' },
     ], mapping: { body: 'Normal' } }, extracted)
     const saved = await saveDocxFormatInterpretation(project, extracted.state.revision, suggestion)
     expect(saved.state.modelInterpreted.values).toMatchObject({ 'body.font': '宋体', 'body.latinFont': 'Times New Roman',
-      'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.line': 1.5 })
+      'body.size': 12, 'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.line': 1.5, 'body.lineRule': 'auto' })
+    expect(saved.state.modelInterpreted.evidence.find(item => item.key === 'body.size')?.value).toBe(12)
     expect(saved.state.resolved['body.font']).toBe('宋体')
     expect(() => validateFormatSuggestion({ rules: [{ key: 'body.size', value: 15, evidence: '模板里没有这句话' }], mapping: {} }, extracted)).toThrow('模板原文')
+  })
+
+  it('在严格字段校验前统一转换模板说明中的字号、行距和缩进', () => {
+    const fields = formatFields(defaults)
+    const source = '各级标题均为三号宋体，正文（包括图表标题）小四宋体，首行缩进2字符，段前段后0行，行距1.5倍。'
+    const view = resolveFormat(defaultDocxFormatState(fields), fields)
+    view.state.extracted.paragraphs = [source]
+    const suggestion = validateFormatSuggestion({ rules: [
+      ...Array.from({ length: 6 }, (_, index) => ({ key: `heading${String(index + 1)}.size`, value: '三号', evidence: source })),
+      { key: 'body.size', value: '小四', evidence: source },
+      { key: 'figureCaption.size', value: '小四', evidence: source },
+      { key: 'tableCaption.size', value: '小四', evidence: source },
+      { key: 'body.firstLine', value: '2字符', evidence: source },
+      { key: 'body.before', value: '0行', evidence: source },
+      { key: 'body.after', value: '0行', evidence: source },
+      { key: 'body.line', value: '1.5倍', evidence: source },
+    ], mapping: {} }, view)
+    expect(suggestion.values).toMatchObject({
+      'heading1.size': 16,
+      'heading6.size': 16,
+      'body.size': 12,
+      'figureCaption.size': 12,
+      'tableCaption.size': 12,
+      'body.firstLine': 2,
+      'body.firstLineUnit': 'chars',
+      'body.before': 0,
+      'body.after': 0,
+      'body.line': 1.5,
+      'body.lineRule': 'auto',
+    })
+    expect(Object.values(suggestion.values).some(value => typeof value === 'string' && /号|磅|pt|字符|倍|行/iu.test(value))).toBe(false)
+    expect(suggestion.evidence.find(item => item.key === 'body.firstLineUnit')).toMatchObject({ value: 'chars', text: source })
   })
 
   it('Word Caption 和题注样式可同时映射图题与表题并保留多个样本', async () => {
@@ -211,6 +244,48 @@ describe('项目 Word 格式链路', () => {
     expect(() => validateFormatValues({ '../path': 'x' }, fields)).toThrow('配置无效')
     expect(() => validateFormatValues({ 'body.size': -1 }, fields)).toThrow('配置无效')
     expect(() => validateFormatValues({ 'numbering.1.text': '%2' }, fields)).toThrow('不能引用下级')
+  })
+
+  it('字号兼容数字、pt、磅和完整常用中文字号表并拒绝非法单位', () => {
+    const fields = formatFields(defaults)
+    const cases: Array<[number | string, number]> = [
+      [16, 16], ['16', 16], ['16pt', 16], ['16 pt', 16], ['16磅', 16],
+      ['初号', 42], ['小初', 36], ['一号', 26], ['小一', 24], ['二号', 22], ['小二', 18],
+      ['三号', 16], ['小三', 15], ['四号', 14], ['小四', 12], ['五号', 10.5], ['小五', 9],
+      ['六号', 7.5], ['小六', 6.5], ['七号', 5.5], ['八号', 5],
+    ]
+    for (const [input, expected] of cases)
+      expect(validateFormatValues({ 'body.size': input }, fields)).toEqual({ 'body.size': expected })
+    expect(validateFormatValues({ 'body.line': '1.5 倍', 'body.firstLine': '2 字符',
+      'page.top': '25.4mm', 'table.width': '80%' }, fields)).toEqual({
+      'body.line': 1.5, 'body.lineRule': 'auto', 'body.firstLine': 2, 'body.firstLineUnit': 'chars',
+      'page.top': 25.4, 'table.width': 80,
+    })
+    expect(validateFormatValues({ 'body.line': '18磅' }, fields)).toEqual({ 'body.line': 18, 'body.lineRule': 'exact' })
+    expect(() => validateFormatValues({ 'body.size': '十六号' }, fields)).toThrow('body.size')
+    expect(() => validateFormatValues({ 'body.size': '16px' }, fields)).toThrow('body.size')
+    expect(() => validateFormatValues({ 'body.before': '1行' }, fields)).toThrow('body.before')
+  })
+
+  it('候选来源的带单位数值也在进入 resolved 前标准化', () => {
+    const fields = formatFields(defaults)
+    const state = defaultDocxFormatState(fields)
+    state.extracted.candidates = [{ id: 'body-format', name: '正文说明', roles: ['body'], samples: [],
+      values: { size: '12 pt', line: '1.5倍', firstLine: '2字符', before: '0行', after: '0行' },
+      evidence: [
+        { key: 'size', value: '12 pt', source: 'named_style' },
+        { key: 'line', value: '1.5倍', source: 'named_style' },
+        { key: 'firstLine', value: '2字符', source: 'named_style' },
+        { key: 'before', value: '0行', source: 'named_style' },
+        { key: 'after', value: '0行', source: 'named_style' },
+      ] }]
+    const view = resolveFormat(state, fields)
+    expect(view.state.resolved).toMatchObject({ 'body.size': 12, 'body.line': 1.5, 'body.lineRule': 'auto',
+      'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.before': 0, 'body.after': 0 })
+    expect(view.state.extracted.candidates[0]?.values).toMatchObject({ size: 12, line: 1.5, lineRule: 'auto',
+      firstLine: 2, firstLineUnit: 'chars', before: 0, after: 0 })
+    expect(view.state.conflicts.flatMap(conflict => conflict.evidence).filter(item => item.key === 'body.size')
+      .every(item => typeof item.value === 'number')).toBe(true)
   })
 
   it('配置指纹只读取 resolved 而不重新猜测模板', async () => {

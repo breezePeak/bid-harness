@@ -56,6 +56,7 @@ export function BidWordExport({ sessionId,
   const [busy, setBusy] = useState('')
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
+  const [formatVisible, setFormatVisible] = useState(false)
   const [activeConflict, setActiveConflict] = useState<FormatConflict | null>(null)
   const [selected, setSelected] = useState<FormatValue | undefined>()
   const firstConflict = useRef<HTMLButtonElement | null>(null)
@@ -75,6 +76,7 @@ export function BidWordExport({ sessionId,
       if (disposed) return
       setView(next)
       setPreviewHtml(rendered.previewHtml ?? '')
+      setFormatVisible(true)
     }, (reason: unknown) => { if (!disposed) setError(reason instanceof Error ? reason.message : 'Word 格式读取失败。') })
     return () => { disposed = true }
   }, [getFormat, isBid, preview, sessionId])
@@ -84,6 +86,7 @@ export function BidWordExport({ sessionId,
     if (busy) return
     setBusy(label)
     setError('')
+    setStatus('')
     void action().catch((reason: unknown) => { setError(reason instanceof Error ? reason.message : '操作失败，请重试。') })
       .finally(() => { setBusy('') })
   }
@@ -116,18 +119,22 @@ export function BidWordExport({ sessionId,
             const file = event.target.files?.[0]
             if (!file || !view) return
             perform('正在解析模板…', async () => {
+              setFormatVisible(false)
+              setPreviewHtml('')
+              setActiveConflict(null)
               if (file.size > templateMaxBytes) throw new Error(`模板文件不能超过 ${String(templateMaxMiB)} MiB。`)
               const next = await uploadTemplate(file, view.state.revision)
               setView(next)
               await loadPreview()
+              setFormatVisible(true)
               setStatus('模板解析完成')
             })
           }}/>
-          {view?.state.template && <span>{view.state.template.name}</span>}
+          {formatVisible && view?.state.template && <span>{view.state.template.name}</span>}
         </label>
         <p role="status" className={css.status}>{busy || status || (partial ? '当前导出仅包含已完成并保存的章节。' : '')}</p>
         {error && <p role="alert" className={css.error}>{error}</p>}
-        {view && <table className={css.summary}>
+        {formatVisible && view && <table className={css.summary}>
           <caption>模板主要格式</caption>
           <thead><tr><th>类型</th><th>字体</th><th>字号</th><th>对齐</th><th>行距</th><th>缩进</th><th>状态</th></tr></thead>
           <tbody>{ROWS.map(({ role, label }) => {
@@ -143,7 +150,7 @@ export function BidWordExport({ sessionId,
             </tr>
           })}</tbody>
         </table>}
-        {otherConflicts.length > 0 && <div className={css.otherConflicts} aria-label="其他格式冲突">
+        {formatVisible && otherConflicts.length > 0 && <div className={css.otherConflicts} aria-label="其他格式冲突">
           <strong>其他待确认</strong>
           {otherConflicts.map(conflict => <button key={conflict.key}
             ref={conflict.key === firstUnresolvedKey ? firstConflict : undefined}
@@ -154,11 +161,12 @@ export function BidWordExport({ sessionId,
         </div>}
       </div>
       <div className={css.preview}>
-        {previewHtml ? <iframe title="Word 效果预览" sandbox="" srcDoc={previewHtml} className={css.frame}/> : <p>正在生成 Word 效果预览…</p>}
+        {formatVisible ? previewHtml ? <iframe title="Word 效果预览" sandbox="" srcDoc={previewHtml} className={css.frame}/> : <p>正在生成 Word 效果预览…</p>
+          : <p>尚无本次模板识别结果。</p>}
       </div>
     </div>
     <footer className={css.footer}>
-      <Button variant="primary" disabled={!ready || !view || Boolean(busy)} onClick={() => {
+      <Button variant="primary" disabled={!ready || !view || !formatVisible || Boolean(busy)} onClick={() => {
         if (unresolved.length) {
           setError(`当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`)
           firstConflict.current?.focus()

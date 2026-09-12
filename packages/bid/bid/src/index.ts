@@ -2253,13 +2253,15 @@ export class BidHostRuntime extends TypertRemoteService {
       } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
     }
     return {
-      schema_version: 2,
+      schema_version: 3,
       outline: rows,
       summary: {
         chapter_count: writable.length,
         content_count: writable.filter(row => row.content_available).length,
-        reviewed_count: writable.filter(row => row.review_status === 'pass' || row.review_status === 'needs_attention').length,
-        needs_attention_count: writable.filter(row => row.review_status === 'needs_attention' || row.review_status === 'failed').length,
+        reviewed_count: writable.filter(row => row.review_status === 'pass' || row.review_status === 'needs_input'
+          || row.review_status === 'needs_attention').length,
+        needs_attention_count: writable.filter(row => row.review_status === 'needs_input'
+          || row.review_status === 'needs_attention' || row.review_status === 'failed').length,
         page_estimate: pageEstimate,
         page_target: pageTarget,
       },
@@ -2844,7 +2846,7 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
     section_id: sectionId,
     source: 'review',
     category: 'blocking_issues',
-    severity: 'blocking',
+    severity: 'high',
     status: 'open',
     title: '审核结论',
     detail,
@@ -2863,7 +2865,7 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
         section_id: sectionId,
         source: 'review',
         category,
-        severity: 'blocking',
+        severity: artifact.verdict === 'attention' ? 'medium' : 'high',
         status: 'open',
         title: `覆盖缺口：${check.item}`,
         detail: check.issue ?? '审核报告未提供具体说明。',
@@ -2877,7 +2879,7 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
       section_id: sectionId,
       source: 'review',
       category: 'claim_checks',
-      severity: 'blocking',
+      severity: 'high',
       status: 'open',
       title: '事实或承诺未获支持',
       detail: [check.claim_quote, check.issue].filter((value): value is string => value !== null).join('：'),
@@ -2890,7 +2892,7 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
       section_id: sectionId,
       source: 'review',
       category: 'global_compliance_checks',
-      severity: 'blocking',
+      severity: 'high',
       status: 'open',
       title: `违反全局约束：${check.compliance_id}`,
       detail: check.issue ?? check.item,
@@ -2902,10 +2904,22 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
       section_id: sectionId,
       source: 'review',
       category: 'assignment_conflicts',
-      severity: 'blocking',
+      severity: 'medium',
       status: 'open',
       title: `任务分配冲突：${conflict.task}`,
       detail: conflict.basis,
+    })
+  }
+  for (const [index, gap] of artifact.external_input_gaps.entries()) {
+    issues.push({
+      issue_id: `${sectionId}-external-input-${String(index + 1)}`,
+      section_id: sectionId,
+      source: 'review',
+      category: 'external_input_gaps',
+      severity: 'medium',
+      status: 'open',
+      title: `待补项目资料：${gap.required_material}`,
+      detail: gap.reason,
     })
   }
   for (const [name, passed] of Object.entries(artifact.quality_checks)) {
@@ -2915,7 +2929,7 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
       section_id: sectionId,
       source: 'review',
       category: 'quality_checks',
-      severity: 'warning',
+      severity: 'medium',
       status: 'open',
       title: `质量检查未通过：${name}`,
       detail: `${name}：false`,
@@ -2939,7 +2953,7 @@ function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutio
       section_id: sectionId,
       source,
       category: issue.code,
-      severity: 'blocking',
+      severity: 'high',
       status: 'open',
       title,
       detail: issue.message,
@@ -2949,7 +2963,7 @@ function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutio
       section_id: sectionId,
       source,
       category: 'stop_reason',
-      severity: 'blocking',
+      severity: 'high',
       status: 'open',
       title,
       detail: `执行停止原因：${attempt.stop_reason}`,
@@ -2966,7 +2980,11 @@ function projectChapterReview(
   if (execution?.status === 'failed') {
     return { status: 'failed', issues: [...reviewIssuesFromExecution(sectionId, execution), ...reportIssues] }
   }
-  if (artifact !== undefined) return { status: artifact.verdict === 'pass' ? 'pass' : 'needs_attention', issues: reportIssues }
+  if (artifact !== undefined) return {
+    status: artifact.verdict === 'pass' ? 'pass'
+      : artifact.verdict === 'attention' && artifact.external_input_gaps.length > 0 ? 'needs_input' : 'needs_attention',
+    issues: reportIssues,
+  }
   return { status: contentAvailable ? 'reviewing' : 'not_started', issues: [] }
 }
 

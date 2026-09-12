@@ -21,7 +21,7 @@ Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A 
 
 ## Word 导出
 
-S6 通过项目级 `word-export/config.json` 保存格式来源、候选映射和用户覆盖，原始模板及解析缓存放在 `word-export/templates/`，不进入资料库。DOCX XML 解析支持样式继承、页面、六级标题、编号、正文、表格及页眉页脚。实际使用的标题和正文命名样式优先，局部文字字号不拆成额外标题；未明确角色的段落保留直接格式候选。默认正文首行缩进 2 字符，模板和用户覆盖保留字符或毫米单位；文字保留颜色和正斜体，继承链未声明的段前、段后间距按零处理。导出同时写入标题样式定义，避免生成库自带主题改变外观。多候选角色须手动映射或明确使用默认方案，缺失字段标记默认补充。候选不因超过 200 项而拒绝或截断；上传默认上限为 300 MiB，格式 XML 解压总量上限为 32 MiB。模板只提供格式，旧正文、目录和项目文字不复制。格式描述复用会话模型路由生成一次待确认建议；识别输入保留全部候选标识、名称和角色，按 64 KiB 预算缩短文字样本，具体格式值由程序按选中的候选应用。无可用模型或缩短样本后仍超过预算时可以手动配置。
+S6 通过项目级 `word-export/config.json` 保存格式来源、候选映射和用户覆盖，原始模板及解析缓存放在 `word-export/templates/`，不进入资料库。DOCX XML 解析支持样式继承、页面、六级标题、编号、正文、表格及页眉页脚。实际使用的标题和正文命名样式优先，局部文字字号不拆成额外标题；未明确角色的段落保留直接格式候选。默认正文首行缩进 2 字符，模板和用户覆盖保留字符或毫米单位；文字保留颜色和正斜体，继承链未声明的段前、段后间距按零处理。导出同时写入标题样式定义，避免生成库自带主题改变外观。多候选角色须手动映射或明确使用默认方案，缺失字段标记默认补充。候选不因超过 200 项而拒绝或截断；上传默认上限为 300 MiB，格式 XML 解压总量上限为 32 MiB。模板只提供格式，旧正文、目录和项目文字不复制。格式描述复用会话模型路由生成一次待确认建议；识别输入保留全部候选标识、名称和角色，按 64 KiB 预算缩短文字样本。程序在严格字段校验前统一把数字字符串、磅或 pt 字号、常用中文字号、倍数行距及字符或毫米缩进转换为内部数值和单位枚举，具体格式值再按选中的候选应用。无可用模型或缩短样本后仍超过预算时可以手动配置。
 
 预览与生成共用正文快照和生效格式，保留加粗、斜体、链接、嵌套列表、表格及项目内 PNG/JPEG 图片。S5 运行或失败时可导出 execution-log 前后身份不变的已完成章节及其祖先目录，正在写作、审核或修订的章节不进入快照；S5 完成后仍按完整 Manifest 导出。图片路径相对于项目产物目录，外部资源不自动下载。浏览器只提供样式预览，分页与字体效果以 Word 为准。生成成功后保存下载记录和内容标识；修改正文、图片或格式会使旧文件需要更新。多分节、复杂封面、Logo、文本框、浮动对象和完整套版不复刻；标题使用关联“标题 1～标题 6”的 Word 原生多级编号，保留编号形式、起始值和跨父级重新编号设置；在 Word 中插入、删除或移动标题后可继续自动计数，并可按标题插入自动目录。浏览器预览使用同一编号配置计算显示文字，生成文件不把序号写入标题正文。
 
@@ -41,7 +41,7 @@ The browser sends one ordered, same-origin binary S1 request whose body contains
 
 S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；引用只提交 `T1` 等短文件引用、`chunk_*` 和语义位置线索，Host 从真实 chunk 正文直接截取 `raw_text`，计算真实文件 ID、路径与行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
-S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。`required` 失败回到原 Writer 定向修复，`preferred` 失败保留在报告中但不自动阻断。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
+S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。Writer 能修复的 `required` 失败进入有界定向修订，`preferred` 失败和外部资料缺口只保留在报告中。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
 After S5 completes, `exportDocx` validates the confirmed outline and complete chapter set, combines the bodies in outline order, and writes a fresh timestamped Markdown and DOCX pair under `outputDirectory`. Repeated exports do not change the completed S5 runtime or hide its review state. Existing projects already checkpointed at `docx_export/completed` retain the same review and export actions.
 
@@ -103,11 +103,11 @@ S5 以 `outline/confirmed-outline.json` 为唯一章节结构。各级父节点�
 
 Writer 只提交完整 `markdown` 与语义 `metadata`，空数组和 handoff 成员可省略。三个 `section_id` 与三个 `covered_*` 索引由 Host 按 Blueprint 绑定；覆盖索引不代表正文已经响应。资料使用本章稳定的 M（映射材料）、F（可补搜文件）和 W（已验证网页）引用，工具读取仍使用真实路径。相同资料经不同短引用提交时按真实身份去重，语义冲突可恢复地拒绝。框架只作为 preserve/adapt/rewrite 写作输入，不进入 M/F Evidence；新 URL 必须有当前 Writer 的成功 fetch 正文。引用、chunk、usage 和 Snapshot Hash 在 `structured_output` 完成前校验，允许当前 Writer 修正。
 
-Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通过 `review_global_constraints` 独立核验全局要求，再由 `set_review_summary` 替换质量检查、职责冲突和额外阻断，最后以 `finish_chapter_review` 提交。canonical R Checklist 包含本章 must-answer、Requirement、评分响应点、局部 Compliance 和当前 `semantic` 验收条件；显式 `deterministic` 条件由 Host 测量并与同一报告合并。当前候选 Q 原文与只读 E Evidence Pack 包含相关 S2 确认事实、实际使用的本地 chunk、Hash 验证后的 Web 正文及前置 handoff，明确各来源的证明范围。每批可提交多项并分别返回接受项和失败项；漏项或缺少 summary 的 finish 保留记录并返回缺项。普通文本结束时在同一 Child 内按 `modelStageRepairAttempts` 有限续行。
+Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通过 `review_global_constraints` 独立核验全局要求，再由 `set_review_summary` 替换质量检查、正文修复问题、职责冲突和外部资料缺口，最后以 `finish_chapter_review` 提交。canonical R Checklist 包含本章 must-answer、Requirement、评分响应点、局部 Compliance 和当前 `semantic` 验收条件；显式 `deterministic` 条件由 Host 测量并与同一报告合并。当前候选 Q 原文与只读 E Evidence Pack 包含相关 S2 确认事实、实际使用的本地 chunk、Hash 验证后的 Web 正文及前置 handoff，明确各来源的证明范围。缺少企业资质、证书、业绩证明或人员证件等只能由项目补充的资料时，Reviewer 把对应 R 记为 missing 并登记 `external_input_gaps`，不得要求 Writer 虚构或改写。每批可提交多项并分别返回接受项和失败项；漏项或缺少 summary 的 finish 保留记录并返回缺项。普通文本结束时在同一 Child 内按 `modelStageRepairAttempts` 有限续行。
 
-Host 从记录确定 verdict：既有固定审核失败或任一 `required` 动态条件未满足都为 `repair`；`preferred` 未满足只保留独立 coverage，章节职责冲突为 `blocked`，不把错误分工作为正文缺陷交给 Writer 修订。成功 finish 表示报告收集完整，可以是 pass、repair 或 blocked。正文在 Reviewer 启动前即可读取；内容问题使用相同有界修复预算回到原 Writer，耗尽后保留最近的合法已审候选和真实问题。
+Host 从记录确定 verdict：Writer 可修复的固定审核失败或 `required` 动态条件未满足为 `repair`；`preferred` 未满足只保留独立 coverage；外部资料缺口或章节职责冲突在没有正文修复问题时为 `attention`。成功 finish 表示报告收集完整，可以是 pass、repair 或 attention。Reviewer 子任务使用确认目录中的真实章节号命名，例如 `3.1 - 审查`，不把内部流水号和修订轮次写入名称。正文问题使用相同有界修复预算回到原 Writer；`attention` 不触发 Writer，`repair` 耗尽后保留最近的合法已审候选和真实风险，均不阻断阶段完成或导出。
 
-全部章节完成后，现有 Main Agent 先完成文档级合规审核，再逐项验收当前计划的章节与整书条件。Main Agent 对 `semantic` 条件判断 met/unmet，显式 `deterministic` 条件服从 Host 测量；任一 `required` 未满足时选择最小充分章节并给出具体修订，调度器复用原 Writer 后重新执行章节审核、全局审核和整书验收。完成账本绑定计划版本、Word 格式版本、正文 Hash 和每轮修改前后身份；`preferred` 未满足可以随完成结论持久化。
+全部章节完成后，现有 Main Agent 先完成文档级合规审核，再逐项验收当前计划的章节与整书条件。Main Agent 对 `semantic` 条件判断 met/unmet，显式 `deterministic` 条件服从 Host 测量；只有整书条件能够由正文改写满足时才从 Reviewer 已判定为 `pass` 的章节中选择最小充分集合，调度器复用原 Writer 后重新执行章节审核、全局审核和整书验收。`repair` 和 `attention` 已是章节级修订收敛后的风险结论，整书验收不得再次选择对应章节。外部资料缺口、不适合继续改写的风险、无进展和修订轮次耗尽都写入完成账本并结束 S5，不把审核结论当成阶段门禁。完成账本绑定计划版本、Word 格式版本、正文 Hash 和每轮修改前后身份。
 
 私有工具通过 in-process 的 `subagent/child-setup` 在 Child 发布前安装，以真实 Agent 和本次章节尝试隔离。finish 调用 `concludeTurn()`，只在权威 `tools/result`（嵌套调用同时等待外层结果）成功后确认；结束或释放后不能修改结果。Writer、Reviewer 均为 fresh-context 一层 Child，默认章节并发为 3，强依赖等待、弱关联不阻塞。路径、持久化字段和版本不变；M/F/W/R/Q/E 不进入外部 Artifact。
 

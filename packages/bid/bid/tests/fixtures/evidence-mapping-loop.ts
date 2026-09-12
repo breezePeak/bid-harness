@@ -538,6 +538,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     },
     blocking_issues: [],
     assignment_conflicts: [],
+    external_input_gaps: [],
   }
   const parentScript = [
     toolCall('add-plan-note', 'add_global_consistency_note', { note: '统一使用访问控制项目名称和权限审计术语。' }),

@@ -133,16 +133,6 @@ export function parseChapterWritingCompletionState(value: unknown): ChapterWriti
   }
 }
 
-function requiredSectionFailures(plan: WritingPlan, sections: readonly SectionAcceptanceAuthority[]): string[] {
-  return sections.flatMap((section) => {
-    const contract = plan.sections.find(item => item.section_id === section.section_id)
-    if (contract === undefined) return [section.section_id]
-    return section.review.acceptance_criteria_results.some(result => result.status !== 'met'
-      && contract.acceptance_criteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required')
-      ? [section.section_id] : []
-  })
-}
-
 /**
  * 在现有 Main Agent 上注册整书验收和有界章节只读工具；章节验收是不可覆盖的输入事实。
  * @param agent 执行最终整书验收的 Main Agent。
@@ -163,7 +153,7 @@ export function attachChapterWritingCompletionReview(
 ): ChapterProtocol<ChapterWritingCompletionDecision> {
   const semantic = plan.document_acceptance.filter(criterion => criterion.evaluator.kind === 'semantic')
   const allowedSections = new Set(plan.sections.map(section => section.section_id))
-  const blockedSections = new Set(requiredSectionFailures(plan, sections))
+  const settledRiskSections = new Set(sections.flatMap(section => section.review.verdict === 'pass' ? [] : [section.section_id]))
   const quoteRefs = new Map<string, { section_id: string; quote: string }>()
   const runtime = createChapterProtocol<ChapterWritingCompletionDecision>(agent, 'submit_chapter_writing_completion_review', maxContinuations)
   runtime.register({
@@ -254,21 +244,16 @@ export function attachChapterWritingCompletionReview(
         if (result === undefined) throw new Error(`S5 final review lost ${criterion.id}`)
         return result
       })
-      if (submission.action === 'complete') {
-        const documentBlocked = plan.document_acceptance.some(criterion => criterion.priority === 'required'
-          && results.find(result => result.criterion_id === criterion.id)?.status !== 'met')
-        if (documentBlocked || blockedSections.size > 0) {
-          throw new ToolArgsError(['complete: required document 或 Chapter Reviewer 权威 section criterion 仍未满足。'])
-        }
-      } else {
+      if (submission.action === 'revise') {
         const selected = new Set<string>()
         for (const section of submission.sections) {
           if (!allowedSections.has(section.section_id)) throw new ToolArgsError([`sections: 未知可写章节 ${section.section_id}。`])
+          if (settledRiskSections.has(section.section_id)) {
+            throw new ToolArgsError([`sections: ${section.section_id} 的章节风险已经 Reviewer 结算，不得再次要求 Writer 修订。`])
+          }
           if (selected.has(section.section_id)) throw new ToolArgsError([`sections: 重复章节 ${section.section_id}。`])
           selected.add(section.section_id)
         }
-        const omitted = [...blockedSections].filter(sectionId => !selected.has(sectionId))
-        if (omitted.length > 0) throw new ToolArgsError([`sections: 必须修复 required section criterion 未满足的章节 ${omitted.join(', ')}。`])
       }
       return Promise.resolve(runtime.finish(exec, {
         action: submission.action,
@@ -309,7 +294,7 @@ export function renderChapterWritingCompletionTask(input: {
     `文档级固定合规审核：${JSON.stringify(input.globalReview)}`,
     '只为 evaluator.kind=semantic 的 document criterion 提交 criterion_id、met/unmet、reason 和可选 evidence_quote_refs；deterministic 结果由 Host 合入，绝不能重新判断 section criterion。',
     '摘要不足以判断跨章术语、重复、矛盾或整书逻辑时，调用 read_completed_chapter 按 section_id 分段读取当前正文；返回的 DQ 引用可用于 document acceptance。',
-    'required document 条件和各 Chapter Reviewer 的 required section 条件全部满足时可以 action=complete。否则 action=revise，选择最小充分章节并给原 Writer 具体修改要求；不得修改目录、虚构事实、清空已有正文或靠重复内容凑指标。',
+    'Writer 能通过修改正文解决 document 条件时，可以 action=revise，但只能选择 Chapter Reviewer 判定为 pass 的最小充分章节并给出具体修改要求。repair 和 attention 都是已经结算的章节风险，不得再次触发 Writer；未通过项保留给工作台显示风险，不阻断阶段。不得修改目录、虚构事实、清空已有正文或靠重复内容凑指标。',
     '只使用 read_completed_chapter 和 submit_chapter_writing_completion_review；普通文本不能完成本轮验收。',
   ].join('\n')
 }

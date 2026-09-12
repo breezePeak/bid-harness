@@ -6,7 +6,7 @@ Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversati
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
-面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；运行或失败时开放当前已完成章节的 Word 导出，完成后导出完整标书。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
+面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。运行或失败时开放当前已完成章节的 Word 导出，完成后导出完整标书。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
 After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, keeps the composer disabled, and exposes one “Start this stage” action backed by `bid/startStage`. Reset itself never starts model execution.
 

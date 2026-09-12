@@ -260,6 +260,11 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 25%, transparent);
 }
 
+.statusDotYellow {
+  background: var(--dsw-alias-state-warning-primary, #f59e0b);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 25%, transparent);
+}
+
 .statusDotPulsing {
   animation: dotPulse 1.8s infinite ease-in-out;
 }
@@ -537,12 +542,12 @@
   gap: 6px;
 }
 
-.issueCard[data-severity='blocking'] {
+.issueCard[data-severity='high'] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);
   background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 4%, transparent);
 }
 
-.issueCard[data-severity='warning'] {
+.issueCard[data-severity='medium'] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 30%, transparent);
   background: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 4%, transparent);
 }

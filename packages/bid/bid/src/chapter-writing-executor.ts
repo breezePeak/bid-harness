@@ -740,7 +740,7 @@ function renderChapterReviewerTask(
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
     '明确作为本次拟采用方案提出的实施方法、职责分工、台账字段和质量控制措施，不因采购原文未逐项列出而成为 unsupported claim。审查其是否符合采购要求、是否自洽和可执行；合理方案设计不登记为需要来源证明的既有事实。若方案冒充既有人员设备或企业能力、违反采购要求、迁入旧项目条件或作出缺少支撑的硬承诺，应说明具体问题并要求修复。',
-    'set_review_summary 整体替换质量判断和额外 blocking_issues，可撤销误判。固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外阻断得到 repair；preferred 动态条件失败必须如实记录但不自动阻断。finish 收集完整报告即可成功，不需要为结束而改成通过。',
+    'set_review_summary 整体替换质量判断、正文修复问题、任务冲突和 external_input_gaps，可撤销误判。只有 Writer 能通过修改正文解决的问题才写入 blocking_issues。缺少必须由用户或项目资料提供的企业资质、证书、业绩证明、人员证件等信息时，将对应 R 记录为 missing，并在 external_input_gaps 中填写 item_ref、required_material 和 reason；不得要求 Writer 虚构、改写或反复处理。未登记为 external_input_gaps 的固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外正文问题得到 repair；preferred 动态条件失败必须如实记录但不自动修订。finish 收集完整报告即可成功，不需要为结束而改成通过。',
     `Project：${JSON.stringify(modelContext(context.project))}`,
     renderChapterOutlineContext(context),
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
@@ -816,6 +816,20 @@ export function validateChapterReview(
     ...review.response_point_coverage,
     ...review.compliance_coverage,
   ]
+  const checklist = buildChapterReviewChecklist(context)
+  const coverageByRef = new Map(checklist.map((item, index) => [item.item_ref, coverage[index]]))
+  const externalGapRefs = new Set<string>()
+  for (const gap of review.external_input_gaps) {
+    const covered = coverageByRef.get(gap.item_ref)
+    if (externalGapRefs.has(gap.item_ref) || covered?.status !== 'missing') {
+      issues.push({
+        code: 'CHAPTER_REVIEW_EXTERNAL_INPUT_GAP_INVALID',
+        message: `外部资料缺口 ${gap.item_ref} 必须唯一引用已标为 missing 的审核项。`,
+        path: 'external_input_gaps',
+      })
+    }
+    externalGapRefs.add(gap.item_ref)
+  }
   for (const item of coverage) {
     quotesPresent(item.evidence_quotes, 'coverage.evidence_quotes')
     if ((item.status === 'covered' && (item.evidence_quotes.length === 0 || item.issue !== null))
@@ -863,8 +877,12 @@ export function validateChapterReview(
       issues.push({ code: 'CHAPTER_REVIEW_ASSIGNMENT_CONFLICT_INVALID', message: `任务分配冲突引用未知章节 ${sectionId}。`, path: 'assignment_conflicts' })
     }
   }
-  if ((review.verdict === 'blocked') !== (review.assignment_conflicts.length > 0)) {
-    issues.push({ code: 'CHAPTER_REVIEW_ASSIGNMENT_VERDICT_INVALID', message: 'blocked 仅用于已记录的任务分配冲突，其他结论不得隐藏该冲突。', path: 'verdict' })
+  if ((review.verdict === 'attention') !== (review.blocking_issues.length === 0
+    && (review.assignment_conflicts.length > 0 || review.external_input_gaps.length > 0))) {
+    issues.push({ code: 'CHAPTER_REVIEW_ATTENTION_VERDICT_INVALID', message: 'attention 只用于无需 Writer 修改的任务冲突或外部资料缺口。', path: 'verdict' })
+  }
+  if ((review.verdict === 'repair') !== (review.blocking_issues.length > 0)) {
+    issues.push({ code: 'CHAPTER_REVIEW_REPAIR_VERDICT_INVALID', message: 'repair 必须对应至少一个 Writer 可修复问题。', path: 'verdict' })
   }
   if (review.verdict === 'pass') {
     const covered = [
@@ -1385,22 +1403,29 @@ async function reviewWritingPlanCompletion(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
-  const stop = async (reason: NonNullable<ChapterWritingCompletionState['stopped_reason']>, message: string): Promise<never> => {
-    recovery = { ...recovery, stopped_reason: reason }
+  const finishReview = async (
+    decision: ChapterWritingCompletionDecision,
+    stoppedReason?: NonNullable<ChapterWritingCompletionState['stopped_reason']>,
+  ): Promise<StageArtifact[]> => {
+    recovery = {
+      ...recovery,
+      ...(stoppedReason === undefined ? {} : { stopped_reason: stoppedReason }),
+      completion: {
+        plan_version: writingPlan.plan_version,
+        format_revision: measured.estimate?.format.revision ?? null,
+        pages: measured.estimate?.total ?? null,
+        document_sha256: current.documentSha256,
+        reason: decision.reason,
+        document_acceptance_results: decision.document_acceptance_results,
+      },
+    }
     await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery)
-    throw new BidStageAttentionRequiredError([{
-      code: `CHAPTER_WRITING_COMPLETION_${reason.toUpperCase()}`,
-      message,
-      artifact: COMPLETION_REVIEW_PATH,
-    }])
+    return completedArtifacts()
   }
   while (true) {
     if (options.control?.pending() === true) {
       artifacts = await runChapterWriting(agent, workspace, task, options)
       return reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
-    }
-    if (recovery.stopped_reason !== undefined) {
-      return stop(recovery.stopped_reason, '正文和审核结果已保留；请调整写作计划或明确新的定向要求后继续。')
     }
     const hostResults = evaluateHostAcceptanceCriteria(writingPlan.document_acceptance, {
       markdown: current.documentMarkdown,
@@ -1434,23 +1459,11 @@ async function reviewWritingPlanCompletion(
       }), CHAPTER_WRITING_COMPLETION_TOOLS, reviewRuntime, options.signal)
     } finally { reviewRuntime.dispose() }
     if (decision.action === 'complete') {
-      recovery = {
-        ...recovery,
-        completion: {
-          plan_version: writingPlan.plan_version,
-          format_revision: measured.estimate?.format.revision ?? null,
-          pages: measured.estimate?.total ?? null,
-          document_sha256: current.documentSha256,
-          reason: decision.reason,
-          document_acceptance_results: decision.document_acceptance_results,
-        },
-      }
-      await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery)
-      return completedArtifacts()
+      return finishReview(decision)
     }
     const maxCompletionRepairRounds = options.maxCompletionRepairRounds ?? DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS
     if (recovery.rounds.length >= maxCompletionRepairRounds) {
-      return stop('round_limit', `正文和审核结果已保留；整书验收已达到 ${maxCompletionRepairRounds} 轮修订上限。`)
+      return finishReview(decision, 'round_limit')
     }
     const selected = decision.sections ?? []
     const selectedRevisions = await Promise.all(selected.map(async (selected) => {
@@ -1507,7 +1520,7 @@ async function reviewWritingPlanCompletion(
     }] }
     await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery)
     if (afterSnapshot.documentSha256 === current.documentSha256) {
-      return stop('no_progress', '正文和审核结果已保留；原 Writer 完成本轮任务后正文身份没有变化。')
+      return finishReview(decision, 'no_progress')
     }
     measured = afterMeasurement
     current = afterSnapshot
@@ -2008,7 +2021,7 @@ async function runChapterWriting(
       } | undefined
       const maxWriterAttempts = options.maxRepairAttempts + 1
       const reviewCandidate = async (
-        candidate: AcceptedChapterCandidate, repairRound: number,
+        candidate: AcceptedChapterCandidate,
       ): Promise<{ review?: ChapterReview; reviewerChildSessionId?: string; issues: StageValidationIssue[] }> => {
         const quotes = new Map(candidate.markdown.split('\n').map(line => line.trim()).filter(Boolean)
           .map((line, index) => [`Q${index + 1}`, line]))
@@ -2029,8 +2042,7 @@ async function runChapterWriting(
         for (let reviewInfrastructureRetries = 0;;) {
           signal.throwIfAborted()
           const reviewAttempt = log.attempts.filter(item => item.role === 'reviewer').length + 1
-          const reviewRetryLabel = reviewInfrastructureRetries === 0 ? '' : ` · 运行重试 ${reviewInfrastructureRetries}`
-          const reviewLabel = `S5 · ${serial} · 审查 ${repairRound + 1}.1${reviewRetryLabel} · ${context.section.title}`
+          const reviewLabel = `${number} - 审查`
           const reviewStartedAt = new Date().toISOString()
           let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
           childSetups.set(reviewLabel, (child) => {
@@ -2107,7 +2119,7 @@ async function runChapterWriting(
       const preserved = effectiveRevision === undefined ? checkpoint?.drafts.get(sectionId) : undefined
       let firstAttempt = 0
       if (preserved !== undefined) {
-        const reviewed = await reviewCandidate(preserved.candidate, 0)
+        const reviewed = await reviewCandidate(preserved.candidate)
         if (reviewed.review === undefined || reviewed.reviewerChildSessionId === undefined) {
           throw new Error(`Bid chapter review failed for preserved ${sectionId}; ${reviewed.issues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
         }
@@ -2226,7 +2238,7 @@ async function runChapterWriting(
               assertCurrentInput()
             }
             await persistLog()
-            const reviewed = await reviewCandidate(candidate, attempt)
+            const reviewed = await reviewCandidate(candidate)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
               reviewedFallback = {
                 candidate,

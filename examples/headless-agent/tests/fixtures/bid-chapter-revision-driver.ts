@@ -68,6 +68,7 @@ try {
           placeholder_free: true, obvious_repetition_free: true },
         blocking_issues: [],
         assignment_conflicts: [],
+        external_input_gaps: [],
       }),
       toolCall('finish-review', 'finish_chapter_review', {}),
     )
