@@ -1226,7 +1226,7 @@ describe('evidence-mapping Agent executor', () => {
         research_assessment: Record<string, unknown>
       }>
     }
-    const saved = checkpoint.tasks.find((task: { task_id: string }) => task.task_id === 'MAP-INIT-SEC-1')
+    const saved = checkpoint.tasks.find((task: { task_id: string }) => task.task_id === 'MAP-INIT-SEC-1')!
     expect(checkpoint.schema_version).toBe(10)
     expect(saved.structure_assessment).toMatchObject({ stale: false, decision: 'keep' })
     expect(saved.structure_invalidated).toBe(changes.length + 1)
