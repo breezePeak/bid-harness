@@ -1,6 +1,7 @@
 # Agent Note: S2 招标分析按校验问题定向修复
 
 Status: implemented
+Archived: 2026-09-13
 
 ## Problem
 

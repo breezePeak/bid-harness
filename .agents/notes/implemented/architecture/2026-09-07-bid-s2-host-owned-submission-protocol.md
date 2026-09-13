@@ -12,7 +12,7 @@ S2 Main Agent 直接写四个完整 JSON 时同时承担招标语义判断、正
 
 Host 按 manifest 顺序把每个 `role=tender && parseStatus=success` 文件映射为 `T1`、`T2` 等执行期引用。提交工具的 source 只接受 `file_ref`、chunk index 中的 `chunk_*` ID 和 `semantic_hint`；Host 验证文件与 chunk 归属，在排除 HTML comment 元数据后，以规范化双字符组重合度从可见正文行中选择唯一位置，再从未规范化的原始行直接截取 quote，并按原始 chunk 中换行符计算一基、闭区间 `line_start` 和 `line_end`。线索不足或最佳位置不唯一时以参数错误拒绝，跨行或跨 chunk 原文由多个 source 定位。
 
-Requirement、Scoring 和 Compliance 以 `R*`、`S*`、`C*` 运行时引用保存在 Map 中。首次接受时分别锁定三位补零的 `REQ-*`、`SC-*`、`COM-*` 正式 ID；`replace_ref` 覆盖已有记录且不改变 ID。没有恢复检查点的运行把未记录的格式合法 `replace_ref` 作为新条目保存，以允许阶段重置后的历史工具参数继续建立空暂存；动态任务同时要求新条目省略旧引用。恢复检查点后，未知引用仍被拒绝。三类记录的 `raw_text` 都由 Host 连接已定位的原文 quote 生成，模型只提交分类、归纳、强制性、评分规则等语义字段。Scoring 只接受招标评分体系中作为独立评审对象，并具有独立名称及总分、权重或区块边界的评分大项，Host 固定正式 `parent=null`；重复提交的评分大项按除来源和 ID 外的完整结构化内容归并，保留首次正式 ID 并合并来源，不能只凭名称合并。
+Requirement、Scoring 和 Compliance 以 `R*`、`S*`、`C*` 运行时引用保存在 Map 中。首次接受时分别锁定三位补零的 `REQ-*`、`SC-*`、`COM-*` 正式 ID；三类工具以判别式 `action` 区分 `create` 与 `replace`，前者禁止 `replace_ref`，后者只覆盖当前 Map 中已有记录且不改变 ID。Host 以最低未占用数字分配新 runtime ref，未知引用在新运行与恢复运行中都被拒绝并返回当前有效 refs。此前允许空暂存接纳未知引用的例外由 [S2 staged replace 严格协议](../bug-fix/2026-09-13-bid-s2-staged-replace-protocol.md)撤销。三类记录的 `raw_text` 都由 Host 连接已定位的原文 quote 生成，模型只提交分类、归纳、强制性、评分规则等语义字段。Scoring 只接受招标评分体系中作为独立评审对象，并具有独立名称及总分、权重或区块边界的评分大项，Host 固定正式 `parent=null`；重复提交的评分大项按除来源和 ID 外的完整结构化内容归并，保留首次正式 ID 并合并来源，不能只凭名称合并。
 
 `finish_tender_analysis` 从 staged Map 组装四个现有 Schema：Host 提供 schema version、未知项目单值 `null`、未知数组 `[]`、manifest 中全部成功 tender 的 `analyzed_tender_files`、正式 ID 和 source refs。持久化前复用 Validator 的语料完整性与技术评分分类检查；可修正缺项返回 `completed=false` 与 issues，同一 staged state 继续接受补充或覆盖。首次通过确定性检查的 finish 只返回 `review_required` 和当前 revision，不写正式文件；执行器在原 Agent 初始轮次结束后注入完整 staged snapshot，强制其重新读取每条来源并复核所有记录。复核中每次接受的提交都递增 revision，最终 finish 必须携带当前 `review_revision` 才会原子写入四个路径并立即通过 `validateTenderAnalysis()`。强制复核不消耗缺项续修预算；Agent 只回复文字、重复初次 finish 或提交旧 revision 都不能推进 S2。该边界的缺陷修复与 S3 对称协议见[模型与 Host 复核直连边界](../bug-fix/2026-09-09-bid-model-host-review-boundaries.md)。
 
@@ -20,11 +20,11 @@ Requirement、Scoring 和 Compliance 以 `R*`、`S*`、`C*` 运行时引用保�
 
 ## Alternatives considered
 
-**继续让模型写完整 JSON，再按 Validator issue 定向修文件。** 不采用；它缩小了修复范围，却仍把稳定 ID、引用行号、文件覆盖与 Schema 组装交给模型。该方案记录于[S2 定向修复决策](../simplification/2026-09-02-bid-s2-targeted-analysis-repair.md)。
+**继续让模型写完整 JSON，再按 Validator issue 定向修文件。** 不采用；它缩小了修复范围，却仍把稳定 ID、引用行号、文件覆盖与 Schema 组装交给模型。该历史方案记录于[S2 定向修复决策](../../archived/simplification/2026-09-02-bid-s2-targeted-analysis-repair.md)。
 
 **只加强 Prompt。** 不采用；Prompt 不能使文件身份、原文截取、chunk 归属或正式 ID 成为确定性结果。
 
-**始终拒绝未知 runtime ref。** 不采用；阶段重置会删除暂存检查点，模型携带的历史工具参数会使空暂存无法建立任何记录。恢复检查点的运行仍保留该拒绝，避免把引用错误静默扩展为新条目。
+**新运行将未知 runtime ref 视为新增。** 不再采用；阶段重置后的历史工具参数不能改变 create / replace 语义，也不能承担 runtime ref 撞号风险。当前严格协议见 [S2 staged replace 严格协议](../bug-fix/2026-09-13-bid-s2-staged-replace-protocol.md)。
 
 **在阶段重置后保留暂存检查点。** 不采用；重置必须清理 S2 与下游状态，旧暂存不能成为新分析的输入。
 

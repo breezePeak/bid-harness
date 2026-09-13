@@ -5,7 +5,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
-import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import {
   type ModelStageExecutionOptions,
   waitForModelStageIdle,
@@ -43,7 +43,6 @@ function renderLocators(locators: readonly TenderLocator[]): string[] {
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @param locators Host-issued short references for successful tender files.
- * @param emptyStagedRecords Whether this S2 run starts without recovered staged records.
  * @returns Dynamic assignment text for the Agent follow-up.
  */
 export function renderTenderAnalysisTask(
@@ -51,7 +50,6 @@ export function renderTenderAnalysisTask(
   workspace: BidWorkspace,
   task: BidStageTask,
   locators: readonly TenderLocator[] = [],
-  emptyStagedRecords = false,
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
@@ -69,11 +67,11 @@ export function renderTenderAnalysisTask(
     '使用 grep 定位候选 chunk，再用 read 阅读原文；语义被截断时读取 chunks/index.json 后继续读相邻 chunk。不得一次读取完整 document.md。',
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
     '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
-    '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 replace_ref。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
+    '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 action=replace。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
     '引用只提交 sources=[{file_ref,chunk,semantic_hint}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id，semantic_hint 用简短关键词或描述指出该 chunk 中的相关正文位置，无需逐字复制原文。一个 source 只定位一行相关正文；跨行或跨 chunk 内容提交多个 source。',
     '不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref、schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。Host 从真实 chunk 行直接截取 quote，生成 raw_text 和 source_refs，并固定评分 parent=null；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
-    ...(emptyStagedRecords ? ['本次 S2 的 staged 记录为空。Requirement、Scoring 和 Compliance 的新条目均省略 replace_ref；此前 S2 运行的 runtime ref 不属于当前 staged 记录。'] : []),
-    '工具返回 INVALID_ARGS 或语义位置不唯一时只修正当前条目的 chunk 或 semantic_hint。已记录条目需要修改时，用其 runtime ref 作为 replace_ref；覆盖不会改变正式 ID。',
+    'Requirement、Scoring、Compliance 必须显式声明 action：新增使用 action=create，且不得携带 replace_ref；修改使用 action=replace，且必须携带当前 staged 中真实存在的 replace_ref。runtime ref 只能来自 Host 工具返回值或 Host 提供的 staged snapshot；禁止根据数量、revision、排序、历史 Run 或记忆猜测 R*、S*、C*。',
+    '工具返回 INVALID_ARGS 或语义位置不唯一时只修正当前条目的 chunk 或 semantic_hint。已记录条目需要修改时，使用 action=replace 和真实 runtime ref；覆盖不会改变正式 ID。',
     '所有区域分析完成后调用 finish_tender_analysis({})。确定性校验通过后，Host 会在当前轮结束后强制发起一次全量语义复核；初次 finish 不会写入正式 Artifact。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
   ].join('\n')
@@ -102,7 +100,7 @@ export function renderTenderAnalysisQualityReviewTask(
     `Bid Session：${agent.id}`,
     `Project Workspace：${workspacePath}`,
     '这是独立的强制复核轮次。重新读取每项 staged 记录对应的 tender chunk，逐项检查 Project、Requirement、Scoring 和 Compliance 的语义、记录边界及来源归属。特别检查相邻表格行之间是否发生 title、raw_text、criterion、分值或来源串配。',
-    '发现问题时使用对应 runtime ref 和 replace_ref 原地修正；不得按标题、分值、关键词或行位置推测并批量改写。没有问题时保持 staged 内容不变。',
+    '发现问题时使用 action=replace、对应 runtime ref 和 replace_ref 原地修正；不得按标题、分值、关键词或行位置推测并批量改写。没有问题时保持 staged 内容不变。',
     'Tender locators：',
     ...renderLocators(locators),
     `当前 staged snapshot：${JSON.stringify(snapshot)}`,
@@ -116,6 +114,7 @@ export function renderTenderAnalysisQualityReviewTask(
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @param issues Recoverable issues last returned by finish, or a missing-finish issue.
+ * @param snapshot Current Host-rendered staged records and their runtime references.
  * @returns Dynamic continuation that preserves the current staged submissions.
  */
 export function renderTenderAnalysisRepairTask(
@@ -123,15 +122,28 @@ export function renderTenderAnalysisRepairTask(
   workspace: BidWorkspace,
   task: BidStageTask,
   issues: readonly StageValidationIssue[],
+  snapshot: unknown,
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
+  const staged = snapshot as {
+    revision?: number
+    requirements?: Array<{ requirement_ref: string }>
+    scoring?: Array<{ scoring_ref: string }>
+    compliance?: Array<{ compliance_ref: string }>
+  }
   return [
     `当前阶段：${task.stage} / Staged Submission Repair`,
     `Bid Session：${agent.id}`,
     `Project Workspace：${workspacePath}`,
     'S2 尚未完成；当前 staged 记录仍然保留。只处理以下问题：',
     ...issues.map(issue => `- ${issue.code} | ${issue.path ?? '未指定字段'} | ${issue.message}`),
+    `当前 revision：${String(staged.revision ?? 0)}`,
+    `当前 Requirement refs：${JSON.stringify(staged.requirements?.map(item => item.requirement_ref) ?? [])}`,
+    `当前 Scoring refs：${JSON.stringify(staged.scoring?.map(item => item.scoring_ref) ?? [])}`,
+    `当前 Compliance refs：${JSON.stringify(staged.compliance?.map(item => item.compliance_ref) ?? [])}`,
+    `当前 staged snapshot：${JSON.stringify(snapshot)}`,
+    '当前 staged state 和 lastIssues 已由 Host 提供。修改已有记录时使用 action=replace，且只能使用其中真实存在的 replace_ref；缺少新记录时使用 action=create，且不得传 replace_ref。禁止根据当前数量、revision、排序、上一轮记忆或历史 Run 推算 R*、S*、C* runtime ref。',
     `普通工具仍只允许：${task.allowedTools.join(', ')}；使用 ${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')} 补充、replace 或再次 finish。`,
     '不得 write analysis/*.json、重新提交整套 Artifact 或推进 S3。只有 finish_tender_analysis 返回 completed=true 才能停止。',
   ].join('\n')
@@ -199,8 +211,9 @@ export async function executeTenderAnalysis(
       }
     }
     options.run.signal.throwIfAborted()
-    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators, runtime.revision === 0), () => runtime.phase !== 'collecting')
+    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators), () => runtime.phase !== 'collecting')
     let attempts = 0
+    let latestIssues = runtime.lastIssues
     while (!runtime.completed) {
       options.run.signal.throwIfAborted()
       if (runtime.phase === 'review_required') {
@@ -214,9 +227,17 @@ export async function executeTenderAnalysis(
         code: 'TENDER_ANALYSIS_FINISH_REQUIRED',
         message: '必须调用 finish_tender_analysis 并处理其返回问题；普通回复不能完成 S2。',
       }]
-      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues), () => runtime.completed || runtime.phase === 'review_required')
+      latestIssues = issues
+      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.reviewSnapshot()), () => runtime.completed || runtime.phase === 'review_required')
     }
     await waitForModelStageIdle(agent, options.run.signal)
+    if (!runtime.completed) {
+      throw new BidStageExecutionError([{
+        code: 'TENDER_ANALYSIS_STAGED_INCOMPLETE',
+        artifact: 'analysis/tender-analysis-checkpoint.json',
+        message: `S2 staged submission 未完成（phase=${runtime.phase}，revision=${String(runtime.revision)}）。最近问题：${latestIssues.map(issue => issue.code).join(', ') || '无'}。暂存摘要：${JSON.stringify(runtime.reviewSnapshot())}`,
+      }])
+    }
     return artifacts
   } finally {
     liftGuard?.()

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -86,15 +86,18 @@ function source(semantic_hint: string, chunk?: string, file_ref = 'T1') {
 async function submitComplete(value: Fixture): Promise<void> {
   await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
   await value.call('submit_requirement', {
+    action: 'create',
     category: '功能要求', normalized_requirement: '系统应支持统一身份认证和审计日志。',
     mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
   })
   await value.call('submit_scoring_item', {
+    action: 'create',
     group: '技术方案', title: '总体技术方案',
     criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
     must_answer: true, sources: [source(SCORING_QUOTE)],
   })
   await value.call('submit_compliance_item', {
+    action: 'create',
     type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。',
     severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
   })
@@ -136,9 +139,12 @@ describe('tender-analysis staged submission runtime', () => {
     })
     await restored.beginReview()
     await expect(value.call('submit_requirement', {
-      replace_ref: 'R99', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+      action: 'replace', replace_ref: 'R99', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
-    })).rejects.toThrow('未知 Requirement 引用 R99')
+    })).resolves.toMatchObject({
+      recorded: false, rejected: true, replace_ref: 'R99', current_refs: ['R1'], revision,
+    })
+    expect(restored.revision).toBe(revision)
     restored.dispose()
   })
 
@@ -187,10 +193,12 @@ describe('tender-analysis staged submission runtime', () => {
     await value.call('submit_project_fact', args)
     await value.call('submit_project_fact', args)
     await value.call('submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
@@ -217,23 +225,25 @@ describe('tender-analysis staged submission runtime', () => {
   it('assigns stable REQ IDs, replaces by runtime ref, and rejects model-owned fields', async () => {
     const value = await fixture()
     const first = await value.call('submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: '初始归纳', mandatory: true,
       sources: [source(REQUIREMENT_QUOTE)],
     }) as { requirement_ref: string }
     await value.call('submit_requirement', {
-      replace_ref: first.requirement_ref, category: '功能要求',
+      action: 'replace', replace_ref: first.requirement_ref, category: '功能要求',
       normalized_requirement: '修正后的归纳', mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await expect(value.call('submit_requirement', {
-      id: 'REQ-CUSTOM', category: '功能要求', raw_text: REQUIREMENT_QUOTE,
+      action: 'create', id: 'REQ-CUSTOM', category: '功能要求', raw_text: REQUIREMENT_QUOTE,
       normalized_requirement: '非法', mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })).rejects.toThrow()
     await expect(value.call('submit_requirement', {
-      category: '功能要求', normalized_requirement: '非法', mandatory: true,
+      action: 'create', category: '功能要求', normalized_requirement: '非法', mandatory: true,
       sources: [{ file_ref: 'T1', chunk: 'chunk_0002', quote: REQUIREMENT_QUOTE }],
     })).rejects.toThrow()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
@@ -246,47 +256,184 @@ describe('tender-analysis staged submission runtime', () => {
     value.runtime.dispose()
   })
 
-  it('treats stale replacement refs as new staged records', async () => {
+  it('uses a discriminated create/replace schema', async () => {
     const value = await fixture()
-    await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
-    await expect(value.call('submit_requirement', {
-      replace_ref: 'R10', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+    const requirement = {
+      category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
-    })).resolves.toMatchObject({ recorded: true, requirement_ref: 'R10' })
-    await expect(value.call('submit_scoring_item', {
-      replace_ref: 'S11', group: '技术方案', title: '总体技术方案', criterion: '方案完整合理',
+    }
+    const scoring = {
+      group: '技术方案', title: '总体技术方案', criterion: '方案完整合理',
       score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
-    })).resolves.toMatchObject({ recorded: true, scoring_ref: 'S11' })
-    await expect(value.call('submit_compliance_item', {
-      replace_ref: 'C12', type: '强制要求', normalized_rule: COMPLIANCE_QUOTE,
-      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
-    })).resolves.toMatchObject({ recorded: true, compliance_ref: 'C12' })
-    await expect(finishReviewed(value)).resolves.toMatchObject({ completed: true })
+    }
+    const compliance = {
+      type: '强制要求', normalized_rule: COMPLIANCE_QUOTE,
+      severity: 'mandatory' as const, sources: [source(COMPLIANCE_QUOTE)],
+    }
+    await expect(value.call('submit_requirement', { action: 'create', replace_ref: 'R1', ...requirement })).rejects.toThrow()
+    await expect(value.call('submit_scoring_item', { action: 'create', replace_ref: 'S1', ...scoring })).rejects.toThrow()
+    await expect(value.call('submit_compliance_item', { action: 'create', replace_ref: 'C1', ...compliance })).rejects.toThrow()
+    await expect(value.call('submit_requirement', { action: 'replace', ...requirement })).rejects.toThrow()
+    await expect(value.call('submit_scoring_item', { action: 'replace', ...scoring })).rejects.toThrow()
+    await expect(value.call('submit_compliance_item', { action: 'replace', ...compliance })).rejects.toThrow()
     value.runtime.dispose()
+  })
+
+  it('requires existing runtime refs for replace, preserves staged records, and ends the rejected turn', async () => {
+    const value = await fixture()
+    expect(value.tools.get('submit_requirement')?.description).toContain('action=create')
+    expect(value.tools.get('submit_scoring_item')?.description).toContain('action=replace')
+    expect(value.tools.get('submit_compliance_item')?.description).toContain('action=create')
+    const requirement = await value.call('submit_requirement', {
+      action: 'create',
+      category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    }) as { requirement_ref: string }
+    const requirementRevision = value.runtime.revision
+    const requirementSnapshot = value.runtime.reviewSnapshot()
+    await expect(value.call('submit_requirement', {
+      action: 'replace', replace_ref: 'R99', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    })).resolves.toMatchObject({
+      recorded: false, rejected: true, replace_ref: 'R99', current_refs: ['R1'], revision: requirementRevision,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_REPLACE_REF_UNKNOWN' })],
+      message: '未知 Requirement runtime ref R99。当前有效 refs：R1。',
+    })
+    expect(value.runtime.revision).toBe(requirementRevision)
+    expect(value.runtime.reviewSnapshot()).toEqual(requirementSnapshot)
+    expect(value.concludeTurn).toHaveBeenCalledOnce()
+    await expect(value.call('submit_requirement', {
+      action: 'create',
+      category: '功能要求', normalized_requirement: '系统应提供审计日志。',
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, requirement_ref: 'R2' })
+    const scoring = await value.call('submit_scoring_item', {
+      action: 'create',
+      group: '技术方案', title: '总体技术方案', criterion: '方案完整合理',
+      score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+    }) as { scoring_ref: string }
+    const scoringRevision = value.runtime.revision
+    const scoringSnapshot = value.runtime.reviewSnapshot()
+    await expect(value.call('submit_scoring_item', {
+      action: 'replace', replace_ref: 'S99', group: '技术方案', title: '总体技术方案', criterion: '方案完整合理',
+      score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+    })).resolves.toMatchObject({
+      recorded: false, rejected: true, replace_ref: 'S99', current_refs: ['S1'], revision: scoringRevision,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_REPLACE_REF_UNKNOWN' })],
+      message: '未知 Scoring runtime ref S99。当前有效 refs：S1。',
+    })
+    expect(value.runtime.revision).toBe(scoringRevision)
+    expect(value.runtime.reviewSnapshot()).toEqual(scoringSnapshot)
+    await expect(value.call('submit_scoring_item', {
+      action: 'create',
+      group: '技术方案', title: '实施方案', criterion: '实施方案合理',
+      score: 5, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, scoring_ref: 'S2' })
+    const compliance = await value.call('submit_compliance_item', {
+      action: 'create',
+      type: '强制要求', normalized_rule: COMPLIANCE_QUOTE,
+      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+    }) as { compliance_ref: string }
+    const complianceRevision = value.runtime.revision
+    const complianceSnapshot = value.runtime.reviewSnapshot()
+    await expect(value.call('submit_compliance_item', {
+      action: 'replace', replace_ref: 'C99', type: '强制要求', normalized_rule: COMPLIANCE_QUOTE,
+      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+    })).resolves.toMatchObject({
+      recorded: false, rejected: true, replace_ref: 'C99', current_refs: ['C1'], revision: complianceRevision,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_REPLACE_REF_UNKNOWN' })],
+      message: '未知 Compliance runtime ref C99。当前有效 refs：C1。',
+    })
+    expect(value.runtime.revision).toBe(complianceRevision)
+    expect(value.runtime.reviewSnapshot()).toEqual(complianceSnapshot)
+    expect(value.concludeTurn).toHaveBeenCalledTimes(3)
+    await expect(value.call('submit_compliance_item', {
+      action: 'create',
+      type: '强制要求', normalized_rule: '技术方案必须支持安全审计。',
+      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, compliance_ref: 'C2' })
+    expect({ requirement, scoring, compliance }).toMatchObject({
+      requirement: { requirement_ref: 'R1' }, scoring: { scoring_ref: 'S1' }, compliance: { compliance_ref: 'C1' },
+    })
+    expect(value.runtime.reviewSnapshot()).toMatchObject({
+      requirements: [{ requirement_ref: 'R1' }, { requirement_ref: 'R2' }],
+      scoring: [{ scoring_ref: 'S1' }, { scoring_ref: 'S2' }],
+      compliance: [{ compliance_ref: 'C1' }, { compliance_ref: 'C2' }],
+    })
+    value.runtime.dispose()
+  })
+
+  it('allocates unused runtime refs after restoring sparse staged records', async () => {
+    const value = await fixture()
+    for (const normalized_requirement of ['要求一', '要求二', '要求三']) {
+      await value.call('submit_requirement', { action: 'create', category: '功能要求', normalized_requirement, mandatory: true, sources: [source(REQUIREMENT_QUOTE)] })
+    }
+    for (const title of ['评分一', '评分二', '评分三']) {
+      await value.call('submit_scoring_item', {
+        action: 'create', group: '技术方案', title, criterion: `${title}规则`, score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+      })
+    }
+    for (const normalized_rule of ['规则一', '规则二', '规则三']) {
+      await value.call('submit_compliance_item', { action: 'create', type: '强制要求', normalized_rule, severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] })
+    }
+    const checkpointPath = join(value.workspace.projectRoot, 'analysis/tender-analysis-checkpoint.json')
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+      requirements: Array<{ ref: string }>
+      scoring: Array<{ ref: string }>
+      compliance: Array<{ ref: string }>
+    }
+    checkpoint.requirements[2]!.ref = 'R4'
+    checkpoint.scoring[2]!.ref = 'S4'
+    checkpoint.compliance[2]!.ref = 'C4'
+    await writeFile(checkpointPath, JSON.stringify(checkpoint))
+    value.runtime.dispose()
+    const restored = await attachTenderAnalysisSubmissionRuntime(
+      value.agent, value.workspace, await value.workspace.readManifest(), value.run,
+    )
+
+    await expect(value.call('submit_requirement', {
+      action: 'create', category: '功能要求', normalized_requirement: '要求四', mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    })).resolves.toMatchObject({ requirement_ref: 'R3' })
+    await expect(value.call('submit_scoring_item', {
+      action: 'create', group: '技术方案', title: '评分四', criterion: '评分四规则', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+    })).resolves.toMatchObject({ scoring_ref: 'S3' })
+    await expect(value.call('submit_compliance_item', {
+      action: 'create', type: '强制要求', normalized_rule: '规则四', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+    })).resolves.toMatchObject({ compliance_ref: 'C3' })
+    expect(restored.reviewSnapshot()).toMatchObject({
+      requirements: [{ requirement_ref: 'R1' }, { requirement_ref: 'R2' }, { requirement_ref: 'R4' }, { requirement_ref: 'R3' }],
+      scoring: [{ scoring_ref: 'S1' }, { scoring_ref: 'S2' }, { scoring_ref: 'S4' }, { scoring_ref: 'S3' }],
+      compliance: [{ compliance_ref: 'C1' }, { compliance_ref: 'C2' }, { compliance_ref: 'C4' }, { compliance_ref: 'C3' }],
+    })
+    restored.dispose()
   })
 
   it('keeps original scoring groups, fixes parent to null, and deduplicates identical groups structurally', async () => {
     const value = await fixture()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await expect(value.call('submit_scoring_item', {
-      parent_ref: 'S1', group: '技术方案', title: '内部细则',
+      action: 'create', parent_ref: 'S1', group: '技术方案', title: '内部细则',
       criterion: '非法', score: null, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })).rejects.toThrow()
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '完整规则：根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
     })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '另一独立评分区块的规则。', score: 5, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
@@ -307,23 +454,26 @@ describe('tender-analysis staged submission runtime', () => {
   it('assigns stable COM IDs on replace and rejects an invalid severity at the tool boundary', async () => {
     const value = await fixture()
     const first = await value.call('submit_compliance_item', {
+      action: 'create',
       type: '强制要求', normalized_rule: '初始规则', severity: 'mandatory',
       sources: [source(COMPLIANCE_QUOTE)],
     }) as { compliance_ref: string }
     await value.call('submit_compliance_item', {
-      replace_ref: first.compliance_ref, type: '强制要求',
+      action: 'replace', replace_ref: first.compliance_ref, type: '强制要求',
       normalized_rule: '技术方案必须提供数据安全措施。', severity: 'fatal', sources: [source(COMPLIANCE_QUOTE)],
     })
     await expect(value.call('submit_compliance_item', {
-      type: '强制要求', normalized_rule: '非法', severity: 'critical',
+      action: 'create', type: '强制要求', normalized_rule: '非法', severity: 'critical',
       sources: [source(COMPLIANCE_QUOTE)],
     })).rejects.toThrow()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
       mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
     })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
@@ -346,10 +496,12 @@ describe('tender-analysis staged submission runtime', () => {
     const secondQuote = secondQuoteMatch[0]
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: '系统支持审计并保持稳定运行。', mandatory: true,
       sources: [source(REQUIREMENT_QUOTE), source(secondQuote, chunkId, 'T2')],
     })
     await value.call('submit_scoring_item', {
+      action: 'create',
       group: '技术方案', title: '总体技术方案',
       criterion: '方案完整合理', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
     })
@@ -372,6 +524,7 @@ describe('tender-analysis staged submission runtime', () => {
       'TENDER_ANALYSIS_SCORING_SUSPICIOUSLY_EMPTY',
       'TENDER_ANALYSIS_REQUIREMENTS_SUSPICIOUSLY_EMPTY',
     ]))
+    expect(scoringMissing.concludeTurn).toHaveBeenCalledOnce()
     expect(scoringMissing.runtime.completed).toBe(false)
     scoringMissing.runtime.dispose()
   })
@@ -389,21 +542,29 @@ describe('tender-analysis staged submission runtime', () => {
     expect(value.runtime.phase).toBe('review_required')
     expect(value.concludeTurn).toHaveBeenCalledOnce()
     await expect(readFile(join(value.workspace.projectRoot, 'analysis/project.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(value.call('finish_tender_analysis', {})).rejects.toThrow('当前初始分析已结束')
+    await expect(value.call('finish_tender_analysis', {})).resolves.toMatchObject({
+      completed: false,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_OPERATION_NOT_ALLOWED' })],
+    })
     for (const [name, args] of [
       ['submit_project_fact', { field: 'project_name', value: '不应写入', sources: [source(PROJECT_QUOTE)] }],
-      ['submit_requirement', { category: '功能要求', normalized_requirement: '不应写入', mandatory: true, sources: [source(REQUIREMENT_QUOTE)] }],
-      ['submit_scoring_item', { group: '技术方案', title: '不应写入', criterion: '不应写入', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)] }],
-      ['submit_compliance_item', { type: '强制要求', normalized_rule: '不应写入', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] }],
-    ] as const) await expect(value.call(name, args)).rejects.toThrow('当前初始分析已结束')
+      ['submit_requirement', { action: 'create', category: '功能要求', normalized_requirement: '不应写入', mandatory: true, sources: [source(REQUIREMENT_QUOTE)] }],
+      ['submit_scoring_item', { action: 'create', group: '技术方案', title: '不应写入', criterion: '不应写入', score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)] }],
+      ['submit_compliance_item', { action: 'create', type: '强制要求', normalized_rule: '不应写入', severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)] }],
+    ] as const) await expect(value.call(name, args)).resolves.toMatchObject({
+      recorded: false,
+      rejected: true,
+      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_OPERATION_NOT_ALLOWED' })],
+    })
     expect(value.runtime.revision).toBe(initialRevision)
+    expect(value.concludeTurn).toHaveBeenCalledTimes(6)
 
     const snapshot = value.runtime.reviewSnapshot() as { revision: number; scoring: Array<{ scoring_ref: string; title: string }> }
     expect(snapshot).toMatchObject({ revision: initialRevision })
     expect(snapshot.scoring).toEqual([expect.objectContaining({ scoring_ref: 'S1', title: '总体技术方案' })])
     await value.runtime.beginReview()
     const corrected = await value.call('submit_scoring_item', {
-      replace_ref: 'S1', group: '技术方案', title: '总体技术方案（复核修正）',
+      action: 'replace', replace_ref: 'S1', group: '技术方案', title: '总体技术方案（复核修正）',
       criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
       must_answer: true, sources: [source(SCORING_QUOTE)],
     }) as { revision: number }
@@ -413,6 +574,7 @@ describe('tender-analysis staged submission runtime', () => {
       issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_REVIEW_REVISION_MISMATCH' })],
       revision: corrected.revision,
     })
+    expect(value.concludeTurn).toHaveBeenCalledTimes(7)
     await expect(value.call('finish_tender_analysis', { review_revision: corrected.revision })).resolves.toMatchObject({
       completed: true,
       revision: corrected.revision,

@@ -197,15 +197,18 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
       field: 'project_name', value: '智慧审计平台建设项目', sources: [source('智慧审计平台建设项目')],
     }),
     toolCall('submit-requirement', 'submit_requirement', {
+      action: 'create',
       category: '功能要求', normalized_requirement: '系统必须支持统一身份认证和审计日志。', mandatory: true,
       sources: [source('系统必须支持统一身份认证和审计日志。')],
     }),
     toolCall('submit-scoring', 'submit_scoring_item', {
+      action: 'create',
       group: '技术评分', title: '总体技术方案', criterion: '总体技术方案完整合理得 10 分。',
       score: 10, score_range: null, must_answer: true,
       sources: [source('技术评分：总体技术方案完整合理得 10 分。')],
     }),
     toolCall('submit-compliance', 'submit_compliance_item', {
+      action: 'create',
       type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。', severity: 'mandatory',
       sources: [source('技术方案必须提供数据安全措施。')],
     }),
