@@ -134,19 +134,19 @@ describe('Bid client projection', () => {
     expect(getBidClientProjection({
       stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
     })).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'pending', failureReason: 'document needs OCR' },
+      runtime: { stage: 'file_intake', status: 'suspended', failureReason: 'document needs OCR' },
       allowedActions: ['send_message'],
       composer: { enabled: true },
     })
     expect(getBidClientProjection({
       stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation',
     })).toMatchObject({
-      runtime: { stage: 'tender_analysis', status: 'pending', failureReason: 'invalid citation' },
+      runtime: { stage: 'tender_analysis', status: 'suspended', failureReason: 'invalid citation' },
       allowedActions: ['send_message'],
       composer: { enabled: true },
     })
     expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'pending' },
+      runtime: { stage: 'chapter_writing', status: 'suspended' },
       allowedActions: ['send_message', 'export_docx', 'revise_chapter'],
       composer: { enabled: true },
     })
@@ -201,7 +201,7 @@ describe('Bid client projection', () => {
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: {
         stage: 'file_intake',
-        status: 'pending',
+        status: 'suspended',
         failureReason: 'document needs OCR',
         failureIssues: [{ code: 'DOCUMENT_INVALID', artifact: 'manifest.json', path: 'files[0]', message: 'document cannot be parsed' }],
       },

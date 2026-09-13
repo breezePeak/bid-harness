@@ -1799,17 +1799,23 @@ export async function readEvidenceMappingLog(workspace: BidWorkspace): Promise<E
 /**
  * 读取当前证据映射执行的任务进度。
  * @param workspace 会话工作区。
- * @returns 当前映射执行的状态计数，尚未执行时返回 null。
+ * @returns checkpoint 完成事实与执行日志瞬时状态合并后的计数，尚未执行时返回 null。
  */
 export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
   const log = await readEvidenceMappingLog(workspace)
   if (log === null) return null
+  const rawPlan = await readOptionalJson(workspace, PLAN_PATH)
+  const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
+  const planByTask = new Map((rawPlan === undefined ? [] : parseEvidenceMappingPlan(rawPlan).tasks)
+    .map(task => [task.task_id, task] as const))
+  const checkpointCompleted = new Set((rawCheckpoint === undefined ? [] : evidenceMappingCheckpointSchema.parse(rawCheckpoint).tasks)
+    .filter(task => task.completed).map(task => task.task_id))
   let completed = 0
   let running = 0
   let notStarted = 0
   let failed = 0
   for (const task of log.tasks) {
-    switch (task.status) {
+    switch (checkpointCompleted.has(task.task_id) ? 'completed' : task.status) {
       case 'completed':
         completed++
         break
@@ -1824,8 +1830,12 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
         break
     }
   }
+  const failedSectionIds = [...new Set(log.tasks.flatMap(task => task.status !== 'failed' || checkpointCompleted.has(task.task_id)
+    ? []
+    : planByTask.get(task.task_id)?.section_ids ?? []))]
   return { total: log.tasks.length, initial: log.tasks.filter(task => task.phase === 'initial').length,
-    supplemental: log.tasks.filter(task => task.phase === 'final_check').length, completed, running, not_started: notStarted, failed }
+    supplemental: log.tasks.filter(task => task.phase === 'final_check').length, completed, running, not_started: notStarted,
+    failed, failed_section_ids: failedSectionIds }
 }
 
 /**
@@ -3077,14 +3087,12 @@ async function executeEvidenceMappingRun(
       for (const item of savedLog.tasks) {
         const saved = savedCheckpoints.get(item.task_id)
         const currentTask = plan.tasks.find(task => task.task_id === item.task_id)
-        if (item.status === 'completed') {
-          if (saved?.completed !== true || currentTask === undefined) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
-        }
-        const scopeExists = currentTask?.section_ids.every(id => fingerprintOutline.sections.some(section => section.id === id)) === true
-        if (saved !== undefined && currentTask !== undefined && scopeExists
-          && saved.input_fingerprint === taskInputFingerprint(currentTask, fingerprintOutline)) {
+        if (item.status === 'completed' && saved?.completed !== true) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
+        if (saved?.completed === true) {
+          if (currentTask === undefined) throw new Error(`evidence-mapping-resume-task-missing:${item.task_id}`)
           reusable.add(item.task_id)
-          if (saved.completed && saved.outline_operations !== undefined) {
+          item.status = 'completed'
+          if (saved.outline_operations !== undefined) {
             fingerprintOutline = mergeRefinedTasks(fingerprintOutline, [{
               task: currentTask,
               result: saved.result,
@@ -3098,9 +3106,14 @@ async function executeEvidenceMappingRun(
               fetchedSnapshots: [],
             }], inputs.responsePoints).outline
           }
+          continue
         }
-        else item.status = 'pending'
-        if (item.status !== 'completed') item.status = 'pending'
+        const scopeExists = currentTask?.section_ids.every(id => fingerprintOutline.sections.some(section => section.id === id)) === true
+        if (saved !== undefined && currentTask !== undefined && scopeExists
+          && saved.input_fingerprint === taskInputFingerprint(currentTask, fingerprintOutline)) {
+          reusable.add(item.task_id)
+        }
+        if (item.status === 'running') item.status = 'pending'
       }
       checkpoint = { schema_version: 11, tasks: checkpoint.tasks.filter(item => reusable.has(item.task_id)) }
       delete savedLog.failure
@@ -3291,6 +3304,22 @@ async function executeEvidenceMappingRun(
   let activeTasks = 0
 
   const maxMappingRepairs = options.maxRepairAttempts
+  const completedTaskFromCheckpoint = (mappingTask: EvidenceMappingTask): CompletedMappingTask => {
+    const saved = checkpointTasks.get(mappingTask.task_id)
+    if (saved?.completed !== true) throw new Error(`evidence-mapping-resume-checkpoint-missing:${mappingTask.task_id}`)
+    return {
+      task: mappingTask,
+      result: saved.result,
+      ...(saved.outline_operations === undefined ? {} : { outlineOperations: saved.outline_operations as OutlineEditOperation[] }),
+      ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
+      ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
+      ...(saved.structure_assessment === undefined ? {} : { structureAssessment: saved.structure_assessment }),
+      taskOperations: structuredClone(saved.task_operations),
+      researchCandidates: structuredClone(saved.research_candidates),
+      snapshots: availableSnapshots,
+      fetchedSnapshots: [],
+    }
+  }
   const runTaskAttempt = async (
     mappingTask: EvidenceMappingTask,
     runInputs: EvidenceMappingInputs,
@@ -3298,22 +3327,7 @@ async function executeEvidenceMappingRun(
     signal.throwIfAborted()
     const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
     if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
-    if (log.status === 'completed') {
-      const saved = checkpointTasks.get(mappingTask.task_id)
-      if (saved === undefined) throw new Error(`evidence-mapping-resume-checkpoint-missing:${mappingTask.task_id}`)
-      return {
-        task: mappingTask,
-        result: saved.result,
-        ...(saved.outline_operations === undefined ? {} : { outlineOperations: saved.outline_operations as OutlineEditOperation[] }),
-        ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
-        ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
-        ...(saved.structure_assessment === undefined ? {} : { structureAssessment: saved.structure_assessment }),
-        taskOperations: structuredClone(saved.task_operations),
-        researchCandidates: structuredClone(saved.research_candidates),
-        snapshots: availableSnapshots,
-        fetchedSnapshots: [],
-      }
-    }
+    if (log.status === 'completed') return completedTaskFromCheckpoint(mappingTask)
     const attemptBase = log.attempts.length
     const reservedChildId = SessionId(randomUUID())
     activeTasks++
@@ -3753,21 +3767,40 @@ async function executeEvidenceMappingRun(
     seedTasks: readonly EvidenceMappingTask[],
     runInputs: EvidenceMappingInputs,
   ): Promise<{ outline: OutlineArtifact; tasks: CompletedMappingTask[] }> => {
-    const pending = [...seedTasks]
+    const completedTasks = seedTasks.filter(task => checkpointTasks.get(task.task_id)?.completed === true)
+    const failedTasks = seedTasks.filter(task => checkpointTasks.get(task.task_id)?.completed !== true
+      && executionLog.tasks.find(item => item.task_id === task.task_id)?.status === 'failed')
+    const failedTaskIds = new Set(failedTasks.map(task => task.task_id))
+    const pendingTasks = seedTasks.filter(task => checkpointTasks.get(task.task_id)?.completed !== true
+      && !failedTaskIds.has(task.task_id))
+    const tasks = [...seedTasks]
+    const replayTaskIds = new Set(completedTasks.map(task => task.task_id))
+    const scheduledTaskIds = new Set([...failedTasks, ...pendingTasks].map(task => task.task_id))
     const completed: CompletedMappingTask[] = []
+    let resumeBarrierTaskId = resuming ? failedTasks[0]?.task_id : undefined
     let outline = runInputs.outline
-    while (pending.length > 0) {
-      const generation = Math.min(...pending.map(task => task.generation))
-      const wave = pending.filter(task => task.generation === generation)
-      for (const task of wave) pending.splice(pending.indexOf(task), 1)
+    while (replayTaskIds.size > 0 || scheduledTaskIds.size > 0) {
+      const remaining = tasks.filter(task => replayTaskIds.has(task.task_id) || scheduledTaskIds.has(task.task_id))
+      const generation = Math.min(...remaining.map(task => task.generation))
+      const wave = remaining.filter(task => task.generation === generation)
+      const replayed = wave.filter(task => replayTaskIds.delete(task.task_id))
+      const runnable = wave.filter(task => scheduledTaskIds.has(task.task_id))
+      const barrier = runnable.find(task => task.task_id === resumeBarrierTaskId)
+      const scheduled = barrier === undefined ? runnable : [barrier]
+      for (const task of scheduled) scheduledTaskIds.delete(task.task_id)
       const before = outline
-      const results = await runBatch(wave, { ...runInputs, outline: before })
+      const restored = replayed.map(completedTaskFromCheckpoint)
+      const fresh = await runBatch(scheduled, { ...runInputs, outline: before })
+      const byTask = new Map([...restored, ...fresh].map(result => [result.task.task_id, result]))
+      const results = wave.flatMap(task => byTask.get(task.task_id) ?? [])
       outline = mergeRefinedTasks(before, results, runInputs.responsePoints).outline
       observedOutline = outline
       completed.push(...results)
       const dynamic = dynamicLeafMappingTasks(before, outline, results, new Set(plan.tasks.map(task => task.task_id)))
       await appendPlannedTasks(dynamic)
-      pending.push(...dynamic)
+      tasks.push(...dynamic)
+      for (const task of dynamic) scheduledTaskIds.add(task.task_id)
+      if (barrier !== undefined) resumeBarrierTaskId = undefined
     }
     return { outline, tasks: completed }
   }
@@ -3987,7 +4020,6 @@ export async function executeEvidenceMapping(
         }
       }
       log.failure = issues.map(({ code, message }) => ({ code, message }))
-      for (const task of log.tasks) if (task.status !== 'completed') task.status = 'failed'
       await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, LOG_PATH))
       await writeJson(join(workspace.projectRoot, LOG_PATH), log, options.run.commits)
     } catch (logError) {

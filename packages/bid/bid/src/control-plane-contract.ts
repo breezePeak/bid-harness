@@ -133,6 +133,7 @@ export const STAGE_RUN_STATUSES = [
   'waiting_start',
   'running',
   'waiting_user',
+  'suspended',
   'attention_required',
   'failed',
   'completed',
@@ -149,7 +150,7 @@ export interface BidEvidenceMappingProgress {
   readonly supplemental: number
   /** Number of Mapping Tasks in the approved execution plan. */
   readonly total: number
-  /** Mapping Tasks whose Child result the Host accepted. */
+  /** Mapping Tasks whose accepted result is durable in the S4 checkpoint. */
   readonly completed: number
   /** Mapping Tasks currently assigned to a Child Session. */
   readonly running: number
@@ -157,15 +158,17 @@ export interface BidEvidenceMappingProgress {
   readonly not_started: number
   /** Mapping Tasks 因基础设施异常或模型修复耗尽而失败。 */
   readonly failed: number
+  /** 失败 Mapping Tasks 直接负责的 Section，按执行计划顺序去重。 */
+  readonly failed_section_ids: readonly string[]
 }
 
 /** Flattened compatibility view derived from Workflow and Run state. */
 export interface BidRuntimeState {
   stage: BidStage
   status: StageRunStatus
-  /** Host-recorded reason for the current failed stage. */
+  /** Host-recorded error for the current failed or suspended stage. */
   readonly failureReason?: string | undefined
-  /** Browser-safe validation details for the current failed stage. */
+  /** Browser-safe validation details for the current failed or suspended stage. */
   readonly failureIssues?: readonly StageValidationIssue[] | undefined
 }
 

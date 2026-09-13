@@ -48,8 +48,8 @@ function props(
 ): BidStagePanelProps {
   const useProjection = (_key: string, selector?: (item: BidClientProjection | undefined) => unknown) =>
     selector === undefined ? value : selector(value)
-  const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string }> }) => unknown) =>
-    selector({ byId: { session_bid: { agentPreset: 'bid' } } })
+  const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
+    selector({ byId: { session_bid: { agentPreset: 'bid', running: false } } })
   return {
     sessionId: 'session_bid',
     useProjection,
@@ -252,6 +252,7 @@ describe('BidStagePanel', () => {
     const getOutlineDraft = vi.fn(async () => draft)
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 1, initial: 1, supplemental: 0, completed: 1, running: 0, not_started: 0, failed: 0,
+      failed_section_ids: [],
     }))
     const confirmOutline = vi.fn(async () => {})
     const shared = {
@@ -303,6 +304,7 @@ describe('BidStagePanel', () => {
       running: 2,
       not_started: 5,
       failed: 0,
+      failed_section_ids: [],
     }))
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'running' },
@@ -352,7 +354,7 @@ describe('BidStagePanel', () => {
         work: suspendedWork,
         status: 'suspended', cause: 'user_stop', startedAt: 10, updatedAt: 20,
       },
-      runtime: { stage: 'evidence_mapping', status: 'pending' },
+      runtime: { stage: 'evidence_mapping', status: 'suspended' },
       allowedActions: ['send_message'],
       composer: { enabled: true },
     }))} />)
@@ -362,22 +364,57 @@ describe('BidStagePanel', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('自动中断的 Run 只保留挂起状态，由聊天时间线呈现终端错误', () => {
+  it('S4 挂起且 Main Agent 运行时保留进度、原因和失败 Section，不显示阶段处理中', async () => {
+    const getEvidenceMappingProgress = vi.fn(async () => ({
+      total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
+      failed_section_ids: ['SEC-401'],
+    }))
     render(<BidStagePanel {...props(projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
         runId: 'run-interrupted', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
         work: suspendedWork,
-        status: 'suspended', cause: 'executor_error', startedAt: 10, updatedAt: 20,
-        error: { message: '连接失败' },
+        status: 'suspended', cause: 'retry_exhausted', startedAt: 10, updatedAt: 20,
+        error: { message: 'SEC-401 映射失败' },
       },
-      runtime: { stage: 'evidence_mapping', status: 'pending', failureReason: '连接失败' },
+      runtime: { stage: 'evidence_mapping', status: 'suspended', failureReason: 'SEC-401 映射失败' },
       allowedActions: ['send_message'], composer: { enabled: true },
-    }))} />)
+    }), {
+      getEvidenceMappingProgress,
+      useSessions: ((selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
+        selector({ byId: { session_bid: { agentPreset: 'bid', running: true } } })) as BidStagePanelProps['useSessions'],
+    })} />)
 
     expect(screen.getByText('已挂起')).toBeTruthy()
-    expect(screen.queryByText('连接失败')).toBeNull()
-    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('阶段执行已挂起')).toBeTruthy()
+    expect(screen.getByText('主 Agent 正在检查恢复方案……')).toBeTruthy()
+    expect(screen.getByText('挂起原因：retry_exhausted')).toBeTruthy()
+    expect(screen.queryByText('正在处理…')).toBeNull()
+    expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
+    expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
+    expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
+    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
+  })
+
+  it.each([
+    ['running', '正在处理…'],
+    ['waiting_user', '等待用户确认'],
+    ['completed', '已完成'],
+  ] as const)('S4 %s 只按阶段投影显示 %s', (status, label) => {
+    render(<BidStagePanel {...props(projection({
+      workflow: { stage: 'evidence_mapping', gate: status === 'waiting_user' ? 'waiting_user' : status === 'completed' ? 'completed' : 'ready' },
+      runtime: { stage: 'evidence_mapping', status },
+      allowedActions: status === 'waiting_user' ? ['confirm_outline', 'regenerate_outline', 'send_message'] : ['send_message'],
+      composer: { enabled: true },
+    }), {
+      getEvidenceMappingProgress: async () => null,
+      useSessions: ((selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
+        selector({ byId: { session_bid: { agentPreset: 'bid', running: true } } })) as BidStagePanelProps['useSessions'],
+    })} />)
+
+    expect(screen.getByText(label)).toBeTruthy()
+    expect(screen.queryByText('主 Agent 正在检查恢复方案……')).toBeNull()
   })
 
   it('stays absent for a non-Bid session even when a projection is available', () => {

@@ -230,7 +230,12 @@ function cloneRun(run: BidRunSnapshot | null): BidRunSnapshot | null {
   }
 }
 
-/** Convert a legacy flat runtime into split Workflow and Run state. */
+/**
+ * Convert a legacy flat runtime into split Workflow and Run state.
+ * @param runtime Legacy browser state to convert.
+ * @param _revision Reserved project revision from the legacy caller.
+ * @returns Equivalent authoritative Workflow and Run state.
+ */
 export function controlStateFromLegacyRuntime(runtime: BidRuntimeState, _revision = 0): BidControlState {
   const failure = runtime.failureReason === undefined ? undefined : {
     message: runtime.failureReason,
@@ -260,6 +265,10 @@ export function controlStateFromLegacyRuntime(runtime: BidRuntimeState, _revisio
       const run = legacyRun('suspended', 'executor_error')
       return { workflow: { stage: runtime.stage, gate: 'ready' }, run, lastRun: run }
     }
+    case 'suspended': {
+      const run = legacyRun('suspended', 'host_restart')
+      return { workflow: { stage: runtime.stage, gate: 'ready' }, run, lastRun: run }
+    }
     case 'pending': return { workflow: { stage: runtime.stage, gate: 'ready' }, run: null, lastRun: null }
     case 'waiting_start': return { workflow: { stage: runtime.stage, gate: 'waiting_start' }, run: null, lastRun: null }
     case 'waiting_user': return { workflow: { stage: runtime.stage, gate: 'waiting_user' }, run: null, lastRun: null }
@@ -272,13 +281,17 @@ export function controlStateFromLegacyRuntime(runtime: BidRuntimeState, _revisio
   }
 }
 
-/** Derive the existing browser view without making it the state authority. */
+/**
+ * Derive the browser view without making it the state authority.
+ * @param state Authoritative Workflow and Run state.
+ * @returns Detached stage status for browser consumers.
+ */
 export function bidRuntimeView(state: BidControlState): BidRuntimeState {
   const run = state.run
   if (run?.status === 'running' || run?.status === 'cancelling') return { stage: run.stage, status: 'running' }
   if (run?.status === 'suspended') return {
     stage: state.workflow.stage,
-    status: 'pending',
+    status: 'suspended',
     ...run.error === undefined ? {} : {
       failureReason: run.error.message,
       ...run.error.issues === undefined ? {} : { failureIssues: run.error.issues.map(issue => ({ ...issue })) },
@@ -295,7 +308,12 @@ export function bidRuntimeView(state: BidControlState): BidRuntimeState {
   }
 }
 
-/** Fold one committed Session event into authoritative Workflow and Run state. */
+/**
+ * Fold one committed Session event into authoritative Workflow and Run state.
+ * @param state Control state before the event.
+ * @param event Committed Session event to apply.
+ * @returns Control state after the event.
+ */
 export function reduceBidControlState(state: BidControlState, event: SessionEvent): BidControlState {
   switch (event.type) {
     case 'bid.project.resumed': {
@@ -424,12 +442,22 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
   }
 }
 
-/** Compatibility reducer for callers that only need the flattened browser view. */
+/**
+ * Reduce one Session event for callers that only need the flattened browser view.
+ * @param state Browser state before the event.
+ * @param event Committed Session event to apply.
+ * @returns Browser state after the event.
+ */
 export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
   return bidRuntimeView(reduceBidControlState(controlStateFromLegacyRuntime(state), event))
 }
 
-/** Project Host-owned action and composer decisions from split Workflow and Run state. */
+/**
+ * Build Project Host-owned action and composer decisions from split Workflow and Run state.
+ * @param source Authoritative control state or a legacy browser state.
+ * @param fileLimits Host file limits exposed to the browser.
+ * @returns Detached browser projection and Host-admitted actions.
+ */
 export function getBidClientProjection(
   source: BidControlState | BidRuntimeState,
   fileLimits: Pick<BidClientProjection, 'allowedExtensions' | 'maxFiles' | 'maxFileBytes' | 'maxTotalBytes'> = {},

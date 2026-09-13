@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只显示当前 `projection.runtime` 阶段与状态；执行进度继续由 DSH Transcript、Todo 和工具视图展示。客户端只将 durable `bid.run.notice` 折叠为聊天时间线中的终端 Run 提示；它不推进阶段、不推导权限，也不保存本地阶段或状态。
+标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只读取当前 `projection.runtime` 的阶段与状态，不使用聊天流、Main Agent、Subagent 或工具的运行状态推导阶段是否执行；Main Agent 运行状态只在阶段已挂起时显示独立的恢复检查提示。客户端只将 durable `bid.run.notice` 折叠为聊天时间线中的终端 Run 提示；它不推进阶段、不推导权限，也不保存本地阶段或状态。
 
-`projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，时间线以持久化通知显示停止或中断，不把通知送入模型上下文；面板只保留简短状态，不提供停止或重试按钮。Main Agent 根据完整聊天语义选择只读检查或携带 Run ID 与项目 revision 的恢复工具。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
+`projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，状态行固定显示“已挂起”并停止阶段动画，同时显示挂起原因和安全错误；时间线以持久化通知显示停止或中断，不把通知送入模型上下文。Main Agent 根据完整聊天语义选择只读检查或携带 Run ID 与项目 revision 的恢复工具。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
 
 “招标详情”在 S2 结果可确认时出现，确认后只读并常驻。“目录详情”从 S3 确认后出现，S4 执行期间读取 S3 确认目录；S4 生成结束等待确认时展示深化目录及原有编辑操作，确认后读取最终目录。“正文详情”从进入 S5 开始常驻，轮询已生成正文和 Reviewer 状态，等待、失败及完成状态均保留已有章节。可写叶节的状态灯只映射 Host 的 schema v5 `chapter_indicator`，不依据正文或审核字段推断；`repairing` 与 `needs_input` 保留为独立状态，目录概述保留文字状态。进入 S6 或刷新、重新进入会话时，三个详情入口从 Host 已发布产物恢复。
 
@@ -16,7 +16,7 @@ Word 格式页从 Host 读取模板字节上限，默认显示 300 MiB。选择�
 
 S2–S5 重置完成后，面板显示 `waiting_start` 和“开始本阶段”按钮，并保持 Composer 禁用。按钮调用 `bid/startStage`；成功进入执行状态后才恢复该阶段的常规进度展示，避免重置操作在用户确认前自动消耗模型调用。
 
-S4 运行时，状态行分别显示 Host 返回的初始任务数与补充任务数。初始数量等于初步确认目录中的可写叶子数；目录深化和最终用户编辑产生的补映射计入补充数量，任务名称使用真实章节标题路径。
+S4 的任务进度在 `running`、`waiting_user`、`suspended` 和 `completed` 状态下保持可见，分别显示 Host 返回的初始任务数、补充任务数、完成数、运行数、未开始数和失败数。挂起后停止轮询但保留最后一次持久化进度，并列出失败任务负责的 Section。初始数量等于初步确认目录中的可写叶子数；目录深化和最终用户编辑产生的补映射计入补充数量，任务名称使用真实章节标题路径。
 
 S3 审核使用“当前目录／章节关联内容”两栏；S4 使用“S3 已确认目录／当前深化目录／章节关联内容”三栏。S4 基线读取 `outline/initial-confirmed-outline.json`，始终只读。当前章节按稳定 ID 联动基线定位，差异分别统计新增、修改、删除和移动；“只看变化”保留并弱化变化章节的祖先。
 

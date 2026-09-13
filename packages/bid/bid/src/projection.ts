@@ -24,7 +24,7 @@ const clientProjectionSchema = z.object({
   run: bidRunSchema.nullable(),
   runtime: z.object({
     stage: z.enum(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export']),
-    status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'attention_required', 'failed', 'completed']),
+    status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'suspended', 'attention_required', 'failed', 'completed']),
     failureReason: z.string().optional(),
     failureIssues: z.array(z.object({
       code: z.string(), message: z.string(), artifact: z.string().optional(), path: z.string().optional(),

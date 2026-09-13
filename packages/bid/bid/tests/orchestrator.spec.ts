@@ -64,7 +64,7 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'pending' })
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'suspended' })
     expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'retry_exhausted',
       error: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } })
   })
@@ -109,7 +109,7 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'pending' })
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'suspended' })
     expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'user_stop' })
     expect(current.events.some(event => event.type === 'bid.stage.failed')).toBe(false)
   })

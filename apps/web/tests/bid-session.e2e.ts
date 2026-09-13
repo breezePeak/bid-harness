@@ -332,7 +332,7 @@ describe('web e2e: Bid file intake', () => {
     await panel.getByText('资料上传', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await uploadResponse).status()).toBe(200)
 
-    await panel.getByText('等待确认', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('等待用户确认', { exact: true }).waitFor({ timeout: 15_000 })
     await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
 
     expect(uploadPosts).toBe(1)
@@ -671,7 +671,7 @@ describe('web e2e: Bid file intake', () => {
     if (saved?.run?.status !== 'suspended') throw new Error('S2 failure did not persist a suspended Run')
     analysisAdapter.setSession(bidCwd, bid.sessionId)
     await scaffold.ctx.bid.resumeCurrentRun(agent.session, saved.run.runId, saved.revision)
-    await panel.getByText('等待确认', { exact: true }).waitFor({ timeout: 30_000 })
+    await panel.getByText('等待用户确认', { exact: true }).waitFor({ timeout: 30_000 })
     await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
 
     expect(promptPosts).toBe(0)

@@ -21,7 +21,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 入库会拒绝空文件、不安全文件、不支持格式、超大文件和超数量批次。解析失败会保留原文件，并在 `manifest.json` 中记录稳定的提取错误。复用提取输出目录时，系统通过 `dsh-atomic-write` 原子替换三个完整语料文件。`exportDocx()` 只接受项目目录内 Markdown，并写入项目输出目录。
 
-S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；检查点与 Web Evidence 进入关键状态队列，失败会终止当前批次。执行日志使用独立的尽力写入队列和原子替换，短暂的 Windows 文件占用会有限重试，重试耗尽只记录 Host 告警且不阻断后续检查点。
+S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；任一任务成功后立即将结果和 `completed=true` 写入关键状态队列，恢复调度和进度统计均以该完成标记覆盖执行日志中的瞬时状态。执行日志保留真正失败、运行中与未开始任务的区别并使用独立的尽力写入队列和原子替换；恢复只调度失败与未开始任务，首个失败任务通过恢复屏障后立即按配置并发继续。短暂的 Windows 文件占用会有限重试，重试耗尽只记录 Host 告警且不阻断后续检查点。
 
 ## 控制面类型
 
@@ -31,13 +31,13 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 ## 控制面 Runtime
 
-`project-state.json` 是项目进度的持久化来源，schema version 2 保存 `workflow`、`run`、`last_run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取 schema version 1 时只在内存中确定性迁移，下一次 checkpoint 写入 version 2。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 ready，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
+`project-state.json` 是项目进度的持久化来源，schema version 3 保存 `workflow`、`run`、`last_run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。旧 schema version 会被拒绝。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 ready，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
 `BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidControlState()` 归约当前 Session 已同步的状态。Workflow 只记录业务阶段和确认门，Run 记录一次执行尝试的身份、epoch、基线 revision、状态和停止原因。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 running 或 cancelling Run 时，Host 将其确定性挂起为 `host_restart`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
-`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`，其中 `allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage 推导业务权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
+`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`；扁平 `runtime` 从 Workflow 与 Run 派生，Run 挂起时明确返回 `suspended`，不会退化为 `pending`。`allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage、聊天或 Agent 活动推导业务状态和权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8；`chapterWritingCompletionRepairRounds` 单独限制 S5 整书验收后的修订轮数，默认为 3，不随并发数变化。
 

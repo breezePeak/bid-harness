@@ -138,7 +138,7 @@ function promptText(request: { prompt: readonly { type: string; text?: string }[
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
-async function writeInputs(workspace: BidWorkspace) {
+async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2']) {
   const [tender, reference, framework, referenceBid] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('可复用的统一技术资料。') },
@@ -170,16 +170,19 @@ async function writeInputs(workspace: BidWorkspace) {
     writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] })),
   ])
   const outline = {
-    schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [1, 2].map(value => ({
-      id: `SEC-${value}`, parent_id: null, order: value, level: 1, title: `章节${value}`, purpose: `响应主题${value}`, writable: true,
-      must_answer: [`响应主题${value}`], requirement_ids: [`R-${value}`], scoring_ids: [`S-${value}`], compliance_ids: [], origin: 'generated',
-      scoring_response_point_ids: [`RP-${String(value).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `S-${value}`, response_point: `响应点${value}` }], suggested_tables: [], suggested_figures: [], writing_notes: [],
-    })),
+    schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: sectionIds.map((id, index) => {
+      const value = Math.min(index + 1, 2)
+      return {
+        id, parent_id: null, order: index + 1, level: 1, title: `章节${String(index + 1)}`, purpose: `响应主题${value}`, writable: true,
+        must_answer: [`响应主题${value}`], requirement_ids: [`R-${value}`], scoring_ids: [`S-${value}`], compliance_ids: [], origin: 'generated',
+        scoring_response_point_ids: [`RP-${String(value).padStart(6, '0')}`], scoring_response_points: [{ scoring_id: `S-${value}`, response_point: `响应点${value}` }], suggested_tables: [], suggested_figures: [], writing_notes: [],
+      }
+    }),
   }
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await Promise.all([
     writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline)),
-    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: ['SEC-1', 'SEC-2'], issues: [] })),
+    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'], checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'], reviewed_section_ids: sectionIds, issues: [] })),
   ])
   return {
     chunk,
@@ -1162,7 +1165,7 @@ describe('evidence-mapping Agent executor', () => {
       tasks: Array<{ status: string }>
     }
     expect(failed.failure).toEqual([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: 'injected atomic publication failure' }])
-    expect(failed.tasks.every((task: { status: string }) => task.status === 'failed')).toBe(true)
+    expect(failed.tasks.map(task => task.status)).toEqual(['failed', 'pending'])
   })
 
   it('一次 progress log 写入失败不会污染后续关键 checkpoint', async () => {
@@ -1849,6 +1852,7 @@ describe('evidence-mapping Agent executor', () => {
       running: 2,
       not_started: 0,
       failed: 0,
+      failed_section_ids: [],
     })
     const initialPrompt = promptText(fixture.starts[0]!.request.request)
     expect(initialPrompt).toContain('current_section_scope：[{"id":"SEC-1"')
@@ -1928,6 +1932,7 @@ describe('evidence-mapping Agent executor', () => {
       running: 0,
       not_started: 0,
       failed: 0,
+      failed_section_ids: [],
     })
 
     const map = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')) as { section_mappings: Array<{ section_id: string; local_materials: unknown[] }> }
@@ -2035,36 +2040,83 @@ describe('evidence-mapping Agent executor', () => {
     expect(resumed.starts).toHaveLength(0)
   })
 
-  it('恢复时只重新运行输入指纹变化的初始任务', async () => {
+  it('32 个任务恢复时保留 14 个 checkpoint 完成项，失败项成功后恢复并发且多次恢复不重复完成项', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-local-resume-')))
-    const material = await writeInputs(workspace)
+    const completedSectionIds = Array.from({ length: 14 }, (_, index) => `SEC-${String(index + 1)}`)
+    const pendingSectionIds = Array.from({ length: 17 }, (_, index) => `SEC-${String(index + 402)}`)
+    const material = await writeInputs(workspace, [...completedSectionIds, 'SEC-401', ...pendingSectionIds])
     const first = mappingFixture(workspace, material)
-    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-INIT-SEC-2' ? '{' : JSON.stringify(value))
+    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-INIT-SEC-401' ? '{' : JSON.stringify(value))
     const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxRepairAttempts: 0, maxConcurrency: 2,
+      maxRepairAttempts: 0, maxConcurrency: 1,
     })
-    const rejected = expect(failed).rejects.toBeInstanceOf(Error)
-    await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
-    first.starts.forEach((start) => { start.resolve() })
-    await rejected
-
-    const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
-    const requirements = JSON.parse(await readFile(requirementsPath, 'utf8')) as {
-      requirements: Array<{ id: string; normalized_requirement: string }>
+    const rejection = failed.catch((error: unknown) => error)
+    for (const [index] of completedSectionIds.entries()) {
+      await vi.waitFor(() => { expect(first.starts).toHaveLength(index + 1) })
+      first.starts[index]!.resolve()
     }
-    requirements.requirements.find(item => item.id === 'R-2')!.normalized_requirement = '只调整第二章对应要求'
-    await writeFile(requirementsPath, JSON.stringify(requirements))
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(15) })
+    first.starts[14]!.resolve()
+    expect(await rejection).toBeInstanceOf(Error)
+    expect(first.starts).toHaveLength(15)
+
+    const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+      tasks: Array<{ task_id: string; completed: boolean; result: EvidenceMappingPartialResult }>
+    }
+    const completedTaskIds = new Set(checkpoint.tasks.filter(task => task.completed).map(task => task.task_id))
+    expect(completedTaskIds.size).toBe(14)
+    const logPath = join(workspace.projectRoot, 'analysis/evidence-mapping-log.json')
+    const interruptedLog = JSON.parse(await readFile(logPath, 'utf8')) as {
+      tasks: Array<{ task_id: string; status: 'pending' | 'running' | 'completed' | 'failed' }>
+    }
+    for (const task of interruptedLog.tasks) if (completedTaskIds.has(task.task_id)) task.status = 'pending'
+    await writeFile(logPath, JSON.stringify(interruptedLog))
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+      total: 32, completed: 14, running: 0, not_started: 17, failed: 1, failed_section_ids: ['SEC-401'],
+    })
 
     const resumed = mappingFixture(workspace, material)
+    const resumeController = new AbortController()
     const completed = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxRepairAttempts: 0, maxConcurrency: 2, resume: true,
+      maxRepairAttempts: 0, maxConcurrency: 3, resume: true, signal: resumeController.signal,
     })
+    const resumedRejection = completed.catch((error: unknown) => error)
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
-    expect(promptText(resumed.starts[0]!.request.request)).toContain('"task_id":"MAP-INIT-SEC-2"')
+    expect(promptText(resumed.starts[0]!.request.request)).toContain('"task_id":"MAP-INIT-SEC-401"')
+    for (const taskId of completedTaskIds) {
+      expect(resumed.starts.some(start => promptText(start.request.request).includes(`Mapping Task：{"task_id":"${taskId}"`))).toBe(false)
+    }
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+      total: 32, completed: 14, running: 1, not_started: 17, failed: 0,
+    })
     resumed.starts[0]!.resolve()
-    await completed
-    expect(resumed.taskAttempts.has('MAP-INIT-SEC-1')).toBe(false)
-    expect(resumed.taskAttempts.get('MAP-INIT-SEC-2')).toBe(1)
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(4) })
+    expect(resumed.maxActive()).toBe(3)
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+      total: 32, completed: 15, running: 3, not_started: 14, failed: 0,
+    })
+    for (const taskId of completedTaskIds) expect(resumed.taskAttempts.has(taskId)).toBe(false)
+    expect(resumed.taskAttempts.get('MAP-INIT-SEC-401')).toBe(1)
+    resumeController.abort()
+    expect(await resumedRejection).toBeInstanceOf(Error)
+    const resumedCheckpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+      tasks: Array<{ task_id: string; completed: boolean }>
+    }
+    expect(resumedCheckpoint.tasks.filter(task => task.completed)).toHaveLength(15)
+
+    const resumedAgain = mappingFixture(workspace, material)
+    const secondController = new AbortController()
+    const second = executeEvidenceMapping(resumedAgain.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 3, resume: true, signal: secondController.signal,
+    })
+    const secondRejection = second.catch((error: unknown) => error)
+    await vi.waitFor(() => { expect(resumedAgain.starts.length).toBeGreaterThan(0) })
+    for (const task of resumedCheckpoint.tasks.filter(task => task.completed)) {
+      expect(resumedAgain.starts.some(start => promptText(start.request.request).includes(`Mapping Task：{"task_id":"${task.task_id}"`))).toBe(false)
+    }
+    secondController.abort()
+    expect(await secondRejection).toBeInstanceOf(Error)
   })
 
   it('拆分后新叶研究失败，恢复复用既有动态任务而不重复创建 REFINE 任务', async () => {
@@ -2078,20 +2130,22 @@ describe('evidence-mapping Agent executor', () => {
     }] })
     first.serializeReply.mockImplementation(value => value.task_id.startsWith('MAP-INIT-SEC-S4-') ? '{' : JSON.stringify(value))
     const execution = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
-    const rejected = expect(execution).rejects.toBeInstanceOf(Error)
+    const rejection = execution.catch((error: unknown) => error)
     await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
     first.starts.forEach((start) => { start.resolve() })
     await vi.waitFor(() => { expect(first.starts).toHaveLength(4) })
     first.starts.slice(2).forEach((start) => { start.resolve() })
-    await rejected
+    expect(await rejection).toBeInstanceOf(Error)
     const planPath = join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json')
     const before = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
     const resumed = mappingFixture(workspace, material)
     const completion = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, resume: true,
     })
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+    resumed.starts[0]!.resolve()
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(2) })
-    resumed.starts.forEach((start) => { start.resolve() })
+    resumed.starts[1]!.resolve()
     await completion
     expect(resumed.starts).toHaveLength(2)
     const after = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
@@ -2506,7 +2560,7 @@ describe('S4 Host 准入与最终确认', () => {
     expect(log).toContain(location.file_id)
     expect(log).toContain(location.name)
     const executionLog = JSON.parse(log) as { tasks: Array<{ status: string }> }
-    expect(executionLog.tasks.every(task => task.status === 'failed')).toBe(true)
+    expect(executionLog.tasks.every(task => task.status === 'pending')).toBe(true)
   })
 
   it('未调用结构化提交工具时仅在原 Child 修复一次', async () => {
@@ -2694,7 +2748,9 @@ describe('S4 Host 准入与最终确认', () => {
     expect(log.tasks.some(task => task.status === 'failed')).toBe(true)
     expect(log.tasks[0]!.attempts).toHaveLength(1)
     expect(log.tasks[0]!.attempts[0]).toMatchObject({ accepted: false, issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR' }] })
-    expect((await readEvidenceMappingProgress(workspace))!.failed).toBeGreaterThan(0)
+    const progress = await readEvidenceMappingProgress(workspace)
+    expect(progress?.failed).toBeGreaterThan(0)
+    expect(progress?.failed_section_ids).toEqual(['SEC-1'])
   })
 
   it('空 Evidence 合法，本地 chunk 不需要 Child read 日志证明', async () => {

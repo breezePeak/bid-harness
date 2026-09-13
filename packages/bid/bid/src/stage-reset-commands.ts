@@ -63,12 +63,13 @@ async function startStage(ctx: Context, invocation: CommandInvocation): Promise<
         : '当前阶段没有已完成且等待确认的重置。',
     }
   }
-  return {
-    kind: result.value.status === 'failed' ? 'error' : 'success',
-    text: result.value.status === 'failed'
-      ? `本阶段执行失败：${result.value.failureReason ?? '未知错误'}`
-      : `已确认并执行本阶段：${result.value.stage} / ${result.value.status}。`,
+  if (result.value.status === 'suspended') return {
+    kind: 'error',
+    text: `本阶段执行已挂起：${result.value.failureReason ?? '未知原因'}`,
   }
+  return result.value.status === 'failed'
+    ? { kind: 'error', text: `本阶段执行失败：${result.value.failureReason ?? '未知错误'}` }
+    : { kind: 'success', text: `已确认并执行本阶段：${result.value.stage} / ${result.value.status}。` }
 }
 
 /**

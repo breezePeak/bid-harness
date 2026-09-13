@@ -102,6 +102,7 @@ function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'er
     case 'waiting_start': return 'warning'
     case 'waiting_user': return 'warning'
     case 'running': return 'ongoing'
+    case 'suspended': return 'warning'
     case 'attention_required': return 'warning'
     case 'failed': return 'error'
     case 'completed': return 'done'
@@ -116,6 +117,7 @@ function statusKey(status: StageRunStatus): BidKey {
     case 'waiting_start': return 'status.waiting_start'
     case 'running': return 'status.running'
     case 'waiting_user': return 'status.waiting_user'
+    case 'suspended': return 'status.suspended'
     case 'attention_required': return 'status.failed'
     case 'failed': return 'status.failed'
     case 'completed': return 'status.completed'
@@ -126,6 +128,7 @@ function statusKey(status: StageRunStatus): BidKey {
 
 function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
   if (status === 'waiting_start') return 'prompt.stage_waiting_start'
+  if (status === 'suspended') return 'prompt.stage_suspended'
   switch (stage) {
     case 'file_intake':
       if (status === 'running') return 'prompt.file_intake_running'
@@ -205,7 +208,9 @@ export function BidStagePanel({
   actions,
   t,
 }: BidStagePanelProps) {
-  const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const sessionSummary = useSessions(state => state.byId[sessionId])
+  const isBidSession = sessionSummary?.agentPreset === 'bid'
+  const mainAgentRunning = sessionSummary?.running === true
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate | null>(null)
@@ -267,7 +272,12 @@ export function BidStagePanel({
   }, [])
 
   useEffect(() => {
-    if (projection?.runtime.stage !== 'evidence_mapping' || (projection.runtime.status !== 'running' && projection.runtime.status !== 'waiting_user') || getEvidenceMappingProgress === undefined) {
+    if (projection?.runtime.stage !== 'evidence_mapping'
+      || projection.runtime.status !== 'running'
+        && projection.runtime.status !== 'waiting_user'
+        && projection.runtime.status !== 'suspended'
+        && projection.runtime.status !== 'completed'
+      || getEvidenceMappingProgress === undefined) {
       setMappingProgress(null)
       return
     }
@@ -595,10 +605,10 @@ export function BidStagePanel({
   }
 
   const suspendedRun = projection.run?.status === 'suspended' ? projection.run : undefined
-  const hostFailureReason = suspendedRun === undefined && projection.runtime.status === 'failed'
+  const hostFailureReason = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
     ? projection.runtime.failureReason
     : undefined
-  const hostFailureIssues = suspendedRun === undefined && projection.runtime.status === 'failed'
+  const hostFailureIssues = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
     ? projection.runtime.failureIssues ?? []
     : []
   const dotState = statusDot(projection.runtime.status)
@@ -753,8 +763,16 @@ export function BidStagePanel({
           <span className={css.message} role="status">
             {t(promptKey(displayStage, projection.runtime.status))}
           </span>
-          <span className={css.runtimeStatus}>{suspendedRun === undefined ? t(statusKey(projection.runtime.status)) : t('status.suspended')}</span>
+          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
         </div>
+
+        {projection.runtime.status === 'suspended' && mainAgentRunning && (
+          <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
+        )}
+
+        {suspendedRun !== undefined && (
+          <p className={css.suspensionReason}>{t('suspension.reason', { reason: suspendedRun.cause ?? 'host_restart' })}</p>
+        )}
 
         {mappingProgress !== null && (
           <div
@@ -824,6 +842,11 @@ export function BidStagePanel({
                 style={{ width: `${mappingPercent}%` }}
               />
             </div>
+            {mappingProgress.failed_section_ids.length > 0 && (
+              <p className={css.mappingFailureSections}>
+                {t('mapping.failed_sections', { sections: mappingProgress.failed_section_ids.join('、') })}
+              </p>
+            )}
           </div>
         )}
 

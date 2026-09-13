@@ -385,7 +385,7 @@ describe('Workspace 项目与独立 Session', () => {
       return []
     })
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
-    expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'pending', failureReason: '模拟 S3 模型失败' } })
+    expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'suspended', failureReason: '模拟 S3 模型失败' } })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
     const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
     const confirmedScoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
@@ -414,7 +414,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, failed)
     await fresh('session-a')
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'pending', failureReason: '章节执行失败' })
+    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended', failureReason: '章节执行失败' })
     expect(getBidClientProjection(b.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)).allowedActions).toContain('send_message')
     expect(await ctx.bid.getReviewWorkbench(b.session)).toMatchObject({ outline: [{ section_id: 'SEC-1', writing_status: 'completed', content_available: true }], summary: { content_count: 1 } })
     expect(await ctx.bid.getReviewChapter(b.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
@@ -820,9 +820,9 @@ describe('Workspace 项目与独立 Session', () => {
     expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT' }] } })
     if (!exported.ok) throw new Error('已有正文应可导出')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文。')
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'pending', failureReason: '部分章节失败' })
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'suspended', failureReason: '部分章节失败' })
     expect(await readBidProjectState(workspace)).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'pending', failureReason: '部分章节失败' },
+      runtime: { stage: 'chapter_writing', status: 'suspended', failureReason: '部分章节失败' },
     })
   })
 
@@ -1156,10 +1156,10 @@ describe('Workspace 项目与独立 Session', () => {
     expect(onRequest).not.toHaveBeenCalled()
     stageGate.reject(new Error('模拟 S4 执行失败'))
     await expect(retry).resolves.toMatchObject({ ok: true, value: {
-      stage: 'evidence_mapping', status: 'pending',
+      stage: 'evidence_mapping', status: 'suspended',
     } })
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      runtime: { stage: 'evidence_mapping', status: 'pending' },
+      runtime: { stage: 'evidence_mapping', status: 'suspended' },
       allowedActions: ['send_message'],
     })
   })
@@ -1215,6 +1215,40 @@ describe('Workspace 项目与独立 Session', () => {
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
     expect(await readBidProjectState(workspace)).toMatchObject({
       run: { runId: run.runId, stage: 'evidence_mapping', status: 'suspended', cause: 'user_stop' },
+    })
+  })
+
+  it('S4 重试耗尽后 project-state、Session 与客户端 Projection 同步为挂起', async () => {
+    const { ctx, workspace, fresh, executor, validator } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('retry-exhausted-state-sync')
+    const before = await readBidProjectState(workspace)
+    if (before?.run?.status !== 'suspended') throw new Error('测试项目没有可恢复的 S4 Run')
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    validator.validate = async () => ({ ok: false, issues: [{
+      code: 'EVIDENCE_MAPPING_TASK_FAILED',
+      message: 'SEC-401 映射重试耗尽。',
+      artifact: 'analysis/evidence-mapping-execution-log.json',
+    }] })
+
+    await expect(ctx.bid.resumeCurrentRun(agent.session, before.run.runId, before.revision))
+      .resolves.toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+    expect(await readBidProjectState(workspace)).toMatchObject({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: {
+        stage: 'evidence_mapping',
+        status: 'suspended',
+        cause: 'retry_exhausted',
+        error: { issues: [{ code: 'EVIDENCE_MAPPING_TASK_FAILED', message: 'SEC-401 映射重试耗尽。' }] },
+      },
+      runtime: { stage: 'evidence_mapping', status: 'suspended' },
+    })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+    expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: { status: 'suspended', cause: 'retry_exhausted' },
+      runtime: { stage: 'evidence_mapping', status: 'suspended' },
     })
   })
 
@@ -1301,7 +1335,7 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'pending' })
+    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended' })
     expect(await readBidProjectState(workspace)).toMatchObject({
       workflow: { stage: 'chapter_writing', gate: 'ready' },
       run: { stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
