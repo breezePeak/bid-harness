@@ -389,6 +389,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
   let phase: TenderAnalysisSubmissionRuntime['phase'] = 'collecting'
   let revision = 0
   let lastIssues: StageValidationIssue[] = []
+  let hasRecoveredCheckpoint = false
 
   const checkpointPath = within(workspace.projectRoot, TENDER_ANALYSIS_CHECKPOINT_PATH)
   await assertNoLinkedPath(workspace.root, checkpointPath)
@@ -409,6 +410,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
     for (const item of saved.compliance) compliance.set(item.ref, item.value)
     phase = saved.phase === 'reviewing' ? 'review_required' : saved.phase
     revision = saved.revision
+    hasRecoveredCheckpoint = true
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
@@ -509,7 +511,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const input = toolArgs(args, requirementSchema)
       const ref = input.replace_ref ?? `R${String(requirements.size + 1)}`
       const current = requirements.get(ref)
-      if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Requirement 引用 ${ref}。`])
+      if (input.replace_ref !== undefined && current === undefined && hasRecoveredCheckpoint) throw new ToolArgsError([`replace_ref: 未知 Requirement 引用 ${ref}。`])
       const resolved = await sources(input.sources)
       requirements.set(ref, {
         id: current?.id ?? `REQ-${String(requirements.size + 1).padStart(3, '0')}`,
@@ -533,7 +535,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const input = toolArgs(args, scoringSchema)
       const ref = input.replace_ref ?? `S${String(scoring.size + 1)}`
       const current = scoring.get(ref)
-      if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Scoring 引用 ${ref}。`])
+      if (input.replace_ref !== undefined && current === undefined && hasRecoveredCheckpoint) throw new ToolArgsError([`replace_ref: 未知 Scoring 引用 ${ref}。`])
       const resolved = await sources(input.sources)
       scoring.set(ref, {
         id: current?.id ?? `SC-${String(scoring.size + 1).padStart(3, '0')}`,
@@ -560,7 +562,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const input = toolArgs(args, complianceSchema)
       const ref = input.replace_ref ?? `C${String(compliance.size + 1)}`
       const current = compliance.get(ref)
-      if (input.replace_ref !== undefined && current === undefined) throw new ToolArgsError([`replace_ref: 未知 Compliance 引用 ${ref}。`])
+      if (input.replace_ref !== undefined && current === undefined && hasRecoveredCheckpoint) throw new ToolArgsError([`replace_ref: 未知 Compliance 引用 ${ref}。`])
       const resolved = await sources(input.sources)
       compliance.set(ref, {
         id: current?.id ?? `COM-${String(compliance.size + 1).padStart(3, '0')}`,
@@ -582,9 +584,6 @@ export async function attachTenderAnalysisSubmissionRuntime(
     async execute(args, exec) {
       ensureAgent(exec)
       const input = toolArgs(args, finishSchema)
-      if (phase === 'collecting' && input.review_revision !== undefined) {
-        throw new ToolArgsError(['review_revision: 初次 finish 不接受复核版本。'])
-      }
       const projectSources = uniqueSourceRefs([
         ...[...singles.values()].flatMap(value => value.source_refs),
         ...[...lists.values()].flatMap(values => [...values.values()].flat()),

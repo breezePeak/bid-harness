@@ -167,5 +167,7 @@ describe('tender-analysis Agent executor', () => {
     expect(text).toContain('.bid-harness/manifest.json')
     expect(text).toContain('chunks/index.json')
     expect(text).not.toContain('必须按期交付，技术方案得 10 分')
+    expect(renderTenderAnalysisTask({ id: 'session' } as Agent, workspace, buildBidStageTask('tender_analysis'), [], true))
+      .toContain('此前 S2 运行的 runtime ref 不属于当前 staged 记录')
   })
 })

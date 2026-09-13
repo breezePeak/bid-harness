@@ -43,6 +43,7 @@ function renderLocators(locators: readonly TenderLocator[]): string[] {
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
  * @param locators Host-issued short references for successful tender files.
+ * @param emptyStagedRecords Whether this S2 run starts without recovered staged records.
  * @returns Dynamic assignment text for the Agent follow-up.
  */
 export function renderTenderAnalysisTask(
@@ -50,6 +51,7 @@ export function renderTenderAnalysisTask(
   workspace: BidWorkspace,
   task: BidStageTask,
   locators: readonly TenderLocator[] = [],
+  emptyStagedRecords = false,
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
@@ -70,6 +72,7 @@ export function renderTenderAnalysisTask(
     '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 replace_ref。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
     '引用只提交 sources=[{file_ref,chunk,semantic_hint}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id，semantic_hint 用简短关键词或描述指出该 chunk 中的相关正文位置，无需逐字复制原文。一个 source 只定位一行相关正文；跨行或跨 chunk 内容提交多个 source。',
     '不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref、schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。Host 从真实 chunk 行直接截取 quote，生成 raw_text 和 source_refs，并固定评分 parent=null；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
+    ...(emptyStagedRecords ? ['本次 S2 的 staged 记录为空。Requirement、Scoring 和 Compliance 的新条目均省略 replace_ref；此前 S2 运行的 runtime ref 不属于当前 staged 记录。'] : []),
     '工具返回 INVALID_ARGS 或语义位置不唯一时只修正当前条目的 chunk 或 semantic_hint。已记录条目需要修改时，用其 runtime ref 作为 replace_ref；覆盖不会改变正式 ID。',
     '所有区域分析完成后调用 finish_tender_analysis({})。确定性校验通过后，Host 会在当前轮结束后强制发起一次全量语义复核；初次 finish 不会写入正式 Artifact。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
@@ -196,7 +199,7 @@ export async function executeTenderAnalysis(
       }
     }
     options.run.signal.throwIfAborted()
-    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators), () => runtime.phase !== 'collecting')
+    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators, runtime.revision === 0), () => runtime.phase !== 'collecting')
     let attempts = 0
     while (!runtime.completed) {
       options.run.signal.throwIfAborted()

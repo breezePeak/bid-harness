@@ -134,6 +134,11 @@ describe('tender-analysis staged submission runtime', () => {
       scoring: [{ title: '总体技术方案' }],
       compliance: [{ normalized_rule: '技术方案必须提供数据安全措施。' }],
     })
+    await restored.beginReview()
+    await expect(value.call('submit_requirement', {
+      replace_ref: 'R99', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    })).rejects.toThrow('未知 Requirement 引用 R99')
     restored.dispose()
   })
 
@@ -238,6 +243,25 @@ describe('tender-analysis staged submission runtime', () => {
       id: 'REQ-001', raw_text: REQUIREMENT_QUOTE, normalized_requirement: '修正后的归纳',
     })])
     expect(artifact.requirements[0]?.source_refs[0]).not.toHaveProperty('file_ref')
+    value.runtime.dispose()
+  })
+
+  it('treats stale replacement refs as new staged records', async () => {
+    const value = await fixture()
+    await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
+    await expect(value.call('submit_requirement', {
+      replace_ref: 'R10', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE,
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, requirement_ref: 'R10' })
+    await expect(value.call('submit_scoring_item', {
+      replace_ref: 'S11', group: '技术方案', title: '总体技术方案', criterion: '方案完整合理',
+      score: 10, score_range: null, must_answer: true, sources: [source(SCORING_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, scoring_ref: 'S11' })
+    await expect(value.call('submit_compliance_item', {
+      replace_ref: 'C12', type: '强制要求', normalized_rule: COMPLIANCE_QUOTE,
+      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+    })).resolves.toMatchObject({ recorded: true, compliance_ref: 'C12' })
+    await expect(finishReviewed(value)).resolves.toMatchObject({ completed: true })
     value.runtime.dispose()
   })
 
@@ -395,6 +419,19 @@ describe('tender-analysis staged submission runtime', () => {
     })
     const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8')))
     expect(scoring.scoring_items[0]?.title).toBe('总体技术方案（复核修正）')
+    value.runtime.dispose()
+  })
+
+  it('提前携带复核版本时仍进入初次复核', async () => {
+    const value = await fixture()
+    await submitComplete(value)
+
+    await expect(value.call('finish_tender_analysis', { review_revision: value.runtime.revision })).resolves.toEqual({
+      completed: false,
+      review_required: true,
+      revision: value.runtime.revision,
+    })
+    expect(value.runtime.phase).toBe('review_required')
     value.runtime.dispose()
   })
 
