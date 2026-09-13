@@ -60,11 +60,11 @@ export interface TenderLocator {
   readonly chunks: ReadonlyMap<string, TenderChunkLocator>
 }
 
-/** Model-side semantic locator resolved immediately against one tender chunk. */
-export interface TenderSourceHint {
+/** Model-copied original-text anchor resolved immediately against one tender chunk. */
+export interface TenderSourceAnchor {
   readonly file_ref: string
   readonly chunk: string
-  readonly semantic_hint: string
+  readonly anchor_text: string
 }
 
 /** Exact chunk text and canonical reference selected by the Host. */
@@ -146,12 +146,12 @@ const tenderAnalysisCheckpointSchema = z.object({
 }).strict()
 
 const text = z.string().trim().min(1)
-const sourceHintSchema = z.object({
+const sourceAnchorSchema = z.object({
   file_ref: z.string().regex(/^T[1-9]\d*$/u),
   chunk: z.string().regex(/^chunk_[0-9]+$/u),
-  semantic_hint: text,
+  anchor_text: text,
 }).strict()
-const sourcesSchema = z.array(sourceHintSchema).min(1)
+const sourcesSchema = z.array(sourceAnchorSchema).min(1)
 const runtimeRef = (prefix: string) => z.string().regex(new RegExp(`^${prefix}[1-9]\\d*$`, 'u'))
 
 const projectFactSchema = z.object({
@@ -234,32 +234,40 @@ function maskHtmlComments(value: string): string {
   return value.replace(/<!--[\s\S]*?-->/gu, match => match.replace(/[^\r\n]/gu, ' '))
 }
 
-function searchableText(value: string): string {
-  return value.normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[^\p{L}\p{N}]+/gu, '')
+interface NormalizedOffset {
+  start: number
+  end: number
 }
 
-function bigrams(value: string): Set<string> {
-  const values = new Set<string>()
-  for (let index = 0; index < value.length - 1; index++) values.add(value.slice(index, index + 2))
-  return values
+/** Normalize only NFKC and consecutive whitespace while retaining original offsets. */
+function normalizeAnchorText(value: string): { text: string; offsets: NormalizedOffset[] } {
+  const text: string[] = []
+  const offsets: NormalizedOffset[] = []
+  let offset = 0
+  for (const character of value) {
+    const start = offset
+    offset += character.length
+    for (const normalized of character.normalize('NFKC')) {
+      if (/\s/u.test(normalized)) {
+        const previous = offsets.at(-1)
+        if (text.at(-1) === ' ' && previous !== undefined) previous.end = offset
+        else {
+          text.push(' ')
+          offsets.push({ start, end: offset })
+        }
+        continue
+      }
+      text.push(normalized)
+      for (let index = 0; index < normalized.length; index++) offsets.push({ start, end: offset })
+    }
+  }
+  return { text: text.join(''), offsets }
 }
 
-interface QuoteCandidate {
-  readonly quote: string
-  readonly offset: number
-  readonly searchable: string
-}
-
-function quoteCandidates(content: string): QuoteCandidate[] {
-  const visible = maskHtmlComments(content)
-  return [...visible.matchAll(/[^\r\n]+/gu)].flatMap((match) => {
-    if (match[0].trim().length === 0) return []
-    const index = match.index
-    const sourceLine = content.slice(index, index + match[0].length)
-    const quote = sourceLine.trim()
-    if (quote.length === 0) return []
-    return [{ quote, offset: index + sourceLine.indexOf(quote), searchable: searchableText(quote) }]
-  }).filter(candidate => candidate.searchable.length > 0)
+class TenderSourceAnchorError extends Error {
+  constructor(readonly issue: StageValidationIssue) {
+    super(issue.message)
+  }
 }
 
 function lineAt(value: string, offset: number): number {
@@ -269,16 +277,16 @@ function lineAt(value: string, offset: number): number {
 }
 
 /**
- * Resolve one semantic hint to an exact visible line in its tender chunk.
+ * Resolve one copied original-text anchor to its exact chunk position.
  * @param workspace Workspace that owns the tender corpus.
  * @param locators Host-built tender identity table for this S2 execution.
- * @param source Model-provided short file reference, chunk id, and semantic location hint.
+ * @param source Model-provided short file reference, chunk id, and copied original-text anchor.
  * @returns Original chunk text and its canonical inclusive one-based line reference.
  */
-export async function resolveTenderSourceHint(
+export async function resolveTenderSourceAnchor(
   workspace: BidWorkspace,
   locators: readonly TenderLocator[],
-  source: TenderSourceHint,
+  source: TenderSourceAnchor,
 ): Promise<ResolvedTenderSource> {
   const locator = locators.find(value => value.file_ref === source.file_ref)
   if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${source.file_ref}。`])
@@ -286,31 +294,33 @@ export async function resolveTenderSourceHint(
   if (chunk === undefined) throw new ToolArgsError([`chunk: ${source.chunk} 不属于 ${source.file_ref}。`])
   await assertNoLinkedPath(workspace.root, chunk.absolutePath)
   const content = await readFile(chunk.absolutePath, 'utf8')
-  const hint = searchableText(source.semantic_hint)
-  if (hint.length < 4) throw new ToolArgsError(['semantic_hint: 请提供至少四个字母或数字的语义线索。'])
-  const hintBigrams = bigrams(hint)
-  const minimumCommon = Math.max(2, Math.ceil(hintBigrams.size * 0.35))
-  const candidates = quoteCandidates(content).map((candidate) => {
-    const candidateBigrams = bigrams(candidate.searchable)
-    const common = [...hintBigrams].filter(value => candidateBigrams.has(value)).length
-    return { ...candidate, exact: candidate.searchable.includes(hint), common }
-  }).filter(candidate => candidate.exact || candidate.common >= minimumCommon)
-    .sort((left, right) => Number(right.exact) - Number(left.exact) || right.common - left.common)
-  const selected = candidates[0]
-  if (selected === undefined) {
-    throw new ToolArgsError([`semantic_hint: 无法在 ${source.file_ref}/${source.chunk} 正文中定位相关原文。`])
-  }
-  const tied = candidates[1]
-  if (tied !== undefined && tied.exact === selected.exact && tied.common === selected.common) {
-    throw new ToolArgsError([`semantic_hint: 在 ${source.file_ref}/${source.chunk} 正文中定位不唯一；请补充区分该位置的语义线索。`])
-  }
-  const last = selected.offset + selected.quote.length - 1
-  const lineStart = lineAt(content, selected.offset)
-  const lineEnd = lineAt(content, last)
+  const anchor = normalizeAnchorText(source.anchor_text).text
+  if (anchor.length === 0) throw new ToolArgsError(['anchor_text: 必须逐字复制非空原文。'])
+  const normalized = normalizeAnchorText(maskHtmlComments(content))
+  const matches: number[] = []
+  for (let index = normalized.text.indexOf(anchor); index >= 0; index = normalized.text.indexOf(anchor, index + 1)) matches.push(index)
+  if (matches.length === 0) throw new TenderSourceAnchorError({
+    code: 'TENDER_ANALYSIS_ANCHOR_NOT_FOUND', path: 'sources.anchor_text',
+    message: `anchor_text: 无法在 ${source.file_ref}/${source.chunk} 正文中定位；请重新读取该 chunk 后逐字复制真实原文。`,
+  })
+  if (matches.length > 1) throw new TenderSourceAnchorError({
+    code: 'TENDER_ANALYSIS_ANCHOR_AMBIGUOUS', path: 'sources.anchor_text',
+    message: `anchor_text: 在 ${source.file_ref}/${source.chunk} 正文中出现 ${String(matches.length)} 次；请提供更长、更有区分度的真实原文。`,
+  })
+  const matchedOffset = matches[0]
+  if (matchedOffset === undefined) throw new Error('tender-analysis-source-line-resolution-invalid')
+  const startOffset = normalized.offsets[matchedOffset]
+  const endOffset = normalized.offsets[matchedOffset + anchor.length - 1]
+  if (startOffset === undefined || endOffset === undefined) throw new Error('tender-analysis-source-line-resolution-invalid')
+  const start = startOffset.start
+  const end = endOffset.end
+  const quote = content.slice(start, end)
+  const lineStart = lineAt(content, start)
+  const lineEnd = lineAt(content, end - 1)
   const lineCount = content.split('\n').length
   if (lineStart < 1 || lineEnd < lineStart || lineEnd > lineCount) throw new Error('tender-analysis-source-line-resolution-invalid')
   return {
-    quote: selected.quote,
+    quote,
     source_ref: { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: lineStart, line_end: lineEnd },
   }
 }
@@ -446,14 +456,19 @@ export async function attachTenderAnalysisSubmissionRuntime(
     await run.commits.writeJson(checkpointPath, value)
   }
 
-  const sources = async (values: readonly TenderSourceHint[]): Promise<{
+  const sources = async (values: readonly TenderSourceAnchor[]): Promise<{
     quotes: string[]
     source_refs: TenderSourceRef[]
-  }> => {
-    const resolved = await Promise.all(values.map(value => resolveTenderSourceHint(workspace, locators, value)))
-    return {
-      quotes: [...new Set(resolved.map(value => value.quote))],
-      source_refs: uniqueSourceRefs(resolved.map(value => value.source_ref)),
+  } | { issue: StageValidationIssue }> => {
+    try {
+      const resolved = await Promise.all(values.map(value => resolveTenderSourceAnchor(workspace, locators, value)))
+      return {
+        quotes: [...new Set(resolved.map(value => value.quote))],
+        source_refs: uniqueSourceRefs(resolved.map(value => value.source_ref)),
+      }
+    } catch (error: unknown) {
+      if (error instanceof TenderSourceAnchorError) return { issue: error.issue }
+      throw error
     }
   }
   const recover = <T extends object>(exec: ToolRunContext, issue: StageValidationIssue | readonly StageValidationIssue[], result: T): T & {
@@ -532,6 +547,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       if (issue !== undefined) return recover(exec, issue, { recorded: false, rejected: true })
       const input = toolArgs(args, projectFactSchema)
       const resolved = await sources(input.sources)
+      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
       if (isSingleField(input.field)) {
         singles.set(input.field, { value: input.value, source_refs: resolved.source_refs })
       } else {
@@ -562,6 +578,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const current = requirements.get(ref)
       if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Requirement', ref, requirements)
       const resolved = await sources(input.sources)
+      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
       requirements.set(ref, {
         id: current?.id ?? `REQ-${String(requirements.size + 1).padStart(3, '0')}`,
         category: input.category,
@@ -587,6 +604,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const current = scoring.get(ref)
       if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Scoring', ref, scoring)
       const resolved = await sources(input.sources)
+      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
       scoring.set(ref, {
         id: current?.id ?? `SC-${String(scoring.size + 1).padStart(3, '0')}`,
         group: input.group,
@@ -615,6 +633,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const current = compliance.get(ref)
       if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Compliance', ref, compliance)
       const resolved = await sources(input.sources)
+      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
       compliance.set(ref, {
         id: current?.id ?? `COM-${String(compliance.size + 1).padStart(3, '0')}`,
         type: input.type,

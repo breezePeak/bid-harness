@@ -53,7 +53,7 @@ interface AnalysisManifestFile {
 interface AnalysisSource {
   file_ref: string
   chunk: string
-  semantic_hint: string
+  anchor_text: string
 }
 
 /** Deterministic model that drives S2 through the real Agent tool loop. */
@@ -115,9 +115,9 @@ class BidAnalysisAdapter extends LlmAdapter {
     if (chunk === undefined) throw new Error('Tender file has no chunk entry')
     const content = await readFile(join(projectRoot, tender.chunksPath, chunk.path), 'utf8')
     const lines = content.replace(/<!--[\s\S]*?-->/gu, '').split('\n')
-    const semanticHint = lines.find(line => line.trim().length > 0)?.trim()
-    if (semanticHint === undefined) throw new Error('Tender chunk has no source text')
-    this.source = { file_ref: `T${String(tenderIndex + 1)}`, chunk: chunk.id, semantic_hint: semanticHint }
+    const anchorText = lines.find(line => line.trim().length > 0)?.trim()
+    if (anchorText === undefined) throw new Error('Tender chunk has no source text')
+    this.source = { file_ref: `T${String(tenderIndex + 1)}`, chunk: chunk.id, anchor_text: anchorText }
     return this.source
   }
 

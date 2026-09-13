@@ -88,7 +88,8 @@ describe('tender-analysis Agent executor', () => {
     expect(initial.content[0]?.text).toContain('T1:')
     expect(initial.content[0]?.text).toContain('submit_project_fact')
     expect(initial.content[0]?.text).toContain('不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref')
-    expect(initial.content[0]?.text).toContain('semantic_hint')
+    expect(initial.content[0]?.text).toContain('anchor_text')
+    expect(initial.content[0]?.text).toContain('逐字复制一段连续原文')
     expect(initial.content[0]?.text).toContain('评分响应点')
     expect(initial.content[0]?.text).toContain('评分大项')
     expect(initial.content[0]?.text).toContain('不得另建评分项')
@@ -160,7 +161,7 @@ describe('tender-analysis Agent executor', () => {
           signal: new AbortController().signal,
           concludeTurn: idle === 2 ? rejectedTurn : vi.fn(),
         } as unknown as ToolRunContext
-        const source = (semantic_hint: string) => [{ file_ref: 'T1', chunk: 'chunk_0001', semantic_hint }]
+        const source = (anchor_text: string) => [{ file_ref: 'T1', chunk: 'chunk_0001', anchor_text }]
         if (idle === 2) {
           unknownRefAttempts++
           await expect(definitions.get('submit_requirement')?.execute({
@@ -230,7 +231,7 @@ describe('tender-analysis Agent executor', () => {
       if (idle === 2) {
         await definitions.get('submit_project_fact')?.execute({
           field: 'project_name', value: '审计平台',
-          sources: [{ file_ref: 'T1', chunk: 'chunk_0001', semantic_hint: '项目名称审计平台' }],
+          sources: [{ file_ref: 'T1', chunk: 'chunk_0001', anchor_text: '项目名称：审计平台。' }],
         }, exec)
         const staged = await definitions.get('finish_tender_analysis')?.execute({}, exec) as { revision?: number }
         reviewRevision = staged.revision

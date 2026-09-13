@@ -13,7 +13,7 @@ import {
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
   parseTenderScoringArtifact,
-  resolveTenderSourceHint,
+  resolveTenderSourceAnchor,
   validateTenderAnalysis,
   type BidRunContext,
 } from '@deepseek-ai/dsh-bid'
@@ -77,10 +77,10 @@ async function fixture(_durable = false): Promise<Fixture> {
   return { workspace, agent, tools: definitions, runtime, concludeTurn, call, run }
 }
 
-function source(semantic_hint: string, chunk?: string, file_ref = 'T1') {
-  const resolvedChunk = chunk ?? (semantic_hint === PROJECT_QUOTE ? 'chunk_0001'
-    : semantic_hint === REQUIREMENT_QUOTE || semantic_hint === COMPLIANCE_QUOTE ? 'chunk_0002' : 'chunk_0003')
-  return { file_ref, chunk: resolvedChunk, semantic_hint }
+function source(anchor_text: string, chunk?: string, file_ref = 'T1') {
+  const resolvedChunk = chunk ?? (anchor_text === PROJECT_QUOTE ? 'chunk_0001'
+    : anchor_text === REQUIREMENT_QUOTE || anchor_text === COMPLIANCE_QUOTE ? 'chunk_0002' : 'chunk_0003')
+  return { file_ref, chunk: resolvedChunk, anchor_text }
 }
 
 async function submitComplete(value: Fixture): Promise<void> {
@@ -148,14 +148,14 @@ describe('tender-analysis staged submission runtime', () => {
     restored.dispose()
   })
 
-  it('builds T1/T2 from successful tenders and resolves a semantic hint to exact chunk text and lines', async () => {
+  it('builds T1/T2 from successful tenders and resolves a unique anchor to exact chunk text and lines', async () => {
     const value = await fixture()
     expect(value.runtime.locators.map(locator => ({ ref: locator.file_ref, name: locator.name }))).toEqual([
       { ref: 'T1', name: 'main-tender.md' },
       { ref: 'T2', name: 'second-tender.md' },
     ])
     const locator = value.runtime.locators[0]!
-    const resolved = await resolveTenderSourceHint(value.workspace, value.runtime.locators, source('统一认证与审计日志', 'chunk_0002'))
+    const resolved = await resolveTenderSourceAnchor(value.workspace, value.runtime.locators, source(REQUIREMENT_QUOTE, 'chunk_0002'))
     const raw = await readFile(locator.chunks.get('chunk_0002')!.absolutePath, 'utf8')
     const start = raw.indexOf(REQUIREMENT_QUOTE)
     const expectedLine = raw.slice(0, start).split('\n').length
@@ -171,19 +171,61 @@ describe('tender-analysis staged submission runtime', () => {
     value.runtime.dispose()
   })
 
-  it('rejects unknown file refs, wrong chunks, weak hints, and ambiguous semantic locations immediately', async () => {
+  it('rejects unknown file refs, wrong chunks, absent anchors, and ambiguous anchors immediately', async () => {
     const value = await fixture()
-    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0001', 'T9')))
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0001', 'T9')))
       .rejects.toThrow('未知 tender 引用')
     expect(value.runtime.locators[1]?.chunks.has('chunk_0004')).toBe(true)
-    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0004')))
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, source(PROJECT_QUOTE, 'chunk_0004')))
       .rejects.toThrow('不属于 T1')
-    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('无关的虚构语义位置', 'chunk_0001')))
-      .rejects.toThrow('无法在 T1/chunk_0001 正文中定位')
-    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('main tender md', 'chunk_0001')))
-      .rejects.toThrow('无法在 T1/chunk_0001 正文中定位')
-    await expect(resolveTenderSourceHint(value.workspace, value.runtime.locators, source('重复短语', 'chunk_0003')))
-      .rejects.toThrow('定位不唯一')
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, source('无关的虚构原文', 'chunk_0001')))
+      .rejects.toThrow('重新读取该 chunk')
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, source('重复短语。', 'chunk_0003')))
+      .rejects.toThrow('更长、更有区分度')
+    value.runtime.dispose()
+  })
+
+  it('normalizes only NFKC and whitespace while returning the original quote and spanning lines', async () => {
+    const value = await fixture()
+    const locator = value.runtime.locators[0]!
+    const chunk = locator.chunks.get('chunk_0001')!
+    await writeFile(chunk.absolutePath, '第一行：全角ＡＢＣ。\n第二行\t连续 空白。')
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
+      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: '全角ABC。 第二行 连续 空白。',
+    })).resolves.toEqual({
+      quote: '全角ＡＢＣ。\n第二行\t连续 空白。',
+      source_ref: { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: 1, line_end: 2 },
+    })
+    value.runtime.dispose()
+  })
+
+  it('returns recoverable anchor issues, concludes the turn, and accepts a longer replacement anchor', async () => {
+    const value = await fixture()
+    const requirement = {
+      action: 'create' as const, category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE, mandatory: true,
+    }
+    await expect(value.call('submit_requirement', { ...requirement, sources: [source('并不存在的原文', 'chunk_0002')] }))
+      .resolves.toMatchObject({ recorded: false, rejected: true, issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_ANCHOR_NOT_FOUND' })] })
+    await expect(value.call('submit_requirement', { ...requirement, sources: [source('重复短语。', 'chunk_0003')] }))
+      .resolves.toMatchObject({ recorded: false, rejected: true, issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_ANCHOR_AMBIGUOUS' })] })
+    expect(value.concludeTurn).toHaveBeenCalledTimes(2)
+    await expect(value.call('submit_requirement', {
+      ...requirement, sources: [source('重复短语。\n\n重复短语。', 'chunk_0003')],
+    })).resolves.toMatchObject({ recorded: true, requirement_ref: 'R1' })
+    value.runtime.dispose()
+  })
+
+  it('applies the same anchor recovery to Requirement, Scoring, and Compliance submissions', async () => {
+    const value = await fixture()
+    const invalid = [source('并不存在的原文', 'chunk_0002')]
+    for (const [name, args] of [
+      ['submit_requirement', { action: 'create', category: '功能要求', normalized_requirement: REQUIREMENT_QUOTE, mandatory: true, sources: invalid }],
+      ['submit_scoring_item', { action: 'create', group: '技术方案', title: '总体技术方案', criterion: SCORING_QUOTE, score: 10, score_range: null, must_answer: true, sources: invalid }],
+      ['submit_compliance_item', { action: 'create', type: '强制要求', normalized_rule: COMPLIANCE_QUOTE, severity: 'mandatory', sources: invalid }],
+    ] as const) await expect(value.call(name, args)).resolves.toMatchObject({
+      recorded: false, rejected: true, issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_ANCHOR_NOT_FOUND' })],
+    })
+    expect(value.concludeTurn).toHaveBeenCalledTimes(3)
     value.runtime.dispose()
   })
 
@@ -239,7 +281,7 @@ describe('tender-analysis staged submission runtime', () => {
     })).rejects.toThrow()
     await expect(value.call('submit_requirement', {
       action: 'create', category: '功能要求', normalized_requirement: '非法', mandatory: true,
-      sources: [{ file_ref: 'T1', chunk: 'chunk_0002', quote: REQUIREMENT_QUOTE }],
+      sources: [{ file_ref: 'T1', chunk: 'chunk_0002', anchor_text: REQUIREMENT_QUOTE, quote: REQUIREMENT_QUOTE, source_ref: {}, line_start: 1, line_end: 1 }],
     })).rejects.toThrow()
     await value.call('submit_project_fact', { field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] })
     await value.call('submit_scoring_item', {

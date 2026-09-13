@@ -190,7 +190,7 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   }
   const chunk = index.chunks[0]?.id
   if (chunk === undefined) throw new Error('S2 integration chunk missing')
-  const source = (semantic_hint: string) => ({ file_ref: 'T1', chunk, semantic_hint })
+  const source = (anchor_text: string) => ({ file_ref: 'T1', chunk, anchor_text })
   const sessionId = SessionId('s2-real-loop')
   const parentScript = [
     toolCall('submit-project', 'submit_project_fact', {

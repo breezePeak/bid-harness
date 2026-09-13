@@ -68,10 +68,10 @@ export function renderTenderAnalysisTask(
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
     '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
     '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 action=replace。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
-    '引用只提交 sources=[{file_ref,chunk,semantic_hint}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id，semantic_hint 用简短关键词或描述指出该 chunk 中的相关正文位置，无需逐字复制原文。一个 source 只定位一行相关正文；跨行或跨 chunk 内容提交多个 source。',
-    '不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref、schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。Host 从真实 chunk 行直接截取 quote，生成 raw_text 和 source_refs，并固定评分 parent=null；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
+    '引用只提交 sources=[{file_ref,chunk,anchor_text}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id。anchor_text 必须从你已经读取到的指定 chunk 正文中逐字复制一段连续原文，仅用于定位。不要改写、概括或自行生成。一个 source 只负责一个可确定定位的原文锚点；跨行或跨 chunk 内容提交多个 source。Host 只允许 NFKC 与换行/连续空白归一化后的确定性匹配。',
+    '不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref、schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。Host 从真实锚点生成 quote、raw_text 和 source_refs，并固定评分 parent=null；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
     'Requirement、Scoring、Compliance 必须显式声明 action：新增使用 action=create，且不得携带 replace_ref；修改使用 action=replace，且必须携带当前 staged 中真实存在的 replace_ref。runtime ref 只能来自 Host 工具返回值或 Host 提供的 staged snapshot；禁止根据数量、revision、排序、历史 Run 或记忆猜测 R*、S*、C*。',
-    '工具返回 INVALID_ARGS 或语义位置不唯一时只修正当前条目的 chunk 或 semantic_hint。已记录条目需要修改时，使用 action=replace 和真实 runtime ref；覆盖不会改变正式 ID。',
+    'anchor_text 未命中时重新读取该 chunk 后逐字复制真实原文；出现多次时提交更长、更有区分度的 anchor_text。Host 会结束当前内部 Turn 并在 Repair 中保留 staged 状态。已记录条目需要修改时，使用 action=replace 和真实 runtime ref；覆盖不会改变正式 ID。',
     '所有区域分析完成后调用 finish_tender_analysis({})。确定性校验通过后，Host 会在当前轮结束后强制发起一次全量语义复核；初次 finish 不会写入正式 Artifact。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
   ].join('\n')
