@@ -12,6 +12,7 @@ import {
   buildBidStageTask,
   buildEvidenceMappingAcceptanceReport,
   executeEvidenceMapping,
+  createTestBidRunContext,
   within,
 } from '@deepseek-ai/dsh-bid'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
@@ -182,7 +183,7 @@ export async function replayBidS4(options: ReplayBidS4Options): Promise<string> 
     await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxConcurrency: options.maxConcurrency,
       maxRepairAttempts: options.maxRepairAttempts,
-      signal: AbortSignal.timeout(options.timeoutMs),
+      run: createTestBidRunContext({ signal: AbortSignal.timeout(options.timeoutMs) }),
     })
     const report = await buildEvidenceMappingAcceptanceReport(workspace, options.sections)
     const reportPath = join(options.output, 's4-acceptance-report.json')

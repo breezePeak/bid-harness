@@ -59,6 +59,8 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
  * @param validate 验证候选引用；可纠正错误由工具返回给原 Writer。
  * @param signal 章节所属阶段的取消信号。
  * @param existingId 已完成章节的原 Writer 身份；只恢复原会话，不能创建替代会话。
+ * @param chapterTitle Writer 协议中展示的章节标题。
+ * @param webAccess 是否禁止此 Writer 使用 Web 工具。
  * @returns 由调用方 finally 释放的章节 Writer。
  */
 export function createChapterWriterChild(
@@ -73,8 +75,15 @@ export function createChapterWriterChild(
   let started = existingId !== undefined
   let runtime: ChapterProtocol<unknown> | undefined
   let eventStart = 0
+  let webGuard = () => {}
   const install = (agent: Agent) => {
     runtime?.dispose()
+    webGuard()
+    const tools = agent.ctx.get('tools')
+    if (tools === undefined) throw new Error('S5 Writer requires tools service')
+    webGuard = webAccess === 'disabled'
+      ? tools.guard(exec => exec.name === 'web_search' || exec.name === 'web_fetch' ? 'BID_WEB_ACCESS_DISABLED' : undefined)
+      : () => {}
     child = agent
     eventStart = agent.session.events.length
     if (chapterTitle) {
@@ -150,6 +159,7 @@ export function createChapterWriterChild(
     },
     async dispose() {
       try { await subagents.drainContinuableChildren(parent, [id]) } finally {
+        webGuard()
         runtime?.dispose()
         liftSetup()
       }

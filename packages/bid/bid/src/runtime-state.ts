@@ -2,6 +2,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { z } from 'zod'
 import {
   BID_STAGES,
+  BID_WORK_KINDS,
   BID_WORKFLOW_GATES,
   STAGE_RUN_STATUSES,
   type BidStage,
@@ -52,6 +53,14 @@ export const bidRunSchema = z.object({
   epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   baseProjectRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   controlRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  work: z.object({
+    kind: z.enum(BID_WORK_KINDS),
+    workId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+    stage: z.enum(BID_STAGES),
+    requestRef: z.string().min(1),
+    requestSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    inputFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  }).strict(),
   resumeOf: z.object({
     runId: z.string().min(1),
     cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
@@ -232,6 +241,10 @@ export function controlStateFromLegacyRuntime(runtime: BidRuntimeState, _revisio
     stage: runtime.stage,
     epoch: 0,
     baseProjectRevision: 0,
+    work: {
+      kind: 'stage_execution', workId: `legacy-${runtime.stage}`, stage: runtime.stage,
+      requestRef: `requests/legacy-${runtime.stage}.json`, requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64),
+    },
     status,
     ...(cause === undefined ? {} : { cause }),
     ...(failure === undefined ? {} : { error: failure }),
@@ -332,6 +345,10 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
         stage: event.data.stage,
         epoch: 0,
         baseProjectRevision: 0,
+        work: {
+          kind: 'stage_execution', workId: `legacy-event-${event.data.stage}`, stage: event.data.stage,
+          requestRef: `requests/legacy-event-${event.data.stage}.json`, requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64),
+        },
         status: 'running',
         startedAt: 0,
         updatedAt: 0,
@@ -352,6 +369,10 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
         stage: event.data.stage,
         epoch: 0,
         baseProjectRevision: 0,
+        work: {
+          kind: 'stage_execution', workId: `legacy-failure-${event.data.stage}`, stage: event.data.stage,
+          requestRef: `requests/legacy-failure-${event.data.stage}.json`, requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64),
+        },
         status: 'running' as const,
         startedAt: 0,
         updatedAt: 0,

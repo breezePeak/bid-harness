@@ -20,6 +20,7 @@ interface TestOperation {
   readonly key: string
   readonly ready: boolean
   controller: AbortController
+  readonly runs: { retire(): Promise<void> }
   readonly done: Promise<void>
   readonly settle: () => void
   reservedForReset: boolean
@@ -63,8 +64,9 @@ describe('Bid Host stage reset', () => {
     const operation: TestOperation = {
       session, workspace, key, ready: true,
       controller: new AbortController(),
+      runs: { retire: vi.fn(async () => {}) },
       done: prior.promise,
-      settle: () => prior.resolve(undefined),
+      settle: () => { prior.resolve(undefined) },
       reservedForReset: false,
     }
     const cancel = vi.fn()
@@ -98,7 +100,7 @@ describe('Bid Host stage reset', () => {
     )).rejects.toMatchObject({ code: 'BID_STAGE_RESET_NOT_ALLOWED' })
 
     const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, 'evidence_mapping')
-    await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }))
+    await vi.waitFor(() => { expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
     expect(operation.controller.signal.aborted).toBe(true)
     expect(drive).not.toHaveBeenCalled()
     await expect(BidHostRuntime.prototype.resetStage.call(
@@ -137,10 +139,11 @@ describe('Bid Host stage reset', () => {
     await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
     const stageIndex = BID_STAGES.indexOf(stage)
     const clear = vi.fn()
+    const cancel = vi.fn()
     const agent = {
       id: session.id,
       session,
-      cancel: vi.fn(),
+      cancel,
       whenIdle: vi.fn(async () => {}),
       inbox: { clear },
     } as unknown as Agent
@@ -170,8 +173,8 @@ describe('Bid Host stage reset', () => {
       data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice' } },
       sourceEventSeqs: messages.slice(stageIndex).map(message => message.seq),
     })
-    expect(clear).toHaveBeenCalledOnce()
-    expect(agent.cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' })
+    expect(clear).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' })
     expect(drive).not.toHaveBeenCalled()
   })
 })

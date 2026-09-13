@@ -291,7 +291,7 @@ async function inspectBidStageValue(
     }
   }
   const draft = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
-    .then(async outline => outline === null ? null : getOrCreateOutlineDraft(workspace, false))
+    .then(async outline => outline === null ? null : getOrCreateOutlineDraft(workspace))
   const response_points = await readOptionalStageJson(workspace, 'analysis/scoring-response-points.json', parseScoringResponsePointCatalog)
   const evidence = runtime.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) : null
@@ -460,7 +460,10 @@ export function installStageInteractionTools(
       if (stage === undefined) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-      const available = suspended !== undefined ? [names[0], names[8]]
+      const available = suspended !== undefined
+        ? suspended.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
+          ? [names[0], names[4], names[5], names[8]]
+          : [names[0], names[8]]
         : runtime.status !== 'waiting_user'
           ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6, 8) : [])]
             : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]

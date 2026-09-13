@@ -1,11 +1,13 @@
 /** Workspace 级 Bid 控制状态的持久化；Host 项目锁串行化所有写入。 */
 
 import { readFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import type { BidControlState, BidRuntimeState } from './control-plane-contract.ts'
 import { bidControlStateSchema, bidRuntimeSchema, bidRuntimeView, controlStateFromLegacyRuntime } from './runtime-state.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
 
 const projectStateV1Schema = z.object({
   schema_version: z.literal(1),
@@ -15,7 +17,7 @@ const projectStateV1Schema = z.object({
 }).strict()
 
 const projectStateSchema = z.object({
-  schema_version: z.literal(2),
+  schema_version: z.literal(3),
   workflow: bidControlStateSchema.shape.workflow,
   run: bidControlStateSchema.shape.run,
   last_run: bidControlStateSchema.shape.lastRun,
@@ -42,6 +44,7 @@ function exposeRuntime(state: z.infer<typeof projectStateSchema>): BidProjectSta
  * @returns 文件中的项目状态和修订号。
  */
 export async function readBidProjectState(workspace: ProjectWorkspace): Promise<BidProjectState | undefined> {
+  await reconcileBidPublications(workspace.root, dirname(workspace.projectStatePath))
   await assertNoLinkedPath(workspace.root, workspace.projectStatePath)
   let raw: string
   try {
@@ -54,16 +57,8 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
     const value: unknown = JSON.parse(raw)
     const current = projectStateSchema.safeParse(value)
     if (current.success) return exposeRuntime(current.data)
-    const legacy = projectStateV1Schema.parse(value)
-    const control = controlStateFromLegacyRuntime(legacy.runtime, legacy.revision)
-    return exposeRuntime({
-      schema_version: 2,
-      workflow: control.workflow,
-      run: control.run,
-      last_run: control.lastRun,
-      revision: legacy.revision,
-      updated_at: legacy.updated_at,
-    })
+    projectStateV1Schema.parse(value)
+    throw new Error('bid-project-state-version-unsupported')
   } catch (cause: unknown) {
     throw new Error(`bid-invalid-project-state: ${workspace.projectStatePath}`, { cause })
   }
@@ -77,7 +72,7 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
 export async function writeBidProjectState(workspace: ProjectWorkspace, state: BidProjectState): Promise<void> {
   await assertNoLinkedPath(workspace.root, workspace.projectStatePath)
   const validated = projectStateSchema.parse({
-    schema_version: state.schema_version,
+    schema_version: 3,
     workflow: state.workflow,
     run: state.run,
     last_run: state.last_run,
@@ -90,7 +85,7 @@ export async function writeBidProjectState(workspace: ProjectWorkspace, state: B
 /**
  * 在 Host 已持有的项目锁内保存 runtime，成功写入后修订号递增一次。
  * @param workspace 项目所在的 Workspace 和状态文件路径。
- * @param runtime 当前操作结束或启动恢复后的项目控制状态。
+ * @param control 当前操作结束或启动恢复后的项目控制状态。
  * @returns 已提交的项目状态，首次修订号为 1。
  */
 export async function checkpointBidProjectState(
@@ -99,8 +94,10 @@ export async function checkpointBidProjectState(
 ): Promise<BidProjectState> {
   const previous = await readBidProjectState(workspace)
   const normalized = 'workflow' in control ? control : controlStateFromLegacyRuntime(control, previous?.revision ?? 0)
+  if (previous !== undefined && JSON.stringify({ workflow: previous.workflow, run: previous.run, lastRun: previous.last_run })
+    === JSON.stringify(normalized)) return previous
   const state = exposeRuntime({
-    schema_version: 2,
+    schema_version: 3,
     workflow: normalized.workflow,
     run: normalized.run,
     last_run: normalized.lastRun,
@@ -108,5 +105,44 @@ export async function checkpointBidProjectState(
     updated_at: Date.now(),
   })
   await writeBidProjectState(workspace, state)
+  return state
+}
+
+/**
+ * 将短时 canonical mutation 与项目修订号作为一个 publication 提交。
+ * @param workspace 项目所在的 Workspace 和状态文件路径。
+ * @param expectedRevision 调用方读取并持有锁时观察到的修订号。
+ * @param control mutation 完成后的项目控制状态。
+ * @param mutate 在同一 publication 内写入 canonical artifact 的回调。
+ * @returns 已提交且修订号递增一次的项目状态。
+ */
+export async function commitBidProjectMutation(
+  workspace: ProjectWorkspace,
+  expectedRevision: number,
+  control: BidControlState | BidRuntimeState,
+  mutate: (lease: BidPublicationLease) => Promise<void>,
+): Promise<BidProjectState> {
+  const previous = await readBidProjectState(workspace)
+  if ((previous?.revision ?? 0) !== expectedRevision) throw new Error('BID_PROJECT_REVISION_CONFLICT')
+  const normalized = 'workflow' in control ? control : controlStateFromLegacyRuntime(control, expectedRevision)
+  const state = exposeRuntime({
+    schema_version: 3,
+    workflow: normalized.workflow,
+    run: normalized.run,
+    last_run: normalized.lastRun,
+    revision: expectedRevision + 1,
+    updated_at: Date.now(),
+  })
+  await publishBidBatch(workspace.root, dirname(workspace.projectStatePath), async (lease) => {
+    await mutate(lease)
+    await lease.writeJson(workspace.projectStatePath, {
+      schema_version: 3,
+      workflow: state.workflow,
+      run: state.run,
+      last_run: state.last_run,
+      revision: state.revision,
+      updated_at: state.updated_at,
+    })
+  })
   return state
 }

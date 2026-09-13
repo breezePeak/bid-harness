@@ -74,6 +74,11 @@ export function installMainAgentInterleave(
   let disposed = false
 
   const owns = (message: UserMessage): boolean => owned.has(String(message.id)) || options.ownsMessage?.(message) === true
+  const discardOwnedInbox = (): void => {
+    for (const message of [...agent.inbox.nextStep, ...agent.inbox.nextTurn]) {
+      if (owned.has(String(message.id))) agent.inbox.remove(message.id)
+    }
+  }
   const setMode = (next: 'internal' | 'user'): void => {
     if (mode === next) return
     if (next === 'user') {
@@ -145,14 +150,11 @@ export function installMainAgentInterleave(
 
   return {
     own(message) { owned.add(String(message.id)) },
-    discardOwnedInbox() {
-      for (const message of [...agent.inbox.nextStep, ...agent.inbox.nextTurn]) {
-        if (owned.has(String(message.id))) agent.inbox.remove(message.id)
-      }
-    },
+    discardOwnedInbox,
     dispose() {
       if (disposed) return
       disposed = true
+      discardOwnedInbox()
       publicRestriction?.()
       publicRestriction = undefined
       options.setPrivateToolsEnabled?.(true)
@@ -197,7 +199,7 @@ export async function runMainAgentProtocol<T>(
   const unbindMainAgent = run?.bindMainAgent({
     cancel: () => { agent.cancel({ kind: 'hook', reason: 'bid-run-suspended' }, { keepInbox: true }) },
     whenIdle: () => agent.whenIdle(),
-    discardOwnedInbox: () => interleave.discardOwnedInbox(),
+    discardOwnedInbox: () => { interleave.discardOwnedInbox() },
   })
   const settled = Promise.withResolvers<T>()
   let finished = false

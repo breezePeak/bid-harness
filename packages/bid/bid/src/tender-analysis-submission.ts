@@ -364,6 +364,7 @@ function artifactsList() {
  * @param agent Live Bid Agent allowed to call the tools.
  * @param workspace Workspace receiving the final Host-authored Artifacts.
  * @param manifest Manifest frozen for this execution's tender identities and coverage.
+ * @param run Run authority that owns tools, cancellation, and publication.
  * @returns Runtime status and a disposer for every registration.
  */
 export async function attachTenderAnalysisSubmissionRuntime(
@@ -649,17 +650,17 @@ export async function attachTenderAnalysisSubmissionRuntime(
         return { completed: false, issues: lastIssues, revision }
       }
 
-      await run.commits.publish(async lease => {
+      await run.commits.publish(async (lease) => {
         for (const [path, value] of [
-        ['analysis/project.json', project],
-        ['analysis/requirements.json', requirementsArtifact],
-        ['analysis/scoring-origin.json', scoringArtifact],
-        ['analysis/tender-analysis-selection.json', createTenderScoringSelection(scoringArtifact)],
-        ['analysis/compliance.json', complianceArtifact],
+          ['analysis/project.json', project],
+          ['analysis/requirements.json', requirementsArtifact],
+          ['analysis/scoring-origin.json', scoringArtifact],
+          ['analysis/tender-analysis-selection.json', createTenderScoringSelection(scoringArtifact)],
+          ['analysis/compliance.json', complianceArtifact],
         ] as const) {
-        const absolute = within(workspace.projectRoot, path)
-        await assertNoLinkedPath(workspace.root, absolute)
-        await lease.writeJson(absolute, value)
+          const absolute = within(workspace.projectRoot, path)
+          await assertNoLinkedPath(workspace.root, absolute)
+          await lease.writeJson(absolute, value)
         }
       })
       const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifactsList())

@@ -37,6 +37,12 @@ The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-
 
 `registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and Host-configured file limits. S1 through S5 form the linear writing workflow. S6 is an on-demand export action available beside the completed S5 review workbench.
 
+### 执行与恢复所有权
+
+每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。Run 启动后，执行器、Main Agent、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
+
+Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先对 commit intent 前滚或清理未提交批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。
+
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
 S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；引用只提交 `T1` 等短文件引用、`chunk_*` 和语义位置线索，Host 从真实 chunk 正文直接截取 `raw_text`，计算真实文件 ID、路径与行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。

@@ -129,6 +129,7 @@ export const writingPlanSchema = z.object({
 export const writingRequestSchema = z.object({
   schema_version: z.literal(WRITING_PLAN_SCHEMA_VERSION),
   confirmed_outline_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  prompt_event: writingRequirementMessageRefSchema,
 }).strict()
 
 /** Main-Agent-authored S5 initial plan or versioned patch. */

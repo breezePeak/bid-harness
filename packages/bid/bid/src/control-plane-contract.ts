@@ -44,6 +44,8 @@ export type BidRunStatus = 'running' | 'cancelling' | 'suspended' | 'completed'
 export interface BidRunNotice {
   /** Stable deduplication identity for one terminal Run outcome. */
   readonly noticeId: string
+  /** Failed model turn replaced by this safe Run notice, or null outside a model turn. */
+  readonly supersedesTurn: number | null
   /** The exact Run that reached a terminal resumable state. */
   readonly runId: string
   /** Workflow stage whose execution stopped. */
@@ -71,6 +73,29 @@ export interface BidResumePolicy {
   readonly webAccess?: 'inherit' | 'disabled' | undefined
 }
 
+/** Closed set of durable work admitted by the Bid Host. */
+export const BID_WORK_KINDS = [
+  'stage_execution',
+  'file_intake',
+  'evidence_remap',
+  'outline_regeneration',
+  'outline_confirmation',
+  'chapter_revision',
+] as const
+
+/** One resumable unit of work, independent of its individual Run attempts. */
+export type BidWorkKind = typeof BID_WORK_KINDS[number]
+
+/** Durable request and input identity shared by every attempt of one work item. */
+export interface BidWorkDescriptor {
+  readonly kind: BidWorkKind
+  readonly workId: string
+  readonly stage: BidStage
+  readonly requestRef: string
+  readonly requestSha256: string
+  readonly inputFingerprint: string
+}
+
 /** Persisted identity and settlement of one stage execution attempt. */
 export interface BidRunSnapshot {
   readonly runId: string
@@ -79,6 +104,8 @@ export interface BidRunSnapshot {
   readonly baseProjectRevision: number
   /** Revision after this Run's `running` state was durably published. */
   readonly controlRevision?: number | undefined
+  /** Exact durable work this attempt executes or resumes. */
+  readonly work: BidWorkDescriptor
   /** The prior suspended attempt; a resumed Run always receives a fresh identity. */
   readonly resumeOf?: BidRunResumeIdentity | undefined
   readonly resumePolicy?: BidResumePolicy | undefined

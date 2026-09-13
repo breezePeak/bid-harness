@@ -4,13 +4,13 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import {
   BidHostRuntime, BidOrchestrator, BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog,
   EVIDENCE_MAPPING_SCHEMA_VERSION, WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   getOrCreateOutlineDraft, parseEvidenceMapArtifact, parseOutlineArtifact, validateEvidenceMapping,
-  type Config, type OutlineArtifact, type OutlineDraftView,
+  type BidRunContext, type BidStageTask, type Config, type OutlineArtifact, type OutlineDraftView,
 } from '@deepseek-ai/dsh-bid'
 import { executeEvidenceMappingFinalCheck } from '../src/evidence-mapping-executor.ts'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
@@ -65,10 +65,19 @@ async function fixture() {
   session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
   session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
   await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
-  const followup = vi.fn()
-  const agent = { id: session.id, session, followup } as unknown as Agent
+  const followup = vi.fn((message: UserMessage) => {
+    session.append('user/message', message, { surfaceOp: 'append' })
+  })
+  const runtimeCtx = {
+    on: ctx.on.bind(ctx),
+    get: (name: string) => name === 'sessions' ? ctx.sessions : undefined,
+    agents: { get: () => agent, list: () => [agent] },
+    sessions: ctx.sessions,
+    subagents: { drainContinuableDescendants: async () => {} },
+  }
+  const agent = { id: session.id, session, followup, ctx: runtimeCtx } as unknown as Agent
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-    ctx: { agents: { get: () => agent, list: () => [agent] }, sessions: { flush: async () => {}, list: () => [session] } },
+    ctx: runtimeCtx,
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096, docxTemplateMaxBytes: 300 * 1024 * 1024,
       modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1,
       chapterWritingCompletionRepairRounds: 1,
@@ -135,9 +144,19 @@ describe('S4 Draft 最终确认', () => {
       const writingRequest = JSON.parse(await f.read('chapters/writing-request.json')) as {
         schema_version: number
         confirmed_outline_sha256: string
+        prompt_event: { session_id: string; message_id: string; seq: number }
       }
       expect(writingRequest.schema_version).toBe(3)
       expect(writingRequest.confirmed_outline_sha256).toMatch(/^[a-f0-9]{64}$/u)
+      await writeFile(join(f.workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify({
+        ...writingRequest, prompt_event: { ...writingRequest.prompt_event, session_id: 'stale-session' },
+      }))
+      f.followup.mockClear()
+      await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
+      expect(f.followup).toHaveBeenCalledOnce()
+      expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
+        prompt_event: { session_id: String(f.session.id) },
+      })
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
       const s5Context = JSON.stringify(f.session.deriveMessages())
       expect(s5Context).not.toContain('S4 旧资料与错误 Section-Z')
@@ -175,7 +194,7 @@ describe('S4 Draft 最终确认', () => {
       const draft = await getOrCreateOutlineDraft(f.workspace)
       const confirmed = await f.host.confirmOutline(f.session, identity(draft))
       if (!confirmed.ok) throw new Error(JSON.stringify(confirmed.error))
-      const execute = vi.fn(async () => [])
+      const execute = vi.fn(async (_task: BidStageTask, _run: BidRunContext) => [])
       const host = f.host as unknown as {
         automaticOrchestrator: typeof f.host['automaticOrchestrator']
       }
@@ -201,11 +220,13 @@ describe('S4 Draft 最终确认', () => {
           { section_id: 'SEC-2', task: '说明项目阶段2的交付安排', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
         ],
       })
-      expect(execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'chapter_writing' }))
-      expect(f.session.events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ type: 'bid.user_confirmation.received', data: { stage: 'chapter_writing', confirmed: true } }),
-        expect.objectContaining({ type: 'bid.stage.started', data: { stage: 'chapter_writing', status: 'running' } }),
-      ]))
+      const execution = execute.mock.calls[0]
+      expect(execution?.[0].stage).toBe('chapter_writing')
+      expect(execution?.[1].work).toMatchObject({ kind: 'stage_execution', stage: 'chapter_writing' })
+      expect(f.session.events.some(event => event.type === 'bid.user_confirmation.received'
+        && event.data.stage === 'chapter_writing' && event.data.confirmed)).toBe(true)
+      expect(f.session.events.some(event => event.type === 'bid.run.started'
+        && event.data.run.stage === 'chapter_writing' && event.data.run.status === 'running')).toBe(true)
     } finally { await f.ctx.fiber.dispose() }
   })
 

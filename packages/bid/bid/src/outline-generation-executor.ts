@@ -7,7 +7,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
-import { parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'
 import type { BidWorkspace } from './index.ts'
@@ -404,7 +404,7 @@ export async function executeOutlineGeneration(
     const unbindMainAgent = options.run.bindMainAgent({
       cancel: () => { agent.cancel({ kind: 'hook', reason: 'bid-run-suspended' }, { keepInbox: true }) },
       whenIdle: () => agent.whenIdle(),
-      discardOwnedInbox: () => interleave.discardOwnedInbox(),
+      discardOwnedInbox: () => { interleave.discardOwnedInbox() },
     })
     try {
       agent.followup(message)
@@ -649,6 +649,16 @@ export async function executeOutlineGeneration(
         await write(REGENERATION_CHANGE_SET, { ...changeSet, changes: outlineRegenerationChanges(draft.outline, reviewed).map(change => ({
           ...change, reason: changeSet.changes.find(item => item.section_id === change.section_id && item.type === change.type)?.reason ?? '响应点覆盖修复及目录质量复核',
         })) })
+      } else {
+        const hash = outlineArtifactSha256(reviewed)
+        await write('outline/draft.json', {
+          schema_version: 1,
+          scope: 'technical_bid',
+          revision: 1,
+          source_outline_sha256: hash,
+          draft_outline_sha256: hash,
+          outline: reviewed,
+        } satisfies OutlineDraftView)
       }
       await waitForModelStageIdle(agent, options.run.signal)
       completed = true

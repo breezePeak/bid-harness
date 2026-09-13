@@ -22,6 +22,15 @@ const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
   return value
 }) as BidStagePanelProps['t']
 
+const suspendedWork = {
+  kind: 'stage_execution' as const,
+  workId: 'test-evidence-mapping',
+  stage: 'evidence_mapping' as const,
+  requestRef: 'requests/test-evidence-mapping.json',
+  requestSha256: '0'.repeat(64),
+  inputFingerprint: '0'.repeat(64),
+}
+
 function projection(patch: Partial<BidClientProjection> = {}): BidClientProjection {
   return {
     workflow: { stage: 'file_intake', gate: 'ready' },
@@ -340,6 +349,7 @@ describe('BidStagePanel', () => {
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
         runId: 'run-stopped', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+        work: suspendedWork,
         status: 'suspended', cause: 'user_stop', startedAt: 10, updatedAt: 20,
       },
       runtime: { stage: 'evidence_mapping', status: 'pending' },
@@ -357,6 +367,7 @@ describe('BidStagePanel', () => {
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
         runId: 'run-interrupted', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+        work: suspendedWork,
         status: 'suspended', cause: 'executor_error', startedAt: 10, updatedAt: 20,
         error: { message: '连接失败' },
       },
@@ -866,9 +877,10 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'running' as const } },
       })
+    const conversationRegister = vi.fn(() => () => {})
     const ctx = {
       effect: (factory: () => unknown) => factory(),
-      conversationEvents: { register: vi.fn(() => () => {}) },
+      conversationEvents: { register: conversationRegister },
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
       remote: { bid: {
@@ -883,7 +895,7 @@ describe('ui-bid browser plugin', () => {
     } as unknown as ClientContext
 
     apply(ctx)
-    expect(ctx.conversationEvents.register).toHaveBeenCalledOnce()
+    expect(conversationRegister).toHaveBeenCalledOnce()
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.chat.node', key: 'bid-run-notice',
     }), expect.any(Function))

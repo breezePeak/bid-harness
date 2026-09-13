@@ -1,7 +1,6 @@
 import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { z, ZodError } from 'zod'
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -95,7 +94,7 @@ import {
 import { estimateChapterCandidatePages, estimateChapterWritingPages } from './page-estimate.ts'
 import { evaluateHostAcceptanceCriteria, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import { findBidInternalIdentifiers } from './customer-facing-prose.ts'
-import type { BidCommitScope, BidRunContext } from './run-coordinator.ts'
+import type { BidCommitLease, BidCommitScope, BidRunContext } from './run-coordinator.ts'
 
 const PLAN_PATH = 'chapters/execution-plan.json'
 const LOG_PATH = 'chapters/execution-log.json'
@@ -115,8 +114,8 @@ export const DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS = 3
 
 /** A validated Host command applied by the currently running S5 scheduler. */
 export type ChapterWritingCommand =
-  | { readonly kind: 'writing_plan'; readonly plan: WritingPlan }
-  | { readonly kind: 'revision'; readonly request: BidChapterRevisionRequest }
+  | { readonly kind: 'writing_plan'; readonly plan: WritingPlan; readonly commandId?: string }
+  | { readonly kind: 'revision'; readonly request: BidChapterRevisionRequest; readonly commandId?: string }
 
 /** Operation-local command channel; the Host remains the sole producer. */
 export interface ChapterWritingControl {
@@ -126,6 +125,8 @@ export interface ChapterWritingControl {
   pending(): boolean
   /** Wake the scheduler when a command is committed. */
   subscribe(listener: () => void): () => void
+  /** Atomically save drained command effects and mark those commands applied. */
+  commit?(commands: readonly ChapterWritingCommand[], write: (lease: BidCommitLease) => Promise<void>): Promise<void>
 }
 
 /** Host-owned S5 repair and concurrency limits. */
@@ -542,7 +543,7 @@ async function persistChapterWebSnapshots(
   childSessionId: string,
   writerAttempt: number,
   snapshots: readonly WebEvidenceSnapshot[],
-  commits?: BidCommitScope,
+  commits: BidCommitScope,
 ): Promise<WebEvidenceSnapshot[]> {
   if (snapshots.length === 0) return []
   const ledgerPath = join(workspace.projectRoot, 'analysis/web-evidence-sources.json')
@@ -571,11 +572,9 @@ async function persistChapterWebSnapshots(
     const source = snapshot.source
     const absolute = join(workspace.projectRoot, ...source.snapshot_path.split('/'))
     await assertNoLinkedPath(workspace.root, absolute)
-    if (commits === undefined) await writeFileAtomic(absolute, snapshot.content, { mode: 0o600, dirMode: 0o700 })
-    else await commits.writeText(absolute, snapshot.content)
+    await commits.writeText(absolute, snapshot.content)
   }
-  if (commits === undefined) await writeFileAtomic(ledgerPath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-  else await commits.writeJson(ledgerPath, updated)
+  await commits.writeJson(ledgerPath, updated)
   return bound
 }
 
@@ -1098,9 +1097,8 @@ function safeAttemptIssues(issues: readonly StageValidationIssue[]): ChapterExec
   return issues.map(({ code, message }) => ({ code, message }))
 }
 
-async function writeJson(path: string, value: unknown, commits?: BidCommitScope): Promise<void> {
-  if (commits === undefined) await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-  else await commits.writeJson(path, value)
+async function writeJson(path: string, value: unknown, commits: BidCommitScope): Promise<void> {
+  await commits.writeJson(path, value)
 }
 
 async function loadValidPlan(
@@ -1116,13 +1114,13 @@ async function loadValidPlan(
     writingPlan: WritingPlan
   },
   maxRepairAttempts: number,
-  run?: BidRunContext,
-  commits?: BidCommitScope,
+  run: BidRunContext,
+  persist = true,
 ): Promise<ChapterExecutionPlan> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid chapter planning requires tools service')
   const absolutePlanPath = join(workspace.projectRoot, PLAN_PATH)
-  run?.signal.throwIfAborted()
+  run.signal.throwIfAborted()
   // 合法计划独立于 execution-log；中断发生在两者写入之间时也可复用。
   try {
     const saved = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
@@ -1130,13 +1128,13 @@ async function loadValidPlan(
   } catch { /* 缺失或非法计划必须重新规划。 */ }
   const runtime = attachChapterPlan(agent, outline, outlineHash, inputs.writingPlan.plan_version, maxRepairAttempts)
   try {
-    run?.signal.throwIfAborted()
+    run.signal.throwIfAborted()
     const plan = await runMainAgentProtocol(
       agent, renderChapterExecutionPlanTask(agent, workspace, outline, outlineHash, inputs), CHAPTER_PLAN_TOOLS, runtime, run,
     )
-    run?.signal.throwIfAborted()
+    run.signal.throwIfAborted()
     await assertNoLinkedPath(workspace.root, absolutePlanPath)
-    await writeJson(absolutePlanPath, plan, commits)
+    if (persist) await writeJson(absolutePlanPath, plan, run.commits)
     return plan
   } finally {
     runtime.dispose()
@@ -1259,9 +1257,8 @@ async function writeGlobalComplianceReview(
   chapters: readonly GlobalComplianceChapter[],
   manifest: BidManifest,
   maxRepairAttempts: number,
-  run?: BidRunContext,
+  run: BidRunContext,
   writingPlan?: WritingPlan,
-  commits?: BidCommitScope,
 ): Promise<void> {
   let saved: GlobalComplianceReviewArtifact | undefined
   try { saved = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH)) } catch { /* 缺失或旧版本结果不参与当前核验。 */ }
@@ -1270,7 +1267,7 @@ async function writeGlobalComplianceReview(
     await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), {
       schema_version: GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
       scope: 'technical_bid', confirmed_outline_sha256: outlineHash, items: [],
-    }, commits)
+    }, run.commits)
     return
   }
   if (retained.length === outline.global_compliance_ids.length) return
@@ -1281,15 +1278,15 @@ async function writeGlobalComplianceReview(
     agent, outline, outlineHash, compliance, chapters, evidence, retained, maxRepairAttempts,
   )
   try {
-    run?.signal.throwIfAborted()
+    run.signal.throwIfAborted()
     const report = await runMainAgentProtocol(
       agent, renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained, writingPlan),
       GLOBAL_COMPLIANCE_REVIEW_TOOLS, runtime, run,
     )
-    run?.signal.throwIfAborted()
+    run.signal.throwIfAborted()
     const issues = validateGlobalComplianceReview(report, outline, compliance, chapters, manifest)
     if (issues.length > 0) throw new Error(issues.map(issue => `${issue.code}: ${issue.message}`).join('; '))
-    await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), report, commits)
+    await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), report, run.commits)
   } finally {
     runtime.dispose()
   }
@@ -1706,7 +1703,7 @@ async function runChapterWriting(
     const previousPlan = checkpointPlan
     plan = await loadValidPlan(
       agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan }, options.maxRepairAttempts,
-      options.run, options.run.commits,
+      options.run,
     )
     if (checkpoint !== undefined && previousPlan !== undefined) {
       const update = scopedPlanUpdate(previousPlan, plan, writingPlanInvalidations)
@@ -1911,16 +1908,15 @@ async function runChapterWriting(
         contexts.set(section.id, context)
       }
       const previousPlan = plan
-    plan = await loadValidPlan(
-      agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan },
-        options.maxRepairAttempts, options.run, options.run.commits,
+      plan = await loadValidPlan(
+        agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan },
+        options.maxRepairAttempts, options.run, false,
       )
       const update = scopedPlanUpdate(
         previousPlan, plan,
         new Set(next.revision?.affected_section_ids ?? worklist.map(section => section.id)),
       )
       plan = update.plan
-      await writeJson(join(workspace.projectRoot, PLAN_PATH), plan, options.run.commits)
       planSections = new Map(plan.sections.map(section => [section.section_id, section]))
       executionLog.writing_plan_version = next.plan_version
       for (const log of executionLog.sections) {
@@ -1943,7 +1939,14 @@ async function runChapterWriting(
         invalidateSection(sectionId)
       }
     }
-    await persistLog()
+    await logWrites
+    const write = async (lease: BidCommitLease): Promise<void> => {
+      await lease.writeJson(join(workspace.projectRoot, 'chapters/writing-plan.json'), writingPlan)
+      await lease.writeJson(join(workspace.projectRoot, PLAN_PATH), plan)
+      await lease.writeJson(join(workspace.projectRoot, LOG_PATH), executionLog)
+    }
+    if (options.control?.commit === undefined) await options.run.commits.publish(write)
+    else await options.control.commit(commands, write)
   }
 
   const writeSection = async (sectionId: string): Promise<CompletedChapter> => {
@@ -2043,7 +2046,7 @@ async function runChapterWriting(
             final_writer_child_session_id: writerChildSessionId,
             final_reviewer_child_session_id: reviewerChildSessionId,
           }
-          await options.run.commits.publish(async lease => {
+          await options.run.commits.publish(async (lease) => {
             if (persistCandidate) {
               await lease.writeText(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`)
               await lease.writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
@@ -2495,7 +2498,6 @@ async function runChapterWriting(
     options.maxRepairAttempts,
     options.run,
     writingPlan,
-    options.run.commits,
   )
   if (options.control?.pending() === true) return runChapterWriting(agent, workspace, task, options)
   if (revision === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {

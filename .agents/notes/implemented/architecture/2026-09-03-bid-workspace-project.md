@@ -10,13 +10,13 @@ Status: implemented
 
 `BidWorkspace` 只接收 Workspace 根目录与配置。`projectDirectory` 默认为 `.bid-harness`，该目录统一拥有 manifest、input、corpus、analysis、outline、chapters、output 及 `project-state.json`，不读取或迁移旧的 Session 独立目录。
 
-`project-state.json` schema version 2 保存 Workflow、当前 Run、最近 Run、单调递增 revision 和更新时间，是项目进度的持久化来源。Host 在项目锁内集中进行原子 checkpoint；当前 Session 的 `bid.*` 事件仍记录执行结果并驱动 Projection。`bid.project.resumed` 只携带控制状态与 revision，不向模型注入消息、摘要、提示词或其他会话的日志。schema version 1 只在读取时迁移，下一次 checkpoint 写入 version 2。
+`project-state.json` schema version 3 保存 Workflow、带 Work Descriptor 的当前 Run、最近 Run、单调递增 revision 和更新时间，是项目进度的持久化来源。Host 在项目锁内提交控制转换；当前 Session 的 `bid.*` 事件仍记录执行结果并驱动 Projection。`bid.project.resumed` 只携带控制状态与 revision，不向模型注入消息、摘要、提示词或其他会话的日志。旧 schema 明确拒绝，由首次发布前策略要求重新创建项目。
 
 Workspace 的“+”保留 `sessions.create()`。Bid 在 `agent/session-start` 从 cwd 读取项目：没有状态文件时创建 S1 ready；已有项目只同步当前进度，等待确认、挂起、失败和完成状态都不自动运行。读取到没有活动 operation 的 running 或 cancelling Run 时保留 Workflow 进度并挂起为 `host_restart`，避免把部分产物当作完成结果。
 
 Host 独占操作以规范 Workspace 路径为键，同一项目的不同 Session 共用锁。Windows 路径键统一大小写；真实路径归一化防止目录别名绕过锁。操作仍记录执行所用 Session 和 Agent，取消、重置与日志写入遵守各自的所有权；不同 Workspace 保持并行。
 
-S6 复用现有 DOCX primitive，按确认目录及其哈希匹配的完整章节 manifest 导出正文；目录顺序和结构标题由 Host 决定，正文标题降到所属章节之下。导出作为现有 program stage 运行，共用执行前与结束后的项目 checkpoint，不新增 UI 操作或模型回合。
+Word 模板、预览、测算和导出使用独立 DOCX Operation，不占用 Workflow Run。导出按确认目录及当前已保存正文生成；目录顺序和结构标题由 Host 决定，正文标题降到所属章节之下。DOCX 字节、可选 Markdown 快照与 `lastExport` 身份在同一个 PublicationBatch 中提交，不改变 Workflow 与项目 revision。
 
 ## Alternatives considered
 

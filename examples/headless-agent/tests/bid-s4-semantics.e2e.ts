@@ -24,6 +24,7 @@ import {
   parseOutlineArtifact, parseEvidenceMapArtifact, buildEvidenceMappingPlan,
   parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact,
   parseTenderComplianceArtifact, parseScoringResponsePointCatalog,
+  createTestBidRunContext,
 } from '@deepseek-ai/dsh-bid'
 import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 import { reviewRefinedOutline } from '../../../packages/bid/bid/src/evidence-mapping-executor.ts'
@@ -168,7 +169,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         : parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
       const agent = ctx.agentLoop.create(SessionId(`semantic-${scenario.id}`), { provider, model: String(report.model) }, { cwd: root })
       if (!existsSync(join(workspace.projectRoot, 'analysis/evidence-map.json'))) await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
-        maxRepairAttempts: 1, maxConcurrency: 2, signal,
+        maxRepairAttempts: 1, maxConcurrency: 2, run: createTestBidRunContext({ signal }),
       })
       report.s4_ms = performance.now() - phaseStart
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
@@ -284,7 +285,10 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         implementation.writing_notes = ['完整说明当前任务的方法、输入成果与质量责任；S5 不得自建正式子标题。']
         const agent = ctx.agentLoop.create(SessionId('independent-outline-review'),
           { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root })
-        const review = await reviewRefinedOutline(agent, workspace, inputs, results, 0, AbortSignal.timeout(150_000))
+        const reviewRun = createTestBidRunContext({ signal: AbortSignal.timeout(150_000) })
+        const review = await reviewRefinedOutline(
+          agent, workspace, inputs, results, 0, reviewRun.signal, reviewRun.commits,
+        )
         await writeFile(join(root, 'independent-review-report.json'), JSON.stringify(review, null, 2))
         if (scenario.id === 'boundary') {
           expect(review.blockingIssues).toContainEqual(expect.objectContaining({ code: 'OUTLINE_REFINEMENT_MISSED', section_id: 'IMPLEMENTATION' }))

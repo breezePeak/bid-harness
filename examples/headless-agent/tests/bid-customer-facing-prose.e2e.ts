@@ -22,6 +22,7 @@ import {
   BidWorkspace, EVIDENCE_MAPPING_SCHEMA_VERSION, buildBidStageTask,
   executeChapterWriting, executeOutlineGeneration, outlineArtifactSha256, parseChapterReviewArtifact,
   parseChapterWritingManifest, parseOutlineArtifact, validateChapterWriting, validateOutlineGeneration,
+  createTestBidRunContext,
 } from '@deepseek-ai/dsh-bid'
 import { collectDocxMarkdown } from '../../../packages/bid/bid/src/docx-export.ts'
 import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
@@ -115,7 +116,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash',
       }, { cwd: root })
       const s3Artifacts = await executeOutlineGeneration(s3Agent, workspace, buildBidStageTask('outline_generation'), {
-        maxRepairAttempts: 2, signal,
+        maxRepairAttempts: 2, run: createTestBidRunContext({ signal }),
       })
       await expect(validateOutlineGeneration(workspace, 'outline_generation', s3Artifacts)).resolves.toEqual({ ok: true })
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
@@ -167,7 +168,8 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       })}\n`)
 
       const s5Artifacts = await executeChapterWriting(s5Agent, workspace, buildBidStageTask('chapter_writing'), {
-        maxRepairAttempts: 2, maxCompletionRepairRounds: 1, maxConcurrency: 1, signal,
+        maxRepairAttempts: 2, maxCompletionRepairRounds: 1, maxConcurrency: 1,
+        run: createTestBidRunContext({ signal }),
       })
       await expect(validateChapterWriting(workspace, 'chapter_writing', s5Artifacts)).resolves.toEqual({ ok: true })
       const manifest = parseChapterWritingManifest(JSON.parse(

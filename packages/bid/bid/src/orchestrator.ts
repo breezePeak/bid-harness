@@ -6,6 +6,7 @@ import type {
   BidRuntimeState,
   BidStage,
   BidStageTask,
+  BidWorkDescriptor,
   StageArtifact,
   StageValidationResult,
   StageValidationIssue,
@@ -21,6 +22,9 @@ import {
 } from './runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
 import type { BidResumePolicy, BidRunResumeIdentity } from './control-plane-contract.ts'
+import { safeBidRunError } from './safe-error.ts'
+
+function signalAborted(signal: AbortSignal): boolean { return signal.aborted }
 
 /** Executor port used by program and agent stages. */
 export interface BidStageExecutorPort {
@@ -34,6 +38,7 @@ export interface BidStageExecutorPort {
   /**
    * Execute one host-created stage assignment.
    * @param task - immutable-in-intent assignment derived from the stage policy.
+   * @param run - mandatory Run authority for cancellation and publication.
    * @returns workspace artifact references produced by the executor.
    */
   execute(task: BidStageTask, run: BidRunContext): Promise<StageArtifact[]>
@@ -45,10 +50,14 @@ export interface BidStageValidatorPort {
    * Validate one stage's complete artifact set.
    * @param stage - stage requesting completion.
    * @param artifacts - workspace references returned by the executor.
+   * @param run - Run authority when validation reads private candidate state.
    * @returns whether the stage may complete, with actionable issues on rejection.
    */
-  validate(stage: BidStage, artifacts: StageArtifact[]): Promise<StageValidationResult>
+  validate(stage: BidStage, artifacts: StageArtifact[], run?: BidRunContext): Promise<StageValidationResult>
 }
+
+/** Persist and return the exact work request before a Run starts. */
+export type BidStageWorkFactory = (stage: BidStage) => Promise<BidWorkDescriptor>
 
 /** Prepare the model-context commit applied after a successful stage completion event. */
 export type BidStageContextTransition = (fromStage: BidStage, toStage: BidStage) => Promise<() => void>
@@ -106,6 +115,7 @@ export class BidOrchestrator {
     private readonly signal?: AbortSignal,
     private readonly prepareContextTransition?: BidStageContextTransition,
     runs?: BidRunCoordinator,
+    private readonly prepareWork?: BidStageWorkFactory,
   ) {
     this.runs = runs ?? new BidRunCoordinator(
       session,
@@ -147,8 +157,18 @@ export class BidOrchestrator {
     })
   }
 
-  /** Reconcile a suspended attempt through the stage Executor's durable checkpoints, then continue unfinished work. */
-  resume(suspendedRunId: string, resumePolicy?: BidResumePolicy): Promise<BidRuntimeState> {
+  /**
+   * Reconcile a suspended attempt through the stage Executor's durable checkpoints, then continue unfinished work.
+   * @param suspendedRunId - Exact suspended attempt to resume.
+   * @param resumePolicy - User-selected checkpoint reuse policy.
+   * @param onAccepted - Callback invoked after the replacement Run is durable.
+   * @returns State reached when the resumed work next settles.
+   */
+  resume(
+    suspendedRunId: string,
+    resumePolicy?: BidResumePolicy,
+    onAccepted?: (run: BidRunContext) => void,
+  ): Promise<BidRuntimeState> {
     this.assertIdle()
     const control = this.controlState
     const suspended = control.run
@@ -160,7 +180,7 @@ export class BidOrchestrator {
         runId: suspended.runId,
         cause: suspended.cause ?? 'host_restart',
       }
-      const settlement = await this.executeStage(suspended.stage, resumeOf, resumePolicy)
+      const settlement = await this.executeStage(suspended.stage, resumeOf, resumePolicy, suspended.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -285,6 +305,42 @@ export class BidOrchestrator {
   }
 
   /**
+   * Commit a user confirmation after a Long Run validated and atomically published
+   * the exact candidate bytes. The caller owns that validation boundary.
+   * @param stage - Waiting stage whose candidate was published.
+   * @param artifacts - Canonical artifact references validated by the caller.
+   * @param completeRun - Optional settlement that durably groups Run and Workflow terminal events.
+   * @returns Continued workflow state.
+   */
+  commitPrevalidatedStage(
+    stage: BidStage,
+    artifacts: StageArtifact[],
+    completeRun?: (commitWorkflow: () => void) => Promise<void>,
+  ): Promise<BidRuntimeState> {
+    this.assertIdle()
+    const control = this.controlState
+    const policy = getBidStagePolicy(stage)
+    if (control.workflow.stage !== stage || control.workflow.gate !== 'waiting_user'
+      || policy.userGate !== 'after_validation') {
+      throw new BidOrchestratorError(
+        'BID_CONFIRM_NOT_ALLOWED',
+        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(control.workflow.stage)} and gate is ${JSON.stringify(control.workflow.gate)}`,
+      )
+    }
+    return this.begin(async () => {
+      const commitContext = await this.prepareStageContextTransition(stage)
+      const commitWorkflow = () => {
+        this.session.append('bid.user_confirmation.received', { stage, confirmed: true })
+        this.session.append('bid.stage.completed', { stage, status: 'completed', artifacts })
+        commitContext()
+      }
+      if (completeRun === undefined) commitWorkflow()
+      else await completeRun(commitWorkflow)
+      return this.driveLoop()
+    })
+  }
+
+  /**
    * Enforce one client business action against current host state.
    * @param action - requested client action.
    * @throws {@link BidOrchestratorError} when the action is not currently admitted.
@@ -366,59 +422,75 @@ export class BidOrchestrator {
     stage: BidStage,
     resumeOf?: BidRunResumeIdentity,
     resumePolicy?: BidResumePolicy,
+    resumedWork?: BidWorkDescriptor,
+    onAccepted?: (run: BidRunContext) => void,
   ): Promise<StageExecutionSettlement> {
     if (this.isAborted()) return 'aborted'
-    const run = await this.runs.start(stage, resumeOf, resumePolicy)
+    const work = resumedWork ?? await (this.prepareWork?.(stage) ?? Promise.resolve({
+      kind: 'stage_execution' as const,
+      workId: `embedded-${crypto.randomUUID()}`,
+      stage,
+      requestRef: `requests/embedded-${stage}.json`,
+      requestSha256: '0'.repeat(64),
+      inputFingerprint: '0'.repeat(64),
+    }))
+    if (work.stage !== stage) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the Work Descriptor stage does not match the workflow')
+    const run = await this.runs.start(work, resumeOf, resumePolicy)
+    onAccepted?.(run)
     let artifacts: StageArtifact[]
     try {
-      artifacts = await this.executor.execute(buildBidStageTask(stage), run)
+      artifacts = await run.activities.track(() => this.executor.execute(buildBidStageTask(stage), run))
     } catch (error: unknown) {
-      if (this.isAborted()) {
+      if (signalAborted(run.signal)) {
         await this.runs.suspend('user_stop')
         return 'aborted'
       }
       if (error instanceof BidStageAttentionRequiredError) {
-        this.runs.complete(run)
-        this.attentionRequired(stage, error.message, [...error.issues])
+        await this.runs.complete(run, () => {
+          this.attentionRequired(stage, error.message, [...error.issues])
+        })
         return 'attention_required'
       }
       if (error instanceof BidStageExecutionError) {
-        await this.runs.suspend('retry_exhausted', { message: error.message, issues: [...error.issues] })
+        await this.runs.suspend('retry_exhausted', safeBidRunError(error, error.issues))
         return 'failed'
       }
-      await this.runs.suspend('executor_error', { message: `executor failed: ${String(error)}` })
+      await this.runs.suspend('executor_error', safeBidRunError(error))
       return 'failed'
     }
-    if (this.isAborted()) { await this.runs.suspend('user_stop'); return 'aborted' }
-    const validation = await this.validate(stage, artifacts)
-    if (this.isAborted()) { await this.runs.suspend('user_stop'); return 'aborted' }
+    if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
+    const validation = await this.validate(stage, artifacts, run)
+    if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
     if (!validation.ok) {
       await this.runs.suspend('retry_exhausted', {
+        code: 'BID_STAGE_VALIDATION_FAILED',
         message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : validation.issues.map(formatStageValidationIssue).join('; '),
         issues: validation.issues,
       })
       return 'failed'
     }
     if (getBidStagePolicy(stage).userGate === 'after_validation') {
-      this.runs.complete(run)
-      this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      await this.runs.complete(run, () => {
+        this.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      })
       return 'waiting_user'
     }
     let commitContext: () => void
     try {
       commitContext = await this.prepareStageContextTransition(stage)
     } catch (error: unknown) {
-      await this.runs.suspend('executor_error', { message: `stage context transition failed: ${String(error)}` })
+      await this.runs.suspend('executor_error', safeBidRunError(error))
       return 'failed'
     }
-    if (this.isAborted()) { await this.runs.suspend('user_stop'); return 'aborted' }
-    this.runs.complete(run)
-    this.session.append('bid.stage.completed', {
-      stage,
-      status: 'completed',
-      artifacts,
+    if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
+    await this.runs.complete(run, () => {
+      this.session.append('bid.stage.completed', {
+        stage,
+        status: 'completed',
+        artifacts,
+      })
+      commitContext()
     })
-    commitContext()
     return 'completed'
   }
 
@@ -430,10 +502,10 @@ export class BidOrchestrator {
   }
 
   /** Validate artifacts without changing Workflow or Run ownership. */
-  private async validate(stage: BidStage, artifacts: StageArtifact[]): Promise<StageValidationResult> {
+  private async validate(stage: BidStage, artifacts: StageArtifact[], run: BidRunContext): Promise<StageValidationResult> {
     let result: StageValidationResult
     try {
-      result = await this.validator.validate(stage, artifacts)
+      result = await this.validator.validate(stage, artifacts, run)
     } catch {
       const issues = [{ code: 'VALIDATOR_FAILED', message: 'The stage validator could not complete.' }]
       return { ok: false, issues }

@@ -1,7 +1,7 @@
 /** 通过真实 Loader 执行 S5 当前章节的本地补搜。 */
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
-import { BidOrchestrator, getBidClientProjection, validateChapterWriting, type BidStage } from '@deepseek-ai/dsh-bid'
+import { BidOrchestrator, createTestBidRunContext, getBidClientProjection, validateChapterWriting, type BidStage } from '@deepseek-ai/dsh-bid'
 import { runChapterWritingLoop } from '../../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 import { executeDocxExport } from '../../../../packages/bid/bid/src/docx-export.ts'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -27,7 +27,7 @@ try {
   const waiting = await orchestrator.drive()
   agent.session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
   const runtime = await orchestrator.runConfirmedStage()
-  await executeDocxExport(workspace)
+  await executeDocxExport(workspace, createTestBidRunContext())
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
   for (const section of log.sections) {
@@ -38,7 +38,7 @@ try {
     section.final_reviewer_child_session_id = null
   }
   await writeFile(logPath, JSON.stringify(log))
-  await executeDocxExport(workspace, undefined, 'output/saved.docx')
+  await executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx')
   process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, waiting, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()

@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises'
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { applyOutlineEdits, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
@@ -7,6 +6,7 @@ import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import type { BidPublicationLease } from './publication-batch.ts'
 
 /** Host workspace paths needed by the draft store without importing the Host entrypoint. */
 interface OutlineDraftWorkspace {
@@ -38,13 +38,18 @@ async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise
   return JSON.parse(await readFile(absolute, 'utf8'))
 }
 
+async function readPersistedOutlineDraft(workspace: OutlineDraftWorkspace): Promise<OutlineDraftView> {
+  const path = within(workspace.projectRoot, 'outline/draft.json')
+  await assertNoLinkedPath(workspace.root, path)
+  return parseOutlineDraft(JSON.parse(await readFile(path, 'utf8')))
+}
+
 /**
- * Read the Host-owned outline draft or initialize it from the current published outline.
+ * Read the Host-owned outline draft or derive it from the current published outline.
  * @param workspace Bid project workspace.
- * @param persist 是否持久化初始化或源目录刷新；只读 inspect 使用 false。
- * @returns Existing or initialized Host-owned draft.
+ * @returns Existing draft or a read-only derived view when no current draft exists.
  */
-export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, persist = true): Promise<OutlineDraftView> {
+export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace): Promise<OutlineDraftView> {
   const source = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
   const sourceHash = outlineArtifactSha256(source)
   const path = within(workspace.projectRoot, 'outline/draft.json')
@@ -56,7 +61,6 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, 
       schema_version: 1, scope: 'technical_bid', revision: existing.revision + 1,
       source_outline_sha256: sourceHash, draft_outline_sha256: sourceHash, outline: source,
     }
-    if (persist) await writeFileAtomic(path, `${JSON.stringify(replacement, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     return replacement
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -64,7 +68,6 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, 
       schema_version: 1, scope: 'technical_bid', revision: 1,
       source_outline_sha256: sourceHash, draft_outline_sha256: sourceHash, outline: source,
     }
-    if (persist) await writeFileAtomic(path, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
     return initial
   }
 }
@@ -73,11 +76,13 @@ export async function getOrCreateOutlineDraft(workspace: OutlineDraftWorkspace, 
  * Apply one concurrency-checked edit batch to the persisted outline draft.
  * @param workspace Bid project workspace.
  * @param request CAS identity and edit batch.
+ * @param lease Publication lease that owns the draft write.
  * @returns Persisted draft or a recoverable rejection.
  */
 export async function mutateOutlineDraft(
   workspace: OutlineDraftWorkspace,
   request: OutlineDraftMutationRequest,
+  lease: BidPublicationLease,
 ): Promise<OutlineDraftMutationResult> {
   const current = await getOrCreateOutlineDraft(workspace)
   if (request.expected_revision !== current.revision || request.expected_draft_sha256 !== current.draft_outline_sha256) {
@@ -90,7 +95,10 @@ export async function mutateOutlineDraft(
     return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: error instanceof Error ? error.message : 'The requested outline edit is invalid.', current } }
   }
   const hash = outlineArtifactSha256(candidate)
-  if (hash === current.draft_outline_sha256) return { ok: true, value: current }
+  if (hash === current.draft_outline_sha256) {
+    await lease.writeJson(within(workspace.projectRoot, 'outline/draft.json'), current)
+    return { ok: true, value: current }
+  }
   const [requirements, scoring, compliance, catalog] = await Promise.all([
     readJson(workspace, 'analysis/requirements.json'), readJson(workspace, 'analysis/scoring.json'),
     readJson(workspace, 'analysis/compliance.json'), readJson(workspace, 'analysis/scoring-response-points.json'),
@@ -112,7 +120,7 @@ export async function mutateOutlineDraft(
   const next: OutlineDraftView = { ...current, revision: current.revision + 1, draft_outline_sha256: hash, outline: candidate }
   const path = within(workspace.projectRoot, 'outline/draft.json')
   try {
-    await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    await lease.writeJson(path, next)
   } catch {
     return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_PERSIST_FAILED', message: 'The Host could not persist the outline draft.', current } }
   }
@@ -124,24 +132,29 @@ export async function mutateOutlineDraft(
  * @param workspace Bid project workspace.
  * @param request Expected draft identity.
  * @param candidate S4-validated candidate.
+ * @param lease Publication lease that owns the draft write.
  * @returns Persisted replacement or a recoverable rejection.
  */
 export async function replaceOutlineDraft(
   workspace: OutlineDraftWorkspace,
   request: OutlineDraftIdentityRequest,
   candidate: ReturnType<typeof parseOutlineArtifact>,
+  lease: BidPublicationLease,
 ): Promise<OutlineDraftMutationResult> {
-  const current = await getOrCreateOutlineDraft(workspace)
+  const current = await readPersistedOutlineDraft(workspace)
   if (request.expected_revision !== current.revision || request.expected_draft_sha256 !== current.draft_outline_sha256) {
     return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed during regeneration.', current } }
   }
   const parsed = parseOutlineArtifact(candidate)
   const hash = outlineArtifactSha256(parsed)
-  if (hash === current.draft_outline_sha256) return { ok: true, value: current }
+  if (hash === current.draft_outline_sha256) {
+    await lease.writeJson(within(workspace.projectRoot, 'outline/draft.json'), current)
+    return { ok: true, value: current }
+  }
   const next: OutlineDraftView = { ...current, revision: current.revision + 1, draft_outline_sha256: hash, outline: parsed }
   const path = within(workspace.projectRoot, 'outline/draft.json')
   try {
-    await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    await lease.writeJson(path, next)
   } catch {
     return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_PERSIST_FAILED', message: 'The Host could not persist the regenerated outline draft.', current } }
   }

@@ -293,6 +293,45 @@ export async function validateTenderAnalysisDraft(
   return issues
 }
 
+/**
+ * Validate an in-memory S2 candidate before a ProjectMutation publishes it.
+ * @param workspace - Project workspace supplying manifest and source material.
+ * @param artifacts - Complete in-memory S2 candidate.
+ * @returns Blocking validation issues.
+ */
+export async function validateTenderAnalysisCandidate(
+  workspace: BidWorkspace,
+  artifacts: TenderAnalysisArtifacts,
+): Promise<StageValidationIssue[]> {
+  const issues: StageValidationIssue[] = []
+  const manifest = await workspace.readManifest()
+  if (tenderRecords(manifest).length === 0) {
+    reject(issues, 'TENDER_ANALYSIS_TENDER_MISSING', 'The Bid Session has no successfully parsed tender file.', 'manifest.json')
+  }
+  validateCoverage(artifacts.project, manifest, issues)
+  issues.push(...await validateTenderAnalysisDraft(workspace, manifest, artifacts))
+  for (const [path, values] of [
+    ['analysis/requirements.json', artifacts.requirements.requirements],
+    ['analysis/scoring-origin.json', artifacts.scoring.scoring_items],
+    ['analysis/compliance.json', artifacts.compliance.compliance_items],
+  ] as const) {
+    for (const id of duplicateIds(values)) reject(issues, 'TENDER_ANALYSIS_DUPLICATE_ID', `Artifact contains duplicate id ${JSON.stringify(id)}.`, path)
+  }
+  await Promise.all([
+    ...artifacts.project.source_refs.map((ref, index) => validateSourceRef(workspace, manifest, ref, issues, 'analysis/project.json', `source_refs[${index}]`)),
+    ...artifacts.requirements.requirements.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/requirements.json', `requirements[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
+    ...artifacts.scoring.scoring_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/scoring-origin.json', `scoring_items[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
+    ...artifacts.compliance.compliance_items.flatMap((item, itemIndex) => item.source_refs.map((ref, refIndex) => (
+      validateSourceRef(workspace, manifest, ref, issues, 'analysis/compliance.json', `compliance_items[${itemIndex}].source_refs[${refIndex}]`)
+    ))),
+  ])
+  return issues
+}
+
 async function validateSourceRef(
   workspace: BidWorkspace,
   manifest: BidManifest,

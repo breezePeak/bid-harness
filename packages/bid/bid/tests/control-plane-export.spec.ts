@@ -12,6 +12,7 @@ describe('browser-safe Bid control-plane export', () => {
       'BID_UPLOAD_FILES_HEADER',
       'BID_UPLOAD_SESSION_HEADER',
       'BID_WORKFLOW_GATES',
+      'BID_WORK_KINDS',
       'DOCX_TEMPLATE_MAX_BYTES',
       'DOCX_TEMPLATE_NAME_HEADER',
       'DOCX_TEMPLATE_REVISION_HEADER',

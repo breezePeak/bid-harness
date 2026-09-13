@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { CallId, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
 import { reviewPendingMappingItems, runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
@@ -14,6 +14,17 @@ function call(name: string, args: object): StreamChunk[] {
 
 function answer(text: string): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'finish', reason: { kind: 'stop' } }]
+}
+
+function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
+  for (const message of [...options.messages].reverse()) {
+    for (const block of message.content) {
+      if (block.type !== 'text') continue
+      const match = pattern.exec(block.text)
+      if (match?.[1] !== undefined) return match[1]
+    }
+  }
+  throw new Error('模型上下文缺少候选文件路径')
 }
 
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */
@@ -29,8 +40,8 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
   const changeSet = { schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256,
     changes: outlineRegenerationChanges(draft.outline, candidate).map(change => ({ ...change, reason: '明确方案标题' })) }
   parentScript.push(
-    call('write', { file_path: join(workspace.projectRoot, 'outline/outline.json'), content: JSON.stringify(candidate) }),
-    call('write', { file_path: join(workspace.projectRoot, 'outline/regeneration/change-set.json'), content: JSON.stringify(changeSet) }),
+    options => call('write', { file_path: visibleTarget(options, /本轮初稿唯一输出：([^。\r\n]+)/u), content: JSON.stringify(candidate) }),
+    options => call('write', { file_path: visibleTarget(options, /同时写入 ([^，\r\n]+)/u), content: JSON.stringify(changeSet) }),
     answer('目录已重生成。'),
     call('submit_outline_quality_review', { issues: (JSON.parse(quality) as { issues: unknown[] }).issues }),
     answer('目录已复核。'),

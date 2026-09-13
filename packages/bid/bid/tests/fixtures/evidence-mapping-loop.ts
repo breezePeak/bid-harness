@@ -15,7 +15,7 @@ import {
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact, parseTenderScoringSelection, EVIDENCE_MAPPING_SCHEMA_VERSION,
-  webEvidenceContentSha256, webEvidenceSourceId,
+  webEvidenceContentSha256, webEvidenceSourceId, createTestBidRunContext,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -61,7 +61,7 @@ class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
   constructor(
     private readonly parentId: SessionId,
-    private readonly parentScript: StreamChunk[][],
+    private readonly parentScript: ScriptStep[],
     private readonly childScript: ScriptStep[],
   ) {
     super()
@@ -216,7 +216,9 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(sessionId, parentScript, [])))
   registerIntegrationTools(ctx, root, [])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
-  const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 0 })
+  const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), {
+    maxRepairAttempts: 0, run: createTestBidRunContext(),
+  })
   const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
   if (!validation.ok) {
     const results = agent.session.events.filter(event => event.type === 'tool/result').map(event => event.data.message.content)
@@ -427,7 +429,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     reviewPendingMappingItems,
     toolCall('finish-final-check', 'finish_final_check', {}),
   ]
-  const parentScript: StreamChunk[][] = []
+  const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
@@ -443,7 +445,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
   const orchestrator = new BidOrchestrator(
     agent.session,
-    { canExecute: stage => stage === 'evidence_mapping', execute: task => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2 }) },
+    { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2, run }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
   )
 
@@ -589,7 +591,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, 'https://official.example/standard')
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
-  const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
+  const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+    maxRepairAttempts: 0, maxConcurrency: 1, run: createTestBidRunContext(),
+  })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
   return { agent, artifacts, workspace, requests: adapter.requests, parentScript, childScript }
 }
@@ -643,7 +647,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   }
   let maxRepairAttempts = 0
   const orchestrator = new BidOrchestrator(agent.session,
-    { canExecute: stage => stage === 'outline_generation', execute: task => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts }) },
+    { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts, run }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
   const failed = await orchestrator.runCurrentAutomaticStage()
   if (failed.status !== 'failed' || !failed.failureReason?.includes('RP-999999')) throw new Error('未知 RP 未进入可续修的失败状态')

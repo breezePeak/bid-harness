@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import * as atomicWrite from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
 import type { ContinuableStartSpec, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { chapterWriterOutputSchema } from '../src/chapter-writing-writer.ts'
@@ -451,10 +451,27 @@ function fixtureAgent(
   }
   const listeners = new Map<string, (...args: unknown[]) => void>()
   const listenerSets = new Map<string, Set<(...args: unknown[]) => void>>()
+  const nextStep: UserMessage[] = []
+  const nextTurn: UserMessage[] = []
   const agent = {
     id: 'parent',
     options: {},
     session: { header: { cwd: workspace.root }, events: [] },
+    inbox: {
+      nextStep,
+      nextTurn,
+      append: (_target: string, message: UserMessage) => { nextTurn.push(message) },
+      prepend: (_target: string, message: UserMessage) => { nextTurn.unshift(message) },
+      remove: (messageId: UserMessage['id']) => {
+        const removeFrom = (messages: UserMessage[]) => {
+          const index = messages.findIndex(message => message.id === messageId)
+          if (index < 0) return false
+          messages.splice(index, 1)
+          return true
+        }
+        return removeFrom(nextStep) || removeFrom(nextTurn)
+      },
+    },
     ctx: {
       agents: { get: (id: SessionId) => children.get(id)?.child },
       get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents : undefined,
@@ -659,7 +676,7 @@ describe('chapter-writing executor', () => {
       const target = point === '正文写入中' ? name.endsWith('sections/0001.md') && ++bodies === 1
         : point === 'metadata 写入后' ? name.endsWith('meta/0001.json') && ++metadata === 1
           : point === 'review 写入后' ? name.endsWith('reviews/0001.json')
-            : name.endsWith('execution-log.json') && content.includes('"status": "completed"')
+            : name.endsWith('execution-log.json') && typeof content === 'string' && content.includes('"status": "completed"')
       if (target && point === '正文写入中') { entered.resolve(undefined); await release.promise }
       await original(path, content, options)
       if (target && point !== '正文写入中') { entered.resolve(undefined); await release.promise }
@@ -707,7 +724,7 @@ describe('chapter-writing executor', () => {
       const name = path.replaceAll('\\', '/')
       if (name.endsWith('execution-log.json')) {
         if (blockNextLog) { blockNextLog = false; queueEntered.resolve(undefined); await releaseQueue.promise }
-        published.push(parseChapterExecutionLog(JSON.parse(content)))
+        if (typeof content === 'string') published.push(parseChapterExecutionLog(JSON.parse(content)))
       }
       await original(path, content, options)
       if (name.endsWith('reviews/0001.json')) reviewWritten.resolve(undefined)
@@ -745,7 +762,7 @@ describe('chapter-writing executor', () => {
     const fixture = fixtureAgent(workspace, outline)
     const { writeFileAtomic: original } = await vi.importActual<typeof import('@deepseek-ai/dsh-atomic-write')>('@deepseek-ai/dsh-atomic-write')
     const spy = vi.spyOn(atomicWrite, 'writeFileAtomic').mockImplementation(async (path, content, options) => {
-      if (path.endsWith('execution-log.json') && content.includes('"status": "completed"')) throw new Error('测试磁盘失败')
+      if (path.endsWith('execution-log.json') && typeof content === 'string' && content.includes('"status": "completed"')) throw new Error('测试磁盘失败')
       await original(path, content, options)
     })
     try {
@@ -790,6 +807,8 @@ describe('chapter-writing executor', () => {
       expect(disk.sections[1]!.status).toBe('completed')
       expect(spy.mock.calls.some(([path]) => path.replaceAll('\\', '/').endsWith('chapters/manifest.json'))).toBe(false)
       expect(fixture.starts).toHaveLength(1)
+      await expect(Promise.all(retainedPaths.map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8'))))
+        .resolves.toEqual(retained)
     } finally { release.resolve(undefined); spy.mockRestore() }
   })
 

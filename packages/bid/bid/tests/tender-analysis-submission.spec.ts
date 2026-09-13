@@ -8,6 +8,7 @@ import {
   attachTenderAnalysisSubmissionRuntime,
   BidWorkspace,
   DEFAULT_BID_CONFIG,
+  createTestBidRunContext,
   parseTenderComplianceArtifact,
   parseTenderProjectArtifact,
   parseTenderRequirementsArtifact,
@@ -28,11 +29,11 @@ interface Fixture {
   tools: Map<string, ToolDefinition>
   runtime: Awaited<ReturnType<typeof attachTenderAnalysisSubmissionRuntime>>
   concludeTurn: ReturnType<typeof vi.fn>
-  run?: BidRunContext
+  run: BidRunContext
   call(name: string, args: unknown): Promise<unknown>
 }
 
-async function fixture(durable = false): Promise<Fixture> {
+async function fixture(_durable = false): Promise<Fixture> {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-submit-')), {
     ...DEFAULT_BID_CONFIG,
     documentChunk: { minChars: 200, targetChars: 400, maxChars: 500 },
@@ -65,12 +66,7 @@ async function fixture(durable = false): Promise<Fixture> {
   }
   const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name] } } as unknown as Agent
   const signal = new AbortController().signal
-  const run = durable ? {
-    runId: 'run-s2', epoch: 1, projectRevision: 0, signal,
-    scheduler: { paused: () => false, close: () => {}, waitUntilRunnable: async () => {} },
-    commits: { assertWritable: () => {} },
-    children: { drain: async () => {} },
-  } as unknown as BidRunContext : undefined
+  const run = createTestBidRunContext({ signal })
   const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest(), run)
   const concludeTurn = vi.fn()
   const call = async (name: string, args: unknown): Promise<unknown> => {
@@ -78,7 +74,7 @@ async function fixture(durable = false): Promise<Fixture> {
     if (definition === undefined) throw new Error(`missing tool ${name}`)
     return definition.execute(args, { agent, signal: new AbortController().signal, concludeTurn } as unknown as ToolRunContext)
   }
-  return { workspace, agent, tools: definitions, runtime, concludeTurn, call, ...(run === undefined ? {} : { run }) }
+  return { workspace, agent, tools: definitions, runtime, concludeTurn, call, run }
 }
 
 function source(semantic_hint: string, chunk?: string, file_ref = 'T1') {

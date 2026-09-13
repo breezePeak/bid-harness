@@ -975,6 +975,27 @@ describe('built-in conversation node Definitions', () => {
     expect(node(snapshot(failed), 'turn-error')).toBeDefined()
   })
 
+  it('hides a raw turn error superseded by one sanitized Bid Run notice', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'raw provider payload' } },
+      }),
+      at(3, 'bid.run.notice', {
+        noticeId: 'run:one:suspended',
+        supersedesTurn: 1,
+        runId: 'one',
+        stage: 'evidence_mapping',
+        kind: 'interrupted',
+        severity: 'error',
+        message: 'PROVIDER_ERROR：[REDACTED]',
+      }),
+    ])
+
+    expect(node(snapshot(value), 'turn-error')).toMatchObject({ visibility: 'hidden' })
+  })
+
   it('keeps the max-tokens notice when the window starts after the owning turn/start', () => {
     const value = assembler([
       at(9, 'turn/end', { turn: 3, reason: { kind: 'max-tokens' } }),

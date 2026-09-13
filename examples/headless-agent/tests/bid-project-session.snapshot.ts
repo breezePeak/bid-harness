@@ -28,20 +28,12 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         [
           {
             "data": {
+              "lastRun": null,
               "revision": 1,
-              "runtime": {
+              "run": null,
+              "workflow": {
+                "gate": "waiting_user",
                 "stage": "evidence_mapping",
-                "status": "waiting_user",
-              },
-            },
-            "type": "bid.project.resumed",
-          },
-          {
-            "data": {
-              "revision": 1,
-              "runtime": {
-                "stage": "evidence_mapping",
-                "status": "waiting_user",
               },
             },
             "type": "bid.project.resumed",
@@ -49,11 +41,17 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         ]
       `)
       expect(JSON.parse(await readFile(join(cwd, '.bid-harness/project-state.json'), 'utf8'))).toMatchObject({
-        schema_version: 1, revision: 1, runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+        schema_version: 3,
+        revision: 1,
+        workflow: { stage: 'evidence_mapping', gate: 'waiting_user' },
+        run: null,
+        last_run: null,
       })
       const exported = join(cwd, 'export-project/.bid-harness')
       expect(JSON.parse(await readFile(join(exported, 'project-state.json'), 'utf8'))).toMatchObject({
-        runtime: { stage: 'docx_export', status: 'completed' },
+        schema_version: 3,
+        workflow: { stage: 'docx_export', gate: 'ready' },
+        run: null,
       })
       const format = JSON.parse(await readFile(join(exported, 'word-export/default.config.json'), 'utf8')) as { lastExport: { path: string } }
       expect((await readFile(join(exported, format.lastExport.path))).subarray(0, 2).toString()).toBe('PK')
@@ -80,11 +78,11 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
           "tender": "项目 A",
         },
         "docxAvailable": true,
-        "executions": 1,
+        "executions": 0,
         "formatRestored": true,
         "headingNumbering": {
-          "lists": 1,
-          "paragraphs": 1,
+          "lists": 2,
+          "paragraphs": 2,
           "styles": [
             "Heading1",
             "Heading2",
@@ -97,12 +95,12 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         "messages": [],
         "nextRuntime": {
           "stage": "docx_export",
-          "status": "completed",
+          "status": "pending",
         },
         "previewIsFixedSample": true,
         "runtime": {
           "stage": "docx_export",
-          "status": "completed",
+          "status": "pending",
         },
         "unchanged": true,
       },

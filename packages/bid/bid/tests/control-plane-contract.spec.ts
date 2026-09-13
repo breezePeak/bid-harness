@@ -106,6 +106,7 @@ describe('bid control-plane public contract', () => {
   it('exports the model-invisible Run notice payload', () => {
     expectTypeOf<BidRunNotice>().toEqualTypeOf<{
       readonly noticeId: string
+      readonly supersedesTurn: number | null
       readonly runId: string
       readonly stage: typeof BID_STAGES[number]
       readonly kind: 'stopped' | 'interrupted'

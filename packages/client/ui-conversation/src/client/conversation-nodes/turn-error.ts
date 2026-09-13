@@ -14,12 +14,20 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
 
 interface TurnErrorState {
   readonly turn: number
+  readonly superseded: boolean
   readonly failure?: {
     readonly seq: number
     readonly time: number
     readonly message: string
     readonly code?: string
   }
+}
+
+function supersededTurn(match: Pick<ConversationMatch, 'event'>): number | undefined {
+  const event = match.event as unknown as { readonly type?: unknown; readonly data?: unknown }
+  if (event.type !== 'bid.run.notice' || typeof event.data !== 'object' || event.data === null) return undefined
+  const turn = (event.data as { readonly supersedesTurn?: unknown }).supersedesTurn
+  return typeof turn === 'number' && Number.isSafeInteger(turn) && turn > 0 ? turn : undefined
 }
 
 function lastStep(context: ConversationNodeContext<TurnErrorState>): number {
@@ -44,7 +52,12 @@ function fallbackState(context: ConversationNodeContext<TurnErrorState>): TurnEr
   if (end?.event.type !== 'turn/end') return undefined
   const failure = failureFrom(end)
   if (failure === undefined) return undefined
-  return { turn: end.event.data.turn, failure }
+  const turn = end.event.data.turn
+  return {
+    turn,
+    superseded: context.matches.some(match => supersededTurn(match) === turn),
+    failure,
+  }
 }
 
 /**
@@ -60,13 +73,16 @@ export const turnErrorDefinition: ConversationNodeDefinition<TurnErrorState> = {
     if (event.type === 'turn/end' && event.data.reason.kind === 'error') {
       return { id: String(event.data.turn), role: 'update' }
     }
+    const turn = supersededTurn({ event })
+    if (turn !== undefined) return { id: String(turn), role: 'update' }
     return null
   },
   start: (_context, match) => {
     if (match.event.type !== 'turn/start') throw new Error('turn-error start requires turn/start')
-    return { turn: match.event.data.turn }
+    return { turn: match.event.data.turn, superseded: false }
   },
   update: (context, match) => {
+    if (supersededTurn(match) === context.state.turn) return { ...context.state, superseded: true }
     const failure = failureFrom(match)
     return failure === undefined ? context.state : { ...context.state, failure }
   },
@@ -83,7 +99,9 @@ export const turnErrorDefinition: ConversationNodeDefinition<TurnErrorState> = {
       message: failure.message,
       ...failure.code === undefined ? {} : { code: failure.code },
     }
-    return chatNode(context, 'turn-error', node.seq, node)
+    return chatNode(context, 'turn-error', node.seq, node, {
+      visibility: state.superseded ? 'hidden' : 'visible',
+    })
   },
 }
 
