@@ -11,6 +11,7 @@ describe('browser-safe Bid control-plane export', () => {
       'BID_STAGES',
       'BID_UPLOAD_FILES_HEADER',
       'BID_UPLOAD_SESSION_HEADER',
+      'BID_WORKFLOW_GATES',
       'DOCX_TEMPLATE_MAX_BYTES',
       'DOCX_TEMPLATE_NAME_HEADER',
       'DOCX_TEMPLATE_REVISION_HEADER',
@@ -31,8 +32,6 @@ describe('browser-safe Bid control-plane export', () => {
     expect(controlPlane.BID_CLIENT_ACTIONS).toEqual([
       'upload_files',
       'start_stage',
-      'stop_stage',
-      'retry_stage',
       'export_docx',
       'revise_chapter',
       'confirm_tender_analysis',

@@ -34,7 +34,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(await runFullOutlineRegenerationLoop(ctx, root)).toMatchObject({
         result: { ok: true }, draft: { revision: 2, outline: { sections: [{ title: '访问控制与安全审计方案' }] } },
         canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' },
-        transitions: ['bid.stage.started', 'bid.user_confirmation.required'],
+        transitions: ['bid.run.started', 'bid.run.completed', 'bid.user_confirmation.required'],
       })
     } finally { await ctx.fiber.dispose() }
   }, 30_000)

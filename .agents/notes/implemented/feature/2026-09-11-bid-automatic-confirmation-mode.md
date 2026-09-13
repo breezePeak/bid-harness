@@ -14,7 +14,7 @@ Bid 输入工具栏通过 `conversation.input.left` 提供会话级“手动确�
 
 S5 的 `request_writing_requirements` 与 `auto_start_chapter_writing` 都是 `chapter_writing/waiting_user` 才允许的正式 Host Action。阶段推进、重试和重置只发布等待状态，不抢先询问；手动模式随后调用前者，保持[整体写作要求门禁](2026-09-09-bid-s5-writing-requirements-gate.md)的询问与真实消息引用语义。自动模式调用后者，Host 读取 `outline/confirmed-outline.json`，构造 schema v3 默认 Writing Plan，以章节 `purpose` 作为每个可写叶节的任务，使用固定非空全书指令，并保持全部用户消息引用、用户要求和动态验收条件为空。Host 通过既有 `validateWritingPlan()` 校验后原子写入 `chapters/writing-plan.json`，追加 `bid.user_confirmation.received`，再调用 `runConfirmedStage()`；阶段启动事件仍只由 Orchestrator 产生。
 
-客户端不自动调用 `retry_stage` 或 `start_stage`。`failed` 和 `waiting_start` 保持人工操作；自动确认或自动启动失败后，用户可检查错误、切回手动模式或刷新会话，但当前挂载周期不自动重试。
+客户端不自动恢复 suspended Run，也不自动调用 `start_stage`。挂起与 `waiting_start` 保持人工决策；自动确认或自动启动失败后，用户可检查错误、切回手动模式或刷新会话，但当前挂载周期不自动恢复。
 
 ## Alternatives considered
 

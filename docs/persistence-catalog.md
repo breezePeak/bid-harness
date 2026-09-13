@@ -251,10 +251,68 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
  * @param runtime 已持久化的项目控制状态。
  * @param revision 项目状态文件的修订号。
  */
-'bid.project.resumed': { runtime: BidRuntimeState; revision: number }
+'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:25`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.completed/*`
+
+<a id="bidruncompleted--log-only"></a>
+
+#### `bid.run.completed` — log-only
+
+```ts persistence-catalog
+/** One exact execution attempt settled after committing its stage outcome. */
+'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.started/*`
+
+<a id="bidrunstarted--log-only"></a>
+
+#### `bid.run.started` — log-only
+
+```ts persistence-catalog
+/** One exact stage execution attempt became active. */
+'bid.run.started': { run: BidRunSnapshot }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:39`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.suspended/*`
+
+<a id="bidrunsuspended--log-only"></a>
+
+#### `bid.run.suspended` — log-only
+
+```ts persistence-catalog
+/** One exact execution attempt stopped without changing business progress. */
+'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.stage.attention_required/*`
+
+<a id="bidstageattention_required--log-only"></a>
+
+#### `bid.stage.attention_required` — log-only
+
+```ts persistence-catalog
+/**
+ * A stage retained usable artifacts but exhausted a bounded business correction.
+ * @param stage Stage whose current artifacts remain readable.
+ * @param status Stable recoverable status.
+ * @param reason Short user-visible summary.
+ * @param issues Browser-safe unmet business conditions.
+ */
+'bid.stage.attention_required': { stage: BidStage; status: 'attention_required'; reason: string; issues: StageValidationIssue[] }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.completed/*`
 
@@ -267,7 +325,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:25`](../packages/bid/bid/src/bid-ev
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:29`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -286,7 +344,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:29`](../packages/bid/bid/src/bid-ev
 'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:65`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.reset/*`
 
@@ -303,7 +361,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-ev
 'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:71`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -316,7 +374,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-ev
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -336,7 +394,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:27`](../packages/bid/bid/src/bid-ev
   | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:52`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:80`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -349,7 +407,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:52`](../packages/bid/bid/src/bid-ev
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:73`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.word-format.request/*`
 
@@ -359,13 +417,13 @@ Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-ev
 
 ```ts persistence-catalog
 /**
-     * 格式建议的完整模型输入；不进入正文对话上下文。
-     * @param system 模型指令。
-     * @param messages 仅含格式字段、用户要求和限长模板候选的数据。
-     * @param provider 实际调用的服务商。
-     * @param model 实际调用的模型。
-     * @param maxTokens 输出上限。
-     */
+ * 模板格式解释的完整模型输入；不进入正文对话上下文。
+ * @param system 模型指令。
+ * @param messages 仅含格式字段、模板正文和限长候选的数据。
+ * @param provider 实际调用的服务商。
+ * @param model 实际调用的模型。
+ * @param maxTokens 输出上限。
+ */
 'bid.word-format.request': {
   system: string
   messages: Message[]
@@ -376,6 +434,19 @@ Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-ev
 ```
 
 Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/bid/src/docx-format-suggestions.ts)
+
+### `bid.workflow.failed/*`
+
+<a id="bidworkflowfailed--log-only"></a>
+
+#### `bid.workflow.failed` — log-only
+
+```ts persistence-catalog
+/** Project progress cannot be continued or reconciled safely. */
+'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 

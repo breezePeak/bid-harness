@@ -8,6 +8,7 @@ import {
   buildBidStageTask,
   getBidStagePolicy,
   type BidStage,
+  type BidRunContext,
   type BidStageTask,
   type StageArtifact,
 } from '@deepseek-ai/dsh-bid'
@@ -28,7 +29,7 @@ describe('BidOrchestrator', () => {
     expect(BID_STAGES.map(stage => getBidStagePolicy(stage).userGate)).toEqual(['none', 'after_validation', 'after_validation', 'after_validation', 'before_execution', 'none'])
 
     const current = await session()
-    const execute = vi.fn(async task => artifacts(task.stage))
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
     const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute }, { validate: async () => ({ ok: true }) })
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
@@ -45,7 +46,7 @@ describe('BidOrchestrator', () => {
 
   it('starts a reset S5 at the writing-requirements gate without executing chapters', async () => {
     const current = await session()
-    const execute = vi.fn(async task => artifacts(task.stage))
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
     const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute }, { validate: async () => ({ ok: true }) })
     current.append('bid.project.resumed', { runtime: { stage: 'chapter_writing', status: 'waiting_start' }, revision: 1 })
 
@@ -57,20 +58,20 @@ describe('BidOrchestrator', () => {
     const current = await session()
     const orchestrator = new BidOrchestrator(
       current,
-      { canExecute: stage => stage === 'tender_analysis', execute: async task => artifacts(task.stage) },
+      { canExecute: stage => stage === 'tender_analysis', execute: async (task: BidStageTask) => artifacts(task.stage) },
       { validate: async () => ({ ok: false, issues: [{ code: 'INVALID_ARTIFACT', message: 'Artifact rejected.', artifact: 'analysis/scoring.json' }] }) },
     )
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({
-      stage: 'tender_analysis', status: 'failed', failureIssues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }],
-    })
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'pending' })
+    expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'retry_exhausted',
+      error: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } })
   })
 
   it('starts a reset stage only after the explicit post-reset confirmation', async () => {
     const current = await session()
-    const execute = vi.fn(async task => artifacts(task.stage))
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
     const orchestrator = new BidOrchestrator(
       current,
       { canExecute: () => true, execute },
@@ -84,7 +85,8 @@ describe('BidOrchestrator', () => {
     expect(execute).not.toHaveBeenCalled()
     await expect(orchestrator.startResetStage()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
     expect(execute).toHaveBeenCalledOnce()
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ stage: 'tender_analysis' }))
+    expect(execute.mock.calls[0]?.[0].stage).toBe('tender_analysis')
+    expect(typeof execute.mock.calls[0]?.[1].runId).toBe('string')
     expect(() => orchestrator.startResetStage()).toThrow(expect.objectContaining({ code: 'BID_STAGE_START_NOT_ALLOWED' }))
   })
 
@@ -107,9 +109,8 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({
-      stage: 'tender_analysis', status: 'running',
-    })
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'pending' })
+    expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'user_stop' })
     expect(current.events.some(event => event.type === 'bid.stage.failed')).toBe(false)
   })
 
@@ -178,7 +179,7 @@ describe('BidOrchestrator', () => {
     expect(prepare).not.toHaveBeenCalled()
   })
 
-  it('same-stage retry does not prepare a cross-stage context boundary', async () => {
+  it('same-stage resume does not prepare a cross-stage context boundary', async () => {
     const current = await session()
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
@@ -193,7 +194,9 @@ describe('BidOrchestrator', () => {
       prepare,
     )
 
-    await expect(orchestrator.retryCurrentAutomaticStage()).resolves.toEqual({
+    const suspended = orchestrator.controlState.run
+    expect(suspended?.status).toBe('suspended')
+    await expect(orchestrator.resume(suspended!.runId)).resolves.toEqual({
       stage: 'tender_analysis', status: 'waiting_user',
     })
     expect(prepare).not.toHaveBeenCalled()

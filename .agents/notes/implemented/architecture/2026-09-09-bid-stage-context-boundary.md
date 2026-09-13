@@ -28,4 +28,4 @@ S1→S2、S2→S3、S3→S4 和 S4→S5 均使用该边界。同阶段 Validator
 
 ## Consequences
 
-跨阶段模型输入以 Stage Policy 的正式文件为唯一交接清单，旧模型结论仍可审计但不可见。边界准备增加一次对下一阶段全部 required inputs 的读取和 SHA-256 计算；缺失、链接或不可读输入会在阶段完成前阻止推进。S5 上下文超限恢复不调用模型摘要，因而不会把已经超限的历史再次发送给压缩模型；恢复后的私有协议从磁盘读取当前计划、章节检查点和审核产物。Session 与 Artifact Schema 均不改变，普通同阶段重试和现有 fresh-context Subagent 行为保持不变。
+跨阶段模型输入以 Stage Policy 的正式文件为唯一交接清单，旧模型结论仍可审计但不可见。边界准备增加一次对下一阶段全部 required inputs 的读取和 SHA-256 计算；缺失、链接或不可读输入会在阶段完成前阻止推进。S5 上下文超限恢复不调用模型摘要，因而不会把已经超限的历史再次发送给压缩模型；恢复后的私有协议从磁盘读取当前计划、章节检查点和审核产物。Session 与 Artifact Schema 均不改变，同阶段 Run 恢复和现有 fresh-context Subagent 行为保持该边界。

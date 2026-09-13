@@ -3,21 +3,37 @@
 import { readFile } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
-import type { BidRuntimeState } from './control-plane-contract.ts'
-import { bidRuntimeSchema } from './runtime-state.ts'
+import type { BidControlState, BidRuntimeState } from './control-plane-contract.ts'
+import { bidControlStateSchema, bidRuntimeSchema, bidRuntimeView, controlStateFromLegacyRuntime } from './runtime-state.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
-const projectStateSchema = z.object({
+const projectStateV1Schema = z.object({
   schema_version: z.literal(1),
   runtime: bidRuntimeSchema,
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   updated_at: z.number().int().nonnegative(),
 }).strict()
 
+const projectStateSchema = z.object({
+  schema_version: z.literal(2),
+  workflow: bidControlStateSchema.shape.workflow,
+  run: bidControlStateSchema.shape.run,
+  last_run: bidControlStateSchema.shape.lastRun,
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  updated_at: z.number().int().nonnegative(),
+}).strict()
+
 /** 仅保存项目控制状态，不携带 Session 身份或聊天上下文。 */
-export type BidProjectState = z.infer<typeof projectStateSchema>
+export type BidProjectState = z.infer<typeof projectStateSchema> & { readonly runtime: BidRuntimeState }
 
 type ProjectWorkspace = { readonly root: string; readonly projectStatePath: string }
+
+function exposeRuntime(state: z.infer<typeof projectStateSchema>): BidProjectState {
+  return Object.defineProperty(state, 'runtime', {
+    enumerable: false,
+    value: bidRuntimeView({ workflow: state.workflow, run: state.run, lastRun: state.last_run }),
+  }) as BidProjectState
+}
 
 /**
  * 读取项目状态；未创建时返回 undefined，格式无效或版本不符时拒绝读取。
@@ -35,7 +51,19 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
     throw error
   }
   try {
-    return projectStateSchema.parse(JSON.parse(raw))
+    const value: unknown = JSON.parse(raw)
+    const current = projectStateSchema.safeParse(value)
+    if (current.success) return exposeRuntime(current.data)
+    const legacy = projectStateV1Schema.parse(value)
+    const control = controlStateFromLegacyRuntime(legacy.runtime, legacy.revision)
+    return exposeRuntime({
+      schema_version: 2,
+      workflow: control.workflow,
+      run: control.run,
+      last_run: control.lastRun,
+      revision: legacy.revision,
+      updated_at: legacy.updated_at,
+    })
   } catch (cause: unknown) {
     throw new Error(`bid-invalid-project-state: ${workspace.projectStatePath}`, { cause })
   }
@@ -48,7 +76,14 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
  */
 export async function writeBidProjectState(workspace: ProjectWorkspace, state: BidProjectState): Promise<void> {
   await assertNoLinkedPath(workspace.root, workspace.projectStatePath)
-  const validated = projectStateSchema.parse(state)
+  const validated = projectStateSchema.parse({
+    schema_version: state.schema_version,
+    workflow: state.workflow,
+    run: state.run,
+    last_run: state.last_run,
+    revision: state.revision,
+    updated_at: state.updated_at,
+  })
   await writeFileAtomic(workspace.projectStatePath, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
@@ -58,14 +93,20 @@ export async function writeBidProjectState(workspace: ProjectWorkspace, state: B
  * @param runtime 当前操作结束或启动恢复后的项目控制状态。
  * @returns 已提交的项目状态，首次修订号为 1。
  */
-export async function checkpointBidProjectState(workspace: ProjectWorkspace, runtime: BidRuntimeState): Promise<BidProjectState> {
+export async function checkpointBidProjectState(
+  workspace: ProjectWorkspace,
+  control: BidControlState | BidRuntimeState,
+): Promise<BidProjectState> {
   const previous = await readBidProjectState(workspace)
-  const state: BidProjectState = {
-    schema_version: 1,
-    runtime,
+  const normalized = 'workflow' in control ? control : controlStateFromLegacyRuntime(control, previous?.revision ?? 0)
+  const state = exposeRuntime({
+    schema_version: 2,
+    workflow: normalized.workflow,
+    run: normalized.run,
+    last_run: normalized.lastRun,
     revision: (previous?.revision ?? 0) + 1,
     updated_at: Date.now(),
-  }
+  })
   await writeBidProjectState(workspace, state)
   return state
 }

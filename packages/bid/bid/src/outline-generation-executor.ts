@@ -309,11 +309,12 @@ export async function executeOutlineGeneration(
     }
   }
   const write = async (artifact: string, value: unknown): Promise<void> => {
-    options.signal?.throwIfAborted()
+    options.run?.commits.assertWritable(options.run)
     await assertNoLinkedPath(workspace.root, path(artifact))
     await writeFileAtomic(path(artifact), JSON.stringify(value, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
   }
   const remove = async (artifact: string): Promise<void> => {
+    options.run?.commits.assertWritable(options.run)
     await assertNoLinkedPath(workspace.root, path(artifact))
     await rm(path(artifact), { force: true })
     const fs = agent.ctx.get('fs')
@@ -370,7 +371,7 @@ export async function executeOutlineGeneration(
     },
   ): Promise<void> => {
     options.signal?.throwIfAborted()
-    await options.scheduler?.waitUntilRunnable(options.signal)
+    if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(options.signal ?? new AbortController().signal)
     writablePaths = outputs
     const eventStart = agent.session.events.length
     const message = createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
@@ -445,9 +446,15 @@ export async function executeOutlineGeneration(
     if (catalog === undefined) {
       if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
       if (await read(RESPONSE_POINT_CANDIDATE) === undefined) {
-        await run(renderResponsePointAnalysisTask(agent, workspace, task, scoring.scoring_items.map(item => item.id)), [RESPONSE_POINT_CANDIDATE])
+        await run(
+          renderResponsePointAnalysisTask(agent, workspace, task, scoring.scoring_items.map(item => item.id)),
+          [RESPONSE_POINT_CANDIDATE],
+        )
       }
-      await run(renderResponsePointSemanticReviewTask(agent, workspace, scoring.scoring_items.map(item => item.id)), [RESPONSE_POINT_CANDIDATE])
+      await run(
+        renderResponsePointSemanticReviewTask(agent, workspace, scoring.scoring_items.map(item => item.id)),
+        [RESPONSE_POINT_CANDIDATE],
+      )
       const candidate = parseScoringResponsePointCandidate(JSON.parse((await read(RESPONSE_POINT_CANDIDATE)) ?? 'null'))
       catalog = createScoringResponsePointCatalog(scoring, candidate)
       await write(RESPONSE_POINT_CATALOG, catalog)

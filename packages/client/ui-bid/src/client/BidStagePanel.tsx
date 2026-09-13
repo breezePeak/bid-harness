@@ -37,7 +37,7 @@ export type BidConfirmationModeControlProps =
   & PropsStore<ReturnType<typeof createBidConfirmationModeStore>>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'start' | 'stop' | 'retry' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
+type PendingAction = 'upload' | 'start' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -190,8 +190,6 @@ export function BidStagePanel({
   getDocxLibrary,
   uploadDocxTemplate,
   startStage,
-  stopStage,
-  retryStage,
   requestWritingRequirements,
   autoStartChapterWriting,
   confirmOutline,
@@ -477,8 +475,6 @@ export function BidStagePanel({
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const canStart = projection.allowedActions.includes('start_stage')
-  const canStop = projection.allowedActions.includes('stop_stage')
-  const canRetry = projection.allowedActions.includes('retry_stage')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -598,12 +594,12 @@ export function BidStagePanel({
     setRequestError(null)
   }
 
-  const hostFailureReason = projection.runtime.status === 'failed'
-    ? projection.runtime.failureReason
+  const suspendedRun = projection.run?.status === 'suspended' ? projection.run : undefined
+  const hostFailureReason = suspendedRun?.cause !== 'user_stop'
+    ? suspendedRun?.error?.message ?? (projection.runtime.status === 'failed' ? projection.runtime.failureReason : undefined)
     : undefined
-  const hostFailureIssues = projection.runtime.status === 'failed'
-    ? projection.runtime.failureIssues ?? []
-    : []
+  const hostFailureIssues = suspendedRun?.error?.issues
+    ?? (projection.runtime.status === 'failed' ? projection.runtime.failureIssues ?? [] : [])
   const dotState = statusDot(projection.runtime.status)
   const displayStage = projection.runtime.stage === 'docx_export' ? 'chapter_writing' : projection.runtime.stage
 
@@ -756,7 +752,7 @@ export function BidStagePanel({
           <span className={css.message} role="status">
             {t(promptKey(displayStage, projection.runtime.status))}
           </span>
-          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
+          <span className={css.runtimeStatus}>{suspendedRun === undefined ? t(statusKey(projection.runtime.status)) : t('status.suspended')}</span>
         </div>
 
         {mappingProgress !== null && (
@@ -828,6 +824,10 @@ export function BidStagePanel({
               />
             </div>
           </div>
+        )}
+
+        {suspendedRun?.cause === 'user_stop' && (
+          <p className={css.decisionHint} role="status">{t('run.stopped')}</p>
         )}
 
         {hostFailureReason !== undefined && (
@@ -1065,30 +1065,6 @@ export function BidStagePanel({
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
               </Button>
             </>
-          )}
-          {canRetry && (
-            <Button
-              size="sm"
-              variant="outline"
-              icon={<IconRefreshOutline16 />}
-              disabled={requestPending !== null || retryStage === undefined}
-              title={retryStage === undefined ? t('action.unavailable') : undefined}
-              onClick={() => { invoke('retry', retryStage) }}
-            >
-              {t('action.retry')}
-            </Button>
-          )}
-          {canStop && (
-            <Button
-              size="sm"
-              variant="outline"
-              icon={<IconCloseOutline16 />}
-              disabled={requestPending !== null || stopStage === undefined}
-              title={stopStage === undefined ? t('action.unavailable') : t('action.stop_stage_hint')}
-              onClick={() => { invoke('stop', stopStage) }}
-            >
-              {requestPending === 'stop' ? t('action.stopping_stage') : t('action.stop_stage')}
-            </Button>
           )}
           {canStart && (
             <Button

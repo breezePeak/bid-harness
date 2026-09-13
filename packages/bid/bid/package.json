@@ -106,7 +106,6 @@
     "@deepseek-ai/dsh-tool-fs-search": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
     "@deepseek-ai/dsh-typert-protocol": "workspace:^",
-    "@deepseek-ai/dsh-user-questions": "workspace:^",
     "@types/word-extractor": "1.0.2"
   }
 }

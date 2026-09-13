@@ -55,7 +55,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const before = agent.session.events.length
   const concurrent: Promise<string>[] = []
   const releaseObserver = ctx.on('session/event', (session, event) => {
-    if (session !== agent.session || event.type !== 'bid.stage.started') return
+    if (session !== agent.session || event.type !== 'bid.run.started') return
     concurrent.push(ctx.serial('session/prompt-admission', { session, mode: 'steer', content: [{ type: 'text', text: 'test' }] })
       .then((rejection) => {
         if (rejection !== undefined) throw new Error(`阶段执行期间拒绝了普通消息：${rejection.reason}`)

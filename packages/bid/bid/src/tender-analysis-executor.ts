@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -18,6 +18,7 @@ import {
 } from './tender-analysis-submission.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { installMainAgentInterleave } from './main-agent-interleave.ts'
+import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 
 const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
   'analysis/project.json': 'tender_project',
@@ -156,29 +157,25 @@ export async function executeTenderAnalysis(
   const fs = agent.ctx.get('fs')
   const tools = agent.ctx.get('tools')
   if (fs === undefined || tools === undefined) throw new Error('Bid tender analysis requires fs and tools services')
-  await Promise.all([...task.requiredArtifacts, 'analysis/scoring.json', 'analysis/tender-analysis-selection.json'].map(async (path) => {
-    const artifactPath = join(workspace.projectRoot, path)
-    await rm(artifactPath, { force: true })
-    const target = await fs.resolve(artifactPath)
-    agent.ctx.emit('fs/observed', target, { kind: 'absent' }, { agent })
-  }))
-  const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest())
-  const allowedTools = [...task.allowedTools, ...TENDER_ANALYSIS_SUBMISSION_TOOLS]
-  const allowed = new Set(allowedTools)
-  let liftRestriction: (() => void) | undefined
-  let liftGuard: (() => void) | undefined
   const artifacts = task.requiredArtifacts.map(path => ({
     stage: 'tender_analysis' as const,
     type: ARTIFACT_TYPES[path] ?? 'tender_analysis',
     path,
   }))
+  const existing = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
+  if (existing.ok) return artifacts
+  const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest(), options.run)
+  const allowedTools = [...task.allowedTools, ...TENDER_ANALYSIS_SUBMISSION_TOOLS]
+  const allowed = new Set(allowedTools)
+  let liftRestriction: (() => void) | undefined
+  let liftGuard: (() => void) | undefined
   try {
     liftRestriction = tools.restrict({ allow: task.allowedTools })
     liftGuard = tools.guard(exec => allowed.has(exec.name)
       ? undefined
       : `Bid stage ${task.stage} allows only ${allowedTools.join(', ')}`)
     const run = async (prompt: string, isComplete: () => boolean): Promise<void> => {
-      await options.scheduler?.waitUntilRunnable(options.signal)
+      if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(options.signal ?? new AbortController().signal)
       const message = createUserMessage({
         content: [{ type: 'text', text: prompt }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
@@ -206,7 +203,7 @@ export async function executeTenderAnalysis(
       options.signal?.throwIfAborted()
       if (runtime.phase === 'review_required') {
         const snapshot = runtime.reviewSnapshot()
-        runtime.beginReview()
+        await runtime.beginReview()
         await run(renderTenderAnalysisQualityReviewTask(agent, workspace, task, snapshot, runtime.locators), () => runtime.completed)
         continue
       }

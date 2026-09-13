@@ -1,24 +1,35 @@
 import { z } from 'zod'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { BidClientProjection, BidRuntimeState } from './control-plane-contract.ts'
+import type { BidClientProjection, BidControlState } from './control-plane-contract.ts'
 import { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY } from './control-plane-contract.ts'
 import {
-  BID_INITIAL_RUNTIME_STATE,
-  bidRuntimeSchema,
+  BID_INITIAL_CONTROL_STATE,
+  bidControlStateSchema,
+  bidRunSchema,
+  bidWorkflowSchema,
   getBidClientProjection,
-  reduceBidRuntimeState,
+  reduceBidControlState,
 } from './runtime-state.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Replayable Bid state derived from the shared session log. */
-    [BID_RUNTIME_PROJECTION_KEY]: BidRuntimeState
+    [BID_RUNTIME_PROJECTION_KEY]: BidControlState
   }
 
 }
 
 const clientProjectionSchema = z.object({
-  runtime: bidRuntimeSchema,
+  workflow: bidWorkflowSchema,
+  run: bidRunSchema.nullable(),
+  runtime: z.object({
+    stage: z.enum(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export']),
+    status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'attention_required', 'failed', 'completed']),
+    failureReason: z.string().optional(),
+    failureIssues: z.array(z.object({
+      code: z.string(), message: z.string(), artifact: z.string().optional(), path: z.string().optional(),
+    }).strict()).readonly().optional(),
+  }).strict(),
   allowedActions: z.array(z.enum(BID_CLIENT_ACTIONS)),
   composer: z.union([
     z.object({ enabled: z.literal(true) }),
@@ -57,13 +68,13 @@ export function registerBidRuntimeProjection(
 ): () => void {
   return registry.register({
     key: BID_RUNTIME_PROJECTION_KEY,
-    stateSchema: bidRuntimeSchema,
-    init: () => BID_INITIAL_RUNTIME_STATE,
-    apply: reduceBidRuntimeState,
+    stateSchema: bidControlStateSchema,
+    init: () => BID_INITIAL_CONTROL_STATE,
+    apply: reduceBidControlState,
     wire: {
       viewSchema: clientProjectionSchema,
       view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 9,
+    stateVersion: 10,
   })
 }

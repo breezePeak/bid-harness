@@ -14,6 +14,7 @@ import {
   parseTenderScoringArtifact,
   resolveTenderSourceHint,
   validateTenderAnalysis,
+  type BidRunContext,
 } from '@deepseek-ai/dsh-bid'
 
 const PROJECT_QUOTE = '项目名称：智慧审计平台。'
@@ -27,10 +28,11 @@ interface Fixture {
   tools: Map<string, ToolDefinition>
   runtime: Awaited<ReturnType<typeof attachTenderAnalysisSubmissionRuntime>>
   concludeTurn: ReturnType<typeof vi.fn>
+  run?: BidRunContext
   call(name: string, args: unknown): Promise<unknown>
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(durable = false): Promise<Fixture> {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-submit-')), {
     ...DEFAULT_BID_CONFIG,
     documentChunk: { minChars: 200, targetChars: 400, maxChars: 500 },
@@ -62,14 +64,21 @@ async function fixture(): Promise<Fixture> {
     },
   }
   const agent = { id: 'session', ctx: { get: (name: keyof typeof services) => services[name] } } as unknown as Agent
-  const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest())
+  const signal = new AbortController().signal
+  const run = durable ? {
+    runId: 'run-s2', epoch: 1, projectRevision: 0, signal,
+    scheduler: { paused: () => false, close: () => {}, waitUntilRunnable: async () => {} },
+    commits: { assertWritable: () => {} },
+    children: { drain: async () => {} },
+  } as unknown as BidRunContext : undefined
+  const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest(), run)
   const concludeTurn = vi.fn()
   const call = async (name: string, args: unknown): Promise<unknown> => {
     const definition = definitions.get(name)
     if (definition === undefined) throw new Error(`missing tool ${name}`)
     return definition.execute(args, { agent, signal: new AbortController().signal, concludeTurn } as unknown as ToolRunContext)
   }
-  return { workspace, agent, tools: definitions, runtime, concludeTurn, call }
+  return { workspace, agent, tools: definitions, runtime, concludeTurn, call, ...(run === undefined ? {} : { run }) }
 }
 
 function source(semantic_hint: string, chunk?: string, file_ref = 'T1') {
@@ -98,11 +107,40 @@ async function submitComplete(value: Fixture): Promise<void> {
 async function finishReviewed(value: Fixture): Promise<unknown> {
   const staged = await value.call('finish_tender_analysis', {}) as { review_required?: boolean; revision?: number }
   expect(staged).toMatchObject({ completed: false, review_required: true, revision: value.runtime.revision })
-  value.runtime.beginReview()
+  await value.runtime.beginReview()
   return value.call('finish_tender_analysis', { review_revision: value.runtime.revision })
 }
 
 describe('tender-analysis staged submission runtime', () => {
+  it('restores durable staged records and restarts an interrupted review at its safe boundary', async () => {
+    const value = await fixture(true)
+    await submitComplete(value)
+    await expect(value.call('finish_tender_analysis', {})).resolves.toMatchObject({
+      completed: false,
+      review_required: true,
+    })
+    await value.runtime.beginReview()
+    const revision = value.runtime.revision
+    value.runtime.dispose()
+
+    const restored = await attachTenderAnalysisSubmissionRuntime(
+      value.agent,
+      value.workspace,
+      await value.workspace.readManifest(),
+      value.run,
+    )
+
+    expect(restored.phase).toBe('review_required')
+    expect(restored.revision).toBe(revision)
+    expect(restored.reviewSnapshot()).toMatchObject({
+      project_facts: [{ field: 'project_name', value: '智慧审计平台' }],
+      requirements: [{ normalized_requirement: '系统应支持统一身份认证和审计日志。' }],
+      scoring: [{ title: '总体技术方案' }],
+      compliance: [{ normalized_rule: '技术方案必须提供数据安全措施。' }],
+    })
+    restored.dispose()
+  })
+
   it('builds T1/T2 from successful tenders and resolves a semantic hint to exact chunk text and lines', async () => {
     const value = await fixture()
     expect(value.runtime.locators.map(locator => ({ ref: locator.file_ref, name: locator.name }))).toEqual([
@@ -343,7 +381,7 @@ describe('tender-analysis staged submission runtime', () => {
     const snapshot = value.runtime.reviewSnapshot() as { revision: number; scoring: Array<{ scoring_ref: string; title: string }> }
     expect(snapshot).toMatchObject({ revision: initialRevision })
     expect(snapshot.scoring).toEqual([expect.objectContaining({ scoring_ref: 'S1', title: '总体技术方案' })])
-    value.runtime.beginReview()
+    await value.runtime.beginReview()
     const corrected = await value.call('submit_scoring_item', {
       replace_ref: 'S1', group: '技术方案', title: '总体技术方案（复核修正）',
       criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,

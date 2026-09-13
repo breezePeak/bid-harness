@@ -1,9 +1,20 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
-import type { BidRuntimeState, BidStage, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
+import type {
+  BidControlState,
+  BidRunSnapshot,
+  BidRuntimeState,
+  BidStage,
+  StageArtifact,
+  StageValidationIssue,
+} from './control-plane-contract.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
+  'bid.run.started',
+  'bid.run.suspended',
+  'bid.run.completed',
+  'bid.workflow.failed',
   'bid.stage.started',
   'bid.stage.completed',
   'bid.stage.attention_required',
@@ -23,7 +34,15 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param runtime 已持久化的项目控制状态。
      * @param revision 项目状态文件的修订号。
      */
-    'bid.project.resumed': { runtime: BidRuntimeState; revision: number }
+    'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
+    /** One exact stage execution attempt became active. */
+    'bid.run.started': { run: BidRunSnapshot }
+    /** One exact execution attempt stopped without changing business progress. */
+    'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
+    /** One exact execution attempt settled after committing its stage outcome. */
+    'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
+    /** Project progress cannot be continued or reconciled safely. */
+    'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
     /** A stage began execution and is the control plane's current running stage. */
     'bid.stage.started': { stage: BidStage; status: 'running' }
     /** A stage passed validation; artifacts remain in the workspace at these references. */

@@ -65,12 +65,8 @@ export interface BidStagePanelInjected {
   /** S1 独立读取和上传 Word 导出模板，不进入普通资料批次。 */
   getDocxLibrary: () => Promise<DocxTemplateLibraryView>
   uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
-  /** Host retry action, installed when the Bid action API is composed. */
-  retryStage?: () => Promise<void>
   /** Start the current stage after a reset has finished and the user confirms. */
   startStage?: () => Promise<void>
-  /** Explicitly stop the running stage without cancelling an unrelated chat response. */
-  stopStage?: () => Promise<void>
   /** Ask the Main Agent for manual S5 writing requirements. */
   requestWritingRequirements?: () => Promise<void>
   /** Create the default S5 writing plan and start the confirmed stage. */
@@ -201,11 +197,6 @@ export function apply(ctx: ClientContext): void {
         } | undefined
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
-      retryStage: async () => {
-        const result = await ctx.remote.bid.retryStage(sessionId)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error)
-      },
       startStage: async () => {
         const remote = ctx.remote.bid as unknown as {
           startStage(id: SessionId): Promise<{
@@ -217,18 +208,6 @@ export function apply(ctx: ClientContext): void {
         const result = await remote.startStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_START_FAILED', message: '阶段启动失败。' })
-      },
-      stopStage: async () => {
-        const remote = ctx.remote.bid as unknown as {
-          stopStage(id: SessionId): Promise<{
-            ok: boolean
-            value: { ok: boolean; error?: Parameters<typeof actionFailure>[0] }
-            error: Parameters<typeof actionFailure>[0]
-          }>
-        }
-        const result = await remote.stopStage(sessionId)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_STOP_FAILED', message: '阶段停止失败。' })
       },
       requestWritingRequirements: async () => {
         const result = await ctx.remote.bid.requestWritingRequirements(sessionId)
@@ -379,7 +358,6 @@ export function apply(ctx: ClientContext): void {
           value: unknown
           error: Parameters<typeof actionFailure>[0]
         }>
-        retryStage(id: SessionId): Promise<{ ok: boolean; value: { ok: boolean; error?: { code: string; message: string } } }>
       }
       return {
         getWorkbench: async () => {
@@ -397,11 +375,6 @@ export function apply(ctx: ClientContext): void {
           conversation?.setViewAvailable('bid-word-export', true)
           conversation?.selectView('bid-word-export')
           return Promise.resolve()
-        },
-        retryStage: async () => {
-          const result = await remote.retryStage(sessionId)
-          if (!result.ok) throw new Error('BID_RETRY_FAILED')
-          if (!result.value.ok) throw new Error(result.value.error?.message ?? 'BID_RETRY_FAILED')
         },
       }
     },

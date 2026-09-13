@@ -24,6 +24,8 @@ const t = ((key: keyof typeof zh, params?: Record<string, unknown>) => {
 
 function projection(patch: Partial<BidClientProjection> = {}): BidClientProjection {
   return {
+    workflow: { stage: 'file_intake', gate: 'ready' },
+    run: null,
     runtime: { stage: 'file_intake', status: 'pending' },
     allowedActions: [],
     composer: { enabled: false, reason: 'bid.upload_required' },
@@ -193,7 +195,8 @@ describe('BidStagePanel', () => {
     expect(requestWritingRequirements).toHaveBeenCalledOnce()
     automatic.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'chapter_writing', status: 'failed', failureReason: '正文失败' },
-      allowedActions: ['retry_stage'],
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     }), { ...automaticMode, requestWritingRequirements, autoStartChapterWriting })} />)
     automatic.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'chapter_writing', status: 'waiting_start' },
@@ -322,18 +325,31 @@ describe('BidStagePanel', () => {
     await waitFor(() => { expect(startStage).toHaveBeenCalledOnce() })
   })
 
-  it('运行中单独显示停止任务，并调用阶段控制而不是聊天取消', async () => {
-    const stopStage = vi.fn(async () => {})
+  it('运行中不提供独立阶段停止按钮，停止统一使用聊天原生控制', () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'running' },
-      allowedActions: ['send_message', 'stop_stage'],
+      allowedActions: ['send_message'],
       composer: { enabled: true },
-    }), { stopStage })} />)
+    }))} />)
 
-    const button = screen.getByRole('button', { name: '停止任务' })
-    expect(button.getAttribute('title')).toContain('“停止回复”仅停止聊天回复')
-    fireEvent.click(button)
-    await waitFor(() => { expect(stopStage).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull()
+  })
+
+  it('用户停止的 Run 显示中性挂起提示，不渲染失败告警', () => {
+    render(<BidStagePanel {...props(projection({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: {
+        runId: 'run-stopped', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+        status: 'suspended', cause: 'user_stop', startedAt: 10, updatedAt: 20,
+      },
+      runtime: { stage: 'evidence_mapping', status: 'pending' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
+    }))} />)
+
+    expect(screen.getByText('已挂起')).toBeTruthy()
+    expect(screen.getByText('当前任务已停止，已保存完成进度。')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('stays absent for a non-Bid session even when a projection is available', () => {
@@ -564,8 +580,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
   })
 
-  it('shows every structured S2 validation issue and keeps retry available', () => {
-    const retryStage = vi.fn(async () => {})
+  it('shows every unrecoverable S2 validation issue without a stage retry button', () => {
     render(<BidStagePanel {...props(projection({
       runtime: {
         stage: 'tender_analysis',
@@ -586,16 +601,17 @@ describe('BidStagePanel', () => {
           },
         ],
       },
-      allowedActions: ['retry_stage'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
-    }), { retryStage })} />)
+      workflow: { stage: 'tender_analysis', gate: 'failed', failureReason: '招标分析结果未通过校验。' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
+    }))} />)
 
     expect(screen.getByText('校验发现 2 个问题')).toBeTruthy()
     expect(screen.getByText('文件：analysis/scoring.json')).toBeTruthy()
     expect(screen.getByText('字段：scoring_items[2].response_points')).toBeTruthy()
     expect(screen.getByText('原因：至少需要一项技术响应重点。')).toBeTruthy()
     expect(screen.getByText('文件：analysis/compliance.json')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
     expect(screen.queryByRole('button', { name: '确认技术标分析' })).toBeNull()
   })
 
@@ -638,50 +654,18 @@ describe('BidStagePanel', () => {
     expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
   })
 
-  it('dispatches retry and confirmation without changing projected runtime', async () => {
-    const retryStage = vi.fn(async () => {})
+  it('dispatches confirmation without changing projected runtime', async () => {
     const confirmOutline = vi.fn(async () => {})
     const draft = outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] })
-    const retryProjection = projection({ allowedActions: ['retry_stage'] })
-    const view = render(<BidStagePanel {...props(retryProjection, { retryStage, confirmOutline })} />)
-
-    fireEvent.click(screen.getByRole('button', { name: '重试' }))
-    await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
-    expect(screen.getByText('请添加本项目资料')).toBeTruthy()
-
     const confirmationProjection = projection({
       runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
     })
-    view.rerender(<BidStagePanel {...props(confirmationProjection, { retryStage, confirmOutline, getOutlineDraft: async () => draft })} />)
+    render(<BidStagePanel {...props(confirmationProjection, { confirmOutline, getOutlineDraft: async () => draft })} />)
     await waitFor(() => { expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy() })
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => { expect(confirmOutline).toHaveBeenLastCalledWith({ expected_revision: 1, expected_draft_sha256: 'b'.repeat(64) }) })
     expect(screen.getByText('请确认技术标目录')).toBeTruthy()
-  })
-
-  it('discards an action failure after the Host advances the stage', async () => {
-    const retry = Promise.withResolvers<undefined>()
-    const retryStage = vi.fn(() => retry.promise)
-    const view = render(<BidStagePanel {...props(projection({
-      runtime: { stage: 'file_intake', status: 'failed', failureReason: '网络错误' },
-      allowedActions: ['retry_stage'],
-    }), { retryStage })} />)
-
-    fireEvent.click(screen.getByRole('button', { name: '重试' }))
-    await waitFor(() => { expect(retryStage).toHaveBeenCalledOnce() })
-    view.rerender(<BidStagePanel {...props(projection({
-      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
-      allowedActions: ['confirm_outline'],
-      composer: { enabled: true },
-    }), { retryStage, getOutlineDraft: async () => outlineDraft({ schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [], sections: [] }) })} />)
-    await waitFor(() => { expect(screen.getByRole('button', { name: '使用该目录' })).toBeTruthy() })
-    await act(async () => {
-      retry.reject(new Error('client api: bid/retryStage failed: Failed to fetch (internal)'))
-      await retry.promise.catch(() => {})
-    })
-
-    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('shows every technical scoring item, emits controlled S2 edits, and keeps invalid confirmation editable', async () => {
@@ -849,20 +833,10 @@ describe('ui-bid browser plugin', () => {
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
-    const remoteRetry = vi.fn<(_sessionId: string) => Promise<unknown>>()
-      .mockResolvedValue({
-        ok: true as const,
-        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'pending' as const } },
-      })
     const remoteStart = vi.fn<(_sessionId: string) => Promise<unknown>>()
       .mockResolvedValue({
         ok: true as const,
         value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'waiting_user' as const } },
-      })
-    const remoteStop = vi.fn<(_sessionId: string) => Promise<unknown>>()
-      .mockResolvedValue({
-        ok: true as const,
-        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'failed' as const } },
       })
     const remoteRequestWritingRequirements = vi.fn<(_sessionId: string) => Promise<unknown>>()
       .mockResolvedValue({
@@ -879,9 +853,7 @@ describe('ui-bid browser plugin', () => {
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
       remote: { bid: {
-        retryStage: remoteRetry,
         startStage: remoteStart,
-        stopStage: remoteStop,
         requestWritingRequirements: remoteRequestWritingRequirements,
         autoStartChapterWriting: remoteAutoStartChapterWriting,
       } },
@@ -904,9 +876,7 @@ describe('ui-bid browser plugin', () => {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
-        retryStage: () => Promise<void>
         startStage: () => Promise<void>
-        stopStage: () => Promise<void>
         requestWritingRequirements: () => Promise<void>
         autoStartChapterWriting: () => Promise<void>
       }
@@ -966,12 +936,8 @@ describe('ui-bid browser plugin', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     await expect(injected.uploadFiles([{ file: tender, role: 'tender' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
 
-    await injected.retryStage()
-    expect(remoteRetry).toHaveBeenCalledWith('session_bid')
     await injected.startStage()
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
-    await injected.stopStage()
-    expect(remoteStop).toHaveBeenCalledWith('session_bid')
     await injected.requestWritingRequirements()
     expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
     await injected.autoStartChapterWriting()

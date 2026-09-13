@@ -1308,7 +1308,7 @@ export async function executeChapterWriting(
     maxCompletionRepairRounds: DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   },
 ): Promise<StageArtifact[]> {
-  await options.scheduler?.waitUntilRunnable(options.signal)
+  if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(options.signal ?? new AbortController().signal)
   const discardOwnedChildMessages = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
     const decision = await next()
     if (subject !== agent || decision.kind === 'reject') return decision
@@ -1768,7 +1768,10 @@ async function runChapterWriting(
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
     if (revision !== undefined) return Promise.resolve()
-    logWrites = logWrites.then(() => writeJson(join(workspace.projectRoot, LOG_PATH), executionLog))
+    logWrites = logWrites.then(() => {
+      options.run?.commits.assertWritable(options.run)
+      return writeJson(join(workspace.projectRoot, LOG_PATH), executionLog)
+    })
     return logWrites
   }
   await persistLog()
@@ -1778,9 +1781,10 @@ async function runChapterWriting(
   const persistWebSnapshots = (
     sectionId: string, childSessionId: string, writerAttempt: number, snapshots: readonly WebEvidenceSnapshot[],
   ): Promise<WebEvidenceSnapshot[]> => {
-    const result = webWrites.then(() => persistChapterWebSnapshots(
-      workspace, sectionId, childSessionId, writerAttempt, snapshots,
-    ))
+    const result = webWrites.then(() => {
+      options.run?.commits.assertWritable(options.run)
+      return persistChapterWebSnapshots(workspace, sectionId, childSessionId, writerAttempt, snapshots)
+    })
     webWrites = result.then(() => undefined)
     return result.then((bound) => {
       for (const snapshot of bound) {
@@ -2019,6 +2023,7 @@ async function runChapterWriting(
         persistCandidate = true,
       ): Promise<CompletedChapter> => {
         signal.throwIfAborted()
+        options.run?.commits.assertWritable(options.run)
         assertCurrentInput()
         const reviewPath = `chapters/reviews/${serial}.json`
         const candidateSha256 = chapterCandidateSha256(candidate.markdown)
@@ -2297,6 +2302,7 @@ async function runChapterWriting(
           await persistLog()
           if (accepted && candidate !== undefined) {
             signal.throwIfAborted()
+            options.run?.commits.assertWritable(options.run)
             await appendChapterWebReferences(workspace, references, [...durableWebSources.values()])
             rejectedCandidate = projectChapterWriterCandidate(candidate, references)
             if (effectiveRevision === undefined) {
@@ -2386,7 +2392,7 @@ async function runChapterWriting(
     } catch (error: unknown) {
       if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
       log.status = 'failed'
-      log.failure_phase = log.phase ?? 'queued'
+      log.failure_phase = log.phase
       log.phase = null
       await persistLog()
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
@@ -2403,7 +2409,7 @@ async function runChapterWriting(
   try {
     while (true) {
       signal.throwIfAborted()
-      await options.scheduler?.waitUntilRunnable(signal)
+      if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(signal)
       await applyCommands()
       for (const section of worklist) {
         if (running.size >= options.maxConcurrency) break
@@ -2471,6 +2477,7 @@ async function runChapterWriting(
     return chapter.entry
   })
   signal.throwIfAborted()
+  options.run?.commits.assertWritable(options.run)
   if (revision !== undefined) await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog)
   await writeJson(join(workspace.projectRoot, MANIFEST_PATH), {
     schema_version: CHAPTER_WRITING_SCHEMA_VERSION,

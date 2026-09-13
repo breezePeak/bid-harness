@@ -673,7 +673,9 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     finalText('逐项复核章节归属和写作指导已完成。'),
   )
   maxRepairAttempts = 4
-  const outcome = await orchestrator.retry()
+  const suspended = orchestrator.controlState.run
+  if (suspended?.status !== 'suspended') throw new Error('S3 失败没有保留可恢复 Run')
+  const outcome = await orchestrator.resume(suspended.runId)
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
   const catalogUnchanged = catalogBefore === await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')

@@ -1,5 +1,6 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { StageValidationIssue } from './control-plane-contract.ts'
+import type { BidRunContext } from './run-coordinator.ts'
 
 /** Default number of Validator-guided repair turns for one model-produced Bid stage. */
 export const DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS = 3
@@ -8,17 +9,21 @@ export const DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS = 3
 export interface StageSchedulerControl {
   /** Whether the Host currently holds new stage work. */
   paused(): boolean
+  /** Permanently reject new work for a retired Run. */
+  close(): void
   /** Wait until scheduling resumes or the owning operation is cancelled. */
-  waitUntilRunnable(signal?: AbortSignal): Promise<void>
+  waitUntilRunnable(signal: AbortSignal): Promise<void>
 }
 
 /** Host-owned repair limit shared by model-produced Bid stages. */
 export interface ModelStageExecutionOptions {
   /** Maximum Validator-guided repair turns after the initial model output. */
   maxRepairAttempts: number
-  /** Host operation cancellation for reset-to-stage recovery. */
+  /** Exact Run authority required for cancellation, scheduling, and formal commits. */
+  run?: BidRunContext | undefined
+  /** Exact Run cancellation; retained as a local convenience alias. */
   signal?: AbortSignal | undefined
-  /** Operation-local pause gate checked before starting later model or Child work. */
+  /** Exact Run scheduler; retained as a local convenience alias. */
   scheduler?: StageSchedulerControl | undefined
 }
 

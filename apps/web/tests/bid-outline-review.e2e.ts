@@ -51,7 +51,12 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     await seedProjectArtifacts(workspace)
     const publish = async (runtime: Parameters<typeof checkpointBidProjectState>[1]) => {
       const state = await checkpointBidProjectState(workspace, runtime)
-      agent.session.append('bid.project.resumed', { revision: state.revision, runtime })
+      agent.session.append('bid.project.resumed', {
+        workflow: state.workflow,
+        run: state.run,
+        lastRun: state.last_run,
+        revision: state.revision,
+      })
     }
     await publish({ stage: 'tender_analysis', status: 'waiting_user' })
     await page.getByRole('tab', { name: '招标详情', exact: true }).waitFor()

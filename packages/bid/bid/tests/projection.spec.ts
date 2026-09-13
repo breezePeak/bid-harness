@@ -60,7 +60,7 @@ describe('Bid client projection', () => {
       session.append('bid.project.resumed', {
         runtime: { stage: 'evidence_mapping', status: 'waiting_user' }, revision: 12,
       })
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
         runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
         allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
         composer: { enabled: true },
@@ -88,70 +88,70 @@ describe('Bid client projection', () => {
   })
 
   it('derives allowed actions and composer capability from host runtime state', () => {
-    expect(getBidClientProjection({ stage: 'file_intake', status: 'pending' })).toEqual({
+    expect(getBidClientProjection({ stage: 'file_intake', status: 'pending' })).toMatchObject({
       runtime: { stage: 'file_intake', status: 'pending' },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.upload_required' },
     })
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'pending' })).toEqual({
+    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'pending' })).toMatchObject({
       runtime: { stage: 'tender_analysis', status: 'pending' },
       allowedActions: [],
       composer: { enabled: false, reason: 'bid.stage_pending' },
     })
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toEqual({
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
       allowedActions: ['start_stage'],
       composer: { enabled: false, reason: 'bid.stage_start_required' },
     })
     for (const stage of BID_STAGES) {
-      expect(getBidClientProjection({ stage, status: 'running' })).toEqual({
+      expect(getBidClientProjection({ stage, status: 'running' })).toMatchObject({
         runtime: { stage, status: 'running' },
         allowedActions: stage === 'chapter_writing'
-          ? ['send_message', 'stop_stage', 'export_docx'] : ['send_message', 'stop_stage'],
+          ? ['send_message', 'export_docx'] : ['send_message'],
         composer: { enabled: true },
       })
     }
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toEqual({
+    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toMatchObject({
       runtime: { stage: 'tender_analysis', status: 'waiting_user' },
       allowedActions: ['confirm_tender_analysis', 'send_message'],
       composer: { enabled: true },
     })
-    expect(getBidClientProjection({ stage: 'outline_generation', status: 'waiting_user' })).toEqual({
+    expect(getBidClientProjection({ stage: 'outline_generation', status: 'waiting_user' })).toMatchObject({
       runtime: { stage: 'outline_generation', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
       composer: { enabled: true },
     })
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toEqual({
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
       composer: { enabled: true },
     })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'waiting_user' })).toEqual({
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'waiting_user' })).toMatchObject({
       runtime: { stage: 'chapter_writing', status: 'waiting_user' },
       allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
       composer: { enabled: true },
     })
     expect(getBidClientProjection({
       stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
-    })).toEqual({
-      runtime: { stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR' },
-      allowedActions: ['upload_files'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
+    })).toMatchObject({
+      runtime: { stage: 'file_intake', status: 'pending', failureReason: 'document needs OCR' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({
       stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation',
-    })).toEqual({
-      runtime: { stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation' },
-      allowedActions: ['retry_stage'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
+    })).toMatchObject({
+      runtime: { stage: 'tender_analysis', status: 'pending', failureReason: 'invalid citation' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toEqual({
-      runtime: { stage: 'chapter_writing', status: 'failed' },
-      allowedActions: ['retry_stage', 'export_docx'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toMatchObject({
+      runtime: { stage: 'chapter_writing', status: 'pending' },
+      allowedActions: ['send_message', 'export_docx', 'revise_chapter'],
+      composer: { enabled: true },
     })
     for (const stage of BID_STAGES) {
-      expect(getBidClientProjection({ stage, status: 'completed' })).toEqual({
+      expect(getBidClientProjection({ stage, status: 'completed' })).toMatchObject({
         runtime: { stage, status: 'completed' },
         allowedActions: stage === 'chapter_writing' || stage === 'docx_export'
           ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
@@ -167,7 +167,7 @@ describe('Bid client projection', () => {
     registerBidRuntimeProjection(ctx.sessionProjections)
     const session = ctx.sessions.create()
 
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'pending' },
       allowedActions: ['upload_files'],
       composer: { enabled: false, reason: 'bid.upload_required' },
@@ -177,16 +177,16 @@ describe('Bid client projection', () => {
     resetSession.append('bid.project.resumed', {
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' }, revision: 1,
     })
-    expect(ctx.sessionProjections.snapshot(resetSession).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+    expect(ctx.sessionProjections.snapshot(resetSession).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
       allowedActions: ['start_stage'],
       composer: { enabled: false, reason: 'bid.stage_start_required' },
     })
 
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: ['send_message', 'stop_stage'],
+      allowedActions: ['send_message'],
       composer: { enabled: true },
     })
 
@@ -198,21 +198,21 @@ describe('Bid client projection', () => {
         message: 'document cannot be parsed',
       }],
     })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toEqual({
+    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: {
         stage: 'file_intake',
-        status: 'failed',
+        status: 'pending',
         failureReason: 'document needs OCR',
         failureIssues: [{ code: 'DOCUMENT_INVALID', artifact: 'manifest.json', path: 'files[0]', message: 'document cannot be parsed' }],
       },
-      allowedActions: ['upload_files'],
-      composer: { enabled: false, reason: 'bid.stage_failed' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     })
 
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: ['send_message', 'stop_stage'],
+      allowedActions: ['send_message'],
     })
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
       'runtime.failureReason',

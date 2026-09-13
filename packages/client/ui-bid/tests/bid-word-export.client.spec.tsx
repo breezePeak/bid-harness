@@ -234,7 +234,9 @@ describe('Word 导出页面', () => {
     const message = 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。'
     vi.mocked(actions.generate).mockResolvedValue({ path: 'output/bid.docx', warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT', message }] })
     render(<BidWordExport {...props} useProjection={() => ({
-      allowedActions: ['send_message', 'stop_stage', 'export_docx'],
+      workflow: { stage: 'chapter_writing', gate: 'ready' },
+      run: null,
+      allowedActions: ['send_message', 'export_docx'],
       runtime: { stage: 'chapter_writing', status: 'running' },
     })}/>)
     await screen.findByTitle('Word 效果预览')

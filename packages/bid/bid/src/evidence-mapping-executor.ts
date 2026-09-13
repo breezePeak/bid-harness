@@ -138,33 +138,23 @@ class MappingSubagentInfrastructureError extends BidStageExecutionError {
   constructor(
     issues: readonly StageValidationIssue[],
     readonly retryable: boolean,
-    readonly retryAfterMs?: number,
   ) {
     super(issues)
     this.name = 'MappingSubagentInfrastructureError'
   }
 }
 
-function isRetryableMappingInfrastructureError(error: unknown): boolean {
-  const details = record(error)
-  if (details?.code === 'RATE_LIMIT') return true
-  if (details?.status === 429 && details.code !== 'QUOTA') return true
-  const text = error instanceof BidStageExecutionError
-    ? error.issues.map(issue => `${issue.code} ${issue.message}`).join('\n')
-    : error instanceof Error ? error.message : String(error)
-  return /\brpm[\s_-]+exhausted\b|\brate[\s_-]?limit(?:ed|ing)?\b|\btoo many requests\b|\b429\b/i.test(text)
+function isRebuildableMappingTaskRuntimeError(error: unknown): boolean {
+  const code = record(error)?.code
+  return ['SUBAGENT_MATERIALIZATION_FAILED', 'SUBAGENT_RESUME_FAILED', 'SUBAGENT_RESULT_CHANNEL_FAILED']
+    .includes(typeof code === 'string' ? code : '')
 }
 
-function retryAfterMs(error: unknown): number | undefined {
-  const value = record(error)?.providerRetryAfterMs
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
-}
-
-async function waitForMappingInfrastructureRetry(signal: AbortSignal, attempt: number, retryAfter?: number): Promise<void> {
+async function waitForMappingInfrastructureRetry(signal: AbortSignal, attempt: number): Promise<void> {
   signal.throwIfAborted()
   const delay = Math.min(
     MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS,
-    retryAfter ?? MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+    MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
   )
   let onAbort!: () => void
   const cancelled = new Promise<never>((_resolve, reject) => {
@@ -3090,6 +3080,7 @@ async function executeEvidenceMappingRun(
       if (snapshots.length > 0) {
         const rawLedger = await readOptionalJson(workspace, 'analysis/web-evidence-sources.json')
         const retained = rawLedger === undefined ? [] : parseWebEvidenceSourcesArtifact(rawLedger).sources
+        options.run?.commits.assertWritable(options.run)
         await writeWebEvidenceArtifacts(workspace, snapshots, retained)
         const known = new Set(availableSnapshots.map(snapshot => snapshot.source.source_id))
         availableSnapshots = [...availableSnapshots, ...snapshots.filter(snapshot => !known.has(snapshot.source.source_id))]
@@ -3201,7 +3192,7 @@ async function executeEvidenceMappingRun(
   })
   let activeTasks = 0
 
-  const maxMappingRepairs = Math.min(1, options.maxRepairAttempts)
+  const maxMappingRepairs = options.maxRepairAttempts
   const runTaskAttempt = async (
     mappingTask: EvidenceMappingTask,
     runInputs: EvidenceMappingInputs,
@@ -3557,7 +3548,7 @@ async function executeEvidenceMappingRun(
               log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
               log.status = 'failed'
               await persistLog()
-              throw new MappingSubagentInfrastructureError(latestIssues, isRetryableMappingInfrastructureError(error), retryAfterMs(error))
+              throw new MappingSubagentInfrastructureError(latestIssues, isRebuildableMappingTaskRuntimeError(error))
             }
             if (attempt < maxMappingRepairs) {
               outputEventStart = child.session.events.length
@@ -3591,7 +3582,7 @@ async function executeEvidenceMappingRun(
         if (signal.aborted) throw error
         if (error instanceof BidStageExecutionError) throw error
         const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }]
-        throw new MappingSubagentInfrastructureError(issues, isRetryableMappingInfrastructureError(error), retryAfterMs(error))
+        throw new MappingSubagentInfrastructureError(issues, isRebuildableMappingTaskRuntimeError(error))
       }
     } finally {
       submissionRequests.delete(String(reservedChildId))
@@ -3613,7 +3604,7 @@ async function executeEvidenceMappingRun(
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'
         await persistLog()
-        await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
+        await waitForMappingInfrastructureRetry(signal, retry)
       }
     }
   }
@@ -3627,7 +3618,7 @@ async function executeEvidenceMappingRun(
     const workers = Array.from({ length: Math.min(maxConcurrency, tasks.length) }, async () => {
       while (true) {
         signal.throwIfAborted()
-        await options.scheduler?.waitUntilRunnable(signal)
+        if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(signal)
         const mappingTask = tasks[nextTask++]
         if (mappingTask === undefined) return
         completed.set(mappingTask.task_id, await runTask(mappingTask, runInputs))
@@ -3706,6 +3697,7 @@ async function executeEvidenceMappingRun(
         let preliminary = buildEvidenceMap(initialMerged, initialResults, finalOutline)
         signal.throwIfAborted()
         availableSnapshots = [...availableSnapshots, ...preliminary.snapshots]
+        options.run?.commits.assertWritable(options.run)
         await writeWebEvidenceArtifacts(workspace, availableSnapshots, previousWeb?.sources)
         if (previous !== undefined && options.remap !== undefined) {
           const mappings = new Map(previous.section_mappings.map(mapping => [mapping.section_id, mapping]))
@@ -3751,6 +3743,7 @@ async function executeEvidenceMappingRun(
             for (const mapping of initialMerged.section_mappings) acceptedMappings.set(mapping.section_id, mapping)
             preliminary = buildEvidenceMap(initialMerged, initialResults, finalOutline)
             availableSnapshots = [...availableSnapshots, ...preliminary.snapshots]
+            options.run?.commits.assertWritable(options.run)
             await writeWebEvidenceArtifacts(workspace, availableSnapshots, previousWeb?.sources)
             candidateMappings = initialMerged.section_mappings
             currentEvidence = preliminary.map
@@ -3792,6 +3785,7 @@ async function executeEvidenceMappingRun(
         if (mapping === undefined) throw new Error(`evidence-mapping-current-section-missing:${section.id}`)
         return [mapping]
       }) }
+      options.run?.commits.assertWritable(options.run)
       await writeWebEvidenceArtifacts(workspace, result.snapshots, availableSnapshots.map(snapshot => snapshot.source))
     }
     const evidence = finalEvidence
@@ -3812,6 +3806,7 @@ async function executeEvidenceMappingRun(
     })
     if (!validation.ok) throw new BidStageExecutionError(validation.issues)
     if (finalCheck !== undefined) return { artifacts, outline: finalOutline, evidence }
+    options.run?.commits.assertWritable(options.run)
     await writeJson(join(workspace.projectRoot, OUTLINE_PATH), finalOutline)
     await writeJson(artifactPath, evidence)
     await writeJson(join(workspace.projectRoot, QUALITY_PATH), quality)

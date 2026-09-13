@@ -16,7 +16,11 @@ import { readEvidenceMappingLog, readEvidenceMappingProgress } from './evidence-
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
-import { BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from './runtime-state.ts'
+import {
+  BID_INITIAL_CONTROL_STATE,
+  bidRuntimeView,
+  reduceBidControlState,
+} from './runtime-state.ts'
 import {
   initialWritingPlanInputSchema,
   parseWritingPlan,
@@ -41,7 +45,11 @@ export const stageInteractionSchema = z.union([
   }).strict(),
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
-  z.object({ action: z.literal('bid_stop_stage') }).strict(),
+  z.object({
+    action: z.literal('bid_resume_current_run'),
+    suspended_run_id: z.string().min(1),
+    expected_project_revision: z.number().int().positive(),
+  }).strict(),
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
@@ -59,7 +67,7 @@ const names = [
   'bid_revise_chapter',
   'bid_pause_stage',
   'bid_resume_stage',
-  'bid_stop_stage',
+  'bid_resume_current_run',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -141,11 +149,12 @@ async function inspectBidStageValue(
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view: 'summary' | 'task_contract_context' = 'summary',
 ) {
-  const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-  const started = session.events.findLast(event => event.type === 'bid.stage.started' && event.data.stage === runtime.stage)
+  const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
+  const runtime = bidRuntimeView(control)
+  const started = control.run ?? control.lastRun
   const base = {
     runtime,
-    started_at: started === undefined ? null : new Date(started.time).toISOString(),
+    started_at: started === null ? null : new Date(started.startedAt).toISOString(),
     latest_public_events: latestPublicEvents(session),
   }
   if (runtime.stage === 'file_intake') {
@@ -389,7 +398,7 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'atten
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
     status === 'running'
-      ? '用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已经运行的 Writer/Reviewer 自然收敛。只有用户明确要求停止当前阶段任务时才调用 bid_stop_stage。停止回复由聊天界面单独控制。'
+      ? '用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已经运行的 Writer/Reviewer 自然收敛。停止任务只使用聊天界面的原生停止。'
       : '当前阶段没有运行中的任务，不得调用 pause、resume 或 stop 阶段工具。',
   ].join('\n')
 }
@@ -407,8 +416,18 @@ export function renderLiveStageInteractionPrompt(stage: string, status: 'running
     '进度、资料范围和设计原因只调用 bid_stage_inspect 读取有界 Host 快照并回答；不得直接读写 Artifact、停止阶段、重启阶段或创建新的阶段请求。',
     status === 'completed'
       ? '阶段产物保持完成态。普通问答不得重开阶段或修改产物；当前没有受控修改工具时，应说明可用的正式重置或后续阶段入口。'
-      : '普通消息不拥有阶段生命周期，也不取消当前模型任务或已启动的 Child。当前没有受控修改工具时，应说明修改需要等待现有阶段到达正式交互边界。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。只有用户明确要求停止当前阶段任务时才调用 bid_stop_stage；停止回复由聊天界面单独控制。',
+      : '普通消息不拥有阶段生命周期，也不取消当前模型任务或已启动的 Child。当前没有受控修改工具时，应说明修改需要等待现有阶段到达正式交互边界。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。停止任务只使用聊天界面的原生停止。',
   ].join('\n')
+}
+
+function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, reason?: string): string {
+  return [
+    `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
+    reason === undefined ? undefined : `中断原因：${reason}`,
+    '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
+    '只有用户确实要求继续时才调用 bid_resume_current_run，并原样提交上述 Run 身份和项目修订号；Host 会核对正式成果与 checkpoint，只调度未完成工作。',
+    '普通解释、“先别继续”或询问停止原因不得调用恢复工具。停止仍只使用聊天界面的原生停止。',
+  ].filter(line => line !== undefined).join('\n')
 }
 
 /**
@@ -425,12 +444,14 @@ export function installStageInteractionTools(
   ctx.inject(['tools'], (toolCtx) => {
     const mounted = new Map<Agent, { scope: string; dispose: () => void }>()
     const sync = (agent: Agent): void => {
-      const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
+      const runtime = bidRuntimeView(control)
+      const suspended = control.run?.status === 'suspended' ? control.run : undefined
       const stage = isBidMainSession(agent.session)
         && (runtime.status === 'waiting_user' || runtime.status === 'running'
-          || runtime.status === 'completed' || runtime.status === 'attention_required')
+          || runtime.status === 'completed' || runtime.status === 'attention_required' || suspended !== undefined)
         ? runtime.stage : undefined
-      const scope = stage === undefined ? undefined : `${stage}:${runtime.status}`
+      const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? runtime.status : `suspended:${suspended.runId}`}`
       const existing = mounted.get(agent)
       if (existing?.scope === scope) return
       existing?.dispose()
@@ -438,13 +459,14 @@ export function installStageInteractionTools(
       if (stage === undefined) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-      const available = runtime.status !== 'waiting_user'
-        ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6) : [])]
-          : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]
-            : runtime.status === 'running' ? [names[0], ...names.slice(6)] : [names[0]]
-        : stage === 'tender_analysis' ? names.slice(0, 1)
-          : stage === 'outline_generation' ? names.slice(0, 3)
-            : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
+      const available = suspended !== undefined ? [names[0], names[8]]
+        : runtime.status !== 'waiting_user'
+          ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6, 8) : [])]
+            : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]
+              : runtime.status === 'running' ? [names[0], ...names.slice(6, 8)] : [names[0]]
+          : stage === 'tender_analysis' ? names.slice(0, 1)
+            : stage === 'outline_generation' ? names.slice(0, 3)
+              : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
@@ -454,7 +476,7 @@ export function installStageInteractionTools(
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
-            || name === 'bid_stop_stage' ? {} : { ...cas }
+            || name === 'bid_resume_current_run' ? {} : { ...cas }
           const required = Object.keys(properties)
           let parameters: JsonSchemaNode | undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
@@ -473,6 +495,11 @@ export function installStageInteractionTools(
             properties.instruction = text
             properties.reference = chapterReference
             required.push('instruction', 'reference')
+          }
+          if (name === 'bid_resume_current_run') {
+            properties.suspended_run_id = text
+            properties.expected_project_revision = { type: 'integer' }
+            required.push('suspended_run_id', 'expected_project_revision')
           }
           if (name === 'bid_outline_apply_operations') {
             properties.operations = { type: 'array', items: { type: 'object' }, description: '按 type 提交操作：update_section(section_id,title?,purpose?,must_answer?)；add_section(parent_id,order,writable,title,purpose,must_answer?)；delete_section(section_id)；move_section(section_id,parent_id,order)；split_section(section_id,children:[{title,purpose,must_answer}])；merge_sections(section_ids,title,purpose)。' }
@@ -550,7 +577,7 @@ export function installStageInteractionTools(
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
               : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                 : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                  : name === 'bid_stop_stage' ? '仅在用户明确要求停止当前阶段任务时终止阶段及其后台子任务；不得用于停止当前聊天回复。'
+                  : name === 'bid_resume_current_run' ? '核对挂起 Run 与项目修订号，并从持久化 checkpoint 继续剩余任务。'
                     : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
                       : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
                         : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
@@ -582,14 +609,17 @@ export function installStageInteractionTools(
       const subject = exec.agent
       const session = subject?.session
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
-      const runtime = session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      if ((runtime.status === 'waiting_user' || interacting(session) || publicRestrictions.has(subject))
+      const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
+      const runtime = bidRuntimeView(control)
+      if ((runtime.status === 'waiting_user' || control.run?.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
         && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
     }))
     toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       if (!isBidMainSession(agent.session)) return
-      const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
-      if (runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required') return
+      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
+      const runtime = bidRuntimeView(control)
+      if (runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required'
+        && control.run?.status !== 'suspended') return
       const previous = claimState.get(agent)
       const prior = agent.session.events.findLast(event => event.type === 'step/end' && event.data.turn === turn)
       const priorStep = prior?.type === 'step/end' ? prior.data.step : 0
@@ -618,9 +648,17 @@ export function installStageInteractionTools(
     }, { global: true })
     toolCtx.on('agent/pre-step', async ({ agent, messages }, next) => {
       const decision = await next()
-      const runtime = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
+      const runtime = bidRuntimeView(control)
       if (decision.kind === 'reject' || !isBidMainSession(agent.session) || !messages.some(message => message.source.kind === 'user')) return decision
-      const prompt = runtime.status === 'waiting_user' ? renderStageInteractionPrompt(runtime.stage)
+      const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
+      const suspended = control.run?.status === 'suspended' ? control.run : undefined
+      const prompt = suspended !== undefined ? renderSuspendedRunPrompt(
+        runtime.stage,
+        suspended.runId,
+        resumed?.type === 'bid.project.resumed' ? resumed.data.revision : suspended.baseProjectRevision,
+        suspended.error?.message,
+      ) : runtime.status === 'waiting_user' ? renderStageInteractionPrompt(runtime.stage)
         : (runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'attention_required' || runtime.status === 'completed')
           || runtime.stage === 'docx_export' && runtime.status === 'completed')
           ? renderChapterWritingInteractionPrompt(runtime.status, runtime.stage)

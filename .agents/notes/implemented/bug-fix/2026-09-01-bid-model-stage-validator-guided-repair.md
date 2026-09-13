@@ -20,7 +20,7 @@ Writer 的结构化输出按 Manifest 中已解析的 `reference`、`reference_b
 
 Reviewer 接收 Project 事实与候选原文编号表，提交引文编号，Host 从当前冻结候选中回填完整非空行。编号表写入 Reviewer 输入日志，正式审查报告继续保存原文和候选哈希；编号仅在当前候选内有效。未知编号不能绑定原文，模型不必重抄长段落或 Markdown 表格。报告格式与引用错误先在同一候选上重试 Reviewer，复用 `modelStageRepairAttempts`；有效报告的内容问题再交给 Writer。第二轮 Writer 后仍有内容问题的有效报告可标记 `needs_attention`，但格式或引用无效的报告不能持久化或将章节标记完成。
 
-Executor 预校验只提供修复反馈。Orchestrator 仍调用正式 Validator 决定阶段是否完成、等待确认或记录 `bid.stage.failed`；修复回复本身不能推进阶段。预算用尽后，失败事件保留最新问题，用户仍可通过 `bid/retryStage` 完整重跑当前自动阶段。
+Executor 预校验只提供修复反馈。Orchestrator 仍调用正式 Validator 决定阶段是否完成、等待确认或挂起当前 Run；修复回复本身不能推进阶段。预算用尽后的挂起快照保留最新问题，Main Agent 可请求按执行器检查点恢复当前自动阶段。
 
 Writer 或 Reviewer 的非正常结束保留 `SubagentResult.diagnostic`，沿用 Provider 对长度、凭据和原始载荷的安全限制；执行日志及阶段消息据此显示模型服务原因。
 

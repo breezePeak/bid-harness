@@ -9,6 +9,7 @@ import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
+import type { BidRunContext } from './run-coordinator.ts'
 import {
   TENDER_ANALYSIS_SCHEMA_VERSION,
   parseTenderComplianceArtifact,
@@ -107,6 +108,43 @@ interface ComplianceDraft {
   readonly severity: 'fatal' | 'mandatory' | 'warning'
   readonly source_refs: TenderSourceRef[]
 }
+
+const TENDER_ANALYSIS_CHECKPOINT_PATH = 'analysis/tender-analysis-checkpoint.json'
+const sourceRefCheckpointSchema = z.object({
+  file_id: z.string().min(1),
+  chunk: z.string().min(1),
+  line_start: z.number().int().positive(),
+  line_end: z.number().int().positive(),
+}).strict().refine(value => value.line_end >= value.line_start)
+const sourcedValueCheckpointSchema = z.object({
+  value: z.string().nullable(), source_refs: z.array(sourceRefCheckpointSchema),
+}).strict()
+const tenderAnalysisCheckpointSchema = z.object({
+  schema_version: z.literal(1),
+  origin_run_id: z.string().min(1),
+  origin_epoch: z.number().int().positive(),
+  tender_file_ids: z.array(z.string().min(1)),
+  phase: z.enum(['collecting', 'review_required', 'reviewing', 'completed']),
+  revision: z.number().int().nonnegative(),
+  singles: z.array(z.object({ field: z.enum(PROJECT_SINGLE_FIELDS), data: sourcedValueCheckpointSchema }).strict()),
+  lists: z.array(z.object({
+    field: z.enum(PROJECT_LIST_FIELDS), value: z.string().min(1), source_refs: z.array(sourceRefCheckpointSchema),
+  }).strict()),
+  requirements: z.array(z.object({ ref: z.string().regex(/^R[1-9]\d*$/u), value: z.object({
+    id: z.string().min(1), category: z.string().min(1), raw_text: z.string().min(1), normalized_requirement: z.string().min(1),
+    mandatory: z.boolean(), source_refs: z.array(sourceRefCheckpointSchema),
+  }).strict() }).strict()),
+  scoring: z.array(z.object({ ref: z.string().regex(/^S[1-9]\d*$/u), value: z.object({
+    id: z.string().min(1), group: z.string().min(1).nullable(), title: z.string().min(1), raw_text: z.string().min(1),
+    criterion: z.string().min(1), score: z.number().nullable(),
+    score_range: z.object({ min: z.number(), max: z.number() }).strict().nullable(),
+    must_answer: z.boolean(), source_refs: z.array(sourceRefCheckpointSchema),
+  }).strict() }).strict()),
+  compliance: z.array(z.object({ ref: z.string().regex(/^C[1-9]\d*$/u), value: z.object({
+    id: z.string().min(1), type: z.string().min(1), raw_text: z.string().min(1), normalized_rule: z.string().min(1),
+    severity: z.enum(['fatal', 'mandatory', 'warning']), source_refs: z.array(sourceRefCheckpointSchema),
+  }).strict() }).strict()),
+}).strict()
 
 const text = z.string().trim().min(1)
 const sourceHintSchema = z.object({
@@ -306,7 +344,7 @@ export interface TenderAnalysisSubmissionRuntime {
   /** Return the current Host-rendered staged values for the mandatory semantic review. */
   reviewSnapshot(): unknown
   /** Admit the mandatory review turn after the initial model turn has ended. */
-  beginReview(): void
+  beginReview(): Promise<void>
   /** 在下一次请求组装前挂载或卸载 S2 私有提交工具。 */
   setToolsEnabled(enabled: boolean): void
   /** Remove every execution-local tool registration. */
@@ -333,6 +371,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
   agent: Agent,
   workspace: BidWorkspace,
   manifest: BidManifest,
+  run?: BidRunContext,
 ): Promise<TenderAnalysisSubmissionRuntime> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid tender analysis requires tools service')
@@ -351,6 +390,48 @@ export async function attachTenderAnalysisSubmissionRuntime(
   let revision = 0
   let lastIssues: StageValidationIssue[] = []
 
+  const checkpointPath = within(workspace.projectRoot, TENDER_ANALYSIS_CHECKPOINT_PATH)
+  await assertNoLinkedPath(workspace.root, checkpointPath)
+  try {
+    const saved = tenderAnalysisCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8')))
+    const tenderFileIds = locators.map(locator => locator.file_id)
+    if (JSON.stringify(saved.tender_file_ids) !== JSON.stringify(tenderFileIds)) {
+      throw new Error('tender-analysis-checkpoint-input-mismatch')
+    }
+    for (const item of saved.singles) singles.set(item.field, item.data)
+    for (const item of saved.lists) {
+      const values = lists.get(item.field) ?? new Map<string, TenderSourceRef[]>()
+      values.set(item.value, item.source_refs)
+      lists.set(item.field, values)
+    }
+    for (const item of saved.requirements) requirements.set(item.ref, item.value)
+    for (const item of saved.scoring) scoring.set(item.ref, item.value)
+    for (const item of saved.compliance) compliance.set(item.ref, item.value)
+    phase = saved.phase === 'reviewing' ? 'review_required' : saved.phase
+    revision = saved.revision
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+
+  const persistCheckpoint = async (): Promise<void> => {
+    if (run === undefined) return
+    run.commits.assertWritable(run)
+    const value = tenderAnalysisCheckpointSchema.parse({
+      schema_version: 1,
+      origin_run_id: run.runId,
+      origin_epoch: run.epoch,
+      tender_file_ids: locators.map(locator => locator.file_id),
+      phase,
+      revision,
+      singles: [...singles].map(([field, data]) => ({ field, data })),
+      lists: [...lists].flatMap(([field, values]) => [...values].map(([value, source_refs]) => ({ field, value, source_refs }))),
+      requirements: [...requirements].map(([ref, value]) => ({ ref, value })),
+      scoring: [...scoring].map(([ref, value]) => ({ ref, value })),
+      compliance: [...compliance].map(([ref, value]) => ({ ref, value })),
+    })
+    await writeFileAtomic(checkpointPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+  }
+
   const sources = async (values: readonly TenderSourceHint[]): Promise<{
     quotes: string[]
     source_refs: TenderSourceRef[]
@@ -366,7 +447,11 @@ export async function attachTenderAnalysisSubmissionRuntime(
     if (phase === 'completed') throw new ToolArgsError(['value: tender analysis 已完成。'])
     if (phase === 'review_required') throw new ToolArgsError(['value: 当前初始分析已结束，等待 Host 启动独立 Review。'])
   }
-  const accepted = (): number => ++revision
+  const accepted = async (): Promise<number> => {
+    revision++
+    await persistCheckpoint()
+    return revision
+  }
   const output = {
     schema: { type: 'object' as const },
     render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
@@ -412,7 +497,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         recorded: true,
         field: input.field,
         total_values: isSingleField(input.field) ? 1 : lists.get(input.field)?.size ?? 0,
-        revision: accepted(),
+        revision: await accepted(),
       }
     },
   })
@@ -437,7 +522,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: resolved.source_refs,
       })
       lastIssues = []
-      return { recorded: true, requirement_ref: ref, total_requirements: requirements.size, revision: accepted() }
+      return { recorded: true, requirement_ref: ref, total_requirements: requirements.size, revision: await accepted() }
     },
   })
 
@@ -464,7 +549,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: resolved.source_refs,
       })
       lastIssues = []
-      return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size, revision: accepted() }
+      return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size, revision: await accepted() }
     },
   })
 
@@ -488,7 +573,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         source_refs: resolved.source_refs,
       })
       lastIssues = []
-      return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size, revision: accepted() }
+      return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size, revision: await accepted() }
     },
   })
 
@@ -555,6 +640,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
           code: 'TENDER_ANALYSIS_REVIEW_REQUIRED',
           message: '当前 staged 分析已通过确定性校验，必须在独立复核轮次确认同一版本后才能发布。',
         }]
+        await persistCheckpoint()
         exec.concludeTurn()
         return { completed: false, review_required: true, revision }
       }
@@ -573,6 +659,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         ['analysis/tender-analysis-selection.json', createTenderScoringSelection(scoringArtifact)],
         ['analysis/compliance.json', complianceArtifact],
       ] as const) {
+        run?.commits.assertWritable(run)
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
         await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
@@ -580,6 +667,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifactsList())
       if (!validation.ok) throw new Error(`tender-analysis-host-artifact-invalid:${validation.issues.map(issue => issue.code).join(',')}`)
       phase = 'completed'
+      await persistCheckpoint()
       return {
         completed: true,
         revision,
@@ -611,10 +699,11 @@ export async function attachTenderAnalysisSubmissionRuntime(
         compliance: [...compliance].map(([compliance_ref, { id: _id, ...value }]) => ({ compliance_ref, ...value })),
       }
     },
-    beginReview() {
+    async beginReview() {
       if (phase !== 'review_required') throw new Error('tender-analysis-review-phase-invalid')
       phase = 'reviewing'
       lastIssues = []
+      await persistCheckpoint()
     },
     setToolsEnabled,
     dispose() {

@@ -18,7 +18,7 @@ Agent 写入 `analysis/project.json`、`analysis/requirements.json`、`analysis/
 
 Validator 而不是 Agent idle 决定草稿能否进入确认。Host Remote 只返回 Project 和 Scoring，只接受对分析结论的受控编辑，并保留 ID、招标原文、分值、引用与文件覆盖集合。Host 原子替换正式 Project 与 Scoring 路径，再次校验完整 S2 Artifact；只有成功后才记录用户确认与阶段完成。无效用户输入返回问题并保持 `waiting_user`。
 
-`tender_analysis/failed` Projection 只开放 `retry_stage`。Client 只向 `bid/retryStage` Remote 提交重试意图；Host 重新读取 Session 日志并执行准入，复用当前 Agent、工作区、Executor 和 Validator。重试会再次删除四个 S2 Artifact，并向同一 Agent 的文件观测策略记录这些路径不存在，使 `write` 能在读后写保护下重新创建文件。S2 重试成功后由同一驱动器继续后续自动阶段；失败则保持 `tender_analysis/failed`，不会启动 S3。
+S2 每条受控提交和 Review phase 都持久化到 Run 栅栏保护的检查点。执行器错误或修复耗尽时 Run 挂起，Projection 保持 Composer 可用；Main Agent 通过精确 Run 身份请求恢复后，Host 复用已提交记录，只完成尚未结束的收集、Review 和正式发布。完整正式 Artifact 已通过 Validator 时直接复用，不删除后重建；S2 未完成时不会启动 S3。
 
 首次提取完成后，Host 在同一轮工具限制内向同一 live Agent 注入一次 Coverage Audit follow-up，并在第二次 idle 后再验证四个 Artifact。审计根据当前招标文件动态重查技术要求、技术评分、技术否决和必须响应项，发现遗漏时直接修正既有 Artifact。
 

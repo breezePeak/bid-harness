@@ -216,6 +216,16 @@ declare module '@deepseek-ai/cordis' {
      */
     'agent/session-start'(this: Scoped<Agent>, payload: { agent: Agent; source: SessionStartSource }): void
 
+    /**
+     * An owner requested cancellation before the Agent mutates its inbox or aborts active work.
+     * @param payload.agent Agent receiving the request.
+     * @param payload.cause Typed cancellation reason supplied by the caller.
+     * @param payload.keepInbox Whether queued and steering input survives the request.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode emit
+     */
+    'agent/cancel-requested'(this: Scoped<Agent>, payload: { agent: Agent; cause: AgentCancelCause; keepInbox: boolean }): void
+
     // ---- the machine's extension points ----
     /**
      * Reject a proposed step or replace the messages that enter it. Calling

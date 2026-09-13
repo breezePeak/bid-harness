@@ -55,6 +55,21 @@ function userTexts(agent: Agent): string[] {
 }
 
 describe('Agent.cancel()', () => {
+  it('emits cancel-requested before mutating the inbox', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    const agent = ctx.agentLoop.create(SessionId('cancel-lifecycle'), { provider: 'mock', model: 'mock' })
+    agent.inject(createUserMessage({ content: [{ type: 'text', text: 'queued' }], source: { kind: 'user' } }))
+    let observed: unknown
+    ctx.on('agent/cancel-requested', (payload) => {
+      if (payload.agent === agent) observed = { cause: payload.cause, keepInbox: payload.keepInbox, pending: agent.inbox.hasPending }
+    })
+
+    agent.cancel({ kind: 'hook', reason: 'test' })
+
+    expect(observed).toEqual({ cause: { kind: 'hook', reason: 'test' }, keepInbox: false, pending: true })
+    expect(agent.inbox.hasPending).toBe(false)
+  })
+
   it('cancel() on an idle agent with nothing queued is a no-op; the next prompt runs (F2 leak guard)', async () => {
     const adapter = new MockAdapter([textResponse('reply')])
     const ctx = await harness(adapter)

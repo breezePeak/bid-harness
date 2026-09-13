@@ -1,11 +1,20 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { z } from 'zod'
-import { BID_STAGES, STAGE_RUN_STATUSES, type BidStage } from './control-plane-contract.ts'
+import {
+  BID_STAGES,
+  BID_WORKFLOW_GATES,
+  STAGE_RUN_STATUSES,
+  type BidStage,
+} from './control-plane-contract.ts'
 import type {
   BidClientProjection,
+  BidControlState,
+  BidProjectWorkflow,
+  BidRunSnapshot,
   BidRuntimeState,
   BidStagePolicy,
   BidStageTask,
+  StageValidationIssue,
 } from './control-plane-contract.ts'
 
 /** Bid 项目文件和客户端投影允许的控制状态字段，不包含聊天内容。 */
@@ -21,8 +30,54 @@ export const bidRuntimeSchema = z.object({
   }).strict()).readonly().optional(),
 }).strict()
 
+const stageValidationIssueSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  artifact: z.string().optional(),
+  path: z.string().optional(),
+}).strict()
+
+/** Durable Workflow schema used by project state and Session projection replay. */
+export const bidWorkflowSchema = z.object({
+  stage: z.enum(BID_STAGES),
+  gate: z.enum(BID_WORKFLOW_GATES),
+  failureReason: z.string().optional(),
+  failureIssues: z.array(stageValidationIssueSchema).readonly().optional(),
+}).strict()
+
+/** Durable identity and settlement schema for one Bid Run. */
+export const bidRunSchema = z.object({
+  runId: z.string().min(1),
+  stage: z.enum(BID_STAGES),
+  epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  baseProjectRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
+  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
+  error: z.object({
+    code: z.string().optional(),
+    message: z.string(),
+    issues: z.array(stageValidationIssueSchema).readonly().optional(),
+  }).strict().optional(),
+  startedAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+}).strict()
+
+/** Replayable Workflow and Run state. */
+export const bidControlStateSchema = z.object({
+  workflow: bidWorkflowSchema,
+  run: bidRunSchema.nullable(),
+  lastRun: bidRunSchema.nullable(),
+}).strict()
+
 /** Runtime state produced by an empty Bid session log. */
 export const BID_INITIAL_RUNTIME_STATE: BidRuntimeState = Object.freeze({ stage: 'file_intake', status: 'pending' })
+
+/** Control state produced by an empty Bid Session log. */
+export const BID_INITIAL_CONTROL_STATE: BidControlState = Object.freeze({
+  workflow: Object.freeze({ stage: 'file_intake', gate: 'ready' }),
+  run: null,
+  lastRun: null,
+})
 
 const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
   file_intake: {
@@ -128,120 +183,272 @@ export function buildBidStageTask(stage: BidStage): BidStageTask {
     allowedTools: [...policy.allowedTools], constraints: [...CONSTRAINTS[stage]] }
 }
 
-/**
- * Fold one committed session event into replayable Bid runtime state.
- * @param state Runtime state before the event.
- * @param event Committed Session event being replayed.
- * @returns Resulting runtime state, or the original state for an inapplicable event.
- */
-export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
+function cloneIssue(issue: StageValidationIssue) {
+  return {
+    code: issue.code,
+    message: issue.message,
+    ...(issue.artifact === undefined ? {} : { artifact: issue.artifact }),
+    ...(issue.path === undefined ? {} : { path: issue.path }),
+  }
+}
+
+function cloneWorkflow(workflow: BidProjectWorkflow): BidProjectWorkflow {
+  return {
+    ...workflow,
+    ...workflow.failureIssues === undefined ? {} : {
+      failureIssues: workflow.failureIssues.map(cloneIssue),
+    },
+  }
+}
+
+function cloneRun(run: BidRunSnapshot | null): BidRunSnapshot | null {
+  return run === null ? null : {
+    ...run,
+    ...run.error === undefined ? {} : {
+      error: {
+        ...run.error,
+        ...run.error.issues === undefined ? {} : {
+          issues: run.error.issues.map(cloneIssue),
+        },
+      },
+    },
+  }
+}
+
+/** Convert a legacy flat runtime into split Workflow and Run state. */
+export function controlStateFromLegacyRuntime(runtime: BidRuntimeState, _revision = 0): BidControlState {
+  const failure = runtime.failureReason === undefined ? undefined : {
+    message: runtime.failureReason,
+    ...runtime.failureIssues === undefined ? {} : { issues: runtime.failureIssues.map(cloneIssue) },
+  }
+  const legacyRun = (status: 'running' | 'suspended', cause?: 'executor_error' | 'host_restart'): BidRunSnapshot => ({
+    runId: `legacy-${runtime.stage}`,
+    stage: runtime.stage,
+    epoch: 0,
+    baseProjectRevision: 0,
+    status,
+    ...(cause === undefined ? {} : { cause }),
+    ...(failure === undefined ? {} : { error: failure }),
+    startedAt: 0,
+    updatedAt: 0,
+  })
+  switch (runtime.status) {
+    case 'running': {
+      const run = legacyRun('running')
+      return { workflow: { stage: runtime.stage, gate: 'ready' }, run, lastRun: null }
+    }
+    case 'failed': {
+      const run = legacyRun('suspended', 'executor_error')
+      return { workflow: { stage: runtime.stage, gate: 'ready' }, run, lastRun: run }
+    }
+    case 'pending': return { workflow: { stage: runtime.stage, gate: 'ready' }, run: null, lastRun: null }
+    case 'waiting_start': return { workflow: { stage: runtime.stage, gate: 'waiting_start' }, run: null, lastRun: null }
+    case 'waiting_user': return { workflow: { stage: runtime.stage, gate: 'waiting_user' }, run: null, lastRun: null }
+    case 'attention_required': return { workflow: {
+      stage: runtime.stage, gate: 'attention_required',
+      ...runtime.failureReason === undefined ? {} : { failureReason: runtime.failureReason },
+      ...runtime.failureIssues === undefined ? {} : { failureIssues: runtime.failureIssues.map(cloneIssue) },
+    }, run: null, lastRun: null }
+    case 'completed': return { workflow: { stage: runtime.stage, gate: 'completed' }, run: null, lastRun: null }
+  }
+}
+
+/** Derive the existing browser view without making it the state authority. */
+export function bidRuntimeView(state: BidControlState): BidRuntimeState {
+  const run = state.run
+  if (run?.status === 'running' || run?.status === 'cancelling') return { stage: run.stage, status: 'running' }
+  if (run?.status === 'suspended') return {
+    stage: state.workflow.stage,
+    status: 'pending',
+    ...run.error === undefined ? {} : {
+      failureReason: run.error.message,
+      ...run.error.issues === undefined ? {} : { failureIssues: run.error.issues.map(issue => ({ ...issue })) },
+    },
+  }
+  const workflow = state.workflow
+  return {
+    stage: workflow.stage,
+    status: workflow.gate === 'ready' ? 'pending' : workflow.gate,
+    ...workflow.failureReason === undefined ? {} : { failureReason: workflow.failureReason },
+    ...workflow.failureIssues === undefined ? {} : {
+      failureIssues: workflow.failureIssues.map(issue => ({ ...issue })),
+    },
+  }
+}
+
+/** Fold one committed Session event into authoritative Workflow and Run state. */
+export function reduceBidControlState(state: BidControlState, event: SessionEvent): BidControlState {
   switch (event.type) {
     case 'bid.project.resumed': {
-      const runtime = event.data.runtime
-      const previousIssues = state.failureIssues
-      const nextIssues = runtime.failureIssues
-      const sameIssues = previousIssues === nextIssues || (
-        previousIssues !== undefined && nextIssues !== undefined
-        && previousIssues.length === nextIssues.length
-        && previousIssues.every((issue, index) => {
-          const next = nextIssues[index]
-          if (next === undefined) return false
-          return issue.code === next.code && issue.message === next.message
-            && issue.artifact === next.artifact && issue.path === next.path
-        })
-      )
-      if (state.stage === runtime.stage && state.status === runtime.status
-        && state.failureReason === runtime.failureReason && sameIssues) return state
-      return { ...runtime,
-        ...runtime.failureIssues === undefined ? {} : {
-          failureIssues: runtime.failureIssues.map(issue => ({ ...issue })),
-        } }
+      const resumed = 'workflow' in event.data ? {
+        workflow: cloneWorkflow(event.data.workflow),
+        run: cloneRun(event.data.run),
+        lastRun: cloneRun(event.data.lastRun),
+      } : controlStateFromLegacyRuntime(event.data.runtime, event.data.revision)
+      return JSON.stringify(state) === JSON.stringify(resumed) ? state : resumed
     }
-    case 'bid.stage.started':
-      return event.data.stage === state.stage && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'failed'
-        || state.stage === 'chapter_writing' && state.status === 'attention_required'
-        || (getBidStagePolicy(state.stage).userGate === 'after_validation' && state.status === 'waiting_user'))
-        ? { stage: state.stage, status: 'running' } : state
+    case 'bid.run.started':
+      return event.data.run.stage === state.workflow.stage
+        ? { ...state, run: cloneRun(event.data.run) }
+        : state
+    case 'bid.run.suspended':
+      return state.run?.runId === event.data.run.runId && state.run.epoch === event.data.run.epoch
+        ? { ...state, run: cloneRun(event.data.run), lastRun: cloneRun(event.data.run) }
+        : state
+    case 'bid.run.completed':
+      return state.run?.runId === event.data.run.runId && state.run.epoch === event.data.run.epoch
+        ? { ...state, run: null, lastRun: cloneRun(event.data.run) }
+        : state
+    case 'bid.workflow.failed':
+      return event.data.stage === state.workflow.stage ? {
+        ...state,
+        workflow: {
+          stage: event.data.stage,
+          gate: 'failed',
+          failureReason: event.data.reason,
+          ...event.data.issues === undefined ? {} : { failureIssues: event.data.issues.map(issue => ({ ...issue })) },
+        },
+        run: null,
+      } : state
+    // Legacy events remain readable; execution failures become resumable Runs.
+    case 'bid.stage.started': {
+      if (event.data.stage !== state.workflow.stage) return state
+      const run: BidRunSnapshot = {
+        runId: `legacy-event-${event.data.stage}`,
+        stage: event.data.stage,
+        epoch: 0,
+        baseProjectRevision: 0,
+        status: 'running',
+        startedAt: 0,
+        updatedAt: 0,
+      }
+      return { ...state, run }
+    }
     case 'bid.stage.attention_required':
-      return event.data.stage === state.stage && state.stage === 'chapter_writing' && state.status === 'running'
-        ? { stage: state.stage, status: 'attention_required', failureReason: event.data.reason,
-          failureIssues: event.data.issues.map(issue => ({ ...issue })) }
-        : state
-    case 'bid.stage.failed':
-      return event.data.stage === state.stage && state.status === 'running'
-        ? { stage: state.stage, status: 'failed', failureReason: event.data.reason,
-          ...event.data.issues === undefined ? {} : { failureIssues: event.data.issues.map(issue => ({ ...issue })) } }
-        : state
+      return event.data.stage === state.workflow.stage ? {
+        ...state,
+        workflow: { stage: event.data.stage, gate: 'attention_required', failureReason: event.data.reason,
+          failureIssues: event.data.issues.map(issue => ({ ...issue })) },
+        run: null,
+      } : state
+    case 'bid.stage.failed': {
+      if (event.data.stage !== state.workflow.stage) return state
+      const prior = state.run ?? {
+        runId: `legacy-failure-${event.data.stage}`,
+        stage: event.data.stage,
+        epoch: 0,
+        baseProjectRevision: 0,
+        status: 'running' as const,
+        startedAt: 0,
+        updatedAt: 0,
+      }
+      const run: BidRunSnapshot = {
+        ...prior,
+        status: 'suspended',
+        cause: 'executor_error',
+        error: {
+          message: event.data.reason,
+          ...event.data.issues === undefined ? {} : { issues: event.data.issues.map(issue => ({ ...issue })) },
+        },
+      }
+      return { ...state, run, lastRun: run }
+    }
     case 'bid.stage.reset':
-      return BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.stage)
-        ? { stage: event.data.stage, status: event.data.status }
+      return BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.workflow.stage)
+        ? { workflow: { stage: event.data.stage, gate: event.data.status === 'pending' ? 'ready' : 'waiting_start' }, run: null, lastRun: state.lastRun }
         : state
     case 'bid.user_confirmation.required':
-      return event.data.stage === state.stage && getBidStagePolicy(state.stage).userGate !== 'none'
-        && (state.status === 'pending' || state.status === 'waiting_start' || state.status === 'running' || state.status === 'failed'
-          || state.stage === 'chapter_writing' && (state.status === 'completed' || state.status === 'attention_required'))
-        ? { stage: state.stage, status: 'waiting_user' } : state
+      if (event.data.stage !== state.workflow.stage || getBidStagePolicy(state.workflow.stage).userGate === 'none') return state
+      return {
+        ...state,
+        workflow: { stage: state.workflow.stage, gate: 'waiting_user' },
+        ...(state.run?.stage === event.data.stage ? {
+          run: null,
+          lastRun: { ...state.run, status: 'completed', updatedAt: event.time },
+        } : {}),
+      }
     case 'bid.user_confirmation.received':
-      if (event.data.stage !== state.stage || state.status !== 'waiting_user') return state
-      return event.data.confirmed && getBidStagePolicy(state.stage).userGate === 'after_validation'
-        ? { stage: state.stage, status: 'running' }
-        : { stage: state.stage, status: 'pending' }
+      return event.data.stage === state.workflow.stage && state.workflow.gate === 'waiting_user'
+        ? { ...state, workflow: { stage: state.workflow.stage, gate: 'ready' } }
+        : state
     case 'bid.stage.completed': {
-      if (event.data.stage !== state.stage || state.status !== 'running') return state
+      if (event.data.stage !== state.workflow.stage) return state
       const next = getBidStagePolicy(event.data.stage).nextStage
-      return next === null ? { stage: event.data.stage, status: 'completed' } : { stage: next, status: 'pending' }
+      return {
+        ...state,
+        workflow: next === null
+          ? { stage: event.data.stage, gate: 'completed' }
+          : { stage: next, gate: 'ready' },
+        ...(state.run?.stage === event.data.stage ? {
+          run: null,
+          lastRun: { ...state.run, status: 'completed', updatedAt: event.time },
+        } : {}),
+      }
     }
     default: return state
   }
 }
 
-/**
- * Project Host-owned Bid action and composer decisions for a client.
- * @param runtime Current replayed Bid runtime state.
- * @param fileLimits Optional Host-configured file intake limits.
- * @returns Browser-safe runtime, admitted actions, composer decision, and file limits.
- */
+/** Compatibility reducer for callers that only need the flattened browser view. */
+export function reduceBidRuntimeState(state: BidRuntimeState, event: SessionEvent): BidRuntimeState {
+  return bidRuntimeView(reduceBidControlState(controlStateFromLegacyRuntime(state), event))
+}
+
+/** Project Host-owned action and composer decisions from split Workflow and Run state. */
 export function getBidClientProjection(
-  runtime: BidRuntimeState,
+  source: BidControlState | BidRuntimeState,
   fileLimits: Pick<BidClientProjection, 'allowedExtensions' | 'maxFiles' | 'maxFileBytes' | 'maxTotalBytes'> = {},
 ): BidClientProjection {
+  const state = 'workflow' in source ? source : controlStateFromLegacyRuntime(source)
+  const runtime = bidRuntimeView(state)
+  const base = {
+    workflow: cloneWorkflow(state.workflow),
+    run: cloneRun(state.run),
+    runtime,
+  }
   const fileView = fileLimits.allowedExtensions === undefined ? { ...fileLimits }
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
-  if (runtime.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { runtime: { ...runtime }, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
-  if (runtime.status === 'failed') return {
-    runtime: { ...runtime },
-    allowedActions: runtime.stage === 'file_intake' ? ['upload_files']
-      : runtime.stage === 'chapter_writing' ? ['retry_stage', 'export_docx'] : ['retry_stage'],
-    composer: { enabled: false, reason: 'bid.stage_failed' },
+  if (state.run?.status === 'suspended') return {
+    ...base,
+    allowedActions: state.workflow.stage === 'chapter_writing'
+      ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
+    composer: { enabled: true },
+    ...fileView,
+  }
+  if (state.workflow.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { ...base, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
+  if (state.workflow.gate === 'failed') return {
+    ...base,
+    allowedActions: ['send_message'],
+    composer: { enabled: true },
     ...fileView,
   }
   if (runtime.stage === 'chapter_writing' && runtime.status === 'attention_required') return {
-    runtime: { ...runtime }, allowedActions: ['send_message', 'retry_stage', 'export_docx', 'revise_chapter'],
+    ...base, allowedActions: ['send_message', 'export_docx', 'revise_chapter'],
     composer: { enabled: true }, ...fileView,
   }
-  if (runtime.status === 'waiting_start') return { runtime: { ...runtime }, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
+  if (runtime.status === 'waiting_start') return { ...base, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
   if (runtime.status === 'running') return {
-    runtime: { ...runtime },
+    ...base,
     allowedActions: runtime.stage === 'chapter_writing'
-      ? ['send_message', 'stop_stage', 'export_docx'] : ['send_message', 'stop_stage'],
+      ? ['send_message', 'export_docx'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
   if (runtime.status === 'completed') return {
-    runtime: { ...runtime },
+    ...base,
     allowedActions: runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
       ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
-  if (runtime.stage === 'file_intake') return { runtime: { ...runtime }, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
-  if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
-  if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { runtime: { ...runtime }, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (runtime.stage === 'file_intake') return { ...base, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
+  if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
+  if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
   if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') return {
-    runtime: { ...runtime },
+    ...base,
     allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
     composer: { enabled: true },
     ...fileView,
   }
-  return { runtime: { ...runtime }, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
+  return { ...base, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
 }
