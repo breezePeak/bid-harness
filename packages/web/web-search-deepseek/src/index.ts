@@ -16,6 +16,9 @@ export * from './provider.ts'
 export const name = 'web-search-deepseek'
 export const inject = ['web', 'llm', 'agentDefaultModel']
 
+/** Stable compatibility id for the LLM hosted-search adapter. */
+export const LLM_HOSTED_SEARCH_PROVIDER_ID = 'deepseek-official'
+
 /** The persisted namespace is retained so existing plugin policies keep their address. */
 export const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace('web-search-deepseek')
 const PROVIDER_NS = settingsNamespace('llm-deepseek')
@@ -88,8 +91,8 @@ export function apply(ctx: Context, entry: Config): void {
     onChange: () => {},
   })
   ctx.web.registerSearchProvider({
-    // Existing cordis.yml files select this web-service registration by id.
-    id: 'deepseek-official',
+    // Existing cordis.yml files select this LLM hosted-search adapter by id.
+    id: LLM_HOSTED_SEARCH_PROVIDER_ID,
     available: () => true,
     async search(request, signal) {
       const policy = current()

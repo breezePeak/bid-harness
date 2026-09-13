@@ -756,21 +756,6 @@ function assertStructureCurrent(state: MappingSubmissionState, task: EvidenceMap
   }
 }
 
-function assertWebResearchAvailable(captured: Iterable<CapturedWebResult>): void {
-  const results = [...captured]
-  const failures = MAPPING_AGENT_TOOLS.flatMap((name) => {
-    const calls = results.filter(item => item.exec.name === name)
-    const succeeded = name === 'web_fetch'
-      ? buildWebEvidenceSnapshots(calls).length > 0
-      : calls.some(item => !item.result.isError)
-    if (calls.length === 0 || succeeded) return []
-    return calls.map(({ result }) => `${name}: ${result.isError ? result.error.message : '未取得可读取的网页正文'}`)
-  })
-  if (failures.length > 0) throw new ToolArgsError([
-    `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED：已选择的联网研究尚未成功：${uniqueStrings(failures).join('；')}。请配置 web.searchProvider 指向已安装且凭据可用的独立搜索服务，并重试；不能将失败视为研究充分。`,
-  ])
-}
-
 function researchToolStats(captured: Iterable<CapturedWebResult>, previous?: ResearchStats['tools']): ResearchStats['tools'] {
   const results = [...captured]
   return Object.fromEntries([...SOURCE_TOOLS, ...MAPPING_AGENT_TOOLS].map((name) => {
@@ -789,6 +774,24 @@ function researchToolStats(captured: Iterable<CapturedWebResult>, previous?: Res
         result.isError ? result.error.message : '未取得可读取的网页正文')]),
     }]
   })) as ResearchStats['tools']
+}
+
+/** Render this child's attempted retrievals so a repair can choose a new strategy. */
+function renderResearchHistory(captured: Iterable<CapturedWebResult>, assessment: SectionResearchAssessment | undefined): string {
+  const attempts = [...captured].map(({ exec, result }) => ({
+    tool: exec.name,
+    arguments: exec.arguments,
+    outcome: result.isError ? { kind: 'error', message: result.error.message }
+      : (() => {
+        const hits = record(result.value)?.hits
+        return { kind: 'success', hits: Array.isArray(hits) ? hits.length : undefined }
+      })(),
+  }))
+  return JSON.stringify({
+    attempts,
+    successful_sources: buildWebEvidenceSnapshots(captured).map(snapshot => snapshot.source.final_url),
+    unresolved_gaps: assessment?.unresolved_gaps ?? [],
+  })
 }
 
 function mappingStatistics(log: EvidenceMappingExecutionLog, initial: OutlineArtifact, current: OutlineArtifact): NonNullable<EvidenceMappingExecutionLog['statistics']> {
@@ -1308,7 +1311,6 @@ function attachMappingSubmissionRuntime(
     parameters: z.toJSONSchema(sectionResearchAssessmentInputSchema, { target: 'draft-7' }), output,
     execute(raw: unknown): Promise<unknown> {
       const submitted = sectionResearchAssessmentInputSchema.parse(raw)
-      if (submitted.sufficient_for_blueprint) assertWebResearchAvailable(captured())
       const assessment = sectionResearchAssessmentSchema.parse({
         ...submitted,
         key_findings: submitted.key_findings.map(finding => ({ ...finding, finding_ref: researchFindingRef(finding.finding) })),
@@ -1357,7 +1359,6 @@ function attachMappingSubmissionRuntime(
       description: '完整 Blueprint 后判断目录承载能力。假设 S5 不得自建正式标题，分析业务对象、方法、成果责任和评审定位，说明 Hidden Heading Pressure。逐项引用 finding_index 决定归位；新增章节目标由结构操作自动绑定，无需回填。Host 绑定当前 Blueprint 指纹。',
       parameters: z.toJSONSchema(sectionStructureAssessmentInputSchema, { target: 'draft-7' }), output,
       execute(raw: unknown): Promise<unknown> {
-        assertWebResearchAvailable(captured())
         assertResearchReady(state)
         assertBlueprintReady(state, task)
         const submitted = sectionStructureAssessmentInputSchema.parse(raw)
@@ -1383,7 +1384,6 @@ function attachMappingSubmissionRuntime(
       parameters: editSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
-        assertWebResearchAvailable(captured())
         assertStructureCurrent(state, task)
         if (state.locked) throw new ToolArgsError(['operation: 当前 Section 子树已经锁定。'])
         const violations = validateJsonSchemaValue(editSchema, args)
@@ -1437,7 +1437,6 @@ function attachMappingSubmissionRuntime(
       parameters: lockSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
-        assertWebResearchAvailable(captured())
         assertStructureCurrent(state, task)
         assertTopicDispositionsLockable(state.structureAssessment, state, task)
         const violations = validateJsonSchemaValue(lockSchema, args)
@@ -1649,7 +1648,6 @@ function attachMappingSubmissionRuntime(
       }
       if (taskOwnsOutlineRefinement(task)) {
         assertResearchReady(state)
-        assertWebResearchAvailable(captured())
         assertStructureCurrent(state, task)
         assertTopicDispositionsLockable(state.structureAssessment, state, task)
       }
@@ -2043,7 +2041,7 @@ export function renderEvidenceMappingSubagentTask(
       ] : []),
       '先理解 S3 已确认章节职责并列出影响写作深度和结构判断的研究问题，再阅读本地资料，按需检索 Web。以当前招标要求和用户原始框架为约束，旧标目录用于结构参照；不得机械照抄任意目录树，也不得把旧项目事实带入本项目。',
       '研究后调用 submit_section_research_assessment，只判断是否足以设计 Blueprint。key_findings 保存发现、解释、真实 basis、nature 和 evidence_boundary，不提前写 KEEP、REFINE 或主题归位结论。basis 可引用当前 Requirement、Scoring、Response Point、人工框架、参考目录、本轮成功本地检索/读取，或成功 web_fetch 的正文 URL。project_fact 必须有真实来源；professional_design 可以依据招标任务推演方法和方案，但不能冒充采购人指定事实。招标未逐字列出实施步骤不等于禁止合理方案设计。',
-      'Research Ready 不按网页、资料或工具调用数量判断；招标信息充分时允许零联网。已决定联网却搜索失败或未取得所需正文时，必须解决 Provider/网络问题，不能把失败当成充分。客观不可获得且不影响 Blueprint 的信息保留在 unresolved_gaps，并明确成文边界。',
+      'Research Ready 不按网页、资料或工具调用数量判断；招标信息充分时允许零联网。搜索、Provider 或 URL 失败只说明该次工具尝试未完成，不等于资料不存在，也不否决已由招标资料证明充分的 Blueprint；仍有影响 Blueprint 的缺口时，记录失败并改变检索策略或处理明确的工具错误。客观不可获得且不影响 Blueprint 的信息保留在 unresolved_gaps，并明确成文边界。',
       'research_ready=true 后，先调用 update_section_task 提交完整 writing_brief（purpose、must_answer、writing_notes、suggested_tables、suggested_figures）、writing_dimensions、missing_topics；coverage 继承当前章节关联，语义有变化时用 coverage_override 修正。必须先把研究落实到完整 Blueprint，再调用 submit_section_structure_assessment。不得先列独立写作单元或先拆目录再研究。',
       'Structure Assessment 必须基于最新 Blueprint：如果 S5 只能按确认目录写作，不得自建正式目录标题，当前 Leaf 能否清晰、完整且便于评审定位地表达方案？navigation_analysis 应分析不同业务对象/场景、方法体系、输入—处理—输出闭环、成果验收和质量责任、评分响应与目录导航价值。连续流程或没有独立评分点都不是 KEEP 的充分条件；需要多个事实上的正式子标题才能写清楚时，应记录 hidden_heading_pressure 并深化或重划职责。',
       '同时防止机械拆分：同一方法内部的普通步骤、准备、参数、注意事项、简短公共质量要求，以及表格和流程图本身通常可以留在章内。每个步骤都可以描述输入、输出或责任，这本身不能证明存在不同方法体系或独立技术任务。先尝试用自然段衔接、步骤列表和表格承载；提出隐藏标题压力时，说明哪项实际技术差异无法这样表达，而非仅列出多个展开维度。不能按 writing_dimensions 数量、固定行业词、层级或新增比例决定目录，也不要求每个研究发现单独成节。',
@@ -3264,11 +3262,6 @@ async function executeEvidenceMappingRun(
     const log = executionLog.tasks.find(item => item.task_id === request?.task.task_id)
     if (request === undefined || log === undefined) return
     const state = request.state
-    if (result.isError && MAPPING_AGENT_TOOLS.some(name => name === exec.name) && taskOwnsOutlineRefinement(request.task)) {
-      state.researchReady = false
-      state.locked = false
-      invalidateStructureAssessment(state, request.task)
-    }
     log.research_stats = {
       research_ready: state.researchReady && state.researchAssessment?.sufficient_for_blueprint === true,
       findings: state.researchAssessment?.key_findings.length ?? 0,
@@ -3667,7 +3660,11 @@ async function executeEvidenceMappingRun(
               submissionRequest.state.generation++
               submissionRequest.state.captured = undefined
               await subagents.followup(agent, started.childId, [{
-                type: 'text', text: renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues),
+                type: 'text', text: [
+                  renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues),
+                  `本轮 research_history：${renderResearchHistory(capturedByChild.get(String(started.childId))?.values() ?? [], submissionRequest.state.researchAssessment)}`,
+                  '若仍有影响 Blueprint 的缺口，必须依据这份历史改用不同的检索维度、关键词粒度、资料类型或来源范围；不得机械重复已失败或零命中的相同查询。Provider 或 URL 错误如阻止必要研究，保留其明确错误，不得伪装成资料不足。',
+                ].join('\n'),
               }], { source: { kind: 'user' }, signal })
               const resumed = agent.ctx.agents.get(started.childId)
               if (resumed !== undefined) child = resumed

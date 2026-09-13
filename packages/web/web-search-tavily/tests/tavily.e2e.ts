@@ -8,6 +8,7 @@ describe.skipIf(!process.env.TAVILY_API_KEY)('Tavily live search', () => {
     const provider = new TavilySearchProvider(
       () => resolveTavilyOptions({}),
       async () => apiKey,
+      async () => true,
     )
     const result = await provider.search({ query: 'DeepSeek Harness GitHub', maxResults: 3 })
     expect(result.sources.length).toBeGreaterThan(0)

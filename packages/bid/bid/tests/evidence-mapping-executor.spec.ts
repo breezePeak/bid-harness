@@ -1382,7 +1382,7 @@ describe('evidence-mapping Agent executor', () => {
       .rejects.toThrow('BID_SECTION_SCOPE_INVALID:SEC-UNKNOWN')
   })
 
-  it('选择联网后搜索失败不得声明研究充分，成功重试并读取正文后才解除阻断', async () => {
+  it('Web Provider 故障不阻断已由招标资料证明充分的 Blueprint', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-failure-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
@@ -1392,18 +1392,7 @@ describe('evidence-mapping Agent executor', () => {
     const childId = start.request.childId!
     const child = fixture.children.get(String(childId))!
     fixture.emitWeb(child, [observation({ callId: 'failed-search', name: 'web_search', arguments: { queries: ['技术依据'] }, callSeq: 1, resultSeq: 2, isError: true })])
-    const rejected = await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', branchResearchAssessment())
-    expect(rejected.isError).toBe(true)
-    if (rejected.isError) expect(rejected.error.message).toContain('EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED')
-    const blockedStructure = await fixture.invokeSubmissionTool(childId, 'submit_section_structure_assessment', structureAssessment())
-    expect(blockedStructure.isError).toBe(true)
-    if (blockedStructure.isError) expect(blockedStructure.error.message).toContain('EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED')
-    const research = branchResearchAssessment()
-    research.key_findings[0]!.basis = [{ kind: 'web_material', ref: webUrl }]
-    fixture.emitWeb(child, [webResearch('retry').search])
-    expect((await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', research)).isError).toBe(true)
-    fixture.emitWeb(child, [webResearch('retry').fetch])
-    expect((await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', research)).isError).toBe(false)
+    expect((await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', branchResearchAssessment())).isError).toBe(false)
     start.resolve()
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts[1]!.resolve()
@@ -1416,8 +1405,8 @@ describe('evidence-mapping Agent executor', () => {
         }
       }
     }
-    expect(log.statistics.tools.web_search).toMatchObject({ calls: 2, succeeded: 1, failed: 1, failure_reasons: ['failed'] })
-    expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 1, succeeded: 1, failed: 0 })
+    expect(log.statistics.tools.web_search).toMatchObject({ calls: 1, succeeded: 0, failed: 1, failure_reasons: ['failed'] })
+    expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
   })
 
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {

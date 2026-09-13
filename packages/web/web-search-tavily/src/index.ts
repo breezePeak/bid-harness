@@ -111,5 +111,12 @@ export function apply(ctx: Context, entry: Config): void {
     if (hit?.value !== undefined && hit.value.length > 0) return hit.value
     throw new WebError(`Tavily search has no API key for "${ref}"; store it through the credentials service or export ${ref}`, 'WEB_PROVIDER_ERROR')
   }
-  ctx.web.registerSearchProvider(new TavilySearchProvider(options, resolveApiKey))
+  const credentialReady = async (name: string): Promise<boolean> => {
+    const ref = credentialRef(name)
+    const credentials = ctx.get('credentials')
+    return credentials === undefined
+      ? (launchEnvironmentOf(ctx).get(ref)?.value.length ?? 0) > 0
+      : (await credentials.describe(ref)).configured
+  }
+  ctx.web.registerSearchProvider(new TavilySearchProvider(options, resolveApiKey, credentialReady))
 }

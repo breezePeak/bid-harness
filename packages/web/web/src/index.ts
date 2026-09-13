@@ -137,7 +137,7 @@ export class WebRuntime extends Service {
    * @returns the provider's results, capped to `request.maxResults`.
    */
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
-    const provider = resolveProvider({
+    const provider = await resolveProvider({
       providers: this.searchProviders,
       ...this.searchProviderId !== undefined ? { configuredId: this.searchProviderId } : {},
     })
@@ -154,7 +154,7 @@ export class WebRuntime extends Service {
    * @returns the retrieval outcome; non-2xx responses resolve descriptively.
    */
   async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult> {
-    const provider = resolveProvider({
+    const provider = await resolveProvider({
       providers: this.fetchProviders,
       ...this.fetchProviderId !== undefined ? { configuredId: this.fetchProviderId } : {},
     })
@@ -164,23 +164,25 @@ export class WebRuntime extends Service {
 
 interface ResolvableProvider {
   readonly id: string
-  available(): boolean
+  available(): boolean | Promise<boolean>
 }
 
 /** Resolve the selected provider or throw the matching {@link WebError}. */
-function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>): P {
+async function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>): Promise<P> {
   const { configuredId, providers } = selection
   if (configuredId !== undefined) {
     const provider = providers.get(configuredId)
     if (!provider) {
       throw new WebError(`configured web provider "${configuredId}" is not registered`, 'WEB_PROVIDER_CONFIGURED_MISSING')
     }
-    if (!provider.available()) {
+    if (!await provider.available()) {
       throw new WebError(`configured web provider "${configuredId}" is registered but unavailable`, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
     }
     return provider
   }
-  const usable = [...providers.values()].filter(provider => provider.available())
+  const usable = (await Promise.all([...providers.values()].map(async provider => ({ provider, available: await provider.available() }))))
+    .filter(({ available }) => available)
+    .map(({ provider }) => provider)
   const [single] = usable
   if (single === undefined) {
     throw new WebError('no usable web provider is registered', 'WEB_PROVIDER_UNAVAILABLE')

@@ -71,14 +71,20 @@ export function mapTavilyResponse(response: TavilySearchResponse): WebSearchResu
 export class TavilySearchProvider implements WebSearchProvider {
   readonly id = TAVILY_PROVIDER_ID
 
-  /** @param options current configuration thunk. @param resolveApiKey per-operation credential resolver. */
+  /**
+   * @param options current configuration thunk.
+   * @param resolveApiKey per-operation credential resolver.
+   * @param credentialReady local credential-state lookup.
+   */
   constructor(
     private readonly options: () => TavilySearchProviderOptions,
     private readonly resolveApiKey: (ref: string) => Promise<string>,
+    private readonly credentialReady: (ref: string) => Promise<boolean>,
   ) {}
 
-  available(): boolean {
-    return this.options().apiKeyEnv.length > 0
+  async available(): Promise<boolean> {
+    const ref = this.options().apiKeyEnv
+    return ref.length > 0 && await this.credentialReady(ref)
   }
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {

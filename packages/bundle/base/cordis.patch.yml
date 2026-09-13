@@ -405,7 +405,7 @@
     - id: web
       name: '@deepseek-ai/dsh-web'
       config:
-        searchProvider: tavily
+        searchProvider: deepseek-official
         fetchProvider: http
 
     - id: web-search-deepseek

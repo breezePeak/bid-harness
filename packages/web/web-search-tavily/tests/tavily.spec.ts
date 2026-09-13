@@ -70,6 +70,14 @@ describe('Tavily configuration', () => {
   })
 })
 
+describe('Tavily availability', () => {
+  it('requires both a credential reference and a resolved credential', async () => {
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => false).available()).resolves.toBe(false)
+    await expect(new TavilySearchProvider(() => ({ ...options, apiKeyEnv: '' }), async () => 'key', async () => true).available()).resolves.toBe(false)
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).available()).resolves.toBe(true)
+  })
+})
+
 describe('Tavily request and failure mapping', () => {
   it('sends the provider parameters and lets request maxResults win', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ results: [{ url: 'https://result.test', title: 'R', content: 'S' }] }))
@@ -77,6 +85,7 @@ describe('Tavily request and failure mapping', () => {
     const provider = new TavilySearchProvider(
       () => ({ ...options, searchDepth: 'advanced', topic: 'news', includeAnswer: 'basic', maxResults: 9, chunksPerSource: 2 }),
       async () => 'tvly-key',
+      async () => true,
     )
     await expect(provider.search({ query: 'current rules', maxResults: 4 })).resolves.toMatchObject({
       sources: [{ url: 'https://result.test', title: 'R', snippet: 'S' }],
@@ -93,7 +102,7 @@ describe('Tavily request and failure mapping', () => {
   it('forwards caller cancellation', async () => {
     const controller = new AbortController()
     controller.abort()
-    await expect(new TavilySearchProvider(() => options, async () => 'key').search({ query: 'q' }, controller.signal))
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).search({ query: 'q' }, controller.signal))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_ABORTED' }))
   })
 
@@ -101,7 +110,7 @@ describe('Tavily request and failure mapping', () => {
     vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
     })))
-    await expect(new TavilySearchProvider(() => ({ ...options, timeoutMs: 10 }), async () => 'key').search({ query: 'q' }))
+    await expect(new TavilySearchProvider(() => ({ ...options, timeoutMs: 10 }), async () => 'key', async () => true).search({ query: 'q' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_SEARCH_TIMEOUT' }))
   })
 
@@ -110,13 +119,13 @@ describe('Tavily request and failure mapping', () => {
     { response: new Response('gateway', { status: 502 }), message: 'Tavily API error (HTTP 502)' },
   ])('maps HTTP failures: $message', async ({ response, message }) => {
     vi.stubGlobal('fetch', vi.fn(async () => response))
-    await expect(new TavilySearchProvider(() => options, async () => 'key').search({ query: 'q' }))
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).search({ query: 'q' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR', message }))
   })
 
   it('maps malformed success responses to WEB_PROVIDER_ERROR', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ results: null })))
-    await expect(new TavilySearchProvider(() => options, async () => 'key').search({ query: 'q' }))
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).search({ query: 'q' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
   })
 })
@@ -132,7 +141,8 @@ describe('Tavily plugin registration and live credentials/settings', () => {
     await ctx.plugin(WebRuntime, { searchProvider: TAVILY_PROVIDER_ID })
     const fiber = await ctx.plugin(tavilyPlugin, {})
     try {
-      await expect(ctx.web.search({ query: 'q' })).rejects.toThrow(/TAVILY_API_KEY/u)
+      await expect(ctx.web.search({ query: 'q' }))
+        .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE' }))
       await ctx.credentials.set(credentialRef('TAVILY_API_KEY'), 'first-key')
       await ctx.web.search({ query: 'one' })
       await ctx.credentials.set(credentialRef('TAVILY_API_KEY'), 'second-key')
@@ -155,7 +165,7 @@ describe('Tavily plugin registration and live credentials/settings', () => {
     await ctx.plugin(WebRuntime, { searchProvider: TAVILY_PROVIDER_ID })
     const fiber = await ctx.plugin(tavilyPlugin, {})
     await expect(ctx.web.search({ query: 'q' }))
-      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE' }))
     await fiber.dispose()
     await expect(ctx.web.search({ query: 'q' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CONFIGURED_MISSING' }))
