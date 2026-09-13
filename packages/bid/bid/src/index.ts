@@ -8,9 +8,9 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { basename, extname, resolve, sep } from 'node:path'
+import { basename, extname, relative, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
@@ -88,7 +88,7 @@ import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidRuntimeProjection } from './projection.ts'
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection } from './runtime-state.ts'
 import { BID_INITIAL_CONTROL_STATE, bidRuntimeView, reduceBidControlState } from './runtime-state.ts'
-import { BidRunCoordinator, type BidRunContext } from './run-coordinator.ts'
+import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { checkpointBidProjectState, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
@@ -127,6 +127,7 @@ import type {
   BidReviewIssueView,
   BidReviewMaterialView,
   BidRuntimeState,
+  BidResumePolicy,
   BidStage,
   BidDocumentRole,
   BidBinaryUploadFile,
@@ -177,6 +178,7 @@ export type {
   BidRuntimeState,
   BidProjectWorkflow,
   BidRunSnapshot,
+  BidResumePolicy,
   BidRunStatus,
   BidRunSuspensionCause,
   BidStage,
@@ -200,8 +202,8 @@ export {
   reduceBidRuntimeState,
   reduceBidControlState,
 } from './runtime-state.ts'
-export { BidCommitFence, BidRunCoordinator, DirectBidRunScheduler } from './run-coordinator.ts'
-export type { BidChildScope, BidRunContext, BidRunScheduler } from './run-coordinator.ts'
+export { BidCommitScope, BidRunCoordinator, DirectBidRunScheduler, createTestBidRunContext } from './run-coordinator.ts'
+export type { BidChildScope, BidCommitLease, BidRunCheckpoint, BidRunContext, BidRunScheduler } from './run-coordinator.ts'
 export { BidOrchestrator, BidOrchestratorError }
 export type {
   BidOrchestratorErrorCode,
@@ -913,6 +915,10 @@ export class BidHostRuntime extends TypertRemoteService {
         },
       },
       () => holder.current?.projectRevision ?? 0,
+      async () => {
+        await this.checkpoint(operation)
+        return operation.projectRevision
+      },
       controller.signal,
     )
     const operation: ActiveBidOperation = {
@@ -945,7 +951,7 @@ export class BidHostRuntime extends TypertRemoteService {
           })
         }
         await operation.suspension
-        await this.checkpoint(operation)
+        if (operation.suspension === undefined) await this.checkpoint(operation)
       }
     } finally {
       if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
@@ -969,6 +975,14 @@ export class BidHostRuntime extends TypertRemoteService {
         workflow: state.workflow,
         run: interrupted,
         lastRun: interrupted,
+      })
+      operation.session.append('bid.run.notice', {
+        noticeId: `run:${interrupted.runId}:suspended`,
+        runId: interrupted.runId,
+        stage: interrupted.stage,
+        kind: 'interrupted',
+        severity: 'error',
+        message: '当前阶段已中断，已保存已完成进度。',
       })
     }
     operation.projectRevision = state.revision
@@ -1177,7 +1191,10 @@ export class BidHostRuntime extends TypertRemoteService {
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
     if (request.action === 'bid_resume_current_run') {
-      void this.resumeCurrentRun(session, request.suspended_run_id, request.expected_project_revision).catch((error: unknown) => {
+      const resumePolicy: BidResumePolicy | undefined = request.resume_policy === undefined
+        ? undefined
+        : { webAccess: request.resume_policy.web_access }
+      void this.resumeCurrentRun(session, request.suspended_run_id, request.expected_project_revision, resumePolicy).catch((error: unknown) => {
         this.ctx.logger.warn(`Bid Run 恢复失败：${String(error)}`)
       })
       return { ok: true, message: '已开始核对保存进度并继续未完成任务。' }
@@ -1255,14 +1272,13 @@ export class BidHostRuntime extends TypertRemoteService {
         }
       }
       signal.throwIfAborted()
-      run = operation.runs.start(runtime.stage)
+      run = await operation.runs.start(runtime.stage)
       started = true
       const operations = request.action === 'bid_outline_regenerate_scope'
         ? await generateScopedOutlineOperations(agent, base, request.section_ids, request.feedback, signal)
         : request.action === 'bid_outline_apply_operations' ? parseOutlineEditOperations(request.operations) : []
       signal.throwIfAborted()
       restored = false
-      run.commits.assertWritable(run)
       const mutation = await mutateOutlineDraft(workspace, { ...request, operations })
       if (!mutation.ok) { restored = true; return mutation }
       signal.throwIfAborted()
@@ -1273,16 +1289,15 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const persist = async (path: string, value: unknown): Promise<void> => {
         if (run === undefined) throw new Error('BID_RUN_REQUIRED')
-        run.commits.assertWritable(run)
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
-        await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await run.commits.writeJson(absolute, value)
       }
       const previousOutline = parseOutlineArtifact(await readStageJson(workspace, 'outline/outline.json'))
       await persist('outline/outline.json', draft.outline)
       await executeEvidenceMapping(agent, workspace, buildBidStageTask('evidence_mapping'), {
         maxRepairAttempts: this.config.modelStageRepairAttempts, maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-        run, signal: run.signal, scheduler: run.scheduler,
+        run,
         remap: {
           section_ids: request.section_ids,
           mode: request.mode,
@@ -1372,25 +1387,21 @@ export class BidHostRuntime extends TypertRemoteService {
         execute: async (task, run) => {
           const operation = this.inFlight.get(projectKey(agent.session))
           await run.scheduler.waitUntilRunnable(run.signal)
-          if (task.stage === 'docx_export') return executeDocxExport(workspace, run.signal)
+          if (task.stage === 'docx_export') return executeDocxExport(workspace, run)
           return task.stage === 'tender_analysis'
             ? executeTenderAnalysis(agent, workspace, task, {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               run,
-              signal: run.signal,
-              scheduler: run.scheduler,
             })
             : task.stage === 'evidence_mapping'
               ? executeEvidenceMapping(agent, workspace, task, {
                 maxRepairAttempts: this.config.modelStageRepairAttempts,
                 maxConcurrency: this.config.evidenceMappingMaxConcurrency,
                 run,
-                signal: run.signal,
-                scheduler: run.scheduler,
               })
               : task.stage === 'outline_generation'
                 ? executeOutlineGeneration(agent, workspace, task, {
-                  maxRepairAttempts: this.config.modelStageRepairAttempts, run, signal: run.signal, scheduler: run.scheduler,
+                  maxRepairAttempts: this.config.modelStageRepairAttempts, run,
                 })
                 : task.stage === 'chapter_writing'
                   ? executeChapterWriting(agent, workspace, task, {
@@ -1398,8 +1409,6 @@ export class BidHostRuntime extends TypertRemoteService {
                     maxConcurrency: this.config.chapterWritingMaxConcurrency,
                     maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
                     run,
-                    signal: run.signal,
-                    scheduler: run.scheduler,
                     ...(operation === undefined ? {} : { control: operation.writingControl }),
                   })
                   : Promise.reject(new Error(`Bid Host has no executor for ${task.stage}`))
@@ -1715,9 +1724,8 @@ export class BidHostRuntime extends TypertRemoteService {
           execute: async (task, run) => {
             await run.scheduler.waitUntilRunnable(run.signal)
             if (task.stage === 'file_intake') {
-              run.commits.assertWritable(run)
               try {
-                imported = await workspace.import(incoming)
+                imported = await workspace.import(incoming, run)
               } catch {
                 throw new Error('file intake could not persist the selected files')
               }
@@ -1727,12 +1735,10 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
-            if (task.stage === 'docx_export') return executeDocxExport(workspace, run.signal)
+            if (task.stage === 'docx_export') return executeDocxExport(workspace, run)
             const repair = {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               run,
-              signal: run.signal,
-              scheduler: run.scheduler,
             }
             if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
@@ -1932,6 +1938,9 @@ export class BidHostRuntime extends TypertRemoteService {
           },
         },
         { validate: () => Promise.resolve({ ok: true }) },
+        operation.controller.signal,
+        undefined,
+        operation.runs,
       )
       const failed = await orchestrator.runCurrentProgramStage()
       await this.ctx.sessions.flush(session)
@@ -1944,7 +1953,12 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /** Resume one exact suspended Run after checking its project revision and durable checkpoints. */
-  async resumeCurrentRun(session: Session, suspendedRunId: string, expectedProjectRevision: number): Promise<BidRuntimeState> {
+  async resumeCurrentRun(
+    session: Session,
+    suspendedRunId: string,
+    expectedProjectRevision: number,
+    resumePolicy?: BidResumePolicy,
+  ): Promise<BidRuntimeState> {
     if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
       throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', 'Resume requires a Bid Session with a Host workspace.')
     }
@@ -1964,7 +1978,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       if (runtime.stage === 'chapter_writing') recoverOverflowedBidStageContext(session, runtime.stage)
       const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
-      const next = await orchestrator.resume(suspendedRunId)
+      const next = await orchestrator.resume(suspendedRunId, resumePolicy)
       await this.ctx.sessions.flush(session)
       return next
     } finally {
@@ -2098,11 +2112,15 @@ export class BidHostRuntime extends TypertRemoteService {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const artifacts = await executeDocxExport(workspace, undefined, destination, templateId)
+      const markdown = await collectDocxMarkdown(workspace)
+      const source = destination.slice(0, -'.docx'.length) + '.md'
+      const sourcePath = within(workspace.projectRoot, source)
+      await assertNoLinkedPath(workspace.root, sourcePath)
+      await writeFileAtomic(sourcePath, markdown, { mode: 0o600, dirMode: 0o700 })
+      await workspace.exportDocx(source, destination, templateId)
+      const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
-      if (!validation.ok) {
-        return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
-      }
+      if (!validation.ok) return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
         message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
@@ -2120,8 +2138,7 @@ export class BidHostRuntime extends TypertRemoteService {
           : active.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
         return generate(workspace, control)
       })
-    }
-    catch (error: unknown) { return failure(error) }
+    } catch (error: unknown) { return failure(error) }
   }
 
   /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
@@ -2212,17 +2229,14 @@ export class BidHostRuntime extends TypertRemoteService {
       if (parent.session.header.cwd === undefined || projectKey(parent.session) !== projectKey(session)) {
         return reject('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE', '原编写会话的父会话不属于当前标书项目。')
       }
-      const run = operation.runs.start(runtime.stage)
+      const run = await operation.runs.start(runtime.stage)
       await executeChapterWriting(parent, operation.workspace, buildBidStageTask('chapter_writing'), {
         maxRepairAttempts: this.config.modelStageRepairAttempts,
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
         maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
         run,
-        signal: run.signal,
-        scheduler: run.scheduler,
         revision: parsed.data,
       })
-      run.commits.assertWritable(run)
       operation.runs.complete(run)
       return { ok: true, value: await this.getReviewChapter(session, parsed.data.reference.section_id) }
     } catch (error: unknown) {
@@ -2817,7 +2831,7 @@ export class BidHostRuntime extends TypertRemoteService {
           backup.set(path, null)
         }
       }
-      const run = operation.runs.start(runtime.stage)
+      const run = await operation.runs.start(runtime.stage)
       try {
         run.signal.throwIfAborted()
         if (runtime.stage === 'evidence_mapping') {
@@ -2833,15 +2847,12 @@ export class BidHostRuntime extends TypertRemoteService {
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
               summarySectionIds,
               run,
-              signal: run.signal,
-              scheduler: run.scheduler,
             })
             candidate = checked.outline
             evidence = checked.evidence
           }
           const reconciled = reconcileSectionEvidence(candidate, evidence)
-          run.commits.assertWritable(run)
-          await writeFileAtomic(evidencePath, `${JSON.stringify(reconciled, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+          await run.commits.writeJson(evidencePath, reconciled)
           const ledger = parseWebEvidenceSourcesArtifact(await readStageJson(workspace, 'analysis/web-evidence-sources.json'))
           const referenced = new Set(
             reconciled.section_mappings.flatMap(mapping => mapping.web_materials.map(material => material.source_id)),
@@ -2866,8 +2877,7 @@ export class BidHostRuntime extends TypertRemoteService {
           ])
           if (!validation.ok) throw new BidStageExecutionError(validation.issues)
         }
-        run.commits.assertWritable(run)
-        await writeFileAtomic(confirmedPath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+        await run.commits.writeJson(confirmedPath, candidate)
         if (runtime.stage === 'evidence_mapping') {
           const confirmationPath = within(workspace.projectRoot, 'outline/confirmation.json')
           await assertNoLinkedPath(workspace.root, confirmationPath)
@@ -2939,7 +2949,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
-      run = operation.runs.start(runtime.stage)
+      run = await operation.runs.start(runtime.stage)
       started = true
       const outlinePath = within(workspace.projectRoot, 'outline/outline.json')
       const qualityPath = within(workspace.projectRoot, 'outline/quality-report.json')
@@ -2955,8 +2965,6 @@ export class BidHostRuntime extends TypertRemoteService {
         const artifacts = await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
           maxRepairAttempts: this.config.modelStageRepairAttempts,
           run,
-          signal: run.signal,
-          scheduler: run.scheduler,
           regeneration: { feedback: normalized, revision: draft.revision, draftSha256: draft.draft_outline_sha256 },
         })
         const validation = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
@@ -3374,6 +3382,20 @@ function parseDeterministic(extension: string, bytes: Uint8Array): string {
   throw new Error('bid-unsupported-file-type')
 }
 
+/** List regular files produced in one Run's private intake staging directory. */
+async function stagedFiles(root: string): Promise<string[]> {
+  let entries
+  try { entries = await readdir(root, { withFileTypes: true, encoding: 'utf8' }) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const paths = await Promise.all(entries.map(async entry => {
+    const path = resolve(root, entry.name)
+    return entry.isDirectory() ? stagedFiles(path) : entry.isFile() ? [path] : []
+  }))
+  return paths.flat()
+}
+
 /** 同一 Workspace 内所有 Bid Session 共用的项目文件。 */
 export class BidWorkspace {
   /** Absolute workspace root. */
@@ -3415,10 +3437,14 @@ export class BidWorkspace {
    * @param files - Validated upload bytes to import into the project.
    * @returns Manifest entries with process-local absolute paths.
    */
-  async import(files: readonly IncomingFile[]): Promise<ImportedFile[]> {
+  async import(files: readonly IncomingFile[], run?: BidRunContext): Promise<ImportedFile[]> {
     validateBidFileBatch(files, this.config)
     await assertNoLinkedPath(this.root, this.manifestPath)
     const manifest = await this.readManifest()
+    const stagingRoot = run === undefined ? undefined : resolve(this.projectRoot, 'runs', run.runId, 'staging')
+    const destination = (path: string): string => stagingRoot === undefined
+      ? within(this.projectRoot, path)
+      : resolve(stagingRoot, ...path.split('/'))
     const used = new Set(manifest.files.map(file => basename(file.inputPath).toLocaleLowerCase('en-US')))
     const imported: ImportedFile[] = []
     for (const file of files) {
@@ -3426,7 +3452,7 @@ export class BidWorkspace {
       const extension = extname(originalName).toLocaleLowerCase('en-US')
       const storedName = uniqueName(originalName, used)
       const inputPath = `input/${storedName}`
-      const input = within(this.projectRoot, inputPath)
+      const input = destination(inputPath)
       await atomicBytes(this.root, input, file.bytes)
       const hash = createHash('sha256').update(file.bytes).digest('hex')
       const record: ManifestFile = { id: hash as BidFileId, role: file.role ?? 'tender', originalName, inputPath, corpusPath: null,
@@ -3437,7 +3463,7 @@ export class BidWorkspace {
         const documentPath = `${corpusPath}/document.md`
         record.corpusPath = corpusPath
         if (extension === '.pdf' || extension === '.docx' || extension === '.doc') {
-          const corpus = within(this.projectRoot, corpusPath)
+          const corpus = destination(corpusPath)
           await assertNoLinkedPath(this.root, corpus)
           const result = await extractDocument({ sourcePath: input, outputDir: corpus })
           if (result.parseStatus === 'failed' || result.parseStatus === 'unsupported_format') {
@@ -3449,7 +3475,7 @@ export class BidWorkspace {
           record.metadataPath = `${corpusPath}/metadata.json`
           record.parseStatus = result.parseStatus
         } else {
-          const document = within(this.projectRoot, documentPath)
+          const document = destination(documentPath)
           await assertNoLinkedPath(this.root, document)
           await writeFileAtomic(
             document,
@@ -3461,12 +3487,12 @@ export class BidWorkspace {
         }
         if (record.parseStatus === 'success') {
           const chunksPath = `${corpusPath}/chunks`
-          const chunks = within(this.projectRoot, chunksPath)
+          const chunks = destination(chunksPath)
           await assertNoLinkedPath(this.root, chunks)
           await chunkDocument({
-            documentPath: within(this.projectRoot, documentPath),
-            structurePath: record.structurePath === null ? null : within(this.projectRoot, record.structurePath),
-            metadataPath: record.metadataPath === null ? null : within(this.projectRoot, record.metadataPath),
+            documentPath: destination(documentPath),
+            structurePath: record.structurePath === null ? null : destination(record.structurePath),
+            metadataPath: record.metadataPath === null ? null : destination(record.metadataPath),
             outputDir: chunks,
             config: this.config.documentChunk,
           })
@@ -3490,7 +3516,14 @@ export class BidWorkspace {
       })
     }
     await assertNoLinkedPath(this.root, this.manifestPath)
-    await writeFileAtomic(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    if (stagingRoot === undefined) await writeFileAtomic(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    else await run!.commits.publish(async lease => {
+      for (const staged of await stagedFiles(stagingRoot)) {
+        const destinationPath = within(this.projectRoot, relative(stagingRoot, staged).replaceAll('\\', '/'))
+        await lease.writeBytes(destinationPath, await readFile(staged))
+      }
+      await lease.writeJson(this.manifestPath, manifest)
+    })
     return imported
   }
 
@@ -3535,22 +3568,39 @@ export class BidWorkspace {
     source: string,
     destination = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
+    commits?: BidCommitScope,
   ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const sourcePath = within(this.projectRoot, source)
     if (!source.endsWith('.md')) throw new Error('bid-source-must-be-markdown')
+    await assertNoLinkedPath(this.root, sourcePath)
+    return this.exportDocxMarkdown(await readFile(sourcePath, 'utf8'), destination, templateId, commits)
+  }
+
+  /** Render a collected Markdown snapshot and publish its DOCX only through the supplied commit scope. */
+  async exportDocxMarkdown(
+    markdown: string,
+    destination = `${this.config.outputDirectory}/技术标.docx`,
+    templateId?: DocxTemplateId | null,
+    commits?: BidCommitScope,
+  ): Promise<string> {
+    if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const destinationPath = within(this.projectRoot, destination)
     if (!destinationPath.startsWith(`${this.outputRoot}${sep}`)) throw new Error('bid-output-path-required')
-    await assertNoLinkedPath(this.root, sourcePath)
-    const markdown = await readFile(sourcePath, 'utf8')
     const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
     const rendered = await renderDocx(this, markdown, view.state.resolved)
     await readDocxXml(rendered.bytes)
-    await atomicBytes(this.root, destinationPath, rendered.bytes)
-    await writeDocxFormat(this, view.templateId, { ...view.state,
+    const nextFormat = { ...view.state,
       lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, rendered.assetHash) },
+    }
+    if (commits === undefined) {
+      await atomicBytes(this.root, destinationPath, rendered.bytes)
+      await writeDocxFormat(this, view.templateId, nextFormat)
+    } else await commits.publish(async lease => {
+      await lease.writeBytes(destinationPath, rendered.bytes)
+      await writeDocxFormat(this, view.templateId, nextFormat, lease)
     })
     return this.relative(destination)
   }

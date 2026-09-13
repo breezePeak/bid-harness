@@ -40,8 +40,36 @@ export interface BidProjectWorkflow {
 /** Process state of one exact stage execution attempt. */
 export type BidRunStatus = 'running' | 'cancelling' | 'suspended' | 'completed'
 
+/** Durable terminal Run notice rendered in the conversation timeline. */
+export interface BidRunNotice {
+  /** Stable deduplication identity for one terminal Run outcome. */
+  readonly noticeId: string
+  /** The exact Run that reached a terminal resumable state. */
+  readonly runId: string
+  /** Workflow stage whose execution stopped. */
+  readonly stage: BidStage
+  /** Neutral user stop or an interrupted automatic attempt. */
+  readonly kind: 'stopped' | 'interrupted'
+  /** Presentation intent; the renderer does not infer severity from text. */
+  readonly severity: 'info' | 'error'
+  /** Host-authored, model-invisible user-facing summary. */
+  readonly message: string
+}
+
 /** Why one Run stopped before completing its stage. */
 export type BidRunSuspensionCause = 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart'
+
+/** Identity of the suspended Run from which a new attempt resumes. */
+export interface BidRunResumeIdentity {
+  readonly runId: string
+  readonly cause: BidRunSuspensionCause
+}
+
+/** Durable execution constraints selected when resuming a suspended Run. */
+export interface BidResumePolicy {
+  /** Whether resumed Subagents may receive Web tools. */
+  readonly webAccess?: 'inherit' | 'disabled' | undefined
+}
 
 /** Persisted identity and settlement of one stage execution attempt. */
 export interface BidRunSnapshot {
@@ -49,6 +77,11 @@ export interface BidRunSnapshot {
   readonly stage: BidStage
   readonly epoch: number
   readonly baseProjectRevision: number
+  /** Revision after this Run's `running` state was durably published. */
+  readonly controlRevision?: number | undefined
+  /** The prior suspended attempt; a resumed Run always receives a fresh identity. */
+  readonly resumeOf?: BidRunResumeIdentity | undefined
+  readonly resumePolicy?: BidResumePolicy | undefined
   readonly status: BidRunStatus
   readonly cause?: BidRunSuspensionCause | undefined
   readonly error?: {

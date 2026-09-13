@@ -20,6 +20,7 @@ import { defaultDocxFormatState, formatFields, FORMAT_ROLES, resolveFormat, vali
 import { parseDocxTemplate } from './docx-template.ts'
 import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
+import type { BidCommitScope } from './run-coordinator.ts'
 
 const valueSchema = z.union([z.string().max(200), z.number(), z.boolean()])
 const valuesSchema = z.record(z.string().max(100), valueSchema)
@@ -224,12 +225,19 @@ export async function readDocxFormat(workspace: BidWorkspace, templateId?: DocxT
 }
 
 /** 在调用方 Word 操作锁内原子保存一份模板或系统默认格式配置。 */
-export async function writeDocxFormat(workspace: BidWorkspace, templateId: DocxTemplateId | null, state: DocxFormatState): Promise<void> {
+export async function writeDocxFormat(
+  workspace: BidWorkspace,
+  templateId: DocxTemplateId | null,
+  state: DocxFormatState,
+  commits?: Pick<BidCommitScope, 'writeJson'>,
+): Promise<void> {
   const path = formatPath(workspace, templateId)
   await assertNoLinkedPath(workspace.root, path)
   if (templateId === null ? state.template !== undefined : state.template?.hash !== templateId)
     throw new Error('Word 格式配置与模板 ID 不一致。')
-  await writeFileAtomic(path, `${JSON.stringify(stateSchema.parse(state))}\n`, { mode: 0o600, dirMode: 0o700 })
+  const value = stateSchema.parse(state)
+  if (commits === undefined) await writeFileAtomic(path, `${JSON.stringify(value)}\n`, { mode: 0o600, dirMode: 0o700 })
+  else await commits.writeJson(path, value)
 }
 
 async function resolveAndWrite(

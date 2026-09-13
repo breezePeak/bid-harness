@@ -2,7 +2,6 @@
 import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
 import { readDocxXml } from './docx-template.ts'
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { collectDocxChapterBody } from './docx-content.ts'
 import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationIssue, type StageValidationResult } from './control-plane-contract.ts'
 import type { BidWorkspace } from './index.ts'
@@ -14,6 +13,7 @@ import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
+import type { BidRunContext } from './run-coordinator.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -33,25 +33,25 @@ export { collectDocxChapterBody } from './docx-content.ts'
 /**
  * 按完整确认目录导出父节点概述和已保存叶节正文；缺失正文保留标题并标注。
  * @param workspace 已由 Host 锁定的项目。
- * @param signal 本次阶段操作的取消信号。
+ * @param run 本次阶段的唯一执行与正式提交权限。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
  * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认格式。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
 export async function executeDocxExport(
   workspace: BidWorkspace,
-  signal?: AbortSignal,
+  run: BidRunContext,
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
   templateId?: DocxTemplateId | null,
 ): Promise<StageArtifact[]> {
-  const markdown = await collectDocxMarkdown(workspace, signal)
+  const markdown = await collectDocxMarkdown(workspace, run.signal)
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
   const source = destination.slice(0, -'.docx'.length) + '.md'
   const absolute = within(workspace.projectRoot, source)
   await assertNoLinkedPath(workspace.root, absolute)
-  signal?.throwIfAborted()
-  await writeFileAtomic(absolute, markdown, { mode: 0o600, dirMode: 0o700 })
-  await workspace.exportDocx(source, destination, templateId)
+  run.signal.throwIfAborted()
+  await run.commits.writeText(absolute, markdown)
+  await workspace.exportDocxMarkdown(markdown, destination, templateId, run.commits)
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 

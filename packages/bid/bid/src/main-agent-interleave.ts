@@ -1,6 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
+import type { BidRunContext } from './run-coordinator.ts'
 
 /** 私有 Main Agent 任务在公开用户回合之间切换工具面的运行时。 */
 export interface MainAgentPrivateRuntime<T> {
@@ -34,6 +35,8 @@ export interface MainAgentInterleaveOptions {
 export interface MainAgentInterleave {
   /** 把一条将要进入 inbox 的消息标记为当前内部任务。 */
   own(message: UserMessage): void
+  /** Remove still-pending private messages without touching user steering. */
+  discardOwnedInbox(): void
   /** 释放监听器、限制和工具可见性切换。 */
   dispose(): void
 }
@@ -142,6 +145,11 @@ export function installMainAgentInterleave(
 
   return {
     own(message) { owned.add(String(message.id)) },
+    discardOwnedInbox() {
+      for (const message of [...agent.inbox.nextStep, ...agent.inbox.nextTurn]) {
+        if (owned.has(String(message.id))) agent.inbox.remove(message.id)
+      }
+    },
     dispose() {
       if (disposed) return
       disposed = true
@@ -159,7 +167,7 @@ export function installMainAgentInterleave(
  * @param prompt 内部任务提示。
  * @param privateTools 当前任务独占的私有工具。
  * @param runtime 私有完成协议。
- * @param signal Host 阶段 operation 的取消信号。
+ * @param run Host 阶段的执行所有权。
  * @param label 诊断所用任务名。
  * @returns 私有工具已确认的权威结果。
  */
@@ -168,9 +176,10 @@ export async function runMainAgentProtocol<T>(
   prompt: string,
   privateTools: readonly string[],
   runtime: MainAgentPrivateRuntime<T>,
-  signal?: AbortSignal,
+  run?: BidRunContext,
   label = 'Bid Main Agent',
 ): Promise<T> {
+  const signal = run?.signal
   signal?.throwIfAborted()
   const message = createUserMessage({
     content: [{ type: 'text', text: prompt }],
@@ -185,6 +194,11 @@ export async function runMainAgentProtocol<T>(
     label,
   })
   interleave.own(message)
+  const unbindMainAgent = run?.bindMainAgent({
+    cancel: () => { agent.cancel({ kind: 'hook', reason: 'bid-run-suspended' }, { keepInbox: true }) },
+    whenIdle: () => agent.whenIdle(),
+    discardOwnedInbox: () => interleave.discardOwnedInbox(),
+  })
   const settled = Promise.withResolvers<T>()
   let finished = false
   const finish = (value: T): void => {
@@ -224,6 +238,7 @@ export async function runMainAgentProtocol<T>(
     return await settled.promise
   } finally {
     signal?.removeEventListener('abort', abort)
+    unbindMainAgent?.()
     for (const dispose of disposers.reverse()) dispose()
     interleave.dispose()
   }

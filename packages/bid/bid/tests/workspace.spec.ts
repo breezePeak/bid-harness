@@ -15,6 +15,7 @@ import * as XLSX from 'xlsx'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG, parseBidDocument, safeFileName, within } from '../src/index.ts'
 import { readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
 const signal = new AbortController().signal
@@ -38,6 +39,21 @@ describe('BidWorkspace', () => {
     expect(inventory).toContain('.bid-harness/input/公司资料.txt')
     expect(inventory).toContain('.bid-harness/corpus/公司资料.txt/document.md')
     expect(inventory).not.toContain(root)
+  })
+
+  it('keeps a retired Run import in staging and never publishes its manifest or corpus', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root)
+    const run = createTestBidRunContext()
+    run.commits.retire()
+
+    await expect(bid.import([{ name: '迟到解析.txt', bytes: new TextEncoder().encode('仍在解析') }], run))
+      .rejects.toThrow('BID_RUN_RETIRED')
+
+    await expect(readFile(join(bid.projectRoot, 'manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(bid.projectRoot, 'corpus', '迟到解析.txt', 'document.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(bid.projectRoot, 'runs', run.runId, 'staging', 'corpus', '迟到解析.txt', 'document.md'), 'utf8'))
+      .resolves.toBe('仍在解析')
   })
 
   it('persists every document role and renders its model-visible inventory name', async () => {

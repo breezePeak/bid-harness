@@ -13,9 +13,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  BidWorkspace, buildBidStageTask, executeChapterWriting, parseChapterExecutionLog,
+  BidWorkspace, buildBidStageTask, executeChapterWriting as executeChapterWritingImplementation, parseChapterExecutionLog,
   parseChapterReviewArtifact, parseChapterWritingCompletionState, validateChapterWriting,
 } from '@deepseek-ai/dsh-bid'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { CHAPTER_REVIEW_TOOLS } from '../src/chapter-writing-review.ts'
 import { CHAPTER_PLAN_TOOLS } from '../src/chapter-writing-planning.ts'
 import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
@@ -23,6 +24,20 @@ import { writeInputs } from './fixtures/chapter-writing-inputs.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { webEvidenceContentSha256, type WebEvidenceSource } from '../src/web-evidence-source-artifacts.ts'
 
+const executeChapterWriting = (
+  agent: import('@deepseek-ai/dsh-agent').Agent,
+  workspace: BidWorkspace,
+  task: ReturnType<typeof buildBidStageTask>,
+  options: Record<string, unknown> = {},
+) => {
+  const { signal, run, ...stageOptions } = options
+  return executeChapterWritingImplementation(agent, workspace, task, {
+    maxRepairAttempts: 1,
+    maxConcurrency: 3,
+    ...stageOptions,
+    run: run ?? createTestBidRunContext(signal instanceof AbortSignal ? { signal } : {}),
+  } as Parameters<typeof executeChapterWritingImplementation>[3])
+}
 
 async function fixture(cancelWriter?: () => void, omitReviewFinish = false) {
   const ctx = new Context()

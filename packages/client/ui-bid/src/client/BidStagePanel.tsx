@@ -595,11 +595,12 @@ export function BidStagePanel({
   }
 
   const suspendedRun = projection.run?.status === 'suspended' ? projection.run : undefined
-  const hostFailureReason = suspendedRun?.cause !== 'user_stop'
-    ? suspendedRun?.error?.message ?? (projection.runtime.status === 'failed' ? projection.runtime.failureReason : undefined)
+  const hostFailureReason = suspendedRun === undefined && projection.runtime.status === 'failed'
+    ? projection.runtime.failureReason
     : undefined
-  const hostFailureIssues = suspendedRun?.error?.issues
-    ?? (projection.runtime.status === 'failed' ? projection.runtime.failureIssues ?? [] : [])
+  const hostFailureIssues = suspendedRun === undefined && projection.runtime.status === 'failed'
+    ? projection.runtime.failureIssues ?? []
+    : []
   const dotState = statusDot(projection.runtime.status)
   const displayStage = projection.runtime.stage === 'docx_export' ? 'chapter_writing' : projection.runtime.stage
 
@@ -824,10 +825,6 @@ export function BidStagePanel({
               />
             </div>
           </div>
-        )}
-
-        {suspendedRun?.cause === 'user_stop' && (
-          <p className={css.decisionHint} role="status">{t('run.stopped')}</p>
         )}
 
         {hostFailureReason !== undefined && (

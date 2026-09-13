@@ -51,6 +51,12 @@ export const bidRunSchema = z.object({
   stage: z.enum(BID_STAGES),
   epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   baseProjectRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  controlRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  resumeOf: z.object({
+    runId: z.string().min(1),
+    cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
+  }).strict().optional(),
+  resumePolicy: z.object({ webAccess: z.enum(['inherit', 'disabled']).optional() }).strict().optional(),
   status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
   cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
   error: z.object({
@@ -289,6 +295,14 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
     }
     case 'bid.run.started':
       return event.data.run.stage === state.workflow.stage
+        ? { ...state, run: cloneRun(event.data.run) }
+        : state
+    case 'bid.run.start_failed':
+      return state.run?.runId === event.data.runId && state.run.epoch === event.data.epoch
+        ? { ...state, run: null }
+        : state
+    case 'bid.run.cancelling':
+      return state.run?.runId === event.data.run.runId && state.run.epoch === event.data.run.epoch
         ? { ...state, run: cloneRun(event.data.run) }
         : state
     case 'bid.run.suspended':

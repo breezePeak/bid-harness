@@ -7,6 +7,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   BidWorkspace,
   buildBidStageTask,
+  createTestBidRunContext,
   executeTenderAnalysis,
   getBidStagePolicy,
   renderTenderAnalysisRepairTask,
@@ -28,7 +29,7 @@ describe('tender-analysis Agent executor', () => {
       agent,
       workspace,
       buildBidStageTask('tender_analysis'),
-      { maxRepairAttempts: 1, signal: controller.signal },
+      { maxRepairAttempts: 1, run: createTestBidRunContext({ signal: controller.signal }) },
     )).rejects.toMatchObject({ name: 'AbortError' })
     expect(followup).not.toHaveBeenCalled()
   })
@@ -63,7 +64,7 @@ describe('tender-analysis Agent executor', () => {
     } as unknown as Agent
     const task = buildBidStageTask('tender_analysis')
 
-    const result = await executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: 1 })
+    const result = await executeTenderAnalysis(agent, workspace, task, { maxRepairAttempts: 1, run: createTestBidRunContext() })
 
     expect(restrict).toHaveBeenCalledWith({ allow: ['grep', 'read'] })
     expect(policy({ name: 'read' })).toBeUndefined()
@@ -145,7 +146,7 @@ describe('tender-analysis Agent executor', () => {
       whenIdle,
     } as unknown as Agent
 
-    await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1 })
+    await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'), { maxRepairAttempts: 1, run: createTestBidRunContext() })
 
     expect(followup).toHaveBeenCalledTimes(2)
     const review = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }

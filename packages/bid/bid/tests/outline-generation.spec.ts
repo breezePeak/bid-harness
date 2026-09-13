@@ -11,7 +11,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   BidWorkspace,
   buildBidStageTask,
-  executeOutlineGeneration,
+  executeOutlineGeneration as executeOutlineGenerationImplementation,
   parseOutlineQualityReport,
   parseTenderScoringArtifact,
   parseTenderRequirementsArtifact,
@@ -27,6 +27,21 @@ import {
   type StageArtifact,
   type StageValidationIssue,
 } from '@deepseek-ai/dsh-bid'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
+
+const executeOutlineGeneration = (
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: ReturnType<typeof buildBidStageTask>,
+  options: Record<string, unknown> = {},
+) => {
+  const { signal, run, ...stageOptions } = options
+  return executeOutlineGenerationImplementation(agent, workspace, task, {
+    maxRepairAttempts: 3,
+    ...stageOptions,
+    run: run ?? createTestBidRunContext(signal instanceof AbortSignal ? { signal } : {}),
+  } as Parameters<typeof executeOutlineGenerationImplementation>[3])
+}
 
 const artifacts: StageArtifact[] = [
   { stage: 'outline_generation', type: 'scoring_response_points', path: 'analysis/scoring-response-points.json' },
@@ -758,8 +773,12 @@ describe('S3 确定性规范化与局部续修', () => {
         for (const file of ['analysis/scoring-response-points.json', 'outline/outline.json', 'outline/initial-confirmed-outline.json']) {
           expect(check({ name: 'write', arguments: { file_path: join(workspace.projectRoot, file) } } as ToolExecution)).toContain('只读')
         }
-        expect(check({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'outline/repair-operations.json') } } as ToolExecution)).toBeUndefined()
-        await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+        const scratch = prompt.match(/\.bid-harness\/runs\/[^/]+\/scratch\/outline-generation\/outline\/repair-operations\.json/u)?.[0]
+        expect(scratch).toBeDefined()
+        const output = join(workspace.root, scratch!)
+        expect(check({ name: 'write', arguments: { file_path: output } } as ToolExecution), output).toBeUndefined()
+        await mkdir(join(output, '..'), { recursive: true })
+        await writeFile(output, JSON.stringify(repairSchedule))
       } else {
         expect(prompt).toContain('Blueprint Quality Review')
         await submitReview()

@@ -62,6 +62,7 @@ export type {
   BidRuntimeState,
   BidProjectWorkflow,
   BidRunSnapshot,
+  BidRunNotice,
   BidRunStatus,
   BidRunSuspensionCause,
   BidStage,

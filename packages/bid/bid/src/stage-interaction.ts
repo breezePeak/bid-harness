@@ -49,6 +49,7 @@ export const stageInteractionSchema = z.union([
     action: z.literal('bid_resume_current_run'),
     suspended_run_id: z.string().min(1),
     expected_project_revision: z.number().int().positive(),
+    resume_policy: z.object({ web_access: z.enum(['inherit', 'disabled']).optional() }).strict().optional(),
   }).strict(),
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
@@ -499,6 +500,9 @@ export function installStageInteractionTools(
           if (name === 'bid_resume_current_run') {
             properties.suspended_run_id = text
             properties.expected_project_revision = { type: 'integer' }
+            properties.resume_policy = { type: 'object', properties: {
+              web_access: { type: 'string', enum: ['inherit', 'disabled'] },
+            }, additionalProperties: false }
             required.push('suspended_run_id', 'expected_project_revision')
           }
           if (name === 'bid_outline_apply_operations') {
@@ -577,7 +581,7 @@ export function installStageInteractionTools(
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
               : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                 : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                  : name === 'bid_resume_current_run' ? '核对挂起 Run 与项目修订号，并从持久化 checkpoint 继续剩余任务。'
+                  : name === 'bid_resume_current_run' ? '核对挂起 Run 与项目修订号，并从持久化 checkpoint 继续剩余任务；需要禁用联网时传 resume_policy.web_access=disabled。'
                     : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
                       : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
                         : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'

@@ -335,7 +335,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull()
   })
 
-  it('用户停止的 Run 显示中性挂起提示，不渲染失败告警', () => {
+  it('用户停止的 Run 只显示挂起状态，不在面板重复终端提示', () => {
     render(<BidStagePanel {...props(projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
@@ -348,7 +348,24 @@ describe('BidStagePanel', () => {
     }))} />)
 
     expect(screen.getByText('已挂起')).toBeTruthy()
-    expect(screen.getByText('当前任务已停止，已保存完成进度。')).toBeTruthy()
+    expect(screen.queryByText('当前任务已停止，已保存完成进度。')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('自动中断的 Run 只保留挂起状态，由聊天时间线呈现终端错误', () => {
+    render(<BidStagePanel {...props(projection({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: {
+        runId: 'run-interrupted', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+        status: 'suspended', cause: 'executor_error', startedAt: 10, updatedAt: 20,
+        error: { message: '连接失败' },
+      },
+      runtime: { stage: 'evidence_mapping', status: 'pending', failureReason: '连接失败' },
+      allowedActions: ['send_message'], composer: { enabled: true },
+    }))} />)
+
+    expect(screen.getByText('已挂起')).toBeTruthy()
+    expect(screen.queryByText('连接失败')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
@@ -828,6 +845,7 @@ describe('ui-bid browser plugin', () => {
   it('declares every client service read by its slot injections', async () => {
     const { inject } = await import('../src/client/index.ts')
     expect(inject).toContain('sessions')
+    expect(inject).toContain('conversationEvents')
   })
 
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
@@ -850,6 +868,7 @@ describe('ui-bid browser plugin', () => {
       })
     const ctx = {
       effect: (factory: () => unknown) => factory(),
+      conversationEvents: { register: vi.fn(() => () => {}) },
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
       remote: { bid: {
@@ -864,6 +883,10 @@ describe('ui-bid browser plugin', () => {
     } as unknown as ClientContext
 
     apply(ctx)
+    expect(ctx.conversationEvents.register).toHaveBeenCalledOnce()
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'conversation.chat.node', key: 'bid-run-notice',
+    }), expect.any(Function))
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
     }), BidStagePanel)

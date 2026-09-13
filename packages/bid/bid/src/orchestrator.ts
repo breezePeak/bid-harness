@@ -20,6 +20,7 @@ import {
   reduceBidControlState,
 } from './runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
+import type { BidResumePolicy, BidRunResumeIdentity } from './control-plane-contract.ts'
 
 /** Executor port used by program and agent stages. */
 export interface BidStageExecutorPort {
@@ -111,6 +112,7 @@ export class BidOrchestrator {
       new DirectBidRunScheduler(),
       { drain: () => Promise.resolve() },
       () => 0,
+      undefined,
       signal,
     )
   }
@@ -146,7 +148,7 @@ export class BidOrchestrator {
   }
 
   /** Reconcile a suspended attempt through the stage Executor's durable checkpoints, then continue unfinished work. */
-  resume(suspendedRunId: string): Promise<BidRuntimeState> {
+  resume(suspendedRunId: string, resumePolicy?: BidResumePolicy): Promise<BidRuntimeState> {
     this.assertIdle()
     const control = this.controlState
     const suspended = control.run
@@ -154,7 +156,11 @@ export class BidOrchestrator {
       throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the requested suspended Bid Run is no longer current')
     }
     return this.begin(async () => {
-      const settlement = await this.executeStage(suspended.stage)
+      const resumeOf: BidRunResumeIdentity = {
+        runId: suspended.runId,
+        cause: suspended.cause ?? 'host_restart',
+      }
+      const settlement = await this.executeStage(suspended.stage, resumeOf, resumePolicy)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -356,9 +362,13 @@ export class BidOrchestrator {
   }
 
   /** Execute and validate one non-user stage, recording its complete outcome. */
-  private async executeStage(stage: BidStage): Promise<StageExecutionSettlement> {
+  private async executeStage(
+    stage: BidStage,
+    resumeOf?: BidRunResumeIdentity,
+    resumePolicy?: BidResumePolicy,
+  ): Promise<StageExecutionSettlement> {
     if (this.isAborted()) return 'aborted'
-    const run = this.runs.start(stage)
+    const run = await this.runs.start(stage, resumeOf, resumePolicy)
     let artifacts: StageArtifact[]
     try {
       artifacts = await this.executor.execute(buildBidStageTask(stage), run)
@@ -402,7 +412,6 @@ export class BidOrchestrator {
       return 'failed'
     }
     if (this.isAborted()) { await this.runs.suspend('user_stop'); return 'aborted' }
-    run.commits.assertWritable(run)
     this.runs.complete(run)
     this.session.append('bid.stage.completed', {
       stage,

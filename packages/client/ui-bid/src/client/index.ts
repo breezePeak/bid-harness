@@ -19,6 +19,8 @@ import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbench.tsx'
 import { BidComposerContext } from './BidComposerContext.tsx'
+import { BidRunNotice } from './BidRunNotice.tsx'
+import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -97,7 +99,7 @@ export class BidActionError extends Error {
 }
 
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
-export const inject = ['slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid']
+export const inject = ['conversationEvents', 'slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid']
 
 /** Browser material paired with its selected business role. */
 export interface BidSelectedFile { readonly file: File; readonly role: BidDocumentRole }
@@ -121,6 +123,7 @@ function actionFailure(error: {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  ctx.conversationEvents.register(bidRunNoticeDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
   const getChapter = async (sessionId: SessionId, sectionId: string): Promise<BidReviewChapterView> => {
@@ -134,6 +137,10 @@ export function apply(ctx: ClientContext): void {
     return result.value
   }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-bid: dictionaries')
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node',
+    key: 'bid-run-notice',
+  }, BidRunNotice))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'bid-confirmation-mode',

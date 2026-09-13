@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import mammoth from 'mammoth'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
-import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from '../src/docx-export.ts'
+import { assessDocxExportPageTarget, executeDocxExport as executeDocxExportImplementation, validateDocxExport } from '../src/docx-export.ts'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
 import { parseWritingPlan } from '../src/writing-requirements.ts'
@@ -21,6 +22,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   } }
 })
 afterEach(() => { reads.afterRead = undefined })
+
+const executeDocxExport = (
+  workspace: BidWorkspace,
+  signal?: AbortSignal,
+  destination?: string,
+  templateId?: import('../src/docx-format-contract.ts').DocxTemplateId | null,
+) => executeDocxExportImplementation(
+  workspace,
+  createTestBidRunContext(signal === undefined ? {} : { signal }),
+  destination,
+  templateId,
+)
 
 async function exportFixture() {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-export-')), { ...DEFAULT_BID_CONFIG, outputDirectory: 'deliverables' })
@@ -90,6 +103,32 @@ describe('Bid DOCX export', () => {
     expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)
     expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
   })
+
+  it('renderer 在 Run 退休后返回时不能覆盖正式 DOCX 或导出记录', async () => {
+    const { workspace } = await exportFixture()
+    await executeDocxExport(workspace)
+    const previous = await readFile(join(workspace.outputRoot, 'bid.docx'))
+    const saved = await readDocxFormat(workspace)
+    const run = createTestBidRunContext()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const original = workspace.exportDocxMarkdown.bind(workspace)
+    vi.spyOn(workspace, 'exportDocxMarkdown').mockImplementation(async (...args) => {
+      entered.resolve()
+      await release.promise
+      return original(...args)
+    })
+
+    const exporting = executeDocxExportImplementation(workspace, run)
+    await entered.promise
+    run.commits.retire()
+    release.resolve()
+
+    await expect(exporting).rejects.toThrow('BID_RUN_RETIRED')
+    expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)
+    expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
+  })
+
   it('按确认目录顺序导出各级父节点概述和叶节正文，保留正文标题', async () => {
     const { workspace } = await exportFixture()
     const artifacts = await executeDocxExport(workspace)

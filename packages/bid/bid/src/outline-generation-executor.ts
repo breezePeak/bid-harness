@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
@@ -14,7 +13,6 @@ import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from '.
 import type { BidWorkspace } from './index.ts'
 import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import {
-  DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
   renderStageRepairIssues,
   waitForModelStageIdle,
@@ -295,28 +293,37 @@ export async function executeOutlineGeneration(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
-  options: OutlineGenerationExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
+  options: OutlineGenerationExecutionOptions,
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  await waitForModelStageIdle(agent, options.signal)
+  await waitForModelStageIdle(agent, options.run.signal)
   const frameworks = await loadOutlineFrameworkStructures(workspace)
   const path = (artifact: string): string => join(workspace.projectRoot, artifact)
+  const scratchRoot = join(workspace.projectRoot, 'runs', options.run.runId, 'scratch', 'outline-generation')
+  const scratchPath = (artifact: string): string => join(scratchRoot, artifact)
+  const scratchArtifacts = new Set<string>()
   const read = async (artifact: string): Promise<string | undefined> => {
-    await assertNoLinkedPath(workspace.root, path(artifact))
-    try { return await readFile(path(artifact), 'utf8') } catch (error) {
+    const candidate = scratchArtifacts.has(artifact) ? scratchPath(artifact) : path(artifact)
+    await assertNoLinkedPath(workspace.root, candidate)
+    try { return await readFile(candidate, 'utf8') } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      return undefined
+      if (!scratchArtifacts.has(artifact)) return undefined
+      await assertNoLinkedPath(workspace.root, path(artifact))
+      try { return await readFile(path(artifact), 'utf8') } catch (fallback) {
+        if ((fallback as NodeJS.ErrnoException).code !== 'ENOENT') throw fallback
+        return undefined
+      }
     }
   }
   const write = async (artifact: string, value: unknown): Promise<void> => {
-    options.run?.commits.assertWritable(options.run)
     await assertNoLinkedPath(workspace.root, path(artifact))
-    await writeFileAtomic(path(artifact), JSON.stringify(value, null, 2) + '\n', { mode: 0o600, dirMode: 0o700 })
+    await options.run.commits.writeJson(path(artifact), value)
+    scratchArtifacts.delete(artifact)
+    await rm(scratchPath(artifact), { force: true })
   }
   const remove = async (artifact: string): Promise<void> => {
-    options.run?.commits.assertWritable(options.run)
     await assertNoLinkedPath(workspace.root, path(artifact))
-    await rm(path(artifact), { force: true })
+    await options.run.commits.remove(path(artifact))
     const fs = agent.ctx.get('fs')
     if (fs !== undefined) agent.ctx.emit('fs/observed', await fs.resolve(path(artifact)), { kind: 'absent' }, { agent })
   }
@@ -356,7 +363,7 @@ export async function executeOutlineGeneration(
     if (!allowed.has(exec.name)) return 'S3 仅允许读取输入及写入当前任务指定的候选文件。'
     if (exec.name !== 'write' || exec.arguments === undefined) return undefined
     const args = z.object({ file_path: z.string() }).safeParse(exec.arguments)
-    if (!args.success || !writablePaths.some(artifact => relative(path(artifact), resolve(workspace.root, args.data.file_path)) === '')) {
+    if (!args.success || !writablePaths.some(artifact => relative(artifact, resolve(workspace.root, args.data.file_path)) === '')) {
       return '正式响应点、确认目录与其他输入只读；只能写入当前任务指定的候选文件。'
     }
     return undefined
@@ -370,11 +377,22 @@ export async function executeOutlineGeneration(
       readonly complete: () => boolean
     },
   ): Promise<void> => {
-    options.signal?.throwIfAborted()
-    if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(options.signal ?? new AbortController().signal)
-    writablePaths = outputs
+    options.run.signal.throwIfAborted()
+    await options.run.scheduler.waitUntilRunnable(options.run.signal)
+    await Promise.all(outputs.map(async (output) => {
+      const candidate = scratchPath(output)
+      await assertNoLinkedPath(workspace.root, candidate)
+      await mkdir(join(candidate, '..'), { recursive: true, mode: 0o700 })
+      await rm(candidate, { force: true })
+      scratchArtifacts.add(output)
+    }))
+    writablePaths = outputs.map(scratchPath)
     const eventStart = agent.session.events.length
-    const message = createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
+    const modelPrompt = outputs.reduce((text, output) => text.replaceAll(
+      relative(workspace.root, path(output)).replaceAll('\\', '/'),
+      relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
+    ), prompt)
+    const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const interleave = installMainAgentInterleave(agent, {
       privateTools: privateTask?.names ?? [],
       setPrivateToolsEnabled: privateTask?.setEnabled,
@@ -383,10 +401,16 @@ export async function executeOutlineGeneration(
       label: 'S3 Outline Generation',
     })
     interleave.own(message)
+    const unbindMainAgent = options.run.bindMainAgent({
+      cancel: () => { agent.cancel({ kind: 'hook', reason: 'bid-run-suspended' }, { keepInbox: true }) },
+      whenIdle: () => agent.whenIdle(),
+      discardOwnedInbox: () => interleave.discardOwnedInbox(),
+    })
     try {
       agent.followup(message)
-      await waitForModelStageIdle(agent, options.signal)
+      await waitForModelStageIdle(agent, options.run.signal)
     } finally {
+      unbindMainAgent()
       interleave.dispose()
     }
     const end = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
@@ -494,7 +518,7 @@ export async function executeOutlineGeneration(
       return issues
     }
     while (true) {
-      options.signal?.throwIfAborted()
+      options.run.signal.throwIfAborted()
       const raw = (await read(OUTLINE_ARTIFACT)) ?? ''
       const candidate = inspectOutlineCandidate(raw, catalog, scoring)
       if (candidate.kind !== 'valid') {
@@ -509,7 +533,7 @@ export async function executeOutlineGeneration(
         await remove(output)
         if (candidate.kind === 'format') {
           await assertNoLinkedPath(workspace.root, path('outline/format-repair-source.txt'))
-          await writeFileAtomic(path('outline/format-repair-source.txt'), raw, { mode: 0o600 })
+          await options.run.commits.writeText(path('outline/format-repair-source.txt'), raw)
         }
         const repairTask = [
           '当前阶段：outline_generation / 候选' + (candidate.kind === 'format' ? ' JSON 格式修复' : '字段修复'),
@@ -529,7 +553,7 @@ export async function executeOutlineGeneration(
             : applyOutlineCandidateRepair(candidate.value, JSON.parse((await read(output)) ?? 'null'), candidate.issues,
               { catalog, scoring, requirements, compliance, frameworks })
         } catch (error) {
-          if (options.signal?.aborted) throw error
+          if (options.run.signal.aborted) throw error
           repairFailure = error instanceof Error ? error.message : String(error)
           continue
         }
@@ -558,7 +582,7 @@ export async function executeOutlineGeneration(
         try {
           await run(repairTask, [operationsPath])
         } catch (error) {
-          if (options.signal?.aborted) throw error
+          if (options.run.signal.aborted) throw error
           throw new BidStageExecutionError([...issues, { code: 'OUTLINE_GENERATION_REPAIR_FAILED', message: error instanceof Error ? error.message : String(error) }])
         }
         let repaired: OutlineArtifact
@@ -626,7 +650,7 @@ export async function executeOutlineGeneration(
           ...change, reason: changeSet.changes.find(item => item.section_id === change.section_id && item.type === change.type)?.reason ?? '响应点覆盖修复及目录质量复核',
         })) })
       }
-      await waitForModelStageIdle(agent, options.signal)
+      await waitForModelStageIdle(agent, options.run.signal)
       completed = true
       return artifacts
     }

@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只显示当前 `projection.runtime` 阶段与状态；执行进度继续由 DSH Transcript、Todo 和工具视图展示。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
+标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只显示当前 `projection.runtime` 阶段与状态；执行进度继续由 DSH Transcript、Todo 和工具视图展示。客户端只将 durable `bid.run.notice` 折叠为聊天时间线中的终端 Run 提示；它不推进阶段、不推导权限，也不保存本地阶段或状态。
 
-`projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，面板显示挂起原因但不提供停止或重试按钮；Main Agent 根据完整聊天语义选择只读检查或携带 Run ID 与项目 revision 的恢复工具。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
+`projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，时间线以持久化通知显示停止或中断，不把通知送入模型上下文；面板只保留简短状态，不提供停止或重试按钮。Main Agent 根据完整聊天语义选择只读检查或携带 Run ID 与项目 revision 的恢复工具。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
 
 “招标详情”在 S2 结果可确认时出现，确认后只读并常驻。“目录详情”从 S3 确认后出现，S4 执行期间读取 S3 确认目录；S4 生成结束等待确认时展示深化目录及原有编辑操作，确认后读取最终目录。“正文详情”从进入 S5 开始常驻，轮询已生成正文和 Reviewer 状态，等待、失败及完成状态均保留已有章节。可写叶节的状态灯只映射 Host 的 schema v5 `chapter_indicator`，不依据正文或审核字段推断；`repairing` 与 `needs_input` 保留为独立状态，目录概述保留文字状态。进入 S6 或刷新、重新进入会话时，三个详情入口从 Host 已发布产物恢复。
 

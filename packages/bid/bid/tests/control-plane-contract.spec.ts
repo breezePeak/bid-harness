@@ -11,7 +11,7 @@ import {
   type StageValidationResult,
 } from '@deepseek-ai/dsh-bid'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
-import type { BidEvidenceMappingProgress } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidEvidenceMappingProgress, BidRunNotice } from '@deepseek-ai/dsh-bid/control-plane'
 
 describe('bid control-plane public contract', () => {
   it('校验工作台页数返回，拒绝把异常估算伪装成零页', () => {
@@ -50,7 +50,10 @@ describe('bid control-plane public contract', () => {
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
       'bid.run.started',
+      'bid.run.start_failed',
+      'bid.run.cancelling',
       'bid.run.suspended',
+      'bid.run.notice',
       'bid.run.completed',
       'bid.workflow.failed',
       'bid.stage.started',
@@ -97,6 +100,17 @@ describe('bid control-plane public contract', () => {
       readonly running: number
       readonly not_started: number
       readonly failed: number
+    }>()
+  })
+
+  it('exports the model-invisible Run notice payload', () => {
+    expectTypeOf<BidRunNotice>().toEqualTypeOf<{
+      readonly noticeId: string
+      readonly runId: string
+      readonly stage: typeof BID_STAGES[number]
+      readonly kind: 'stopped' | 'interrupted'
+      readonly severity: 'info' | 'error'
+      readonly message: string
     }>()
   })
 

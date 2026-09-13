@@ -2,6 +2,7 @@ import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type {
   BidControlState,
   BidRunSnapshot,
+  BidRunNotice,
   BidRuntimeState,
   BidStage,
   StageArtifact,
@@ -12,7 +13,10 @@ import type {
 export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
   'bid.run.started',
+  'bid.run.start_failed',
+  'bid.run.cancelling',
   'bid.run.suspended',
+  'bid.run.notice',
   'bid.run.completed',
   'bid.workflow.failed',
   'bid.stage.started',
@@ -37,8 +41,14 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
     /** One exact stage execution attempt became active. */
     'bid.run.started': { run: BidRunSnapshot }
+    /** The running-state checkpoint failed before execution authority was granted. */
+    'bid.run.start_failed': { runId: string; epoch: number }
+    /** One exact execution attempt is draining before it can become resumable. */
+    'bid.run.cancelling': { run: BidRunSnapshot & { status: 'cancelling' } }
     /** One exact execution attempt stopped without changing business progress. */
     'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
+    /** Model-invisible terminal Run row for the conversation timeline. */
+    'bid.run.notice': BidRunNotice
     /** One exact execution attempt settled after committing its stage outcome. */
     'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
     /** Project progress cannot be continued or reconciled safely. */

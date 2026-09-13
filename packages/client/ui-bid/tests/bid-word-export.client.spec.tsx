@@ -251,7 +251,7 @@ describe('Word 导出页面', () => {
 
   it('模板文件仍通过独立二进制请求发送', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
-    const ctx = { effect: (factory: () => unknown) => factory(), locale: { register: vi.fn(() => () => {}) },
+    const ctx = { effect: (factory: () => unknown) => factory(), conversationEvents: { register: vi.fn(() => () => {}) }, locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set: vi.fn() }, submitHandlers: { register: vi.fn() } }, remote: { bid: {} },
       sessions: { scope: () => undefined },
       slots: { inject: vi.fn((_name: string, factory: () => unknown) => factory()), register } } as unknown as ClientContext

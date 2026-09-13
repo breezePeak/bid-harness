@@ -7,7 +7,6 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
 import type { BidStageTask, StageArtifact, StageValidationIssue } from './control-plane-contract.ts'
 import {
-  DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS,
   type ModelStageExecutionOptions,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
@@ -147,10 +146,10 @@ export async function executeTenderAnalysis(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
-  options: ModelStageExecutionOptions = { maxRepairAttempts: DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS },
+  options: ModelStageExecutionOptions,
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
-  await waitForModelStageIdle(agent, options.signal)
+  await waitForModelStageIdle(agent, options.run.signal)
   const analysisRoot = join(workspace.projectRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
@@ -175,7 +174,7 @@ export async function executeTenderAnalysis(
       ? undefined
       : `Bid stage ${task.stage} allows only ${allowedTools.join(', ')}`)
     const run = async (prompt: string, isComplete: () => boolean): Promise<void> => {
-      if (options.scheduler !== undefined) await options.scheduler.waitUntilRunnable(options.signal ?? new AbortController().signal)
+      await options.run.scheduler.waitUntilRunnable(options.run.signal)
       const message = createUserMessage({
         content: [{ type: 'text', text: prompt }],
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
@@ -191,16 +190,16 @@ export async function executeTenderAnalysis(
       interleave.own(message)
       try {
         agent.followup(message)
-        await waitForModelStageIdle(agent, options.signal)
+        await waitForModelStageIdle(agent, options.run.signal)
       } finally {
         interleave.dispose()
       }
     }
-    options.signal?.throwIfAborted()
+    options.run.signal.throwIfAborted()
     await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators), () => runtime.phase !== 'collecting')
     let attempts = 0
     while (!runtime.completed) {
-      options.signal?.throwIfAborted()
+      options.run.signal.throwIfAborted()
       if (runtime.phase === 'review_required') {
         const snapshot = runtime.reviewSnapshot()
         await runtime.beginReview()
@@ -214,7 +213,7 @@ export async function executeTenderAnalysis(
       }]
       await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues), () => runtime.completed || runtime.phase === 'review_required')
     }
-    await waitForModelStageIdle(agent, options.signal)
+    await waitForModelStageIdle(agent, options.run.signal)
     return artifacts
   } finally {
     liftGuard?.()

@@ -20,11 +20,7 @@ export interface ModelStageExecutionOptions {
   /** Maximum Validator-guided repair turns after the initial model output. */
   maxRepairAttempts: number
   /** Exact Run authority required for cancellation, scheduling, and formal commits. */
-  run?: BidRunContext | undefined
-  /** Exact Run cancellation; retained as a local convenience alias. */
-  signal?: AbortSignal | undefined
-  /** Exact Run scheduler; retained as a local convenience alias. */
-  scheduler?: StageSchedulerControl | undefined
+  run: BidRunContext
 }
 
 /**
@@ -33,10 +29,10 @@ export interface ModelStageExecutionOptions {
  * @param signal - optional Host operation cancellation.
  * @returns when the Agent is idle and the operation remains active.
  */
-export async function waitForModelStageIdle(agent: Agent, signal?: AbortSignal): Promise<void> {
-  signal?.throwIfAborted()
+export async function waitForModelStageIdle(agent: Agent, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
   await agent.whenIdle()
-  signal?.throwIfAborted()
+  signal.throwIfAborted()
 }
 
 /**

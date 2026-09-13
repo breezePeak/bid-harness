@@ -1143,6 +1143,9 @@ describe('Workspace 项目与独立 Session', () => {
       workflow: { stage: 'chapter_writing', gate: 'ready' },
       run: { stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
     })
+    expect(b.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
+      data: { kind: 'interrupted', severity: 'error' },
+    })
     expect(executor.execute).not.toHaveBeenCalled()
   })
 

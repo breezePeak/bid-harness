@@ -1,6 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
@@ -371,7 +370,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
   agent: Agent,
   workspace: BidWorkspace,
   manifest: BidManifest,
-  run?: BidRunContext,
+  run: BidRunContext,
 ): Promise<TenderAnalysisSubmissionRuntime> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid tender analysis requires tools service')
@@ -414,8 +413,6 @@ export async function attachTenderAnalysisSubmissionRuntime(
   }
 
   const persistCheckpoint = async (): Promise<void> => {
-    if (run === undefined) return
-    run.commits.assertWritable(run)
     const value = tenderAnalysisCheckpointSchema.parse({
       schema_version: 1,
       origin_run_id: run.runId,
@@ -429,7 +426,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
       scoring: [...scoring].map(([ref, value]) => ({ ref, value })),
       compliance: [...compliance].map(([ref, value]) => ({ ref, value })),
     })
-    await writeFileAtomic(checkpointPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    await run.commits.writeJson(checkpointPath, value)
   }
 
   const sources = async (values: readonly TenderSourceHint[]): Promise<{
@@ -652,18 +649,19 @@ export async function attachTenderAnalysisSubmissionRuntime(
         return { completed: false, issues: lastIssues, revision }
       }
 
-      for (const [path, value] of [
+      await run.commits.publish(async lease => {
+        for (const [path, value] of [
         ['analysis/project.json', project],
         ['analysis/requirements.json', requirementsArtifact],
         ['analysis/scoring-origin.json', scoringArtifact],
         ['analysis/tender-analysis-selection.json', createTenderScoringSelection(scoringArtifact)],
         ['analysis/compliance.json', complianceArtifact],
-      ] as const) {
-        run?.commits.assertWritable(run)
+        ] as const) {
         const absolute = within(workspace.projectRoot, path)
         await assertNoLinkedPath(workspace.root, absolute)
-        await writeFileAtomic(absolute, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
-      }
+        await lease.writeJson(absolute, value)
+        }
+      })
       const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifactsList())
       if (!validation.ok) throw new Error(`tender-analysis-host-artifact-invalid:${validation.issues.map(issue => issue.code).join(',')}`)
       phase = 'completed'

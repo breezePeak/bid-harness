@@ -64,7 +64,7 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
 export function createChapterWriterChild(
   parent: Agent, label: string, maxContinuations: number,
   validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
-  chapterTitle?: string,
+  chapterTitle?: string, webAccess: 'inherit' | 'disabled' = 'inherit',
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
@@ -120,7 +120,7 @@ export function createChapterWriterChild(
           provider: 'spawn', childId: id, label, signal,
           request: {
             parent, prompt: [{ type: 'text', text: prompt }], maxDepth: 1,
-            toolFilter: { allow: ['grep', 'read', 'web_search', 'web_fetch'] },
+            toolFilter: { allow: webAccess === 'disabled' ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'] },
             persona: '你是技术标章节写作 Subagent。只写指定章节；通过 submit_chapter 提交候选，并在本会话根据审查意见修改。',
           },
         })

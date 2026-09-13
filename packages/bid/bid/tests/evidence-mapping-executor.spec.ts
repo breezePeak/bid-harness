@@ -1,4 +1,3 @@
-import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,8 +27,9 @@ import {
   buildEvidenceMappingAcceptanceReport,
   applyOutlineEdits,
   createScoringResponsePointCatalog,
-  executeEvidenceMapping,
-  executeEvidenceMappingFinalCheck,
+  executeEvidenceMapping as executeEvidenceMappingImplementation,
+  executeEvidenceMappingFinalCheck as executeEvidenceMappingFinalCheckImplementation,
+  createTestBidRunContext,
   parseWebEvidenceSourcesArtifact,
   parseEvidenceMapArtifact,
   type EvidenceMappingPlan,
@@ -52,6 +52,29 @@ import {
   type SectionEvidenceMapping,
 } from '@deepseek-ai/dsh-bid'
 import { writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
+
+const executeEvidenceMapping = (
+  agent: Agent,
+  workspace: BidWorkspace,
+  task: ReturnType<typeof buildBidStageTask>,
+  options: Record<string, unknown> = {},
+) => executeEvidenceMappingImplementation(agent, workspace, task, {
+  maxRepairAttempts: 1,
+  ...options,
+  run: options.run ?? createTestBidRunContext(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+} as Parameters<typeof executeEvidenceMappingImplementation>[3])
+
+const executeEvidenceMappingFinalCheck = (
+  agent: Agent,
+  workspace: BidWorkspace,
+  outline: ReturnType<typeof parseOutlineArtifact>,
+  sectionIds: readonly string[],
+  options: Record<string, unknown> = {},
+) => executeEvidenceMappingFinalCheckImplementation(agent, workspace, outline, sectionIds, {
+  maxRepairAttempts: 1,
+  ...options,
+  run: options.run ?? createTestBidRunContext(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+} as Parameters<typeof executeEvidenceMappingFinalCheckImplementation>[4])
 
 const atomicWriteFailure = vi.hoisted(() => ({ suffix: '', remaining: 0 }))
 
@@ -1115,25 +1138,20 @@ describe('evidence-mapping Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-state-write-failure-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
-    const writes = vi.spyOn(fixture.filesystem, 'writeText')
-    let checkpointFailures = 0
-    fixture.filesystem.internals.inspectTemp = async ({ tempPath }) => {
-      if (!tempPath.endsWith('evidence-mapping-checkpoint.json.tmp') || checkpointFailures++ > 0) return
-      throw Object.assign(new Error('injected checkpoint publication failure'), { code: 'EPERM' })
-    }
+    atomicWriteFailure.suffix = 'evidence-mapping-checkpoint.json'
+    atomicWriteFailure.remaining = 1
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, maxConcurrency: 1,
     })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
     fixture.starts[0]!.resolve()
-    await expect(execution).rejects.toThrow('injected checkpoint publication failure')
-    expect(checkpointFailures).toBe(1)
-    expect(writes.mock.calls.map(call => call[4])).toEqual(writes.mock.calls.map(() => ({ mode: 'workspace-write', workspaceRoot: realpathSync.native(workspace.root), sessionId: 'session' })))
+    await expect(execution).rejects.toThrow('injected atomic publication failure')
+    expect(atomicWriteFailure.remaining).toBe(0)
     const failed = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
       failure: Array<{ code: string; message: string }>
       tasks: Array<{ status: string }>
     }
-    expect(failed.failure).toEqual([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: 'injected checkpoint publication failure' }])
+    expect(failed.failure).toEqual([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: 'injected atomic publication failure' }])
     expect(failed.tasks.every((task: { status: string }) => task.status === 'failed')).toBe(true)
   })
 
