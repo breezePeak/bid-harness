@@ -23,6 +23,7 @@ import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
 import { writeInputs } from './fixtures/chapter-writing-inputs.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { webEvidenceContentSha256, type WebEvidenceSource } from '../src/web-evidence-source-artifacts.ts'
+import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
 
 const executeChapterWriting = (
   agent: import('@deepseek-ai/dsh-agent').Agent,
@@ -194,7 +195,7 @@ describe('S5 真实 DSH Child 接入', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('候选池坏来源不阻塞三章，已发 W1 损坏后由同一 Writer 工具拒绝并纠错，释放 Child 和私有工具', async () => {
+  it('未映射坏来源不暴露且不阻塞三章，已发 W1 损坏后由同一 Writer 工具拒绝并纠错', async () => {
     const { ctx, workspace, adapter, agent, children } = await fixture()
     try {
       const content = '公开技术措施与审计依据。'
@@ -207,7 +208,17 @@ describe('S5 真实 DSH Child 接入', () => {
       await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
       await writeFile(join(workspace.projectRoot, sources[0]!.snapshot_path), '初始 Hash 不匹配。')
       await writeFile(join(workspace.projectRoot, sources[2]!.snapshot_path), content)
+      const mappedIndex = buildWebEvidenceChunkIndex(sources[2]!, content)
+      await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(sources[2]!.source_id)), JSON.stringify(mappedIndex))
       await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources }))
+      const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+      const evidence = JSON.parse(await readFile(evidencePath, 'utf8')) as { section_mappings: Array<{ section_id: string; web_materials: unknown[] }> }
+      evidence.section_mappings.find(mapping => mapping.section_id === 'SEC-2')!.web_materials = [{
+        source_id: sources[2]!.source_id, snapshot_path: sources[2]!.snapshot_path,
+        chunk_refs: mappedIndex.chunks.map(chunk => chunk.chunk_ref),
+        usage: 'reference', summary: '公开依据', supports: '技术措施',
+      }]
+      await writeFile(evidencePath, JSON.stringify(evidence))
       const childSessions = new Map<string, Session>()
       ctx.on('agent/created', ({ agent: child }) => {
         if (child.session.header.parentSession === agent.id) childSessions.set(String(child.id), child.session)
@@ -218,12 +229,12 @@ describe('S5 真实 DSH Child 接入', () => {
         const prompt = child.session.deriveMessages().flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
         if (damagedWriter === undefined && ctx.tools.schemas(child).some(tool => tool.name === 'submit_chapter')
           && prompt.split('\n').some(line => line.startsWith('Current Chapter Blueprint：') && line.includes('"id":"SEC-2"'))) {
-          const verified = prompt.split('\n').find(line => line.startsWith('Verified Web Snapshots：'))!
-          expect(JSON.parse(verified.slice('Verified Web Snapshots：'.length))).toEqual([
+          const verified = prompt.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!
+          expect(JSON.parse(verified.slice('Verified Web Chunks：'.length))).toEqual([
             expect.objectContaining({ web_ref: 'W1', url: sources[2]!.final_url }),
           ])
-          expect(prompt).toContain('Snapshot Hash')
-          expect(prompt).toContain('ENOENT')
+          expect(prompt).not.toContain(sources[0]!.final_url)
+          expect(prompt).not.toContain(sources[1]!.final_url)
           expect(await readFile(join(workspace.projectRoot, sources[2]!.snapshot_path), 'utf8')).toBe(content)
           damagedWriter = String(child.id)
           await writeFile(join(workspace.projectRoot, sources[2]!.snapshot_path), 'W1 发出后正文被替换。')

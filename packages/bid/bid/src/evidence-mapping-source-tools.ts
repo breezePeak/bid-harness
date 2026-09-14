@@ -2,7 +2,7 @@
 import { ToolArgsError, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { MappingCorpusLocation } from './evidence-mapping-corpus.ts'
-import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
+import type { S4WebResearchPool } from './web-research-pool.ts'
 
 /**
  * 为当前资料目录中的真实分块生成运行内引用。
@@ -39,6 +39,8 @@ export function mappingSourceCatalog(locations: readonly MappingCorpusLocation[]
 
 const readSchema = z.object({ source_ref: z.string().min(1) }).strict()
 const searchSchema = z.object({ scope_ref: z.string().min(1), keywords: z.array(z.string().min(1)).min(1) }).strict()
+const sourceListSchema = z.object({ offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20), filter: z.string().min(1).optional() }).strict()
+const chunkListSchema = z.object({ source_ref: z.string().regex(/^W:WEB-[a-f0-9]{16}$/u), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20), heading: z.string().min(1).optional() }).strict()
 
 type TextSource = { fileIndex: number; location: MappingCorpusLocation; start: number; end: number; chunk?: MappingCorpusLocation['chunks'][number] }
 type SearchHit = { source_ref: string; file_id: string; name: string; line: number; excerpt: string; heading_paths: string[][] }
@@ -47,15 +49,15 @@ type Page = { kind: 'text'; source: TextSource; offset: number } | { kind: 'sear
 /**
  * 创建当前 Child 的受控读取工具；后续引用由程序分配，读取不要求先搜索。
  * @param locations 已预检且属于当前项目的本地资料。
- * @param snapshots 当前授权的联网快照，包含本 Child 新抓取的正文。
+ * @param pool Host 持有并供并发 Child 复用的 Web Research Pool。
+ * @param childId 当前 Child 的运行内身份，用于记录真实 Chunk 阅读。
  * @returns 工具定义；所有接受入口直接拒绝未知引用及额外路径、来源字段。
  */
 export function createMappingSourceTools(
-  locations: readonly MappingCorpusLocation[], snapshots: () => readonly WebEvidenceSnapshot[],
+  locations: readonly MappingCorpusLocation[], pool: S4WebResearchPool, childId: string,
 ): ToolDefinition[] {
   const sources = new Map<string, TextSource>()
   const pages = new Map<string, Page>()
-  const webPages = new Map<string, { snapshot: WebEvidenceSnapshot; offset: number }>()
   for (const [fileIndex, location] of locations.entries()) {
     sources.set(`F${fileIndex + 1}`, { fileIndex, location, start: 1, end: location.source.lines.length })
     for (const [index, heading] of location.source.headings.entries()) {
@@ -106,18 +108,8 @@ export function createMappingSourceTools(
       if (page !== undefined) return page.kind === 'text' ? readText(page.source, page.offset) : readHits(page.hits, page.offset)
       const source = sources.get(ref)
       if (source !== undefined) return readText(source, 0)
-      const web = snapshots().find(snapshot => `W:${snapshot.source.source_id}` === ref)
-      if (web !== undefined) {
-        // 快照正文使用相同分页引用；本地位置与材料引用只来自本地资料目录。
-        return { url: web.source.final_url, source_id: web.source.source_id, body: web.content.slice(0, 12_000),
-          ...(web.content.length > 12_000 ? { next_ref: storeWebPage(web, 1) } : {}) }
-      }
-      const webPage = webPages.get(ref)
-      if (webPage !== undefined) return { url: webPage.snapshot.source.final_url, source_id: webPage.snapshot.source.source_id,
-        body: webPage.snapshot.content.slice(webPage.offset, webPage.offset + 12_000),
-        ...(webPage.offset + 12_000 < webPage.snapshot.content.length
-          ? { next_ref: storeWebPage(webPage.snapshot, webPage.offset / 12_000 + 1) } : {}),
-      }
+      if (/^W:WEB-[a-f0-9]{16}:C\d{4}$/u.test(ref)) return pool.readChunk(ref, childId)
+      if (/^W:WEB-[a-f0-9]{16}$/u.test(ref)) return pool.readSourceCatalog(ref)
       throw new ToolArgsError([`source_ref: 未知或过期引用 ${ref}。请使用资料目录或工具返回的引用。`])
     },
   }, {
@@ -147,11 +139,19 @@ export function createMappingSourceTools(
       }
       return readHits(hits, 0)
     },
+  }, {
+    name: 'list_research_sources', description: '分页列出当前 S4 Research Pool 中已持久化的 Web Source；可用字面过滤辅助导航，不自动判断章节相关性。',
+    parameters: z.toJSONSchema(sourceListSchema, { target: 'draft-7' }), output,
+    async execute(raw: unknown): Promise<unknown> {
+      const { offset, limit, filter } = await sourceListSchema.parseAsync(raw)
+      return pool.listSources(offset, limit, filter)
+    },
+  }, {
+    name: 'list_web_chunks', description: '分页列出一个 Web Source 的 Chunk 引用、标题路径和原文预览；列表命中不等于已经阅读正文。',
+    parameters: z.toJSONSchema(chunkListSchema, { target: 'draft-7' }), output,
+    async execute(raw: unknown): Promise<unknown> {
+      const { source_ref, offset, limit, heading } = await chunkListSchema.parseAsync(raw)
+      return pool.listChunks(source_ref, offset, limit, heading)
+    },
   }]
-
-  function storeWebPage(snapshot: WebEvidenceSnapshot, page: number): string {
-    const ref = `WP${webPages.size + 1}`
-    webPages.set(ref, { snapshot, offset: page * 12_000 })
-    return ref
-  }
 }

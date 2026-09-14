@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 10 as const
+export const EVIDENCE_MAPPING_SCHEMA_VERSION = 11 as const
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -32,6 +32,8 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+const webChunkRefSchema = z.string().regex(/^W:WEB-[a-f0-9]{16}:C\d{4}$/u)
+
 /** URL-shaped Web material returned before the Host binds a durable snapshot. */
 export const transientWebEvidenceMaterialSchema = z.object({
   url: z.url().refine(isHttpUrl, { message: 'Web material URL must use http or https' }),
@@ -40,16 +42,35 @@ export const transientWebEvidenceMaterialSchema = z.object({
   supports: z.string().trim().min(1),
 }).strict()
 
+/** Web chunks returned by an S4 Child before the Host adds source fields. */
+export const transientWebChunkEvidenceMaterialSchema = z.object({
+  chunk_refs: z.array(webChunkRefSchema).min(1),
+  usage: z.enum(WEB_MATERIAL_USAGES),
+  summary: z.string().trim().min(1),
+  supports: z.string().trim().min(1),
+}).strict().superRefine((material, context) => {
+  const sources = new Set(material.chunk_refs.map(ref => ref.slice(2, ref.lastIndexOf(':'))))
+  if (sources.size !== 1) context.addIssue({ code: 'custom', path: ['chunk_refs'], message: 'Web material chunks must belong to one source' })
+  if (new Set(material.chunk_refs).size !== material.chunk_refs.length) {
+    context.addIssue({ code: 'custom', path: ['chunk_refs'], message: 'Web material chunk refs must be unique' })
+  }
+})
+
 /** 绑定 Host 快照的联网资料；summary 保存当前章节的具体用途与展开限度。 */
 export const webEvidenceMaterialSchema = z.object({
   source_id: z.string().regex(/^WEB-[a-f0-9]{16}$/u),
   snapshot_path: z.string().regex(/^analysis\/web-sources\/WEB-[a-f0-9]{16}\.md$/u),
+  chunk_refs: z.array(webChunkRefSchema).min(1),
   usage: z.enum(WEB_MATERIAL_USAGES),
   summary: z.string().trim().min(1),
   supports: z.string().trim().min(1),
 }).strict().superRefine((material, context) => {
   if (material.snapshot_path !== `analysis/web-sources/${material.source_id}.md`) {
     context.addIssue({ code: 'custom', path: ['snapshot_path'], message: 'snapshot path must be owned by source id' })
+  }
+  if (new Set(material.chunk_refs).size !== material.chunk_refs.length
+    || material.chunk_refs.some(ref => !ref.startsWith(`W:${material.source_id}:`))) {
+    context.addIssue({ code: 'custom', path: ['chunk_refs'], message: 'chunk refs must be unique and owned by source id' })
   }
 })
 
@@ -61,7 +82,7 @@ const mappingSchema = z.object({
 
 const partialMappingSchema = z.object({
   local_materials: z.array(localEvidenceMaterialSchema),
-  web_materials: z.array(transientWebEvidenceMaterialSchema),
+  web_materials: z.array(transientWebChunkEvidenceMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
 }).strict()
 
@@ -150,6 +171,8 @@ export const evidenceMappingPartialResultSchema = z.object({
 export type LocalEvidenceMaterial = z.infer<typeof localEvidenceMaterialSchema>
 /** URL-shaped public technical reference awaiting Host snapshot binding. */
 export type TransientWebEvidenceMaterial = z.infer<typeof transientWebEvidenceMaterialSchema>
+/** S4 Web Chunk references awaiting Host-owned source binding. */
+export type TransientWebChunkEvidenceMaterial = z.infer<typeof transientWebChunkEvidenceMaterialSchema>
 /** Public technical reference bound to a durable Host snapshot. */
 export type WebEvidenceMaterial = z.infer<typeof webEvidenceMaterialSchema>
 /** Parsed section-to-evidence mapping. */

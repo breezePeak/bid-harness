@@ -73,7 +73,7 @@ S1→S2、S2→S3、S3→S4、S4→S5 正式完成时，Host 在最终校验和�
 
 所有修改使用 Host 的项目锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 保存 Draft；范围外节点及选中根位置不得改变。目录编辑不启动资料复核，也不覆盖最近完成研究的目录。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
 
-S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度、有限修复及 Web Snapshot。指定可写叶子只研究该叶子，指定结构节点展开其可写后代；Final Check 复核最终合并的材料、任务和必要的祖先总述。`replace` 替换目标材料，`supplement` 去重合并材料；写作维度与缺口由独立任务操作确定，不从旧材料合并中恢复。Writing Brief 保存到 Draft，最近完成整体验证的目录基线保留。其他尚未研究的新叶节留待确认前复核，不能算作已审；最终确认运行整体验证并按引用清理快照。
+S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度、有限修复及 Web Research Pool。指定可写叶子只研究该叶子，指定结构节点展开其可写后代；Final Check 复核最终合并的材料、任务和必要的祖先总述。`replace` 替换目标材料，`supplement` 去重合并材料；写作维度与缺口由独立任务操作确定，不从旧材料合并中恢复。Writing Brief 保存到 Draft，最近完成整体验证的目录基线保留。其他尚未研究的新叶节留待确认前复核，不能算作已审；最终确认运行整体验证并按 Chunk 引用清理快照与索引。
 
 修改成功更新 Draft revision，发布 `running → waiting_user`，客户端刷新并提示“已更新，请重新确认”。最终确认比较 Draft 与研究目录，只复核写作目标、必答问题、业务关联、写作要求或祖先语义变化影响的叶子；单纯排序不触发模型。复核同步 Writing Brief、父节点摘要与 Evidence，完整校验后发布确认产物；失败恢复正式产物并保留 Draft。聊天文字不代表确认，只有正式确认动作可以推进阶段。决定依据见[章节研究记录](../../../.agents/notes/implemented/feature/2026-09-03-bid-section-research-blueprint.md)。
 
@@ -87,7 +87,7 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
-S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子创建一个 Initial Mapping Task，在并发上限内按代执行。Initial 与 Repair Child 先研究并通过结构化充分性判断，Host 才允许目录操作和章节任务固化；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前 Section 职责、对应 S3 基线、局部差异和候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关兄弟的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Child 只能修改 `outline_edit_scope_id` 指定的 Section 自身及其后代；拆分后的原节点不再提交叶子 Mapping，新叶在下一代各自成为一个任务，其他已完成 Section 不重跑。父任务读过的本地资料和 Web Snapshot 作为 `research_candidates` 传给新叶，Host 不据此自动写入 Evidence。结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v10、分块索引与 S5 输入保持不变。
+S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子创建一个 Initial Mapping Task，在并发上限内按代执行。Initial 与 Repair Child 先研究并通过结构化充分性判断，Host 才允许目录操作和章节任务固化；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前 Section 职责、对应 S3 基线、局部差异和候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关兄弟的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Child 只能修改 `outline_edit_scope_id` 指定的 Section 自身及其后代；拆分后的原节点不再提交叶子 Mapping，新叶在下一代各自成为一个任务，其他已完成 Section 不重跑。父任务读过的本地资料和 Web Source 身份作为 `research_candidates` 传给新叶，Host 不据此自动写入 Evidence。结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map schema v11 以 `chunk_refs` 保存精确 Web 证据范围。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
@@ -101,13 +101,13 @@ Section Child 通过 `submit_section_research_assessment` 只记录研究充分�
 
 无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。提示只展开一次当前待审对象；后续修改、复核和未完成 finish 只返回固定大小的 `review_progress`，模型仅在修正产生新版本或引用过期时通过 `list_review_items` 刷新，避免把剩余对象反复写入同一 Child 上下文。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点 schema v10 保存研究发现、带 fingerprint/stale 的结构判断、失效次数、目录操作及 Host 绑定、任务与资料版本和完成状态；旧版本必须重置 S4。正式 Outline v3、Evidence Map v10 和 S5 输入不变。日志 schema v3 的 statistics 和各任务 research_stats 记录叶子数、研究充分性、搜索次数与命中、Web 成败及原因、findings、KEEP/REFINE、stale、结构操作、全书复核问题和 Repair 结果，不保存完整 Prompt。
 
-开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、通用 `web_search`/`web_fetch` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
+开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、Child 可见的 `web_search`/`fetch_web_source` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
 
-S4、S5 的 Agent 按 web_search → web_fetch → 阅读正文研究新的公开资料；已登记候选正文可复用。共用 `buildWebEvidenceSnapshots` 只根据真实成功 fetch 的 HTTP(S) URL、HTTP 2xx 和非空正文生成本地 Snapshot 与正文 SHA-256。Web ledger schema v2 不保存工具调用关联；URL 与正文哈希确定 source ID，同 URL 不同正文分别保存。最终确认按引用裁剪 ledger 和无用快照。
+S4 Child 按 `web_search` → `fetch_web_source` → `list_web_chunks` → `read_source` 研究公开资料；原始 `web_fetch` 只由 Host 包装器调用，正文不会进入 Child 工具结果。Host 将成功正文、SHA-256、确定性 Markdown Chunk 索引和 ledger 原子写入共享 Research Pool；同一规范化 URL 并发请求 single-flight，重定向后的最终 URL 与正文哈希确定 source ID。只有 Child 实际读取的 `W:WEB-…:C0001` 引用可进入映射与研究依据。恢复时由已验证快照重建缺失或非法索引，最终确认按引用裁剪 ledger、快照和索引。S5 保留自己的 `web_search`/`web_fetch` 补搜路径。
 
 S4 是否联网由模型决定；调用沿用 Web 服务的 searchProvider/fetchProvider 配置。某类已调用 Web 研究工具全部失败时，Host 拒绝 Research Ready、结构判断及锁定，报告 `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED`；修复搜索配置或重试成功后仍须重新提交研究判断。聊天 Provider 不支持 hosted search 且未配置独立搜索 Provider 时不能静默视为研究充分。
 
-S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文。Writer 与 Reviewer 同时获得完整目录职责及当前祖先路径，依据父子关系、同级节点分工和本节任务检查正文归属，不根据固定章名或行业词指定内容位置。叶节使用段落、列表和表格，提交及恢复检查拒绝根标题以外的 Markdown 标题；Host 只按确认目录生成根标题编号。已有正文的预览和导出保留其子标题原文，不生成新的节内编号。Writer 优先使用 S4 Evidence，遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 及登记 Web Snapshot 中有限 grep/read；相邻分块按索引读取，tender 始终禁止。补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map；framework 保持草稿身份，不作事实 Evidence。
+S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文。Writer 与 Reviewer 同时获得完整目录职责及当前祖先路径，依据父子关系、同级节点分工和本节任务检查正文归属，不根据固定章名或行业词指定内容位置。叶节使用段落、列表和表格，提交及恢复检查拒绝根标题以外的 Markdown 标题；Host 只按确认目录生成根标题编号。已有正文的预览和导出保留其子标题原文，不生成新的节内编号。Writer 只获得当前 Section 在 S4 映射的精确 Web Chunk 行范围，不能 grep 或整篇读取这些快照；Reviewer Evidence Pack 也只包含候选实际引用的 Chunk。遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 中有限 grep/read，并保留 S5 自己的 `web_search`/`web_fetch` 补搜能力；补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map。tender 始终禁止，framework 保持草稿身份，不作事实 Evidence。
 
 S5 以 `outline/confirmed-outline.json` 为唯一章节结构。各级父节点直接展示 S4 已确认的 `summary`；Word 导出在对应父标题下、子章节之前插入同一概述。S4 通过 `submit_branch_summary` 生成可直接用于技术标正文的自然总述：根据最终子章节任务与已确认信息概括业务内容和总体思路，不逐条解说目录、不展开操作步骤、不新增事实或承诺，也不声称核验尚未生成的正文。程序只校验节点身份、非空及复核完成状态，文体和适用性由模型判断。父节点不进入叶节 Writer 调度、审查进度和正文修订。Main Agent 只通过 `add_global_consistency_note`、`set_chapter_relations` 和 `finish_chapter_plan` 判断关系，不使用文件工具。Host 按目录遍历预置全部可写章节，补齐身份、版本和 Hash；至少一项真实全局说明及无环强依赖校验通过后原子写入 `execution-plan.json`。仅有合法 plan、尚无 execution-log 时也复用计划。
 

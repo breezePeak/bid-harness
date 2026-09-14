@@ -8,6 +8,7 @@ import { parseChapterCandidate, parseChapterMetadata } from '../src/chapter-writ
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, projectChapterWriterCandidate, readChapterWebSource, renderChapterWriterReferences } from '../src/chapter-writing-writer.ts'
 import { buildChapterReviewEvidence } from '../src/chapter-writing-review.ts'
 import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-evidence-source-artifacts.ts'
+import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-inputs.ts'
 
@@ -44,7 +45,14 @@ async function fixture() {
   const web = snapshot()
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
   await writeFile(join(workspace.projectRoot, web.source.snapshot_path), web.content)
+  const webIndex = buildWebEvidenceChunkIndex(web.source, web.content)
+  await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(web.source.source_id)), JSON.stringify(webIndex))
   await ledger(workspace, [web])
+  context.webMaterials = [{
+    source_id: web.source.source_id, snapshot_path: web.source.snapshot_path,
+    chunk_refs: webIndex.chunks.map(chunk => chunk.chunk_ref),
+    usage: 'reference', summary: '公开资料', supports: '技术方法',
+  }]
   await appendChapterWebReferences(workspace, refs, [web.source])
   const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(workspace, manifest, context, refs, { markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`, metadata }, snapshots)
   return { workspace, manifest, context, refs, web, bind }
@@ -87,8 +95,8 @@ describe('S5 Writer 短引用与语义输入', () => {
     const { context, refs, web } = await fixture()
     const missing = snapshot('未登记正文')
     context.webMaterials = [
-      { source_id: missing.source.source_id, snapshot_path: missing.source.snapshot_path, usage: 'reference', summary: '必须解释容灾机制', supports: '恢复时间要求' },
-      { source_id: web.source.source_id, snapshot_path: missing.source.snapshot_path, usage: 'background', summary: '必须说明数据保护', supports: '加密要求' },
+      { source_id: missing.source.source_id, snapshot_path: missing.source.snapshot_path, chunk_refs: [`W:${missing.source.source_id}:C0001`], usage: 'reference', summary: '必须解释容灾机制', supports: '恢复时间要求' },
+      { source_id: web.source.source_id, snapshot_path: missing.source.snapshot_path, chunk_refs: [`W:${web.source.source_id}:C0001`], usage: 'background', summary: '必须说明数据保护', supports: '加密要求' },
     ]
     const rendered = renderChapterWriterReferences(context, refs)
     for (const value of ['不可用', '账本', '身份不匹配', '必须解释容灾机制', '恢复时间要求', '必须说明数据保护', '加密要求', '写作要求']) {
@@ -118,6 +126,11 @@ describe('S5 Writer 短引用与语义输入', () => {
     await expect(bind(metadata)).rejects.toBeInstanceOf(ToolArgsError)
     await ledger(workspace, [web, second])
     await appendChapterWebReferences(workspace, refs, [second.source, web.source])
+    context.webMaterials.push({
+      source_id: second.source.source_id, snapshot_path: second.source.snapshot_path,
+      chunk_refs: buildWebEvidenceChunkIndex(second.source, second.content).chunks.map(chunk => chunk.chunk_ref),
+      usage: 'reference', summary: '新增公开资料', supports: '技术方法',
+    })
     expect(refs.unavailable.size).toBe(0)
     expect(refs.web.get('W1')?.source_id).toBe(web.source.source_id)
     await expect(bind(metadata)).resolves.toBeDefined()
@@ -229,11 +242,16 @@ describe('S5 Writer 短引用与语义输入', () => {
   })
 
   it('修复只追加 W 编号，候选投影不带内部身份或任务覆盖索引', async () => {
-    const { bind, web, workspace, refs } = await fixture()
+    const { bind, web, workspace, refs, context } = await fixture()
     const second = snapshot('新增公开技术资料', 'https://official.example/new')
     await writeFile(join(workspace.projectRoot, second.source.snapshot_path), second.content)
     await ledger(workspace, [web, second])
     await appendChapterWebReferences(workspace, refs, [second.source, web.source])
+    context.webMaterials.push({
+      source_id: second.source.source_id, snapshot_path: second.source.snapshot_path,
+      chunk_refs: buildWebEvidenceChunkIndex(second.source, second.content).chunks.map(chunk => chunk.chunk_ref),
+      usage: 'reference', summary: '新增公开资料', supports: '技术方法',
+    })
     expect([...refs.web].map(([ref, source]) => [ref, source.source_id])).toEqual([['W1', web.source.source_id], ['W2', second.source.source_id]])
     const candidate = await bind({ local_materials_used: [{ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '依据' }], web_materials_used: [{ web_ref: 'W2', usage: 'reference', summary: '依据', supports: '技术方法' }] })
     const { additional_web_materials: _additional, ...metadata } = candidate.metadata
@@ -247,14 +265,20 @@ describe('S5 Writer 短引用与语义输入', () => {
     const { workspace, manifest, context, refs, bind } = await fixture()
     const newWeb = snapshot('新 fetch 的实际技术正文', 'https://official.example/new')
     await writeFile(join(workspace.projectRoot, newWeb.source.snapshot_path), newWeb.content)
+    await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(newWeb.source.source_id)), JSON.stringify(buildWebEvidenceChunkIndex(newWeb.source, newWeb.content)))
     await ledger(workspace, [newWeb])
     await appendChapterWebReferences(workspace, refs, [newWeb.source])
+    context.webMaterials.push({
+      source_id: newWeb.source.source_id, snapshot_path: newWeb.source.snapshot_path,
+      chunk_refs: buildWebEvidenceChunkIndex(newWeb.source, newWeb.content).chunks.map(chunk => chunk.chunk_ref),
+      usage: 'reference', summary: '新增公开资料', supports: '技术方法',
+    })
     const candidate = await bind({ local_materials_used: [{ file_ref: 'F2', chunk: 'chunk_0001', usage: 'adapt', summary: '仅为 summary' }], web_materials_used: [{ web_ref: 'W2', usage: 'reference', summary: '仅为 summary', supports: '技术' }] })
     const { additional_web_materials: _additional, ...metadata } = candidate.metadata
     const pack = await buildChapterReviewEvidence(workspace, manifest, context, { ...candidate, metadata }, [newWeb.source], [{ section_id: 'SEC-2', handoff: metadata.handoff }])
     expect(pack.find(item => item.category === 'reference_bid')?.content).toContain('历史方案技术资料原文')
     expect(pack.find(item => item.category === 'web')?.content).toBe(newWeb.content)
-    expect(pack.find(item => item.category === 'web')?.locator).toBe(newWeb.source.snapshot_path)
+    expect(pack.find(item => item.category === 'web')?.locator).toBe(`${newWeb.source.snapshot_path}#W:${newWeb.source.source_id}:C0001`)
     expect(pack.find(item => item.category === 'handoff')?.allowed_claim_kinds).toEqual([])
     expect(JSON.stringify(pack)).not.toContain('整本 tender 不得注入')
     expect(pack.map(item => item.source_ref)).toEqual(pack.map((_, index) => `E${index + 1}`))

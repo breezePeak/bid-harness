@@ -61,7 +61,7 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
     'analysis/tender-analysis-selection.json': { schema_version: 1, selected_scoring_ids: ['SCORE-1'] },
     'analysis/scoring-response-points.json': createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明技术方案' }] }),
     'analysis/compliance.json': { schema_version: 1, compliance_items: [] },
-    'analysis/evidence-map.json': { schema_version: 10, section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'] }] },
+    'analysis/evidence-map.json': { schema_version: 11, section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'] }] },
     'outline/outline.json': outline,
     'outline/confirmed-outline.json': outline,
     'chapters/writing-plan.json': {

@@ -253,8 +253,8 @@ function mappingFixture(
     prompt: Array<{ type: string; text: string }>
   }> = []
   const outlineReviewDisposals: Array<ReturnType<typeof vi.fn>> = []
-  const onReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
-  const onFinalReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void>()
+  const onReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void | Promise<void>>()
+  const onFinalReply = vi.fn<(child: Agent, result: EvidenceMappingPartialResult, attempt: number) => void | Promise<void>>()
   const fileRefs = new Map<string, { file_id: string; source_kind: 'reference' | 'reference_bid' }>()
   type ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined
   const childGuards = new Map<string, ToolGuard[]>()
@@ -265,8 +265,31 @@ function mappingFixture(
   const submissionTools = new Map<string, Map<string, ToolDefinition>>()
   const preparedChildren = new Set<string>()
   const resultObservers = new Map<string, Array<(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void>>()
-  const emitWeb = (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]) => {
+  const queuedFetchResults = new Map<string, ToolExecutionResult[]>()
+  const childWebRefs = new Map<string, string[]>()
+  const emitWeb = async (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]): Promise<void> => {
     for (const outcome of outcomes) {
+      if (outcome.name === 'web_fetch') {
+        const url = String((outcome.arguments as { url?: unknown }).url)
+        const queued = queuedFetchResults.get(url) ?? []
+        queued.push(outcome.result as ToolExecutionResult)
+        queuedFetchResults.set(url, queued)
+        const definitions = submissionTools.get(String(child.id))
+        const fetchTool = definitions?.get('fetch_web_source')
+        const readTool = definitions?.get('read_source')
+        if (fetchTool === undefined || readTool === undefined) throw new Error('missing S4 Web research tools')
+        const fetched = await invokeSubmissionTool(child, fetchTool, { url })
+        if (!fetched.isError) {
+          const chunks = (fetched.value as { chunks?: Array<{ chunk_ref: string }> }).chunks ?? []
+          const refs: string[] = []
+          for (const chunk of chunks.slice(0, 1)) {
+            const read = await invokeSubmissionTool(child, readTool, { source_ref: chunk.chunk_ref })
+            if (!read.isError) refs.push(chunk.chunk_ref)
+          }
+          childWebRefs.set(String(child.id), refs)
+        }
+        continue
+      }
       const callSeq = child.session.events.length
       ;(child.session.events as unknown[]).push(
         { type: 'tool/call', seq: callSeq, data: { callId: outcome.callId, name: outcome.name } },
@@ -277,7 +300,7 @@ function mappingFixture(
       } as ToolExecution, outcome.result)
     }
   }
-  const partial = (request: { prompt: readonly { type: string; text?: string }[] }, child: Agent) => {
+  const partial = async (request: { prompt: readonly { type: string; text?: string }[] }, child: Agent) => {
     const lines = promptText(request).split('\n')
     const field = (prefix: string): unknown => {
       const line = lines.find(value => value.startsWith(prefix))
@@ -361,12 +384,12 @@ function mappingFixture(
       const unchangedMappings = JSON.stringify(result.section_mappings)
       const missingMapping = pendingReviews?.some(item => item.kind === 'task'
         && (item.value as { mapping_present?: boolean }).mapping_present === false) ?? false
-      onFinalReply(child, result, attempt)
+      await onFinalReply(child, result, attempt)
       if (!missingMapping && JSON.stringify(result.section_mappings) === unchangedMappings) result.section_mappings = []
-    } else onReply(child, result, attempt)
+    } else await onReply(child, result, attempt)
     return result
   }
-  const submissionArgs = (value: unknown): unknown => {
+  const submissionArgs = (value: unknown, childId: string): unknown => {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
     const result = value as Record<string, unknown>
     if (!Array.isArray(result.section_mappings)) return value
@@ -383,6 +406,7 @@ function mappingFixture(
         const mapping = candidate as Record<string, unknown>
         if (!Array.isArray(mapping.local_materials)) return candidate
         const localMaterials = mapping.local_materials as unknown[]
+        const webMaterials = Array.isArray(mapping.web_materials) ? mapping.web_materials as unknown[] : []
         return { ...mapping, local_materials: localMaterials.map((entry) => {
           if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry
           const materialEntry = entry as Record<string, unknown>
@@ -394,6 +418,11 @@ function mappingFixture(
             ? { ...fields, material_ref: mappingMaterialRef(Number(fileRef.slice(1)) - 1, String(chunk)) }
             : { ...fields, material_ref: mappingMaterialRef(Number(fileRef.slice(1)) - 1, String(chunk)),
               source_kind: materialEntry.source_kind }
+        }), web_materials: webMaterials.map((entry) => {
+          if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry
+          if (!('url' in entry)) return entry
+          const { url: _url, ...fields } = entry as Record<string, unknown>
+          return { ...fields, chunk_refs: childWebRefs.get(childId) ?? [] }
         }) }
       }),
     }
@@ -449,13 +478,13 @@ function mappingFixture(
   const submitReply = async (request: ContinuableStartSpec, child: Agent): Promise<void> => {
     let parsed: unknown
     try {
-      parsed = JSON.parse(serializeReply(partial(request.request, child)))
+      parsed = JSON.parse(serializeReply(await partial(request.request, child)))
     } catch {
       parsed = undefined
     }
     const tools = submissionTools.get(String(child.id))
     if (parsed !== undefined && tools !== undefined) {
-      const candidates = submissionCandidates(submissionArgs(parsed))
+      const candidates = submissionCandidates(submissionArgs(parsed, String(child.id)))
       const first = candidates[0] as Record<string, unknown> | undefined
       if (!preparedChildren.has(String(child.id)) && first !== undefined) {
         const operations = (first.outline_operations as unknown[] | undefined) ?? []
@@ -547,7 +576,12 @@ function mappingFixture(
         if (record.task_id === 'MAP-FINAL-CHECK') {
           const pending = await invokeSubmissionTool(child, tools.get('list_review_items')!, {})
           if (pending.isError) continue
-          const items = (pending.value as { pending_items: Array<{ review_ref: string }> }).pending_items
+          const items = (pending.value as { pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }> }).pending_items
+          for (const item of items.filter(item => item.kind === 'web_material')) {
+            for (const ref of item.value.chunk_refs ?? []) {
+              await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: ref })
+            }
+          }
           if (items.length > 0 && (await invokeSubmissionTool(child, tools.get('review_items')!, {
             items: items.map(item => ({ review_ref: item.review_ref, decision: 'keep', reason: '已对照原始职责和招标要求，任务与材料用途限于本章。' })),
           })).isError) continue
@@ -699,6 +733,13 @@ function mappingFixture(
   }
   const tools = {
     schemas: vi.fn(() => ['read', 'write', 'grep', 'web_search', 'web_fetch'].map(name => ({ name }))),
+    execute: vi.fn(async (request: { name: string; arguments: { url?: string } }) => {
+      const url = request.arguments.url ?? ''
+      const queued = queuedFetchResults.get(url) ?? []
+      const result = queued.shift()
+      if (result === undefined) throw new Error(`missing queued Web fetch result for ${url}`)
+      return result
+    }),
     restrict: vi.fn(() => () => {}),
     guard: vi.fn(() => () => {}),
   }
@@ -744,7 +785,12 @@ function mappingFixture(
       const tools = submissionTools.get(String(childId))!
       const response = await invokeSubmissionTool(child, tools.get('list_review_items')!, {})
       if (response.isError) throw new Error(response.error.message)
-      const items = (response.value as { pending_items: Array<{ review_ref: string }> }).pending_items
+      const items = (response.value as { pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }> }).pending_items
+      for (const item of items.filter(item => item.kind === 'web_material')) {
+        for (const ref of item.value.chunk_refs ?? []) {
+          await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: ref })
+        }
+      }
       if (items.length > 0) {
         const reviewed = await invokeSubmissionTool(child, tools.get('review_items')!, {
           items: items.map(item => ({ review_ref: item.review_ref, decision: 'keep', reason: '任务符合已确认职责，材料用途和总述限于本章。' })),
@@ -759,7 +805,7 @@ function mappingFixture(
 const webUrl = 'https://official.example/a'
 
 function webMaterial(url = webUrl) {
-  return { url, usage: 'reference' as const, summary: '官方技术依据。', supports: '支持技术响应。' }
+  return { url, chunk_refs: [], usage: 'reference' as const, summary: '官方技术依据。', supports: '支持技术响应。' }
 }
 
 function webResearch(taskId: string) {
@@ -791,10 +837,10 @@ describe('evidence-mapping Agent executor', () => {
     outline.sections.unshift(parent('ROOT', null, 1, 1), parent('PARENT', 'ROOT', 1, 2), parent('OTHER', 'ROOT', 2, 2))
     await writeFile(outlinePath, JSON.stringify(outline))
     const initial = mappingFixture(workspace, material)
-    initial.onReply.mockImplementation((child, result) => {
+    initial.onReply.mockImplementation(async (child, result) => {
       if (!result.section_mappings.some(mapping => mapping.section_id === 'SEC-1')) return
       const research = webResearch(result.task_id)
-      initial.emitWeb(child, [research.search, research.fetch])
+      await initial.emitWeb(child, [research.search, research.fetch])
       result.section_mappings.find(mapping => mapping.section_id === 'SEC-1')!.web_materials = [webMaterial()]
     })
     const execution = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
@@ -829,7 +875,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(final.request.request)).toContain('current_section_baseline：')
     expect(promptText(final.request.request)).toContain('scoped_diffs：')
     await expect(call('finish_final_check', {})).resolves.toMatchObject({ isError: false, value: { completed: false } })
-    const valid = { section_id: 'SEC-1', local_materials: [{ material_ref: `M1:${material.chunk}`, usage: 'background', summary: '支持业务范围说明，仅概括适用对象，不展开实施步骤。' }], web_materials: [webMaterial()] }
+    const valid = { section_id: 'SEC-1', local_materials: [{ material_ref: `M1:${material.chunk}`, usage: 'background', summary: '支持业务范围说明，仅概括适用对象，不展开实施步骤。' }], web_materials: [refs.find(item => item.kind === 'web_material')!.value] }
     for (const field of ['purpose', 'must_answer', 'writing_notes', 'suggested_tables', 'suggested_figures', 'writing_dimensions', 'requirement_ids', 'scoring_ids', 'scoring_response_point_ids', 'writing_brief', 'coverage_override', 'missing_topics']) {
       await expect(call('replace_section_mapping', { ...valid, [field]: ['夹带任务'] })).resolves.toMatchObject({ isError: true })
     }
@@ -911,10 +957,10 @@ describe('evidence-mapping Agent executor', () => {
     original.sections = [root, ...leaves]
     await writeFile(outlinePath, JSON.stringify(original))
     const first = mappingFixture(workspace, material, false, {}, false)
-    first.onReply.mockImplementation((child, result) => {
+    first.onReply.mockImplementation(async (child, result) => {
       const mapping = result.section_mappings.find(item => item.section_id === 'LEAF-01')
       if (mapping === undefined) return
-      first.emitWeb(child, [webResearch(result.task_id).fetch])
+      await first.emitWeb(child, [webResearch(result.task_id).fetch])
       mapping.web_materials = [webMaterial()]
     })
     const failedRun = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
@@ -929,8 +975,13 @@ describe('evidence-mapping Agent executor', () => {
     const final = first.finalStarts[0]!
     const listed = await first.invokeSubmissionTool(final.request.childId!, 'list_review_items', {})
     if (listed.isError) throw new Error(listed.error.message)
-    const items = (listed.value as { pending_items: Array<{ review_ref: string }> }).pending_items
+    const items = (listed.value as { pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }> }).pending_items
     expect(items).toHaveLength(100)
+    for (const item of items.slice(0, 80).filter(item => item.kind === 'web_material')) {
+      for (const ref of item.value.chunk_refs ?? []) {
+        await first.invokeSubmissionTool(final.request.childId!, 'read_source', { source_ref: ref })
+      }
+    }
     const reviewResult = await first.invokeSubmissionTool(final.request.childId!, 'review_items', {
       items: items.slice(0, 80).map(item => ({
         review_ref: item.review_ref, decision: 'keep', reason: '已核对当前职责、材料用途或分支总述。',
@@ -1391,7 +1442,7 @@ describe('evidence-mapping Agent executor', () => {
     const start = fixture.starts[0]!
     const childId = start.request.childId!
     const child = fixture.children.get(String(childId))!
-    fixture.emitWeb(child, [observation({ callId: 'failed-search', name: 'web_search', arguments: { queries: ['技术依据'] }, callSeq: 1, resultSeq: 2, isError: true })])
+    await fixture.emitWeb(child, [observation({ callId: 'failed-search', name: 'web_search', arguments: { queries: ['技术依据'] }, callSeq: 1, resultSeq: 2, isError: true })])
     expect((await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', branchResearchAssessment())).isError).toBe(false)
     start.resolve()
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
@@ -1401,12 +1452,12 @@ describe('evidence-mapping Agent executor', () => {
       statistics: {
         tools: {
           web_search: Record<string, unknown>
-          web_fetch: Record<string, unknown>
+          fetch_web_source: Record<string, unknown>
         }
       }
     }
     expect(log.statistics.tools.web_search).toMatchObject({ calls: 1, succeeded: 0, failed: 1, failure_reasons: ['failed'] })
-    expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
+    expect(log.statistics.tools.fetch_web_source).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
   })
 
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {
@@ -1549,9 +1600,9 @@ describe('evidence-mapping Agent executor', () => {
   it.each(['replace', 'supplement'] as const)('局部 %s 只运行选中 Section，并保留其他章节及 Web 快照', async (mode) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-targeted-remap-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    fixture.onReply.mockImplementation((child, result) => {
+    fixture.onReply.mockImplementation(async (child, result) => {
       const { search, fetch } = webResearch(result.task_id)
-      fixture.emitWeb(child, [search, fetch])
+      await fixture.emitWeb(child, [search, fetch])
       result.section_mappings[0]!.web_materials = [webMaterial()]
       result.section_mappings[0]!.writing_dimensions = ['需要删除的旧任务']
     })
@@ -1619,11 +1670,11 @@ describe('evidence-mapping Agent executor', () => {
     expect(await Promise.all(paths.map(path => readFile(path, 'utf8')))).toEqual(before)
   })
 
-  it('局部重新抓取同 URL 时绑定新正文，并保留未修改章节的原快照', async () => {
+  it('局部重新研究同 URL 时复用已注册正文，并保留未修改章节的原快照', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-remap-refetch-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    fixture.onReply.mockImplementation((child, result) => {
-      fixture.emitWeb(child, [webResearch(result.task_id).fetch])
+    fixture.onReply.mockImplementation(async (child, result) => {
+      await fixture.emitWeb(child, [webResearch(result.task_id).fetch])
       result.section_mappings[0]!.web_materials = [webMaterial()]
     })
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
@@ -1642,8 +1693,8 @@ describe('evidence-mapping Agent executor', () => {
     const after = parseEvidenceMapArtifact(JSON.parse(await readFile(mapPath, 'utf8')))
     expect(after.section_mappings[0]).toEqual(before.section_mappings[0])
     const latest = after.section_mappings[1]!.web_materials[0]!
-    expect(latest.source_id).not.toBe(before.section_mappings[1]!.web_materials[0]!.source_id)
-    expect(await readFile(join(workspace.projectRoot, latest.snapshot_path), 'utf8')).toContain('MAP-REMAP-SEC-2 正文')
+    expect(latest.source_id).toBe(before.section_mappings[1]!.web_materials[0]!.source_id)
+    expect(await readFile(join(workspace.projectRoot, latest.snapshot_path), 'utf8')).toContain('MAP-INIT-SEC-1 正文')
   })
 
   it.each([
@@ -1654,15 +1705,15 @@ describe('evidence-mapping Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-repair-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     const { search, fetch } = webResearch('MAP-INIT-SEC-1')
-    fixture.onReply.mockImplementation((child, result, attempt) => {
+    fixture.onReply.mockImplementation(async (child, result, attempt) => {
       if (result.task_id !== 'MAP-INIT-SEC-1') return
       result.section_mappings[0]!.web_materials = [webMaterial()]
       if (completedBeforeRepair) {
         if (attempt === 1) {
-          fixture.emitWeb(child, [search, fetch])
+          await fixture.emitWeb(child, [search, fetch])
           result.section_mappings = []
         }
-      } else fixture.emitWeb(child, attempt === 1 ? [search] : [fetch])
+      } else await fixture.emitWeb(child, attempt === 1 ? [search] : [fetch])
     })
     if (replaceAgent) {
       const followup = fixture.subagents.followup.getMockImplementation()!
@@ -1696,12 +1747,12 @@ describe('evidence-mapping Agent executor', () => {
   it.each([
     { reverse: false },
     { reverse: true },
-  ])('binds the same URL to the task whose material survives merging: %j', async ({ reverse }) => {
+  ])('single-flights the same URL across concurrent tasks: %j', async ({ reverse }) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-owners-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    fixture.onReply.mockImplementation((child, result) => {
+    fixture.onReply.mockImplementation(async (child, result) => {
       const { search, fetch } = webResearch(result.task_id)
-      fixture.emitWeb(child, [search, fetch])
+      await fixture.emitWeb(child, [search, fetch])
       for (const mapping of result.section_mappings) mapping.web_materials = [webMaterial()]
     })
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
@@ -1712,14 +1763,13 @@ describe('evidence-mapping Agent executor', () => {
 
     const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
-    expect(ledger.sources).toHaveLength(2)
-    for (const [index, mapping] of map.section_mappings.entries()) {
+    expect(ledger.sources).toHaveLength(1)
+    for (const mapping of map.section_mappings) {
       const bound = mapping.web_materials[0]!
       const source = ledger.sources.find(source => source.source_id === bound.source_id)!
-      const taskId = `MAP-INIT-SEC-${index + 1}`
       expect(bound.snapshot_path).toBe(source.snapshot_path)
       const content = await readFile(join(workspace.projectRoot, source.snapshot_path), 'utf8')
-      expect(content).toContain(`${taskId} 正文`)
+      expect(content).toContain(reverse ? 'MAP-INIT-SEC-2 正文' : 'MAP-INIT-SEC-1 正文')
       expect(source.content_sha256).toBe(webEvidenceContentSha256(content))
     }
   })
@@ -1728,9 +1778,9 @@ describe('evidence-mapping Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-supplement-')))
     const inputs = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, inputs, false, { 'MAP-INIT-SEC-1': [{ type: 'update_section', section_id: 'SEC-1', title: '深化后的技术响应' }] })
-    fixture.onReply.mockImplementation((child, result) => {
+    fixture.onReply.mockImplementation(async (child, result) => {
       const { search, fetch } = webResearch(result.task_id)
-      fixture.emitWeb(child, [search, fetch])
+      await fixture.emitWeb(child, [search, fetch])
       result.section_mappings[0]!.web_materials = [webMaterial()]
     })
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
@@ -1741,7 +1791,7 @@ describe('evidence-mapping Agent executor', () => {
     const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
     const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     const bound = map.section_mappings[0]!.web_materials[0]!
-    expect(ledger.sources).toHaveLength(2)
+    expect(ledger.sources).toHaveLength(1)
     expect(fixture.starts).toHaveLength(2)
     expect(await readFile(join(workspace.projectRoot, bound.snapshot_path), 'utf8')).toContain('MAP-INIT-SEC-1 正文')
   })
@@ -1749,14 +1799,14 @@ describe('evidence-mapping Agent executor', () => {
   it.each(['fetch only', 'sibling search', 'late search', 'unknown URL'])('成功 fetch 不依赖 %s 的搜索证明', async (scenario) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-reject-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    fixture.onReply.mockImplementation((child, result) => {
+    fixture.onReply.mockImplementation(async (child, result) => {
       const { search, fetch } = webResearch(result.task_id)
       if (result.task_id === 'MAP-INIT-SEC-1') {
-        if (scenario === 'sibling search') fixture.emitWeb(child, [search])
+        if (scenario === 'sibling search') await fixture.emitWeb(child, [search])
         return
       }
       result.section_mappings[0]!.web_materials = [webMaterial()]
-      fixture.emitWeb(child, scenario === 'late search' ? [fetch, search]
+      await fixture.emitWeb(child, scenario === 'late search' ? [fetch, search]
         : scenario === 'unknown URL' ? [{ ...search, result: { ...search.result, value: { sources: [{ url: 'https://other.example/a' }] } } as ToolExecutionResult }, fetch]
           : [fetch])
     })
@@ -1768,7 +1818,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(map.section_mappings[1]!.web_materials).toHaveLength(1)
   })
 
-  it('未 fetch 的 URL 在逐章提交时立即拒绝且不写入 staged mapping', async () => {
+  it('未读取的 Web Chunk 在逐章提交时立即拒绝且不写入 staged mapping', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-dedup-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     fixture.onReply.mockImplementation((_child, result) => {
@@ -1783,7 +1833,7 @@ describe('evidence-mapping Agent executor', () => {
     await rejection
     const failures = fixture.submissionResults.filter(result => result.isError)
     expect(failures).toHaveLength(2)
-    expect(failures.every(result => result.isError && result.error.message.includes('web_materials.0.url'))).toBe(true)
+    expect(failures.every(result => result.isError && result.error.message.includes('chunk_refs'))).toBe(true)
   })
 
   it.each(['schema', 'unknown-file'] as const)('提交工具拒绝单章任务的 %s material 后允许同轮修正', async (scenario) => {
@@ -1894,7 +1944,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.path)
     expect(promptText(fixture.starts[0]!.request.request)).toContain('"file_ref":"F2"')
     for (const start of fixture.starts) {
-      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search', 'web_fetch'] } })
+      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search'] } })
     }
     const childReadGuard = fixture.childGuards.get(String(fixture.starts[0]!.request.childId))?.at(-1)
     expect(childReadGuard).toBeDefined()
@@ -2842,9 +2892,9 @@ describe('S4 Host 准入与最终确认', () => {
       await writeFile(path, JSON.stringify(outline))
     }
     const fixture = mappingFixture(workspace, material)
-    fixture.onReply.mockImplementation((child, result) => {
+    fixture.onReply.mockImplementation(async (child, result) => {
       const { search, fetch } = webResearch(result.task_id)
-      fixture.emitWeb(child, [search, fetch])
+      await fixture.emitWeb(child, [search, fetch])
       result.section_mappings[0]!.web_materials = [webMaterial()]
     })
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
@@ -2937,9 +2987,7 @@ describe('S4 Host 准入与最终确认', () => {
         expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1'])
         const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
         const retained = initialSourceContents.find(item => item.content.includes('MAP-INIT-SEC-1 正文'))!
-        const removed = initialSourceContents.find(item => item.content.includes('MAP-INIT-SEC-2 正文'))!
         expect(ledger.sources).toEqual([retained.source])
-        await expect(readFile(join(workspace.projectRoot, removed.source.snapshot_path), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
         expect(await readFile(join(workspace.projectRoot, retained.source.snapshot_path), 'utf8')).toContain('MAP-INIT-SEC-1 正文')
       }
       if (edit === 'add') expect(evidence.section_mappings.find(mapping => mapping.section_id === 'SEC-NEW')).toMatchObject({ local_materials: [expect.any(Object)], web_materials: [], missing_topics: [] })

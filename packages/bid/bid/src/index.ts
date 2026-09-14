@@ -233,6 +233,8 @@ export * from './section-evidence-context.ts'
 export * from './evidence-mapping-corpus.ts'
 export * from './web-evidence-source-artifacts.ts'
 export * from './web-evidence-snapshot.ts'
+export * from './web-evidence-chunks.ts'
+export * from './web-research-pool.ts'
 export {
   DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS,
   DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,

@@ -85,6 +85,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(map.section_mappings[0]?.web_materials).toEqual([{
         source_id: ledger.sources[0]!.source_id,
         snapshot_path: ledger.sources[0]!.snapshot_path,
+        chunk_refs: [`W:${ledger.sources[0]!.source_id}:C0001`],
         usage: 'reference',
         summary: '要求访问控制与审计。',
         supports: '支持安全方案。',

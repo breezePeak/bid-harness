@@ -14,6 +14,7 @@ import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scori
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
+import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 
 const MAP_PATH = 'analysis/evidence-map.json'
 const WEB_PATH = 'analysis/web-evidence-sources.json'
@@ -56,13 +57,17 @@ async function validateWebSource(
   workspace: BidWorkspace,
   source: WebEvidenceSource,
   issues: StageValidationIssue[],
-): Promise<boolean> {
+): Promise<ReadonlySet<string> | undefined> {
   try {
     const path = within(workspace.projectRoot, source.snapshot_path)
     await assertNoLinkedPath(workspace.root, path)
     const content = await readFile(path, 'utf8')
     if (!(await lstat(path)).isFile() || content.trim().length === 0 || webEvidenceContentSha256(content) !== source.content_sha256) throw new Error('invalid')
-    return true
+    const indexPath = within(workspace.projectRoot, webEvidenceChunkIndexPath(source.source_id))
+    await assertNoLinkedPath(workspace.root, indexPath)
+    const index = parseWebEvidenceChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+    if (!(await lstat(indexPath)).isFile() || !webEvidenceChunkIndexMatches(index, source, content)) throw new Error('invalid-index')
+    return new Set(index.chunks.map(chunk => chunk.chunk_ref))
   } catch {
     reject(
       issues,
@@ -70,18 +75,20 @@ async function validateWebSource(
       `Web source ${source.source_id} has no valid durable snapshot.`,
       source.snapshot_path,
     )
-    return false
+    return undefined
   }
 }
 
 function validateWebMaterial(
   material: WebEvidenceMaterial,
   sources: ReadonlyMap<string, WebEvidenceSource>,
-  valid: ReadonlySet<string>,
+  validChunks: ReadonlyMap<string, ReadonlySet<string>>,
   issues: StageValidationIssue[],
 ): void {
   const source = sources.get(material.source_id)
-  if (source === undefined || source.snapshot_path !== material.snapshot_path || !valid.has(material.source_id)) {
+  const chunks = validChunks.get(material.source_id)
+  if (source === undefined || source.snapshot_path !== material.snapshot_path || chunks === undefined
+    || material.chunk_refs.some(ref => !chunks.has(ref))) {
     reject(issues, 'EVIDENCE_MAPPING_WEB_MATERIAL_INVALID', `Web material ${material.source_id} does not match a valid source snapshot.`, MAP_PATH)
   }
 }
@@ -182,11 +189,11 @@ export async function validateEvidenceMapping(
       source,
       await validateWebSource(workspace, source, issues),
     ] as const))
-    const validIds = new Set(validity.filter(([, valid]) => valid).map(([source]) => source.source_id))
+    const validChunks = new Map(validity.flatMap(([source, chunks]) => chunks === undefined ? [] : [[source.source_id, chunks] as const]))
     const sources = new Map(web.sources.map(source => [source.source_id, source]))
     for (const mapping of map.section_mappings) {
       for (const material of mapping.web_materials) {
-        validateWebMaterial(material, sources, validIds, issues)
+        validateWebMaterial(material, sources, validChunks, issues)
       }
     }
   } catch (error) {

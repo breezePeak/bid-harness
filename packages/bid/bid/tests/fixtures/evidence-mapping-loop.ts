@@ -282,9 +282,14 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   return { chunk, requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
 }
 
+function expectedWebChunkRef(url: string): string {
+  const content = '官方标准要求访问控制与安全审计。'
+  return `W:${webEvidenceSourceId(url, webEvidenceContentSha256(content))}:C0001`
+}
+
 function transientWebMaterial(url: string) {
   return {
-    url, usage: 'reference' as const, summary: '要求访问控制与审计。', supports: '支持安全方案。',
+    chunk_refs: [expectedWebChunkRef(url)], usage: 'reference' as const, summary: '要求访问控制与审计。', supports: '支持安全方案。',
   }
 }
 
@@ -394,10 +399,12 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('research-not-ready', 'submit_section_research_assessment', researchAssessment(false, true)),
     toolCall('search-research-gap', 'search_sources', { scope_ref: 'ALL', keywords: ['权限', '审计'] }),
     toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
-    toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
+    toolCall('fetch-source', 'fetch_web_source', { url: sourceUrl }),
+    toolCall('list-source-chunks', 'list_web_chunks', { source_ref: expectedWebChunkRef(sourceUrl).slice(0, -6) }),
+    toolCall('read-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) }),
     ...(!repair ? [
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
-      toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
+      toolCall('fetch-unused', 'fetch_web_source', { url: unusedSourceUrl }),
     ] : []),
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
     toolCall('update-task', 'update_section_task', blueprint),
@@ -429,6 +436,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
     toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
     toolCall('list-final-items', 'list_review_items', {}),
+    toolCall('reread-final-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) }),
     reviewPendingMappingItems,
     toolCall('finish-final-check', 'finish_final_check', {}),
   ]
@@ -496,6 +504,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   await writeFile(join(workspace.projectRoot, unavailableSources[1]!.snapshot_path), '与账本 Hash 不符的正文')
   const evidenceBefore = JSON.stringify({ schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION, section_mappings: [{
     section_id: section.id, local_materials: [], web_materials: [{ source_id: missing.source_id, snapshot_path: missing.snapshot_path,
+      chunk_refs: [`W:${missing.source_id}:C0001`],
       usage: 'reference', summary: 'S4 已映射的公开审计资料。', supports: '安全审计要求' }],
     missing_topics: ['缺少实施流程参考资料。'], writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
   }] })

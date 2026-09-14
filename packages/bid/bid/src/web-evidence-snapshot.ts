@@ -27,26 +27,38 @@ export function buildWebEvidenceSnapshots(captured: Iterable<CapturedWebResult>)
   const snapshots = new Map<string, WebEvidenceSnapshot>()
   for (const { exec, result } of captured) {
     if (exec.name !== 'web_fetch' || result.isError) continue
-    const fetched = record(result.value)
-    const body = record(fetched?.body)
     const args = record(exec.arguments)
-    if (typeof fetched?.url !== 'string' || normalizeWebEvidenceUrl(fetched.url) === undefined
-      || typeof fetched.statusCode !== 'number' || !Number.isInteger(fetched.statusCode)
-      || fetched.statusCode < 200 || fetched.statusCode >= 300
-      || typeof body?.content !== 'string' || body.content.trim().length === 0) continue
-    const requestedUrl = typeof args?.url === 'string' && normalizeWebEvidenceUrl(args.url) !== undefined ? args.url : fetched.url
-    const content = body.content
-    const hash = webEvidenceContentSha256(content)
-    const id = webEvidenceSourceId(fetched.url, hash)
-    snapshots.set(id, {
-      content,
-      source: {
-        source_id: id, requested_url: requestedUrl, final_url: fetched.url,
-        status_code: fetched.statusCode, truncated: fetched.truncated === true,
-        fetched_at: new Date().toISOString(), content_sha256: hash,
-        snapshot_path: `analysis/web-sources/${id}.md`,
-      },
-    })
+    const requestedUrl = typeof args?.url === 'string' ? args.url : ''
+    const snapshot = webEvidenceSnapshotFromFetch(requestedUrl, result.value)
+    if (snapshot !== undefined) snapshots.set(snapshot.source.source_id, snapshot)
   }
   return [...snapshots.values()]
+}
+
+/**
+ * Convert one successful raw `web_fetch` value into a durable snapshot.
+ * @param requestedUrl URL selected by the caller before redirects.
+ * @param value raw tool value kept inside the Host-controlled fetch wrapper.
+ * @returns a snapshot for a valid HTTP 2xx Markdown body, otherwise `undefined`.
+ */
+export function webEvidenceSnapshotFromFetch(requestedUrl: string, value: unknown): WebEvidenceSnapshot | undefined {
+  const fetched = record(value)
+  const body = record(fetched?.body)
+  if (typeof fetched?.url !== 'string' || normalizeWebEvidenceUrl(fetched.url) === undefined
+    || normalizeWebEvidenceUrl(requestedUrl) === undefined
+    || typeof fetched.statusCode !== 'number' || !Number.isInteger(fetched.statusCode)
+    || fetched.statusCode < 200 || fetched.statusCode >= 300
+    || typeof body?.content !== 'string' || body.content.trim().length === 0) return undefined
+  const content = body.content
+  const hash = webEvidenceContentSha256(content)
+  const id = webEvidenceSourceId(fetched.url, hash)
+  return {
+    content,
+    source: {
+      source_id: id, requested_url: requestedUrl, final_url: fetched.url,
+      status_code: fetched.statusCode, truncated: fetched.truncated === true,
+      fetched_at: new Date().toISOString(), content_sha256: hash,
+      snapshot_path: `analysis/web-sources/${id}.md`,
+    },
+  }
 }

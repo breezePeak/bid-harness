@@ -31,9 +31,10 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-        .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
-      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 1]])
-      expect(childLog).toContain('web_materials.0.url')
+        .filter(event => event.data.name === 'web_search' || event.data.name === 'fetch_web_source')
+      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['fetch_web_source', 1]])
+      expect(childLog).toContain('web_materials.0.chunk_refs')
+      expect(childLog).not.toContain('"name":"web_fetch"')
       expect(childLog).toContain('search-unknown-scope')
       expect(childLog).toContain('read-forged-path')
       expect(childLog).toContain('search_sources')
@@ -85,7 +86,9 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const [finalHeaderLine, ...finalEventLines] = finalCheckLog.trimEnd().split('\n')
       const finalHeader = JSON.parse(finalHeaderLine!) as SessionHeader
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
-      expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual(['finish_final_check', 'list_review_items', 'review_items', 'finish_final_check'])
+      expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
+        'finish_final_check', 'list_review_items', 'read_source', 'review_items', 'finish_final_check',
+      ])
       expect(finalCheckLog).toContain('pending_review_items：')
       expect(finalCheckLog).toContain('pending_web_refs：')
       expect(finalCheckLog).not.toContain('当前章节资料与已知缺口：')
@@ -116,7 +119,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
           structure_invalidated: number
         }>
       }
-      expect(checkpoint.schema_version).toBe(10)
+      expect(checkpoint.schema_version).toBe(11)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
           sufficient_for_blueprint: true,
@@ -128,6 +131,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(ledger.sources).toHaveLength(1)
       expect(map.section_mappings[0]!.web_materials[0]).toMatchObject({
         source_id: ledger.sources[0]!.source_id, snapshot_path: ledger.sources[0]!.snapshot_path,
+        chunk_refs: [expect.stringMatching(/^W:WEB-[a-f0-9]{16}:C0001$/u)],
       })
       const snapshots = await Promise.all(ledger.sources.map(source => readFile(join(projectRoot, source.snapshot_path), 'utf8')))
       const artifacts = JSON.stringify({
@@ -155,6 +159,6 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
   })
   expect(JSON.parse(result.stdout)).toEqual({
     stage: 'evidence_mapping', status: 'waiting_user',
-    state_files: ['evidence-mapping-checkpoint.json', 'evidence-mapping-plan.json'],
+    state_files: [],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

@@ -14,9 +14,9 @@ S3 需要同时理解整个项目、覆盖全部技术 Requirement、Scoring 与
 
 S4 保留 `evidence_mapping` 阶段、正式 Artifact 和 Orchestrator 推进方式。任务拓扑由 Host 按 `outline/initial-confirmed-outline.json` 的可写叶子确定，一章一个任务；Child 负责资料检索语义，Main Agent 只执行一次证据驱动的目录深化。[章节证据新鲜度](../architecture/2026-09-03-bid-section-evidence-freshness.md)规定任务计划、指纹与最终用户编辑后的补映射。
 
-Host 复用 `@deepseek-ai/dsh-subagent` 的 `spawn` Provider，在可配置并发上限内为每个任务启动 fresh-context Child Session。Child 以 Section Blueprint 和由其引用派生的 Requirement、Scoring、Response Point、Compliance 为首要上下文，只获得 Host 已预检的 `reference`/`reference_bid` 绝对路径，直接返回 `section_mappings` 与目录深化建议。工具限制为 `grep`、`read`、`web_search`、`web_fetch`，深度上限为 1；招标文件与人工框架不能作为 Evidence。模型输出问题在同一可继续 Child 的后续轮次有限修复；可识别的限流错误按[S4 限流基础设施错误自动恢复](../bug-fix/2026-09-12-s4-transient-infrastructure-retry.md)有限退避重试，其他基础设施错误立即失败，已接受的兄弟结果保持不变。
+Host 复用 `@deepseek-ai/dsh-subagent` 的 `spawn` Provider，在可配置并发上限内为每个任务启动 fresh-context Child Session。Child 以 Section Blueprint 和由其引用派生的 Requirement、Scoring、Response Point、Compliance 为首要上下文，只获得 Host 已预检的 `reference`/`reference_bid` 引用和私有资料读取工具，直接返回 `section_mappings` 与目录深化建议。联网工具与正文边界由[S4 Web Research Pool](../architecture/2026-09-14-s4-web-research-pool.md)定义，深度上限为 1；招标文件与人工框架不能作为 Evidence。模型输出问题在同一可继续 Child 的后续轮次有限修复；可识别的限流错误按[S4 限流基础设施错误自动恢复](../bug-fix/2026-09-12-s4-transient-infrastructure-retry.md)有限退避重试，其他基础设施错误立即失败，已接受的兄弟结果保持不变。
 
-Host 汇总所有 Child 的 Web Tool 结果，沿用来源账本与有界快照机制持久化公开资料。只有同一 Child 先搜索得到 URL、再成功抓取该 URL 的非空正文，才能形成来源记录。局部结果按唯一 Section ID 汇总；本地资料按 `source_kind + file_id + chunk id` 去重，公开资料由临时 URL 绑定为 Host 保存的 `source_id + snapshot_path`。首轮 Evidence Map 完成后，Main Agent 基于证据深化一次目录；Host 保留现有 ID，为新节点分配稳定 `SEC-*`，并只对新增或语义变化的可写 Section 运行一批补充 Mapping Task，最终只保存深化目录中的可写 Section。
+Host 通过共享 Research Pool 即时持久化公开资料。局部结果按唯一 Section ID 汇总；本地资料按 `source_kind + file_id + chunk id` 去重，公开资料只接受 Child 已读取的 `chunk_refs`，再由 Host 绑定 `source_id + snapshot_path`。首轮 Evidence Map 完成后，Main Agent 基于证据深化一次目录；Host 保留现有 ID，为新节点分配稳定 `SEC-*`，并只对新增或语义变化的可写 Section 运行一批补充 Mapping Task，最终只保存深化目录中的可写 Section。
 
 本地证据身份由 `source_kind + file_id + chunk id` 决定。模型只提交 `chunk_XXXX`，Validator 根据 `file_id` 对应 manifest 文件的 chunk index 解析规范路径；不存在的 chunk、角色不一致、普通资料使用复用权限、招标文件或人工框架引用都失败。
 

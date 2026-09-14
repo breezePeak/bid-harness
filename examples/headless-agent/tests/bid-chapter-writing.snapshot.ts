@@ -46,7 +46,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(writerLog).toContain('F999')
       expect(writerLog).toContain('不可用')
       expect(writerLog).toContain('ENOENT')
-      expect(writerLog).toContain('Hash')
+      expect(writerLog).not.toContain('Snapshot Hash')
       expect(writerLog).toContain('S4 已映射的公开审计资料。')
       expect(writerLog).toContain('未知 W1')
       expect(writerLog).toContain('正文包含系统内部编号 REQ-1')
@@ -86,11 +86,13 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(markdown).not.toContain('补充服务方案')
       expect(markdown.split('\n').filter(line => /^#{1,6} /u.test(line))).toEqual(['# 1 访问控制与安全审计'])
       const sessionIds = [header.parentSession!, ...childLogs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)]
+      const planningLog = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!
+        .replace(/"(startedAt|updatedAt)":\d+/gu, '"$1":0')
       const expected = {
         'export.expected.json': exportSnapshot,
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
-        'planning.expected.jsonl': normalizeSessionSnapshot(logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession === undefined)!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'planning.expected.jsonl': normalizeSessionSnapshot(planningLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'artifacts.expected.json': JSON.stringify({ map, metadata, markdown, globalReview, completionReview }, null, 2) + '\n',
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {

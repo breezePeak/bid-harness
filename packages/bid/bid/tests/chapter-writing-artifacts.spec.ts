@@ -4,6 +4,7 @@ import { parseChapterCandidate, parseChapterMetadata, parseChapterWritingManifes
 const web = {
   source_id: 'WEB-aaaaaaaaaaaaaaaa',
   snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+  chunk_refs: ['W:WEB-aaaaaaaaaaaaaaaa:C0001'],
   usage: 'reference' as const,
   summary: '标准正文摘要。',
   supports: '支持当前章节的公开技术方法。',

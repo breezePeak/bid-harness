@@ -10,6 +10,8 @@ import {
   parseTenderScoringArtifact,
   scoringArtifactSha256,
   validateEvidenceMapping,
+  buildWebEvidenceChunkIndex,
+  webEvidenceChunkIndexPath,
   webEvidenceContentSha256,
   type EvidenceMapArtifact,
   type LocalEvidenceMaterial,
@@ -35,7 +37,7 @@ const writingBrief: SectionWritingBrief = {
 
 function evidenceMap(value: Partial<EvidenceMapArtifact> = {}): EvidenceMapArtifact {
   return {
-    schema_version: 10,
+    schema_version: 11,
     section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['总体技术架构'] }],
     ...value,
   }
@@ -123,12 +125,15 @@ async function writeMap(workspace: BidWorkspace, map: EvidenceMapArtifact): Prom
 async function writeWebSource(workspace: BidWorkspace, content = 'Fetched https://example.com/standard (HTTP 200)\n\n标准正文。'): Promise<WebEvidenceMaterial> {
   const source_id = 'WEB-0123456789abcdef'
   const snapshot_path = `analysis/web-sources/${source_id}.md`
+  const source = { source_id, requested_url: 'https://example.com/standard', final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: '2026-08-31T00:00:00.000Z', content_sha256: webEvidenceContentSha256(content), snapshot_path }
+  const index = buildWebEvidenceChunkIndex(source, content)
   await writeFile(join(workspace.projectRoot, snapshot_path), content)
-  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [{ source_id, requested_url: 'https://example.com/standard', final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: '2026-08-31T00:00:00.000Z', content_sha256: webEvidenceContentSha256(content), snapshot_path }] }))
-  return { source_id, snapshot_path, usage: 'reference', summary: '说明安全控制措施。', supports: '支持安全控制措施的设计。' }
+  await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(source_id)), JSON.stringify(index))
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [source] }))
+  return { source_id, snapshot_path, chunk_refs: index.chunks.map(chunk => chunk.chunk_ref), usage: 'reference', summary: '说明安全控制措施。', supports: '支持安全控制措施的设计。' }
 }
 
-describe('evidence-map v10 schema', () => {
+describe('evidence-map v11 schema', () => {
   it('rejects the previous schema version and preserves local-material permissions', () => {
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), schema_version: 7 })).toThrow()
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, local_materials: [{ source_kind: 'reference', file_id: 'file', chunk: 'chunk_0001', usage: 'adapt', summary: '资料。' }] }] })).toThrow()
@@ -136,7 +141,7 @@ describe('evidence-map v10 schema', () => {
   })
 
   it('keeps Child URL results separate from durable Host references', () => {
-    const partial = { task_id: 'TASK-1', section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [{ url: 'https://example.com/standard', usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'], writing_brief: writingBrief }], refinement_suggestions: [] }
+    const partial = { task_id: 'TASK-1', section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [{ chunk_refs: ['W:WEB-0123456789abcdef:C0001'], usage: 'reference', summary: '标准。', supports: '支持方案。' }], missing_topics: [], writing_dimensions: ['安全'], writing_brief: writingBrief }], refinement_suggestions: [] }
     expect(() => parseEvidenceMappingPartialResult(partial)).not.toThrow()
     expect(() => parseEvidenceMappingPartialResult({
       ...partial, section_mappings: [{ ...partial.section_mappings[0], writing_brief: undefined }],
@@ -144,7 +149,7 @@ describe('evidence-map v10 schema', () => {
     expect(() => parseEvidenceMappingPartialResult({
       ...partial, section_mappings: [{ ...partial.section_mappings[0], writing_brief: { ...writingBrief, must_answer: [] } }],
     })).toThrow()
-    expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, web_materials: [{ source_id: 'WEB-0123456789abcdef', snapshot_path: 'analysis/web-sources/WEB-fedcba9876543210.md', usage: 'reference', summary: '标准。', supports: '支持方案。' }] }] })).toThrow()
+    expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, web_materials: [{ source_id: 'WEB-0123456789abcdef', snapshot_path: 'analysis/web-sources/WEB-fedcba9876543210.md', chunk_refs: ['W:WEB-0123456789abcdef:C0001'], usage: 'reference', summary: '标准。', supports: '支持方案。' }] }] })).toThrow()
   })
 })
 

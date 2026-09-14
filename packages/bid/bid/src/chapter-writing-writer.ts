@@ -12,6 +12,7 @@ import { validateChapterHeadings } from './chapter-headings.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
+import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
 
 const text = z.string().trim().min(1)
 const strings = z.array(text).optional()
@@ -166,6 +167,11 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
     if (unavailable.has(material.source_id)) continue
     if (source === undefined) unavailable.set(material.source_id, '已映射来源不在当前账本中。')
     else if (source.snapshot_path !== material.snapshot_path) unavailable.set(material.source_id, '已映射来源与账本的身份不匹配。')
+    else {
+      const readable = new Set(context.webReadLocations.filter(location => location.source_id === material.source_id)
+        .map(location => location.chunk_ref))
+      if (material.chunk_refs.some(ref => !readable.has(ref))) unavailable.set(material.source_id, '已映射 Chunk 索引或引用不可用。')
+    }
   }
   return [
     '资料提交用下列 M/F/W 短引用；grep/read 必须使用表中真实路径，短引用不是路径。',
@@ -175,10 +181,14 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
       ...context.localReadLocations.find(value => value.file_id === material.file_id && value.chunk === material.chunk),
     })))}`,
     `Available Evidence Files：${JSON.stringify([...refs.files].map(([file_ref, file]) => ({ file_ref, name: file.name, role: file.role, chunks_path: file.chunks_path, chunk_index_path: file.chunk_index_path, allowed_usage: usage(file.role) })))}`,
-    `Verified Web Snapshots：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).map(([web_ref, source]) => ({
-      web_ref, url: source.final_url, read_path: source.read_path,
+    `Verified Web Chunks：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).map(([web_ref, source]) => ({
+      web_ref, url: source.final_url,
       allowed_usage: ['reference', 'background'], truncated: source.truncated,
       summary: context.webMaterials.find(value => value.source_id === source.source_id)?.summary,
+      mapped_chunks: context.webReadLocations.filter(location => location.source_id === source.source_id).map(location => ({
+        chunk_ref: location.chunk_ref, read_path: location.read_path, offset: location.start_line,
+        limit: location.end_line - location.start_line + 1,
+      })),
     })))}`,
     `不可用 Web 来源：${JSON.stringify([...unavailable].map(([source_id, reason]) => ({
       source_id, web_ref: [...refs.web].find(([, source]) => source.source_id === source_id)?.[0], reason,
@@ -187,7 +197,7 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
       })),
     })))}`,
     '不可用来源不能作为证据引用；对应写作要求仍须回应，请补充有效来源，无法证实时明确记录未解决事项。',
-    '本地条目只提交 {material_ref, usage, summary} 或 {file_ref, chunk, usage, summary}，两者不可并用；已登记网页只提交 {web_ref, usage, summary, supports}。新网页提交 {url, usage, summary, supports}，必须有当前 Writer 成功 fetch 的正文。',
+    '本地条目只提交 {material_ref, usage, summary} 或 {file_ref, chunk, usage, summary}，两者不可并用；已登记网页只提交 {web_ref, usage, summary, supports}，并仅按 mapped_chunks 给出的行范围读取。新网页提交 {url, usage, summary, supports}，必须有当前 Writer 成功 fetch 的正文。',
   ].join('\n')
 }
 
@@ -269,8 +279,11 @@ export async function bindChapterWriterInput(
       throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 的来源已从账本移除或身份不匹配。`])
     }
     await readChapterWebSource(workspace, current)
+    const mapped = context.webMaterials.find(value => value.source_id === source.source_id)
+    if (mapped === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 不属于当前章节的 S4 映射。`])
     web.push({
       source_id: source.source_id, snapshot_path: source.snapshot_path,
+      chunk_refs: mapped.chunk_refs,
       usage: material.usage, summary: material.summary, supports: material.supports })
   }
   const additional = input.metadata.additional_web_materials ?? []
@@ -284,6 +297,7 @@ export async function bindChapterWriterInput(
     }
     additionalBound.push({
       source_id: snapshot.source.source_id, snapshot_path: snapshot.source.snapshot_path,
+      chunk_refs: buildWebEvidenceChunkIndex(snapshot.source, snapshot.content).chunks.map(chunk => chunk.chunk_ref),
       usage: material.usage, summary: material.summary, supports: material.supports })
   }
   mergeChapterWebMaterials([...web, ...additionalBound])

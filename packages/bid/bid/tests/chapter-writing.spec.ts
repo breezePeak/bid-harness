@@ -50,6 +50,8 @@ import {
   parseWritingPlan,
   parseWebEvidenceSourcesArtifact,
   webEvidenceContentSha256,
+  buildWebEvidenceChunkIndex,
+  webEvidenceChunkIndexPath,
 } from '@deepseek-ai/dsh-bid'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 
@@ -127,17 +129,17 @@ async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
   const snapshot = '公开技术资料\n'
   const sourceId = 'WEB-aaaaaaaaaaaaaaaa'
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
-  await writeFile(join(workspace.projectRoot, `analysis/web-sources/${sourceId}.md`), snapshot)
+  const webSource = {
+    source_id: sourceId, requested_url: 'https://example.com/standard', final_url: 'https://example.com/standard',
+    status_code: 200, truncated: false, fetched_at: fetchedAt,
+    content_sha256: webEvidenceContentSha256(snapshot), snapshot_path: `analysis/web-sources/${sourceId}.md`,
+  }
+  await writeFile(join(workspace.projectRoot, webSource.snapshot_path), snapshot)
+  await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(sourceId)), JSON.stringify(buildWebEvidenceChunkIndex(webSource, snapshot)))
   await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
     schema_version: 2,
     stage: 'evidence_mapping',
-    sources: [{
-      source_id: sourceId,
-
-      requested_url: 'https://example.com/standard',
-      final_url: 'https://example.com/standard', status_code: 200, truncated: false, fetched_at: fetchedAt,
-      content_sha256: webEvidenceContentSha256(snapshot), snapshot_path: `analysis/web-sources/${sourceId}.md`,
-    }],
+    sources: [webSource],
   })}\n`)
 }
 
@@ -848,7 +850,7 @@ describe('chapter-writing executor', () => {
     }
     const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-    evidence.section_mappings[1]!.web_materials = [{ source_id: source.source_id, snapshot_path: source.snapshot_path, usage: 'reference', summary: '已映射的技术要求', supports: '技术方案' }]
+    evidence.section_mappings[1]!.web_materials = [{ source_id: source.source_id, snapshot_path: source.snapshot_path, chunk_refs: [`W:${source.source_id}:C0001`], usage: 'reference', summary: '已映射的技术要求', supports: '技术方案' }]
     await writeFile(evidencePath, JSON.stringify(evidence))
     const evidenceText = await readFile(evidencePath, 'utf8')
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
@@ -1122,7 +1124,7 @@ describe('chapter-writing executor', () => {
         severity: 'mandatory', source_refs: source,
       }] }),
       evidence: parseEvidenceMapArtifact({
-        schema_version: 10,
+        schema_version: 11,
         section_mappings: [{
           section_id: 'SEC-1',
 
@@ -1130,7 +1132,7 @@ describe('chapter-writing executor', () => {
             { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
             { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
           ],
-          web_materials: [{ source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md', usage: 'reference', summary: '公开资料', supports: '评分响应' }],
+          web_materials: [{ source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md', chunk_refs: ['W:WEB-aaaaaaaaaaaaaaaa:C0001'], usage: 'reference', summary: '公开资料', supports: '评分响应' }],
           missing_topics: [], writing_dimensions: ['需求维度', '评分维度'],
         }],
       }),
@@ -1234,6 +1236,7 @@ describe('chapter-writing executor', () => {
     ]
     evidence.section_mappings[0]!.web_materials = [{
       source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+      chunk_refs: ['W:WEB-aaaaaaaaaaaaaaaa:C0001'],
       usage: 'reference', summary: '公开资料', supports: '章节方法',
     }]
     await writeFile(evidencePath, `${JSON.stringify(evidence)}\n`)
@@ -1252,12 +1255,12 @@ describe('chapter-writing executor', () => {
     expect(prompt).toContain('corpus/reference_bid/chunks/chunk_0001.md')
     expect(prompt).toContain('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md')
 
-    const guard = fixture.guards.at(-1)
+    const guard = fixture.guards[0]
     expect(guard).toBeDefined()
-    const guarded = (name: 'read' | 'grep', argument: 'file_path' | 'path', path: string): string | undefined => guard!({
+    const guarded = (name: 'read' | 'grep', argument: 'file_path' | 'path', path: string, range: Record<string, number> = {}): string | undefined => guard!({
       name,
-      arguments: { [argument]: path },
-      agent: { session: { id: SessionId('guard-child'), header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
+      arguments: { [argument]: path, ...range },
+      agent: { session: { id: firstWriter!.run.localAgent!.id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
     } as unknown as ToolExecution)
     const sessionPath = (path: string): string => join(workspace.projectRoot, ...path.split('/'))
     expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks/chunk_0001.md'))).toBeUndefined()
@@ -1265,14 +1268,16 @@ describe('chapter-writing executor', () => {
     expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/reference_bid/chunks/chunk_0001.md'))).toBeUndefined()
     expect(guarded('grep', 'path', sessionPath('corpus/reference_bid/chunks/index.json'))).toBeUndefined()
-    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'), { offset: 1, limit: 1 })).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toContain('offset')
+    expect(guarded('grep', 'path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toContain('Chunk')
     expect(guarded('read', 'file_path', sessionPath('corpus/tender/chunks/chunk_0001.md'))).toContain('不可读取')
     expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toBeUndefined()
     expect(guarded('grep', 'path', sessionPath('corpus/outline_framework/chunks'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks'))).toContain('不可读取')
     expect(guarded('grep', 'path', sessionPath('corpus/tender/chunks'))).toContain('不可读取')
     expect(guarded('grep', 'path', sessionPath('corpus'))).toContain('只可检索')
-    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('账本')
+    expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('当前章节')
   })
 
   it('未映射资料的定位支持当前章节补搜，实际引用写入 metadata 且不改 S4', async () => {
@@ -1290,8 +1295,8 @@ describe('chapter-writing executor', () => {
         chunk_index_path: string
       }>
       expect(corpus.map(file => file.role)).toEqual(['reference', 'reference_bid'])
-      const snapshots = JSON.parse(lines.find(line => line.startsWith('Verified Web Snapshots：'))!.slice('Verified Web Snapshots：'.length)) as Array<{ web_ref: string; read_path: string }>
-      expect(snapshots[0]?.web_ref).toBe('W1')
+      const snapshots = JSON.parse(lines.find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ web_ref: string; read_path: string }>
+      expect(snapshots).toEqual([])
       const candidate = candidateFrom(request)
       if (!('metadata' in candidate)) throw new Error('expected writer candidate')
       if (!request.label?.endsWith('章节1')) return { stopReason: 'completed', output: [], structured: candidate }
@@ -1354,6 +1359,7 @@ describe('chapter-writing executor', () => {
         web_materials_used: [{
           source_id: 'WEB-aaaaaaaaaaaaaaaa',
           snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
+          chunk_refs: ['W:WEB-aaaaaaaaaaaaaaaa:C0001'],
           usage: 'reference',
           summary: '公开资料',
           supports: '章节方法',
@@ -1393,7 +1399,7 @@ describe('chapter-writing executor', () => {
       expect(prompt).not.toContain('corpus/tender')
       expect(prompt).toContain('Mapped Materials：')
       expect(prompt).toContain('Available Evidence Files：')
-      expect(prompt).toContain('Verified Web Snapshots：')
+      expect(prompt).toContain('Verified Web Chunks：')
       expect(prompt).toContain('Writing Dimensions：')
     }
     fixture.starts[0]!.resolve()
@@ -1465,6 +1471,7 @@ describe('chapter-writing executor', () => {
     expect(manifest.chapters[0]?.web_materials_used).toEqual([{
       source_id: ledger.sources[0]?.source_id,
       snapshot_path: ledger.sources[0]?.snapshot_path,
+      chunk_refs: [`W:${ledger.sources[0]?.source_id}:C0001`],
       usage: 'reference',
       summary: '官方正文摘要',
       supports: '公开技术要求',

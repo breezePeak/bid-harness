@@ -1,5 +1,6 @@
 /** 当前候选的只读证据包、规范 Checklist 和可分批修正的 Reviewer 记录。 */
 import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
@@ -12,6 +13,8 @@ import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './
 import { readChapterWebSource } from './chapter-writing-writer.ts'
 import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
+import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
+import { assertNoLinkedPath } from './workspace-path.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
 export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_acceptance_criteria', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
@@ -87,11 +90,21 @@ export async function buildChapterReviewEvidence(
   for (const material of candidate.metadata.web_materials_used) {
     const source = sources.find(source => source.source_id === material.source_id && source.snapshot_path === material.snapshot_path)
     if (source === undefined) throw new Error(`CHAPTER_REVIEW_EVIDENCE_MISSING: ${material.source_id}`)
-    if (pack.has(source.snapshot_path)) continue
-    pack.set(source.snapshot_path, {
-      locator: source.snapshot_path, category: 'web', allowed_claim_kinds: ['technical_fact'],
-      content: await readChapterWebSource(workspace, source), truncated: source.truncated,
-    })
+    const content = await readChapterWebSource(workspace, source)
+    const indexPath = join(workspace.projectRoot, webEvidenceChunkIndexPath(source.source_id))
+    await assertNoLinkedPath(workspace.root, indexPath)
+    const index = parseWebEvidenceChunkIndex(JSON.parse(await readFile(indexPath, 'utf8')))
+    if (!webEvidenceChunkIndexMatches(index, source, content)) throw new Error(`CHAPTER_REVIEW_EVIDENCE_INVALID: ${material.source_id}`)
+    for (const ref of material.chunk_refs) {
+      const chunk = index.chunks.find(chunk => chunk.chunk_ref === ref)
+      if (chunk === undefined) throw new Error(`CHAPTER_REVIEW_EVIDENCE_CHUNK_MISSING: ${ref}`)
+      const locator = `${source.snapshot_path}#${ref}`
+      if (pack.has(locator)) continue
+      pack.set(locator, {
+        locator, category: 'web', allowed_claim_kinds: ['technical_fact'],
+        content: content.slice(chunk.start_offset, chunk.end_offset), truncated: source.truncated,
+      })
+    }
   }
   for (const dependency of dependencies) {
     const locator = `chapter-handoff:${dependency.section_id}`

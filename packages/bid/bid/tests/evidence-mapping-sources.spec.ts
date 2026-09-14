@@ -6,6 +6,7 @@ import { BidWorkspace } from '../src/index.ts'
 import { resolveMappingCorpusLocations } from '../src/evidence-mapping-corpus.ts'
 import { buildMappingSourceIndex } from '../src/evidence-mapping-sources.ts'
 import { createMappingSourceTools, mappingSourceCatalog } from '../src/evidence-mapping-source-tools.ts'
+import type { S4WebResearchPool } from '../src/web-research-pool.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DocumentChunkEntry } from '../src/document-chunk.ts'
 
@@ -56,7 +57,7 @@ describe('S4 真实资料位置与受控引用', () => {
     await workspace.import([{ name: '旧标.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 总体\n\n业务范围 a.*\n\n## 实施\n\n步骤细节\n\n# 相邻\n\n相邻正文') }])
     const locations = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
     const catalog = mappingSourceCatalog(locations)[0]!
-    const [read, search] = createMappingSourceTools(locations, () => [])
+    const [read, search] = createMappingSourceTools(locations, {} as S4WebResearchPool, 'child')
     const exec = toolExec()
     const direct = await read!.execute({ source_ref: catalog.body_headings[0]!.direct_body.source_ref }, exec) as {
       body: string
@@ -86,7 +87,7 @@ describe('S4 真实资料位置与受控引用', () => {
     const body = '# 范围\n\n' + '长行内容。'.repeat(3000) + '\n\n' + Array.from({ length: 43 }, (_, index) => `匹配${index}`).join('\n')
     await workspace.import([{ name: '长资料.md', role: 'reference', bytes: new TextEncoder().encode(body) }])
     const locations = await resolveMappingCorpusLocations(workspace, await workspace.readManifest())
-    const [read, search] = createMappingSourceTools(locations, () => [])
+    const [read, search] = createMappingSourceTools(locations, {} as S4WebResearchPool, 'child')
     const exec = toolExec()
     let ref: string | undefined = mappingSourceCatalog(locations)[0]!.source_ref
     let text = ''

@@ -9,7 +9,7 @@ import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
-import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import type { LocalEvidenceMaterial, WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
@@ -25,6 +25,7 @@ import {
   webEvidenceContentSha256,
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
+import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -59,12 +60,18 @@ async function validateMaterial(
   }
 }
 
-async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEvidenceSource): Promise<boolean> {
+async function webSourceSnapshotValid(workspace: BidWorkspace, source: WebEvidenceSource, material: WebEvidenceMaterial): Promise<boolean> {
   try {
     const path = within(workspace.projectRoot, source.snapshot_path)
     await assertNoLinkedPath(workspace.root, path)
     if (!(await lstat(path)).isFile()) return false
-    return webEvidenceContentSha256(await readFile(path, 'utf8')) === source.content_sha256
+    const content = await readFile(path, 'utf8')
+    const index = parseWebEvidenceChunkIndex(JSON.parse(await readFile(
+      within(workspace.projectRoot, webEvidenceChunkIndexPath(source.source_id)), 'utf8',
+    )))
+    return webEvidenceContentSha256(content) === source.content_sha256
+      && webEvidenceChunkIndexMatches(index, source, content)
+      && material.chunk_refs.every(ref => index.chunks.some(chunk => chunk.chunk_ref === ref))
   } catch {
     return false
   }
@@ -89,7 +96,7 @@ async function validateWebMaterials(
     for (const material of chapter.web_materials_used) {
       const source = sources.find(candidate => candidate.source_id === material.source_id)
       if (source === undefined || source.snapshot_path !== material.snapshot_path
-        || !(await webSourceSnapshotValid(workspace, source))) {
+        || !(await webSourceSnapshotValid(workspace, source, material))) {
         reject(issues, 'CHAPTER_WRITING_WEB_SOURCE_UNVERIFIED', 'A chapter Web material must match a durable ledger Snapshot and its content hash.', 'analysis/web-evidence-sources.json')
       }
     }

@@ -13,7 +13,7 @@ function outline(): OutlineArtifact {
 }
 
 function evidence(value: OutlineArtifact): EvidenceMapArtifact {
-  return { schema_version: 10, section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
+  return { schema_version: 11, section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
 }
 
 it('14 个可写叶子生成 14 个独立 Mapping Task，S5 仍逐章节写作', () => {
