@@ -24,7 +24,7 @@ S5 的运行中计划修改和章节修订先写入 Run command journal，再唤
 
 每个 suspended Run 同时产生以 Run ID 派生的 `bid.run.notice`，Host restart 将孤儿 running Run 转为 suspended 时也生成同类通知。浏览器将这一单事件投影为 model-invisible 的聊天时间线行；用户停止使用中性样式，自动中断显示经统一脱敏的 code、message 和 issues。notice 记录被替代的 generic error turn，使同一次失败只显示一个主要错误节点。
 
-`Agent.cancel()` 在修改 inbox 或传播 abort 前同步发出带类型原因的 `agent/cancel-requested`。Bid Host 仅响应当前项目 operation 所属 Main Agent 的 user cause，因此聊天原生 Stop 同时停止公开回复与当前 Run；其他 Session、普通消息和暂停调度不会触发挂起。独立的 `stop_stage`、`retry_stage`、`bid_stop_stage` 及对应 Remote 不属于公开控制面。
+`Agent.cancel()` 在修改 inbox 或传播 abort 前同步发出带类型原因的 `agent/cancel-requested`。Bid Host 响应任一同项目 Interaction Session 的 user cause，因此聊天原生 Stop 同时停止公开回复与当前 Run；普通消息、聊天 Provider 错误和暂停调度不会触发挂起。独立的 `stop_stage`、`retry_stage`、`bid_stop_stage` 及对应 Remote 不属于公开控制面。Interaction Session 与 Execution Session 的所有权由[独立交互与执行通道](../bug-fix/2026-09-14-bid-interaction-execution-lanes.md)记录。
 
 挂起后的 Composer 保持可用。扁平 runtime 忠实投影 suspended Run，不以 Workflow 的 ready gate 改写为 pending；Bid 阶段栏只读取该 Host Projection，Main Agent 的运行状态只产生独立恢复检查提示，不能改变阶段文案、状态点或进度卡。`bid.run.suspended` 提供即时更新，持久化后的 `bid.project.resumed` 即使逻辑状态相同也再发布 suspended 权威投影；重连仍以基线 snapshot 补齐，不增加轮询。阶段栏的“继续未完成任务”只发送明确继续消息，不直接调用 Host Remote；Main Agent 仍先用阶段检查读取有界状态，再根据完整聊天语义决定是否调用 `bid_resume_current_run`。工具必须携带 suspended Run ID 与 expected project revision。S4 进度在挂起后保留完成数、失败数与失败任务负责的 Section，并停止运行态轮询和动画。Host 持锁重读项目并执行 CAS，身份或 revision 改变就拒绝。Host 启动发现 running 或 cancelling 只写 `host_restart` 挂起，不自动恢复。
 
@@ -50,4 +50,4 @@ Workflow 业务进度不会因用户停止、Host 重启或可恢复执行错误
 
 Run 的内存执行栈、Promise、调度门和 wake queue 不会跨 Host 重启恢复；只有请求、工作树、检查点和 command journal 可复用。Parser 即使在 Stop 后短暂完成，也只能留下 Run staging，不能发布正式结果。写作要求 marker 绑定已 flush 的 prompt event；新 Session 无法证明该事件时会重新询问。Provider 是否可重试不在阶段实现里按错误文本猜测，未来若需要自动退避，应由拥有 Provider 协议和预算的统一层提供。
 
-本记录改变了[Workspace 项目状态](2026-09-03-bid-workspace-project.md)的磁盘格式与中断恢复方式，并取代[全阶段 Main Agent 实时交错](../feature/2026-09-11-bid-all-stage-main-agent-steer.md)中的独立阶段停止工具和重试动作；[S4 未完成任务的恢复指引](../bug-fix/2026-09-14-bid-s4-incomplete-repair-guidance.md)补充 Child 未完成提交的顺序指引与继续消息。两份记录的 Workspace 所有权、项目锁与实时消息交错决定仍然有效。
+本记录改变了[Workspace 项目状态](2026-09-03-bid-workspace-project.md)的磁盘格式与中断恢复方式，并取代[全阶段 Main Agent 交互](../feature/2026-09-11-bid-all-stage-main-agent-steer.md)中的独立阶段停止工具和重试动作；[S4 未完成任务的恢复指引](../bug-fix/2026-09-14-bid-s4-incomplete-repair-guidance.md)补充 Child 未完成提交的顺序指引与继续消息。Workspace 所有权与项目锁仍由这些记录共同约束，运行期会话隔离由[独立交互与执行通道](../bug-fix/2026-09-14-bid-interaction-execution-lanes.md)拥有。

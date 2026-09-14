@@ -704,6 +704,8 @@ interface ActiveBidOperation {
   readonly settle: () => void
   reservedForReset: boolean
   interaction?: boolean
+  executionSessionId?: SessionId
+  executionHandle?: AgentHandle
   readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
   readonly runs: BidRunCoordinator
@@ -1413,7 +1415,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const workspace = new BidWorkspace(key, workspaceConfig(this.config))
     const continuableChildren = new Set<SessionId>()
     const stopTrackingContinuableChildren = this.ctx.on('agent/created', ({ agent }) => {
-      if (agent.session.header.origin === 'subagent' && agent.session.header.parentSession === session.id) {
+      if (agent.session.header.origin === 'subagent'
+        && agent.session.header.parentSession === holder.current?.executionSessionId) {
         continuableChildren.add(agent.id)
       }
     }, { global: true })
@@ -1423,7 +1426,7 @@ export class BidHostRuntime extends TypertRemoteService {
       stageControl,
       {
         drain: async () => {
-          const agent = this.ctx.agents.get(session.id)
+          const agent = holder.current?.executionHandle?.agent
           if (agent !== undefined) await this.ctx.subagents.drainContinuableChildren(agent, [...continuableChildren])
         },
       },
@@ -1434,6 +1437,7 @@ export class BidHostRuntime extends TypertRemoteService {
       },
       controller.signal,
       { workspaceRoot: workspace.root, projectRoot: workspace.projectRoot },
+      () => holder.current?.executionSessionId,
     )
     const operation: ActiveBidOperation = {
       key,
@@ -1455,6 +1459,42 @@ export class BidHostRuntime extends TypertRemoteService {
     return operation
   }
 
+  /** 延迟创建 Host 持有的执行通道，不占用聊天 Agent。 */
+  private async executionAgent(operation: ActiveBidOperation): Promise<Agent> {
+    if (operation.executionHandle !== undefined) return operation.executionHandle.agent
+    const interaction = this.ctx.agents.get(operation.session.id)
+    if (interaction === undefined) throw new Error('Bid interaction Session has no live Agent.')
+    const executionSessionId = SessionId(randomUUID())
+    operation.executionSessionId = executionSessionId
+    try {
+      const handle = await this.ctx.agents.create({
+        sessionId: executionSessionId,
+        agentOptions: interaction.options,
+        meta: {
+          cwd: operation.workspace.root,
+          ...(operation.session.header.agentPreset === undefined ? {} : {
+            agentPreset: operation.session.header.agentPreset,
+          }),
+          parentSession: operation.session.id,
+          origin: 'subagent',
+        },
+      })
+      handle.agent.ctx.on('agent/pre-step', async ({ agent }, next) => {
+        const decision = await next()
+        if (agent !== handle.agent || decision.kind === 'reject') return decision
+        const messages = decision.messages.filter(message =>
+          message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
+        if (messages.length === decision.messages.length) return decision
+        return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
+      })
+      operation.executionHandle = handle
+      return handle.agent
+    } catch (error) {
+      delete operation.executionSessionId
+      throw error
+    }
+  }
+
   /** 先持久化稳定状态，再释放项目；重置接管期间保留锁。 */
   private async finishOperation(_session: Session, operation: ActiveBidOperation, persist = true): Promise<void> {
     const key = operation.key
@@ -1469,9 +1509,13 @@ export class BidHostRuntime extends TypertRemoteService {
         if (operation.suspension === undefined) await this.checkpoint(operation)
       }
     } finally {
-      operation.stopTrackingContinuableChildren()
-      if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
-      operation.settle()
+      try {
+        operation.stopTrackingContinuableChildren()
+        await operation.executionHandle?.dispose()
+      } finally {
+        if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
+        operation.settle()
+      }
     }
   }
 
@@ -1568,16 +1612,6 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('session/prompt-admission', ({ session }) => {
       if (!isBidHostSession(session)) return
       const projection = getBidClientProjection(bidSessionControlState(session))
-      const cwd = session.header.cwd
-      if (cwd !== undefined) {
-        const key = projectKey(session)
-        const active = this.inFlight.get(key)
-        if (active !== undefined) {
-          if (active.session !== session) {
-            return { reason: 'bid.stage_running', message: '当前项目正由另一会话执行阶段任务。' }
-          }
-        }
-      }
       if (projection.composer.enabled) return
       const reason = projection.composer.reason
       return {
@@ -1619,7 +1653,7 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('agent/cancel-requested', ({ agent, cause }) => {
       if (cause.kind !== 'user' || !isBidMainSession(agent.session)) return
       const operation = this.inFlight.get(projectKey(agent.session))
-      if (operation?.session !== agent.session || operation.runs.current === undefined) return
+      if (operation?.runs.current === undefined) return
       operation.suspension ??= operation.runs.suspend('user_stop').catch((error: unknown) => {
         ctx.logger.warn(`Bid Run 停止收敛失败：${String(error)}`)
       })
@@ -1743,7 +1777,6 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     const active = this.inFlight.get(key)
     if (request.action === 'bid_stage_inspect') {
-      if (active !== undefined && active.session !== session) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目正由另一会话执行写作。')
       const workspace = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
       return {
         ...await inspectBidStage(workspace, session, request.reference, request.view),
@@ -1752,7 +1785,7 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     if (active !== undefined) {
       const activeRuntime = bidSessionRuntime(active.session)
-      if (active.session !== session || (request.action !== 'bid_confirm_writing_plan' && request.action !== 'bid_revise_chapter')
+      if ((request.action !== 'bid_confirm_writing_plan' && request.action !== 'bid_revise_chapter')
          || activeRuntime.stage !== 'chapter_writing' || activeRuntime.status !== 'running') {
         throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
       }
@@ -1898,11 +1931,12 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       signal.throwIfAborted()
       const work = await persistHostWork(workspace, request.action === 'bid_evidence_remap' ? 'evidence_remap' : 'outline_regeneration', runtime.stage, request)
+      const executionAgent = await this.executionAgent(operation)
       const admittedRun = await operation.runs.start(work)
       run = admittedRun
       started = true
       const mutation = await admittedRun.activities.track(() => executeOutlineInteractionCandidate(
-        agent,
+        executionAgent,
         workspace,
         request,
         admittedRun,
@@ -1953,7 +1987,8 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       if (runtime.status !== 'pending' || runtime.stage === 'file_intake') return
       driven = true
-      const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal)
+      const executionAgent = await this.executionAgent(operation)
+      const orchestrator = this.automaticOrchestrator(executionAgent, workspace, operation.controller.signal)
       const next = runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace)
         ? await orchestrator.runConfirmedStage()
         : await orchestrator.drive()
@@ -1975,7 +2010,7 @@ export class BidHostRuntime extends TypertRemoteService {
     let importedFiles: ImportedFile[] = []
     const operation = this.inFlight.get(projectKey(agent.session))
     return new BidOrchestrator(
-      agent.session,
+      operation?.session ?? agent.session,
       {
         canExecute: stage => stage === 'file_intake' || stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: async (task, run) => {
@@ -2050,10 +2085,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (operation === undefined) {
       return { ok: false, error: { code: 'BID_STAGE_CONTROL_NOT_ALLOWED', message: '当前没有正在运行的阶段任务。' } }
     }
-    if (operation.session !== session) {
-      return { ok: false, error: { code: 'BID_STAGE_OWNED_BY_ANOTHER_SESSION', message: '当前阶段任务由另一会话持有。' } }
-    }
-    const runtime = bidSessionRuntime(session)
+    const runtime = bidSessionRuntime(operation.session)
     if (runtime.status !== 'running') {
       return { ok: false, error: { code: 'BID_STAGE_CONTROL_NOT_ALLOWED', message: '当前阶段不处于运行状态。' } }
     }
@@ -2211,10 +2243,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!getBidClientProjection(runtime).allowedActions.includes('auto_start_chapter_writing')) {
         return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED', message: 'Automatic chapter writing is not allowed in the current Bid stage state.' })
       }
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) {
-        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: 'Bid Session has no live Agent.' })
-      }
+      const agent = await this.executionAgent(operation)
       const current = await confirmedOutline(operation.workspace)
       const plan = createAutomaticWritingPlan(current.outline, current.sha256)
       const issues = validateWritingPlan(plan, current.outline)
@@ -2258,10 +2287,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!getBidClientProjection(runtime).allowedActions.includes('start_stage')) {
         return stageStartResult({ ok: false, code: 'BID_STAGE_START_NOT_ALLOWED', message: 'The current stage is not waiting for a post-reset start.' })
       }
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) {
-        return stageStartResult({ ok: false, code: 'BID_STAGE_START_FAILED', message: 'Bid Session has no live Agent.' })
-      }
+      const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).startResetStage()
       await this.ctx.sessions.flush(session)
@@ -2330,8 +2356,7 @@ export class BidHostRuntime extends TypertRemoteService {
         )
       }
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const agent = await this.executionAgent(operation)
       validateBidFileBatch(incoming, workspace.config)
       const intakeWork = await persistFileIntakeWork(workspace, incoming)
       let imported: ImportedFile[] = []
@@ -2593,8 +2618,7 @@ export class BidHostRuntime extends TypertRemoteService {
         || suspended.runId !== suspendedRunId) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'The suspended Bid Run changed before resume.')
       if (suspended.work.kind === 'file_intake') await readFileIntakeWork(operation.workspace, suspended.work)
       else await readHostWork(operation.workspace, suspended.work)
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) throw new Error('Bid Session has no live Agent.')
+      const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       if (runtime.stage === 'chapter_writing') recoverOverflowedBidStageContext(session, runtime.stage)
       admitted = true
@@ -3387,8 +3411,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_tender_analysis')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Tender-analysis confirmation is not allowed in the current Bid stage state.' } }
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const projectPath = within(workspace.projectRoot, 'analysis/project.json')
       const requirementsPath = within(workspace.projectRoot, 'analysis/requirements.json')
@@ -3547,8 +3570,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }
@@ -3612,8 +3634,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('regenerate_outline')) return { ok: false, error: { code: 'BID_REGENERATE_NOT_ALLOWED', message: 'Outline regeneration is not allowed in the current Bid stage state.' } }
-      const agent = this.ctx.agents.get(session.id)
-      if (agent === undefined) throw new Error('Bid Session has no live Agent')
+      const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const draft = await getOrCreateOutlineDraft(workspace)
       if (request.expected_revision !== draft.revision || request.expected_draft_sha256 !== draft.draft_outline_sha256) return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', message: 'The outline draft changed in another browser.', current: draft } }

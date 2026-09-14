@@ -324,8 +324,9 @@ async function inspectBidStageValue(
   const mappingProgress = runtime.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
   const mappingTasks = runtime.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
   const sections = draft?.outline.sections ?? []
+  const includeMappingDetails = view === 'task_contract_context' || runtime.status === 'waiting_user'
   const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
-    evidence: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappings.get(item.section.id) ?? null : undefined,
+    ...(includeMappingDetails ? { evidence: mappings.get(item.section.id) ?? null } : {}),
     local_material_count: mappings.get(item.section.id)?.local_materials.length ?? 0,
     web_material_count: mappings.get(item.section.id)?.web_materials.length ?? 0,
   }))
@@ -349,15 +350,14 @@ async function inspectBidStageValue(
       outline_sections: sections.length,
       evidence_mappings: evidence?.section_mappings.length ?? 0,
     },
-    ...(view === 'task_contract_context' || runtime.status === 'waiting_user'
+    ...(includeMappingDetails
       ? { project, requirements, scoring, compliance, response_points, draft } : {}),
     sections: sectionSummary,
     writable_section_ids: sections.filter(item => item.writable)
-      .slice(0, view === 'task_contract_context' || runtime.status === 'waiting_user' ? sections.length : MAX_INSPECT_SECTIONS)
+      .slice(0, includeMappingDetails ? sections.length : MAX_INSPECT_SECTIONS)
       .map(item => item.id),
-    mapping_plan: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappingPlan : undefined,
+    ...(includeMappingDetails ? { mapping_plan: mappingPlan, mapping_tasks: mappingTasks.slice(-MAX_INSPECT_SECTIONS) } : {}),
     mapping_progress: mappingProgress,
-    mapping_tasks: view === 'task_contract_context' || runtime.status === 'waiting_user' ? mappingTasks.slice(-MAX_INSPECT_SECTIONS) : undefined,
   }
 }
 

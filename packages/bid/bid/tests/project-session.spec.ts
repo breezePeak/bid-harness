@@ -84,13 +84,14 @@ class ProjectSessionAdapter extends LlmAdapter {
   onRequest?: () => void
   childGate?: Promise<void>
   onChildRequest?: () => void
+  isExecutionSession?: (sessionId: string) => boolean
 
   override resolveModel(provider: string, model: string) {
     return Promise.resolve({ provider, id: model, name: model })
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (!this.mainSessionIds.has(String(options.sessionId))) {
+    if (!this.mainSessionIds.has(String(options.sessionId)) && this.isExecutionSession?.(String(options.sessionId)) !== true) {
       this.onChildRequest?.()
       await this.childGate
       yield* answer('S4 Mapping Child 已完成。')
@@ -183,21 +184,29 @@ async function fixture(options: { readonly realOrchestrator?: boolean } = {}) {
   await ctx.plugin(BidHostRuntime)
   const workspace = new BidWorkspace(root)
   const host = ctx.bid as unknown as HostExecution
+  adapter.isExecutionSession = sessionId => [...host.inFlight.values()].some(candidate =>
+    (candidate as { executionSessionId?: string }).executionSessionId === sessionId)
   const executeStage = vi.fn<BidStageExecutorPort['execute']>(async () => [])
   const executor = { canExecute: (_stage: BidStage): boolean => false, execute: executeStage } satisfies BidStageExecutorPort
   const validator: BidStageValidatorPort = { validate: async () => ({ ok: true, issues: [] }) }
-  if (options.realOrchestrator !== true) host.automaticOrchestrator = (agent, current, signal) => new BidOrchestrator(agent.session, {
-    canExecute: stage => executor.canExecute(stage),
-    execute: async (task, run) => {
-      await run.scheduler.waitUntilRunnable(run.signal)
-      return executor.execute(task, run)
-    },
-  }, {
-    validate: (stage, artifacts) => stage === 'tender_analysis' ? validateTenderAnalysis(current, stage, artifacts) : validator.validate(stage, artifacts),
-  }, signal, (fromStage, toStage) => prepareBidStageContextTransition(agent.session, current, fromStage, toStage),
-  ([...host.inFlight.values()].find(candidate =>
-    (candidate as { session: Session }).session === agent.session) as { runs: BidRunCoordinator }).runs,
-  stage => persistStageExecutionWork(current, stage))
+  if (options.realOrchestrator !== true) host.automaticOrchestrator = (agent, current, signal) => {
+    const operation = [...host.inFlight.values()].find(candidate =>
+      (candidate as { executionSessionId?: string }).executionSessionId === agent.id) as {
+        session: Session
+        runs: BidRunCoordinator
+      } | undefined
+    if (operation === undefined) throw new Error('测试未找到 execution lane 所属操作')
+    return new BidOrchestrator(operation.session, {
+      canExecute: stage => executor.canExecute(stage),
+      execute: async (task, run) => {
+        await run.scheduler.waitUntilRunnable(run.signal)
+        return executor.execute(task, run)
+      },
+    }, {
+      validate: (stage, artifacts) => stage === 'tender_analysis' ? validateTenderAnalysis(current, stage, artifacts) : validator.validate(stage, artifacts),
+    }, signal, (fromStage, toStage) => prepareBidStageContextTransition(agent.session, current, fromStage, toStage),
+    operation.runs, stage => persistStageExecutionWork(current, stage))
+  }
   const fresh = async (id: string, cwd = root, waitForIdle = true) => {
     adapter.mainSessionIds.add(id)
     const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId(id), agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd, agentPreset: 'bid' } })
@@ -386,6 +395,13 @@ describe('Workspace 项目与独立 Session', () => {
     })
     const activeState = await readBidProjectState(workspace)
     if (activeState?.run?.status !== 'running') throw new Error('测试项目没有活动 Run')
+    expect(activeState.run).toMatchObject({ interactionSessionId: owner.id })
+    expect(activeState.run.executionSessionId).toBeTruthy()
+    expect(activeState.run.executionSessionId).not.toBe(owner.id)
+    expect(ctx.agents.get(SessionId(activeState.run.executionSessionId!))?.session.header).toMatchObject({
+      parentSession: owner.id,
+      origin: 'subagent',
+    })
 
     const observer = await fresh('active-observer', workspace.root, false)
     const mirrored = observer.session.events.findLast(event => event.type === 'bid.project.resumed')
@@ -456,7 +472,9 @@ describe('Workspace 项目与独立 Session', () => {
     const s3Contexts: string[] = []
     executor.canExecute = stage => stage === 'outline_generation'
     executor.execute = vi.fn(async () => {
-      s3Contexts.push(JSON.stringify(b.session.deriveMessages()))
+      const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === b.id)
+      if (execution === undefined) throw new Error('S3 execution lane 未创建')
+      s3Contexts.push(JSON.stringify(execution.session.deriveMessages()))
       if (s3Contexts.length === 1) throw new Error('模拟 S3 模型失败')
       return []
     })
@@ -469,13 +487,13 @@ describe('Workspace 项目与独立 Session', () => {
     expect(confirmedScoring.scoring_items.map(item => item.id)).toEqual(['SCORE-1'])
     await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(JSON.stringify(b.session.deriveMessages())).not.toContain('SC-009')
-    expect(JSON.stringify(b.session.deriveMessages())).toContain('analysis/scoring.json')
+    expect(JSON.stringify(b.session.deriveMessages())).toContain('SC-009')
+    expect(JSON.stringify(b.session.deriveMessages())).not.toContain('analysis/scoring.json')
     expect(JSON.stringify(b.session.events)).toContain('SC-009')
     expect(await resumeRun(ctx, b.session)).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
     expect(s3Contexts).toHaveLength(2)
     expect(s3Contexts.every(context => !context.includes('SC-009'))).toBe(true)
-    expect(s3Contexts.every(context => context.includes('analysis/scoring.json'))).toBe(true)
+    expect(s3Contexts.some(context => context.includes('analysis/scoring.json'))).toBe(true)
     expect((await readBidProjectState(workspace))!.revision).toBeGreaterThan(before)
     expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user' })
     const c = await fresh('session-c')
@@ -1010,27 +1028,37 @@ describe('Workspace 项目与独立 Session', () => {
       expect(host.inFlight.size).toBe(1)
     })
 
-    const admission = ctx.serial('session/prompt-admission', {
-      session: agent.session,
-      mode: 'steer',
-      content: [{ type: 'text', text: '现在写到哪了？' }],
-    })
-    await expect(admission).resolves.toBeUndefined()
-    adapter.script.push(
-      toolCall('bid_stage_inspect', { view: 'summary' }),
-      answer('正文仍在写作，当前任务继续运行。'),
-    )
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: '现在写到哪了？' }],
-      source: { kind: 'user' },
-    }))
-    await agent.whenIdle()
+    for (const [question, response] of [
+      ['现在写到哪了？', '正文仍在写作，当前任务继续运行。'],
+      ['这一章大概多少页？', '页数估算可从当前项目快照读取。'],
+      ['为什么这个章节这么慢？', '当前章节仍在执行审核步骤。'],
+    ] as const) {
+      await expect(ctx.serial('session/prompt-admission', {
+        session: agent.session,
+        mode: 'steer',
+        content: [{ type: 'text', text: question }],
+      })).resolves.toBeUndefined()
+      adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer(response))
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: question }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(agent.session.deriveMessages().at(-1)?.content).toContainEqual({ type: 'text', text: response })
+    }
 
     expect(adapter.script).toEqual([])
     expect(agent.session.events.some(event => event.type === 'tool/call' && event.data.name === 'bid_stage_inspect')).toBe(true)
-    expect(agent.session.deriveMessages().at(-1)?.content).toContainEqual({ type: 'text', text: '正文仍在写作，当前任务继续运行。' })
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.size).toBe(1)
+    expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+
+    const replyErrors: unknown[] = []
+    const stopErrorCapture = ctx.on('agent/error', ({ agent: subject, error }) => {
+      if (subject === agent) replyErrors.push(error)
+    })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '模拟一次聊天服务失败' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    stopErrorCapture()
+    expect(replyErrors).toHaveLength(1)
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
     gate.resolve([])
     await retry
@@ -1042,7 +1070,7 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it.each(['tender_analysis', 'outline_generation'] as const)(
-    '%s 运行任务未完成时同 Session 先回答，另一 Session 不能 steer',
+    '%s 运行任务未完成时任一项目聊天 Session 都能立即回答',
     async (stage: BidStage) => {
       const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
       await seedProjectArtifacts(workspace)
@@ -1063,14 +1091,20 @@ describe('Workspace 项目与独立 Session', () => {
       const other = await fresh(`other-${stage}`, workspace.root, false)
       await expect(ctx.serial('session/prompt-admission', {
         session: other.session, mode: 'steer', content: [{ type: 'text', text: '查看进度' }],
-      })).resolves.toMatchObject({ reason: 'bid.stage_running' })
+      })).resolves.toBeUndefined()
 
       adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('当前阶段仍在执行，后台任务未停止。'))
       agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在做到哪了？' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
+      adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('另一个聊天也能读取同一项目进度。'))
+      other.steer(createUserMessage({ content: [{ type: 'text', text: '查看进度' }], source: { kind: 'user' } }))
+      await other.whenIdle()
+
       expect(agent.session.deriveMessages().at(-1)?.content)
         .toContainEqual({ type: 'text', text: '当前阶段仍在执行，后台任务未停止。' })
+      expect(other.session.deriveMessages().at(-1)?.content)
+        .toContainEqual({ type: 'text', text: '另一个聊天也能读取同一项目进度。' })
       expect(runtime(agent.session)).toEqual({ stage, status: 'running' })
       expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
       expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(artifactBefore)
@@ -1171,7 +1205,9 @@ describe('Workspace 项目与独立 Session', () => {
     executor.execute.mockRejectedValueOnce(new Error('mapping transport failed'))
 
     await expect(resumeRun(ctx, agent.session)).resolves.toMatchObject({ ok: true })
-    await vi.waitFor(() => { expect(drainChildren).toHaveBeenCalledWith(agent, []) })
+    await vi.waitFor(() => { expect(drainChildren).toHaveBeenCalledOnce() })
+    expect(drainChildren.mock.calls[0]?.[0].id).not.toBe(agent.id)
+    expect(drainChildren.mock.calls[0]?.[1]).toEqual([])
 
     expect(drainDescendants).not.toHaveBeenCalled()
   })
@@ -1207,6 +1243,16 @@ describe('Workspace 项目与独立 Session', () => {
       const childId = await childReady.promise
       await childStarted.promise
       expect(ctx.agents.get(childId)).toBeDefined()
+
+      const inspection = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'summary' },
+        callId: CallId('live-evidence-inspect'),
+        signal: new AbortController().signal,
+      })
+      if (inspection.isError) throw new Error(JSON.stringify(inspection))
+      expect(JSON.parse(JSON.stringify(inspection.value))).toEqual(inspection.value)
 
       adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('Mapping Child 仍在后台执行。'))
       agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在查到哪里了？' }], source: { kind: 'user' } }))
@@ -1256,7 +1302,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
   })
 
-  it('停止当前回复不取消 S4 operation 或后台任务', async () => {
+  it('聊天 Stop 同时取消当前回复与 S4 execution lane', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -1278,13 +1324,16 @@ describe('Workspace 项目与独立 Session', () => {
     responseGate.resolve(undefined)
     await agent.whenIdle()
 
-    expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
-    expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
+    const run = executeStage.mock.calls[0]?.[1]
+    if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
+    await vi.waitFor(() => { expect(run.signal.aborted).toBe(true) })
     stageGate.resolve([])
     await retry
+    expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'suspended', failureReason: undefined })
+    expect(host.inFlight.size).toBe(0)
   })
 
-  it('聊天原生停止只挂起同 Session 的 Run，并保留可恢复身份', async () => {
+  it('同项目任一 Interaction Session 的 Stop 都挂起唯一 Run', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -1299,8 +1348,6 @@ describe('Workspace 项目与独立 Session', () => {
 
     const other = await fresh('stop-stage-other', workspace.root, false)
     other.cancel({ kind: 'user' })
-    expect(run.signal.aborted).toBe(false)
-    agent.cancel({ kind: 'user' })
     await vi.waitFor(() => { expect(run.signal.aborted).toBe(true) })
     stageGate.resolve([])
     await resumed

@@ -99,6 +99,10 @@ export interface BidWorkDescriptor {
 /** Persisted identity and settlement of one stage execution attempt. */
 export interface BidRunSnapshot {
   readonly runId: string
+  /** 接纳 Run 且持续处理公开聊天的顶层 Session。 */
+  readonly interactionSessionId?: string | undefined
+  /** Host 持有且执行 Run 模型工作的 Session。 */
+  readonly executionSessionId?: string | undefined
   readonly stage: BidStage
   readonly epoch: number
   readonly baseProjectRevision: number

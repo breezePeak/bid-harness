@@ -39,7 +39,7 @@ The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-
 
 ### 执行与恢复所有权
 
-每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。Run 启动后，执行器、Main Agent、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
+每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。每个 Run 的持久化快照记录 Interaction Session 与 Execution Session 身份；Host 在 Execution Session 中运行执行器及其 Child、Writer 和 Reviewer，Interaction Session 始终可处理项目聊天。Run 启动后，执行器、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
 
 Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先对 commit intent 前滚或清理未提交批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。
 
@@ -55,13 +55,13 @@ Word 模板上传、模板库选择、格式确认、独立格式建议和导出
 
 ### 全阶段 Main Agent 交互
 
-S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。消息通过正式 `Agent.steer()` 和 inbox 进入当前项目的同一个 Main Agent；运行中的 Stage operation、Child、Writer 与 Reviewer 保持原有生命周期，另一 Session 不能向持锁会话插话。运行态和完成态公开回合只挂载当前阶段工具，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
+S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合只挂载当前阶段工具，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
 
-S2、S3 和 S5 的 Main Agent 私有协议在 inbox claim 边界切换公开回合：连续用户消息保持原顺序，内部消息退回 `next-turn`，未完成的工具链在公开回复后恢复。Child 完成通知不会抢占同一 Main Agent 的用户回复；协议完成、公开回复停止及阶段 operation 分别结算，不以 `whenIdle()` 互相等待。
+S2、S3 和 S5 的私有协议只在 Execution Session 中运行；其 continuation、工具切换及 Child 完成通知不进入 Interaction Session。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
-普通消息只由模型判断问答、受控修改或恢复，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与同 Session 的活动 Run；Host 先退休提交权限，再关闭调度、取消后台任务并持久化挂起。Main Agent 检查挂起状态后，可携带精确 Run ID 与项目 revision 调用 `bid_resume_current_run`。
+普通消息只由模型判断问答、受控修改或恢复，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。Main Agent 检查挂起状态后，可携带精确 Run ID 与项目 revision 调用 `bid_resume_current_run`。
 
 S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录、S4 Blueprint 与 Evidence 解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
 

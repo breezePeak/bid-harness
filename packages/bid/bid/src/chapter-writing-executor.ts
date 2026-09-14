@@ -82,7 +82,7 @@ import {
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
 import { parseWritingPlan, validateWritingPlan, type WritingPlan } from './writing-requirements.ts'
-import { runMainAgentProtocol } from './main-agent-interleave.ts'
+import { runMainAgentProtocol } from './main-agent-protocol.ts'
 import {
   attachChapterWritingCompletionReview,
   CHAPTER_WRITING_COMPLETION_TOOLS,

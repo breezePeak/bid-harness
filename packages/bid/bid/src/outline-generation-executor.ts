@@ -38,7 +38,7 @@ import { applyOutlineRepair, outlineRepairOperationSchema, outlineAssociationRep
 import { inspectOutlineCandidate, applyOutlineCandidateRepair, outlineCandidateRepairSchema, parseOutlineFormatRepair } from './outline-candidate-repair.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
-import { installMainAgentInterleave } from './main-agent-interleave.ts'
+import { installMainAgentProtocol } from './main-agent-protocol.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
@@ -374,7 +374,6 @@ export async function executeOutlineGeneration(
     privateTask?: {
       readonly names: readonly string[]
       readonly setEnabled: (enabled: boolean) => void
-      readonly complete: () => boolean
     },
   ): Promise<void> => {
     options.run.signal.throwIfAborted()
@@ -393,25 +392,23 @@ export async function executeOutlineGeneration(
       relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
     ), prompt)
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
-    const interleave = installMainAgentInterleave(agent, {
+    const protocol = installMainAgentProtocol(agent, {
       privateTools: privateTask?.names ?? [],
       setPrivateToolsEnabled: privateTask?.setEnabled,
-      isInternalComplete: privateTask?.complete,
-      resumePrompt: '继续当前 S3 内部目录任务。先检查已写候选，只完成尚未结束的读取、局部写入或质量提交；不要重复已经完成的工作。',
       label: 'S3 Outline Generation',
     })
-    interleave.own(message)
+    protocol.own(message)
     const unbindMainAgent = options.run.bindMainAgent({
       cancel: () => { agent.cancel({ kind: 'hook', reason: 'bid-run-suspended' }, { keepInbox: true }) },
       whenIdle: () => agent.whenIdle(),
-      discardOwnedInbox: () => { interleave.discardOwnedInbox() },
+      discardOwnedInbox: () => { protocol.discardOwnedInbox() },
     })
     try {
       agent.followup(message)
       await waitForModelStageIdle(agent, options.run.signal)
     } finally {
       unbindMainAgent()
-      interleave.dispose()
+      protocol.dispose()
     }
     const end = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
     if (end?.data.reason.kind !== 'completed') {
@@ -454,7 +451,6 @@ export async function executeOutlineGeneration(
       await run(prompt, [OUTLINE_ARTIFACT], {
         names: [QUALITY_REPORT_TOOL],
         setEnabled,
-        complete: () => qualityIssues !== undefined,
       })
     } finally {
       setEnabled(false)

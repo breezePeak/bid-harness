@@ -49,6 +49,8 @@ export const bidWorkflowSchema = z.object({
 /** Durable identity and settlement schema for one Bid Run. */
 export const bidRunSchema = z.object({
   runId: z.string().min(1),
+  interactionSessionId: z.string().min(1).optional(),
+  executionSessionId: z.string().min(1).optional(),
   stage: z.enum(BID_STAGES),
   epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   baseProjectRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),

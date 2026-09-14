@@ -262,6 +262,7 @@ export class BidRunCoordinator {
     private readonly checkpoint?: BidRunCheckpoint,
     private readonly parentSignal?: AbortSignal,
     private readonly publication?: { readonly workspaceRoot: string; readonly projectRoot: string },
+    private readonly executionSessionId?: () => string | undefined,
   ) {}
 
   /** Current live Run, if any. */
@@ -290,8 +291,11 @@ export class BidRunCoordinator {
     // isolated tests, where the current revision remains its authority.
     const controlRevision = this.checkpoint === undefined ? baseProjectRevision : baseProjectRevision + 1
     const now = Date.now()
+    const executionSessionId = this.executionSessionId?.()
     const snapshot: BidRunSnapshot = {
       runId: randomUUID(),
+      interactionSessionId: this.session.id,
+      ...(executionSessionId === undefined ? {} : { executionSessionId }),
       stage: work.stage,
       work,
       epoch,
