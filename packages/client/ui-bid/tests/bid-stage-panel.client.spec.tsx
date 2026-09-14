@@ -365,6 +365,7 @@ describe('BidStagePanel', () => {
   })
 
   it('S4 挂起且 Main Agent 运行时保留进度、原因和失败 Section，不显示阶段处理中', async () => {
+    const resumeRun = vi.fn(async () => {})
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
@@ -381,6 +382,7 @@ describe('BidStagePanel', () => {
       allowedActions: ['send_message'], composer: { enabled: true },
     }), {
       getEvidenceMappingProgress,
+      resumeRun,
       useSessions: ((selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
         selector({ byId: { session_bid: { agentPreset: 'bid', running: true } } })) as BidStagePanelProps['useSessions'],
     })} />)
@@ -395,6 +397,8 @@ describe('BidStagePanel', () => {
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
+    fireEvent.click(screen.getByRole('button', { name: '继续未完成任务' }))
+    await waitFor(() => { expect(resumeRun).toHaveBeenCalledOnce() })
   })
 
   it.each([
@@ -914,12 +918,14 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'running' as const } },
       })
+    const resumeMessage = vi.fn(async () => {})
     const conversationRegister = vi.fn(() => () => {})
     const ctx = {
       effect: (factory: () => unknown) => factory(),
       conversationEvents: { register: conversationRegister },
       locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set } },
+      sessions: { scope: () => ({ get: () => ({ send: resumeMessage }) }) },
       remote: { bid: {
         startStage: remoteStart,
         requestWritingRequirements: remoteRequestWritingRequirements,
@@ -949,6 +955,7 @@ describe('ui-bid browser plugin', () => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
         startStage: () => Promise<void>
+        resumeRun: () => Promise<void>
         requestWritingRequirements: () => Promise<void>
         autoStartChapterWriting: () => Promise<void>
       }
@@ -1010,6 +1017,8 @@ describe('ui-bid browser plugin', () => {
 
     await injected.startStage()
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
+    await injected.resumeRun()
+    expect(resumeMessage).toHaveBeenCalledWith('继续未完成任务。')
     await injected.requestWritingRequirements()
     expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
     await injected.autoStartChapterWriting()

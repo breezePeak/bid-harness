@@ -10,6 +10,7 @@ import {
   type BidStageTask,
   type StageValidationResult,
 } from '@deepseek-ai/dsh-bid'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { BidEvidenceMappingProgress, BidRunNotice } from '@deepseek-ai/dsh-bid/control-plane'
 
@@ -64,6 +65,10 @@ describe('bid control-plane public contract', () => {
       'bid.user_confirmation.required',
       'bid.user_confirmation.received',
     ])
+  })
+
+  it('keeps every Bid durable event readable by the persistence runtime', () => {
+    expect(BID_SESSION_EVENT_TYPES.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
   })
 
   it('expresses a stage policy and task through the package entry', () => {

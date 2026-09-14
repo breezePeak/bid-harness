@@ -2084,15 +2084,51 @@ export function renderEvidenceMappingSubagentTask(
   ].join('\n')
 }
 
+function renderEvidenceMappingRepairChecklist(
+  task: EvidenceMappingTask,
+  state: MappingSubmissionState,
+): string[] {
+  const missingMappings = mappingTaskSections(state.stagedOutline, task)
+    .map(section => section.id)
+    .filter(id => !state.submittedMappings.has(id) && !state.baselineMappings.has(id))
+  const steps: string[] = []
+  if (taskOwnsOutlineRefinement(task)) {
+    if (!state.researchReady) steps.push('先完成当前 Section 的资料研究，再调用 submit_section_research_assessment 提交 sufficient_for_blueprint=true 的结论。')
+    const missingBlueprints = mappingTaskWritingSections(state.stagedOutline, task)
+      .filter(section => !state.blueprintSections.has(section.id)).map(section => section.id)
+    if (missingBlueprints.length > 0) steps.push(`随后为 ${missingBlueprints.join('、')} 调用 update_section_task，提交完整 Blueprint。`)
+    if (state.structureAssessment === undefined || state.structureAssessment.stale) steps.push('再调用 submit_section_structure_assessment，针对当前 Blueprint 提交有效的目录判断。')
+    if (!state.locked) steps.push('完成有效目录判断后调用 lock_section_outline；锁定成功前不得提交 Mapping。')
+  } else if (!state.locked) {
+    steps.push('先调用 lock_section_outline；锁定成功前不得提交 Mapping。')
+  }
+  if (missingMappings.length > 0) {
+    const mappingTool = task.phase === 'final_check' ? 'replace_section_mapping' : 'submit_section_mapping'
+    steps.push(`锁定后逐项调用 ${mappingTool}，当前未提交章节：${missingMappings.join('、')}。`)
+  }
+  if (task.phase === 'final_check') {
+    const missingSummaries = affectedSummarySections(state.stagedOutline, task)
+      .filter(section => !state.branchSummaries.has(section.id)).map(section => section.id)
+    if (missingSummaries.length > 0) steps.push(`提交父节点总述：${missingSummaries.join('、')}。`)
+    if (pendingReviews(state, task).length > 0) steps.push('调用 list_review_items，并复核返回的全部待审项。')
+  }
+  steps.push(`完成以上动作后调用 ${task.phase === 'final_check' ? 'finish_final_check' : 'finish_mapping_task'}；不要直接结束本轮。`)
+  return steps
+}
+
 function renderEvidenceMappingSubagentRepairTask(
   basePrompt: string,
   issues: readonly StageValidationIssue[],
+  task: EvidenceMappingTask,
+  state: MappingSubmissionState,
 ): string {
   return [
     basePrompt,
     '',
-    `这是同一 Child Session 的语义修复轮次。保留已检索内容和工具内草稿，只修正下面的问题，再调用 ${basePrompt.includes('finish_final_check') ? 'finish_final_check' : 'finish_mapping_task'}；不得复述分析过程。`,
+    '这是同一 Child Session 的语义修复轮次。保留已检索内容和工具内草稿，只修正下面的问题；不得复述分析过程。',
     ...renderStageRepairIssues(issues).slice(0, 24),
+    'Host 当前进度要求按以下顺序完成：',
+    ...renderEvidenceMappingRepairChecklist(task, state).map((step, index) => `${String(index + 1)}. ${step}`),
   ].join('\n')
 }
 
@@ -3661,7 +3697,7 @@ async function executeEvidenceMappingRun(
               submissionRequest.state.captured = undefined
               await subagents.followup(agent, started.childId, [{
                 type: 'text', text: [
-                  renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues),
+                  renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues, mappingTask, submissionRequest.state),
                   `本轮 research_history：${renderResearchHistory(capturedByChild.get(String(started.childId))?.values() ?? [], submissionRequest.state.researchAssessment)}`,
                   '若仍有影响 Blueprint 的缺口，必须依据这份历史改用不同的检索维度、关键词粒度、资料类型或来源范围；不得机械重复已失败或零命中的相同查询。Provider 或 URL 错误如阻止必要研究，保留其明确错误，不得伪装成资料不足。',
                 ].join('\n'),

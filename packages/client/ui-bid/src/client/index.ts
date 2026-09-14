@@ -69,6 +69,8 @@ export interface BidStagePanelInjected {
   uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   /** Start the current stage after a reset has finished and the user confirms. */
   startStage?: () => Promise<void>
+  /** Send one explicit continuation request through the existing Bid Main Agent recovery path. */
+  resumeRun?: () => Promise<void>
   /** Ask the Main Agent for manual S5 writing requirements. */
   requestWritingRequirements?: () => Promise<void>
   /** Create the default S5 writing plan and start the confirmed stage. */
@@ -215,6 +217,10 @@ export function apply(ctx: ClientContext): void {
         const result = await remote.startStage(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_START_FAILED', message: '阶段启动失败。' })
+      },
+      resumeRun: () => {
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation') as { send?: (text: string) => Promise<void> } | undefined
+        return conversation?.send?.('继续未完成任务。') ?? Promise.reject(new Error('当前会话不可用。'))
       },
       requestWritingRequirements: async () => {
         const result = await ctx.remote.bid.requestWritingRequirements(sessionId)

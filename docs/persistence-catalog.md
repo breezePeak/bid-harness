@@ -254,7 +254,20 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.cancelling/*`
+
+<a id="bidruncancelling--log-only"></a>
+
+#### `bid.run.cancelling` — log-only
+
+```ts persistence-catalog
+/** One exact execution attempt is draining before it can become resumable. */
+'bid.run.cancelling': { run: BidRunSnapshot & { status: 'cancelling' } }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.completed/*`
 
@@ -267,7 +280,33 @@ Source: [`packages/bid/bid/src/bid-events.ts:37`](../packages/bid/bid/src/bid-ev
 'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:53`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.notice/*`
+
+<a id="bidrunnotice--log-only"></a>
+
+#### `bid.run.notice` — log-only
+
+```ts persistence-catalog
+/** Model-invisible terminal Run row for the conversation timeline. */
+'bid.run.notice': BidRunNotice
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:51`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.start_failed/*`
+
+<a id="bidrunstart_failed--log-only"></a>
+
+#### `bid.run.start_failed` — log-only
+
+```ts persistence-catalog
+/** The running-state checkpoint failed before execution authority was granted. */
+'bid.run.start_failed': { runId: string; epoch: number }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.started/*`
 
@@ -280,7 +319,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-ev
 'bid.run.started': { run: BidRunSnapshot }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:39`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.suspended/*`
 
@@ -293,7 +332,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:39`](../packages/bid/bid/src/bid-ev
 'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.attention_required/*`
 
@@ -312,7 +351,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-ev
 'bid.stage.attention_required': { stage: BidStage; status: 'attention_required'; reason: string; issues: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:67`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.completed/*`
 
@@ -325,7 +364,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-ev
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:59`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -344,7 +383,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-ev
 'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:65`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:75`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.reset/*`
 
@@ -361,7 +400,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:65`](../packages/bid/bid/src/bid-ev
 'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:71`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:81`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -374,7 +413,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:71`](../packages/bid/bid/src/bid-ev
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -394,7 +433,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-ev
   | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:80`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:90`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -407,7 +446,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:80`](../packages/bid/bid/src/bid-ev
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:73`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:83`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.word-format.request/*`
 
@@ -446,7 +485,7 @@ Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/b
 'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:55`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 
@@ -1213,7 +1252,7 @@ Source: [`packages/core/session/src/types.ts:264`](../packages/core/session/src/
 'web/deepseek-search-llm-request': DeepSeekSearchLlmRequest
 ```
 
-Source: [`packages/web/web-search-deepseek/src/index.ts:57`](../packages/web/web-search-deepseek/src/index.ts)
+Source: [`packages/web/web-search-deepseek/src/index.ts:60`](../packages/web/web-search-deepseek/src/index.ts)
 
 <a id="webprovider-search-llm-request--log-only"></a>
 
@@ -1224,4 +1263,4 @@ Source: [`packages/web/web-search-deepseek/src/index.ts:57`](../packages/web/web
 'web/provider-search-llm-request': HostedSearchRequest
 ```
 
-Source: [`packages/web/web-search-deepseek/src/index.ts:59`](../packages/web/web-search-deepseek/src/index.ts)
+Source: [`packages/web/web-search-deepseek/src/index.ts:62`](../packages/web/web-search-deepseek/src/index.ts)

@@ -37,7 +37,7 @@ export type BidConfirmationModeControlProps =
   & PropsStore<ReturnType<typeof createBidConfirmationModeStore>>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'start' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
+type PendingAction = 'upload' | 'start' | 'resume' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -193,6 +193,7 @@ export function BidStagePanel({
   getDocxLibrary,
   uploadDocxTemplate,
   startStage,
+  resumeRun,
   requestWritingRequirements,
   autoStartChapterWriting,
   confirmOutline,
@@ -771,7 +772,20 @@ export function BidStagePanel({
         )}
 
         {suspendedRun !== undefined && (
-          <p className={css.suspensionReason}>{t('suspension.reason', { reason: suspendedRun.cause ?? 'host_restart' })}</p>
+          <div className={css.decisionRow}>
+            <p className={css.suspensionReason}>{t('suspension.reason', { reason: suspendedRun.cause ?? 'host_restart' })}</p>
+            {resumeRun !== undefined && (
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<IconRefreshOutline16 />}
+                disabled={requestPending !== null}
+                onClick={() => { invoke('resume', resumeRun) }}
+              >
+                {requestPending === 'resume' ? t('action.resuming') : t('action.retry')}
+              </Button>
+            )}
+          </div>
         )}
 
         {mappingProgress !== null && (

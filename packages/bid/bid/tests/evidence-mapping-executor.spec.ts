@@ -2001,6 +2001,34 @@ describe('evidence-mapping Agent executor', () => {
     expect(attempts[1]).toMatchObject({ accepted: true, issues: [], warnings: [] })
   })
 
+  it('guides an early finish through research, locking, and the missing Mapping', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-incomplete-repair-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 1, maxConcurrency: 2,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const unfinished = fixture.starts.find(start => promptText(start.request.request).includes('"task_id":"MAP-INIT-SEC-1"'))
+    if (unfinished === undefined) throw new Error('missing SEC-1 Mapping Child')
+    expect(await fixture.invokeSubmissionTool(unfinished.request.childId!, 'finish_mapping_task', {})).toMatchObject({
+      isError: false,
+      value: { completed: false, missing_section_ids: ['SEC-1'] },
+    })
+    unfinished.complete()
+    fixture.starts.filter(start => start !== unfinished).forEach((start) => { start.resolve() })
+    await execution
+
+    const repairPrompt = fixture.subagents.followup.mock.calls[0]?.[2]?.[0]
+    if (repairPrompt === undefined) throw new Error('missing incomplete Mapping repair prompt')
+    expect(repairPrompt.text).toContain('EVIDENCE_MAPPING_SECTION_NOT_LOCKED')
+    expect(repairPrompt.text).toContain('Host 当前进度要求按以下顺序完成')
+    expect(repairPrompt.text).toContain('submit_section_research_assessment')
+    expect(repairPrompt.text).toContain('lock_section_outline')
+    expect(repairPrompt.text).toContain('当前未提交章节：SEC-1')
+    expect(repairPrompt.text).toContain('finish_mapping_task；不要直接结束本轮')
+  })
+
   it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])('重跑只接受 v11 checkpoint，当前版本为 %s', async (version) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-resume-')))
     const material = await writeInputs(workspace)
