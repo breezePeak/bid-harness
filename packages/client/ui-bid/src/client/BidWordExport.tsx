@@ -15,6 +15,7 @@ import type {
 } from '@deepseek-ai/dsh-bid/control-plane'
 import { Button, IconPlusOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
+import { isBidMainSessionSummary } from './session-authority.ts'
 
 const ROWS: Array<{ role: FormatRole; label: string }> = [
   { role: 'heading1', label: '一级标题' },
@@ -62,7 +63,7 @@ const templateEstimateKey = (id: DocxTemplateId | null): string => id ?? 'defaul
 /** 项目级模板库、冲突确认和样式预览。 */
 export function BidWordExport({ sessionId, useSessions, useProjection, getLibrary, getFormat, saveFormat,
   uploadTemplate, preview, estimatePages, setEstimateTemplate, generate, download }: ConvViewProps & BidWordExportInjected) {
-  const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const [library, setLibrary] = useState<DocxTemplateLibraryView | null>(null)
   const [selectedId, setSelectedId] = useState<DocxTemplateId | null>(null)

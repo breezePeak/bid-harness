@@ -13,6 +13,7 @@ import {
   Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidReviewWorkbench.module.css'
+import { isBidMainSessionSummary } from './session-authority.ts'
 
 export type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
 
@@ -77,7 +78,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 export function BidReviewWorkbench({
   sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, actions, useStore,
 }: BidReviewWorkbenchProps) {
-  const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const revision = useStore(state => state.revision)
   const [workbench, setWorkbench] = useState<BidReviewWorkbenchView | null>(null)

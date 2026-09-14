@@ -98,11 +98,11 @@ const evidenceMapSchema = z.object({
 }).strict()
 
 /** Version of the Host-private S4 task plan. */
-export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 6 as const
+export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 7 as const
 
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
-  task_kind: z.enum(['section_mapping', 'outline_repair', 'section_remap', 'final_check']),
+  task_kind: z.enum(['section_mapping', 'outline_repair', 'section_remap', 'final_check', 'branch_summary']),
   generation: z.number().int().nonnegative(),
   title: z.string().min(1),
   phase: z.enum(['initial', 'final_check']),
@@ -113,7 +113,7 @@ const evidenceMappingTaskSchema = z.object({
   review_issues: z.array(z.string().min(1)).optional(),
   heading_path: z.array(z.string().min(1)).min(1),
 }).strict().superRefine((task, context) => {
-  const final = task.task_kind === 'final_check'
+  const final = task.task_kind === 'final_check' || task.task_kind === 'branch_summary'
   if ((task.phase === 'final_check') !== final) {
     context.addIssue({ code: 'custom', path: ['task_kind'], message: 'task kind must match phase' })
   }
@@ -124,11 +124,19 @@ const evidenceMappingTaskSchema = z.object({
   if (task.task_kind === 'section_mapping' && task.section_ids.length !== 1) {
     context.addIssue({ code: 'custom', path: ['section_ids'], message: 'a section mapping task owns exactly one writable leaf' })
   }
+  if (task.task_kind === 'final_check' && task.section_ids.length === 0) {
+    context.addIssue({ code: 'custom', path: ['section_ids'], message: 'a final review shard owns at least one writable section' })
+  }
+  if (task.task_kind === 'final_check' && task.summary_section_ids !== undefined) {
+    context.addIssue({ code: 'custom', path: ['summary_section_ids'], message: 'section review shards do not own branch summaries' })
+  }
+  if (task.task_kind === 'branch_summary' && (task.section_ids.length !== 0 || (task.summary_section_ids?.length ?? 0) === 0)) {
+    context.addIssue({ code: 'custom', path: ['summary_section_ids'], message: 'a branch-summary task owns only explicit summary sections' })
+  }
   if (task.task_kind === 'outline_repair' && task.section_ids.length > 1) {
     context.addIssue({ code: 'custom', path: ['section_ids'], message: 'an outline repair maps at most its writable scope root' })
   }
-  if (task.section_ids.length === 0 && !(task.task_kind === 'outline_repair'
-    || final && (task.summary_section_ids?.length ?? 0) > 0)) {
+  if (task.section_ids.length === 0 && !(task.task_kind === 'outline_repair' || task.task_kind === 'branch_summary')) {
     context.addIssue({ code: 'custom', path: ['section_ids'], message: '映射任务必须包含可写章节或待复核的父节点总述。' })
   }
   if (new Set(task.research_candidate_task_ids ?? []).size !== (task.research_candidate_task_ids?.length ?? 0)) {

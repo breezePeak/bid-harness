@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
-import { Document, Footer, Header, ImageRun, Packer, Paragraph, Table, TableCell, TableRow, VerticalMergeType } from 'docx'
+import { Document, Footer, Header, ImageRun, Packer, Paragraph, Table, TableCell, TableRow, TextRun, VerticalMergeType, type ITableCellOptions } from 'docx'
 import { describe, expect, it } from 'vitest'
 import { composeDocxFromTemplate, inspectDocxTemplateStructure } from '../src/docx-compose.ts'
 import { defaultDocxFormatState, formatFields } from '../src/docx-format.ts'
@@ -10,9 +10,9 @@ import type { BidWorkspace } from '../src/index.ts'
 
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=', 'base64')
 const paragraph = (value: string) => new Paragraph(value)
-const cell = (value: string, options: ConstructorParameters<typeof TableCell>[0] = {}) => new TableCell({
-  ...options,
+const cell = (value: string, options: Omit<ITableCellOptions, 'children'> = {}) => new TableCell({
   children: [paragraph(value)],
+  ...options,
 })
 
 async function workspace(): Promise<BidWorkspace> {
@@ -23,7 +23,7 @@ async function workspace(): Promise<BidWorkspace> {
 async function template(): Promise<Buffer> {
   const header = new Header({ children: [new Paragraph({ children: [
     new ImageRun({ data: pixel, type: 'png', transformation: { width: 12, height: 12 } }),
-    ' 固定页眉',
+    new TextRun(' 固定页眉'),
   ] })] })
   const footer = new Footer({ children: [paragraph('固定页脚')] })
   const table = new Table({ rows: [
@@ -76,7 +76,7 @@ describe('DOCX 模板合成', () => {
     expect(afterDocument).not.toContain('{{正文}}')
     expect(afterDocument).toContain('正文内容。')
     expect(afterDocument.match(/<w:tbl>/gu)).toHaveLength(1)
-    expect(afterDocument.match(/<w:sectPr/gu)).toHaveLength(beforeDocument.match(/<w:sectPr/gu)?.length)
+    expect(afterDocument.match(/<w:sectPr/gu)?.length).toBe(beforeDocument.match(/<w:sectPr/gu)?.length ?? 0)
     expect(await after.file('word/header1.xml')!.async('nodebuffer')).toEqual(await before.file('word/header1.xml')!.async('nodebuffer'))
     expect(await after.file('word/footer1.xml')!.async('nodebuffer')).toEqual(await before.file('word/footer1.xml')!.async('nodebuffer'))
     const templateMedia = Object.keys(before.files).filter(path => path.startsWith('word/media/') && !before.files[path]?.dir)

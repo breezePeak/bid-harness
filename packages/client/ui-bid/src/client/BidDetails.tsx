@@ -6,6 +6,7 @@ import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { zh } from './locales.ts'
 import css from './BidReviewWorkbench.module.css'
+import { isBidMainSessionSummary } from './session-authority.ts'
 
 interface BidDetailsProps extends ConvViewProps {
   kind: 'tender' | 'outline' | 'confirmation'
@@ -18,7 +19,9 @@ interface BidDetailsProps extends ConvViewProps {
  * @returns 已确认招标信息或目录；阶段更新后重新读取持久产物。
  */
 export function BidDetails({ sessionId, useSessions, useProjection, kind, getDetails, setReviewSurface }: BidDetailsProps) {
-  const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const sessionSummary = useSessions(state => state.byId[sessionId])
+  const isBid = isBidMainSessionSummary(sessionSummary)
+  const isSubagent = sessionSummary?.origin === 'subagent'
   const projection = useProjection('bid.runtime')
   const [details, setDetails] = useState<BidDetailsView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -31,14 +34,14 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
     let active = true
     setDetails(null)
     setError(null)
-    if ((isBid || confirming) && projection !== undefined && !confirming) {
+    if (!isSubagent && (isBid || confirming) && projection !== undefined && !confirming) {
       void getDetails().then((value) => { if (active) setDetails(value) }, (reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason))
       })
     }
     return () => { active = false }
-  }, [sessionId, isBid, projection?.runtime.stage, projection?.runtime.status, confirming, getDetails])
-  if (projection === undefined || (!isBid && !confirming)) return null
+  }, [sessionId, isBid, isSubagent, projection?.runtime.stage, projection?.runtime.status, confirming, getDetails])
+  if (isSubagent || projection === undefined || (!isBid && !confirming)) return null
   if (confirming) return (
     <section className={css.confirmationContainer} aria-label={label}>
       <div ref={surface} className={css.reviewSurfaceHost} />

@@ -5,6 +5,7 @@ import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversat
 import type { PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import { CHAPTER_DRAG_TYPE, type createBidRevisionStore } from './revision-reference.ts'
 import css from './BidComposerContext.module.css'
+import { isBidMainSessionSummary } from './session-authority.ts'
 
 /** Host actions and the conversation-owned submission registration. */
 export interface BidComposerContextInjected {
@@ -24,7 +25,7 @@ export type BidComposerContextProps = PropsRuntime<'conversation.input.context'>
 export function BidComposerContext({
   sessionId, useSessions, useProjection, useStore, actions, disabled, getChapter, sendMessage, registerSubmit,
 }: BidComposerContextProps) {
-  const isBid = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const reference = useStore(state => state.reference)
   const enabled = isBid && (projection?.runtime.stage === 'docx_export'

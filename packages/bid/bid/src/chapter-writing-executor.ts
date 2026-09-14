@@ -2294,7 +2294,7 @@ async function runChapterWriting(
         let retryInfrastructure = false
         let stopAfterReview = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
-        childSetups.set(label, child => {
+        childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
         })
         writer ??= createChapterWriterChild(agent, label, options.maxRepairAttempts, async (child, value) => {

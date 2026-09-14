@@ -107,6 +107,54 @@ function outlineStore(initial: OutlineDraftView) {
 }
 
 describe('BidStagePanel', () => {
+  it('Subagent 即使继承 Bid preset 与投影也不渲染项目控件或调用项目 Remote', async () => {
+    const getDetails = vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null }))
+    const getOutlineDraft = vi.fn()
+    const getOutlineReviewContext = vi.fn()
+    const getEvidenceMappingProgress = vi.fn()
+    const getDocxLibrary = vi.fn()
+    const setComposerBlock = vi.fn()
+    const selectReviewView = vi.fn()
+    const setReviewViewAvailable = vi.fn()
+    const childSessions = (selector: (state: unknown) => unknown) => selector({
+      byId: { session_bid: { agentPreset: 'bid', origin: 'subagent', parentSessionId: 'main', running: false } },
+    })
+    const panel = render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
+      allowedActions: ['confirm_outline', 'regenerate_outline'],
+    }), {
+      useSessions: childSessions,
+      getDetails,
+      getOutlineDraft,
+      getOutlineReviewContext,
+      getEvidenceMappingProgress,
+      getDocxLibrary,
+      setComposerBlock,
+      selectReviewView,
+      setReviewViewAvailable,
+    })} />)
+    const mode = confirmationStore()
+    render(<BidConfirmationModeControl {...({
+      sessionId: 'session_bid',
+      useSessions: childSessions,
+      useStore: mode.useStore,
+      actions: mode.actions,
+      t,
+    } as unknown as Parameters<typeof BidConfirmationModeControl>[0])} />)
+
+    await act(async () => { await Promise.resolve() })
+    expect(panel.container.innerHTML).toBe('')
+    expect(screen.queryByRole('button', { name: '确认模式' })).toBeNull()
+    expect(getDetails).not.toHaveBeenCalled()
+    expect(getOutlineDraft).not.toHaveBeenCalled()
+    expect(getOutlineReviewContext).not.toHaveBeenCalled()
+    expect(getEvidenceMappingProgress).not.toHaveBeenCalled()
+    expect(getDocxLibrary).not.toHaveBeenCalled()
+    expect(setComposerBlock).not.toHaveBeenCalled()
+    expect(selectReviewView).not.toHaveBeenCalled()
+    expect(setReviewViewAvailable).toHaveBeenCalledWith(false)
+  })
+
   it('确认模式默认手动并可从输入工具栏切换为自动确认', () => {
     const store = confirmationStore()
     render(<BidConfirmationModeControl {...({

@@ -2071,7 +2071,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   async resetStage(agent: Agent, stage: BidStage): Promise<BidRuntimeState> {
     const { session } = agent
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session) || session.header.cwd === undefined) {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
     }
     const key = projectKey(session)
@@ -2308,7 +2308,7 @@ export class BidHostRuntime extends TypertRemoteService {
     incoming: readonly IncomingFile[],
     failures: readonly BidFileIntakeFileResult[] = [],
   ): Promise<BidFileIntakeResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session) || session.header.cwd === undefined) {
       return intakeRejected('BID_SESSION_REQUIRED', 'File intake requires a Bid Session with a Host workspace.')
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2455,12 +2455,14 @@ export class BidHostRuntime extends TypertRemoteService {
     const session = sessionId === undefined ? undefined : this.ctx.sessions.get(SessionId(sessionId))
     let result: BidFileIntakeResult
     try {
-      if (session === undefined || metadata === undefined) throw new Error('bid-invalid-file-data')
+      if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined || metadata === undefined) throw new Error('bid-invalid-file-data')
       const files = parseBinaryUploadFiles(decodeURIComponent(metadata))
       const incoming = await readBinaryUpload(req, files, this.config)
       result = await this.uploadIncomingFiles(session, incoming)
     } catch (error) {
-      result = session === undefined ? intakeError(error) : await this.recordBinaryUploadFailure(session, error)
+      result = session === undefined || !isBidMainSession(session) || session.header.cwd === undefined
+        ? intakeError(error)
+        : await this.recordBinaryUploadFailure(session, error)
     }
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
     res.end(JSON.stringify(result))
@@ -2496,7 +2498,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       if (!Number.isSafeInteger(revision)) throw new Error('Word 模板上传请求无效。')
       const session = this.ctx.sessions.get(SessionId(sessionHeader))
-      if (session === undefined || resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+      if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined) {
         throw new Error('Word 模板需要标书项目会话。')
       }
       const bytes = await readExactRequestBody(req, size, 'DOCX 模板内容与声明大小不一致。')
@@ -2543,7 +2545,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Record an S1 failure when a selected binary upload cannot be fully reconstructed. */
   private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return intakeError(error)
+    if (!isBidMainSession(session) || session.header.cwd === undefined) return intakeError(error)
     if (this.inFlight.has(projectKey(session))) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
     const operation = this.beginOperation(session)
     try {

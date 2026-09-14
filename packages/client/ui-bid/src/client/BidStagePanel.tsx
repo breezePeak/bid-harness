@@ -22,6 +22,7 @@ import type { BidKey } from './locales.ts'
 import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
+import { isBidMainSessionSummary } from './session-authority.ts'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
@@ -51,7 +52,7 @@ type SelectedTemplate = Omit<SelectedFile, 'role'> & { role: 'docx_template' }
 
 /** Select manual or automatic confirmation for the current Bid Session. */
 export function BidConfirmationModeControl({ sessionId, useSessions, useStore, actions, t }: BidConfirmationModeControlProps) {
-  const isBidSession = useSessions(state => state.byId[sessionId]?.agentPreset === 'bid')
+  const isBidSession = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const mode = useStore(state => state.mode)
   const [open, setOpen] = useState(false)
   if (!isBidSession) return null
@@ -210,7 +211,8 @@ export function BidStagePanel({
   t,
 }: BidStagePanelProps) {
   const sessionSummary = useSessions(state => state.byId[sessionId])
-  const isBidSession = sessionSummary?.agentPreset === 'bid'
+  const isBidSession = isBidMainSessionSummary(sessionSummary)
+  const isSubagent = sessionSummary?.origin === 'subagent'
   const mainAgentRunning = sessionSummary?.running === true
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
@@ -273,7 +275,7 @@ export function BidStagePanel({
   }, [])
 
   useEffect(() => {
-    if (projection?.runtime.stage !== 'evidence_mapping'
+    if (isSubagent || projection?.runtime.stage !== 'evidence_mapping'
       || projection.runtime.status !== 'running'
         && projection.runtime.status !== 'waiting_user'
         && projection.runtime.status !== 'suspended'
@@ -296,16 +298,16 @@ export function BidStagePanel({
       active = false
       window.clearInterval(timer)
     }
-  }, [getEvidenceMappingProgress, projection])
+  }, [getEvidenceMappingProgress, isSubagent, projection])
 
   const blockedReason = useMemo(
     () => projection === undefined ? undefined : composerReason(projection, t),
     [projection, t],
   )
-  const canConfirm = projection?.allowedActions.includes('confirm_outline') ?? false
-  const canRegenerate = projection?.allowedActions.includes('regenerate_outline') ?? false
-  const canConfirmAnalysis = projection?.allowedActions.includes('confirm_tender_analysis') ?? false
-  const hasProjection = projection !== undefined && (isBidSession || canConfirm || canConfirmAnalysis)
+  const canConfirm = !isSubagent && (projection?.allowedActions.includes('confirm_outline') ?? false)
+  const canRegenerate = !isSubagent && (projection?.allowedActions.includes('regenerate_outline') ?? false)
+  const canConfirmAnalysis = !isSubagent && (projection?.allowedActions.includes('confirm_tender_analysis') ?? false)
+  const hasProjection = !isSubagent && projection !== undefined && (isBidSession || canConfirm || canConfirmAnalysis)
   const embedConversation = false
   const reviewViewAvailable = hasProjection && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
   const outlineReviewReady = canConfirm && projection?.runtime.stage === 'evidence_mapping'
@@ -370,13 +372,13 @@ export function BidStagePanel({
   }, [projection?.runtime.stage, sessionId])
 
   useEffect(() => {
-    if (!isBidSession || projection?.runtime.stage !== 'file_intake') { setDocxLibrary(null); return }
+    if (!hasProjection || projection?.runtime.stage !== 'file_intake') { setDocxLibrary(null); return }
     let active = true
     void getDocxLibrary().then((value) => { if (active) setDocxLibrary(value) }, (reason: unknown) => {
       if (active) setDocxTemplateMessage(reason instanceof Error ? reason.message : 'Word 模板库读取失败。')
     })
     return () => { active = false }
-  }, [getDocxLibrary, isBidSession, projection?.runtime.stage, sessionId])
+  }, [getDocxLibrary, hasProjection, projection?.runtime.stage, sessionId])
 
   useEffect(() => {
     setOutlineFeedback('')
@@ -466,7 +468,7 @@ export function BidStagePanel({
   ])
 
   useEffect(() => {
-    if (projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user'
+    if (!hasProjection || projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user'
       || requestPending !== null) return
     const automatic = confirmationMode === 'automatic'
     const key = automatic ? chapterAutomaticKey : chapterManualKey
@@ -479,7 +481,7 @@ export function BidStagePanel({
     invoke(automatic ? 'auto_start' : 'request_requirements', action)
   }, [
     actions, automaticAttempts, autoStartChapterWriting, chapterAutomaticKey, chapterManualKey,
-    confirmationMode, invoke, projection, requestPending, requestWritingRequirements,
+    confirmationMode, hasProjection, invoke, projection, requestPending, requestWritingRequirements,
   ])
 
   if (!hasProjection) return null

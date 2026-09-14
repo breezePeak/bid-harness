@@ -121,7 +121,10 @@ export class S4WebResearchPool {
     if (snapshot === undefined) throw new ToolArgsError(['url: Web 获取未返回 HTTP 2xx 非空正文。'])
     const existing = this.assets.get(snapshot.source.source_id)
     if (existing !== undefined) {
-      this.sourceIdsByUrl.set(normalizeWebEvidenceUrl(url)!, existing.snapshot.source.source_id)
+      const normalizedUrl = normalizeWebEvidenceUrl(url)
+      if (normalizedUrl !== undefined) {
+        this.sourceIdsByUrl.set(normalizedUrl, existing.snapshot.source.source_id)
+      }
       this.counters.web_sources_reused++
       return existing
     }
@@ -175,7 +178,7 @@ export class S4WebResearchPool {
    */
   listSources(offset: number, limit: number, filter?: string): { sources: unknown[]; next_offset?: number } {
     const needle = filter?.toLocaleLowerCase()
-    const assets = [...this.assets.values()].filter((asset) => needle === undefined || [
+    const assets = [...this.assets.values()].filter(asset => needle === undefined || [
       asset.index.title,
       asset.snapshot.source.final_url,
       ...asset.index.headings.map(heading => heading.title),
@@ -195,7 +198,12 @@ export class S4WebResearchPool {
    * @param heading 可选标题过滤词。
    * @returns Source 元数据和 Chunk 目录页。
    */
-  listChunks(sourceRef: string, offset: number, limit: number, heading?: string): { source: unknown; chunks: unknown[]; next_offset?: number } {
+  listChunks(
+    sourceRef: string,
+    offset: number,
+    limit: number,
+    heading?: string,
+  ): { source: unknown; chunks: unknown[]; next_offset?: number } {
     const asset = this.sourceFromRef(sourceRef)
     const needle = heading?.toLocaleLowerCase()
     const chunks = asset.index.chunks.filter(chunk => needle === undefined
@@ -203,7 +211,14 @@ export class S4WebResearchPool {
     const page = chunks.slice(offset, offset + limit)
     return {
       source: this.sourceSummary(asset),
-      chunks: page.map(({ chunk_ref, heading_path, preview, char_count }) => ({ chunk_ref, heading_path, preview, char_count })),
+      chunks: page.map(
+        ({ chunk_ref, heading_path, preview, char_count }) => ({
+          chunk_ref,
+          heading_path,
+          preview,
+          char_count,
+        }),
+      ),
       ...(offset + limit < chunks.length ? { next_offset: offset + limit } : {}),
     }
   }

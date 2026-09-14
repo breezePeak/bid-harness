@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -27,6 +28,12 @@ import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
+import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from '../src/control-plane-contract.ts'
+import {
+  DOCX_TEMPLATE_NAME_HEADER,
+  DOCX_TEMPLATE_REVISION_HEADER,
+  DOCX_TEMPLATE_SIZE_HEADER,
+} from '../src/docx-format-contract.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 
@@ -34,6 +41,8 @@ interface HostExecution {
   readonly inFlight: Map<string, unknown>
   readonly docxInFlight: Set<string>
   automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
+  handleBinaryUpload(req: IncomingMessage, res: ServerResponse): Promise<void>
+  handleDocxTemplateUpload(req: IncomingMessage, res: ServerResponse): Promise<void>
 }
 
 async function resumeRun(ctx: Context, session: Session) {
@@ -199,6 +208,53 @@ async function fixture(options: { readonly realOrchestrator?: boolean } = {}) {
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('继承 Bid preset 与 cwd 的 Subagent 不能写入普通资料或 Word 模板', async () => {
+    const { ctx, workspace, fresh, host } = await fixture()
+    const main = await fresh('upload-main')
+    const childId = SessionId('upload-child')
+    const child = {
+      id: childId,
+      header: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: main.id },
+      events: [],
+    } as unknown as Session
+    const manifest = await workspace.readManifest()
+    const library = await ctx.bid.getDocxTemplateLibrary(main.session)
+    const operationCount = host.inFlight.size
+    await expect(ctx.bid.uploadIncomingFiles(child, [{
+      name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('不得写入'),
+    }])).resolves.toMatchObject({ ok: false, error: { code: 'BID_SESSION_REQUIRED' } })
+
+    vi.spyOn(ctx.sessions, 'get').mockReturnValue(child)
+    const request = (headers: IncomingMessage['headers']) => ({ method: 'POST', headers }) as IncomingMessage
+    const invoke = async (handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>, headers: IncomingMessage['headers']) => {
+      let status = 0
+      let body = ''
+      const response = {
+        writeHead(code: number) { status = code; return response },
+        end(chunk?: string) { body = chunk ?? ''; return response },
+      } as unknown as ServerResponse
+      await handler(request({ host: 'localhost', origin: 'http://localhost', ...headers }), response)
+      return { status, body: JSON.parse(body) as { ok: boolean } }
+    }
+    const binary = await invoke(host.handleBinaryUpload.bind(host), {
+      [BID_UPLOAD_SESSION_HEADER]: String(childId),
+      [BID_UPLOAD_FILES_HEADER]: encodeURIComponent('[]'),
+    })
+    const docx = await invoke(host.handleDocxTemplateUpload.bind(host), {
+      [BID_UPLOAD_SESSION_HEADER]: String(childId),
+      [DOCX_TEMPLATE_NAME_HEADER]: encodeURIComponent('模板.docx'),
+      [DOCX_TEMPLATE_SIZE_HEADER]: '1',
+      [DOCX_TEMPLATE_REVISION_HEADER]: String(library.revision),
+    })
+
+    expect(binary).toMatchObject({ status: 200, body: { ok: false } })
+    expect(docx).toMatchObject({ status: 200, body: { ok: false } })
+    expect(host.inFlight.size).toBe(operationCount)
+    expect(host.docxInFlight.size).toBe(0)
+    expect(await workspace.readManifest()).toEqual(manifest)
+    expect(await ctx.bid.getDocxTemplateLibrary(main.session)).toEqual(library)
+  })
+
   it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
