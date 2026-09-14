@@ -8,7 +8,7 @@ S4 的单个 Final Check Child 同时接收全书章节、材料、复核对象�
 
 ## Decision
 
-Bid 项目能力以 `agentPreset === 'bid' && origin !== 'subagent'` 作为 Main Session authority。前端阶段面板、详情、审阅、导出和 Composer 上下文共用该判断；Host 的阶段重置与三个上传入口同时校验 Bid preset、非 Subagent origin 和项目 cwd。通用 remote fence 保持不变，项目边界在能力入口重复校验。
+Bid Session authority 由 `isBidHostSession`、`isBidMainSession` 和 `assertBidMainSession` 定义：顶层 Bid Session 承载 Host prompt admission，只有同时拥有项目 cwd 的顶层 Bid Session 才能操作项目。Host hook、阶段工具、全部 Bid Remote 和两个 HTTP 上传入口只调用这组判断；`beginOperation` 与 `withDocxOperation` 在创建项目锁前再次断言 Main Session。前端阶段面板、详情、审阅、导出和 Composer 上下文使用相同的 `agentPreset === 'bid' && origin !== 'subagent'` 语义。
 
 Final Check 的叶节复核按目录一级或二级业务分支构造稳定任务，根级可写叶归入单独文档根分片。Prompt 按实际字符数接受 48,000 字符预算；超限任务在启动 Child 前按估算 payload 权重二分，运行中只把带稳定上下文溢出错误码的当前分片替换为更小任务。兄弟任务使用独立 checkpoint，任一失败不取消已经完成的兄弟结果。
 
@@ -26,8 +26,10 @@ Final Check 的叶节复核按目录一级或二级业务分支构造稳定任�
 
 **保留一次全书模型终审。** 它会恢复同一个上下文瓶颈。跨分片闭环改由 Host 的确定性所有权、fingerprint、完整覆盖和无阻断校验承担。
 
-**只在通用 remote fence 阻止 Subagent。** UI 仍会暴露不可用控制，上传等项目专用入口也可能在 fence 外获得状态；Main Session authority 必须在前端与 Host 能力入口一致表达。
+**只在通用 remote fence 阻止 Subagent。** UI 仍会暴露不可用控制，HTTP 上传和 Host hook 也可能绕开 Remote fence；Main Session authority 必须在前端、Host 能力入口和真正取得项目锁的位置一致表达。
+
+**把 Child Session 映射到 Parent Session。** 静默替换会把错误路由变成提权路径，使调用方无法发现传错 Session；`parentSession` 只表示生命周期和导航关系。
 
 ## Consequences
 
-大型目录的 Final Check 调用数量增加，但每个叶节分片只携带相关业务上下文，父节点总述只携带直接子节点，失败和恢复的重跑范围局部化。结构变化、旧 plan 或旧 checkpoint 会触发 S4 重建；正式 Evidence Map 与 S5 schema 保持不变。Main Session UI 与 Host 都拒绝继承 Bid preset 的 Subagent，普通 Bid 主会话行为不变。
+大型目录的 Final Check 调用数量增加，但每个叶节分片只携带相关业务上下文，父节点总述只携带直接子节点，失败和恢复的重跑范围局部化。结构变化、旧 plan 或旧 checkpoint 会触发 S4 重建；正式 Evidence Map 与 S5 schema 保持不变。继承 Bid preset 和 cwd 的 Subagent 不获得项目工具、Remote、HTTP 或 mutation authority，且不进入 Main Session prompt admission；普通 Bid 主会话行为不变。

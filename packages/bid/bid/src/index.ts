@@ -16,7 +16,6 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
@@ -45,7 +44,7 @@ import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
-import { inspectBidStage, installStageInteractionTools, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
+import { assertBidMainSession, inspectBidStage, installStageInteractionTools, isBidHostSession, isBidMainSession, readStageJson, stageInteractionSchema } from './stage-interaction.ts'
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
@@ -1384,6 +1383,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
   private async withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T> {
+    assertBidMainSession(session)
     const key = projectKey(session)
     const active = this.inFlight.get(key)
     if (active?.reservedForReset) {
@@ -1402,6 +1402,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 在第一次异步操作前占用项目，直到落盘和所有执行器完成。 */
   private beginOperation(session: Session): ActiveBidOperation {
+    assertBidMainSession(session)
     const key = projectKey(session)
     if (this.inFlight.has(key)) {
       throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Bid 操作正在执行。')
@@ -1515,7 +1516,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const key = operation.key
     const sessions = [operation.session, ...this.ctx.sessions.list().filter((session) => {
       if (session === operation.session) return false
-      if (!isBidMainSession(session) || session.header.cwd === undefined) return false
+      if (!isBidMainSession(session)) return false
       try { return projectKey(session) === key } catch (error) {
         // 已删除或不可访问的其他工作区不参与当前项目的实时投影。
         if (['ENOENT', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
@@ -1565,7 +1566,7 @@ export class BidHostRuntime extends TypertRemoteService {
       'bid: runtime projection',
     )
     ctx.on('session/prompt-admission', ({ session }) => {
-      if (resolveSessionPreset(session) !== 'bid') return
+      if (!isBidHostSession(session)) return
       const projection = getBidClientProjection(bidSessionControlState(session))
       const cwd = session.header.cwd
       if (cwd !== undefined) {
@@ -1586,10 +1587,10 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     installStageInteractionTools(ctx,
       (agent, request, signal) => this.executeStageInteraction(agent, request, signal),
-      session => session.header.cwd !== undefined && this.inFlight.get(projectKey(session))?.interaction === true)
+      session => isBidMainSession(session) && this.inFlight.get(projectKey(session))?.interaction === true)
     ctx.on('agent/pre-step', async ({ agent }, next) => {
       const decision = await next()
-      if (decision.kind === 'reject' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return decision
+      if (decision.kind === 'reject' || !isBidMainSession(agent.session)) return decision
       const operation = this.inFlight.get(projectKey(agent.session))
       if (operation?.session !== agent.session) return decision
       const messages = decision.messages.filter(message =>
@@ -1600,24 +1601,23 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.inject(['tools'], (toolCtx) => {
       toolCtx.effect(() => toolCtx.tools.guard((execution) => {
         const session = execution.agent?.session
-        if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined) return
+        if (session === undefined || !isBidMainSession(session)) return
         const operation = this.inFlight.get(projectKey(session))
         if (operation !== undefined && operation.session !== session) return 'BID_OPERATION_IN_PROGRESS'
       }))
     })
     ctx.on('agent/session-start', ({ agent }) => {
-      const cwd = agent.session.header.cwd
-      if (agent.session.header.origin === 'subagent' || resolveSessionPreset(agent.session) !== 'bid' || cwd === undefined) return
-      void this.driveStartedSession(agent, cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 项目启动失败：${String(error)}`) })
+      if (!isBidMainSession(agent.session)) return
+      void this.driveStartedSession(agent, agent.session.header.cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 项目启动失败：${String(error)}`) })
     }, { global: true })
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status !== 'idle' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return
+      if (status !== 'idle' || !isBidMainSession(agent.session)) return
       const runtime = bidSessionRuntime(agent.session)
       if (runtime.stage !== 'chapter_writing' || runtime.status !== 'pending') return
       void this.driveStartedSession(agent, agent.session.header.cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 写作计划启动失败：${String(error)}`) })
     }, { global: true })
     ctx.on('agent/cancel-requested', ({ agent, cause }) => {
-      if (cause.kind !== 'user' || !isBidMainSession(agent.session) || agent.session.header.cwd === undefined) return
+      if (cause.kind !== 'user' || !isBidMainSession(agent.session)) return
       const operation = this.inFlight.get(projectKey(agent.session))
       if (operation?.session !== agent.session || operation.runs.current === undefined) return
       operation.suspension ??= operation.runs.suspend('user_stop').catch((error: unknown) => {
@@ -1709,7 +1709,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private async executeStageInteraction(agent: Agent, input: unknown, callerSignal: AbortSignal): Promise<unknown> {
     const { session } = agent
     const request = stageInteractionSchema.parse(input)
-    if (!isBidMainSession(session) || session.header.cwd === undefined) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
+    if (!isBidMainSession(session)) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
     const key = projectKey(session)
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
@@ -2071,7 +2071,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   async resetStage(agent: Agent, stage: BidStage): Promise<BidRuntimeState> {
     const { session } = agent
-    if (!isBidMainSession(session) || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', 'Stage reset requires a Bid Session with a Host workspace.')
     }
     const key = projectKey(session)
@@ -2163,7 +2163,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('requestWritingRequirements')
   async requestWritingRequirements(session: Session): Promise<BidChapterWritingGateResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Writing requirements require a Bid Session with a Host workspace.' })
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2199,7 +2199,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('autoStartChapterWriting')
   async autoStartChapterWriting(session: Session): Promise<BidChapterWritingGateResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Automatic chapter writing requires a Bid Session with a Host workspace.' })
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2246,7 +2246,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('startStage')
   async startStage(session: Session): Promise<BidStageStartResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return stageStartResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Stage start requires a Bid Session with a Host workspace.' })
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2308,7 +2308,7 @@ export class BidHostRuntime extends TypertRemoteService {
     incoming: readonly IncomingFile[],
     failures: readonly BidFileIntakeFileResult[] = [],
   ): Promise<BidFileIntakeResult> {
-    if (!isBidMainSession(session) || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return intakeRejected('BID_SESSION_REQUIRED', 'File intake requires a Bid Session with a Host workspace.')
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2455,12 +2455,12 @@ export class BidHostRuntime extends TypertRemoteService {
     const session = sessionId === undefined ? undefined : this.ctx.sessions.get(SessionId(sessionId))
     let result: BidFileIntakeResult
     try {
-      if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined || metadata === undefined) throw new Error('bid-invalid-file-data')
+      if (session === undefined || !isBidMainSession(session) || metadata === undefined) throw new Error('bid-invalid-file-data')
       const files = parseBinaryUploadFiles(decodeURIComponent(metadata))
       const incoming = await readBinaryUpload(req, files, this.config)
       result = await this.uploadIncomingFiles(session, incoming)
     } catch (error) {
-      result = session === undefined || !isBidMainSession(session) || session.header.cwd === undefined
+      result = session === undefined || !isBidMainSession(session)
         ? intakeError(error)
         : await this.recordBinaryUploadFailure(session, error)
     }
@@ -2498,7 +2498,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       if (!Number.isSafeInteger(revision)) throw new Error('Word 模板上传请求无效。')
       const session = this.ctx.sessions.get(SessionId(sessionHeader))
-      if (session === undefined || !isBidMainSession(session) || session.header.cwd === undefined) {
+      if (session === undefined || !isBidMainSession(session)) {
         throw new Error('Word 模板需要标书项目会话。')
       }
       const bytes = await readExactRequestBody(req, size, 'DOCX 模板内容与声明大小不一致。')
@@ -2545,7 +2545,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Record an S1 failure when a selected binary upload cannot be fully reconstructed. */
   private async recordBinaryUploadFailure(session: Session, error: unknown): Promise<BidFileIntakeResult> {
-    if (!isBidMainSession(session) || session.header.cwd === undefined) return intakeError(error)
+    if (!isBidMainSession(session)) return intakeError(error)
     if (this.inFlight.has(projectKey(session))) return intakeRejected('BID_OPERATION_IN_PROGRESS', 'A file-intake operation is already running for this Bid Session.')
     const operation = this.beginOperation(session)
     try {
@@ -2578,7 +2578,7 @@ export class BidHostRuntime extends TypertRemoteService {
     resumePolicy?: BidResumePolicy,
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidRuntimeState> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', 'Resume requires a Bid Session with a Host workspace.')
     }
     if (this.inFlight.has(projectKey(session))) {
@@ -2711,7 +2711,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getDocxTemplateLibrary')
   async getDocxTemplateLibrary(session: Session): Promise<DocxTemplateLibraryView> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 模板库需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 模板库需要标书项目会话。')
     return readDocxTemplateLibrary(new BidWorkspace(projectKey(session), workspaceConfig(this.config)))
   }
 
@@ -2722,7 +2722,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getDocxFormat')
   async getDocxFormat(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 配置需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const view = await readDocxFormat(workspace, templateId)
     const project = await readBidProjectState(workspace)
@@ -2744,7 +2744,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('saveDocxFormat')
   async saveDocxFormat(session: Session, templateId: DocxTemplateId | null, request: DocxFormatRequest): Promise<DocxFormatView> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 配置需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 配置需要标书项目会话。')
     return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, templateId, request))
   }
 
@@ -2755,7 +2755,7 @@ export class BidHostRuntime extends TypertRemoteService {
     templateId: DocxTemplateId | null,
     revision: number,
   ): Promise<DocxTemplateLibraryView> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 模板选择需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 模板选择需要标书项目会话。')
     return this.withDocxOperation(session, workspace => setEstimateDocxTemplate(workspace, templateId, revision))
   }
 
@@ -2766,7 +2766,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('previewDocx')
   async previewDocx(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 预览需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 预览需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const view = await readDocxFormat(workspace, templateId)
     const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
@@ -2781,7 +2781,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('suggestDocxFormat')
   async suggestDocxFormat(session: Session, templateId: DocxTemplateId): Promise<DocxFormatSuggestion> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('格式建议需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('格式建议需要标书项目会话。')
     return this.withDocxOperation(session, async workspace => suggestDocxFormat(
       this.ctx, session, await readDocxFormat(workspace, templateId),
       AbortSignal.timeout(this.config.wordFormatTimeoutMs),
@@ -2796,7 +2796,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('downloadDocx')
   async downloadDocx(session: Session, templateId: DocxTemplateId | null): Promise<{ data: string; name: string }> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('下载需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('下载需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const view = await readDocxFormat(workspace, templateId)
     if (!view.state.lastExport) throw new Error('请先生成 Word。')
@@ -2814,7 +2814,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('exportDocx')
   async exportDocx(session: Session, templateId: DocxTemplateId | null): Promise<BidDocxExportResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
     }
     const failure = (error: unknown): BidDocxExportResult => {
@@ -2860,7 +2860,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
   @Remote('estimateDocxPages')
   async estimateDocxPages(session: Session, templateId: DocxTemplateId | null): Promise<import('./control-plane-contract.ts').BidPageEstimate> {
-    if (resolveSessionPreset(session) !== 'bid' || !session.header.cwd) throw new Error('Word 页数测算需要标书项目会话。')
+    if (!isBidMainSession(session)) throw new Error('Word 页数测算需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const currentBasis = async (): Promise<import('./control-plane-contract.ts').BidPageEstimateBasis> => {
       const view = await readDocxFormat(workspace, templateId)
@@ -2914,7 +2914,7 @@ export class BidHostRuntime extends TypertRemoteService {
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidChapterRevisionResult> {
     const reject = (code: string, message: string): BidChapterRevisionResult => ({ ok: false, error: { code, message } })
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) {
+    if (!isBidMainSession(session)) {
       return reject('BID_SESSION_REQUIRED', '章节修订需要标书项目会话。')
     }
     if (this.inFlight.has(projectKey(session))) return reject('BID_OPERATION_IN_PROGRESS', '当前项目仍有操作正在执行。')
@@ -3267,7 +3267,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Admit the S5 workbench while writing is running or after its last result. */
   private requireReviewWorkspace(session: Session): BidWorkspace {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
     const runtime = bidSessionRuntime(session)
     if (runtime.stage !== 'chapter_writing' && runtime.stage !== 'docx_export') throw new Error('BID_REVIEW_NOT_ALLOWED')
     return new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
@@ -3280,7 +3280,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getEvidenceMappingProgress')
   async getEvidenceMappingProgress(session: Session): Promise<BidEvidenceMappingProgress | null> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const runtime = bidSessionRuntime(session)
     if (runtime.stage !== 'evidence_mapping' || runtime.status !== 'running') return null
     return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)))
@@ -3293,7 +3293,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getDetails')
   async getDetails(session: Session): Promise<BidDetailsView> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
     const runtime = bidSessionRuntime(session)
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
     const body = runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export'
@@ -3331,7 +3331,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getTenderAnalysisForConfirmation')
   async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const runtime = bidSessionRuntime(session)
     if (runtime.stage === 'file_intake' || (runtime.stage === 'tender_analysis' && runtime.status !== 'waiting_user' && runtime.status !== 'completed')) throw new Error('Tender-analysis details are not available in the current Bid stage state.')
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
@@ -3351,7 +3351,7 @@ export class BidHostRuntime extends TypertRemoteService {
     scoringId: string,
     selected: boolean,
   ): Promise<TenderAnalysisConfirmationView> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('BID_SESSION_REQUIRED')
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
     if (this.inFlight.has(projectKey(session))) throw new Error('BID_OPERATION_IN_PROGRESS')
     const operation = this.beginOperation(session)
     try {
@@ -3381,7 +3381,7 @@ export class BidHostRuntime extends TypertRemoteService {
     session: Session,
     operations: readonly TenderAnalysisEditOperation[],
   ): Promise<BidTenderAnalysisConfirmationResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Tender-analysis confirmation requires a Bid Session with a Host workspace.' } }
+    if (!isBidMainSession(session)) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Tender-analysis confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     const operation = this.beginOperation(session)
     try {
@@ -3470,7 +3470,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getOutlineDraft')
   async getOutlineDraft(session: Session): Promise<OutlineDraftView> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const key = projectKey(session)
     for (let active = this.inFlight.get(key); active !== undefined; active = this.inFlight.get(key)) await active.done
     const workspace = new BidWorkspace(key, workspaceConfig(this.config))
@@ -3487,7 +3487,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('getOutlineReviewContext')
   async getOutlineReviewContext(session: Session): Promise<OutlineReviewContext> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const key = projectKey(session)
     for (let active = this.inFlight.get(key); active !== undefined; active = this.inFlight.get(key)) await active.done
     const workspace = new BidWorkspace(key, workspaceConfig(this.config))
@@ -3511,7 +3511,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('applyOutlineDraftOperations')
   async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) throw new Error('Bid Session with a workspace is required.')
+    if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前阶段已有操作正在执行。')
     const operation = this.beginOperation(session)
     try {
@@ -3539,7 +3539,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('confirmOutline')
   async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
+    if (!isBidMainSession(session)) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline confirmation requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
@@ -3601,7 +3601,7 @@ export class BidHostRuntime extends TypertRemoteService {
     session: Session,
     request: OutlineDraftIdentityRequest & { readonly feedback: string },
   ): Promise<BidOutlineRegenerationResult> {
-    if (resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline regeneration requires a Bid Session with a Host workspace.' } }
+    if (!isBidMainSession(session)) return { ok: false, error: { code: 'BID_SESSION_REQUIRED', message: 'Outline regeneration requires a Bid Session with a Host workspace.' } }
     if (this.inFlight.has(projectKey(session))) return { ok: false, error: { code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' } }
     const normalized = request.feedback.trim()
     if (normalized.length === 0) return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }

@@ -76,12 +76,35 @@ const MAX_PUBLIC_EVENTS = 6
 const MAX_PUBLIC_EVENT_CHARS = 500
 
 /**
- * 判断会话是否拥有 Bid 阶段交互。
+ * 判断会话是否属于可承载项目控制面的顶层 Bid Host。
  * @param session 当前会话。
- * @returns 仅 Bid Main Agent 可进入阶段交互。
+ * @returns 非 Subagent 的 Bid Session 返回 true。
  */
-export function isBidMainSession(session: Session): boolean {
-  return session.header.origin !== 'subagent' && resolveSessionPreset(session) === 'bid' && session.header.cwd !== undefined
+export function isBidHostSession(session: Session): boolean {
+  return session.header.origin !== 'subagent' && resolveSessionPreset(session) === 'bid'
+}
+
+/**
+ * 判断会话是否拥有 Bid 项目控制权及工作区。
+ * @param session 当前会话。
+ * @returns 顶层 Bid Session 同时拥有 cwd 时返回 true。
+ */
+export function isBidMainSession(
+  session: Session,
+): session is Session & { readonly header: Session['header'] & { readonly cwd: string } } {
+  return isBidHostSession(session) && session.header.cwd !== undefined
+}
+
+/**
+ * 在取得 Bid 项目锁或 Word 操作权前拒绝非 Main Session。
+ * @param session 请求项目控制权的会话。
+ * @returns 会话通过检查时收窄为带 cwd 的 Main Session。
+ * @throws {Error} 会话不是带 cwd 的顶层 Bid Session。
+ */
+export function assertBidMainSession(
+  session: Session,
+): asserts session is Session & { readonly header: Session['header'] & { readonly cwd: string } } {
+  if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
 }
 
 /**

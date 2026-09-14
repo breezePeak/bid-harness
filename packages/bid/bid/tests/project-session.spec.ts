@@ -25,6 +25,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
+import { isBidMainSession } from '../src/stage-interaction.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
@@ -40,6 +41,8 @@ import { seedConversation, seedProjectArtifacts } from './fixtures/project-sessi
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
   readonly docxInFlight: Set<string>
+  beginOperation(session: Session): unknown
+  withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T>
   automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
   handleBinaryUpload(req: IncomingMessage, res: ServerResponse): Promise<void>
   handleDocxTemplateUpload(req: IncomingMessage, res: ServerResponse): Promise<void>
@@ -208,23 +211,40 @@ async function fixture(options: { readonly realOrchestrator?: boolean } = {}) {
 }
 
 describe('Workspace 项目与独立 Session', () => {
-  it('继承 Bid preset 与 cwd 的 Subagent 不能写入普通资料或 Word 模板', async () => {
+  it('继承 Bid preset 与 cwd 的 live Subagent 不获得项目控制权', async () => {
     const { ctx, workspace, fresh, host } = await fixture()
     const main = await fresh('upload-main')
     const childId = SessionId('upload-child')
-    const child = {
-      id: childId,
-      header: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: main.id },
-      events: [],
-    } as unknown as Session
+    const childAgent = (await ctx.agentLoop.createAgent(ctx, {
+      sessionId: childId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: main.id },
+    })).agent
+    const child = childAgent.session
     const manifest = await workspace.readManifest()
     const library = await ctx.bid.getDocxTemplateLibrary(main.session)
     const operationCount = host.inFlight.size
+    expect(child.header).toMatchObject({
+      agentPreset: 'bid', cwd: workspace.root, origin: 'subagent', parentSession: main.id,
+    })
+    expect(isBidMainSession(child)).toBe(false)
+    expect(ctx.tools.get('bid_stage_inspect', childAgent)).toBeUndefined()
+    await expect(ctx.serial('session/prompt-admission', {
+      session: child, mode: 'queue', content: [{ type: 'text', text: '内部任务' }],
+    })).resolves.toBeUndefined()
+    await expect(ctx.bid.startStage(child)).resolves.toMatchObject({
+      ok: false, error: { code: 'BID_SESSION_REQUIRED' },
+    })
+    await expect(ctx.bid.getDetails(child)).rejects.toThrow('BID_SESSION_REQUIRED')
+    await expect(ctx.bid.getDocxTemplateLibrary(child)).rejects.toThrow('Word 模板库需要标书项目会话')
+    const executeDocx = vi.fn(async () => undefined)
+    expect(() => host.beginOperation(child)).toThrow('BID_SESSION_REQUIRED')
+    await expect(host.withDocxOperation(child, executeDocx)).rejects.toThrow('BID_SESSION_REQUIRED')
+    expect(executeDocx).not.toHaveBeenCalled()
     await expect(ctx.bid.uploadIncomingFiles(child, [{
       name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('不得写入'),
     }])).resolves.toMatchObject({ ok: false, error: { code: 'BID_SESSION_REQUIRED' } })
 
-    vi.spyOn(ctx.sessions, 'get').mockReturnValue(child)
     const request = (headers: IncomingMessage['headers']) => ({ method: 'POST', headers }) as IncomingMessage
     const invoke = async (handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>, headers: IncomingMessage['headers']) => {
       let status = 0
