@@ -1,4 +1,4 @@
-/** 直接读取 DOCX 的 XML 样式与段落变体；旧正文只保留限长候选样本。 */
+/** 直接读取 DOCX 的 XML 样式与段落变体；正文只保留限长候选样本。 */
 import JSZip from 'jszip'
 import { xml2js } from 'xml-js'
 import { createHash } from 'node:crypto'
@@ -517,16 +517,8 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
     }
   }
   if (descendants(numbering, 'lvlOverride').length) warnings.push('检测到局部编号覆盖，未自动套用；请核对各级起始序号和重新编号设置。')
-  if (descendants(doc, 'sdt').length) warnings.push('检测到内容控件或占位符：仅提取格式，不执行完整套版。')
-  if (descendants(doc, 'gridSpan').length || descendants(doc, 'vMerge').length) warnings.push('模板合并单元格不复制；输出表格结构由当前正文决定。')
-  if (sections.length > 1)
-    warnings.push('检测到多分节：仅应用末节页面样式，不复刻多分节版式。')
-  for (const tag of ['txbxContent', 'anchor', 'pict', 'drawing'])
-    if (descendants(doc, tag).length)
-      warnings.push(`检测到 ${tag} 对象：模板封面、Logo、浮动对象和图片不复制到输出。`)
   if (files['word/numbering.xml'])
     warnings.push('标题使用 Word 原生多级编号，按标题层级自动计数；未关联标题用途的模板编号不自动映射。')
-  warnings.push('仅套用格式；旧正文、目录、批注和页眉页脚文字均不复制。')
   const paragraphTexts = bodyParagraphs.map(node => text(node).trim()).filter(Boolean)
   if (paragraphTexts.length > 2000) warnings.push('模板正文超过 2000 段；模型只读取前 2000 段格式说明。')
   return { parserVersion: DOCX_TEMPLATE_PARSER_VERSION,

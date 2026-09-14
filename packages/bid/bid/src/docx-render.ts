@@ -166,9 +166,16 @@ export async function docxAssetHash(workspace: BidWorkspace, markdown: string): 
  * @param markdown 已完成的正文快照。
  * @param values 经校验的生效格式。
  * @param preview 是否在浏览器预览末尾补充缺失内容的明确示例。
+ * @param pageBasis configured 保留生成格式，a4 固定为纵向 A4 供 S5 分页。
  * @returns 有效 DOCX 字节及安全的内嵌样式预览。
  */
-export async function renderDocx(workspace: BidWorkspace, markdown: string, values: FormatValues, preview = false): Promise<{
+export async function renderDocx(
+  workspace: BidWorkspace,
+  markdown: string,
+  values: FormatValues,
+  preview = false,
+  pageBasis: 'configured' | 'a4' = 'configured',
+): Promise<{
   bytes: Buffer
   html: string
   assetHash: string
@@ -394,7 +401,7 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
     return { doc, html: html.join('') }
   }
   const renderedSections: Array<{ landscape: boolean; doc: (Paragraph | Table)[]; html: string }> = []
-  for (const section of splitDocumentSections(root.children))
+  for (const section of pageBasis === 'a4' ? [{ landscape: false, nodes: root.children }] : splitDocumentSections(root.children))
     renderedSections.push({ landscape: section.landscape, ...await blocks(section.nodes) })
   let html = renderedSections.map(section => section.html).join('')
   if (preview) {
@@ -426,7 +433,8 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   const title = root.children[0]?.type === 'heading' ? content(root.children[0]) : ''
   const headerText = str('header.text') || title, footerText = str('footer.text')
   const pageNumber = str('footer.pageNumber')
-  const page = values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
+  const page = pageBasis === 'a4' ? [210, 297]
+    : values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
   const document = new Document({ numbering: { config: [...(headingLevels.length ? headingConfigs.map(({ reference, levels }) => ({
     reference,
     levels: levels.map(level => ({ ...level,
@@ -445,7 +453,8 @@ export async function renderDocx(workspace: BidWorkspace, markdown: string, valu
   ] }, sections: renderedSections.map((section, index) => ({
     properties: { ...(index === 0 ? {} : { type: SectionType.NEXT_PAGE }), page: { size: { width: mm(page[0] as number),
       height: mm(page[1] as number),
-      orientation: section.landscape ? 'landscape' : str('page.orientation') as 'portrait' | 'landscape' },
+      orientation: pageBasis === 'a4' ? 'portrait'
+        : section.landscape ? 'landscape' : str('page.orientation') as 'portrait' | 'landscape' },
     margin: Object.fromEntries(['top',
       'bottom',
       'left',

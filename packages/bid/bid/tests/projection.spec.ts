@@ -50,6 +50,43 @@ describe('Bid client projection', () => {
     }
   })
 
+  it('持久化的挂起 Run 会再次推送权威投影', async () => {
+    const ctx = new Context()
+    const sessions = await ctx.plugin(SessionStore)
+    const projections = await ctx.plugin(SessionProjectionRegistry)
+    const disposeProjection = registerBidRuntimeProjection(ctx.sessionProjections)
+    const listener = vi.fn()
+    const unsubscribe = ctx.sessionProjections.onChanged(listener)
+    try {
+      const session = ctx.sessions.create()
+      const run = {
+        runId: 'run-1', stage: 'evidence_mapping' as const, epoch: 1, baseProjectRevision: 1,
+        work: {
+          kind: 'stage_execution' as const, workId: 'work-1', stage: 'evidence_mapping' as const,
+          requestRef: 'requests/work-1.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64),
+        },
+        status: 'suspended' as const, cause: 'retry_exhausted' as const,
+        error: { message: '模型修复次数已用尽。' }, startedAt: 1, updatedAt: 2,
+      }
+      const control = { workflow: { stage: 'evidence_mapping' as const, gate: 'ready' as const }, run, lastRun: run }
+
+      session.append('bid.project.resumed', { ...control, revision: 2 })
+      expect(listener).toHaveBeenCalledTimes(1)
+      session.append('bid.project.resumed', { ...control, revision: 3 })
+
+      expect(listener).toHaveBeenCalledTimes(2)
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
+        runtime: { stage: 'evidence_mapping', status: 'suspended' },
+        allowedActions: ['send_message'],
+      })
+    } finally {
+      unsubscribe()
+      disposeProjection()
+      await projections.dispose()
+      await sessions.dispose()
+    }
+  })
+
   it('将项目恢复事件应用到当前 Session，并继续处理当前阶段确认', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)

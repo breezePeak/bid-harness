@@ -322,6 +322,7 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
         run: cloneRun(event.data.run),
         lastRun: cloneRun(event.data.lastRun),
       } : controlStateFromLegacyRuntime(event.data.runtime, event.data.revision)
+      if ('workflow' in event.data && resumed.run?.status === 'suspended') return resumed
       return JSON.stringify(state) === JSON.stringify(resumed) ? state : resumed
     }
     case 'bid.run.started':

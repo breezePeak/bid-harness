@@ -1,4 +1,4 @@
-/** 快速排版近似与可选 LibreOffice 真实分页；两者均使用 Word Renderer 的 resolved 格式。 */
+/** 固定 A4 的快速排版近似与可选 LibreOffice 真实分页；两者均使用模板 resolved 排版格式。 */
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -94,14 +94,7 @@ function roleFor(node: MarkdownNode, first: boolean): string {
   const source = text(node)
   return /^图\s*\d/u.test(source) ? 'figureCaption' : /^表\s*\d/u.test(source) ? 'tableCaption' : 'body'
 }
-function pageSize(values: FormatValues): { width: number; height: number } {
-  const paper: [number, number] = values['page.paper'] === 'A3'
-    ? [297, 420]
-    : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
-  return values['page.orientation'] === 'landscape'
-    ? { width: paper[1], height: paper[0] }
-    : { width: paper[0], height: paper[1] }
-}
+function pageSize(_values: FormatValues): { width: number; height: number } { return { width: 210, height: 297 } }
 function lineHeight(values: FormatValues, role: string): number {
   const size = value(values, `${role}.size`)
   return values[`${role}.lineRule`] === 'auto' ? size * value(values, `${role}.line`) : value(values, `${role}.line`)
@@ -282,7 +275,7 @@ async function renderedPages(
     let pending = renderedInFlight.get(operationKey)
     if (pending === undefined) {
       pending = (async () => {
-        const docx = await renderDocx(workspace, markdown, view.values)
+        const docx = await renderDocx(workspace, markdown, view.values, false, 'a4')
         const pages = await pdfPageCount(await (options.renderPdf ?? libreOfficePdf)(docx.bytes))
         const record = renderedCacheSchema.parse({ version: 1, fingerprint, pages })
         await writeFileAtomic(path, `${JSON.stringify(record)}\n`, { mode: 0o600, dirMode: 0o700 })
@@ -298,7 +291,7 @@ async function renderedPages(
   return { pages: await fastMarkdownPages(workspace, markdown, view.values), method: 'fast', fingerprint }
 }
 
-/** 按指定模板渲染完整 Markdown；LibreOffice 不可用时返回明确的 fast 方法。 */
+/** 按指定模板排版参数在 A4 上渲染完整 Markdown；LibreOffice 不可用时返回明确的 fast 方法。 */
 export async function estimateDocxMarkdownPages(
   workspace: BidWorkspace,
   markdown: string,

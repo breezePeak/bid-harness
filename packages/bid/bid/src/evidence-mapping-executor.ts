@@ -3044,8 +3044,12 @@ async function executeEvidenceMappingRun(
   let previousWeb: WebEvidenceSourcesArtifact | undefined
   const taskInputFingerprintPayload = (mappingTask: EvidenceMappingTask, outline = inputs.outline) => {
     const known = new Set(outline.sections.map(section => section.id))
-    const missingSectionIds = mappingTask.section_ids.filter(id => !known.has(id))
-    const knownSectionIds = mappingTask.section_ids.filter(id => known.has(id))
+    const scopedIds = uniqueStrings([
+      ...mappingTask.section_ids,
+      ...(mappingTask.outline_edit_scope_id === undefined ? [] : [mappingTask.outline_edit_scope_id]),
+    ])
+    const missingSectionIds = scopedIds.filter(id => !known.has(id))
+    const knownSectionIds = scopedIds.filter(id => known.has(id))
     const sectionIds = knownSectionIds.length === 0 ? new Set<string>() : outlineSectionScope(outline, knownSectionIds)
     const parents = new Map(outline.sections.map(section => [section.id, section.parent_id]))
     for (const sectionId of [...sectionIds]) {
@@ -3117,37 +3121,59 @@ async function executeEvidenceMappingRun(
       }
       const savedCheckpoints = new Map(checkpoint.tasks.map(item => [item.task_id, item]))
       const reusable = new Set<string>()
+      const discarded = new Set<string>()
       let fingerprintOutline = inputs.outline
       for (const item of savedLog.tasks) {
         const saved = savedCheckpoints.get(item.task_id)
         const currentTask = plan.tasks.find(task => task.task_id === item.task_id)
         if (item.status === 'completed' && saved?.completed !== true) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
+        const dependsOnDiscarded = currentTask?.research_candidate_task_ids?.some(id => discarded.has(id)) === true
+        const scopeExists = currentTask !== undefined && !dependsOnDiscarded
+          && uniqueStrings([
+            ...currentTask.section_ids,
+            ...(currentTask.outline_edit_scope_id === undefined ? [] : [currentTask.outline_edit_scope_id]),
+          ]).every(id => fingerprintOutline.sections.some(section => section.id === id))
         if (saved?.completed === true) {
           if (currentTask === undefined) throw new Error(`evidence-mapping-resume-task-missing:${item.task_id}`)
-          reusable.add(item.task_id)
-          item.status = 'completed'
-          if (saved.outline_operations !== undefined) {
-            fingerprintOutline = mergeRefinedTasks(fingerprintOutline, [{
-              task: currentTask,
-              result: saved.result,
-              outlineOperations: saved.outline_operations as OutlineEditOperation[],
-              ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
-              ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
-              ...(saved.structure_assessment === undefined ? {} : { structureAssessment: saved.structure_assessment }),
-              taskOperations: structuredClone(saved.task_operations),
-              researchCandidates: structuredClone(saved.research_candidates),
-              snapshots: [],
-              fetchedSnapshots: [],
-            }], inputs.responsePoints).outline
+          let replayedOutline: OutlineArtifact | undefined
+          if (scopeExists && saved.input_fingerprint === taskInputFingerprint(currentTask, fingerprintOutline)) {
+            try {
+              replayedOutline = saved.outline_operations === undefined ? fingerprintOutline : mergeRefinedTasks(fingerprintOutline, [{
+                task: currentTask,
+                result: saved.result,
+                outlineOperations: saved.outline_operations as OutlineEditOperation[],
+                ...(saved.refinement_conclusion === undefined ? {} : { refinementConclusion: saved.refinement_conclusion }),
+                ...(saved.research_assessment === undefined ? {} : { researchAssessment: saved.research_assessment }),
+                ...(saved.structure_assessment === undefined ? {} : { structureAssessment: saved.structure_assessment }),
+                taskOperations: structuredClone(saved.task_operations),
+                researchCandidates: structuredClone(saved.research_candidates),
+                snapshots: [],
+                fetchedSnapshots: [],
+              }], inputs.responsePoints).outline
+            } catch (error: unknown) {
+              if (!(error instanceof ToolArgsError) && !(error instanceof BidStageExecutionError)) throw error
+            }
           }
+          if (replayedOutline !== undefined) {
+            reusable.add(item.task_id)
+            item.status = 'completed'
+            fingerprintOutline = replayedOutline
+            continue
+          }
+          if (!scopeExists || currentTask.task_kind === 'outline_repair') discarded.add(item.task_id)
+          else item.status = 'pending'
           continue
         }
-        const scopeExists = currentTask?.section_ids.every(id => fingerprintOutline.sections.some(section => section.id === id)) === true
         if (saved !== undefined && currentTask !== undefined && scopeExists
           && saved.input_fingerprint === taskInputFingerprint(currentTask, fingerprintOutline)) {
           reusable.add(item.task_id)
         }
+        if (!scopeExists && currentTask !== undefined) discarded.add(item.task_id)
         if (item.status === 'running') item.status = 'pending'
+      }
+      if (discarded.size > 0) {
+        plan = { ...plan, tasks: plan.tasks.filter(task => !discarded.has(task.task_id)) }
+        savedLog.tasks = savedLog.tasks.filter(task => !discarded.has(task.task_id))
       }
       checkpoint = { schema_version: 11, tasks: checkpoint.tasks.filter(item => reusable.has(item.task_id)) }
       delete savedLog.failure

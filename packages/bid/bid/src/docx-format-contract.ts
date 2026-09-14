@@ -4,7 +4,7 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 /** DOCX 模板上传及解析的默认原始字节上限。 */
 export const DOCX_TEMPLATE_MAX_BYTES = 300 * 1024 * 1024
 /** 模板提取规则版本；更换规则后重新上传会丢弃旧解析缓存。 */
-export const DOCX_TEMPLATE_PARSER_VERSION = 4
+export const DOCX_TEMPLATE_PARSER_VERSION = 5
 /** 项目模板 Registry 的当前磁盘格式。 */
 export const DOCX_TEMPLATE_REGISTRY_VERSION = 1
 

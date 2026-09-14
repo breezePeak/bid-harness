@@ -104,6 +104,20 @@ const formatPath = (workspace: BidWorkspace, templateId: DocxTemplateId | null):
   ? within(workspace.projectRoot, 'word-export/default.config.json')
   : within(workspace.projectRoot, `word-export/templates/${templateIdSchema.parse(templateId)}.config.json`)
 
+/**
+ * 读取上传时保存的不可变原始 DOCX，供 S6 直接合成。
+ * @param workspace 模板所属项目。
+ * @param templateId 已登记的模板身份。
+ * @returns 上传时保存的原始 DOCX 字节。
+ */
+export async function readDocxTemplateBytes(workspace: BidWorkspace, templateId: DocxTemplateId): Promise<Buffer> {
+  const registry = await readDocxTemplateRegistry(workspace)
+  if (!registry.templates.some(template => template.id === templateId)) throw new Error('选择的 Word 模板不存在。')
+  const path = within(workspace.projectRoot, `word-export/templates/${templateIdSchema.parse(templateId)}.docx`)
+  await assertNoLinkedPath(workspace.root, path)
+  return readFile(path)
+}
+
 async function parseStateFile(path: string): Promise<DocxFormatState | undefined> {
   let raw: string
   try { raw = await readFile(path, 'utf8') } catch (error) {

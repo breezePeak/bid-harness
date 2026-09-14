@@ -185,4 +185,26 @@ describe('Word page estimate', () => {
     expect(other).toMatchObject({ method: 'rendered', pages: 3 })
     expect(available).toHaveBeenCalledOnce()
   })
+
+  it('S5 真实分页固定使用纵向 A4，同时保留模板排版参数', async () => {
+    clearPageEstimateCache()
+    const project = await workspace()
+    const current = await readDocxFormat(project, null)
+    await writeDocxFormat(project, null, { ...current.state, revision: current.state.revision + 1,
+      resolved: { ...current.state.resolved, 'page.paper': 'A3', 'page.orientation': 'landscape',
+        'page.left': 31, 'body.size': 18 } })
+    const renderPdf = vi.fn(async (docx: Buffer) => {
+      const zip = await import('jszip').then(module => module.default.loadAsync(docx))
+      const [document, styles] = await Promise.all([
+        zip.file('word/document.xml')!.async('string'), zip.file('word/styles.xml')!.async('string'),
+      ])
+      expect(document).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>')
+      expect(document).toContain('<w:pgMar w:top="1417" w:right="1417" w:bottom="1417" w:left="1757"')
+      expect(styles).toContain('<w:sz w:val="36"/>')
+      return pdf(1)
+    })
+
+    await estimateDocxMarkdownPages(project, '# 技术标\n\n正文。\n', null, { renderPdf })
+    expect(renderPdf).toHaveBeenCalledOnce()
+  })
 })

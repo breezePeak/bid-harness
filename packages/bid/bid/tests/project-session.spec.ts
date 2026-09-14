@@ -1084,6 +1084,22 @@ describe('Workspace 项目与独立 Session', () => {
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
   })
 
+  it('阶段失败只回收当前运行登记的 continuable 子代理，不关闭恢复会话', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('resume-child-cleanup')
+    const drainChildren = vi.spyOn(ctx.subagents, 'drainContinuableChildren')
+    const drainDescendants = vi.spyOn(ctx.subagents, 'drainContinuableDescendants')
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executor.execute.mockRejectedValueOnce(new Error('mapping transport failed'))
+
+    await expect(resumeRun(ctx, agent.session)).resolves.toMatchObject({ ok: true })
+    await vi.waitFor(() => { expect(drainChildren).toHaveBeenCalledWith(agent, []) })
+
+    expect(drainDescendants).not.toHaveBeenCalled()
+  })
+
   it('S4 Mapping Child 未完成时 Main Agent 先回复，Child 与阶段随后继续', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)

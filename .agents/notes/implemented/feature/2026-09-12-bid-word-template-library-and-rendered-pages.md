@@ -14,7 +14,7 @@ S1 和 S6 复用 `/api/bid-docx-template`。该端点只保存模板库数据，
 
 所有具体模板操作携带 `templateId`：读取和确认格式、预览、手动页数测算、导出及下载均解析同一份独立状态。S6 的当前选择只控制本次操作；设置 S5 基准是单独 Remote。无参数的内部格式读取专用于 S5，按照 Registry 的 `estimateTemplateId` 解析系统默认格式或模板状态。S5 工作台、父节点汇总、Writer 候选、确定性页数验收和完成账本使用该基准；完成账本同时绑定格式 revision 与模板 ID，任一变化都会使旧结论失效。
 
-页数结果携带 `source`、`method` 和模板身份。`fast` 使用 Markdown 高度算法，服务运行中刷新、章节与父节点汇总、Writer 候选和写作验收。`rendered` 使用正式 `renderDocx()` 生成临时 DOCX，调用 LibreOffice headless 转成 PDF，并由 PDF 解析器读取页数，服务稳定正文、S6 手动测算和导出前核验。LibreOffice 不存在或转换失败时返回标记为 `fast` 的结果，不阻断 S5 或导出。
+页数结果携带 `source`、`method` 和模板身份。`fast` 使用 Markdown 高度算法，服务运行中刷新、章节与父节点汇总、Writer 候选和写作验收。`rendered` 使用正式 `renderDocx()` 生成固定纵向 A4 的临时 DOCX，调用 LibreOffice headless 转成 PDF，并由 PDF 解析器读取页数，服务稳定正文、S6 手动测算和导出前核验。页边距与文字排版仍读取所选模板；模板纸型、方向和分节不改变 S5 基准。LibreOffice 不存在或转换失败时返回标记为 `fast` 的结果，不阻断 S5 或导出。
 
 真实分页缓存保存在 `word-export/page-estimates/{fingerprint}.json`。指纹包含完整 Markdown、项目图片内容摘要、模板 ID、模板格式 revision、排序后的 `resolved` 值和 Renderer 版本；同项目同指纹的并发计算合并为一次，进程内已知失败不反复启动转换。章节快速缓存按正文、模板身份、格式版本及图片变化失效。
 
@@ -34,6 +34,6 @@ S1 和 S6 复用 `/api/bid-docx-template`。该端点只保存模板库数据，
 
 ## Consequences
 
-一个项目可以长期保存并切换多份模板，每份模板保留独立格式证据、冲突和导出记录。S1 可以提前建立 S5 排版基准但不增加工作流阶段，未上传模板的项目继续使用系统默认格式。S5 与 S6 都能展示模板和统计方法；S6 可比较不同模板页数而不改变 S5。
+一个项目可以长期保存并切换多份模板，每份模板保留独立格式证据、冲突、原始 DOCX 和导出记录。S1 可以提前建立 S5 排版基准但不增加工作流阶段，未上传模板的项目继续使用系统默认格式。S5 与 S6 都能展示模板和统计方法；S6 可比较不同模板页数而不改变 S5，并按[模板原位合成](2026-09-14-word-template-first-composition.md)使用所选原始 DOCX。
 
-`rendered` 表示 LibreOffice 对当前 Renderer 产物的分页，不保证等于用户本机 Microsoft Word；字体可用性、LibreOffice 与 Word 的版式差异及打印环境仍会影响结果。上传模板仍只提取受支持的排版参数，不继承复杂封面、Logo、水印、浮动对象或任意 OOXML 母版结构。[S5 常驻审核与按需导出](2026-09-04-bid-s5-persistent-review-export.md)继续拥有导出准入与阶段生命周期，[模板证据解析与冲突确认](2026-09-10-word-template-evidence-resolution.md)继续拥有解析、语义映射和用户确认规则；这两份记录保留为活跃约束，不归档。
+`rendered` 表示 LibreOffice 对当前 Renderer 产物的分页，不保证等于用户本机 Microsoft Word；字体可用性、LibreOffice 与 Word 的版式差异及打印环境仍会影响结果。上传模板只为 S5 提取受支持的排版参数；S6 保留原始 DOCX 的固定 OOXML 结构并只修改识别出的填写区域。[S5 常驻审核与按需导出](2026-09-04-bid-s5-persistent-review-export.md)继续拥有导出准入与阶段生命周期，[模板证据解析与冲突确认](2026-09-10-word-template-evidence-resolution.md)继续拥有解析、语义映射和用户确认规则；这两份记录保留为活跃约束，不归档。

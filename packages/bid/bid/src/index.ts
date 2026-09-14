@@ -64,8 +64,9 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
+import { composeDocxFromTemplate } from './docx-compose.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
-  saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
+  readDocxTemplateBytes, saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
   DOCX_TEMPLATE_NAME_HEADER,
@@ -705,6 +706,7 @@ interface ActiveBidOperation {
   readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
   readonly runs: BidRunCoordinator
+  readonly stopTrackingContinuableChildren: () => void
   projectRevision: number
   suspension?: Promise<unknown>
 }
@@ -1406,6 +1408,12 @@ export class BidHostRuntime extends TypertRemoteService {
     const stageControl = new HostStageSchedulerControl()
     const controller = new AbortController()
     const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+    const continuableChildren = new Set<SessionId>()
+    const stopTrackingContinuableChildren = this.ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.origin === 'subagent' && agent.session.header.parentSession === session.id) {
+        continuableChildren.add(agent.id)
+      }
+    }, { global: true })
     const holder: { current?: ActiveBidOperation } = {}
     const runs = new BidRunCoordinator(
       session,
@@ -1413,7 +1421,7 @@ export class BidHostRuntime extends TypertRemoteService {
       {
         drain: async () => {
           const agent = this.ctx.agents.get(session.id)
-          if (agent !== undefined) await this.ctx.subagents.drainContinuableDescendants([agent])
+          if (agent !== undefined) await this.ctx.subagents.drainContinuableChildren(agent, [...continuableChildren])
         },
       },
       () => holder.current?.projectRevision ?? 0,
@@ -1435,6 +1443,7 @@ export class BidHostRuntime extends TypertRemoteService {
       reservedForReset: false,
       stageControl,
       writingControl: new HostChapterWritingControl(),
+      stopTrackingContinuableChildren,
       projectRevision: 0,
       runs,
     }
@@ -1457,6 +1466,7 @@ export class BidHostRuntime extends TypertRemoteService {
         if (operation.suspension === undefined) await this.checkpoint(operation)
       }
     } finally {
+      operation.stopTrackingContinuableChildren()
       if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
       operation.settle()
     }
@@ -2756,7 +2766,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const view = await readDocxFormat(workspace, templateId)
     const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
-    const rendered = await renderDocx(workspace, markdown, view.state.resolved)
+    const rendered = await renderDocx(workspace, markdown, view.state.resolved, false, 'a4')
     return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
   }
 
@@ -4234,7 +4244,10 @@ export class BidWorkspace {
     const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
-    const rendered = await renderDocx(this, markdown, view.state.resolved)
+    const rendered = view.templateId === null
+      ? await renderDocx(this, markdown, view.state.resolved)
+      : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
+        view.state.resolved, view.state.modelInterpreted.mapping)
     await readDocxXml(rendered.bytes)
     const nextFormat = { ...view.state,
       lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, rendered.assetHash) },

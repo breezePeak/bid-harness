@@ -2136,6 +2136,43 @@ describe('evidence-mapping Agent executor', () => {
     expect(await secondRejection).toBeInstanceOf(Error)
   })
 
+  it('恢复前目录输入变化会失效 completed checkpoint 并重跑受影响任务', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-stale-checkpoint-')))
+    const material = await writeInputs(workspace)
+    const first = mappingFixture(workspace, material)
+    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-INIT-SEC-2' ? '{' : JSON.stringify(value))
+    const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    const rejection = failed.catch((error: unknown) => error)
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(1) })
+    first.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
+    first.starts[1]!.resolve()
+    expect(await rejection).toBeInstanceOf(Error)
+
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = JSON.parse(await readFile(outlinePath, 'utf8')) as { sections: Array<{ id: string; purpose: string }> }
+    outline.sections.find(section => section.id === 'SEC-1')!.purpose = '响应更新后的主题'
+    await writeFile(outlinePath, JSON.stringify(outline))
+
+    const resumed = mappingFixture(workspace, material)
+    const controller = new AbortController()
+    const completion = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, resume: true, signal: controller.signal,
+    })
+    const resumedRejection = completion.catch((error: unknown) => error)
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+    expect(promptText(resumed.starts[0]!.request.request)).toContain('"task_id":"MAP-INIT-SEC-2"')
+    resumed.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(2) })
+    const rerunPrompt = promptText(resumed.starts[1]!.request.request)
+    expect(rerunPrompt).toContain('"task_id":"MAP-INIT-SEC-1"')
+    expect(rerunPrompt).toContain('响应更新后的主题')
+    controller.abort()
+    expect(await resumedRejection).toBeInstanceOf(Error)
+  })
+
   it('拆分后新叶研究失败，恢复复用既有动态任务而不重复创建 REFINE 任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-split-resume-')))
     const material = await writeInputs(workspace)
@@ -2869,9 +2906,10 @@ describe('S4 Host 准入与最终确认', () => {
     const host = Object.create(BidHostRuntime.prototype) as BidHostRuntime
     Object.assign(host, {
       ctx: {
+        on: () => () => {},
         agents: { get: () => fixture.agent, list: () => [fixture.agent] },
         sessions: { list: () => [session], flush: async () => {} },
-        subagents: { drainContinuableDescendants: async () => {} },
+        subagents: { drainContinuableChildren: async () => {} },
       },
       config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024 * 1024, maxTotalBytes: 10 * 1024 * 1024, docxTemplateMaxBytes: 300 * 1024 * 1024, modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, chapterWritingCompletionRepairRounds: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [] } satisfies Config,
       inFlight: new Map(),
