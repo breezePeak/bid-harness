@@ -15,7 +15,8 @@ import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
-import { validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
+import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
+import type { NativeVisioExport } from './native-visio.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -33,7 +34,11 @@ async function readSavedChapter(workspace: BidWorkspace, path: string): Promise<
 async function readSavedFlowcharts(workspace: BidWorkspace, serial: string): Promise<readonly FlowchartSpec[]> {
   try {
     const metadata = parseChapterMetadata(JSON.parse(await readProjectFile(workspace, `chapters/meta/${serial}.json`)))
-    return metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
+    for (const flowchart of metadata.flowcharts) {
+      const issues = validateFlowchartSpec(flowchart)
+      if (issues.length > 0) throw new Error(`流程图无法导出：${issues.join('；')}`)
+    }
+    return metadata.flowcharts
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw error
@@ -48,6 +53,7 @@ export { collectDocxChapterBody } from './docx-content.ts'
  * @param run 本次阶段的唯一执行与正式提交权限。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
  * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认格式。
+ * @param nativeExport 可选的 Visio/Word 能力注入；省略时使用当前 Windows COM 实现。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
 export async function executeDocxExport(
@@ -55,6 +61,7 @@ export async function executeDocxExport(
   run: BidRunContext,
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
   templateId?: DocxTemplateId | null,
+  nativeExport?: NativeVisioExport,
 ): Promise<StageArtifact[]> {
   const markdown = await collectDocxMarkdown(workspace, run.signal)
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
@@ -63,7 +70,7 @@ export async function executeDocxExport(
   await assertNoLinkedPath(workspace.root, absolute)
   run.signal.throwIfAborted()
   await run.commits.writeText(absolute, markdown)
-  await workspace.exportDocxMarkdown(markdown, destination, templateId, run.commits)
+  await workspace.exportDocxMarkdown(markdown, destination, templateId, run.commits, undefined, nativeExport)
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 
@@ -90,6 +97,25 @@ export async function collectDocxMarkdown(
   if (!outline.sections.some(section => section.writable ? chapters.get(section.id)?.markdown.trim() : section.summary?.trim())) {
     throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_NO_SAVED_CHAPTERS', message: '当前还没有已保存的正文。' }])
   }
+  const flowchartsBySection = new Map<string, readonly FlowchartSpec[]>()
+  const figureNumbers = new Map<string, number>()
+  let figureNumber = 0
+  for (const [sectionId, chapter] of chapters) {
+    const flowcharts = await readSavedFlowcharts(workspace, chapter.content_path.slice(-7, -3))
+    flowchartsBySection.set(sectionId, flowcharts)
+    const anchorIssues = validateFlowchartAnchors(chapter.markdown, flowcharts)
+    if (anchorIssues.length > 0) throw new Error(`流程图 anchor 无效：${anchorIssues.join('；')}`)
+    const ordered = [...flowcharts].sort((left, right) => {
+      const leftKey = left.key?.trim() || left.id
+      const rightKey = right.key?.trim() || right.id
+      return chapter.markdown.indexOf(`{{flowchart:${leftKey}}}`) - chapter.markdown.indexOf(`{{flowchart:${rightKey}}}`)
+    })
+    for (const flowchart of ordered) {
+      const key = flowchart.key ?? flowchart.id
+      if (figureNumbers.has(key)) throw new Error(`FLOWCHART_KEY_DUPLICATE:${key}`)
+      figureNumbers.set(key, ++figureNumber)
+    }
+  }
   for (const [sectionId, chapter] of chapters) {
     if (chapter.markdown !== await readSavedChapter(workspace, chapter.content_path)) {
       throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_SNAPSHOT_CHANGED', message: `章节 ${sectionId} 在导出快照期间发生变化，请重新导出。`, artifact: chapter.content_path }])
@@ -109,10 +135,12 @@ export async function collectDocxMarkdown(
       if (section.writable) parts.push('（本节尚无已保存正文。）')
       continue
     }
-    parts.push(collectDocxChapterBody(chapter.markdown, section.title, section.id, number, headingDepth))
-    for (const flowchart of await readSavedFlowcharts(workspace, chapter.content_path.slice(-7, -3))) {
-      parts.push(`\`\`\`flowchart\n${JSON.stringify(flowchart)}\n\`\`\``)
-    }
+    const flowcharts = flowchartsBySection.get(section.id) ?? []
+    parts.push(resolveFlowchartAnchors(
+      collectDocxChapterBody(chapter.markdown, section.title, section.id, number, headingDepth),
+      flowcharts,
+      figureNumbers,
+    ))
   }
   return `${parts.join('\n\n')}\n`
 }

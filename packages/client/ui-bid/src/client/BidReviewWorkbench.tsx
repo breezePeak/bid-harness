@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
 import { renderFlowchartSvg, type FlowchartSpec } from '@deepseek-ai/dsh-bid/flowchart'
+import { Fragment } from 'react'
+import type { JSX } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import { CHAPTER_DRAG_TYPE, selectedParagraphReference, type createBidRevisionStore, type BidRevisionReference } from './revision-reference.ts'
@@ -424,11 +426,7 @@ export function BidReviewWorkbench({
                   })
                 }}
               >
-                <MarkdownText
-                  text={chapter.markdown.replace(/^# [^\n]*(?:\n|$)\s*/u, '')}
-                  paragraphSourceOffset={chapter.markdown.match(/^# [^\n]*(?:\n|$)\s*/u)?.[0].length ?? 0}
-                />
-                {(chapter.flowcharts ?? []).map(flowchart => <FlowchartPreview key={flowchart.id} spec={flowchart} />)}
+                <AnchoredFlowcharts chapter={chapter} />
               </div>
             </article>
           )}
@@ -568,6 +566,33 @@ export function BidReviewWorkbench({
       </div>}
     </section>
   )
+}
+
+function AnchoredFlowcharts({ chapter }: { chapter: BidReviewChapterView }): JSX.Element {
+  const source = chapter.markdown ?? ''
+  const heading = source.match(/^# [^\n]*(?:\n|$)\s*/u)?.[0] ?? ''
+  const markdown = source.slice(heading.length)
+  const flowcharts = chapter.flowcharts ?? []
+  const byKey = new Map(flowcharts.map(flowchart => [flowchart.key ?? flowchart.id, flowchart]))
+  const parts: JSX.Element[] = []
+  let cursor = 0
+  let index = 0
+  for (const match of markdown.matchAll(/\{\{flowchart:([A-Za-z0-9_-]{1,64})\}\}/gu)) {
+    const start = match.index
+    if (start > cursor) parts.push(<MarkdownText key={`text-${index++}`} text={markdown.slice(cursor, start)} paragraphSourceOffset={heading.length + cursor} />)
+    const flowchart = byKey.get(match[1] ?? '')
+    if (flowchart === undefined) parts.push(<MarkdownText key={`unknown-${index++}`} text={match[0]} paragraphSourceOffset={heading.length + start} />)
+    else parts.push(<FlowchartPreview key={flowchart.id} spec={flowchart} />)
+    cursor = start + match[0].length
+  }
+  if (cursor < markdown.length) parts.push(<MarkdownText key={`text-${index}`} text={markdown.slice(cursor)} paragraphSourceOffset={heading.length + cursor} />)
+  if (parts.length === 0) {
+    return <Fragment>
+      <MarkdownText text={markdown} paragraphSourceOffset={heading.length} />
+      {flowcharts.map(flowchart => <FlowchartPreview key={flowchart.id} spec={flowchart} />)}
+    </Fragment>
+  }
+  return <Fragment>{parts}</Fragment>
 }
 
 function FlowchartPreview({ spec }: { spec: FlowchartSpec }): JSX.Element {

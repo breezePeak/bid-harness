@@ -5,6 +5,7 @@ import {
   webEvidenceMaterialSchema,
   type LocalEvidenceMaterial,
   type WebEvidenceMaterial,
+  webMaterialIdentity,
 } from './evidence-mapping-artifacts.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 import { FLOWCHART_SCHEMA_VERSION, FLOWCHART_MAX_EDGES, FLOWCHART_MAX_NODES, type FlowchartDraft, type FlowchartSpec } from './flowchart.ts'
@@ -20,10 +21,6 @@ function duplicate(values: readonly string[]): boolean {
 
 function localIdentity(material: LocalEvidenceMaterial): string {
   return `${material.source_kind}\u0000${material.file_id}\u0000${material.chunk}`
-}
-
-function webIdentity(material: WebEvidenceMaterial): string {
-  return material.source_id
 }
 
 const responsePointSnapshotSchema = z.object({
@@ -50,21 +47,25 @@ const flowchartDraftEdgeSchema = z.object({
   from: z.string().trim().min(1).max(64), to: z.string().trim().min(1).max(64), label: z.string().trim().min(1).max(100).optional(),
 }).strict()
 const flowchartDraftSchema = z.object({
-  type: z.literal('flowchart').optional(), title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(),
+  type: z.literal('flowchart').optional(), key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(), title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(),
   direction: z.enum(['TB', 'LR']).optional(),
   nodes: z.array(flowchartDraftNodeSchema).min(1).max(FLOWCHART_MAX_NODES),
   edges: z.array(flowchartDraftEdgeSchema).max(FLOWCHART_MAX_EDGES),
 }).strict()
 const flowchartSpecSchema = z.object({
-  type: z.literal('flowchart'), schema_version: z.literal(FLOWCHART_SCHEMA_VERSION), id: z.string().regex(/^FLOW-[A-Za-z0-9_-]+$/u),
+  type: z.literal('flowchart'), schema_version: z.literal(FLOWCHART_SCHEMA_VERSION),
+  id: z.string().regex(/^FLOW-[A-Za-z0-9_-]+$/u),
+  key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
   title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(), direction: z.enum(['TB', 'LR']),
-  nodes: z.array(z.object({ id: z.string().regex(/^N\d+$/u), type: flowchartNodeTypeSchema, text: z.string().trim().min(1).max(200) }).strict()).min(1).max(FLOWCHART_MAX_NODES),
+  nodes: z.array(z.object({
+    id: z.string().regex(/^N\d+$/u), type: flowchartNodeTypeSchema, text: z.string().trim().min(1).max(200),
+  }).strict()).min(1).max(FLOWCHART_MAX_NODES),
   edges: z.array(flowchartDraftEdgeSchema).max(FLOWCHART_MAX_EDGES),
 }).strict()
 const flowchartInputSchema = z.union([flowchartDraftSchema, flowchartSpecSchema])
 
 function flowchartInput(value: unknown): FlowchartDraft | FlowchartSpec {
-  return flowchartInputSchema.parse(value) as FlowchartDraft | FlowchartSpec
+  return flowchartInputSchema.parse(value)
 }
 
 const chapterMetadataFields = {
@@ -93,8 +94,8 @@ function addDurableEvidenceIssues(
   if (duplicate(metadata.local_materials_used.map(localIdentity))) {
     context.addIssue({ code: 'custom', message: 'local material identities must be unique' })
   }
-  if (duplicate(metadata.web_materials_used.map(webIdentity))) {
-    context.addIssue({ code: 'custom', message: 'Web source ids must be unique' })
+  if (duplicate(metadata.web_materials_used.map(webMaterialIdentity))) {
+    context.addIssue({ code: 'custom', message: 'Web material identities must be unique' })
   }
 }
 

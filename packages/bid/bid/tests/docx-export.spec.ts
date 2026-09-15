@@ -12,6 +12,7 @@ import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/out
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
+import type { NativeVisioExport } from '../src/native-visio.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -29,12 +30,36 @@ const executeDocxExport = (
   signal?: AbortSignal,
   destination?: string,
   templateId?: import('../src/docx-format-contract.ts').DocxTemplateId | null,
+  nativeExport?: NativeVisioExport,
 ) => executeDocxExportImplementation(
   workspace,
   createTestBidRunContext(signal === undefined ? {} : { signal }),
   destination,
   templateId,
+  nativeExport,
 )
+
+const fakeNativeVisioExport = (): NativeVisioExport => ({
+  visio: {
+    isAvailable: async () => true,
+    createDiagram: async (spec, path) => {
+      await writeFile(path, `fake-vsdx:${spec.id}`)
+      return { path, nodeCount: spec.nodes.length, connectorCount: spec.edges.length }
+    },
+  },
+  word: {
+    isAvailable: async () => true,
+    embed: async (docxPath, replacements) => {
+      const zip = await JSZip.loadAsync(await readFile(docxPath))
+      const document = zip.file('word/document.xml')
+      if (document === null) throw new Error('document.xml missing')
+      const xml = await document.async('string')
+      zip.file('word/document.xml', replacements.reduce((value, replacement) => value.replace(replacement.placeholder, ''), xml))
+      await writeFile(docxPath, await zip.generateAsync({ type: 'nodebuffer' }))
+    },
+    countVisioObjects: async () => 1,
+  },
+})
 
 async function exportFixture() {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-export-')), { ...DEFAULT_BID_CONFIG, outputDirectory: 'deliverables' })
@@ -105,7 +130,7 @@ describe('Bid DOCX export', () => {
     expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
   })
 
-  it('S5 流程图以结构化 metadata 进入 DOCX，并写入 SVG 资源', async () => {
+  it('S6 流程图按正文 anchor 进入 Native Visio 两阶段导出', async () => {
     const { workspace } = await exportFixture()
     await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
@@ -116,19 +141,22 @@ describe('Bid DOCX export', () => {
         deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
       },
       flowcharts: [{
-        type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', title: '质量检查闭环', direction: 'TB',
+        type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', key: 'quality-control-flow', title: '质量检查闭环', direction: 'TB',
         nodes: [
           { id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交' },
         ], edges: [{ from: 'N1', to: 'N2', label: '通过' }],
       }],
     }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n质量控制总体流程如下。\n\n{{flowchart:quality-control-flow}}\n')
 
-    await executeDocxExport(workspace)
+    await executeDocxExport(workspace, undefined, undefined, undefined, fakeNativeVisioExport())
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
     expect(markdown).toContain('```flowchart\n')
     expect(markdown).toContain('质量检查闭环')
     const zip = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'bid.docx')))
-    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(true)
+    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(false)
+    expect(await zip.file('word/document.xml')?.async('string')).not.toContain('BID_VISIO_OBJECT_FLOW-RESOURCE-1-1')
+    expect(await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.vsdx'), 'utf8')).toBe('fake-vsdx:FLOW-RESOURCE-1-1')
   })
 
   it('renderer 在 Run 退休后返回时不能覆盖正式 DOCX 或导出记录', async () => {
@@ -137,11 +165,11 @@ describe('Bid DOCX export', () => {
     const previous = await readFile(join(workspace.outputRoot, 'bid.docx'))
     const saved = await readDocxFormat(workspace)
     const run = createTestBidRunContext()
-    const entered = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
     const original = workspace.exportDocxMarkdown.bind(workspace)
     vi.spyOn(workspace, 'exportDocxMarkdown').mockImplementation(async (...args) => {
-      entered.resolve()
+      entered.resolve(undefined)
       await release.promise
       return original(...args)
     })

@@ -8,11 +8,11 @@ S5 章节正文原先只持久化 Markdown，流程图如果在 S6 临时生成�
 
 ## Decision
 
-章节 metadata 现在可持久化 `flowcharts`，每项是带 `type`、schema version、Host 分配的 `FLOW-*` 身份、节点和连线的结构化 FlowchartSpec。Writer 只提交节点 key 和语义，Host 负责生成身份、校验节点引用、分支和规模，并在旧 metadata 缺少该字段时使用空数组。
+章节 metadata 持久化 `flowcharts`，每项是带 `type`、schema version、语义 `key`、Host 分配的 `FLOW-*` 身份、节点和连线的结构化 FlowchartSpec。Writer 只提交图形语义、节点 key 和正文 anchor，Host 负责生成身份、校验节点引用、分支、规模及 anchor 唯一性，并在旧 metadata 缺少该字段时使用空数组。
 
-S5 正文详情和 S6 DOCX 共用无外部资源的确定性 SVG renderer。S6 通过内部 `flowchart` Markdown 块把已保存的 FlowchartSpec 交给 renderer，不再次调用模型；DOCX 使用 SVG 图片并提供显式 PNG fallback。
+S5 正文详情继续使用无外部资源的确定性 SVG renderer。S6 先将 anchor 展开为内部 `flowchart` Markdown 块，再由独立 `VisioBackend` 使用 Windows PowerShell COM 创建原生 Shape 和 Connector，最后由 Word COM 在 marker 位置以 `LinkToFile=false` 嵌入对应 VSDX；导出不把 SVG、PNG 或 EMF 作为正式流程图实现。
 
-Visio OLE/COM 没有在当前跨平台包中伪造实现。需要 Windows + Office/Visio 的真正可编辑对象时，由独立平台 backend 负责，portable 环境继续使用 SVG/PNG 降级。
+正式 Visio 导出只在 Word 和 Visio COM 均可用时成功。portable 环境或未安装 Office 时返回明确 runtime 错误，S5 的浏览器预览仍可独立使用 SVG。
 
 ## Alternatives considered
 

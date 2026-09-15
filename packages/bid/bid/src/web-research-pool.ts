@@ -19,6 +19,7 @@ import {
   parseWebEvidenceSourcesArtifact,
   WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   webEvidenceContentSha256,
+  uniqueWebEvidenceSources,
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
@@ -42,7 +43,7 @@ type RawFetch = (url: string, exec: ToolRunContext) => Promise<ToolExecutionResu
 export class S4WebResearchPool {
   private readonly assets = new Map<string, WebResearchAsset>()
   private readonly sourceIdsByUrl = new Map<string, string>()
-  private readonly inflight = new Map<string, Promise<WebResearchAsset>>()
+  private readonly inflight = new Map<string, Promise<{ asset: WebResearchAsset; reused: boolean }>>()
   private readonly readByChild = new Map<string, Set<string>>()
   private commitQueue = Promise.resolve()
   private readonly counters: WebResearchPoolStats = {
@@ -103,33 +104,39 @@ export class S4WebResearchPool {
     const pending = this.inflight.get(normalized)
     if (pending !== undefined) {
       this.counters.duplicate_fetch_avoided++
-      return { ...this.sourceCatalog(await pending), reused: true }
+      return { ...this.sourceCatalog((await pending).asset), reused: true }
     }
     const fetching = this.fetchAndRegister(url, exec)
     this.inflight.set(normalized, fetching)
     try {
-      return { ...this.sourceCatalog(await fetching), reused: false }
+      const result = await fetching
+      return { ...this.sourceCatalog(result.asset), reused: result.reused }
     } finally {
       this.inflight.delete(normalized)
     }
   }
 
-  private async fetchAndRegister(url: string, exec: ToolRunContext): Promise<WebResearchAsset> {
+  private async fetchAndRegister(url: string, exec: ToolRunContext): Promise<{ asset: WebResearchAsset; reused: boolean }> {
     const result = await this.rawFetch(url, exec)
     if (result.isError) throw new ToolArgsError([`url: Web 获取失败：${result.error.message}`])
     const snapshot = webEvidenceSnapshotFromFetch(url, result.value)
     if (snapshot === undefined) throw new ToolArgsError(['url: Web 获取未返回 HTTP 2xx 非空正文。'])
     const existing = this.assets.get(snapshot.source.source_id)
     if (existing !== undefined) {
-      const normalizedUrl = normalizeWebEvidenceUrl(url)
-      if (normalizedUrl !== undefined) {
-        this.sourceIdsByUrl.set(normalizedUrl, existing.snapshot.source.source_id)
-      }
+      this.linkSourceUrls(snapshot.source, existing.snapshot.source.source_id)
       this.counters.web_sources_reused++
-      return existing
+      return { asset: existing, reused: true }
     }
     const asset = { snapshot, index: buildWebEvidenceChunkIndex(snapshot.source, snapshot.content) }
+    let committed: WebResearchAsset | undefined
     await this.enqueueCommit(async () => {
+      const existingInCommit = this.assets.get(snapshot.source.source_id)
+      if (existingInCommit !== undefined) {
+        this.linkSourceUrls(snapshot.source, existingInCommit.snapshot.source.source_id)
+        committed = existingInCommit
+        this.counters.web_sources_reused++
+        return
+      }
       const snapshotPath = join(this.workspace.projectRoot, ...snapshot.source.snapshot_path.split('/'))
       const indexPath = join(this.workspace.projectRoot, ...webEvidenceChunkIndexPath(snapshot.source.source_id).split('/'))
       await assertNoLinkedPath(this.workspace.root, snapshotPath)
@@ -137,7 +144,7 @@ export class S4WebResearchPool {
       const ledger = parseWebEvidenceSourcesArtifact({
         schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
         stage: 'evidence_mapping',
-        sources: [...this.assets.values()].map(item => item.snapshot.source).concat(snapshot.source),
+        sources: uniqueWebEvidenceSources([...this.assets.values()].map(item => item.snapshot.source).concat(snapshot.source)),
       })
       await this.commits.publish(async (lease) => {
         await lease.writeText(snapshotPath, snapshot.content)
@@ -145,9 +152,10 @@ export class S4WebResearchPool {
         await lease.writeJson(join(this.workspace.projectRoot, 'analysis/web-evidence-sources.json'), ledger)
       })
       this.publishMemory(asset)
+      committed = asset
     })
-    this.counters.web_sources_fetched++
-    return this.assets.get(snapshot.source.source_id) ?? asset
+    if (committed === asset) this.counters.web_sources_fetched++
+    return { asset: committed ?? this.assets.get(snapshot.source.source_id) ?? asset, reused: committed !== asset }
   }
 
   private enqueueCommit(work: () => Promise<void>): Promise<void> {
@@ -158,9 +166,13 @@ export class S4WebResearchPool {
 
   private publishMemory(asset: WebResearchAsset): void {
     this.assets.set(asset.snapshot.source.source_id, asset)
-    for (const url of [asset.snapshot.source.requested_url, asset.snapshot.source.final_url]) {
+    this.linkSourceUrls(asset.snapshot.source, asset.snapshot.source.source_id)
+  }
+
+  private linkSourceUrls(source: WebEvidenceSource, sourceId: string): void {
+    for (const url of [source.requested_url, source.final_url]) {
       const normalized = normalizeWebEvidenceUrl(url)
-      if (normalized !== undefined) this.sourceIdsByUrl.set(normalized, asset.snapshot.source.source_id)
+      if (normalized !== undefined) this.sourceIdsByUrl.set(normalized, sourceId)
     }
   }
 

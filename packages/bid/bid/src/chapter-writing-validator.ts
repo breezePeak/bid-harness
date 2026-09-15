@@ -26,6 +26,7 @@ import {
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
 import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
+import { validateFlowchartAnchors } from './flowchart.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -259,6 +260,7 @@ export async function validateChapterWriting(
             web_materials_used: chapter.web_materials_used,
             unresolved_topics: chapter.unresolved_topics,
             handoff: chapter.handoff,
+            flowcharts: chapter.flowcharts,
           }
           if (JSON.stringify(metadata) !== JSON.stringify(fromManifest)) throw new Error('metadata-mismatch')
         } catch {
@@ -270,6 +272,9 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
+      for (const message of validateFlowchartAnchors(markdown, chapter.flowcharts)) {
+        reject(issues, 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, chapter.content_path)
+      }
       const leaked = findBidInternalIdentifiers(markdown, customerTextContext)
       if (leaked.length > 0) {
         reject(issues, 'CHAPTER_WRITING_INTERNAL_ID_VISIBLE', `正文包含系统内部编号 ${leaked.join('、')}。`, chapter.content_path)

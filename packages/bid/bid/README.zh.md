@@ -82,6 +82,8 @@ S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。Main Agent
 
 S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章状态常驻。审核工作台中的“导出 Word”调用 Host `exportDocx`，程序核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文；组合结果仍含项目内部 ID 时拒绝导出。每次成功导出在 `outputDirectory` 写入一对带时间标识的 Markdown 和 DOCX 文件。导出成功或失败都不改变 S5 状态，可重复执行。已经保存为 `docx_export/completed` 的旧项目同样保留审核工作台和导出动作。
 
+流程图属于 S5 章节的结构化 metadata。Writer 提交语义 `key` 和正文中的 `{{flowchart:key}}`，Host 生成 `FLOW-*` 与节点 ID，并校验每张图恰好有一个 anchor；`{{flow_ref:key}}` 在导出快照中按图形顺序解析为图号。浏览器预览继续使用 SVG。正式 Word 导出在 Windows 上先用 PowerShell COM 创建原生 Visio Shape 和 Connector，再由 Word COM 在正文 marker 处以 `LinkToFile=false` 嵌入对应 VSDX；Word 或 Visio 不可用时以 `VISIO_RUNTIME_UNAVAILABLE` 或 `WORD_RUNTIME_UNAVAILABLE` 失败，不降级为图片。
+
 
 ### Inventory 文本
 
@@ -102,6 +104,7 @@ S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章�
 - PDF 提取不执行 OCR 或完整表格重建；无法安全恢复列时，带位置信息的行仍保持分行。
 - DOC 提取保留文本、自然段、列表标记和制表符分隔的表格单元格，但不能保留全部二进制 Word 样式。
 - DOCX 与 DOC 页码字段保持 `null`，因为其源结构不提供可靠分页。
+- 原生 Visio 导出需要已注册的 Microsoft Word 和 Microsoft Visio COM；非 Windows 环境以及缺少任一 Office 应用时不会生成静态图片替代品。
 - DOCX 模板只提取支持的页面、Theme、段落、表格与编号样式，不复制旧正文、封面、图片、浮动对象、批注或页眉页脚文字；模板正文最多保存前 2000 段供格式说明解释。
 
 文件接入按文件返回结果：名称、格式、大小、二进制长度或解析失败会附带文件名、角色、稳定错误码和错误消息，不阻断同批次的其他有效文件；至少一个成功解析的招标文件才能推进阶段。

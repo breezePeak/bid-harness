@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { ChapterContext } from './chapter-writing-executor.ts'
 import { parseChapterCandidate, type ChapterCandidate, type AcceptedChapterCandidate } from './chapter-writing-artifacts.ts'
-import { localEvidenceMaterialSchema, transientWebEvidenceMaterialSchema, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import { canonicalWebChunkRefs, localEvidenceMaterialSchema, transientWebEvidenceMaterialSchema, type LocalEvidenceMaterial, type WebEvidenceMaterial, webMaterialIdentity } from './evidence-mapping-artifacts.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs } from './chapter-writing-protocol.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
@@ -35,7 +35,7 @@ const writerInput = z.object({
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
     flowcharts: z.array(z.object({
-      type: z.literal('flowchart').optional(), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
+      type: z.literal('flowchart').optional(), key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
       nodes: z.array(z.object({ key: text, type: z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess']), text }).strict()),
       edges: z.array(z.object({ from: text, to: text, label: text.optional() }).strict()),
     }).strict()).max(100).optional(),
@@ -62,7 +62,7 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
         unresolved_topics: stringArray,
         handoff: { type: 'object', properties: Object.fromEntries(Object.keys(handoffFields).map(key => [key, stringArray])), additionalProperties: false },
         flowcharts: { type: 'array', items: { type: 'object', properties: {
-          type: { type: 'string', enum: ['flowchart'] }, title: stringParameter, purpose: stringParameter,
+          type: { type: 'string', enum: ['flowchart'] }, key: stringParameter, title: stringParameter, purpose: stringParameter,
           direction: { type: 'string', enum: ['TB', 'LR'] },
           nodes: { type: 'array', items: { type: 'object', properties: {
             key: stringParameter, type: { type: 'string', enum: ['start', 'end', 'process', 'decision', 'document', 'subprocess'] }, text: stringParameter,
@@ -195,15 +195,19 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
       ...context.localReadLocations.find(value => value.file_id === material.file_id && value.chunk === material.chunk),
     })))}`,
     `Available Evidence Files：${JSON.stringify([...refs.files].map(([file_ref, file]) => ({ file_ref, name: file.name, role: file.role, chunks_path: file.chunks_path, chunk_index_path: file.chunk_index_path, allowed_usage: usage(file.role) })))}`,
-    `Verified Web Chunks：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).map(([web_ref, source]) => ({
-      web_ref, url: source.final_url,
-      allowed_usage: ['reference', 'background'], truncated: source.truncated,
-      summary: context.webMaterials.find(value => value.source_id === source.source_id)?.summary,
-      mapped_chunks: context.webReadLocations.filter(location => location.source_id === source.source_id).map(location => ({
-        chunk_ref: location.chunk_ref, read_path: location.read_path, offset: location.start_line,
-        limit: location.end_line - location.start_line + 1,
-      })),
-    })))}`,
+    `Verified Web Chunks：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).flatMap(([web_ref, source]) => {
+      const materials = context.webMaterials.filter(material => material.source_id === source.source_id)
+      return (materials.length === 0 ? [undefined] : materials).map(material => ({
+        web_ref, url: source.final_url,
+        allowed_usage: ['reference', 'background'], truncated: source.truncated,
+        ...(material === undefined ? {} : { summary: material.summary, supports: material.supports }),
+        mapped_chunks: context.webReadLocations.filter(location => location.source_id === source.source_id
+          && (material === undefined || material.chunk_refs.includes(location.chunk_ref))).map(location => ({
+          chunk_ref: location.chunk_ref, read_path: location.read_path, offset: location.start_line,
+          limit: location.end_line - location.start_line + 1,
+        })),
+      }))
+    }))}`,
     `不可用 Web 来源：${JSON.stringify([...unavailable].map(([source_id, reason]) => ({
       source_id, web_ref: [...refs.web].find(([, source]) => source.source_id === source_id)?.[0], reason,
       mapped_materials: context.webMaterials.filter(material => material.source_id === source_id).map(material => ({
@@ -234,7 +238,8 @@ function uniqueEvidence<T>(values: readonly T[], identity: (value: T) => string,
  * @returns 按真实来源去重的条目；语义冲突可恢复地拒绝。
  */
 export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial[]): WebEvidenceMaterial[] {
-  return uniqueEvidence(materials, value => value.source_id, 'metadata.web_materials_used')
+  const normalized = materials.map(material => ({ ...material, chunk_refs: canonicalWebChunkRefs(material.chunk_refs) }))
+  return uniqueEvidence(normalized, webMaterialIdentity, 'metadata.web_materials_used')
 }
 
 /**
@@ -279,6 +284,7 @@ export async function bindChapterWriterInput(
   }
   const web: WebEvidenceMaterial[] = []
   const webMaterials = input.metadata.web_materials_used ?? []
+  const mappedUses = new Map<string, number>()
   let currentSources: readonly WebEvidenceSource[] = []
   if (webMaterials.length > 0) {
     const ledgerPath = within(workspace.projectRoot, 'analysis/web-evidence-sources.json')
@@ -293,8 +299,11 @@ export async function bindChapterWriterInput(
       throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 的来源已从账本移除或身份不匹配。`])
     }
     await readChapterWebSource(workspace, current)
-    const mapped = context.webMaterials.find(value => value.source_id === source.source_id)
+    const candidates = context.webMaterials.filter(value => value.source_id === source.source_id)
+    const use = mappedUses.get(source.source_id) ?? 0
+    const mapped = candidates[use] ?? candidates[0]
     if (mapped === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 不属于当前章节的 S4 映射。`])
+    mappedUses.set(source.source_id, use + 1)
     web.push({
       source_id: source.source_id, snapshot_path: source.snapshot_path,
       chunk_refs: mapped.chunk_refs,
@@ -360,6 +369,7 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
       flowcharts: candidate.metadata.flowcharts.map(flowchart => ({
         type: 'flowchart' as const,
+        ...(flowchart.key === undefined ? {} : { key: flowchart.key }),
         title: flowchart.title,
         ...(flowchart.purpose === undefined ? {} : { purpose: flowchart.purpose }),
         direction: flowchart.direction,

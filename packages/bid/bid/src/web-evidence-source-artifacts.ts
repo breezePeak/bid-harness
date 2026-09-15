@@ -45,6 +45,15 @@ export type WebEvidenceSource = z.infer<typeof sourceSchema>
 /** S4 与 S5 共用的 Web 正文快照清单。 */
 export type WebEvidenceSourcesArtifact = z.infer<typeof ledgerSchema>
 
+/** 按 Source 身份防御性合并 ledger 条目；同一 Source 保留首次登记的元数据。 */
+export function uniqueWebEvidenceSources(values: readonly WebEvidenceSource[]): WebEvidenceSource[] {
+  const sources = new Map<string, WebEvidenceSource>()
+  for (const source of values) {
+    if (!sources.has(source.source_id)) sources.set(source.source_id, source)
+  }
+  return [...sources.values()]
+}
+
 /**
  * Parse a Host-owned Web evidence ledger through the strict current schema.
  * @param value - untrusted JSON value read from the Project Workspace.

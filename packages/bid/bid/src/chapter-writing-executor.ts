@@ -63,7 +63,9 @@ import {
   type LocalEvidenceMaterial,
   type TransientWebEvidenceMaterial,
   type WebEvidenceMaterial,
+  webMaterialIdentity,
 } from './evidence-mapping-artifacts.ts'
+import { validateFlowchartAnchors } from './flowchart.ts'
 import {
   type ModelStageExecutionOptions,
   renderStageRepairIssues,
@@ -78,6 +80,7 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 import {
   normalizeWebEvidenceUrl,
   parseWebEvidenceSourcesArtifact,
+  uniqueWebEvidenceSources,
   webEvidenceContentSha256,
   type WebEvidenceSource,
 } from './web-evidence-source-artifacts.ts'
@@ -230,10 +233,6 @@ function localIdentity(material: LocalEvidenceMaterial): string {
   return `${material.source_kind}\u0000${material.file_id}\u0000${material.chunk}`
 }
 
-function webIdentity(material: WebEvidenceMaterial): string {
-  return material.source_id
-}
-
 /**
  * 从确认目录派生全书职责与本节路径，并筛选本节相关的 S2/S4 记录。
  * @param raw 已解析的阶段输入、确认目录、当前章节和输出顺序。
@@ -278,7 +277,7 @@ export function pickChapterContext(raw: {
     relatedMaterials: localMaterials.filter(material => material.source_kind === 'reference'),
     referenceBidMaterials: localMaterials.filter(material => material.source_kind === 'reference_bid'),
     frameworkDraftMaterials: [],
-    webMaterials: uniqueBy(mapping.web_materials, webIdentity),
+    webMaterials: uniqueBy(mapping.web_materials, webMaterialIdentity),
     writingDimensions: [...new Set(mapping.writing_dimensions)],
     missingTopics: [...new Set(mapping.missing_topics)],
     availableLocalCorpus: [],
@@ -606,9 +605,7 @@ async function persistChapterWebSnapshots(
   const updated = parseWebEvidenceSourcesArtifact({
     schema_version: ledger.schema_version,
     stage: ledger.stage,
-    sources: [...new Map(
-      [...ledger.sources, ...bound.map(snapshot => snapshot.source)].map(source => [source.source_id, source]),
-    ).values()],
+    sources: uniqueWebEvidenceSources([...ledger.sources, ...bound.map(snapshot => snapshot.source)]),
   })
   for (const snapshot of bound) {
     const source = snapshot.source
@@ -718,6 +715,10 @@ async function validateAndBindChapterCandidate(
     .map(message => ({ code: 'CHAPTER_WRITING_OUTLINE_HEADING_INVALID', message, path: 'markdown' }))
   issues.push(...chapterInternalIdentifierIssues(context, candidate.markdown))
   const metadata = candidate.metadata
+  const flowcharts = Array.isArray(metadata.flowcharts) ? metadata.flowcharts : []
+  issues.push(...validateFlowchartAnchors(candidate.markdown, flowcharts).map(message => ({
+    code: 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, path: 'markdown',
+  })))
   if (candidate.section_id !== context.section.id || metadata.section_id !== context.section.id) {
     issues.push({ code: 'CHAPTER_WRITING_SECTION_INVALID', message: '候选与 metadata 的 section_id 必须等于当前章节 ID。', path: 'section_id' })
   }

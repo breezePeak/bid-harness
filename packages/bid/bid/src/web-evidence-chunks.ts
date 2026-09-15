@@ -10,6 +10,8 @@ import { webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence
 export const WEB_EVIDENCE_CHUNK_INDEX_SCHEMA_VERSION = 1 as const
 /** Soft size used when grouping complete Markdown blocks. */
 export const WEB_EVIDENCE_CHUNK_TARGET_CHARS = 6_000
+/** Hard size that every emitted Web Chunk must obey, including oversized blocks. */
+export const WEB_EVIDENCE_CHUNK_MAX_CHARS = 12_000
 
 const chunkRefSchema = z.string().regex(/^W:WEB-[a-f0-9]{16}:C\d{4}$/u)
 
@@ -28,6 +30,9 @@ const chunkSchema = z.object({
   if (chunk.end_line < chunk.start_line) context.addIssue({ code: 'custom', path: ['end_line'], message: 'Chunk line range is reversed' })
   if (chunk.end_offset <= chunk.start_offset || chunk.char_count !== chunk.end_offset - chunk.start_offset) {
     context.addIssue({ code: 'custom', path: ['end_offset'], message: 'Chunk offsets and length must agree' })
+  }
+  if (chunk.char_count > WEB_EVIDENCE_CHUNK_MAX_CHARS) {
+    context.addIssue({ code: 'custom', path: ['char_count'], message: 'Chunk exceeds the hard character limit' })
   }
 })
 
@@ -111,9 +116,27 @@ export function buildWebEvidenceChunkIndex(source: WebEvidenceSource, content: s
   if (blocks.length === 0) blocks.push({ start: 0, end: content.length, heading_path: [] })
   else if (cursor < content.length) blocks[blocks.length - 1]!.end = content.length
 
+  const boundedBlocks = blocks.flatMap((block) => {
+    if (block.end - block.start <= WEB_EVIDENCE_CHUNK_MAX_CHARS) return [block]
+    const parts: typeof blocks = []
+    let start = block.start
+    while (start < block.end) {
+      const limit = Math.min(start + WEB_EVIDENCE_CHUNK_MAX_CHARS, block.end)
+      if (limit === block.end) {
+        parts.push({ start, end: limit, heading_path: block.heading_path })
+        break
+      }
+      const lineBreak = content.lastIndexOf('\n', limit - 1)
+      const end = lineBreak >= start ? lineBreak + 1 : limit
+      parts.push({ start, end, heading_path: block.heading_path })
+      start = end
+    }
+    return parts
+  })
+
   const groups: typeof blocks[] = []
   let group: typeof blocks = []
-  for (const block of blocks) {
+  for (const block of boundedBlocks) {
     const size = group.reduce((total, item) => total + item.end - item.start, 0)
     if (group.length > 0 && (block.heading_path.join('\0') !== group[0]!.heading_path.join('\0')
       || size + block.end - block.start > WEB_EVIDENCE_CHUNK_TARGET_CHARS)) {

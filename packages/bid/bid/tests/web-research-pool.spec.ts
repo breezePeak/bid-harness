@@ -58,4 +58,27 @@ describe('S4 Web Research Pool', () => {
     await restoredWithoutIndex.restore(ledger.sources)
     await expect(readFile(indexPath, 'utf8')).resolves.toContain(chunk.chunk_ref)
   })
+
+  it('不同 requested URL 重定向到同一 Source 时在提交临界区只登记一次', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-pool-redirect-')))
+    await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
+    const run = createTestBidRunContext()
+    const rawFetch = vi.fn(async (_url: string): Promise<ToolExecutionResult> => ({
+      isError: false,
+      value: { url: 'https://example.com/final', statusCode: 200, body: { kind: 'text', content: '# 相同正文\n\n同一来源。' }, truncated: false },
+      content: [],
+    }))
+    const pool = new S4WebResearchPool(workspace, run.commits, rawFetch)
+    const exec = { signal: new AbortController().signal } as ToolRunContext
+    const [left, right] = await Promise.all([
+      pool.fetch('https://example.com/left', exec), pool.fetch('https://example.com/right', exec),
+    ])
+    expect(rawFetch).toHaveBeenCalledTimes(2)
+    expect(left.source_ref).toBe(right.source_ref)
+    expect([left.reused, right.reused].sort()).toEqual([false, true])
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+    expect(ledger.sources).toHaveLength(1)
+    expect(pool.listSources(0, 20).sources).toHaveLength(1)
+    expect(pool.stats()).toMatchObject({ web_sources_fetched: 1, web_sources_reused: 1 })
+  })
 })

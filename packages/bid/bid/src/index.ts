@@ -8,7 +8,7 @@
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { readFile, readdir } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname, relative, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -82,6 +82,7 @@ import { parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './c
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { validateFlowchartSpec } from './flowchart.ts'
+import { createNativeVisioExport, extractFlowchartSpecs, flowchartPlaceholder, VISIO_RUNTIME_UNAVAILABLE, WORD_RUNTIME_UNAVAILABLE, type NativeVisioExport } from './native-visio.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -245,12 +246,15 @@ export {
   executeEvidenceMappingFinalCheck,
   buildEvidenceMappingAcceptanceReport,
   mergeEvidenceMappingPartialResults,
+  parseEvidenceMappingExecutionLog,
+  readEvidenceMappingLog,
   readEvidenceMappingProgress,
   renderEvidenceMappingSubagentTask,
   buildEvidenceMappingPlan,
   type MergedEvidenceMappingResults,
   type EvidenceMappingAcceptanceReport,
   type EvidenceMappingAcceptanceToolStats,
+  type EvidenceMappingExecutionLog,
   type SectionResearchAssessment,
   type SectionStructureAssessment,
 } from './evidence-mapping-executor.ts'
@@ -291,6 +295,7 @@ export {
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from './docx-export.ts'
+export { createNativeVisioExport, flowchartPlaceholder, type NativeVisioExport, type VisioBackend, type VisioDiagramResult, type WordVisioEmbedder } from './native-visio.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 export { readBidProjectState, writeBidProjectState, checkpointBidProjectState } from './project-state.ts'
 export type { BidProjectState } from './project-state.ts'
@@ -4307,6 +4312,7 @@ export class BidWorkspace {
    * @param destination 输出目录下的项目相对 DOCX 路径。
    * @param templateId 明确的导出模板；仅内部阶段导出可省略并使用 S5 基准。
    * @param commits Long Run 写入时使用的 commit scope；独立 DOCX 操作可省略。
+   * @param nativeExport 可选的 Visio/Word 能力注入；省略时使用当前 Windows COM 实现。
    * @returns 向调用方公开的工作区相对路径。
    */
   async exportDocx(
@@ -4314,12 +4320,13 @@ export class BidWorkspace {
     destination = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
+    nativeExport?: NativeVisioExport,
   ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const sourcePath = within(this.projectRoot, source)
     if (!source.endsWith('.md')) throw new Error('bid-source-must-be-markdown')
     await assertNoLinkedPath(this.root, sourcePath)
-    return this.exportDocxMarkdown(await readFile(sourcePath, 'utf8'), destination, templateId, commits)
+    return this.exportDocxMarkdown(await readFile(sourcePath, 'utf8'), destination, templateId, commits, undefined, nativeExport)
   }
 
   /**
@@ -4329,6 +4336,7 @@ export class BidWorkspace {
    * @param templateId - Explicit format template or the S5 baseline when omitted.
    * @param commits - Long Run commit scope; independent DOCX operations may omit it.
    * @param sourceSnapshot - Optional project-relative Markdown snapshot published with the DOCX.
+   * @param nativeExport - Optional Visio/Word capability injection; defaults to the Windows COM implementation.
    * @returns Workspace-relative DOCX path.
    */
   async exportDocxMarkdown(
@@ -4337,6 +4345,7 @@ export class BidWorkspace {
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
     sourceSnapshot?: string,
+    nativeExport?: NativeVisioExport,
   ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const destinationPath = within(this.projectRoot, destination)
@@ -4344,24 +4353,71 @@ export class BidWorkspace {
     const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
-    const rendered = view.templateId === null
-      ? await renderDocx(this, markdown, view.state.resolved)
-      : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
-        view.state.resolved, view.state.modelInterpreted.mapping)
-    await readDocxXml(rendered.bytes)
+    const flowcharts = extractFlowchartSpecs(markdown)
+    if (/\{\{(?:flowchart|flow_ref):/u.test(markdown)) throw new Error('FLOWCHART_MARKER_UNRESOLVED: 正文仍包含未解析的流程图 marker。')
+    let finalBytes: Buffer
+    let assetHash: string
+    const nativeFlowchartFiles: Array<{ path: string; bytes: Buffer }> = []
+    if (flowcharts.length === 0) {
+      const rendered = view.templateId === null
+        ? await renderDocx(this, markdown, view.state.resolved)
+        : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
+          view.state.resolved, view.state.modelInterpreted.mapping)
+      finalBytes = rendered.bytes
+      await readDocxXml(finalBytes)
+      assetHash = rendered.assetHash
+    } else {
+      const office = nativeExport ?? createNativeVisioExport()
+      if (!(await office.visio.isAvailable())) throw new Error(`${VISIO_RUNTIME_UNAVAILABLE}: 当前环境未检测到 Microsoft Visio，无法生成 Word 内可编辑流程图。`)
+      if (!(await office.word.isAvailable())) throw new Error(`${WORD_RUNTIME_UNAVAILABLE}: 当前环境未检测到 Microsoft Word，无法嵌入 Visio 对象。`)
+      const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-visio-export-'))
+      try {
+        const replacements: Array<{ placeholder: string; visioPath: string }> = []
+        for (const flowchart of flowcharts) {
+          const visioPath = resolve(temporaryRoot, `${flowchart.id}.vsdx`)
+          await office.visio.createDiagram(flowchart, visioPath)
+          nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
+          replacements.push({ placeholder: flowchartPlaceholder(flowchart), visioPath })
+        }
+        const rendered = view.templateId === null
+          ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'visio-placeholder')
+          : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
+            view.state.resolved, view.state.modelInterpreted.mapping, 'visio-placeholder')
+        const temporaryDocx = resolve(temporaryRoot, 'rendered.docx')
+        await writeFile(temporaryDocx, rendered.bytes, { flag: 'wx' })
+        await office.word.embed(temporaryDocx, replacements)
+        const embeddedCount = await office.word.countVisioObjects(temporaryDocx)
+        if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
+        finalBytes = await readFile(temporaryDocx)
+        assetHash = rendered.assetHash
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true })
+      }
+      await readDocxXml(finalBytes)
+    }
     const nextFormat = { ...view.state,
-      lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, rendered.assetHash) },
+      lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, assetHash) },
     }
     if (commits === undefined) {
       await publishBidBatch(this.root, this.projectRoot, async (lease) => {
-        await lease.writeBytes(destinationPath, rendered.bytes)
+        for (const file of nativeFlowchartFiles) {
+          const path = within(this.projectRoot, file.path)
+          await assertNoLinkedPath(this.root, path)
+          await lease.writeBytes(path, file.bytes)
+        }
+        await lease.writeBytes(destinationPath, finalBytes)
         if (sourceSnapshot !== undefined) {
           await lease.writeText(within(this.projectRoot, sourceSnapshot), markdown)
         }
         await writeDocxFormat(this, view.templateId, nextFormat, lease)
       })
     } else await commits.publish(async (lease) => {
-      await lease.writeBytes(destinationPath, rendered.bytes)
+      for (const file of nativeFlowchartFiles) {
+        const path = within(this.projectRoot, file.path)
+        await assertNoLinkedPath(this.root, path)
+        await lease.writeBytes(path, file.bytes)
+      }
+      await lease.writeBytes(destinationPath, finalBytes)
       if (sourceSnapshot !== undefined) {
         await lease.writeText(within(this.projectRoot, sourceSnapshot), markdown)
       }

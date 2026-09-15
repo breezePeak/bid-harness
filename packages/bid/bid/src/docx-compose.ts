@@ -553,6 +553,7 @@ export async function applyTemplateContent(
  * @param markdown S5 保存正文汇总出的 Markdown 快照。
  * @param values 模板提取并确认的正文排版值。
  * @param mapping 模板样式角色映射。
+ * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
  * @returns 合成 DOCX 与正文图片摘要。
  */
 export async function composeDocxFromTemplate(
@@ -561,7 +562,8 @@ export async function composeDocxFromTemplate(
   markdown: string,
   values: FormatValues,
   mapping: DocxFormatInterpretation['mapping'] = {},
+  flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
 ): Promise<{ bytes: Buffer; assetHash: string }> {
-  const rendered = await renderDocx(workspace, markdown, values, false, 'a4')
+  const rendered = await renderDocx(workspace, markdown, values, false, 'a4', flowchartMode)
   return { bytes: await applyTemplateContent(templateBytes, rendered.bytes, mapping), assetHash: rendered.assetHash }
 }

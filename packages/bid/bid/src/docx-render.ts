@@ -25,7 +25,7 @@ import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
 import { applyHeadingRestartRules, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
-import { renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
+import { flowchartPlaceholder, renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
 type Node = {
   type: string
   value?: string | undefined
@@ -170,6 +170,7 @@ export async function docxAssetHash(workspace: BidWorkspace, markdown: string): 
  * @param values 经校验的生效格式。
  * @param preview 是否在浏览器预览末尾补充缺失内容的明确示例。
  * @param pageBasis configured 保留生成格式，a4 固定为纵向 A4 供 S5 分页。
+ * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
  * @returns 有效 DOCX 字节及安全的内嵌样式预览。
  */
 export async function renderDocx(
@@ -178,6 +179,7 @@ export async function renderDocx(
   values: FormatValues,
   preview = false,
   pageBasis: 'configured' | 'a4' = 'configured',
+  flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
 ): Promise<{
   bytes: Buffer
   html: string
@@ -312,10 +314,13 @@ export async function renderDocx(
         doc.push(new Paragraph({ ...paragraph('figureCaption'), keepNext: true,
           numbering: { reference: 'dsh-figureCaption', level: 0 },
           children: [new TextRun({ ...run('figureCaption'), text: `${caption}${spec.title}` })] }))
-        doc.push(new Paragraph({ ...paragraph('figureCaption'), alignment: 'center', keepLines: true,
-          children: [new ImageRun({ type: 'svg', data: Buffer.from(rendered.svg), fallback: { type: 'png', data: SVG_FALLBACK_PNG },
-            transformation: { width: rendered.width * ratio, height: rendered.height * ratio },
-            altText: { name: spec.title, title: spec.title, description: spec.purpose ?? spec.title } })] }))
+        doc.push(flowchartMode === 'visio-placeholder'
+          ? new Paragraph({ ...paragraph('body'), alignment: 'center', keepLines: true,
+            children: [new TextRun({ ...run('body'), text: flowchartPlaceholder(spec), size: 2, color: 'FFFFFF' })] })
+          : new Paragraph({ ...paragraph('figureCaption'), alignment: 'center', keepLines: true,
+            children: [new ImageRun({ type: 'svg', data: Buffer.from(rendered.svg), fallback: { type: 'png', data: SVG_FALLBACK_PNG },
+              transformation: { width: rendered.width * ratio, height: rendered.height * ratio },
+              altText: { name: spec.title, title: spec.title, description: spec.purpose ?? spec.title } })] }))
         html.push(`<figure><figcaption style="${style('figureCaption')}">${escape(caption)}${escape(spec.title)}</figcaption>${rendered.svg}</figure>`)
         continue
       }

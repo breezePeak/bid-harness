@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
 import { parseChapterCandidate, parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
-import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, projectChapterWriterCandidate, readChapterWebSource, renderChapterWriterReferences } from '../src/chapter-writing-writer.ts'
+import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, readChapterWebSource, renderChapterWriterReferences } from '../src/chapter-writing-writer.ts'
 import { buildChapterReviewEvidence } from '../src/chapter-writing-review.ts'
 import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-evidence-source-artifacts.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
@@ -218,6 +218,43 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect((await bind({ local_materials_used: [{ ...file, file_ref: 'F2', usage: 'adapt' }] })).metadata.local_materials_used[0]?.source_kind).toBe('reference_bid')
   })
 
+  it('同一 Source 的不同 Chunk Material 均保留，Chunk 顺序归一且语义冲突拒绝', async () => {
+    const { workspace, manifest, refs, context } = await fixture()
+    const content = `# 依据\n\n${'A'.repeat(4000)}\n\n${'B'.repeat(4000)}`
+    const large = snapshot(content, 'https://official.example/multi-chunk')
+    await writeFile(join(workspace.projectRoot, large.source.snapshot_path), large.content)
+    await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(large.source.source_id)), JSON.stringify(buildWebEvidenceChunkIndex(large.source, large.content)))
+    await ledger(workspace, [large])
+    const chunks = buildWebEvidenceChunkIndex(large.source, large.content).chunks
+    expect(chunks).toHaveLength(2)
+    context.webReadLocations = chunks.map(chunk => ({
+      source_id: large.source.source_id, snapshot_path: large.source.snapshot_path,
+      read_path: join(workspace.projectRoot, large.source.snapshot_path), chunk_ref: chunk.chunk_ref,
+      start_line: chunk.start_line, end_line: chunk.end_line,
+    }))
+    context.webMaterials = chunks.map((chunk, index) => ({
+      source_id: large.source.source_id, snapshot_path: large.source.snapshot_path, chunk_refs: [chunk.chunk_ref],
+      usage: index === 0 ? 'reference' as const : 'background' as const,
+      summary: index === 0 ? '实施流程' : '质量控制', supports: index === 0 ? '支持外业实施步骤' : '支持质量检查机制',
+    }))
+    await appendChapterWebReferences(workspace, refs, [large.source])
+    const rendered = renderChapterWriterReferences(context, refs)
+    const verified = JSON.parse(rendered.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ mapped_chunks: Array<{ chunk_ref: string }> }>
+    expect(verified).toHaveLength(2)
+    expect(verified.map(item => item.mapped_chunks[0]?.chunk_ref)).toEqual(chunks.map(chunk => chunk.chunk_ref))
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`,
+      metadata: { web_materials_used: [
+        { web_ref: 'W2', usage: 'reference', summary: '实施流程', supports: '支持外业实施步骤' },
+        { web_ref: 'W2', usage: 'background', summary: '质量控制', supports: '支持质量检查机制' },
+      ] },
+    }, [])
+    expect(candidate.metadata.web_materials_used.map(material => material.chunk_refs)).toEqual(chunks.map(chunk => [chunk.chunk_ref]))
+    const same = { source_id: large.source.source_id, snapshot_path: large.source.snapshot_path, chunk_refs: [chunks[0]!.chunk_ref, chunks[1]!.chunk_ref], usage: 'reference' as const, summary: '同一资料', supports: '同一支撑' }
+    expect(mergeChapterWebMaterials([{ ...same, chunk_refs: [...same.chunk_refs].reverse() }, same])).toHaveLength(1)
+    expect(() => mergeChapterWebMaterials([same, { ...same, supports: '冲突支撑' }])).toThrow('冲突')
+  })
+
   it.each([
     { material_ref: 'M999', usage: 'reference', summary: '资料依据' },
     { file_ref: 'F3', chunk: 'chunk_0001', usage: 'reference', summary: '框架伪装成证据' },
@@ -287,7 +324,7 @@ describe('S5 Writer 短引用与语义输入', () => {
   it('流程图由 Host 分配身份并保留为章节 metadata，旧候选仍可投影给 Writer 修复', async () => {
     const { bind, refs } = await fixture()
     const candidate = await bind({ flowcharts: [{
-      title: '质量检查闭环', nodes: [
+      key: 'quality-control-flow', title: '质量检查闭环', nodes: [
         { key: 'start', type: 'start', text: '开始' }, { key: 'check', type: 'decision', text: '质量检查' },
         { key: 'fix', type: 'process', text: '整改' }, { key: 'end', type: 'end', text: '提交' },
       ], edges: [
