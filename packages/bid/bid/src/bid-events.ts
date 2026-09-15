@@ -1,6 +1,9 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   BidControlState,
+  BidRunDecision,
+  BidRunDecisionType,
   BidRunSnapshot,
   BidRunNotice,
   BidRuntimeState,
@@ -24,6 +27,8 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.stage.attention_required',
   'bid.stage.failed',
   'bid.stage.reset',
+  'bid.run.decision.required',
+  'bid.run.decision.received',
   'bid.user_confirmation.required',
   'bid.user_confirmation.received',
 ] as const
@@ -79,6 +84,22 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param status Stable post-reset user gate.
      */
     'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
+    /** Native DSH question required before a suspended Run or reset stage can proceed. */
+    'bid.run.decision.required': {
+      decisionKey: string
+      stage: BidStage
+      runId: string
+      decisionType: BidRunDecisionType
+      question: AskUserQuestionItem
+    }
+    /** The explicit option selected for one previously requested native question. */
+    'bid.run.decision.received': {
+      decisionKey: string
+      stage: BidStage
+      runId: string
+      decisionType: BidRunDecisionType
+      decision: BidRunDecision
+    }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
     /**

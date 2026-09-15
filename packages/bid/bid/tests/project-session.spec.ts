@@ -13,6 +13,8 @@ import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import {
   BID_INITIAL_CONTROL_STATE, BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   BidRunCoordinator,
@@ -198,6 +200,7 @@ async function fixture(options: { readonly realOrchestrator?: boolean; readonly 
     } as never)
   }
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(UserQuestionService)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(spawn, { providerName: 'spawn' })
@@ -1244,88 +1247,6 @@ describe('Workspace 项目与独立 Session', () => {
     expect(active.controller.signal.aborted).toBe(false)
   })
 
-  it('恢复工具只等待 durable admission，不等待长阶段完成', async () => {
-    const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
-    await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
-    const agent = await fresh('resume-two-phase')
-    const saved = await readBidProjectState(workspace)
-    if (saved?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
-    const gate = Promise.withResolvers<never[]>()
-    executor.canExecute = stage => stage === 'evidence_mapping'
-    executeStage.mockImplementationOnce(() => gate.promise)
-
-    const admission = await ctx.tools.execute({
-      agent,
-      name: 'bid_resume_current_run',
-      arguments: {
-        suspended_run_id: saved.run.runId,
-        expected_project_revision: saved.revision,
-      },
-      callId: CallId('resume-two-phase'),
-      signal: new AbortController().signal,
-    })
-
-    expect(admission.isError).toBe(false)
-    expect(admission.value).toMatchObject({ ok: true, accepted: true, workKind: 'stage_execution' })
-    if (typeof admission.value !== 'object' || admission.value === null || !('runId' in admission.value)) {
-      throw new Error('恢复接纳结果缺少 Run 身份')
-    }
-    expect(typeof admission.value.runId).toBe('string')
-    expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
-    expect(host.inFlight.size).toBe(1)
-    expect(executeStage).toHaveBeenCalledOnce()
-
-    gate.resolve([])
-    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-  })
-
-  it('公开回合的 tool restriction 不污染独立 S4 execution lane', async () => {
-    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture({ withPreset: true })
-    await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
-    const agent = await fresh('resume-during-public-turn')
-    const saved = await readBidProjectState(workspace)
-    if (saved?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 S4 Run')
-    const stageGate = Promise.withResolvers<never[]>()
-    executor.canExecute = stage => stage === 'evidence_mapping'
-    executeStage.mockImplementationOnce(() => stageGate.promise)
-    const publicToolViews: string[][] = []
-    const executionToolViews: string[][] = []
-    adapter.onRequest = () => {
-      publicToolViews.push(ctx.tools.schemas(agent).map(tool => tool.name).sort())
-      const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === agent.id)
-      if (execution !== undefined) executionToolViews.push(ctx.tools.schemas(execution).map(tool => tool.name).sort())
-    }
-    adapter.script.push(
-      toolCall('bid_resume_current_run', {
-        suspended_run_id: saved.run.runId,
-        expected_project_revision: saved.revision,
-      }),
-      answer('已接纳恢复任务，继续处理当前对话。'),
-    )
-    agent.steer(createUserMessage({ content: [{ type: 'text', text: '恢复当前 S4，同时回答我这条消息。' }], source: { kind: 'user' } }))
-    await agent.whenIdle()
-
-    const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === agent.id)
-    if (execution === undefined) throw new Error('S4 execution lane 未创建')
-    expect(publicToolViews.some(names => !names.includes('web_search') && !names.includes('web_fetch'))).toBe(true)
-    expect(executionToolViews).not.toHaveLength(0)
-    expect(executionToolViews.every(names => names.includes('web_search') && names.includes('web_fetch'))).toBe(true)
-    const admitted = await readBidProjectState(workspace)
-    expect(admitted?.run).toMatchObject({
-      status: 'running', interactionSessionId: agent.id, executionSessionId: execution.id,
-    })
-    const namesWhileRunning = ctx.tools.schemas(execution).map(tool => tool.name).sort()
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
-    adapter.script.push(answer('第二条消息也可以继续处理。'))
-    agent.steer(createUserMessage({ content: [{ type: 'text', text: '再聊一句' }], source: { kind: 'user' } }))
-    await agent.whenIdle()
-    expect(ctx.tools.schemas(execution).map(tool => tool.name).sort()).toEqual(namesWhileRunning)
-    stageGate.resolve([])
-    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-  })
-
   it('阶段失败只回收当前运行登记的 continuable 子代理，不关闭恢复会话', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
@@ -1661,19 +1582,31 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('后端中断的 running 在原阶段挂起，保留已有章节且不自动执行', async () => {
-    const { workspace, fresh, executor } = await fixture()
+    const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
-    const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended' })
-    expect(await readBidProjectState(workspace)).toMatchObject({
-      workflow: { stage: 'chapter_writing', gate: 'ready' },
-      run: { stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
-    })
-    expect(b.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
-      data: { kind: 'interrupted', severity: 'error' },
-    })
-    expect(executor.execute).not.toHaveBeenCalled()
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['停止任务'] }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const b = await fresh('session-b')
+      expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended' })
+      expect(await readBidProjectState(workspace)).toMatchObject({
+        workflow: { stage: 'chapter_writing', gate: 'ready' },
+        run: { stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
+      })
+      await vi.waitFor(() => {
+        expect(asked).toHaveBeenCalledOnce()
+        expect(asked.mock.calls[0]?.[0].questions[0]?.question).toContain('host_restart')
+      })
+      expect(b.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
+        data: { kind: 'interrupted', severity: 'error' },
+      })
+      expect(executor.execute).not.toHaveBeenCalled()
+    } finally {
+      dispose()
+    }
   })
 
   it('S1 停止后从 durable raw request 重新装载原始上传字节', async () => {
@@ -1730,7 +1663,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect((await readBidProjectState(workspace))?.revision).toBe(saved.revision)
   })
 
-  it('挂起后的普通消息不自动恢复 Run，恢复工具仍对 Main Agent 可见', async () => {
+  it('挂起后的普通消息不自动恢复 Run，也不注册恢复工具', async () => {
     const { workspace, fresh, executor, adapter, ctx } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -1743,7 +1676,87 @@ describe('Workspace 项目与独立 Session', () => {
 
     expect(executor.execute).not.toHaveBeenCalled()
     expect((await readBidProjectState(workspace))?.run).toEqual(before?.run)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_resume_current_run')
+    expect(ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_resume_current_run')
+  })
+
+  it('挂起 Run 通过原生问题去重，明确停止后记录决策', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const response = Promise.withResolvers<AskUserQuestionAnswer>()
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => {
+      expect(questions[0]?.question).toContain('目录生成/资料映射')
+      return response.promise
+    })
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('native-recovery-question')
+      await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
+      const question = asked.mock.calls[0]?.[0].questions[0]
+      if (question === undefined) throw new Error('原生恢复问题缺少选项')
+      expect(question.options?.map(option => option.label)).toEqual([
+        '继续未完成任务（推荐）', '重新执行当前阶段', '停止任务',
+      ])
+      expect(agent.session.events.filter(event => event.type === 'bid.run.decision.required')).toHaveLength(1)
+
+      const host = ctx.bid as unknown as { ensureRunDecision: (agent: Agent) => void }
+      host.ensureRunDecision(agent)
+      expect(asked).toHaveBeenCalledOnce()
+
+      response.resolve({ answers: [{ id: question.id, selected: ['停止任务'] }] })
+      await vi.waitFor(() => {
+        expect(agent.session.events.some(event => event.type === 'bid.run.decision.received'
+          && event.data.decisionKey === question.id && event.data.decision === 'stop')).toBe(true)
+      })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.decision.required')).toHaveLength(1)
+      host.ensureRunDecision(agent)
+      expect(asked).toHaveBeenCalledOnce()
+    } finally {
+      dispose()
+    }
+  })
+
+  it('原生继续选项沿用当前 Run 的恢复入口', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_RUNTIME_STATE)
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('native-recovery-continue')
+      await vi.waitFor(() => { expect(resume).toHaveBeenCalledOnce() })
+      expect(resume).toHaveBeenCalledWith(agent.session, expect.any(String), expect.any(Number))
+      expect(agent.session.events.some(event => event.type === 'bid.run.decision.received'
+        && event.data.decision === 'continue')).toBe(true)
+    } finally {
+      dispose()
+      resume.mockRestore()
+    }
+  })
+
+  it('原生重跑选项只重置并启动当前阶段', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const reset = vi.spyOn(ctx.bid, 'resetStage').mockResolvedValue(BID_INITIAL_RUNTIME_STATE)
+    const start = vi.spyOn(ctx.bid, 'startStage').mockResolvedValue({ ok: true, value: BID_INITIAL_RUNTIME_STATE })
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('native-recovery-restart')
+      await vi.waitFor(() => { expect(start).toHaveBeenCalledOnce() })
+      expect(reset).toHaveBeenCalledWith(agent, 'evidence_mapping')
+      expect(start).toHaveBeenCalledWith(agent.session)
+    } finally {
+      dispose()
+      reset.mockRestore()
+      start.mockRestore()
+    }
   })
 
   it('挂起的 S5 修订只追加原 work journal，不创建替代 Run', async () => {

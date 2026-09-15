@@ -41,7 +41,7 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8；`chapterWritingCompletionRepairRounds` 单独限制 S5 整书验收后的修订轮数，默认为 3，不随并发数变化。
 
-`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令和 `/bid-start` 确认命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset`，并停在 `waiting_start`。UI 和命令会明确告知“已重置完毕”；只有用户点击“开始本阶段”或执行 `/bid-start` 后，Host 才从阶段入口执行。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
+`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset`，并停在 `waiting_start`。Host 随后通过 DSH 原生用户提问提供当前阶段重跑或停止选项，选择重跑后才从阶段入口执行。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；执行器错误或修复耗尽挂起当前 Run，Workflow 的业务进度不回退。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
 

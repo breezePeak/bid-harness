@@ -61,7 +61,7 @@ S2、S3 和 S5 的私有协议只在 Execution Session 中运行；其 continuat
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
-普通消息只由模型判断问答、受控修改或恢复，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。Main Agent 检查挂起状态后，可携带精确 Run ID 与项目 revision 调用 `bid_resume_current_run`。
+普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。挂起 Run 的继续、当前阶段重跑和停止由 Host 通过 DSH 原生用户提问提供，普通消息不会回答该问题。
 
 S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，唤醒 Main Agent 调用原生 `ask_user_question` 询问“开始正文编写前，是否还有其他整体写作要求？”，并提供“没有，开始编写”及自定义输入；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录、S4 Blueprint 与 Evidence 解释原生问答答案，只追问影响执行的歧义或冲突，并将整体要求写入 `global_instructions`，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
 
@@ -132,7 +132,7 @@ S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果�
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
 
-阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；用户通过 UI 的“开始本阶段”或 `/bid-start` 明确确认后，才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
+阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；Host 通过 DSH 原生用户提问提供当前阶段重跑或停止选项，明确选择重跑后才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
 
 ## Model Experience
 

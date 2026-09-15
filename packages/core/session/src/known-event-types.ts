@@ -27,6 +27,8 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'bid.project.resumed',
   'bid.run.cancelling',
   'bid.run.completed',
+  'bid.run.decision.received',
+  'bid.run.decision.required',
   'bid.run.notice',
   'bid.run.start_failed',
   'bid.run.started',

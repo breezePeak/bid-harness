@@ -268,7 +268,7 @@ describe('BidStagePanel', () => {
     }), { ...automaticMode, requestWritingRequirements, autoStartChapterWriting })} />)
     automatic.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'chapter_writing', status: 'waiting_start' },
-      allowedActions: ['start_stage'],
+      allowedActions: ['send_message'],
     }), { ...automaticMode, requestWritingRequirements, autoStartChapterWriting })} />)
     await act(async () => { await Promise.resolve() })
     expect(autoStartChapterWriting).toHaveBeenCalledOnce()
@@ -384,8 +384,8 @@ describe('BidStagePanel', () => {
   it('S4 等待启动且尚无日志时仍显示占位进度条', () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['start_stage'],
-      composer: { enabled: false, reason: 'bid.stage_start_required' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     }))} />)
 
     expect(screen.getByText('研究任务')).toBeTruthy()
@@ -409,18 +409,16 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
   })
 
-  it('shows reset completion and starts only after the user confirms', async () => {
-    const startStage = vi.fn(async () => {})
+  it('shows reset completion without a stage action button', () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['start_stage'],
-      composer: { enabled: false, reason: 'bid.stage_start_required' },
-    }), { startStage })} />)
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
+    }))} />)
 
     expect(screen.getByText('阶段已重置完毕，请确认后开始执行')).toBeTruthy()
     expect(screen.getByText('等待开始')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '开始本阶段' }))
-    await waitFor(() => { expect(startStage).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('button', { name: '开始本阶段' })).toBeNull()
   })
 
   it('运行中不提供独立阶段停止按钮，停止统一使用聊天原生控制', () => {
@@ -452,7 +450,6 @@ describe('BidStagePanel', () => {
   })
 
   it('S4 挂起且 Main Agent 运行时保留进度、原因和失败 Section，不显示阶段处理中', async () => {
-    const resumeRun = vi.fn(async () => {})
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
@@ -469,7 +466,6 @@ describe('BidStagePanel', () => {
       allowedActions: ['send_message'], composer: { enabled: true },
     }), {
       getEvidenceMappingProgress,
-      resumeRun,
       useSessions: ((selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
         selector({ byId: { session_bid: { agentPreset: 'bid', running: true } } })) as BidStagePanelProps['useSessions'],
     })} />)
@@ -484,8 +480,7 @@ describe('BidStagePanel', () => {
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
-    fireEvent.click(screen.getByRole('button', { name: '继续未完成任务' }))
-    await waitFor(() => { expect(resumeRun).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('button', { name: '继续未完成任务' })).toBeNull()
   })
 
   it('S4 同一工作身份读取失败时保留最后一次成功进度并继续同步', async () => {
@@ -1043,11 +1038,6 @@ describe('ui-bid browser plugin', () => {
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
-    const remoteStart = vi.fn<(_sessionId: string) => Promise<unknown>>()
-      .mockResolvedValue({
-        ok: true as const,
-        value: { ok: true as const, value: { stage: 'evidence_mapping' as const, status: 'waiting_user' as const } },
-      })
     const remoteRequestWritingRequirements = vi.fn<(_sessionId: string) => Promise<unknown>>()
       .mockResolvedValue({
         ok: true as const,
@@ -1069,7 +1059,6 @@ describe('ui-bid browser plugin', () => {
       conversation: { blocks: { set } },
       sessions: { scope: () => ({ get: () => ({ send: resumeMessage }) }) },
       remote: { bid: {
-        startStage: remoteStart,
         requestWritingRequirements: remoteRequestWritingRequirements,
         autoStartChapterWriting: remoteAutoStartChapterWriting,
         getEvidenceMappingProgress: remoteGetEvidenceMappingProgress,
@@ -1105,8 +1094,6 @@ describe('ui-bid browser plugin', () => {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
-        startStage: () => Promise<void>
-        resumeRun: () => Promise<void>
         requestWritingRequirements: () => Promise<void>
         autoStartChapterWriting: () => Promise<void>
         getEvidenceMappingProgress: (observed?: BidClientProjection) => Promise<unknown>
@@ -1167,10 +1154,6 @@ describe('ui-bid browser plugin', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     await expect(injected.uploadFiles([{ file: tender, role: 'tender' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
 
-    await injected.startStage()
-    expect(remoteStart).toHaveBeenCalledWith('session_bid')
-    await injected.resumeRun()
-    expect(resumeMessage).toHaveBeenCalledWith('继续未完成任务。', 'steer')
     await injected.requestWritingRequirements()
     expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
     await injected.autoStartChapterWriting()

@@ -254,7 +254,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:46`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.cancelling/*`
 
@@ -267,7 +267,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:41`](../packages/bid/bid/src/bid-ev
 'bid.run.cancelling': { run: BidRunSnapshot & { status: 'cancelling' } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:52`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.completed/*`
 
@@ -280,7 +280,45 @@ Source: [`packages/bid/bid/src/bid-events.ts:47`](../packages/bid/bid/src/bid-ev
 'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:53`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:58`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.decision.received/*`
+
+<a id="bidrundecisionreceived--log-only"></a>
+
+#### `bid.run.decision.received` — log-only
+
+```ts persistence-catalog
+/** The explicit option selected for one previously requested native question. */
+'bid.run.decision.received': {
+  decisionKey: string
+  stage: BidStage
+  runId: string
+  decisionType: BidRunDecisionType
+  decision: BidRunDecision
+}
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:96`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.run.decision.required/*`
+
+<a id="bidrundecisionrequired--log-only"></a>
+
+#### `bid.run.decision.required` — log-only
+
+```ts persistence-catalog
+/** Native DSH question required before a suspended Run or reset stage can proceed. */
+'bid.run.decision.required': {
+  decisionKey: string
+  stage: BidStage
+  runId: string
+  decisionType: BidRunDecisionType
+  question: AskUserQuestionItem
+}
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:88`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.notice/*`
 
@@ -293,7 +331,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:53`](../packages/bid/bid/src/bid-ev
 'bid.run.notice': BidRunNotice
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:51`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:56`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.start_failed/*`
 
@@ -306,7 +344,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:51`](../packages/bid/bid/src/bid-ev
 'bid.run.start_failed': { runId: string; epoch: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:50`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.started/*`
 
@@ -319,7 +357,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:45`](../packages/bid/bid/src/bid-ev
 'bid.run.started': { run: BidRunSnapshot }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:48`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.suspended/*`
 
@@ -332,7 +370,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:43`](../packages/bid/bid/src/bid-ev
 'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:54`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.attention_required/*`
 
@@ -351,7 +389,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:49`](../packages/bid/bid/src/bid-ev
 'bid.stage.attention_required': { stage: BidStage; status: 'attention_required'; reason: string; issues: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:67`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:72`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.completed/*`
 
@@ -364,7 +402,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:67`](../packages/bid/bid/src/bid-ev
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:59`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:64`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -383,7 +421,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:59`](../packages/bid/bid/src/bid-ev
 'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:75`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:80`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.reset/*`
 
@@ -400,7 +438,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:75`](../packages/bid/bid/src/bid-ev
 'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:81`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:86`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -413,7 +451,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:81`](../packages/bid/bid/src/bid-ev
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:62`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -433,7 +471,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:57`](../packages/bid/bid/src/bid-ev
   | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:90`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:111`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -446,7 +484,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:90`](../packages/bid/bid/src/bid-ev
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:83`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:104`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.word-format.request/*`
 
@@ -485,7 +523,7 @@ Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/b
 'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:55`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:60`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 

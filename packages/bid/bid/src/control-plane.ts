@@ -64,6 +64,8 @@ export type {
   BidProjectWorkflow,
   BidRunSnapshot,
   BidRunResumeIdentity,
+  BidRunDecision,
+  BidRunDecisionType,
   BidRunNotice,
   BidRunStatus,
   BidRunSuspensionCause,

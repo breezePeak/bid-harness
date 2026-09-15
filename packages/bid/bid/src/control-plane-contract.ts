@@ -62,6 +62,12 @@ export interface BidRunNotice {
 /** Why one Run stopped before completing its stage. */
 export type BidRunSuspensionCause = 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart'
 
+/** Durable decision families presented for a recoverable Bid boundary. */
+export type BidRunDecisionType = 'run_recovery' | 'stage_start'
+
+/** Structured result of one native user-question decision. */
+export type BidRunDecision = 'continue' | 'restart_stage' | 'stop'
+
 /** Identity of the suspended Run from which a new attempt resumes. */
 export interface BidRunResumeIdentity {
   readonly runId: string
@@ -183,7 +189,6 @@ export const BID_RUNTIME_PROJECTION_KEY = 'bid.runtime' as const
 /** User actions the Bid Host may admit for the current projection. */
 export const BID_CLIENT_ACTIONS = [
   'upload_files',
-  'start_stage',
   'export_docx',
   'revise_chapter',
   'confirm_tender_analysis',
@@ -274,7 +279,6 @@ export type StageValidationResult =
 /** Stable host reason codes for a disabled Bid composer. */
 export type BidComposerReason =
   | 'bid.upload_required'
-  | 'bid.stage_start_required'
   | 'bid.stage_pending'
   | 'bid.stage_running'
   | 'bid.tender_analysis_confirmation_required'

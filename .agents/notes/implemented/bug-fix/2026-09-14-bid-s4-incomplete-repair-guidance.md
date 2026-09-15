@@ -10,7 +10,7 @@ S4 Child 在尚未锁定目录子树或尚未提交全部章节映射时提前�
 
 S4 修复轮次根据当前 Host 状态生成有序清单：未完成研究、缺失 Blueprint、旧结构判断、未锁定目录、缺失章节 Mapping、Final Check 总述和待审项依次列出，最后才允许调用完成工具。Final Check 的待审项必须通过 `list_review_items` 读取当前引用；可修问题由 `review_items` 的 `correct` 立即改变产物，随后删除旧引用、生成新指纹并重新复核，新版本不能继承旧结论。清单保留既有 Child 状态和工具权限，不替模型编造研究、结构或材料结论。
 
-阶段栏在 Run 挂起时提供“继续未完成任务”。该按钮仅发送明确的继续消息，保持 [Bid Workflow 与 Run 使用统一生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md) 所有权：Main Agent 读取挂起 Run 身份和项目 revision 后调用既有恢复工具，Host 仍执行 CAS 与 checkpoint reconciliation。`finish_final_check` 在存在待审项时返回 `review_pending`、引用列表和结构化诊断；存在 `block` 时终止当前 Final Check，不进入无意义的普通重试。
+Run 挂起后的继续、当前阶段重跑和停止统一由 Host 在 DSH 原生用户提问空间中提供，阶段栏不再提供操作按钮，普通消息也不回答该问题；恢复仍保持 [Bid Workflow 与 Run 使用统一生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md) 的所有权。`finish_final_check` 在存在待审项时返回 `review_pending`、引用列表和结构化诊断；存在 `block` 时终止当前 Final Check，不进入无意义的普通重试。
 
 ## Alternatives considered
 
@@ -22,4 +22,4 @@ S4 修复轮次根据当前 Host 状态生成有序清单：未完成研究、�
 
 ## Consequences
 
-S4 Repair 的模型可见内容包含当前状态派生的工具顺序，提前完成能够在同一 Child 中回到锁定和提交路径。用户可从阶段栏表达继续意图，但恢复仍复用同一安全边界和已完成任务 checkpoint。回归测试固定未锁定、缺少 Mapping 时的修复清单和阶段栏继续消息。
+S4 Repair 的模型可见内容包含当前状态派生的工具顺序，提前完成能够在同一 Child 中回到锁定和提交路径。恢复仍复用同一安全边界和已完成任务 checkpoint。回归测试固定未锁定、缺少 Mapping 时的修复清单；恢复决策由 DSH 原生问题的专用测试覆盖。

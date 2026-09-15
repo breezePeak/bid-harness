@@ -80,7 +80,7 @@ describe('Bid Host stage reset', () => {
     const flush = vi.fn(async () => {})
     const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { sessions: { flush, list: () => [session] } },
+      ctx: { on: vi.fn(() => () => {}), sessions: { flush, list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -149,7 +149,7 @@ describe('Bid Host stage reset', () => {
     } as unknown as Agent
     const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
+      ctx: { on: vi.fn(() => () => {}), sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         docxTemplateMaxBytes: 300 * 1024 * 1024,

@@ -38,7 +38,7 @@ export type BidConfirmationModeControlProps =
   & PropsStore<ReturnType<typeof createBidConfirmationModeStore>>
   & PropsLocale<'bid'>
 
-type PendingAction = 'upload' | 'start' | 'resume' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
+type PendingAction = 'upload' | 'confirm_analysis' | 'confirm' | 'revise' | 'request_requirements' | 'auto_start'
 type TranslateBid = (key: BidKey, vars?: Record<string, string | number>) => string
 type SectionEdit = { title?: string; purpose?: string; must_answer?: string[] }
 type RequestError = { message: string; issues: readonly StageValidationIssue[] }
@@ -154,7 +154,6 @@ function composerReason(projection: BidClientProjection, t: TranslateBid): strin
   if (projection.composer.enabled) return undefined
   switch (projection.composer.reason) {
     case 'bid.upload_required': return t('reason.bid.upload_required')
-    case 'bid.stage_start_required': return t('reason.bid.stage_start_required')
     case 'bid.stage_running': return t('reason.bid.stage_running')
     case 'bid.stage_pending': return t('reason.bid.stage_pending')
     case 'bid.tender_analysis_confirmation_required': return t('reason.bid.tender_analysis_confirmation_required')
@@ -193,8 +192,6 @@ export function BidStagePanel({
   uploadFiles,
   getDocxLibrary,
   uploadDocxTemplate,
-  startStage,
-  resumeRun,
   requestWritingRequirements,
   autoStartChapterWriting,
   confirmOutline,
@@ -561,7 +558,6 @@ export function BidStagePanel({
   if (!hasProjection) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
-  const canStart = projection.allowedActions.includes('start_stage')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -681,7 +677,6 @@ export function BidStagePanel({
     setRequestError(null)
   }
 
-  const suspendedRun = projection.run?.status === 'suspended' ? projection.run : undefined
   const hostFailureReason = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
     ? projection.runtime.failureReason
     : undefined
@@ -888,20 +883,9 @@ export function BidStagePanel({
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
         )}
 
-        {suspendedRun !== undefined && (
+        {projection.run?.status === 'suspended' && (
           <div className={css.decisionRow}>
-            <p className={css.suspensionReason}>{t('suspension.reason', { reason: suspendedRun.cause ?? 'host_restart' })}</p>
-            {resumeRun !== undefined && (
-              <Button
-                size="sm"
-                variant="primary"
-                icon={<IconRefreshOutline16 />}
-                disabled={requestPending !== null}
-                onClick={() => { invoke('resume', resumeRun) }}
-              >
-                {requestPending === 'resume' ? t('action.resuming') : t('action.retry')}
-              </Button>
-            )}
+            <p className={css.suspensionReason}>{t('suspension.reason', { reason: projection.run.cause ?? 'host_restart' })}</p>
           </div>
         )}
 
@@ -1216,18 +1200,6 @@ export function BidStagePanel({
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
               </Button>
             </>
-          )}
-          {canStart && (
-            <Button
-              size="sm"
-              variant="primary"
-              icon={<IconCheckOutline14 />}
-              disabled={requestPending !== null || startStage === undefined}
-              title={startStage === undefined ? t('action.unavailable') : undefined}
-              onClick={() => { invoke('start', startStage) }}
-            >
-              {requestPending === 'start' ? t('action.starting') : t('action.start_stage')}
-            </Button>
           )}
         </div>
 

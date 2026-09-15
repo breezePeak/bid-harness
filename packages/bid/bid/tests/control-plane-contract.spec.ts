@@ -62,6 +62,8 @@ describe('bid control-plane public contract', () => {
       'bid.stage.attention_required',
       'bid.stage.failed',
       'bid.stage.reset',
+      'bid.run.decision.required',
+      'bid.run.decision.received',
       'bid.user_confirmation.required',
       'bid.user_confirmation.received',
     ])

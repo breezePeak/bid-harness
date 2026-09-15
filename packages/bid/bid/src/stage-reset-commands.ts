@@ -1,4 +1,4 @@
-/** Bid-preset human commands that rewind a workflow stage and start it only after confirmation. */
+/** Bid-preset human commands that rewind a workflow stage before native Host confirmation. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -49,31 +49,9 @@ async function resetStage(
   }
 }
 
-/** Start the stage held by a completed reset. */
-async function startStage(ctx: Context, invocation: CommandInvocation): Promise<CommandResult> {
-  if (invocation.rawInput.trim().length > 0) {
-    return { kind: 'error', text: '开始阶段命令不接受参数。' }
-  }
-  const result = await ctx.bid.startStage(invocation.agent.session)
-  if (!result.ok) {
-    return {
-      kind: 'error',
-      text: result.error.code === 'BID_OPERATION_IN_PROGRESS'
-        ? '当前已有 Host 操作在运行，请等待其结束后重试。'
-        : '当前阶段没有已完成且等待确认的重置。',
-    }
-  }
-  if (result.value.status === 'suspended') return {
-    kind: 'error',
-    text: `本阶段执行已挂起：${result.value.failureReason ?? '未知原因'}`,
-  }
-  return result.value.status === 'failed'
-    ? { kind: 'error', text: `本阶段执行失败：${result.value.failureReason ?? '未知错误'}` }
-    : { kind: 'success', text: `已确认并执行本阶段：${result.value.stage} / ${result.value.status}。` }
-}
-
 /**
- * Register S2–S5 reset commands only inside the Bid agent preset.
+ * Register S2–S5 reset commands only inside the Bid agent preset; the post-reset
+ * start decision is presented by the shared DSH user-question provider.
  * @param ctx - agent-scoped Context carrying the Host Bid runtime and command registry.
  */
 export function apply(ctx: Context): void {
@@ -85,10 +63,5 @@ export function apply(ctx: Context): void {
         handler: invocation => resetStage(ctx, invocation, command.stage, command.label),
       })
     }
-    yield ctx.commands.register({
-      name: 'bid-start',
-      description: '确认并开始刚刚重置的阶段',
-      handler: invocation => startStage(ctx, invocation),
-    })
   }, 'bid: stage reset commands')
 }

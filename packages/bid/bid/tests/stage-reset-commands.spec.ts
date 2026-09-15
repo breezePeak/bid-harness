@@ -3,15 +3,10 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import CommandRuntime, { CommandId } from '@deepseek-ai/dsh-commands'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { BidRuntimeState } from '../src/control-plane-contract.ts'
 import * as resetCommands from '../src/stage-reset-commands.ts'
 
 class FakeBidRuntime extends Service {
   readonly resetStage = vi.fn(async (_agent: Agent, stage: string) => ({ stage, status: 'waiting_start' as const }))
-  readonly startStage = vi.fn(async (): Promise<{ ok: true; value: BidRuntimeState }> => ({
-    ok: true as const,
-    value: { stage: 'evidence_mapping' as const, status: 'waiting_user' as const },
-  }))
 
   constructor(ctx: Context) {
     super(ctx, 'bid')
@@ -30,7 +25,7 @@ describe('Bid stage reset commands', () => {
 
     expect(ctx.commands.list(agent).map(command => command.name)).toEqual([
       'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
-      'bid-reset-s5', 'bid-start',
+      'bid-reset-s5',
     ])
     const handler = ctx.commands.find(agent, 'bid-reset-s3')?.handler
     expect(handler).toBeDefined()
@@ -46,34 +41,5 @@ describe('Bid stage reset commands', () => {
     })
     expect((ctx.bid as unknown as FakeBidRuntime).resetStage).toHaveBeenCalledWith(agent, 'outline_generation')
 
-    const start = ctx.commands.find(agent, 'bid-start')?.handler
-    expect(start).toBeDefined()
-    await expect(start!({
-      commandId: CommandId('bid-start-command'),
-      agent,
-      rawInput: '',
-      attachments: [],
-      signal: new AbortController().signal,
-    })).resolves.toEqual({
-      kind: 'success',
-      text: '已确认并执行本阶段：evidence_mapping / waiting_user。',
-    })
-    const bid = ctx.bid as unknown as FakeBidRuntime
-    expect(bid.startStage).toHaveBeenCalledWith(session)
-
-    bid.startStage.mockResolvedValueOnce({
-      ok: true,
-      value: { stage: 'evidence_mapping', status: 'suspended', failureReason: 'SEC-401 映射重试耗尽。' },
-    })
-    await expect(start!({
-      commandId: CommandId('bid-start-suspended-command'),
-      agent,
-      rawInput: '',
-      attachments: [],
-      signal: new AbortController().signal,
-    })).resolves.toEqual({
-      kind: 'error',
-      text: '本阶段执行已挂起：SEC-401 映射重试耗尽。',
-    })
   })
 })

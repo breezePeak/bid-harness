@@ -67,10 +67,6 @@ export interface BidStagePanelInjected {
   /** S1 独立读取和上传 Word 导出模板，不进入普通资料批次。 */
   getDocxLibrary: () => Promise<DocxTemplateLibraryView>
   uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
-  /** Start the current stage after a reset has finished and the user confirms. */
-  startStage?: () => Promise<void>
-  /** Send one explicit continuation request through the existing Bid Main Agent recovery path. */
-  resumeRun?: () => Promise<void>
   /** Ask the Main Agent for manual S5 writing requirements. */
   requestWritingRequirements?: () => Promise<void>
   /** Create the default S5 writing plan and start the confirmed stage. */
@@ -206,23 +202,6 @@ export function apply(ctx: ClientContext): void {
         } | undefined
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
-      startStage: async () => {
-        const remote = ctx.remote.bid as unknown as {
-          startStage(id: SessionId): Promise<{
-            ok: boolean
-            value: { ok: boolean; error?: Parameters<typeof actionFailure>[0] }
-            error: Parameters<typeof actionFailure>[0]
-          }>
-        }
-        const result = await remote.startStage(sessionId)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_START_FAILED', message: '阶段启动失败。' })
-      },
-      resumeRun: () => {
-        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
-        return conversation?.send('继续未完成任务。', 'steer')
-          ?? Promise.reject(new Error('当前会话不可用。'))
-      },
       requestWritingRequirements: async () => {
         const result = await ctx.remote.bid.requestWritingRequirements(sessionId)
         if (!result.ok) throw actionFailure(result.error)

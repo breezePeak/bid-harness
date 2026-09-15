@@ -21,6 +21,8 @@ import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -101,6 +103,7 @@ import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
+import type { BidSessionEventMap } from './bid-events.ts'
 import {
   applyWritingPlanInput,
   createAutomaticWritingPlan,
@@ -137,6 +140,8 @@ import type {
   BidReviewIssueView,
   BidReviewMaterialView,
   BidRuntimeState,
+  BidRunDecision,
+  BidRunDecisionType,
   BidResumePolicy,
   BidStage,
   BidDocumentRole,
@@ -189,6 +194,8 @@ export type {
   BidProjectWorkflow,
   BidRunSnapshot,
   BidRunResumeIdentity,
+  BidRunDecision,
+  BidRunDecisionType,
   BidResumePolicy,
   BidRunStatus,
   BidRunSuspensionCause,
@@ -852,6 +859,38 @@ class HostChapterWritingControl implements ChapterWritingControl {
 
 type BidProjectKey = string & { readonly __bidProjectKey: unique symbol }
 
+type BidRunDecisionRequest = BidSessionEventMap['bid.run.decision.required']
+
+const BID_STAGE_LABELS: Readonly<Record<BidStage, string>> = {
+  file_intake: '资料上传',
+  tender_analysis: '招标分析',
+  outline_generation: '初步目录生成',
+  evidence_mapping: '目录生成/资料映射',
+  chapter_writing: '正文编写',
+  docx_export: '导出标书',
+}
+
+const RUN_DECISION_OPTIONS = {
+  continue: '继续未完成任务（推荐）',
+  restart: '重新执行当前阶段',
+  stop: '停止任务',
+} as const
+
+function runDecisionKey(session: Session, stage: BidStage, runId: string, decisionType: BidRunDecisionType): string {
+  return `${String(session.id)}:${stage}:${runId}:${decisionType}`
+}
+
+function selectedRunDecision(question: AskUserQuestionItem, answer: AskUserQuestionAnswer): BidRunDecision | undefined {
+  const item = answer.answers.find(candidate => candidate.id === question.id)
+  if (item === undefined || item.custom !== undefined || item.selected.length !== 1) return undefined
+  switch (item.selected[0]) {
+    case RUN_DECISION_OPTIONS.continue: return 'continue'
+    case RUN_DECISION_OPTIONS.restart: return 'restart_stage'
+    case RUN_DECISION_OPTIONS.stop: return 'stop'
+    default: return undefined
+  }
+}
+
 function bidSessionControlState(session: Session) {
   return session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
 }
@@ -1388,12 +1427,13 @@ async function readFileIntakeWork(
 
 /** Host-owned Bid RPC runtime that serializes stage mutations and publishes durable stage state. */
 export class BidHostRuntime extends TypertRemoteService {
-  static inject = ['agents', 'sessionProjections', 'sessions', 'subagents']
+  static inject = ['agents', 'sessionProjections', 'sessions', 'subagents', 'userQuestions']
   static Config = Config
 
   private readonly config: Config
   private readonly inFlight = new Map<BidProjectKey, ActiveBidOperation>()
   private readonly docxInFlight = new Set<BidProjectKey>()
+  private readonly pendingRunDecisions = new Map<string, Promise<void>>()
 
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
   private async withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T> {
@@ -1702,6 +1742,112 @@ export class BidHostRuntime extends TypertRemoteService {
     await Promise.all(sessions.map(session => this.ctx.sessions.flush(session)))
   }
 
+  /** 从持久化控制状态构造一个恢复边界；同一 Run 只会生成一个问题。 */
+  private currentRunDecision(session: Session): BidRunDecisionRequest | undefined {
+    const control = bidSessionControlState(session)
+    const suspended = control.run?.status === 'suspended' ? control.run : undefined
+    if (suspended !== undefined) {
+      const decisionKey = runDecisionKey(session, suspended.stage, suspended.runId, 'run_recovery')
+      const options = suspended.stage === 'file_intake'
+        ? [{ label: RUN_DECISION_OPTIONS.continue }, { label: RUN_DECISION_OPTIONS.stop }]
+        : [{ label: RUN_DECISION_OPTIONS.continue }, { label: RUN_DECISION_OPTIONS.restart }, { label: RUN_DECISION_OPTIONS.stop }]
+      return {
+        decisionKey,
+        stage: suspended.stage,
+        runId: suspended.runId,
+        decisionType: 'run_recovery',
+        question: {
+          id: decisionKey,
+          header: BID_STAGE_LABELS[suspended.stage],
+          question: `上次「${BID_STAGE_LABELS[suspended.stage]}」任务因 ${suspended.cause ?? 'host_restart'} 中断，接下来如何处理？`,
+          options,
+        },
+      }
+    }
+    if (control.run !== null || control.workflow.gate !== 'waiting_start') return undefined
+    const revision = session.events.findLast(event => event.type === 'bid.project.resumed')
+    const projectRevision = revision?.type === 'bid.project.resumed' ? revision.data.revision : 0
+    const runId = `stage-reset:${String(projectRevision)}`
+    const decisionKey = runDecisionKey(session, control.workflow.stage, runId, 'stage_start')
+    return {
+      decisionKey,
+      stage: control.workflow.stage,
+      runId,
+      decisionType: 'stage_start',
+      question: {
+        id: decisionKey,
+        header: BID_STAGE_LABELS[control.workflow.stage],
+        question: `「${BID_STAGE_LABELS[control.workflow.stage]}」阶段已准备好，接下来如何处理？`,
+        options: [
+          { label: RUN_DECISION_OPTIONS.restart },
+          { label: RUN_DECISION_OPTIONS.stop },
+        ],
+      },
+    }
+  }
+
+  /** 在共享原生提问空间中挂起恢复决策，不使用普通聊天消息或阶段卡按钮。 */
+  private ensureRunDecision(agent: Agent): void {
+    const { session } = agent
+    if (!isBidMainSession(session)) return
+    const current = this.currentRunDecision(session)
+    if (current === undefined) return
+    const received = session.events.findLast(event => event.type === 'bid.run.decision.received'
+      && event.data.decisionKey === current.decisionKey)
+    if (received !== undefined || this.pendingRunDecisions.has(current.decisionKey)) return
+    const persisted = session.events.findLast(event => event.type === 'bid.run.decision.required'
+      && event.data.decisionKey === current.decisionKey)
+    const request = persisted?.type === 'bid.run.decision.required' ? persisted.data : current
+    const task = this.askRunDecision(agent, request)
+    this.pendingRunDecisions.set(request.decisionKey, task)
+    void task
+  }
+
+  private async askRunDecision(agent: Agent, request: BidRunDecisionRequest): Promise<void> {
+    try {
+      const requested = agent.session.events.findLast(event => event.type === 'bid.run.decision.required'
+        && event.data.decisionKey === request.decisionKey)
+      if (requested === undefined) {
+        agent.session.append('bid.run.decision.required', request)
+        await this.ctx.sessions.flush(agent.session)
+      }
+      const answer = await this.ctx.userQuestions.ask({ agent, questions: [request.question] })
+      const decision = selectedRunDecision(request.question, answer)
+      if (decision === undefined) throw new Error('BID_RUN_DECISION_INVALID')
+      agent.session.append('bid.run.decision.received', {
+        decisionKey: request.decisionKey,
+        stage: request.stage,
+        runId: request.runId,
+        decisionType: request.decisionType,
+        decision,
+      })
+      await this.ctx.sessions.flush(agent.session)
+      await this.applyRunDecision(agent, request, decision)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`Bid 原生用户提问未完成：${String(error)}`)
+    } finally {
+      this.pendingRunDecisions.delete(request.decisionKey)
+    }
+  }
+
+  private async applyRunDecision(agent: Agent, request: BidRunDecisionRequest, decision: BidRunDecision): Promise<void> {
+    if (decision === 'stop') {
+      agent.cancel({ kind: 'user' })
+      return
+    }
+    if (decision === 'continue') {
+      const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
+      const revision = resumed?.type === 'bid.project.resumed'
+        ? resumed.data.revision : undefined
+      if (revision === undefined) throw new Error('BID_RUN_RESUME_REVISION_MISSING')
+      await this.resumeCurrentRun(agent.session, request.runId, revision)
+      return
+    }
+    if (request.decisionType === 'run_recovery') await this.resetStage(agent, request.stage)
+    const result = await this.startStage(agent.session)
+    if (!result.ok) throw new Error(result.error.message)
+  }
+
   /** 执行器启动前及 Host 操作结束后共用的原子项目检查点。 */
   private async checkpoint(operation: ActiveBidOperation): Promise<void> {
     const control = operation.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
@@ -1771,6 +1917,10 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('agent/status', ({ agent, status }) => {
       if (status !== 'idle' || !isBidMainSession(agent.session)) return
       const runtime = bidSessionRuntime(agent.session)
+      if (runtime.status === 'suspended' || runtime.status === 'waiting_start') {
+        this.ensureRunDecision(agent)
+        return
+      }
       if (runtime.stage !== 'chapter_writing' || runtime.status !== 'pending') return
       void this.driveStartedSession(agent, agent.session.header.cwd).catch((error: unknown) => { ctx.logger.warn(`Bid 写作计划启动失败：${String(error)}`) })
     }, { global: true })
@@ -1871,34 +2021,6 @@ export class BidHostRuntime extends TypertRemoteService {
     const key = projectKey(session)
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
-    if (request.action === 'bid_resume_current_run') {
-      const resumePolicy: BidResumePolicy | undefined = request.resume_policy === undefined
-        ? undefined
-        : { webAccess: request.resume_policy.web_access }
-      const accepted = Promise.withResolvers<{ readonly runId: string; readonly workKind: import('./control-plane-contract.ts').BidWorkKind }>()
-      void this.resumeCurrentRun(
-        session,
-        request.suspended_run_id,
-        request.expected_project_revision,
-        resumePolicy,
-        (run) => { accepted.resolve({ runId: run.runId, workKind: run.work.kind }) },
-      ).catch((error: unknown) => {
-        accepted.reject(error)
-        this.ctx.logger.warn(`Bid Run 恢复失败：${String(error)}`)
-      })
-      try {
-        const value = await accepted.promise
-        return { ok: true, accepted: true, runId: value.runId, workKind: value.workKind }
-      } catch (error: unknown) {
-        return {
-          ok: false,
-          error: {
-            code: error instanceof BidOrchestratorError ? error.code : 'BID_RESUME_FAILED',
-            message: error instanceof Error ? error.message : 'Bid Run 恢复接纳失败。',
-          },
-        }
-      }
-    }
     const active = this.inFlight.get(key)
     if (request.action === 'bid_stage_inspect') {
       const workspace = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
@@ -2100,7 +2222,10 @@ export class BidHostRuntime extends TypertRemoteService {
       const runtime = await this.prepareOperation(operation)
       const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
       const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-      if (control.run?.status === 'suspended') return
+      if (control.run?.status === 'suspended' || runtime.status === 'waiting_start') {
+        this.ensureRunDecision(agent)
+        return
+      }
       if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') {
         await ensureWritingRequirementsRequested(agent, workspace, prompt => this.mutateProject(
           operation,
@@ -2123,6 +2248,7 @@ export class BidHostRuntime extends TypertRemoteService {
         ))
       }
       await this.ctx.sessions.flush(session)
+      if (bidSessionRuntime(session).status === 'suspended') this.ensureRunDecision(agent)
     } finally {
       await this.finishOperation(session, operation, driven)
     }
@@ -2417,7 +2543,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     try {
       const runtime = await this.prepareOperation(operation)
-      if (!getBidClientProjection(runtime).allowedActions.includes('start_stage')) {
+      if (runtime.status !== 'waiting_start') {
         return stageStartResult({ ok: false, code: 'BID_STAGE_START_NOT_ALLOWED', message: 'The current stage is not waiting for a post-reset start.' })
       }
       const agent = await this.executionAgent(operation)

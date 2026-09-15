@@ -45,12 +45,6 @@ export const stageInteractionSchema = z.union([
   }).strict(),
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
-  z.object({
-    action: z.literal('bid_resume_current_run'),
-    suspended_run_id: z.string().min(1),
-    expected_project_revision: z.number().int().positive(),
-    resume_policy: z.object({ web_access: z.enum(['inherit', 'disabled']).optional() }).strict().optional(),
-  }).strict(),
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
@@ -68,7 +62,6 @@ const names = [
   'bid_revise_chapter',
   'bid_pause_stage',
   'bid_resume_stage',
-  'bid_resume_current_run',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -450,8 +443,7 @@ function renderSuspendedRunPrompt(stage: string, runId: string, revision: number
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
     '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
-    '只有用户确实要求继续时才调用 bid_resume_current_run，并原样提交上述 Run 身份和项目修订号；Host 会核对正式成果与 checkpoint，只调度未完成工作。',
-    '普通解释、“先别继续”或询问停止原因不得调用恢复工具。停止仍只使用聊天界面的原生停止。',
+    '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
   ].filter(line => line !== undefined).join('\n')
 }
 
@@ -486,8 +478,8 @@ export function installStageInteractionTools(
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
       const available = suspended !== undefined
         ? suspended.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
-          ? [names[0], names[4], names[5], names[8]]
-          : [names[0], names[8]]
+          ? [names[0], names[4], names[5]]
+          : [names[0]]
         : runtime.status !== 'waiting_user'
           ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6, 8) : [])]
             : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]
@@ -508,7 +500,7 @@ export function installStageInteractionTools(
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
-            || name === 'bid_resume_current_run' ? {} : { ...cas }
+            ? {} : { ...cas }
           const required = Object.keys(properties)
           let parameters: JsonSchemaNode | undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
@@ -527,14 +519,6 @@ export function installStageInteractionTools(
             properties.instruction = text
             properties.reference = chapterReference
             required.push('instruction', 'reference')
-          }
-          if (name === 'bid_resume_current_run') {
-            properties.suspended_run_id = text
-            properties.expected_project_revision = { type: 'integer' }
-            properties.resume_policy = { type: 'object', properties: {
-              web_access: { type: 'string', enum: ['inherit', 'disabled'] },
-            }, additionalProperties: false }
-            required.push('suspended_run_id', 'expected_project_revision')
           }
           if (name === 'bid_outline_apply_operations') {
             properties.operations = { type: 'array', items: { type: 'object' }, description: '按 type 提交操作：update_section(section_id,title?,purpose?,must_answer?)；add_section(parent_id,order,writable,title,purpose,must_answer?)；delete_section(section_id)；move_section(section_id,parent_id,order)；split_section(section_id,children:[{title,purpose,must_answer}])；merge_sections(section_ids,title,purpose)。' }
@@ -612,12 +596,11 @@ export function installStageInteractionTools(
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
               : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                 : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                  : name === 'bid_resume_current_run' ? '核对挂起 Run 与项目修订号，并从持久化 checkpoint 继续剩余任务；需要禁用联网时传 resume_policy.web_access=disabled。'
-                    : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                      : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                        : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                          : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                            : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                  : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                    : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                      : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                        : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                          : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {

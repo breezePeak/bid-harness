@@ -137,8 +137,8 @@ describe('Bid client projection', () => {
     })
     expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['start_stage'],
-      composer: { enabled: false, reason: 'bid.stage_start_required' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     })
     for (const stage of BID_STAGES) {
       expect(getBidClientProjection({ stage, status: 'running' })).toMatchObject({
@@ -216,8 +216,8 @@ describe('Bid client projection', () => {
     })
     expect(ctx.sessionProjections.snapshot(resetSession).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['start_stage'],
-      composer: { enabled: false, reason: 'bid.stage_start_required' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
     })
 
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })

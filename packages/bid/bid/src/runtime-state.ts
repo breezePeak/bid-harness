@@ -492,7 +492,7 @@ export function getBidClientProjection(
     ...base, allowedActions: ['send_message', 'export_docx', 'revise_chapter'],
     composer: { enabled: true }, ...fileView,
   }
-  if (runtime.status === 'waiting_start') return { ...base, allowedActions: ['start_stage'], composer: { enabled: false, reason: 'bid.stage_start_required' }, ...fileView }
+  if (runtime.status === 'waiting_start') return { ...base, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
   if (runtime.status === 'running') return {
     ...base,
     allowedActions: runtime.stage === 'chapter_writing'
