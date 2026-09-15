@@ -35,7 +35,7 @@ const writerInput = z.object({
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
     flowcharts: z.array(z.object({
-      type: z.literal('flowchart').optional(), key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
+      type: z.literal('flowchart').optional(), key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
       nodes: z.array(z.object({ key: text, type: z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess']), text }).strict()),
       edges: z.array(z.object({ from: text, to: text, label: text.optional() }).strict()),
     }).strict()).max(100).optional(),
@@ -68,7 +68,7 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
             key: stringParameter, type: { type: 'string', enum: ['start', 'end', 'process', 'decision', 'document', 'subprocess'] }, text: stringParameter,
           }, required: ['key', 'type', 'text'], additionalProperties: false } },
           edges: { type: 'array', items: { type: 'object', properties: { from: stringParameter, to: stringParameter, label: stringParameter }, required: ['from', 'to'], additionalProperties: false } },
-        }, required: ['title', 'nodes', 'edges'], additionalProperties: false } },
+        }, required: ['key', 'title', 'nodes', 'edges'], additionalProperties: false } },
       }, additionalProperties: false,
     },
   }, required: ['markdown', 'metadata'], additionalProperties: false,

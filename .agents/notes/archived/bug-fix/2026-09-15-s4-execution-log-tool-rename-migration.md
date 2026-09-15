@@ -1,6 +1,7 @@
 # Agent Note: S4 执行日志工具统计迁移
 
 Status: implemented
+Archived: 2026-09-15
 
 ## Problem
 
@@ -14,7 +15,7 @@ S4 执行日志当前使用 schema v4，所有读取统一调用 `parseEvidenceM
 
 ## Alternatives considered
 
-**继续让 resume 直接解析 v3。** 不采用。工具字段结构已经变化，重试只能重复同一确定性 schema 错误，无法触达已保存的任务进度。
+**继续让 resume 直接解析 v3。** 不采用。不迁移时工具字段结构已经变化，重试只能重复同一确定性 schema 错误，无法触达已保存的任务进度。
 
 **对执行日志使用 `.passthrough()` 或删除未知字段。** 不采用。前者放松了整个持久化边界，后者可能吞掉未识别的数据；迁移只处理已知的一个旧字段，并在最终严格校验中保留其他错误。
 
@@ -24,4 +25,4 @@ S4 执行日志当前使用 schema v4，所有读取统一调用 `parseEvidenceM
 
 旧 v3 日志可在当前版本直接读取并在恢复首次持久化时写成 v4；只读的进度投影和验收报告也通过同一入口获得规范化结果。当前写入只产生 `web_fetch` 统计。2026-09-15 的回归覆盖顶层统计、多个 Task 统计、新格式、双字段合并和 suspended S4 恢复；旧 Child 不被续接，已完成 Task 不重跑。
 
-该记录补充[S4 Web Research Pool 与 Chunk 证据边界](../architecture/2026-09-14-s4-web-research-pool.md)的持久化兼容约束。
+该记录补充[S4 Web Research Pool 与 Chunk 证据边界](../../../../implemented/architecture/2026-09-14-s4-web-research-pool.md)的持久化兼容约束。

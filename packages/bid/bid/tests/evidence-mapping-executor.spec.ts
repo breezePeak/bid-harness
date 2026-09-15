@@ -109,7 +109,7 @@ afterEach(async () => {
 
 interface EvidenceMappingWebObservation {
   callId: string
-  name: 'web_search' | 'fetch_web_source'
+  name: 'web_search' | 'web_fetch'
   arguments: unknown
   result: Readonly<ToolExecutionResult>
   callSeq: number
@@ -273,13 +273,13 @@ function mappingFixture(
   const childWebRefs = new Map<string, string[]>()
   const emitWeb = async (child: Agent, outcomes: readonly EvidenceMappingWebObservation[]): Promise<void> => {
     for (const outcome of outcomes) {
-      if (outcome.name === 'fetch_web_source') {
+      if (outcome.name === 'web_fetch') {
         const url = String((outcome.arguments as { url?: unknown }).url)
         const queued = queuedFetchResults.get(url) ?? []
         queued.push(outcome.result as ToolExecutionResult)
         queuedFetchResults.set(url, queued)
         const definitions = submissionTools.get(String(child.id))
-        const fetchTool = definitions?.get('fetch_web_source')
+        const fetchTool = definitions?.get('web_fetch')
         const readTool = definitions?.get('read_source')
         if (fetchTool === undefined || readTool === undefined) throw new Error('missing S4 Web research tools')
         const fetched = await invokeSubmissionTool(child, fetchTool, { url })
@@ -838,20 +838,18 @@ function webResearch(taskId: string) {
     value: { sources: [{ url: `${webUrl}#source` }], truncated: false },
   })
   const fetch = observation({
-    callId: `${taskId}-fetch`, name: 'fetch_web_source', arguments: { url: webUrl }, callSeq: 3, resultSeq: 4,
+    callId: `${taskId}-fetch`, name: 'web_fetch', arguments: { url: webUrl }, callSeq: 3, resultSeq: 4,
     value: { url: webUrl, statusCode: 200, body: { kind: 'text', content: `${taskId} 正文` }, truncated: false },
     content: `Fetched ${webUrl} (HTTP 200)\n\n${taskId} 正文`,
   })
   return { search, fetch }
 }
 
-const executionLogToolNames = ['read_source', 'search_sources', 'list_research_sources', 'list_web_chunks', 'web_search', 'fetch_web_source'] as const
+const executionLogToolNames = ['read_source', 'search_sources', 'list_research_sources', 'list_web_chunks', 'web_search', 'web_fetch'] as const
 type ExecutionLogToolStats = { calls: number; succeeded: number; failed: number; hits: number; failure_reasons: string[] }
 
 function executionLogTools(overrides: Record<string, Partial<ExecutionLogToolStats>> = {}) {
-  const names: readonly string[] = Object.hasOwn(overrides, 'web_fetch')
-    ? [...executionLogToolNames, 'web_fetch'] : executionLogToolNames
-  return Object.fromEntries(names.map(name => [name, {
+  return Object.fromEntries(executionLogToolNames.map(name => [name, {
     calls: 0, succeeded: 0, failed: 0, hits: 0, failure_reasons: [], ...overrides[name],
   }]))
 }
@@ -868,7 +866,7 @@ function executionLogFixture(
   taskTools: readonly Record<string, unknown>[] = [],
 ) {
   return {
-    schema_version: 3,
+    schema_version: 5,
     max_concurrency: 1,
     observed_max_concurrency: 0,
     statistics: {
@@ -1609,12 +1607,12 @@ describe('evidence-mapping Agent executor', () => {
       statistics: {
         tools: {
           web_search: Record<string, unknown>
-           fetch_web_source: Record<string, unknown>
+           web_fetch: Record<string, unknown>
         }
       }
     }
     expect(log.statistics.tools.web_search).toMatchObject({ calls: 1, succeeded: 0, failed: 1, failure_reasons: ['failed'] })
-    expect(log.statistics.tools.fetch_web_source).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
+    expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
   })
 
   it('明确禁用 Web Access 时不要求 S4 Web 工具', async () => {
@@ -2123,8 +2121,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.path)
     expect(promptText(fixture.starts[0]!.request.request)).toContain('"file_ref":"F2"')
     for (const start of fixture.starts) {
-      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search', 'fetch_web_source'] } })
-      expect(start.request.request.toolFilter?.allow).not.toContain('web_fetch')
+      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search', 'web_fetch'] } })
     }
     const childReadGuard = fixture.childGuards.get(String(fixture.starts[0]!.request.childId))?.at(-1)
     expect(childReadGuard).toBeDefined()
@@ -2325,16 +2322,8 @@ describe('evidence-mapping Agent executor', () => {
         final_child_session_id: string | null
       }>
     }
-    const useLegacyWebFetchName = (tools: Record<string, unknown> | undefined) => {
-      if (tools === undefined || !Object.hasOwn(tools, 'web_fetch')) return
-      tools.fetch_web_source = tools.web_fetch
-      delete tools.web_fetch
-    }
-    useLegacyWebFetchName(interruptedLog.statistics?.tools)
-    for (const task of interruptedLog.tasks) useLegacyWebFetchName(task.research_stats?.tools)
-    interruptedLog.schema_version = 3
     const interruptedTask = interruptedLog.tasks.find(task => task.task_id === 'MAP-INIT-SEC-401')
-    if (interruptedTask !== undefined) interruptedTask.final_child_session_id = 'legacy-child-with-fetch-web-source'
+    if (interruptedTask !== undefined) interruptedTask.final_child_session_id = 'interrupted-child'
     for (const task of interruptedLog.tasks) if (completedTaskIds.has(task.task_id)) task.status = 'pending'
     await writeFile(logPath, JSON.stringify(interruptedLog))
     await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
@@ -2349,14 +2338,14 @@ describe('evidence-mapping Agent executor', () => {
     const resumedRejection = completed.catch((error: unknown) => error)
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
     expect(promptText(resumed.starts[0]!.request.request)).toContain('"task_id":"MAP-INIT-SEC-401"')
-    expect(resumed.starts[0]!.request.request).toMatchObject({ toolFilter: { allow: ['web_search', 'fetch_web_source'] } })
-    expect(String(resumed.starts[0]!.request.childId)).not.toBe('legacy-child-with-fetch-web-source')
+    expect(resumed.starts[0]!.request.request).toMatchObject({ toolFilter: { allow: ['web_search', 'web_fetch'] } })
+    expect(String(resumed.starts[0]!.request.childId)).not.toBe('interrupted-child')
     const normalizedLog = JSON.parse(await readFile(logPath, 'utf8')) as {
       schema_version: number
       statistics?: { tools?: Record<string, unknown> }
     }
     expect(normalizedLog.schema_version).toBe(5)
-    expect(normalizedLog.statistics?.tools).toHaveProperty('fetch_web_source')
+    expect(normalizedLog.statistics?.tools).toHaveProperty('web_fetch')
     for (const taskId of completedTaskIds) {
       expect(resumed.starts.some(start => promptText(start.request.request).includes(`Mapping Task：{"task_id":"${taskId}"`))).toBe(false)
     }
@@ -2753,46 +2742,10 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
-  it('迁移旧 v3 顶层工具统计并升级为 v5', () => {
-    const legacyTools = executionLogTools({
-      web_fetch: { calls: 3, succeeded: 2, failed: 1, hits: 5, failure_reasons: ['timeout'] },
-    })
-    delete legacyTools.fetch_web_source
-    const parsed = parseEvidenceMappingExecutionLog(executionLogFixture(legacyTools))
-    expect(parsed.schema_version).toBe(5)
-    expect(parsed.statistics?.tools.fetch_web_source).toEqual({
-      calls: 3, succeeded: 2, failed: 1, hits: 5, failure_reasons: ['timeout'],
-    })
-    expect(parsed.statistics?.tools).not.toHaveProperty('web_fetch')
-  })
-
-  it('迁移所有旧 v3 Task research_stats 工具统计', () => {
-    const taskTools = [1, 2].map((index) => {
-      const tools = executionLogTools({ web_fetch: { calls: index, hits: index } })
-      delete tools.fetch_web_source
-      return tools
-    })
-    const parsed = parseEvidenceMappingExecutionLog(executionLogFixture(executionLogTools(), taskTools))
-    expect(parsed.tasks.map(task => task.research_stats?.tools.fetch_web_source)).toEqual([
-      { calls: 1, succeeded: 0, failed: 0, hits: 1, failure_reasons: [] },
-      { calls: 2, succeeded: 0, failed: 0, hits: 2, failure_reasons: [] },
-    ])
-    expect(parsed.tasks.every(task => !Object.hasOwn(task.research_stats!.tools, 'web_fetch'))).toBe(true)
-  })
-
-  it('保留 v5 新格式，并确定性合并新旧工具统计', () => {
+  it('保留 v5 当前工具统计格式', () => {
     const current = { calls: 2, succeeded: 1, failed: 1, hits: 4, failure_reasons: ['current', 'shared'] }
-    const legacy = { calls: 3, succeeded: 2, failed: 1, hits: 6, failure_reasons: ['legacy', 'shared'] }
-    const currentLog = executionLogFixture(executionLogTools({ fetch_web_source: current }))
-    currentLog.schema_version = 5
+    const currentLog = executionLogFixture(executionLogTools({ web_fetch: current }))
     expect(parseEvidenceMappingExecutionLog(currentLog)).toEqual(currentLog)
-
-    const bothTools = executionLogTools({ web_fetch: legacy, fetch_web_source: current })
-    const parsed = parseEvidenceMappingExecutionLog(executionLogFixture(bothTools))
-    expect(parsed.statistics?.tools.fetch_web_source).toEqual({
-      calls: 5, succeeded: 3, failed: 2, hits: 10, failure_reasons: ['current', 'shared', 'legacy'],
-    })
-    expect(parsed.statistics?.tools).not.toHaveProperty('web_fetch')
   })
 
   it('拒绝不支持的 S4 私有执行日志版本', async () => {

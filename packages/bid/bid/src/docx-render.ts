@@ -24,7 +24,7 @@ import { Document,
 import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
-import { applyHeadingRestartRules, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
+import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
 import { flowchartPlaceholder, renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
 type Node = {
   type: string
@@ -199,23 +199,6 @@ export async function renderDocx(
   const definitions = new Map(root.children.filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const num = (key: string): number => Number(values[key])
   const str = (key: string): string => String(values[key])
-  const captionMarker = (role: 'figureCaption' | 'tableCaption'): RegExp => {
-    const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-    const prefix = escaped(str(`${role}.numbering.prefix`))
-    const prefixSeparator = str(`${role}.numbering.prefixIndexSeparator`)
-    const titleSeparator = str(`${role}.numbering.indexTitleSeparator`)
-    const beforeNumber = prefixSeparator.trim() ? escaped(prefixSeparator) : '\\s*'
-    const afterNumber = titleSeparator.trim() ? escaped(titleSeparator) : '\\s*'
-    const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
-    const withoutNumber = titleSeparator ? `${prefix}${escaped(titleSeparator)}` : `${prefix}\\s+`
-    const markers = [prefix, role === 'tableCaption' ? '表' : '图'].filter(Boolean).join('|')
-    return new RegExp(`^\\s*(?:(?:${markers})${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
-  }
-  const captionRole = (value: string): 'figureCaption' | 'tableCaption' | undefined =>
-    captionLevels.find(({ role }) => {
-      if (!str(`${role}.numbering.prefix`)) return false
-      return captionMarker(role).test(value)
-    })?.role
   const run = (role: string): IRunOptions => ({ font: { eastAsia: str(`${role}.font`),
     ascii: str(`${role}.latinFont`),
     hAnsi: str(`${role}.latinFont`) },
@@ -326,7 +309,7 @@ export async function renderDocx(
       }
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
         const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}`
-          : node.type === 'paragraph' ? captionRole(content(node)) ?? 'body' : 'body'
+          : node.type === 'paragraph' ? captionRole(values, content(node)) ?? 'body' : 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
         const sourceNumber = /^(\d+(?:\.\d+)*)\s+/u.exec(content(node))?.[1]
         const numberedHeading = node.type === 'heading' && role !== 'title' && sourceNumber?.split('.').length === node.depth
@@ -344,7 +327,7 @@ export async function renderDocx(
         if (numberedHeading)
           contents = withoutLeadingText(contents, /^\d+(?:\.\d+)*\s+/u)
         const numberedCaption = role === 'figureCaption' || role === 'tableCaption'
-        if (numberedCaption) contents = withoutLeadingText(contents, captionMarker(role))
+        if (numberedCaption) contents = withoutLeadingText(contents, captionMarker(values, role))
         const rendered = await inline(contents, role)
         const prefix = index === 0 ? listPrefix : ''
         doc.push(new Paragraph({ ...paragraph(role),
@@ -384,8 +367,8 @@ export async function renderDocx(
       }
       if (node.type === 'table') {
         const previous = nodes[index - 1], next = nodes[index + 1]
-        const hasCaption = previous?.type === 'paragraph' && captionRole(content(previous)) === 'tableCaption'
-          || next?.type === 'paragraph' && captionRole(content(next)) === 'tableCaption' && nodes[index + 2]?.type !== 'table'
+        const hasCaption = previous?.type === 'paragraph' && captionRole(values, content(previous)) === 'tableCaption'
+          || next?.type === 'paragraph' && captionRole(values, content(next)) === 'tableCaption' && nodes[index + 2]?.type !== 'table'
         if (!hasCaption) {
           const title = (node.children?.[0]?.children ?? []).map(content).filter(Boolean).join('、')
           const caption = await inline([{ type: 'text', value: title }], 'tableCaption')

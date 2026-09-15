@@ -2,6 +2,37 @@
 import JSZip from 'jszip'
 import type { ILevelsOptions } from 'docx'
 import type { FormatValues } from './docx-format-contract.ts'
+
+/** 匹配 Word 按图题或表题编号处理的 Markdown 段落。
+ * @param values 生效的题注编号配置。
+ * @param role 要匹配的题注角色。
+ * @returns 该角色的题注标记正则。
+ */
+export function captionMarker(values: FormatValues, role: 'figureCaption' | 'tableCaption'): RegExp {
+  const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const prefix = escaped(String(values[`${role}.numbering.prefix`]))
+  const prefixSeparator = String(values[`${role}.numbering.prefixIndexSeparator`])
+  const titleSeparator = String(values[`${role}.numbering.indexTitleSeparator`])
+  const beforeNumber = prefixSeparator.trim() ? escaped(prefixSeparator) : '\\s*'
+  const afterNumber = titleSeparator.trim() ? escaped(titleSeparator) : '\\s*'
+  const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
+  const withoutNumber = titleSeparator ? `${prefix}${escaped(titleSeparator)}` : `${prefix}\\s+`
+  const markers = [prefix, role === 'tableCaption' ? '表' : '图'].filter(Boolean).join('|')
+  return new RegExp(`^\\s*(?:(?:${markers})${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
+}
+
+/** 使用与 DOCX renderer 相同的规则识别一个 Markdown 段落的题注角色。
+ * @param values 生效的题注编号配置。
+ * @param value Markdown 段落文本。
+ * @returns 匹配的题注角色；普通正文返回 undefined。
+ */
+export function captionRole(values: FormatValues, value: string): 'figureCaption' | 'tableCaption' | undefined {
+  return (['figureCaption', 'tableCaption'] as const).find(role => {
+    if (!String(values[`${role}.numbering.prefix`])) return false
+    return captionMarker(values, role).test(value)
+  })
+}
+
 /**
  * 解析六级标题的原生编号定义；十进制模式固定从 1 开始逐级编号。
  * @param values 生效编号配置。

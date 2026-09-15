@@ -445,7 +445,7 @@ export function renderChapterSubagentTask(
     '资料不支持真实项目数量、人员、设备或记录值时，不得添加带“示例”的伪数据行，也不得写“待补、XXX、最终填写”等占位值。管理表可以保留正式字段、填写规则和控制要求，由投标人按已核实资料填写。',
     'Related Materials 来自 reference，只用于事实、参数、企业能力、技术依据和参考，不得大段照抄。Reference Bid Materials 是旧参考标书；reuse/adapt 可读取命中 chunk 的 index 和相邻 chunks 以取得完整方案，但必须清理旧项目名称、采购人、地点、日期、周期、数量、金额、环境和客户事实。',
     '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，也不得出现 REQ、SC、COM、RP、SEC、AC 等系统内部编号；需求对应表使用招标文件原有条款编号、需求名称或简要原文。资料使用记录通过 metadata 登记。',
-    '当章节存在明确的步骤顺序、角色流转、判断分支、整改回路、审批关系或质量闭环时，判断结构化流程图是否比纯文字更清晰；只在确有表达价值时填写 metadata.flowcharts。背景、理念、人员介绍、政策说明和参数罗列等说明性章节不要为了增加图表而生成流程图。流程图必须给出完整节点和连线，不得填写“此处插入流程图”等占位文字。使用节点 key 作为连线引用，不要生成 flowchart id、node id、图号、坐标、SVG、Visio XML 或 Word/OLE 内容，Host 会分配身份并完成布局。',
+    '当章节存在明确的步骤顺序、角色流转、判断分支、整改回路、审批关系或质量闭环时，判断结构化流程图是否比纯文字更清晰；只在确有表达价值时填写 metadata.flowcharts。背景、理念、人员介绍、政策说明和参数罗列等说明性章节不要为了增加图表而生成流程图。流程图必须给出完整节点和连线，不得填写“此处插入流程图”等占位文字。每张流程图必须提供唯一语义 key，并在正文最适合展示该图的位置插入唯一的 {{flowchart:<key>}}，其中 <key> 必须与 metadata.flowcharts 对应项的 key 完全一致；如果正文需要引用流程图，使用 {{flow_ref:<key>}}。例如正文可写“项目质量控制流程如下。\n\n{{flowchart:quality-control-flow}}\n\n各环节发现的问题均进入整改复核闭环。”，metadata.flowcharts 对应项的 key 为 quality-control-flow。禁止只生成 metadata.flowcharts 而不插入 anchor，禁止把流程图统一放到章节结尾，禁止生成 FLOW-*、node id、图号、坐标、SVG、Visio XML 或 Word/OLE 内容，Host 会分配身份并完成布局。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Global Consistency Notes：${JSON.stringify(globalConsistencyNotes)}`,
     `Confirmed Global Writing Contract：${JSON.stringify(context.writingPlan)}`,

@@ -147,12 +147,13 @@ describe('Bid DOCX export', () => {
         ], edges: [{ from: 'N1', to: 'N2', label: '通过' }],
       }],
     }))
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n质量控制总体流程如下。\n\n{{flowchart:quality-control-flow}}\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n图 1 普通图片\n\n质量控制总体流程如下。\n\n{{flow_ref:quality-control-flow}}\n\n{{flowchart:quality-control-flow}}\n')
 
     await executeDocxExport(workspace, undefined, undefined, undefined, fakeNativeVisioExport())
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
     expect(markdown).toContain('```flowchart\n')
     expect(markdown).toContain('质量检查闭环')
+    expect(markdown).toContain('图 2')
     const zip = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'bid.docx')))
     expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(false)
     expect(await zip.file('word/document.xml')?.async('string')).not.toContain('BID_VISIO_OBJECT_FLOW-RESOURCE-1-1')

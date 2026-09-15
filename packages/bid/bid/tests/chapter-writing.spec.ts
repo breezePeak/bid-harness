@@ -976,6 +976,8 @@ describe('chapter-writing executor', () => {
     await seedReadableMaterials(workspace)
     const fixture = fixtureAgent(workspace, outline)
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
+    expect(promptText(fixture.starts[0]!.request)).toContain('{{flowchart:<key>}}')
+    expect(promptText(fixture.starts[0]!.request)).toContain('{{flow_ref:<key>}}')
     expect(fixture.starts[0]!.request.outputSchema).toBeUndefined()
     const schema = chapterWriterOutputSchema
     assertSupportedJsonSchema(schema)
@@ -987,6 +989,7 @@ describe('chapter-writing executor', () => {
     expect(validateMaterial({ material_ref: 'M1', usage: 'reference', summary: '资料依据' })).toEqual([])
     expect(validateMaterial({ material_ref: 'M1', file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
     expect(validateMaterial({ source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
+    expect(validateJsonSchemaValue(schema, { ...candidate, metadata: { flowcharts: [{ title: '流程', nodes: [], edges: [] }] } })).not.toEqual([])
     expect(validateJsonSchemaValue(schema, { ...candidate, section_id: 'SEC-1' })).not.toEqual([])
     const reviewRequest = fixture.subagents.start.mock.calls.find(([, request]) => request.toolFilter?.allow?.length === 0)![1]
     expect(reviewRequest.outputSchema).toBeUndefined()

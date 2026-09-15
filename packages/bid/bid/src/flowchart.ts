@@ -116,9 +116,27 @@ function nodeShape(node: FlowchartNode, x: number, y: number, width: number, hei
   return `${shape}<text x="${x + width / 2}" y="${startY}" text-anchor="middle" dominant-baseline="middle" font-family="Microsoft YaHei,Arial,sans-serif" font-size="14" fill="#0f172a">${label}</text>`
 }
 
-/** Deterministic node positions shared by preview and native export. */
+/** 预览和原生导出共用的确定性节点边界。 */
+export interface FlowchartBox {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+/** 判断两个节点边界是否存在正面积交集；仅边界接触不视为重叠。
+ * @param left 第一个节点边界。
+ * @param right 第二个节点边界。
+ * @returns 两个边界是否重叠。
+ */
+export function boxesOverlap(left: FlowchartBox, right: FlowchartBox): boolean {
+  return left.x < right.x + right.width && left.x + left.width > right.x
+    && left.y < right.y + right.height && left.y + left.height > right.y
+}
+
+/** 预览和原生导出共用的确定性节点位置。 */
 export interface FlowchartLayout {
-  readonly positions: ReadonlyMap<string, { x: number; y: number; width: number; height: number }>
+  readonly positions: ReadonlyMap<string, FlowchartBox>
   readonly width: number
   readonly height: number
 }
@@ -134,7 +152,7 @@ export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1)
     outgoing.get(edge.from)?.push(edge.to)
   }
-  const levels = new Map<string, number>()
+  const nodeLevels = new Map<string, number>()
   const queue = spec.nodes.filter(node => (incoming.get(node.id) ?? 0) === 0).map(node => node.id)
   if (queue.length === 0 && spec.nodes.length > 0) {
     const first = spec.nodes[0]
@@ -144,31 +162,47 @@ export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
   while (queue.length > 0) {
     const id = queue.shift()
     if (id === undefined) continue
-    const level = levels.get(id) ?? 0
+    const level = nodeLevels.get(id) ?? 0
     for (const next of outgoing.get(id) ?? []) {
-      if (levels.has(next)) continue
-      levels.set(next, level + 1)
+      if (nodeLevels.has(next)) continue
+      nodeLevels.set(next, level + 1)
       if (!queued.has(next)) {
         queued.add(next)
         queue.push(next)
       }
     }
   }
-  for (const node of spec.nodes) if (!levels.has(node.id)) levels.set(node.id, 0)
+  for (const node of spec.nodes) if (!nodeLevels.has(node.id)) nodeLevels.set(node.id, 0)
   const groups = new Map<number, FlowchartNode[]>()
   for (const node of spec.nodes) {
-    const level = levels.get(node.id)
+    const level = nodeLevels.get(node.id)
     if (level === undefined) continue
     groups.set(level, [...(groups.get(level) ?? []), node])
   }
-  const positions = new Map<string, { x: number; y: number; width: number; height: number }>()
-  const gap = 42, margin = 30
-  for (const [level, nodes] of groups) for (const [index, node] of nodes.entries()) {
+  const positions = new Map<string, FlowchartBox>()
+  const crossGap = 42, mainGap = 72, margin = 30
+  const orderedLevels = [...groups.keys()].sort((left, right) => left - right)
+  const mainCoordinates = new Map<number, number>()
+  let main = margin
+  for (const level of orderedLevels) {
+    const nodes = groups.get(level) ?? []
+    mainCoordinates.set(level, main)
+    main += Math.max(...nodes.map(node => {
+      const size = nodeSize(node)
+      return spec.direction === 'LR' ? size.width : size.height
+    })) + mainGap
+  }
+  for (const level of orderedLevels) for (const [index, node] of (groups.get(level) ?? []).entries()) {
     const size = nodeSize(node)
-    const cross = nodes.slice(0, index).reduce((sum, value) => sum + nodeSize(value).height + gap, 0)
+    const nodes = groups.get(level) ?? []
+    const cross = nodes.slice(0, index).reduce((sum, value) => {
+      const valueSize = nodeSize(value)
+      return sum + (spec.direction === 'LR' ? valueSize.height : valueSize.width) + crossGap
+    }, 0)
+    const mainCoordinate = mainCoordinates.get(level) ?? margin
     positions.set(node.id, spec.direction === 'LR'
-      ? { x: margin + level * 240, y: margin + cross, ...size }
-      : { x: margin + cross, y: margin + level * 150, ...size })
+      ? { x: mainCoordinate, y: margin + cross, ...size }
+      : { x: margin + cross, y: mainCoordinate, ...size })
   }
   const width = Math.max(320, ...[...positions.values()].map(value => value.x + value.width + margin))
   const height = Math.max(180, ...[...positions.values()].map(value => value.y + value.height + margin))

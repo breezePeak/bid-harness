@@ -98,10 +98,10 @@ try {
   $app = New-Object -ComObject 'Visio.Application'
   $app.Visible = $false
   $document = $app.Documents.Add('')
-  $page = $document.Pages.Add()
+  $page = $document.Pages.Item(1)
   $scale = 96.0
-  $pageWidth = [Math]::Max(8.5, ([double]$layout.width / $scale) + 1.0)
-  $pageHeight = [Math]::Max(11.0, ([double]$layout.height / $scale) + 1.0)
+  $pageWidth = [Math]::Max(1.0, ([double]$layout.width / $scale) + 1.0)
+  $pageHeight = [Math]::Max(1.0, ([double]$layout.height / $scale) + 1.0)
   $page.PageSheet.CellsU('PageWidth').FormulaU = "$pageWidth in"
   $page.PageSheet.CellsU('PageHeight').FormulaU = "$pageHeight in"
   $positions = @{}
@@ -202,12 +202,22 @@ try {
     $range = $document.Content.Duplicate()
     $find = $range.Find
     $find.ClearFormatting()
-    $find.Text = [string]$replacement.placeholder
-  $find.Forward = $true
-  $find.Wrap = 0
-  if (-not $find.Execute()) { throw "placeholder not found: $($replacement.placeholder)" }
+  $find.Text = [string]$replacement.placeholder
+    $find.Forward = $true
+    $find.Wrap = 0
+    if (-not $find.Execute()) { throw "placeholder not found: $($replacement.placeholder)" }
+    $section = $range.Sections.Item(1)
     $range.Text = ''
-    [void]$range.InlineShapes.AddOLEObject($null, [string]$replacement.visioPath, $false, $false, $null, $null, $null, $range)
+    $range.Collapse(1)
+    $shape = $range.InlineShapes.AddOLEObject($null, [string]$replacement.visioPath, $false, $false, $null, $null, $null, $range)
+    $availableWidth = [double]$section.PageSetup.PageWidth - [double]$section.PageSetup.LeftMargin - [double]$section.PageSetup.RightMargin
+    $originalWidth = [double]$shape.Width
+    $originalHeight = [double]$shape.Height
+    if ($originalWidth -gt $availableWidth -and $availableWidth -gt 0) {
+      $ratio = $availableWidth / $originalWidth
+      $shape.Width = $originalWidth * $ratio
+      $shape.Height = $originalHeight * $ratio
+    }
   }
   $document.Save()
 } finally {

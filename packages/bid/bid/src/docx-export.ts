@@ -13,6 +13,8 @@ import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
+import { readDocxFormat } from './docx-format-store.ts'
+import { captionRole } from './docx-numbering.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
@@ -63,7 +65,7 @@ export async function executeDocxExport(
   templateId?: DocxTemplateId | null,
   nativeExport?: NativeVisioExport,
 ): Promise<StageArtifact[]> {
-  const markdown = await collectDocxMarkdown(workspace, run.signal)
+  const markdown = await collectDocxMarkdown(workspace, run.signal, templateId)
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
   const source = destination.slice(0, -'.docx'.length) + '.md'
   const absolute = within(workspace.projectRoot, source)
@@ -77,11 +79,13 @@ export async function executeDocxExport(
 /** 读取确认目录和已保存正文为固定 Markdown 快照；读取期间目录或正文变化时拒绝导出。
  * @param workspace 当前项目。
  * @param signal 取消信号。
+ * @param templateId 本次导出模板；用于识别与 Word 相同的显式图题编号。
  * @returns 当前导出范围的文档 Markdown。
  */
 export async function collectDocxMarkdown(
   workspace: BidWorkspace,
   signal?: AbortSignal,
+  templateId?: DocxTemplateId | null,
 ): Promise<string> {
   signal?.throwIfAborted()
   const outlinePath = 'outline/confirmed-outline.json'
@@ -100,6 +104,7 @@ export async function collectDocxMarkdown(
   const flowchartsBySection = new Map<string, readonly FlowchartSpec[]>()
   const figureNumbers = new Map<string, number>()
   let figureNumber = 0
+  const format = await readDocxFormat(workspace, templateId)
   for (const [sectionId, chapter] of chapters) {
     const flowcharts = await readSavedFlowcharts(workspace, chapter.content_path.slice(-7, -3))
     flowchartsBySection.set(sectionId, flowcharts)
@@ -110,10 +115,17 @@ export async function collectDocxMarkdown(
       const rightKey = right.key?.trim() || right.id
       return chapter.markdown.indexOf(`{{flowchart:${leftKey}}}`) - chapter.markdown.indexOf(`{{flowchart:${rightKey}}}`)
     })
+    let cursor = 0
     for (const flowchart of ordered) {
-      const key = flowchart.key ?? flowchart.id
+      const key = flowchart.key?.trim() || flowchart.id
       if (figureNumbers.has(key)) throw new Error(`FLOWCHART_KEY_DUPLICATE:${key}`)
+      const marker = `{{flowchart:${key}}}`
+      const position = chapter.markdown.indexOf(marker, cursor)
+      if (position < 0) throw new Error(`FLOWCHART_ANCHOR_MISSING:${key}`)
+      figureNumber += chapter.markdown.slice(cursor, position).split(/\r?\n/gu)
+        .filter(line => captionRole(format.state.resolved, line) === 'figureCaption').length
       figureNumbers.set(key, ++figureNumber)
+      cursor = position + marker.length
     }
   }
   for (const [sectionId, chapter] of chapters) {

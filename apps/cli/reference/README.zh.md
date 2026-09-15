@@ -96,4 +96,4 @@ dsh web --help
 
 ## 源码执行
 
-请在仓库根目录中，于全新 checkout 之后及产物需要更新时单独运行 `pnpm run build`，然后使用 `pnpm dsh <args...>`。`package.json` 中的脚本不会构建，而是通过 `node --import tsx/esm` 启动 `apps/cli/src/bin.ts`，并转发所有参数。Typert Host 产物缺失时，profile 启动会因不含构建指引的模块解析错误而失败。这些 Host 产物存在后，如果前端或 Client plugin 组合包缺失，启动会失败并提示运行 `pnpm run build`。启动器不会检查产物是否为最新，因此已有的陈旧组合包可能继续运行旧版浏览器代码，直至重新构建。该进程会继承启动环境；当支持环境代理的 Node 版本必须遵循 `HTTP_PROXY` 和 `HTTPS_PROXY` 时，请设置 `NODE_USE_ENV_PROXY=1`。安装形式会直接启动构建后的 `apps/cli/lib/bin.js`，不会重新构建仓库。
+源码启动脚本会先运行 `pnpm run build:lib:host`，再通过 `node --import tsx/esm` 启动 `apps/cli/src/bin.ts`，并转发所有参数；`pnpm run bid:s4-replay` 使用同一 Host build 前置。Bid 工具名检查会在启动前扫描源码、Bid `lib` 和 CLI bundle，旧工具名或错误的 S4 工具过滤器会使启动失败。完整 Web 运行仍需要 `pnpm run build` 生成前端与 Client 产物。该进程会继承启动环境；当支持环境代理的 Node 版本必须遵循 `HTTP_PROXY` 和 `HTTPS_PROXY` 时，请设置 `NODE_USE_ENV_PROXY=1`。安装形式会直接启动构建后的 `apps/cli/lib/bin.js`，不会重新构建仓库；修改 Host 源码后必须重启已运行进程，reset S4 只重置业务阶段，不重新加载插件。
