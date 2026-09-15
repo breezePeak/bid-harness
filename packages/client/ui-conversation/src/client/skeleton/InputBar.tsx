@@ -560,10 +560,12 @@ export function InputBar({
     if (el !== null) toggleCommandMenu?.(selectionOf(el))
   }
 
-  // Ordinary sessions retain their primary Send/Stop toggle. A continuable
-  // child keeps Send as the primary action and exposes Stop independently so
-  // pointer users can queue follow-ups while its current turn is running.
-  const primaryStops = running && subagent === null
+  // An ordinary running session keeps Stop as the only primary action while
+  // the draft is empty. Once the user has typed a follow-up, Send becomes the
+  // primary action and Stop stays beside it, so pointer users do not have to
+  // discover that Enter queues the message.
+  const primaryStops = running && subagent === null && empty
+  const stopBesideSend = running && subagent === null && !primaryStops
   const interruptible = running && continuable
   const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
   const onPrimary = (): void => {
@@ -797,7 +799,7 @@ export function InputBar({
             {rightItems}
             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             <ContextMeter useProjection={useProjection} t={t} />
-            {interruptible && (
+            {(interruptible || stopBesideSend) && (
               <Tooltip label={t('input.stop')} side="top" delayMs={500}>
                 <button
                   type="button"
