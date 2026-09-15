@@ -4,7 +4,7 @@ import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
 import { createBidConfirmationModeStore } from '../src/client/confirmation-mode.ts'
@@ -116,9 +116,9 @@ describe('BidStagePanel', () => {
     const setComposerBlock = vi.fn()
     const selectReviewView = vi.fn()
     const setReviewViewAvailable = vi.fn()
-    const childSessions = (selector: (state: unknown) => unknown) => selector({
+    const childSessions: BidStagePanelProps['useSessions'] = <S,>(selector: (state: SessionListState) => S): S => selector({
       byId: { session_bid: { agentPreset: 'bid', origin: 'subagent', parentSessionId: 'main', running: false } },
-    })
+    } as unknown as SessionListState)
     const panel = render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
       allowedActions: ['confirm_outline', 'regenerate_outline'],
