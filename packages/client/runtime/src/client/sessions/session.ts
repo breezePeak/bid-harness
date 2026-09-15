@@ -27,6 +27,8 @@ import { ProjectionValueStore } from './projection-store.ts'
 import type { ProjectionsBaseline } from './projection-store.ts'
 import { resolvedClientTimeZone } from '../time-zone.ts'
 import { SessionQueueMirror } from './queue-mirror.ts'
+import { OutgoingMessages } from './outgoing-messages.ts'
+import type { OutgoingMessageStatus } from './outgoing-messages.ts'
 
 /** Messages requested per history page. */
 export const PAGE_MESSAGES = 50
@@ -83,6 +85,8 @@ export class Session implements SessionFace {
   private pendingCache: { rev: number; value: PendingInteraction[] } | null = null
   /** Authoritative stream-only inbox snapshot; pending work never hits history. */
   private readonly queueMirror = new SessionQueueMirror()
+  private readonly outgoing = new OutgoingMessages()
+  private promptSequence = 0
   /** Session-owned business Context engine over the contiguous raw window. */
   private readonly conversation: ConversationNodeAssembler
   private running = false
@@ -191,6 +195,7 @@ export class Session implements SessionFace {
     content: PromptContentPart[],
     mode: 'queue' | 'steer',
     signal?: AbortSignal,
+    clientSubmissionId?: string,
   ): Promise<RpcResult<{ accepted: true }>> {
     this.promptError = null
     this.lastAgentError = null
@@ -200,6 +205,9 @@ export class Session implements SessionFace {
     this.promptAttempted = true
     if (this.blankBit) this.firstPromptPendingTurn = true
     this.notifier.markDirty()
+    const submissionId = clientSubmissionId ?? `client-${this.sessionId}-${++this.promptSequence}`
+    this.beginOutgoing(submissionId, content)
+    this.outgoing.update(submissionId, 'submitting')
     let result: RpcResult<{ accepted: true }>
     try {
       if (this.address === undefined) {
@@ -207,6 +215,7 @@ export class Session implements SessionFace {
           sessionId: this.sessionId,
           mode,
           content,
+          clientSubmissionId: submissionId,
           clientTimeZone: resolvedClientTimeZone(),
         }, signal)).result
       } else if (this.address.mode === 'one-shot') {
@@ -243,6 +252,7 @@ export class Session implements SessionFace {
       result = transportError(error)
     }
     if (!result.ok) {
+      this.outgoing.update(submissionId, 'failed', result.error.message)
       this.promptError = { op: 'send', error: result.error }
       this.notifier.markDirty()
       return result
@@ -260,7 +270,33 @@ export class Session implements SessionFace {
       this.options.onEngaged?.(this)
       this.notifier.markDirty()
     }
+    this.outgoing.update(submissionId, 'submitted')
+    this.notifier.markDirty()
     return result
+  }
+
+  /**
+   * Start a local display row before attachment or reference preparation awaits.
+   * @param clientSubmissionId - identity shared with the Host user message.
+   * @param content - prompt content captured at local handoff.
+   */
+  beginOutgoing(clientSubmissionId: string, content: readonly PromptContentPart[]): void {
+    this.outgoing.begin(
+      `outgoing-${clientSubmissionId}`,
+      clientSubmissionId,
+      content,
+    )
+    this.notifier.markDirty()
+  }
+
+  /**
+   * Update a local row without changing Host queue state.
+   * @param clientSubmissionId - local submission identity.
+   * @param status - local lifecycle state.
+   * @param error - optional failure message.
+   */
+  updateOutgoing(clientSubmissionId: string, status: OutgoingMessageStatus, error?: string): void {
+    if (this.outgoing.update(clientSubmissionId, status, error)) this.notifier.markDirty()
   }
 
   /**
@@ -676,8 +712,9 @@ export class Session implements SessionFace {
     this.views.push(view)
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
+    const outgoingChanged = this.outgoing.acceptDurable(event)
     const publication = this.conversation.append({ event, view })
-    return queueChanged ? 'immediate' : publication
+    return queueChanged || outgoingChanged ? 'immediate' : publication
   }
 
   /** Land a live session/event (open/repair in flight -> buffer; overlapping seq -> drop;
@@ -749,6 +786,7 @@ export class Session implements SessionFace {
       runningCalls: legacy.runningCalls,
       pending: this.pendingCache.value,
       queue: this.queueMirror.snapshot(),
+      outgoing: this.outgoing.snapshot(),
       running: this.running,
       subagent: this.address === undefined
         ? null

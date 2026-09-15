@@ -24,12 +24,15 @@ interface CommandFace {
 
 /** Attachment-send face resolved lazily to keep hub/service construction acyclic. */
 interface ConversationAttachmentFace {
+  beginOutgoing(session: SessionFace, text: string, imageIds: readonly DraftAttachmentId[], submissionId: string): void
+  updateOutgoing(session: SessionFace, submissionId: string, error: string): void
   sendSession(
     session: SessionFace,
     text: string,
     imageIds: readonly DraftAttachmentId[],
     mode: InputSubmitMode,
     signal?: AbortSignal,
+    submissionId?: string,
   ): Promise<SubmitOutcome>
   serializeDraftImages(imageIds: readonly DraftAttachmentId[]): Promise<readonly SubmitImageAttachment[]>
   releaseDraftImage(id: DraftAttachmentId): void
@@ -77,6 +80,23 @@ export class InputHub implements SessionInputResolver {
       inputTriggers: () => this.controller(actx),
       popup: () => this.popup(actx),
       queue: queueReadFaceOf(session),
+      localHandoff: attempt => this.conversation().beginOutgoing(
+        session,
+        attempt.draftSnapshot,
+        attempt.imageIds ?? [],
+        attempt.submissionId ?? `client-${attempt.seq}`,
+      ),
+      localImageHandoff: imageIds => this.conversation().beginOutgoing(
+        session,
+        '',
+        imageIds,
+        `client-${id}-${Date.now()}`,
+      ),
+      localHandoffFailed: (attempt, error) => this.conversation().updateOutgoing(
+        session,
+        attempt.submissionId ?? `client-${id}-${attempt.seq}`,
+        error,
+      ),
       defaultSink: (text, imageIds, mode, signal) => this.sink(session, text, imageIds, mode, signal),
       steerQueue: () => { void this.steerQueue(session, shell) },
       commandImages: {

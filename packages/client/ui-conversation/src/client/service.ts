@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // error, so scope resolution goes through the sessions service (scopeOf
 // method) instead of the standalone helper.
 import type { ISessions, SessionFace, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { PromptContentPart } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubmitImageAttachment, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ComposerAttachment } from './contract/slots.ts'
@@ -37,6 +38,10 @@ export interface IConversation {
   readonly blocks: ComposerBlocks
   /** 为有业务引用的输入注册专用提交动作。 */
   readonly submitHandlers: ComposerSubmitHandlers
+  /** Register a local outgoing row before asynchronous message preparation. */
+  beginOutgoing(session: SessionFace, text: string, imageIds: readonly DraftAttachmentId[], submissionId: string): void
+  /** Mark a local outgoing row that failed before Host admission. */
+  updateOutgoing(session: SessionFace, submissionId: string, error: string): void
   /**
    * Send a prompt into the caller scope's session.
    * @param text - prompt text, sent verbatim as one text block.
@@ -44,7 +49,7 @@ export interface IConversation {
    * @param signal - optional cancellation for Host admission.
    * @returns admission completion; does not wait for model replies or stage completion.
    */
-  send(text: string, mode?: InputSubmitMode, signal?: AbortSignal): Promise<void>
+  send(text: string, mode?: InputSubmitMode, signal?: AbortSignal, submissionId?: string): Promise<void>
   /**
    * Apply one edit, remove, or strict steer operation to a pending queue occurrence.
    * @param itemId - agent-owned inbox occurrence identity.
@@ -108,6 +113,7 @@ export class ConversationController extends Service implements IConversation {
   /** The per-session composer-block registry. */
   readonly blocks: ComposerBlocks
   private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
+  private readonly pendingOutgoing = new Map<SessionId, { text: string; imageCount: number; submissionId: string }[]>()
   /** @inheritdoc */
   readonly submitHandlers: ComposerSubmitHandlers = {
     register: (sessionId, handler) => {
@@ -117,6 +123,33 @@ export class ConversationController extends Service implements IConversation {
         if (this.submissions.get(sessionId) === handler) this.submissions.delete(sessionId)
       }
     },
+  }
+
+  /** Register the local display handoff before references, uploads, or Host admission await. */
+  beginOutgoing(
+    session: SessionFace,
+    text: string,
+    imageIds: readonly DraftAttachmentId[],
+    submissionId: string,
+  ): void {
+    const pending = this.pendingOutgoing.get(session.sessionId) ?? []
+    pending.push({ text, imageCount: imageIds.length, submissionId })
+    this.pendingOutgoing.set(session.sessionId, pending)
+    const owner = session as SessionFace & {
+      beginOutgoing?: (id: string, content: readonly PromptContentPart[]) => void
+    }
+    owner.beginOutgoing?.(submissionId, text === '' ? [] : [{ type: 'text', text }])
+  }
+  /** Update a local row when preparation failed before Session.prompt ran. */
+  updateOutgoing(session: SessionFace, submissionId: string, error: string): void {
+    const pending = this.pendingOutgoing.get(session.sessionId)
+    const index = pending?.findIndex(item => item.submissionId === submissionId) ?? -1
+    if (index >= 0) pending?.splice(index, 1)
+    if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
+    const owner = session as SessionFace & {
+      updateOutgoing?: (id: string, status: 'failed', error: string) => void
+    }
+    owner.updateOutgoing?.(submissionId, 'failed', error)
   }
   private readonly draftAttachments = new Map<DraftAttachmentId, ComposerAttachment>()
   private readonly imageUrls = new Map<string, ImageUrlEntry>()
@@ -165,9 +198,10 @@ export class ConversationController extends Service implements IConversation {
     text: string,
     mode: InputSubmitMode = 'queue',
     signal?: AbortSignal,
+    submissionId?: string,
   ): Promise<void> {
     const session = this.scopedSession('send')
-    const result = await session.prompt([{ type: 'text', text }], mode, signal)
+    const result = await session.prompt([{ type: 'text', text }], mode, signal, submissionId)
     if (!result.ok) throw new Error(`conversation.send failed: ${result.error.code}: ${result.error.message}`)
   }
 
@@ -178,6 +212,7 @@ export class ConversationController extends Service implements IConversation {
    * @param imageIds - ordered draft-local attachment ids.
    * @param mode - queue or steer delivery selected by composer policy.
    * @param signal - optional cancellation for the complete Host admission.
+   * @param submissionId - optional client identity captured by local handoff.
    * @returns the Host admission outcome; local attachment preparation failures reject.
    */
   async sendSession(
@@ -186,19 +221,36 @@ export class ConversationController extends Service implements IConversation {
     imageIds: readonly DraftAttachmentId[],
     mode: InputSubmitMode,
     signal?: AbortSignal,
+    submissionId?: string,
   ): Promise<SubmitOutcome> {
-    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode)
+    const pending = this.pendingOutgoing.get(session.sessionId)
+    const index = pending?.findIndex(item => item.text === text && item.imageCount === imageIds.length) ?? -1
+    const resolvedSubmissionId = submissionId ?? (index >= 0 ? pending?.splice(index, 1)[0]?.submissionId : undefined)
+      ?? `client-${session.sessionId}-${Date.now()}`
+    if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
+    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, resolvedSubmissionId)
     if (submitted !== undefined) return submitted
-    const attachments = this.draftImages(imageIds)
-    if (attachments.length !== imageIds.length) {
-      throw new Error('conversation.sendSession: one or more draft images are no longer available')
+    const owner = session as SessionFace & {
+      beginOutgoing?: (id: string, content: readonly PromptContentPart[]) => void
     }
-    const uploaded = await this.serializeImages(attachments.map(attachment => attachment.file))
-    const content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
-    const result = await session.prompt(content, mode, signal)
-    if (!result.ok) return { kind: 'error' }
-    this.releaseDraftImages(attachments)
-    return { kind: 'success' }
+    if (index < 0) owner.beginOutgoing?.(resolvedSubmissionId, text === '' ? [] : [{ type: 'text', text }])
+    try {
+      const attachments = this.draftImages(imageIds)
+      if (attachments.length !== imageIds.length) {
+        throw new Error('conversation.sendSession: one or more draft images are no longer available')
+      }
+      const uploaded = await this.serializeImages(attachments.map(attachment => attachment.file))
+      const content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
+      const result = await session.prompt(content, mode, signal, resolvedSubmissionId)
+      if (!result.ok) return { kind: 'error' }
+      this.releaseDraftImages(attachments)
+      return { kind: 'success' }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      const updater = owner as SessionFace & { updateOutgoing?: (id: string, status: 'failed', error: string) => void }
+      updater.updateOutgoing?.(resolvedSubmissionId, 'failed', message)
+      throw error
+    }
   }
 
   /**

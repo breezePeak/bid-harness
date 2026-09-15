@@ -372,6 +372,8 @@ export interface Config {
   chapterWritingCompletionRepairRounds: number
   /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
   trustedHosts: string[]
+  /** Whether Bid stages may use the registered Web search and fetch tools. */
+  webSearchEnabled: boolean
   /** Word 自然语言格式建议的输出 token 上限。 */
   wordFormatMaxTokens: number
   /** Word 格式建议超时毫秒数。 */
@@ -389,6 +391,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   chapterWritingMaxConcurrency: DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   chapterWritingCompletionRepairRounds: DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   trustedHosts: [],
+  webSearchEnabled: true,
   wordFormatMaxTokens: 8192,
   wordFormatTimeoutMs: 120000,
 }
@@ -406,6 +409,7 @@ export const Config: z<Config> = z.object({
   chapterWritingCompletionRepairRounds: z.natural().min(1).max(20)
     .default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingCompletionRepairRounds),
   trustedHosts: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.trustedHosts),
+  webSearchEnabled: z.boolean().default(DEFAULT_HOST_RUNTIME_CONFIG.webSearchEnabled),
   wordFormatMaxTokens: z.natural().min(256).max(32768).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatMaxTokens),
   wordFormatTimeoutMs: z.natural().min(1000).max(600000).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatTimeoutMs),
 })
@@ -1130,6 +1134,7 @@ async function executeOutlineInteractionCandidate(
   await executeEvidenceMapping(agent, candidate.workspace, buildBidStageTask('evidence_mapping'), {
     maxRepairAttempts: config.modelStageRepairAttempts,
     maxConcurrency: config.evidenceMappingMaxConcurrency,
+    webSearchEnabled: config.webSearchEnabled,
     run: candidate.run,
     remap: {
       section_ids: request.section_ids,
@@ -1307,6 +1312,7 @@ async function executeOutlineConfirmationCandidate(
       const checked = await executeEvidenceMappingFinalCheck(agent, workspace, outline, affected, {
         maxRepairAttempts: config.modelStageRepairAttempts,
         maxConcurrency: config.evidenceMappingMaxConcurrency,
+        webSearchEnabled: config.webSearchEnabled,
         summarySectionIds,
         run: workingRun,
       })
@@ -1654,7 +1660,7 @@ export class BidHostRuntime extends TypertRemoteService {
       runId: run.runId,
       resumeOf: run.resumeOf ?? null,
       stage: run.work.stage,
-      'resumePolicy.webAccess': run.resumePolicy?.webAccess ?? 'inherit',
+      webSearchEnabled: this.config.webSearchEnabled,
       executionAgentToolNames: toolNames,
     })}`)
   }
@@ -1906,6 +1912,9 @@ export class BidHostRuntime extends TypertRemoteService {
       toolCtx.effect(() => toolCtx.tools.guard((execution) => {
         const session = execution.agent?.session
         if (session === undefined || !isBidMainSession(session)) return
+        if ((execution.name === 'web_search' || execution.name === 'web_fetch') && !this.config.webSearchEnabled) {
+          return 'BID_WEB_ACCESS_DISABLED'
+        }
         const operation = this.inFlight.get(projectKey(session))
         if (operation !== undefined && operation.session !== session) return 'BID_OPERATION_IN_PROGRESS'
       }))
@@ -2127,6 +2136,7 @@ export class BidHostRuntime extends TypertRemoteService {
     operation.interaction = true
     const signal = AbortSignal.any([callerSignal, operation.controller.signal])
     let started = false
+    let detached = false
     let run: BidRunContext | undefined
     let runtime = BID_INITIAL_RUNTIME_STATE
     try {
@@ -2181,26 +2191,75 @@ export class BidHostRuntime extends TypertRemoteService {
       const admittedRun = await operation.runs.start(work)
       run = admittedRun
       started = true
-      const mutation = await admittedRun.activities.track(() => executeOutlineInteractionCandidate(
+      detached = true
+      void this.finishDetachedOutlineInteraction(
+        agent,
+        operation,
         executionAgent,
         workspace,
         request,
+        runtime.stage,
         admittedRun,
+      )
+      return {
+        ok: true,
+        accepted: true,
+        runId: admittedRun.runId,
+        message: '阶段操作已接管，正在后台处理；完成后可重新 inspect 查看结果。',
+      }
+    } finally {
+      if (!detached) {
+        if (started) {
+          if (run !== undefined && operation.runs.current === run && !run.signal.aborted) {
+            await operation.runs.complete(run)
+            session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
+          } else if (operation.runs.current !== undefined) {
+            await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop' : 'executor_error', {
+              message: '阶段交互未完成，已保留工作候选供恢复。',
+            })
+          }
+        }
+        try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
+      }
+    }
+  }
+
+  /** Keep a long stage interaction owned by Host after the model tool returns. */
+  private async finishDetachedOutlineInteraction(
+    agent: Agent,
+    operation: ActiveBidOperation,
+    executionAgent: Agent,
+    workspace: BidWorkspace,
+    request: OutlineLongInteraction,
+    stage: BidStage,
+    run: BidRunContext,
+  ): Promise<void> {
+    let mutation: OutlineDraftMutationResult | undefined
+    let failure: unknown
+    try {
+      mutation = await run.activities.track(() => executeOutlineInteractionCandidate(
+        executionAgent,
+        workspace,
+        request,
+        run,
         this.config,
       ))
-      return mutation.ok ? { ok: true, message: '已更新，请重新确认。', draft: mutation.value } : mutation
-    } finally {
-      if (started) {
-        if (run !== undefined && operation.runs.current === run && !run.signal.aborted) {
-          await operation.runs.complete(run)
-          session.append('bid.user_confirmation.required', { stage: runtime.stage, status: 'waiting_user' })
-        } else if (operation.runs.current !== undefined) {
-          await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop' : 'executor_error', {
-            message: '阶段交互未完成，已保留工作候选供恢复。',
-          })
-        }
+    } catch (error: unknown) {
+      failure = error
+    }
+    try {
+      if (mutation?.ok === true && !run.signal.aborted) {
+        await operation.runs.complete(run)
+        agent.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
+      } else if (operation.runs.current === run) {
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
+          message: failure instanceof Error ? failure.message : '阶段交互未完成，已保留工作候选供恢复。',
+        })
       }
-      try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`Bid 后台阶段交互结算失败：${String(error)}`)
+    } finally {
+      try { await this.ctx.sessions.flush(agent.session) } finally { await this.finishOperation(agent.session, operation) }
     }
   }
 
@@ -2284,6 +2343,7 @@ export class BidHostRuntime extends TypertRemoteService {
             case 'evidence_mapping': return executeEvidenceMapping(agent, workspace, task, {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+              webSearchEnabled: this.config.webSearchEnabled,
               run,
             })
             case 'outline_generation': return executeOutlineGeneration(agent, workspace, task, {
@@ -2295,6 +2355,7 @@ export class BidHostRuntime extends TypertRemoteService {
                 maxRepairAttempts: this.config.modelStageRepairAttempts,
                 maxConcurrency: this.config.chapterWritingMaxConcurrency,
                 maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+                webSearchEnabled: this.config.webSearchEnabled,
                 run,
                 control: operation.writingControl,
               })
@@ -2647,12 +2708,14 @@ export class BidHostRuntime extends TypertRemoteService {
             if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
               ...repair,
               maxConcurrency: this.config.evidenceMappingMaxConcurrency,
+              webSearchEnabled: this.config.webSearchEnabled,
             })
             if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
             return executeChapterWriting(agent, workspace, task, {
               ...repair,
               maxConcurrency: this.config.chapterWritingMaxConcurrency,
               maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+              webSearchEnabled: this.config.webSearchEnabled,
               control: operation.writingControl,
             })
           },
@@ -3292,6 +3355,7 @@ export class BidHostRuntime extends TypertRemoteService {
         maxRepairAttempts: this.config.modelStageRepairAttempts,
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
         maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+        webSearchEnabled: this.config.webSearchEnabled,
         run: candidate.run,
         revision: request,
       })

@@ -1,7 +1,6 @@
 /**
- * Reference-submit transaction coverage: chips serialize through their
- * owner, stay resident through Host rejection, and clear only after an
- * accepted prompt.
+ * Reference-submit coverage: chips serialize through their owner, while the
+ * local outgoing handoff clears the editable draft before Host preparation.
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -69,7 +68,7 @@ describe('reference submission', () => {
     })
   })
 
-  it('retains the chip on Host failure and clears it only after a later accepted retry', async () => {
+  it('keeps a failed outgoing handoff out of the editable draft', async () => {
     const serializeReference = vi.fn(() => Promise.resolve(mention))
     const sink = vi.fn<(
       _text: string,
@@ -96,30 +95,30 @@ describe('reference submission', () => {
     })
 
     shell.submit('queue')
-    expect(shell.snapshot.phase).toBe('submitting')
+    expect(shell.snapshot.phase).toBe('plain')
     await vi.waitFor(() => {
-      expect(shell.snapshot.phase).toBe('plain')
+      expect(sink).toHaveBeenCalledTimes(1)
     })
     expect(sink).toHaveBeenNthCalledWith(1, mention, [], 'queue', expect.any(AbortSignal))
-    expect(shell.snapshot).toMatchObject({
-      draft: '@Research ',
-      occurrences: [{ source: 'reference', ref: mention, label: 'Research', offset: 0, length: 9 }],
-    })
+    expect(shell.snapshot.draft).toBe('')
+    expect(shell.snapshot.occurrences).toEqual([])
     expect(shell.notices.getSnapshot()).toMatchObject({
       level: 'error',
       text: 'snapshot unavailable',
     })
 
+    shell.setDraft('@res')
+    chip(shell)
     shell.submit('queue')
     await vi.waitFor(() => {
-      expect(shell.snapshot.draft).toBe('')
+      expect(sink).toHaveBeenCalledTimes(2)
     })
     expect(sink).toHaveBeenNthCalledWith(2, mention, [], 'queue', expect.any(AbortSignal))
     expect(shell.snapshot.occurrences).toEqual([])
     expect(serializeReference).toHaveBeenCalledTimes(2)
   })
 
-  it('blocks submission and retains the chip when its owner cannot serialize it', async () => {
+  it('blocks Host submission and records preparation failure when its owner cannot serialize it', async () => {
     const sink = vi.fn()
     const inputTriggers = {
       serializeReference: () => Promise.reject(new Error('reference codec unavailable')),
@@ -134,18 +133,21 @@ describe('reference submission', () => {
     chip(shell)
     shell.submit()
     await vi.waitFor(() => {
-      expect(shell.snapshot.phase).toBe('plain')
+      expect(shell.notices.getSnapshot()).toMatchObject({
+        level: 'error',
+        text: 'reference codec unavailable',
+      })
     })
     expect(sink).not.toHaveBeenCalled()
-    expect(shell.snapshot.draft).toBe('@Research ')
-    expect(shell.snapshot.occurrences).toHaveLength(1)
+    expect(shell.snapshot.draft).toBe('')
+    expect(shell.snapshot.occurrences).toHaveLength(0)
     expect(shell.notices.getSnapshot()).toMatchObject({
       level: 'error',
       text: 'reference codec unavailable',
     })
   })
 
-  it('aborts Host-side preparation when the input shell is disposed', () => {
+  it('does not abort a detached Host admission when the input shell is disposed', () => {
     let signal: AbortSignal | undefined
     const shell = new SessionInputShell({
       actx: {} as ClientContext,
@@ -159,9 +161,9 @@ describe('reference submission', () => {
     shell.submit()
     expect(signal?.aborted).toBe(false)
     shell.dispose()
-    expect(signal?.aborted).toBe(true)
+    expect(signal?.aborted).toBe(false)
     expect(shell.snapshot.phase).toBe('plain')
-    expect(shell.snapshot.draft).toBe('send this')
+    expect(shell.snapshot.draft).toBe('')
   })
 
   it('retains a rejected default message without duplicating its prompt error notice', async () => {
@@ -175,7 +177,7 @@ describe('reference submission', () => {
     await vi.waitFor(() => {
       expect(shell.snapshot.phase).toBe('plain')
     })
-    expect(shell.snapshot.draft).toBe('retry this')
+    expect(shell.snapshot.draft).toBe('')
     expect(shell.notices.getSnapshot()).toBeNull()
   })
 })

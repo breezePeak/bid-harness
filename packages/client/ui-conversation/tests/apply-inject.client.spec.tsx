@@ -150,7 +150,7 @@ describe('conversation slot inject API', () => {
     await b.runtime.dispose()
   })
 
-  it('the provide-channel input face submits through the machine sink: trim, transactional clear, failure retains the draft', async () => {
+  it('the provide-channel input face submits through the machine sink and keeps late failures from clobbering new drafts', async () => {
     const b = await bench()
     const { injected } = b.conversationApi(ROOT)
     const { state, actions } = b.inputApi(ROOT)
@@ -159,14 +159,14 @@ describe('conversation slot inject API', () => {
     actions.submit()
     expect(b.sessionFake.prompt).not.toHaveBeenCalled()
     expect(state.getSnapshot().draft).toBe('   ')
-    // Success: the draft clears only after the sink settles.
+    // Success: the local handoff clears the draft before the admission settles.
     actions.setDraft('hello')
     actions.submit()
     await vi.waitFor(() => {
       expect(state.getSnapshot().draft).toBe('')
     })
-    expect(b.sessionFake.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', expect.any(AbortSignal))
-    // Failure: the draft is retained through the round-trip.
+    expect(b.sessionFake.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', expect.any(AbortSignal), 'client-1')
+    // Failure: the outgoing row records failure; the editable draft stays clear.
     b.sessionFake.prompt.mockResolvedValueOnce({ ok: false, error: { code: 'agent-busy', message: 'b', details: { reason: 'b' } } })
     actions.setDraft('retry me')
     actions.submit()
@@ -174,7 +174,7 @@ describe('conversation slot inject API', () => {
       expect(b.sessionFake.prompt).toHaveBeenCalledTimes(2)
     })
     await new Promise(r => setTimeout(r, 0))
-    expect(state.getSnapshot().draft).toBe('retry me')
+    expect(state.getSnapshot().draft).toBe('')
     // Failure landing after new typing: no clobber (the interleaved edit wins).
     b.sessionFake.prompt.mockResolvedValueOnce({ ok: false, error: { code: 'agent-busy', message: 'b', details: { reason: 'b' } } })
     actions.submit()

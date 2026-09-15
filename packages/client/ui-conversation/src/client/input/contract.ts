@@ -26,6 +26,7 @@ export type ComposerSubmitHandler = (
   imageIds: readonly DraftAttachmentId[],
   signal: AbortSignal | undefined,
   mode?: InputSubmitMode,
+  submissionId?: string,
 ) => Promise<ComposerSubmitOutcome> | undefined
 
 /** 每个会话最多一个业务提交处理器，由注册方释放。 */
@@ -258,8 +259,19 @@ export interface InputState {
 export interface SubmitAttempt {
   readonly seq: number
   readonly signal: AbortSignal
-  /** Draft at enter time; settlement clears it only after acceptance. */
+  /** Stable client identity reused by any retry of this admission attempt. */
+  readonly submissionId?: string
+  /** Draft at enter time; ordinary messages are locally handed off immediately. */
   readonly draftSnapshot: string
+  /** Reference identities captured before the draft can change. */
+  readonly references?: readonly {
+    readonly offset: number
+    readonly length: number
+    readonly source: string
+    readonly ref: string
+  }[]
+  /** Browser-owned attachments transferred to this attempt. */
+  readonly imageIds?: readonly DraftAttachmentId[]
   /** Default-message delivery intent retained while slash adjudication is pending. */
   readonly mode: InputSubmitMode
 }
@@ -293,7 +305,7 @@ export type InputEvent =
   | { readonly type: 'paste-upgrade'; readonly attemptId: number; readonly span: TokenSpan; readonly reference: ReferenceInsert }
   /** Shell-observed attempt killers the machine cannot see itself (caret/selection ops, Slash interaction updates). */
   | { readonly type: 'invalidate-paste' }
-  | { readonly type: 'enter'; readonly mode: InputSubmitMode }
+  | { readonly type: 'enter'; readonly mode: InputSubmitMode; readonly imageIds?: readonly DraftAttachmentId[] }
   | { readonly type: 'adjudicated'; readonly attempt: SubmitAttempt; readonly outcome: PickOutcome }
   | { readonly type: 'adjudication-failed'; readonly attempt: SubmitAttempt; readonly message: string }
   | { readonly type: 'submit-settled'; readonly attempt: SubmitAttempt; readonly ok: boolean; readonly outcome?: SubmitOutcome; readonly message?: string }
@@ -310,4 +322,5 @@ export type InputEffect =
   | { readonly type: 'adjudicate'; readonly attempt: SubmitAttempt; readonly draft: string }
   | { readonly type: 'begin-submit'; readonly attempt: SubmitAttempt; readonly claim: CommandClaim; readonly args: string }
   | { readonly type: 'default-sink'; readonly attempt: SubmitAttempt; readonly draft: string; readonly mode: InputSubmitMode }
+  | { readonly type: 'local-commit'; readonly attempt: SubmitAttempt }
   | { readonly type: 'notice'; readonly level: 'info' | 'error'; readonly text: string }

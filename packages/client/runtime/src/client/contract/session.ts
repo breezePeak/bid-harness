@@ -42,6 +42,7 @@ export interface ISession {
     content: PromptContentPart[],
     mode: 'queue' | 'steer',
     signal?: AbortSignal,
+    clientSubmissionId?: string,
   ): Promise<RpcResult<{ accepted: true }>>
   /**
    * Resolve one durable image referenced by this session.

@@ -39,6 +39,12 @@ export interface SessionInputDeps {
   popup?: (() => PopupDismissFace | undefined) | undefined
   /** Queue read face; overlaid onto InputState.queue (absent = empty). */
   queue?: ObservableSnapshot<readonly QueuedMessage[]> | undefined
+  /** Register the immutable message handoff before reference or attachment work awaits. */
+  localHandoff?: (attempt: SubmitAttempt) => void
+  /** Register an image-only handoff, whose empty text cannot enter InputMachine. */
+  localImageHandoff?: (imageIds: readonly DraftAttachmentId[]) => void
+  /** Mark a handoff failed before the default sink reaches Session.prompt. */
+  localHandoffFailed?: (attempt: SubmitAttempt, error: string) => void
   /**
    * Steer every still-pending queued message into the running turn, in FIFO
    * order (the empty-draft accelerated-Enter gesture); absent = unsupported.
@@ -211,6 +217,7 @@ export class SessionInputShell implements SessionInput {
       if (this.snapshot.phase === 'plain' && !this.imageSendInFlight) {
         const imageIds = [...this.imageIds]
         this.imageSendInFlight = true
+        this.deps.localImageHandoff?.(imageIds)
         void this.deps.defaultSink('', imageIds, mode, new AbortController().signal).then((outcome) => {
           this.imageSendInFlight = false
           if (this.disposed) return
@@ -232,7 +239,7 @@ export class SessionInputShell implements SessionInput {
       this.notify('error', this.deps.commandImages.unsupportedNotice(before.claim?.token ?? before.draft))
       return
     }
-    this.run(this.core.dispatch({ type: 'enter', mode }))
+    this.run(this.core.dispatch({ type: 'enter', mode, imageIds: [...this.imageIds] }))
     const phase = this.snapshot.phase
     if (phase === 'adjudicating' || phase === 'submitting') {
       this.deps.popup?.()?.dismiss()
@@ -441,6 +448,11 @@ export class SessionInputShell implements SessionInput {
         this.sinkSerialized(fx.attempt, fx.draft, fx.mode)
         return
       }
+      case 'local-commit': {
+        this.deps.localHandoff?.(fx.attempt)
+        this.commitSend(fx.attempt.imageIds ?? [])
+        return
+      }
       default:
         return // machine-internal effects (mirror rides publish)
     }
@@ -450,12 +462,12 @@ export class SessionInputShell implements SessionInput {
    * Prompt serialization before the sink: expand each
    * inline reference range to its owner's model form via the session controller's
    * codec routing. Owner missing / serialize failure / disposal blocks the
-   * send — notice + draft and chips retained, never a silent downgrade to
+   * send — notice plus a failed outgoing row, never a silent downgrade to
    * the clipboard text. Chip-free drafts skip the async detour.
    */
   private sinkSerialized(attempt: SubmitAttempt, draft: string, mode: InputSubmitMode): void {
-    const imageIds = [...this.imageIds]
-    const occurrences = this.core.state.occurrences
+    const imageIds = [...attempt.imageIds ?? []]
+    const occurrences = attempt.references ?? []
     if (occurrences.length === 0) {
       this.settleSubmit(attempt, this.deps.defaultSink(draft.trim(), imageIds, mode, attempt.signal), imageIds)
       return
@@ -487,6 +499,7 @@ export class SessionInputShell implements SessionInput {
         controller.abort()
         if (this.dead(attempt)) return
         const message = error instanceof Error ? error.message : String(error)
+        this.deps.localHandoffFailed?.(attempt, message)
         this.run(this.core.dispatch({ type: 'submit-settled', attempt, ok: false, message }))
       },
     )
@@ -549,11 +562,11 @@ export class SessionInputShell implements SessionInput {
    * The submit transaction: claim.submit against the session scope; ok maps
    * from the outcome kind. An accepting claim receives the serialized draft
    * images, which are cleared and released only on a success outcome; a
-   * failure (serialize, transport, or handler error) keeps draft and images
-   * for correction.
+   * failure (serialize, transport, or handler error) is reported on the
+   * outgoing row; the editable draft is already independent of the attempt.
    */
   private beginSubmit(attempt: SubmitAttempt, claim: CommandClaim, args: string): void {
-    const imageIds = claim.images === true ? [...this.imageIds] : []
+    const imageIds = claim.images === true ? [...attempt.imageIds ?? []] : []
     Promise.resolve()
       .then(async () => {
         const images = imageIds.length > 0 ? await this.deps.commandImages.serialize(imageIds) : []

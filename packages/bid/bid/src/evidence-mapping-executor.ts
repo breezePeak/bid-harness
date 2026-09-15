@@ -134,6 +134,8 @@ const MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS = 60_000
 
 /** Host-owned S4 planning, Mapping Task retry, and concurrency limits. */
 export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOptions {
+  /** Whether Mapping Subagents may receive the registered Web tools. */
+  webSearchEnabled?: boolean
   /** Maximum Mapping Subagents that may run simultaneously. */
   maxConcurrency?: number
   /** Maximum automatic retries for a transient Mapping Subagent infrastructure failure. */
@@ -2171,6 +2173,7 @@ function subagentTaskContext(value: unknown): unknown {
  * @param inputs - current outline and related tender-analysis records.
  * @param locations - Host 预检的绝对 Corpus 路径。
  * @param promptTask - Final Check 中经未完成复核项缩减后的可见任务范围。
+ * @param webSearchEnabled - whether web search and fetch tools are available.
  * @returns model-visible Child assignment.
  */
 export function renderEvidenceMappingSubagentTask(
@@ -2178,6 +2181,7 @@ export function renderEvidenceMappingSubagentTask(
   inputs: EvidenceMappingInputs,
   locations: readonly MappingCorpusLocation[],
   promptTask: EvidenceMappingTask = task,
+  webSearchEnabled = true,
 ): string {
   const summaryContext = new Set((promptTask.summary_section_ids ?? []).flatMap(id => [
     id, ...directChildSections(inputs.outline, id).map(section => section.id),
@@ -2200,7 +2204,7 @@ export function renderEvidenceMappingSubagentTask(
       : taskOwnsOutlineRefinement(task) ? INITIAL_MAPPING_TOOLS : REMAP_MAPPING_TOOLS
   const allowedTools = task.task_kind === 'branch_summary'
     ? phaseTools
-    : [...MAPPING_AGENT_TOOLS, ...SOURCE_TOOLS, ...phaseTools]
+    : [...(webSearchEnabled ? MAPPING_AGENT_TOOLS : []), ...SOURCE_TOOLS, ...phaseTools]
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
     `Mapping Task：${JSON.stringify({ task_id: task.task_id, task_kind: task.task_kind, generation: task.generation,
@@ -3184,10 +3188,13 @@ async function executeEvidenceMappingRun(
   const tools = agent.ctx.get('tools')
   const subagents = agent.ctx.get('subagents')
   if (fs === undefined || tools === undefined || subagents === undefined) throw new Error('Bid evidence mapping requires fs, tools, and subagents services')
-  const requiredTools = MAPPING_AGENT_TOOLS
-  const registered = new Set(tools.schemas(agent).map(schema => schema.name))
-  const missingTools = requiredTools.filter(name => !registered.has(name))
-  if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
+  const webSearchEnabled = options.webSearchEnabled ?? true
+  const mappingAgentTools: readonly string[] = webSearchEnabled ? [...MAPPING_AGENT_TOOLS] : []
+  if (webSearchEnabled) {
+    const registered = new Set(tools.schemas(agent).map(schema => schema.name))
+    const missingTools = MAPPING_AGENT_TOOLS.filter(name => !registered.has(name))
+    if (missingTools.length > 0) throw new Error('Bid Web Search 已开启，但 web_search/web_fetch 工具未正确注册')
+  }
   const spawnProvider = subagents.getProvider('spawn')
   if (spawnProvider === undefined || spawnProvider.inheritsParentContext) {
     throw new Error('Bid evidence mapping requires a fresh-context spawn subagent provider')
@@ -3196,7 +3203,6 @@ async function executeEvidenceMappingRun(
     || !spawnProvider.capabilities.depthLimit || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
     throw new Error('Bid evidence mapping requires a structured-output continuable spawn provider with depth-limit, tool-filter, and persona capabilities')
   }
-  const mappingAgentTools: readonly string[] = requiredTools
   const artifacts: StageArtifact[] = [
     { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
     { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
@@ -3790,7 +3796,7 @@ async function executeEvidenceMappingRun(
           })),
         }]
       })
-      const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask),
+      const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask, webSearchEnabled),
         `current_section_baseline：${JSON.stringify(sectionBaseline)}`,
         `scoped_diffs：${JSON.stringify({
           outline_changes: outlineTaskDifferences(confirmedS3, runInputs.outline)

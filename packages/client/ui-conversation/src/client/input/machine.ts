@@ -17,7 +17,7 @@ import type { CommandClaim, ReferenceInsert, TokenSpan } from '@deepseek-ai/dsh-
 import type { InputSubmitMode } from '../contract/composer-submission.ts'
 import type {
   ConsumeTokenGuard, EditRange, EditSelection, InputEffect, InputEvent, InputMachineOptions,
-  InputState, Occurrence, PasteAttemptState, PasteComponent, SubmitAttempt,
+  DraftAttachmentId, InputState, Occurrence, PasteAttemptState, PasteComponent, SubmitAttempt,
 } from './contract.ts'
 
 /** Legacy fixed-width object replacement character rejected from pasted text. */
@@ -125,6 +125,8 @@ export class InputMachine {
     readonly attempt: SubmitAttempt
     readonly controller: AbortController
   } | undefined
+  /** Ordinary messages leave the input plane at local handoff and settle independently. */
+  private readonly detached = new Map<number, SubmitAttempt>()
   private log: Transaction[] = []
   private redoStack: Transaction[] = []
   /** Open single-char typing run: the next contiguous char within the window coalesces. */
@@ -182,7 +184,7 @@ export class InputMachine {
         this.paste = undefined
         return []
       }
-      case 'enter': return this.onEnter(ev.mode)
+      case 'enter': return this.onEnter(ev.mode, ev.imageIds ?? [])
       case 'adjudicated': return this.onAdjudicated(ev.attempt, ev.outcome)
       case 'adjudication-failed': return this.onAdjudicationFailed(ev.attempt, ev.message)
       case 'submit-settled': return this.onSubmitSettled(ev)
@@ -472,18 +474,42 @@ export class InputMachine {
   // ---- submit plane ----
 
   /** Mint the next SubmitAttempt and take the in-flight slot. */
-  private beginAttempt(mode: InputSubmitMode): SubmitAttempt {
+  private beginAttempt(mode: InputSubmitMode, imageIds: readonly DraftAttachmentId[]): SubmitAttempt {
     const controller = new AbortController()
     this.seq += 1
-    const attempt: SubmitAttempt = { seq: this.seq, signal: controller.signal, draftSnapshot: this.draft, mode }
+    const attempt: SubmitAttempt = {
+      seq: this.seq,
+      signal: controller.signal,
+      submissionId: `client-${this.seq}`,
+      draftSnapshot: this.draft,
+      references: this.occurrences.map(({ offset, length, source, ref }) => ({ offset, length, source, ref })),
+      imageIds: [...imageIds],
+      mode,
+    }
     this.inflight = { attempt, controller }
     return attempt
   }
 
-  private onEnter(mode: InputSubmitMode): InputEffect[] {
+  /** Move a normal message out of the single command/admission slot. */
+  private commitOrdinary(attempt: SubmitAttempt): InputEffect[] {
+    if (this.inflight?.attempt.seq !== attempt.seq) return []
+    this.inflight = undefined
+    this.detached.set(attempt.seq, attempt)
+    this.claim = undefined
+    this.occurrences = []
+    this.adopt('')
+    this.log = []
+    this.redoStack = []
+    this.typingRun = undefined
+    this.paste = undefined
+    this.phase = 'plain'
+    return [{ type: 'local-commit', attempt }]
+  }
+
+  private onEnter(mode: InputSubmitMode, imageIds: readonly DraftAttachmentId[]): InputEffect[] {
     if (this.phase === 'adjudicating' || this.phase === 'submitting') return []
     if (this.phase === 'claimed' && this.claim !== undefined) {
-      const attempt = this.beginAttempt(mode)
+      const attempt = this.beginAttempt(mode, imageIds)
       this.phase = 'submitting'
       this.paste = undefined
       return [{ type: 'begin-submit', attempt, claim: this.claim, args: argsAfter(this.draft, this.claim.token) }]
@@ -492,13 +518,13 @@ export class InputMachine {
     if (trimmed === '') return []
     this.paste = undefined
     if (trimmed.startsWith('/')) {
-      const attempt = this.beginAttempt(mode)
+      const attempt = this.beginAttempt(mode, imageIds)
       this.phase = 'adjudicating'
       return [{ type: 'adjudicate', attempt, draft: this.draft }]
     }
-    const attempt = this.beginAttempt(mode)
-    this.phase = 'submitting'
-    return [{ type: 'default-sink', attempt, draft: this.draft, mode }]
+    const attempt = this.beginAttempt(mode, imageIds)
+    const effects = this.commitOrdinary(attempt)
+    return [...effects, { type: 'default-sink', attempt, draft: attempt.draftSnapshot, mode }]
   }
 
   private onAdjudicated(attempt: SubmitAttempt, outcome: Extract<InputEvent, { type: 'adjudicated' }>['outcome']): InputEffect[] {
@@ -517,8 +543,8 @@ export class InputMachine {
     // 'handled' (source dealt internally), {insert} (no enter-time span
     // semantics), or a miss: all land plain; only the miss flows to the sink.
     if (outcome === undefined) {
-      this.phase = 'submitting'
-      return [{
+      const effects = this.commitOrdinary(attempt)
+      return [...effects, {
         type: 'default-sink',
         attempt,
         draft: attempt.draftSnapshot,
@@ -539,9 +565,21 @@ export class InputMachine {
   }
 
   private onSubmitSettled(ev: Extract<InputEvent, { type: 'submit-settled' }>): InputEffect[] {
-    const flight = this.inflight
-    if (this.phase !== 'submitting' || flight === undefined || flight.attempt.seq !== ev.attempt.seq) return []
-    this.inflight = undefined
+    const detachedAttempt = this.detached.get(ev.attempt.seq)
+    const flight = this.inflight?.attempt.seq === ev.attempt.seq
+      ? this.inflight
+      : detachedAttempt === undefined ? undefined : { attempt: detachedAttempt }
+    if (flight === undefined) return []
+    const detached = this.detached.delete(ev.attempt.seq)
+    if (!detached && (this.phase !== 'submitting' || this.inflight?.attempt.seq !== ev.attempt.seq)) return []
+    if (!detached) this.inflight = undefined
+    if (detached) {
+      return ev.ok && ev.outcome?.text === undefined
+        ? []
+        : ev.outcome?.text !== undefined || ev.message !== undefined
+          ? [{ type: 'notice', level: ev.ok ? 'info' : 'error', text: ev.message ?? ev.outcome?.text ?? 'message failed' }]
+          : []
+    }
     if (ev.ok) {
       this.phase = 'plain'
       this.claim = undefined
@@ -595,6 +633,9 @@ export class InputMachine {
       this.inflight.controller.abort()
       this.inflight = undefined
     }
+    // A locally handed-off ordinary message owns its own transport and must
+    // survive input-shell disposal; only the command/adjudication flight is
+    // cancelled here.
     this.phase = 'plain'
     this.claim = undefined
     this.typingRun = undefined

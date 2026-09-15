@@ -80,6 +80,7 @@ export type {
   SteeringMessageNode, TodoItem, ToolCallBlock, ToolResultNode, TurnErrorNode, TurnMaxTokensNode,
   UnknownSurfaceNode, UserMessageNode,
 } from './sessions/conversation.ts'
+export type { OutgoingMessage, OutgoingMessageStatus } from './sessions/outgoing-messages.ts'
 export {
   EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS, toAssistantBlock, toAssistantBlocks,
 } from './sessions/conversation.ts'

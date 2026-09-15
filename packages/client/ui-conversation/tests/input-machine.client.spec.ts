@@ -36,7 +36,7 @@ function spanOf(m: InputMachine, start: number, end: number): TokenSpan {
 function effectAt<T extends InputEffect['type']>(
   effects: readonly InputEffect[], index: number, type: T,
 ): Extract<InputEffect, { type: T }> {
-  const e = effects[index]
+  const e = effects.filter(effect => effect.type === type)[index]
   expect(e?.type).toBe(type)
   return e as Extract<InputEffect, { type: T }>
 }
@@ -77,7 +77,7 @@ describe('input-machine: plain × enter', () => {
     const effect = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink')
     expect(effect).toMatchObject({ draft: 'hello world', mode: 'queue' })
     expect(effect.attempt.draftSnapshot).toBe('hello world')
-    expect(m.state.phase).toBe('submitting')
+    expect(m.state.phase).toBe('plain')
   })
 
   it('retains an explicit steer mode on the default sink effect', () => {
@@ -142,7 +142,7 @@ describe('input-machine: adjudication outcomes', () => {
       0,
       'default-sink',
     )).toMatchObject({ attempt, draft: '/unknown thing', mode: 'steer' })
-    expect(m.state.phase).toBe('submitting')
+    expect(m.state.phase).toBe('plain')
   })
 
   it("'handled' lands plain with zero effects (popup shell path)", () => {
@@ -525,20 +525,32 @@ describe('input-machine: undo / redo', () => {
     expect(m.state.draft).toBe('')
   })
 
-  it('keeps a suffix typed during the round-trip and drops interleaved edits with the commit', () => {
+  it('keeps new drafts independent from late settlement of an earlier submit', () => {
     const m = new InputMachine()
     m.dispatch({ type: 'draft-changed', draft: 'hello' })
     const effect = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink')
     m.dispatch({ type: 'draft-changed', draft: 'hello world' })
     m.dispatch({ type: 'submit-settled', attempt: effect.attempt, ok: true })
-    expect(m.state.draft).toBe(' world')
+    expect(m.state.draft).toBe('hello world')
 
     const n = new InputMachine()
     n.dispatch({ type: 'draft-changed', draft: 'hello' })
     const second = effectAt(n.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink')
     n.dispatch({ type: 'draft-changed', draft: 'hXello' })
     n.dispatch({ type: 'submit-settled', attempt: second.attempt, ok: true })
-    expect(n.state.draft).toBe('')
+    expect(n.state.draft).toBe('hXello')
+  })
+
+  it('accepts a second ordinary submit while the first admission is unresolved', () => {
+    const m = new InputMachine()
+    m.dispatch({ type: 'draft-changed', draft: 'first' })
+    const first = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink').attempt
+    m.dispatch({ type: 'draft-changed', draft: 'second' })
+    const second = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink').attempt
+    expect(second.submissionId).not.toBe(first.submissionId)
+    expect(m.state.draft).toBe('')
+    m.dispatch({ type: 'submit-settled', attempt: first, ok: false, message: 'offline' })
+    expect(m.state.draft).toBe('')
   })
 })
 

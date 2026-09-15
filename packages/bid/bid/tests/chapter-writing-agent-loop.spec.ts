@@ -306,6 +306,21 @@ describe('S5 真实 DSH Child 接入', () => {
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 
+  it('webSearchEnabled 关闭时 Writer 不获得 Web 工具', async () => {
+    const { ctx, workspace, adapter, agent } = await fixture()
+    try {
+      await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxConcurrency: 3, webSearchEnabled: false,
+        run: createTestBidRunContext({
+          resumeOf: { runId: 'test-suspended-run', cause: 'host_restart' },
+          resumePolicy: { webAccess: 'inherit' },
+        }),
+      })
+      expect([...adapter.requests.values()].filter(request => request.role === 'writer')
+        .every(request => request.tools.includes('web_search') === false && request.tools.includes('web_fetch') === false)).toBe(true)
+    } finally { await ctx.fiber.dispose() }
+  }, 30_000)
+
   it('首次 Writer 请求中取消，释放全部 Child 和私有工具且不发布完成产物', async () => {
     const controller = new AbortController()
     const { ctx, workspace, agent, children } = await fixture(() => { controller.abort() })

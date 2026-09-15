@@ -1641,7 +1641,7 @@ describe('evidence-mapping Agent executor', () => {
     const missing = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxConcurrency: 1, maxRepairAttempts: 0, maxInfrastructureRetryAttempts: 8,
     })
-    await expect(missing).rejects.toThrow('Bid evidence mapping requires registered tools: web_fetch')
+    await expect(missing).rejects.toThrow('Bid Web Search 已开启，但 web_search/web_fetch 工具未正确注册')
     expect(fixture.tools.schemas).toHaveBeenCalledTimes(1)
     expect(fixture.starts).toHaveLength(0)
     expect(fixture.subagents.startContinuable).not.toHaveBeenCalled()
@@ -1653,11 +1653,35 @@ describe('evidence-mapping Agent executor', () => {
 
     const resumed = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxConcurrency: 2, maxRepairAttempts: 0,
+      run: createTestBidRunContext({
+        resumePolicy: { webAccess: 'disabled' },
+      }),
     })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.starts.every(start => start.request.request.toolFilter?.allow)).toBe(true)
-    fixture.starts.forEach(start => { start.resolve() })
+    fixture.starts.forEach((start) => { start.resolve() })
     await resumed
+  })
+
+  it('webSearchEnabled 关闭时不检查或下发 Web 工具，仍完成本地映射', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-disabled-config-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 1, maxRepairAttempts: 0, webSearchEnabled: false,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    expect(fixture.tools.schemas).not.toHaveBeenCalled()
+    expect(fixture.starts[0]!.request.request.toolFilter).toEqual({ allow: [] })
+    const allowedToolsLine = promptText(fixture.starts[0]!.request.request).split('\n')
+      .find(line => line.startsWith('只允许调用：'))
+    expect(allowedToolsLine).not.toContain('web_search')
+    expect(allowedToolsLine).not.toContain('web_fetch')
+    for (let index = 0; index < 2; index++) {
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(index + 1) })
+      fixture.starts[index]!.resolve()
+    }
+    await expect(execution).resolves.toHaveLength(4)
   })
 
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {
@@ -3208,7 +3232,7 @@ describe('S4 Host 准入与最终确认', () => {
         sessions: { list: () => [session], flush: async () => {} },
         subagents: { drainContinuableChildren: async () => {} },
       },
-      config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024 * 1024, maxTotalBytes: 10 * 1024 * 1024, docxTemplateMaxBytes: 300 * 1024 * 1024, modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, chapterWritingCompletionRepairRounds: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [] } satisfies Config,
+      config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024 * 1024, maxTotalBytes: 10 * 1024 * 1024, docxTemplateMaxBytes: 300 * 1024 * 1024, modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, chapterWritingCompletionRepairRounds: 1, wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true } satisfies Config,
       inFlight: new Map(),
       automaticOrchestrator: () => new BidOrchestrator(session,
         { canExecute: () => false, execute: async () => [] },

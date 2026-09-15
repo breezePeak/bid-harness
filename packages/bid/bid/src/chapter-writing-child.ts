@@ -60,13 +60,13 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
  * @param signal 章节所属阶段的取消信号。
  * @param existingId 已完成章节的原 Writer 身份；只恢复原会话，不能创建替代会话。
  * @param chapterTitle Writer 协议中展示的章节标题。
- * @param webAccess 是否禁止此 Writer 使用 Web 工具。
+ * @param webSearchEnabled 是否允许此 Writer 使用 Web 工具。
  * @returns 由调用方 finally 释放的章节 Writer。
  */
 export function createChapterWriterChild(
   parent: Agent, label: string, maxContinuations: number,
   validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
-  chapterTitle?: string, webAccess: 'inherit' | 'disabled' = 'inherit',
+  chapterTitle?: string, webSearchEnabled = true,
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
@@ -81,7 +81,7 @@ export function createChapterWriterChild(
     webGuard()
     const tools = agent.ctx.get('tools')
     if (tools === undefined) throw new Error('S5 Writer requires tools service')
-    webGuard = webAccess === 'disabled'
+    webGuard = !webSearchEnabled
       ? tools.guard(exec => exec.name === 'web_search' || exec.name === 'web_fetch' ? 'BID_WEB_ACCESS_DISABLED' : undefined)
       : () => {}
     child = agent
@@ -129,7 +129,7 @@ export function createChapterWriterChild(
           provider: 'spawn', childId: id, label, signal,
           request: {
             parent, prompt: [{ type: 'text', text: prompt }], maxDepth: 1,
-            toolFilter: { allow: webAccess === 'disabled' ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'] },
+            toolFilter: { allow: !webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'] },
             persona: '你是技术标章节写作 Subagent。只写指定章节；通过 submit_chapter 提交候选，并在本会话根据审查意见修改。',
           },
         })

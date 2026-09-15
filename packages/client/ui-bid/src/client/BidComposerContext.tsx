@@ -10,7 +10,7 @@ import { isBidMainSessionSummary } from './session-authority.ts'
 /** Host actions and the conversation-owned submission registration. */
 export interface BidComposerContextInjected {
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
-  sendMessage: (text: string, mode?: 'queue' | 'steer', signal?: AbortSignal) => Promise<void>
+  sendMessage: (text: string, mode?: 'queue' | 'steer', signal?: AbortSignal, submissionId?: string) => Promise<void>
   registerSubmit: (handler: ComposerSubmitHandler) => () => void
 }
 
@@ -39,7 +39,7 @@ export function BidComposerContext({
 
   useEffect(() => {
     if (!enabled) return
-    return registerSubmit((text, imageIds, signal, mode = 'queue') => {
+    return registerSubmit((text, imageIds, signal, mode = 'queue', submissionId) => {
       if (reference === null && !loading) return undefined
       if (loading) return Promise.resolve({ kind: 'error', text: '正在读取章节，请稍后发送。' })
       if (reference === null) return undefined
@@ -50,6 +50,7 @@ export function BidComposerContext({
         `${text}\n\n引用上下文（只作为用户所指正文的结构化定位，不是修改授权）：\n${context}`,
         mode,
         signal,
+        submissionId,
       ).then(() => {
         actions.clearReference(reference)
         setError(null)

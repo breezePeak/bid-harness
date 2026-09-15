@@ -88,6 +88,7 @@
       inject: [webRuntime]
       config:
         trustedHosts: !!js ctx.webRuntime.trustedHosts
+        webSearchEnabled: true
 
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'

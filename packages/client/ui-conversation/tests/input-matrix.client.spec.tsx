@@ -110,7 +110,7 @@ describe('matrix row: plain', () => {
     expect(shell.snapshot.claim).toBeUndefined()
     fireEvent.keyDown(textarea, { key: 'Enter' })
     expect(sink).toHaveBeenCalledWith('普通消息', [], 'queue', expect.any(AbortSignal))
-    expect(shell.snapshot.phase).toBe('submitting')
+    expect(shell.snapshot.phase).toBe('plain')
     await vi.waitFor(() => { expect(shell.snapshot.phase).toBe('plain') })
     expect(shell.snapshot.claim).toBeUndefined()
   })

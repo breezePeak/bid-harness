@@ -56,7 +56,7 @@ declare module '@deepseek-ai/dsh-llm' {
      * carries no transport vocabulary; rpcId and the optional Host-validated browser zone are
      * durable JSON fields passed back to the client with the event.
      */
-    'user-rpc': { kind: 'user'; rpcId: RpcId; clientTimeZone?: string }
+    'user-rpc': { kind: 'user'; rpcId: RpcId; clientSubmissionId?: string; clientTimeZone?: string }
   }
 }
 
@@ -353,6 +353,7 @@ export interface SessionsApi {
     sessionId: SessionId
     mode: 'queue' | 'steer'
     content: PromptContentPart[]
+    clientSubmissionId?: string
     clientTimeZone?: string
   }>):
   Promise<RpcResponse<{ accepted: true; command?: { kind: 'success'; text?: string } }>>

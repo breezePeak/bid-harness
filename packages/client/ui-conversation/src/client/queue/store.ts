@@ -17,8 +17,18 @@ import type { QueuedMessage } from '../input/contract.ts'
  * @returns the queue read face (snapshot reference stable while the queue is unchanged).
  */
 export function queueReadFaceOf(session: SessionFace): ObservableSnapshot<readonly QueuedMessage[]> {
+  let queue = session.getSnapshot().queue
+  let outgoing = session.getSnapshot().outgoing ?? []
+  let value: readonly QueuedMessage[] = [...outgoing, ...queue]
+  const refresh = (): void => {
+    const snapshot = session.getSnapshot()
+    if (snapshot.queue === queue && snapshot.outgoing === outgoing) return
+    queue = snapshot.queue
+    outgoing = snapshot.outgoing ?? []
+    value = [...outgoing, ...queue]
+  }
   return {
-    getSnapshot: () => session.getSnapshot().queue,
-    subscribe: fn => session.subscribe(fn),
+    getSnapshot: () => { refresh(); return value },
+    subscribe: fn => session.subscribe(() => { refresh(); fn() }),
   }
 }

@@ -47,7 +47,7 @@ describe('S5 reused Writer policy', () => {
       new AbortController().signal,
       writerId,
       undefined,
-      'disabled',
+      false,
     )
 
     expect(guards.some(guard => guard({ name: 'web_search' } as ToolExecution) === 'BID_WEB_ACCESS_DISABLED')).toBe(true)

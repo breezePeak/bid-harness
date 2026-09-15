@@ -12,6 +12,9 @@ import {
   IconEditOutline16, IconQueueOutline14, IconSendOutline14, IconTrashOutline16, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { QueueAction, QueueItemId } from '../contract/queue.ts'
+import type { OutgoingMessageStatus } from '@deepseek-ai/dsh-client-runtime/client'
+import type { OutgoingMessage } from '@deepseek-ai/dsh-client-runtime/client'
+import type { QueueRow } from '../contract/queue.ts'
 import { NS } from '../locales.ts'
 import css from './QueueDock.module.css'
 
@@ -24,13 +27,26 @@ export interface QueueDockInjected {
 /** Full props of a dock entry: InputZone owner share + session standard kit + global seat + the locale seat. */
 export type QueueDockProps = PropsRuntime<'conversation.input.dock'> & QueueDockInjected & PropsLocale<'conversation'>
 
+function statusLabel(t: QueueDockProps['t'], status: OutgoingMessageStatus): string {
+  switch (status) {
+    case 'preparing': return t('queue.status.preparing')
+    case 'submitting': return t('queue.status.submitting')
+    case 'submitted': return t('queue.status.submitted')
+    case 'failed': return t('queue.status.failed')
+  }
+}
+
+function isOutgoing(row: QueueRow): row is OutgoingMessage {
+  return 'localId' in row
+}
+
 /**
  * Queue strip: one item renders directly; multiple items default to a
  * collapsible count header; an empty queue renders nothing.
  */
 export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps) {
   const inbox = useSession(s => s.queue)
-  const queue = useMemo(() => inbox.filter(row => row.placement === 'queued'), [inbox])
+  const queue = useMemo(() => inbox.filter(row => isOutgoing(row) || row.placement === 'queued'), [inbox])
   const running = useSession(s => s.running)
   const queueMutable = useSession(s => s.subagent === null)
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)
@@ -40,7 +56,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
 
   useEffect(() => {
     if (queue.length === 0 && !collapsed) setCollapsed(true)
-    if (editing !== null && (!queueMutable || !queue.some(row => row.id === editing.id))) setEditing(null)
+    if (editing !== null && (!queueMutable || !queue.some(row => !isOutgoing(row) && row.id === editing.id))) setEditing(null)
   }, [collapsed, editing, queue, queueMutable])
 
   if (queue.length === 0) return null
@@ -95,32 +111,36 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
           </button>
         )}
         <ul id={listId} className={css.list} hidden={!listVisible}>
-          {listVisible && queue.map(row => (
-            <li key={row.id} className={css.row}>
+          {listVisible && queue.map((row) => {
+            const local = isOutgoing(row)
+            const rowId = local ? row.localId : row.id
+            return <li key={rowId} className={css.row}>
               {/* Single-item strip has no count header, so the row itself carries the queue glyph. */}
               {queue.length === 1 && <span className={css.lead} aria-hidden><IconQueueOutline14 /></span>}
-              {editing?.id === row.id
-                ? (
-                  <input
-                    autoFocus
-                    className={css.editor}
-                    aria-label={t('queue.edit')}
-                    value={editing.text}
-                    onChange={(event) => { setEditing({ id: row.id, text: event.currentTarget.value }) }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        setEditing(null)
-                        return
-                      }
-                      if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-                        event.preventDefault()
-                        void saveEdit()
-                      }
-                    }}
-                  />
-                )
-                : <span className={css.preview}>{row.preview}</span>}
-              {queueMutable && <div className={css.actions}>
+              {local
+                ? <span className={css.preview}>{row.preview} · {statusLabel(t, row.status)}</span>
+                : editing?.id === row.id
+                  ? (
+                    <input
+                      autoFocus
+                      className={css.editor}
+                      aria-label={t('queue.edit')}
+                      value={editing.text}
+                      onChange={(event) => { setEditing({ id: row.id, text: event.currentTarget.value }) }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          setEditing(null)
+                          return
+                        }
+                        if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                          event.preventDefault()
+                          void saveEdit()
+                        }
+                      }}
+                    />
+                  )
+                  : <span className={css.preview}>{row.preview}</span>}
+              {!local && queueMutable && <div className={css.actions}>
                 {editing?.id === row.id
                   ? (
                     <>
@@ -205,7 +225,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                   )}
               </div>}
             </li>
-          ))}
+          })}
         </ul>
       </div>
     </div>

@@ -136,6 +136,8 @@ export interface ChapterWritingControl {
 
 /** Host-owned S5 repair and concurrency limits. */
 export interface ChapterWritingExecutionOptions extends ModelStageExecutionOptions {
+  /** Whether Chapter Writers may receive the registered Web tools. */
+  webSearchEnabled?: boolean
   /** Maximum Chapter Subagents that may run simultaneously. */
   maxConcurrency: number
   /** Maximum Main-Agent-selected whole-document repair rounds. */
@@ -1703,7 +1705,8 @@ async function runChapterWriting(
     throw new Error('Bid chapter writing requires spawn depth-limit, tool-filter, and persona capabilities')
   }
   const registered = new Set(tools.schemas(agent).map(schema => schema.name))
-  const chapterAgentTools = options.run.resumePolicy?.webAccess === 'disabled'
+  const webSearchEnabled = options.webSearchEnabled ?? true
+  const chapterAgentTools = !webSearchEnabled
     ? CHAPTER_AGENT_TOOLS.filter(name => name !== 'web_search' && name !== 'web_fetch')
     : CHAPTER_AGENT_TOOLS
   const requiredTools = [...new Set([...MAIN_AGENT_TOOLS, ...chapterAgentTools])]
@@ -2331,7 +2334,7 @@ async function runChapterWriting(
             )
           }
         }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId), context.section.title,
-        options.run.resumePolicy?.webAccess ?? 'inherit')
+        webSearchEnabled)
         const run = writer
         if (!readableWebPathsByChild.has(String(run.id))) {
           readableWebPathsByChild.set(String(run.id), mappedWebPaths(context))

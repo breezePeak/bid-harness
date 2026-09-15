@@ -152,10 +152,12 @@ export function apply(ctx: ClientContext): void {
     store: revisionStore,
     inject: (sessionId: SessionId) => ({
       getChapter: (sectionId: string) => getChapter(sessionId, sectionId),
-      sendMessage: (text: string, mode: 'queue' | 'steer' = 'queue', signal?: AbortSignal) => {
+      sendMessage: (text: string, mode: 'queue' | 'steer' = 'queue', signal?: AbortSignal, submissionId?: string) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
-        return conversation.send(text, mode, signal)
+        return submissionId === undefined
+          ? conversation.send(text, mode, signal)
+          : conversation.send(text, mode, signal, submissionId)
       },
       registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
         ctx.conversation.submitHandlers.register(sessionId, handler),
