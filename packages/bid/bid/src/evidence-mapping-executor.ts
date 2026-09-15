@@ -1429,7 +1429,6 @@ function attachMappingSubmissionRuntime(
   state: MappingSubmissionState,
   pool: S4WebResearchPool,
   childId: string,
-  webEnabled: boolean,
   captured: () => Iterable<CapturedWebResult>,
   readWebChunkRefs: () => ReadonlySet<string>,
   persistProgress: (submission: MappingSubmission, completed: boolean) => Promise<void> = () => Promise.resolve(),
@@ -1460,7 +1459,7 @@ function attachMappingSubmissionRuntime(
   if (task.task_kind !== 'branch_summary') {
     for (const definition of createMappingSourceTools(locations, pool, childId)) register(definition)
   }
-  if (webEnabled && task.task_kind !== 'branch_summary') register({
+  if (task.task_kind !== 'branch_summary') register({
     name: 'web_fetch',
     description: '通过 Host 获取一个 HTTP(S) 网页并立即注册到共享 Research Pool。返回标题、目录和少量 Chunk Catalog，不返回整篇正文。',
     parameters: z.toJSONSchema(z.object({ url: z.url() }).strict(), { target: 'draft-7' }), output,
@@ -3185,6 +3184,10 @@ async function executeEvidenceMappingRun(
   const tools = agent.ctx.get('tools')
   const subagents = agent.ctx.get('subagents')
   if (fs === undefined || tools === undefined || subagents === undefined) throw new Error('Bid evidence mapping requires fs, tools, and subagents services')
+  const requiredTools = MAPPING_AGENT_TOOLS
+  const registered = new Set(tools.schemas(agent).map(schema => schema.name))
+  const missingTools = requiredTools.filter(name => !registered.has(name))
+  if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
   const spawnProvider = subagents.getProvider('spawn')
   if (spawnProvider === undefined || spawnProvider.inheritsParentContext) {
     throw new Error('Bid evidence mapping requires a fresh-context spawn subagent provider')
@@ -3193,12 +3196,7 @@ async function executeEvidenceMappingRun(
     || !spawnProvider.capabilities.depthLimit || !spawnProvider.capabilities.toolFilter || !spawnProvider.capabilities.persona) {
     throw new Error('Bid evidence mapping requires a structured-output continuable spawn provider with depth-limit, tool-filter, and persona capabilities')
   }
-  const webEnabled = options.run.resumePolicy?.webAccess !== 'disabled'
-  const mappingAgentTools: readonly string[] = webEnabled ? MAPPING_AGENT_TOOLS : []
-  const registered = new Set(tools.schemas(localRun ? undefined : agent).map(schema => schema.name))
-  const requiredTools = webEnabled ? ['web_search', 'web_fetch'] : []
-  const missingTools = requiredTools.filter(name => !registered.has(name))
-  if (missingTools.length > 0) throw new Error(`Bid evidence mapping requires registered tools: ${missingTools.join(', ')}`)
+  const mappingAgentTools: readonly string[] = requiredTools
   const artifacts: StageArtifact[] = [
     { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
     { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },
@@ -3586,7 +3584,7 @@ async function executeEvidenceMappingRun(
     if (request === undefined) return () => {}
     return attachMappingSubmissionRuntime(
       childCtx, workspace, request.inputs, request.task, locations, request.state,
-      researchPool, String(child.session.id), webEnabled,
+      researchPool, String(child.session.id),
       () => capturedByChild.get(String(child.session.id))?.values() ?? [],
       () => researchPool.readChunkRefs(String(child.session.id)),
       (submission, completed) => request.persistProgress(submission, completed),

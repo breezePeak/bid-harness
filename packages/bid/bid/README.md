@@ -91,7 +91,7 @@ S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
-初始研究、重映射及 Final Check 共用 `read_source` 和 `search_sources`。模型选择程序提供的目录、全文件、材料或搜索范围引用；可直接读取，也可扩大字面搜索范围。长结果返回后续引用，由模型决定是否继续。来源标题、位置与整块覆盖范围保持原样。通用本地 grep/read 不向 S4 开放，不能绕过引用读取；联网搜索、抓取及已授权快照仍可使用。
+初始研究、重映射及 Final Check 共用 `read_source` 和 `search_sources`。Bid preset 必须同时注册 `web_search` 和 `web_fetch`，Host 在创建 Section 任务前检查这两个 schema；缺少时整次 S4 失败且不创建章节子任务。模型选择程序提供的目录、全文件、材料或搜索范围引用；可直接读取，也可扩大字面搜索范围。长结果返回后续引用，由模型决定是否继续。来源标题、位置与整块覆盖范围保持原样。通用本地 grep/read 不向 S4 开放，不能绕过引用读取；联网搜索、抓取及已授权快照仍可使用。
 
 `submit_section_mapping`、`replace_section_mapping` 只处理材料。模型提交绑定唯一文件与分块的 `material_ref`、usage 及 summary；程序回填真实身份，真实工具入口拒绝未知引用、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。找到相关资料本身不构成扩展任务的理由。
 
@@ -105,7 +105,7 @@ Section Child 通过 `submit_section_research_assessment` 只记录研究充分�
 
 S4 Child 按 `web_search` → `web_fetch` → `list_web_chunks` → `read_source` 研究公开资料；`web_fetch` 在 Host 内部调用 raw Web Fetch provider 并接入 Research Pool，正文不会直接进入 S4 Child 工具结果。Host 将成功正文、SHA-256、确定性 Markdown Chunk 索引和 ledger 原子写入共享 Research Pool；同一规范化 URL 并发请求 single-flight，不同 requested URL 即使重定向到同一最终 Source 也只登记一个 Source，多个 URL 通过 alias 复用。Chunk 以约 6000 字符为软目标、12000 字符为硬上限；只有 Child 实际读取的 `W:WEB-…:C0001` 引用可进入映射与研究依据。恢复时由已验证快照重建缺失或非法索引，最终确认按引用裁剪 ledger、快照和索引。S5 保留自己的 `web_search`/`web_fetch` 补搜路径。
 
-S4 是否联网由模型决定；调用沿用 Web 服务的 searchProvider/fetchProvider 配置。某类已调用 Web 研究工具全部失败时，Host 拒绝 Research Ready、结构判断及锁定，报告 `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED`；修复搜索配置或重试成功后仍须重新提交研究判断。聊天 Provider 不支持 hosted search 且未配置独立搜索 Provider 时不能静默视为研究充分。
+S4 是否实际联网由模型决定，但必需工具始终由 Bid preset 提供；调用沿用 Web 服务的 searchProvider/fetchProvider 配置。某类已调用 Web 研究工具全部失败时，Host 拒绝 Research Ready、结构判断及锁定，报告 `EVIDENCE_MAPPING_WEB_RESEARCH_BLOCKED`；修复搜索配置或重试成功后仍须重新提交研究判断。聊天 Provider 不支持 hosted search 且未配置独立搜索 Provider 时不能静默视为研究充分。
 
 S5 读取 `analysis/evidence-map.json`、`analysis/web-evidence-sources.json` 和 `outline/confirmed-outline.json`，按既定 Blueprint 组织正文。Writer 与 Reviewer 同时获得完整目录职责及当前祖先路径，依据父子关系、同级节点分工和本节任务检查正文归属，不根据固定章名或行业词指定内容位置。叶节使用段落、列表和表格，提交及恢复检查拒绝根标题以外的 Markdown 标题；Host 只按确认目录生成根标题编号。已有正文的预览和导出保留其子标题原文，不生成新的节内编号。Writer 只获得当前 Section 在 S4 映射的精确 Web Chunk 行范围，不能 grep 或整篇读取这些快照；Reviewer Evidence Pack 也只包含候选实际引用的 Chunk。遇到具体资料缺口时可在全部成功解析的 reference/reference_bid/outline_framework 中有限 grep/read，并保留 S5 自己的 `web_search`/`web_fetch` 补搜能力；补搜实际使用的资料写入当前 Chapter Metadata，不回写已确认 S4 Evidence Map。tender 始终禁止，framework 保持草稿身份，不作事实 Evidence。
 

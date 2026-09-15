@@ -748,7 +748,10 @@ function mappingFixture(
     }),
   }
   const tools = {
-    schemas: vi.fn((_agent?: Agent) => ['read', 'write', 'grep', 'web_search', 'web_fetch'].map(name => ({ name }))),
+    // Web bundle 的全局层有意保持为空；S4 必须检查当前 Bid Agent 的 preset 作用域，
+    // 包括本地运行路径。
+    schemas: vi.fn((scopedAgent?: Agent) => scopedAgent === undefined ? []
+      : ['read', 'write', 'grep', 'web_search', 'web_fetch'].map(name => ({ name }))),
     execute: vi.fn(async (request: { name: string; arguments: { url?: string } }) => {
       const url = request.arguments.url ?? ''
       const queued = queuedFetchResults.get(url) ?? []
@@ -1630,18 +1633,31 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
   })
 
-  it('明确禁用 Web Access 时不要求 S4 Web 工具', async () => {
+  it('S4 Host preflight 缺少 Web 工具时只失败一次，修复后可继续整批任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-disabled-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
-    const run = createTestBidRunContext({ resumePolicy: { webAccess: 'disabled' } })
-    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { run, maxConcurrency: 1, maxRepairAttempts: 0 })
-    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
-    expect(fixture.starts[0]!.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: [] } })
-    fixture.starts[0]!.resolve()
+    fixture.tools.schemas.mockReturnValueOnce([{ name: 'web_search' }])
+    const missing = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 1, maxRepairAttempts: 0, maxInfrastructureRetryAttempts: 8,
+    })
+    await expect(missing).rejects.toThrow('Bid evidence mapping requires registered tools: web_fetch')
+    expect(fixture.tools.schemas).toHaveBeenCalledTimes(1)
+    expect(fixture.starts).toHaveLength(0)
+    expect(fixture.subagents.startContinuable).not.toHaveBeenCalled()
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+    const failedLog = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(failedLog.tasks).toEqual([])
+
+    const resumed = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 2, maxRepairAttempts: 0,
+    })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts[1]!.resolve()
-    await execution
+    expect(fixture.starts.every(start => start.request.request.toolFilter?.allow)).toBe(true)
+    fixture.starts.forEach(start => { start.resolve() })
+    await resumed
   })
 
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {

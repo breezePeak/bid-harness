@@ -269,6 +269,28 @@ describe('the shipped Web composition', () => {
     }
   })
 
+  it('让 Bid Mapping Subagent 继承启用 fetch 的 Web 工具', async () => {
+    const parent = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-mapping-parent'),
+      meta: { agentPreset: 'bid' },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    const child = await parent.agent.ctx.agents.create({
+      sessionId: SessionId('preset-bid-mapping-child'),
+      meta: childSessionMeta(parent.agent, 1, 0),
+      setup: agentCtx => applyChildComposition(agentCtx, parent.agent, {
+        toolFilter: { allow: ['web_search', 'web_fetch'] },
+      }),
+    })
+    try {
+      expect(toolNames(ctx, parent.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+      expect(toolNames(ctx, child.agent)).toEqual(['web_fetch', 'web_search'])
+    } finally {
+      await child.dispose()
+      await parent.dispose()
+    }
+  })
+
   it('executes the Bid search-fetch chain through the shipped providers', async () => {
     const previousKey = process.env.DEEPSEEK_API_KEY
     process.env.DEEPSEEK_API_KEY = 'bid-search-test-key'

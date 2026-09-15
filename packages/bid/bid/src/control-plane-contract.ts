@@ -76,7 +76,7 @@ export interface BidRunResumeIdentity {
 
 /** Durable execution constraints selected when resuming a suspended Run. */
 export interface BidResumePolicy {
-  /** Whether resumed Subagents may receive Web tools. */
+  /** Whether resumed Subagents outside S4 may receive Web tools; S4 always requires both Web tools. */
   readonly webAccess?: 'inherit' | 'disabled' | undefined
 }
 
