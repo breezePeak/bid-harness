@@ -979,6 +979,11 @@ function entryFor(
     review_path: reviewPath,
     review_sha256: reviewSha256,
     ...candidate.metadata,
+    flowcharts: candidate.metadata.flowcharts.map(flowchart => ({
+      ...flowchart,
+      nodes: flowchart.nodes.map(node => ({ ...node })),
+      edges: flowchart.edges.map(edge => ({ ...edge })),
+    })),
   }
 }
 

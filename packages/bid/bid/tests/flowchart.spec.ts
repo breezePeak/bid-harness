@@ -28,10 +28,12 @@ function expectNoOverlappingNodes(spec: FlowchartSpec): void {
 describe('flowchart contract', () => {
   it('由 Host 分配流程图和节点身份，并生成可复用 SVG', () => {
     const [spec] = normalizeFlowchartInputs('SEC-IMPLEMENT', [draft])
-    expect(spec.id).toBe('FLOW-SEC-IMPLEMENT-1')
-    expect(spec.nodes.map(node => node.id)).toEqual(['N1', 'N2', 'N3', 'N4'])
-    expect(validateFlowchartSpec(spec)).toEqual([])
-    const rendered = renderFlowchartSvg(spec)
+    expect(spec).toBeDefined()
+    const normalized = spec!
+    expect(normalized.id).toBe('FLOW-SEC-IMPLEMENT-1')
+    expect(normalized.nodes.map(node => node.id)).toEqual(['N1', 'N2', 'N3', 'N4'])
+    expect(validateFlowchartSpec(normalized)).toEqual([])
+    const rendered = renderFlowchartSvg(normalized)
     expect(rendered.svg).toContain('<svg')
     expect(rendered.svg).toContain('不通过')
   })

@@ -87,6 +87,7 @@ async function exportFixture() {
       section_id: id, content_path: `chapters/sections/000${index + 1}.md`, requirement_ids: [], scoring_ids: [], compliance_ids: [],
       covered_must_answer: [], covered_scoring_response_point_ids: [], covered_scoring_response_points: [],
       local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      flowcharts: [],
       review_path: `chapters/reviews/000${index + 1}.json`, review_sha256: 'a'.repeat(64),
       handoff: {
         section_id: id, decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
@@ -178,7 +179,7 @@ describe('Bid DOCX export', () => {
     const exporting = executeDocxExportImplementation(workspace, run)
     await entered.promise
     run.commits.retire()
-    release.resolve()
+    release.resolve(undefined)
 
     await expect(exporting).rejects.toThrow('BID_RUN_RETIRED')
     expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)

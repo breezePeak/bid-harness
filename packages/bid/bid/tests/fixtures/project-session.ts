@@ -82,6 +82,7 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
       section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [],
       covered_must_answer: ['按期交付'], covered_scoring_response_point_ids: ['RP-000001'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],
       local_materials_used: [], web_materials_used: [], unresolved_topics: [], review_path: 'chapters/reviews/0001.json', review_sha256: 'a'.repeat(64),
+      flowcharts: [],
       handoff: { section_id: 'SEC-1', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
     }] } satisfies ChapterWritingManifest,
   }

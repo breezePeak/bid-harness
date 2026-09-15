@@ -4,7 +4,7 @@ import { ToolArgsError, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { ChapterContext } from './chapter-writing-executor.ts'
-import { parseChapterCandidate, type ChapterCandidate, type AcceptedChapterCandidate } from './chapter-writing-artifacts.ts'
+import { parseChapterCandidate, type AcceptedChapterCandidate, type BoundChapterCandidate } from './chapter-writing-artifacts.ts'
 import { canonicalWebChunkRefs, localEvidenceMaterialSchema, transientWebEvidenceMaterialSchema, type LocalEvidenceMaterial, type WebEvidenceMaterial, webMaterialIdentity } from './evidence-mapping-artifacts.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { chapterToolArgs } from './chapter-writing-protocol.ts'
@@ -255,7 +255,7 @@ export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial
 export async function bindChapterWriterInput(
   workspace: BidWorkspace, manifest: BidManifest, context: ChapterContext, refs: ChapterWriterReferences,
   value: unknown, snapshots: readonly WebEvidenceSnapshot[],
-): Promise<ChapterCandidate> {
+): Promise<BoundChapterCandidate> {
   const input = chapterToolArgs(writerInput, value)
   const headingIssues = validateChapterHeadings(input.markdown, context.section.title, context.section.id)
   if (headingIssues.length > 0) throw new ToolArgsError(headingIssues.map(issue => `markdown: ${issue}`))
@@ -324,7 +324,8 @@ export async function bindChapterWriterInput(
       usage: material.usage, summary: material.summary, supports: material.supports })
   }
   mergeChapterWebMaterials([...web, ...additionalBound])
-  return parseChapterCandidate({
+  const flowcharts = normalizeFlowchartInputs(context.section.id, input.metadata.flowcharts ?? [])
+  const parsed = parseChapterCandidate({
     markdown: input.markdown, section_id: context.section.id,
     metadata: {
       section_id: context.section.id, covered_must_answer: context.section.must_answer,
@@ -341,9 +342,10 @@ export async function bindChapterWriterInput(
           key, input.metadata.handoff?.[key as keyof typeof handoffFields] ?? [],
         ])),
       },
-      flowcharts: normalizeFlowchartInputs(context.section.id, input.metadata.flowcharts ?? []),
+      flowcharts,
     },
   })
+  return { ...parsed, metadata: { ...parsed.metadata, flowcharts } }
 }
 
 /**

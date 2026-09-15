@@ -147,7 +147,13 @@ export type ChapterWritingManifest = z.infer<typeof chapterWritingManifestSchema
 /** Parsed structured result from one Chapter Subagent before Web snapshot binding. */
 export type ChapterCandidate = z.infer<typeof chapterCandidateSchema>
 /** Chapter candidate after the Host has bound every transient Web source. */
-export type AcceptedChapterCandidate = Omit<ChapterCandidate, 'metadata'> & { metadata: ChapterMetadata }
+export type AcceptedChapterCandidate = Omit<ChapterCandidate, 'metadata'> & {
+  metadata: Omit<ChapterMetadata, 'flowcharts'> & { flowcharts: FlowchartSpec[] }
+}
+/** Candidate after Host normalization, before transient Web materials are persisted. */
+export type BoundChapterCandidate = Omit<AcceptedChapterCandidate, 'metadata'> & {
+  metadata: AcceptedChapterCandidate['metadata'] & Pick<ChapterCandidate['metadata'], 'additional_web_materials'>
+}
 
 /**
  * Parse a chapter sidecar file.
