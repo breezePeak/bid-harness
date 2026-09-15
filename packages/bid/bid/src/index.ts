@@ -3378,15 +3378,17 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * Read the current S4 Mapping Task counts while evidence mapping runs.
+   * Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.
    * @param session - Bid Session that owns the S4 execution log.
-   * @returns task counts, or null when S4 is not running or has not produced its log.
+   * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
    */
   @Remote('getEvidenceMappingProgress')
   async getEvidenceMappingProgress(session: Session): Promise<BidEvidenceMappingProgress | null> {
     if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const runtime = bidSessionRuntime(session)
-    if (runtime.stage !== 'evidence_mapping' || runtime.status !== 'running') return null
+    if (runtime.stage !== 'evidence_mapping'
+      || runtime.status !== 'running' && runtime.status !== 'waiting_user'
+        && runtime.status !== 'suspended' && runtime.status !== 'completed') return null
     return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)))
   }
 

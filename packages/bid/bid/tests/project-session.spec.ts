@@ -1464,6 +1464,26 @@ describe('Workspace 项目与独立 Session', () => {
     })
   })
 
+  it('S4 挂起后仍可读取已保存的映射进度', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
+      schema_version: 5,
+      max_concurrency: 3,
+      observed_max_concurrency: 2,
+      tasks: [{
+        task_id: 'MAP-INIT-SEC-1', phase: 'initial', title: '技术方案', status: 'failed',
+        attempts: [], final_child_session_id: null,
+      }],
+    }))
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('suspended-s4-progress')
+
+    await expect(ctx.bid.getEvidenceMappingProgress(agent.session)).resolves.toMatchObject({
+      total: 1, initial: 1, supplemental: 0, completed: 0, running: 0, not_started: 0, failed: 1,
+    })
+  })
+
   it('S4 挂起 Run 允许普通消息继续对话', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
