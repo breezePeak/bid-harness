@@ -1,7 +1,37 @@
 /** Word 原生多级标题编号及浏览器预览计数，共用生效编号规则。 */
 import JSZip from 'jszip'
 import type { ILevelsOptions } from 'docx'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
+import type { Nodes } from 'mdast'
 import type { FormatValues } from './docx-format-contract.ts'
+
+function markdownText(node: Nodes): string {
+  if (node.type === 'text' || node.type === 'inlineCode') return node.value
+  return 'children' in node ? node.children.map(markdownText).join('') : ''
+}
+
+/** 识别 S5 尚未编号的表题；正式编号由 DOCX/HTML 按正文顺序补入。 */
+export function isTableCaptionText(value: string): boolean {
+  return /^\s*表格?\s*(?:(?:\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)\s*)?\S/u.test(value)
+}
+
+/** 找出没有紧邻表格上方显式表题的 Markdown 表格。 */
+export function missingTableCaptionLines(markdown: string): number[] {
+  const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  const missing: number[] = []
+  const visit = (nodes: readonly Nodes[]): void => {
+    for (const [index, node] of nodes.entries()) {
+      const previous = nodes[index - 1]
+      if (node.type === 'table' && (previous?.type !== 'paragraph' || !isTableCaptionText(markdownText(previous))))
+        missing.push(node.position?.start.line ?? 0)
+      if ('children' in node) visit(node.children)
+    }
+  }
+  visit(root.children)
+  return missing
+}
 
 /** 匹配 Word 按图题或表题编号处理的 Markdown 段落。
  * @param values 生效的题注编号配置。
@@ -16,8 +46,9 @@ export function captionMarker(values: FormatValues, role: 'figureCaption' | 'tab
   const beforeNumber = prefixSeparator.trim() ? escaped(prefixSeparator) : '\\s*'
   const afterNumber = titleSeparator.trim() ? escaped(titleSeparator) : '\\s*'
   const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
-  const withoutNumber = titleSeparator ? `${prefix}${escaped(titleSeparator)}` : `${prefix}\\s+`
-  const markers = [prefix, role === 'tableCaption' ? '表' : '图'].filter(Boolean).join('|')
+  const labels = [...new Set([prefix, role === 'tableCaption' ? '表' : '图', ...(role === 'tableCaption' ? ['表格'] : [])])].filter(Boolean)
+  const withoutNumber = labels.map(label => titleSeparator ? `${escaped(label)}${escaped(titleSeparator)}` : `${escaped(label)}\\s+`).join('|')
+  const markers = labels.map(escaped).join('|')
   return new RegExp(`^\\s*(?:(?:${markers})${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
 }
 
@@ -27,7 +58,7 @@ export function captionMarker(values: FormatValues, role: 'figureCaption' | 'tab
  * @returns 匹配的题注角色；普通正文返回 undefined。
  */
 export function captionRole(values: FormatValues, value: string): 'figureCaption' | 'tableCaption' | undefined {
-  return (['figureCaption', 'tableCaption'] as const).find(role => {
+  return (['figureCaption', 'tableCaption'] as const).find((role) => {
     if (!String(values[`${role}.numbering.prefix`])) return false
     return captionMarker(values, role).test(value)
   })

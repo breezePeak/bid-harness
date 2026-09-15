@@ -308,8 +308,10 @@ export async function renderDocx(
         continue
       }
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
+        const caption = node.type === 'paragraph' ? captionRole(values, content(node)) : undefined
+        const tableCaption = caption === 'tableCaption' && nodes[index + 1]?.type === 'table'
         const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}`
-          : node.type === 'paragraph' ? captionRole(values, content(node)) ?? 'body' : 'body'
+          : node.type === 'paragraph' ? caption === 'tableCaption' ? tableCaption ? 'tableCaption' : 'body' : caption ?? 'body' : 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
         const sourceNumber = /^(\d+(?:\.\d+)*)\s+/u.exec(content(node))?.[1]
         const numberedHeading = node.type === 'heading' && role !== 'title' && sourceNumber?.split('.').length === node.depth
@@ -336,6 +338,7 @@ export async function renderDocx(
           ...(node.type === 'heading' && !numberedHeading ? { numbering: false } : {}),
           ...(numberedHeading && headingLevels.length ? { numbering: headingNumbering((node.depth ?? 1) - 1) } : {}),
           ...(numberedCaption ? { numbering: { reference: `dsh-${role}`, level: 0 },
+            ...(role === 'tableCaption' ? { style: 'DshTableCaption' } : {}),
             ...(role === 'tableCaption' && nodes[index + 1]?.type === 'table' ? { keepNext: true } : {}) } : {}),
           children: [...(prefix ? [new TextRun({ ...run(role),
             text: prefix })] : []),
@@ -366,16 +369,6 @@ export async function renderDocx(
         continue
       }
       if (node.type === 'table') {
-        const previous = nodes[index - 1], next = nodes[index + 1]
-        const hasCaption = previous?.type === 'paragraph' && captionRole(values, content(previous)) === 'tableCaption'
-          || next?.type === 'paragraph' && captionRole(values, content(next)) === 'tableCaption' && nodes[index + 2]?.type !== 'table'
-        if (!hasCaption) {
-          const title = (node.children?.[0]?.children ?? []).map(content).filter(Boolean).join('、')
-          const caption = await inline([{ type: 'text', value: title }], 'tableCaption')
-          doc.push(new Paragraph({ ...paragraph('tableCaption'), keepNext: true,
-            numbering: { reference: 'dsh-tableCaption', level: 0 }, children: caption.runs }))
-          html.push(`<p style="${style('tableCaption')};break-after:avoid">${escape(numberCaption('tableCaption'))}${caption.html}</p>`)
-        }
         const rows: TableRow[] = [], htmlRows: string[] = []
         for (const [rowIndex, row] of (node.children ?? []).entries()) {
           const cells: TableCell[] = [], htmlCells: string[] = []
@@ -383,9 +376,9 @@ export async function renderDocx(
           for (const cell of row.children ?? []) {
             const rendered = await inline(cell.children ?? [], role)
             cells.push(new TableCell({ ...(rowIndex === 0 ? { shading: { fill: str('table.fill') } } : {}),
-              children: [new Paragraph({ ...paragraph(role),
+              children: [new Paragraph({ ...paragraph(role), indent: { firstLine: 0, firstLineChars: 0 },
                 children: rendered.runs })] }))
-            htmlCells.push(`<${rowIndex === 0 ? 'th' : 'td'} style="${style(role)};${rowIndex === 0 ? `background:#${str('table.fill')};` : ''}border:${num('table.borderSize')}pt ${values['table.border'] === 'nil' ? 'none' : values['table.border'] === 'single' ? 'solid' : str('table.border')}">${rendered.html}</${rowIndex === 0 ? 'th' : 'td'}>`)
+            htmlCells.push(`<${rowIndex === 0 ? 'th' : 'td'} style="${style(role)};text-indent:0;${rowIndex === 0 ? `background:#${str('table.fill')};` : ''}border:${num('table.borderSize')}pt ${values['table.border'] === 'nil' ? 'none' : values['table.border'] === 'single' ? 'solid' : str('table.border')}">${rendered.html}</${rowIndex === 0 ? 'th' : 'td'}>`)
           }
           rows.push(new TableRow({ tableHeader: rowIndex === 0, children: cells }))
           htmlRows.push(`<tr>${htmlCells.join('')}</tr>`)
@@ -457,6 +450,7 @@ export async function renderDocx(
   }, paragraphStyles: [
     { id: 'Normal', name: 'Normal', run: run('body'), paragraph: paragraph('body') },
     { id: 'DshHeadingBase', name: '标题基准', run: run('body') },
+    { id: 'DshTableCaption', name: '表题', run: run('tableCaption'), paragraph: paragraph('tableCaption') },
   ] }, sections: renderedSections.map((section, index) => ({
     properties: { ...(index === 0 ? {} : { type: SectionType.NEXT_PAGE }), page: { size: { width: mm(page[0] as number),
       height: mm(page[1] as number),

@@ -15,7 +15,7 @@ import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from '../src/do
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
 import { suggestDocxFormat, validateFormatSuggestion } from '../src/docx-format-suggestions.ts'
-import { createCaptionNumberer, createHeadingNumberer } from '../src/docx-numbering.ts'
+import { createCaptionNumberer, createHeadingNumberer, missingTableCaptionLines } from '../src/docx-numbering.ts'
 
 const defaults = { font: '宋体', bodySize: 24, headingSize: 32 }
 async function workspace(): Promise<BidWorkspace> {
@@ -278,7 +278,7 @@ describe('项目 Word 格式链路', () => {
     const view = resolveFormat({ ...state, modelInterpreted: { values: { 'body.size': 15 }, mapping: {}, evidence: [
       { key: 'body.size', value: 15, source: 'template_instruction', text: '正文 15 磅' },
     ] } }, fields)
-    const rendered = await renderDocx(project, '正文\n\n图 图片标题\n\n表 表格标题', view.state.resolved)
+    const rendered = await renderDocx(project, '正文\n\n图 图片标题\n\n表 表格标题\n\n| 表头 |\n| --- |\n| 内容 |', view.state.resolved)
     const zip = await JSZip.loadAsync(rendered.bytes)
     const styles = await zip.file('word/styles.xml')!.async('string')
     const document = await zip.file('word/document.xml')!.async('string')
@@ -291,7 +291,7 @@ describe('项目 Word 格式链路', () => {
     expect(document).not.toContain('图 图片标题')
   })
 
-  it('无题注表格补入表头名称，已有题注兼容空格和自定义前缀且不重复', async () => {
+  it('表格只使用正文中的显式表题，不从第一行表头自动起名', async () => {
     const project = await workspace()
     const values = defaultDocxFormatState(formatFields(defaults)).resolved
     values['tableCaption.numbering.prefix'] = '表格'
@@ -299,13 +299,13 @@ describe('项目 Word 格式链路', () => {
     values['tableCaption.alignment'] = 'center'
     const table = '| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 资料接收 | 接收日期 |'
     const rendered = await renderDocx(project, `${table}\n\n说明。\n\n**表1 既有名称**\n\n${table}\n\n说明。\n\n${table}\n\n表 2 后置名称`, values)
-    expect(rendered.html).toContain('表格 1 管理事项、台账记录内容</p><table')
-    expect(rendered.html).toContain('表格 2 <strong>既有名称</strong></p><table')
-    expect(rendered.html).toContain('表格 3 后置名称</p>')
+    expect(rendered.html).not.toContain('管理事项、台账记录内容</p><table')
+    expect(rendered.html).toContain('表格 1 <strong>既有名称</strong></p><table')
+    expect(rendered.html).toContain('表 2 后置名称</p>')
     const zip = await JSZip.loadAsync(rendered.bytes)
     const document = await zip.file('word/document.xml')!.async('string')
-    expect(document.match(/<w:numPr>/gu)).toHaveLength(3)
-    expect(document).toContain('管理事项、台账记录内容')
+    expect(document.match(/<w:numPr>/gu)).toHaveLength(1)
+    expect(document).not.toContain('管理事项、台账记录内容</w:t>')
     expect(document).toContain('<w:keepNext/>')
     expect(document).toContain('<w:jc w:val="center"/>')
   })
@@ -347,13 +347,19 @@ describe('项目 Word 格式链路', () => {
     expect(sections[2]).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>')
   })
 
-  it('相邻两表之间的题注归属后表，代码块内题注示例保留原文', async () => {
+  it('表题必须位于表格上方，代码块内题注示例保留原文', async () => {
     const table = '| 内容 |\n| --- |\n| 说明 |'
     const rendered = await renderDocx(await workspace(), `${table}\n\n表 9 后表\n\n${table}\n\n\`\`\`text\n表 1 原样代码\n\`\`\``,
       defaultDocxFormatState(formatFields(defaults)).resolved)
-    expect(rendered.html).toContain('表1 内容</p><table')
-    expect(rendered.html).toContain('表2 后表</p><table')
+    expect(rendered.html).not.toContain('表1 内容</p><table')
+    expect(rendered.html).toContain('表1 后表</p><table')
     expect(rendered.html).toContain('>表 1 原样代码</pre>')
+  })
+
+  it('识别缺失表题并接受紧邻表格上方的无编号表题', () => {
+    expect(missingTableCaptionLines('| 表头 |\n| --- |\n| 内容 |')).toEqual([1])
+    expect(missingTableCaptionLines('表 技术偏离表\n\n| 表头 |\n| --- |\n| 内容 |')).toEqual([])
+    expect(missingTableCaptionLines('表 技术偏离表\n\n> | 表头 |\n> | --- |\n> | 内容 |')).toEqual([3])
   })
 
   it('自动模型请求包含实际模板正文和多角色候选并记录到会话', async () => {

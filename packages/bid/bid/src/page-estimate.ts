@@ -14,6 +14,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { DocxFormatView, DocxTemplateId, FormatValues } from './docx-format-contract.ts'
 import { readDocxFormat } from './docx-format-store.ts'
 import { collectDocxChapterBody } from './docx-content.ts'
+import { captionRole } from './docx-numbering.ts'
 import { docxAssetHash, docxImageDimensions, renderDocx } from './docx-render.ts'
 import type { BidWorkspace } from './index.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
@@ -89,10 +90,11 @@ const renderedCacheSchema = z.strictObject({
 
 function value(values: FormatValues, key: string): number { return Number(values[key]) }
 function text(node: MarkdownNode): string { return node.value ?? (node.children ?? []).map(text).join('') }
-function roleFor(node: MarkdownNode, first: boolean): string {
+function roleFor(values: FormatValues, node: MarkdownNode, first: boolean, next?: MarkdownNode): string {
   if (node.type === 'heading') return node.depth === 1 && first ? 'title' : `heading${node.depth ?? 1}`
   const source = text(node)
-  return /^图\s*\d/u.test(source) ? 'figureCaption' : /^表\s*\d/u.test(source) ? 'tableCaption' : 'body'
+  const role = captionRole(values, source)
+  return role === 'tableCaption' && next?.type !== 'table' ? 'body' : role ?? 'body'
 }
 function pageSize(_values: FormatValues): { width: number; height: number } { return { width: 210, height: 297 } }
 function lineHeight(values: FormatValues, role: string): number {
@@ -148,7 +150,7 @@ async function markdownHeight(
     for (const [index, node] of nodes.entries()) {
       if (node.type === 'definition') continue
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
-        const role = roleFor(node, index === 0 && firstHeadingIsTitle)
+        const role = roleFor(values, node, index === 0 && firstHeadingIsTitle, nodes[index + 1])
         if (values[`${role}.pageBreak`]) height += (pageSize(values).height - value(values, 'page.top') - value(values, 'page.bottom')) * pointsPerMm
         height += paragraphHeight(values, role, node.type === 'code' ? node.value ?? '' : text(node), width, level * 6 * pointsPerMm)
         for (const image of imagesIn(node)) height += await imageHeight(workspace, image.url ?? definitions.get(image.identifier) ?? '', assets)

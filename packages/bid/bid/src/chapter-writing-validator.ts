@@ -27,6 +27,7 @@ import {
 } from './web-evidence-source-artifacts.ts'
 import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { validateFlowchartAnchors } from './flowchart.ts'
+import { missingTableCaptionLines } from './docx-numbering.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -274,6 +275,9 @@ export async function validateChapterWriting(
       const markdown = await readFile(body, 'utf8')
       for (const message of validateFlowchartAnchors(markdown, chapter.flowcharts)) {
         reject(issues, 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, chapter.content_path)
+      }
+      for (const line of missingTableCaptionLines(markdown)) {
+        reject(issues, 'CHAPTER_WRITING_TABLE_CAPTION_INVALID', `正文第 ${line || '?'} 行的表格缺少紧邻上方的表题。`, chapter.content_path)
       }
       const leaked = findBidInternalIdentifiers(markdown, customerTextContext)
       if (leaked.length > 0) {

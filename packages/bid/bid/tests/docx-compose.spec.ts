@@ -11,7 +11,7 @@ import type { BidWorkspace } from '../src/index.ts'
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=', 'base64')
 const paragraph = (value: string) => new Paragraph(value)
 const cell = (value: string, options: Omit<ITableCellOptions, 'children'> = {}) => new TableCell({
-  children: [paragraph(value)],
+  children: [new Paragraph({ indent: { firstLine: 480 }, children: [new TextRun(value)] })],
   ...options,
 })
 
@@ -58,7 +58,7 @@ describe('DOCX 模板合成', () => {
     await mkdir(join(project.projectRoot, 'assets'))
     await writeFile(join(project.projectRoot, 'assets', 'pixel.png'), pixel)
     const values = defaultDocxFormatState(formatFields(project.config)).resolved
-    const markdown = '# 技术标\n\n## 技术偏离表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 完整响应 A | 无偏离 |\n| 交付期限 | 完整响应 B | 无偏离 |\n\n## 实施方案\n\n正文内容。\n\n![示意图](assets/pixel.png)\n'
+    const markdown = '# 技术标\n\n## 技术偏离表\n\n表前说明。\n\n表 响应表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 完整响应 A | 无偏离 |\n| 交付期限 | 完整响应 B | 无偏离 |\n\n## 实施方案\n\n正文内容。\n\n![示意图](assets/pixel.png)\n'
     const result = await composeDocxFromTemplate(project, original, markdown, values)
     const [before, after] = await Promise.all([JSZip.loadAsync(original), JSZip.loadAsync(result.bytes)])
     const [beforeDocument, afterDocument] = await Promise.all([
@@ -67,6 +67,7 @@ describe('DOCX 模板合成', () => {
 
     expect(afterDocument).toContain('固定封面')
     expect(afterDocument).toContain('固定说明')
+    expect(afterDocument).toContain('表前说明。')
     expect(afterDocument).toContain('固定备注 A')
     expect(afterDocument).toContain('固定备注 B')
     expect(afterDocument).toContain('完整响应 A')
@@ -76,6 +77,9 @@ describe('DOCX 模板合成', () => {
     expect(afterDocument).not.toContain('{{正文}}')
     expect(afterDocument).toContain('正文内容。')
     expect(afterDocument.match(/<w:tbl>/gu)).toHaveLength(1)
+    const tableXml = afterDocument.match(/<w:tbl>[\s\S]*?<\/w:tbl>/u)?.[0] ?? ''
+    expect(tableXml).toContain('<w:ind w:firstLine="0" w:firstLineChars="0"/>')
+    expect(tableXml).not.toContain('w:firstLine="480"')
     expect(afterDocument.match(/<w:sectPr/gu)?.length).toBe(beforeDocument.match(/<w:sectPr/gu)?.length ?? 0)
     expect(await after.file('word/header1.xml')!.async('nodebuffer')).toEqual(await before.file('word/header1.xml')!.async('nodebuffer'))
     expect(await after.file('word/footer1.xml')!.async('nodebuffer')).toEqual(await before.file('word/footer1.xml')!.async('nodebuffer'))

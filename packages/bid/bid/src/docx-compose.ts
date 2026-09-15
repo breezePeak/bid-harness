@@ -201,6 +201,28 @@ function setCellText(cell: XmlNode, value: string): void {
   cell.elements = [...(properties === undefined ? [] : [properties]), ...textParagraph(cell, value)]
 }
 
+function clearTableParagraphFirstLineIndent(body: XmlNode): void {
+  for (const table of descendants(body, 'tbl')) {
+    for (const paragraph of descendants(table, 'p')) {
+      const prefix = paragraph.name?.includes(':') ? paragraph.name.slice(0, paragraph.name.indexOf(':') + 1) : 'w:'
+      let properties = child(paragraph, 'pPr')
+      if (properties === undefined) {
+        properties = { type: 'element', name: `${prefix}pPr`, elements: [] }
+        paragraph.elements = [properties, ...(paragraph.elements ?? [])]
+      }
+      let indent = child(properties, 'ind')
+      if (indent === undefined) {
+        indent = { type: 'element', name: `${prefix}ind`, attributes: {} }
+        properties.elements = [...(properties.elements ?? []), indent]
+      }
+      const attributes = indent.attributes ?? {}
+      const firstLine = Object.keys(attributes).find(name => local(name) === 'firstLine') ?? `${prefix}firstLine`
+      const firstLineChars = Object.keys(attributes).find(name => local(name) === 'firstLineChars') ?? `${prefix}firstLineChars`
+      indent.attributes = { ...attributes, [firstLine]: '0', [firstLineChars]: '0' }
+    }
+  }
+}
+
 function rowValues(info: TableInfo, row: XmlNode): Map<string, string> {
   return new Map(info.header.map(header => [header.semantic, cellAt(row, info.gridColumns, header.start)?.value.trim() ?? '']))
 }
@@ -257,20 +279,15 @@ function fillTemplateTables(templateBody: XmlNode, sourceElements: XmlNode[]): S
   return consumed
 }
 
-function removeConsumedBlocks(elements: XmlNode[], consumed: Set<XmlNode>, templateBody: XmlNode): XmlNode[] {
-  const templateText = new Set(descendants(templateBody, 'p').map(node => normalized(text(node))).filter(Boolean))
+function removeConsumedBlocks(elements: XmlNode[], consumed: Set<XmlNode>): XmlNode[] {
   const omitted = new Set<number>()
   for (const table of consumed) {
     const index = elements.indexOf(table)
     if (index < 0) continue
     omitted.add(index)
-    if (index > 0 && local(elements[index - 1]?.name) === 'p') omitted.add(index - 1)
-    for (let before = index - 2; before >= 0; before--) {
-      const candidate = elements[before] as XmlNode
-      if (local(candidate.name) !== 'p') break
-      if (templateText.has(normalized(text(candidate)))) omitted.add(before)
-      break
-    }
+    const caption = elements[index - 1]
+    if (caption !== undefined && local(caption.name) === 'p' && children(child(caption, 'pPr') ?? {}, 'pStyle')
+      .some(style => attr(style, 'val') === 'DshTableCaption')) omitted.add(index - 1)
   }
   return elements.filter((_, index) => !omitted.has(index))
 }
@@ -530,7 +547,7 @@ export async function applyTemplateContent(
   const targetBody = documentBody(targetDocument)
   const sourceBody = documentBody(sourceDocument)
   const sourceElements = (sourceBody.elements ?? []).filter(node => local(node.name) !== 'sectPr')
-  const inserted = removeConsumedBlocks(sourceElements, fillTemplateTables(targetBody, sourceElements), targetBody)
+  const inserted = removeConsumedBlocks(sourceElements, fillTemplateTables(targetBody, sourceElements))
   await mergeStyles(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
     targetRelationships, sourceRelationships, inserted, mapping)
   await mergeNumbering(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
@@ -538,6 +555,7 @@ export async function applyTemplateContent(
   await mergeBodyRelationships(targetZip, sourceZip, targetRelationships, sourceRelationships,
     targetContentTypes, sourceContentTypes, inserted)
   insertBody(targetBody, inserted)
+  clearTableParagraphFirstLineIndent(targetBody)
   targetZip.file('word/document.xml', js2xml(targetDocument, { compact: false }))
   targetZip.file('[Content_Types].xml', js2xml(targetContentTypes, { compact: false }))
   targetZip.file('word/_rels/document.xml.rels', js2xml(targetRelationships, { compact: false }))
