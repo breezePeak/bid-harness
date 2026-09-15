@@ -263,6 +263,7 @@ function mappingFixture(
   let createdObserver: ((payload: { agent: Agent }) => void) | undefined
   let webObserver: ((exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void) | undefined
   let continuableSetup: ((childCtx: Context) => () => void) | undefined
+  let parentSessionId = 'session'
   const setupDisposers = new Map<string, () => void>()
   const submissionTools = new Map<string, Map<string, ToolDefinition>>()
   const preparedChildren = new Set<string>()
@@ -277,7 +278,7 @@ function mappingFixture(
         queued.push(outcome.result as ToolExecutionResult)
         queuedFetchResults.set(url, queued)
         const definitions = submissionTools.get(String(child.id))
-        const fetchTool = definitions?.get('fetch_web_source')
+        const fetchTool = definitions?.get('web_fetch')
         const readTool = definitions?.get('read_source')
         if (fetchTool === undefined || readTool === undefined) throw new Error('missing S4 Web research tools')
         const fetched = await invokeSubmissionTool(child, fetchTool, { url })
@@ -693,7 +694,7 @@ function mappingFixture(
         }),
       } as unknown as Context
       const localAgent = { id, status: 'running', ctx: childCtx,
-        session: { id, header: { cwd: workspace.root, parentSession: 'session', origin: 'subagent' }, events: [] },
+        session: { id, header: { cwd: workspace.root, parentSession: parentSessionId, origin: 'subagent' }, events: [] },
         whenIdle: () => idle } as unknown as Agent
       ;(childCtx as unknown as { agent: Agent }).agent = localAgent
       if (continuableSetup === undefined) throw new Error('missing continuable setup contribution')
@@ -746,7 +747,7 @@ function mappingFixture(
     }),
   }
   const tools = {
-    schemas: vi.fn(() => ['read', 'write', 'grep', 'web_search', 'web_fetch'].map(name => ({ name }))),
+    schemas: vi.fn((_agent?: Agent) => ['read', 'write', 'grep', 'web_search', 'web_fetch'].map(name => ({ name }))),
     execute: vi.fn(async (request: { name: string; arguments: { url?: string } }) => {
       const url = request.arguments.url ?? ''
       const queued = queuedFetchResults.get(url) ?? []
@@ -781,12 +782,13 @@ function mappingFixture(
   filesystemContexts.push(filesystemContext)
   const sandboxPolicy = new SandboxPolicyService(filesystemContext, { mode: 'workspace-write' })
   const filesystem = new SandboxedFileSystem(filesystemContext, { cwd: workspace.root, diffBasisMaxBytes: 10 * 1024 * 1024 })
-  const logger = { warn: vi.fn() }
+  const logger = { warn: vi.fn(), info: vi.fn() }
   const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
   return {
     agent, filesystem, starts, finalStarts, summaryStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
     childGuards, disposed, maxActive: () => maxActive, taskAttempts, on, onReply, onFinalReply, serializeReply, submissionCandidates,
-    submissionResults, logger,
+    submissionResults, logger, tools,
+    setParentSession: (id: string) => { parentSessionId = id },
     serializeQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
     invokeSubmissionTool: async (childId: SessionId, name: string, args: unknown) => {
       const definition = submissionTools.get(String(childId))?.get(name)
@@ -1560,16 +1562,32 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts[1]!.resolve()
     await execution
+    expect(fixture.tools.schemas).toHaveBeenCalledWith(fixture.agent)
+    expect(fixture.tools.schemas(fixture.agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
       statistics: {
         tools: {
           web_search: Record<string, unknown>
-          fetch_web_source: Record<string, unknown>
+          web_fetch: Record<string, unknown>
         }
       }
     }
     expect(log.statistics.tools.web_search).toMatchObject({ calls: 1, succeeded: 0, failed: 1, failure_reasons: ['failed'] })
-    expect(log.statistics.tools.fetch_web_source).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
+    expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
+  })
+
+  it('明确禁用 Web Access 时不要求 S4 Web 工具', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-disabled-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const run = createTestBidRunContext({ resumePolicy: { webAccess: 'disabled' } })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { run, maxConcurrency: 1, maxRepairAttempts: 0 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    expect(fixture.starts[0]!.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: [] } })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    await execution
   })
 
   it('Final Check 复用跨分支候选消除误报缺口，短 F1 由 Host 绑定真实文件', async () => {
@@ -2064,7 +2082,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(promptText(fixture.starts[0]!.request.request)).not.toContain(material.framework.path)
     expect(promptText(fixture.starts[0]!.request.request)).toContain('"file_ref":"F2"')
     for (const start of fixture.starts) {
-      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search'] } })
+      expect(start.request.request).toMatchObject({ maxDepth: 1, toolFilter: { allow: ['web_search', 'web_fetch'] } })
     }
     const childReadGuard = fixture.childGuards.get(String(fixture.starts[0]!.request.childId))?.at(-1)
     expect(childReadGuard).toBeDefined()
@@ -3080,7 +3098,20 @@ describe('S4 Host 准入与最终确认', () => {
     Object.assign(host, {
       ctx: {
         on: () => () => {},
-        agents: { get: () => fixture.agent, list: () => [fixture.agent] },
+        logger: fixture.logger,
+        agents: {
+          get: () => fixture.agent,
+          list: () => [fixture.agent],
+          create: async ({ sessionId }: { sessionId: string }) => {
+            fixture.setParentSession(sessionId)
+            return { agent: {
+              ...fixture.agent,
+              id: sessionId,
+              session: { ...fixture.agent.session, id: sessionId, header: { ...fixture.agent.session.header, parentSession: 'session', origin: 'subagent' } },
+            },
+            dispose: async () => {} }
+          },
+        },
         sessions: { list: () => [session], flush: async () => {} },
         subagents: { drainContinuableChildren: async () => {} },
       },

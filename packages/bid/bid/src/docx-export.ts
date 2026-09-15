@@ -14,6 +14,8 @@ import { parseWritingPlan } from './writing-requirements.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { BidRunContext } from './run-coordinator.ts'
+import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
+import { validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -24,6 +26,16 @@ async function readProjectFile(workspace: BidWorkspace, path: string): Promise<s
 async function readSavedChapter(workspace: BidWorkspace, path: string): Promise<string> {
   try { return await readProjectFile(workspace, path) } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw error
+  }
+}
+
+async function readSavedFlowcharts(workspace: BidWorkspace, serial: string): Promise<readonly FlowchartSpec[]> {
+  try {
+    const metadata = parseChapterMetadata(JSON.parse(await readProjectFile(workspace, `chapters/meta/${serial}.json`)))
+    return metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw error
   }
 }
@@ -98,6 +110,9 @@ export async function collectDocxMarkdown(
       continue
     }
     parts.push(collectDocxChapterBody(chapter.markdown, section.title, section.id, number, headingDepth))
+    for (const flowchart of await readSavedFlowcharts(workspace, chapter.content_path.slice(-7, -3))) {
+      parts.push(`\`\`\`flowchart\n${JSON.stringify(flowchart)}\n\`\`\``)
+    }
   }
   return `${parts.join('\n\n')}\n`
 }

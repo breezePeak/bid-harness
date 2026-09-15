@@ -446,6 +446,7 @@ export function renderChapterSubagentTask(
     '资料不支持真实项目数量、人员、设备或记录值时，不得添加带“示例”的伪数据行，也不得写“待补、XXX、最终填写”等占位值。管理表可以保留正式字段、填写规则和控制要求，由投标人按已核实资料填写。',
     'Related Materials 来自 reference，只用于事实、参数、企业能力、技术依据和参考，不得大段照抄。Reference Bid Materials 是旧参考标书；reuse/adapt 可读取命中 chunk 的 index 和相邻 chunks 以取得完整方案，但必须清理旧项目名称、采购人、地点、日期、周期、数量、金额、环境和客户事实。',
     '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，也不得出现 REQ、SC、COM、RP、SEC、AC 等系统内部编号；需求对应表使用招标文件原有条款编号、需求名称或简要原文。资料使用记录通过 metadata 登记。',
+    '当章节存在明确的步骤顺序、角色流转、判断分支、整改回路、审批关系或质量闭环时，判断结构化流程图是否比纯文字更清晰；只在确有表达价值时填写 metadata.flowcharts。背景、理念、人员介绍、政策说明和参数罗列等说明性章节不要为了增加图表而生成流程图。流程图必须给出完整节点和连线，不得填写“此处插入流程图”等占位文字。使用节点 key 作为连线引用，不要生成 flowchart id、node id、图号、坐标、SVG、Visio XML 或 Word/OLE 内容，Host 会分配身份并完成布局。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Global Consistency Notes：${JSON.stringify(globalConsistencyNotes)}`,
     `Confirmed Global Writing Contract：${JSON.stringify(context.writingPlan)}`,
@@ -467,6 +468,7 @@ export function renderChapterSubagentTask(
     `Dependency Chapter Context：${JSON.stringify(dependencies)}`,
     '只填写语义 metadata：local_materials_used、web_materials_used、additional_web_materials、unresolved_topics 和 handoff。所有语义数组及空 handoff 成员可省略；不要填写任何 section_id 或 covered_*。Host 继承的 Blueprint 索引不代表正文已经覆盖，Reviewer 将独立检查正文。',
     '所有实际使用的本地证据（包括补搜命中）写入 metadata.local_materials_used，summary 说明具体支撑内容；已有 Snapshot 写入 web_materials_used，新 URL 写入 additional_web_materials。',
+    'metadata.flowcharts 是结构化正文内容，不是导出阶段临时装饰；S6 不会重新阅读正文或调用模型决定是否画图。',
     'source_kind 为 reference 时，usage 只能为 reference 或 background；reference_bid 才允许 reuse 或 adapt。',
     '框架草稿 outline_framework 只作为写作输入，不能登记为本地 Evidence；不要填写 file_id、source_kind、source_id 或 snapshot_path。',
   ].join('\n')
@@ -788,6 +790,7 @@ function renderChapterReviewerTask(
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
     '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_id、met/unmet、reason 和可选 evidence_quote_refs；负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
+    '正文包含 metadata.flowcharts 时，将其作为正文的一部分审核：核对流程图与正文步骤、角色、分支和整改闭环是否一致，检查关键评分响应流程是否遗漏、连线是否断裂、判断节点是否缺少分支或与招标要求矛盾。只报告业务问题，不操作布局坐标或生成 Visio/OOXML。',
     '所有 evidence_quote_refs 与 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',

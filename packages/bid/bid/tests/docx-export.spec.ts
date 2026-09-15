@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import mammoth from 'mammoth'
+import JSZip from 'jszip'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
 import { assessDocxExportPageTarget, executeDocxExport as executeDocxExportImplementation, validateDocxExport } from '../src/docx-export.ts'
@@ -102,6 +103,32 @@ describe('Bid DOCX export', () => {
     await expect(executeDocxExport(workspace)).rejects.toThrow('图片不存在或无法读取')
     expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(previous)
     expect((await readDocxFormat(workspace)).state.lastExport).toEqual(saved.state.lastExport)
+  })
+
+  it('S5 流程图以结构化 metadata 进入 DOCX，并写入 SVG 资源', async () => {
+    const { workspace } = await exportFixture()
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: {
+        section_id: 'resource', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
+      },
+      flowcharts: [{
+        type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', title: '质量检查闭环', direction: 'TB',
+        nodes: [
+          { id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交' },
+        ], edges: [{ from: 'N1', to: 'N2', label: '通过' }],
+      }],
+    }))
+
+    await executeDocxExport(workspace)
+    const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
+    expect(markdown).toContain('```flowchart\n')
+    expect(markdown).toContain('质量检查闭环')
+    const zip = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'bid.docx')))
+    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(true)
   })
 
   it('renderer 在 Run 退休后返回时不能覆盖正式 DOCX 或导出记录', async () => {

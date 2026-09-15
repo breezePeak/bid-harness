@@ -7,6 +7,7 @@ import {
   type WebEvidenceMaterial,
 } from './evidence-mapping-artifacts.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
+import { FLOWCHART_SCHEMA_VERSION, FLOWCHART_MAX_EDGES, FLOWCHART_MAX_NODES, type FlowchartDraft, type FlowchartSpec } from './flowchart.ts'
 
 /** Version of the durable S6 chapter manifest and chapter metadata records. */
 export const CHAPTER_WRITING_SCHEMA_VERSION = 6 as const
@@ -41,6 +42,31 @@ const chapterHandoffSchema = z.object({
   unresolved_topics: z.array(z.string().min(1)),
 }).strict()
 
+const flowchartNodeTypeSchema = z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess'])
+const flowchartDraftNodeSchema = z.object({
+  key: z.string().trim().min(1).max(64), type: flowchartNodeTypeSchema, text: z.string().trim().min(1).max(200),
+}).strict()
+const flowchartDraftEdgeSchema = z.object({
+  from: z.string().trim().min(1).max(64), to: z.string().trim().min(1).max(64), label: z.string().trim().min(1).max(100).optional(),
+}).strict()
+const flowchartDraftSchema = z.object({
+  type: z.literal('flowchart').optional(), title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(),
+  direction: z.enum(['TB', 'LR']).optional(),
+  nodes: z.array(flowchartDraftNodeSchema).min(1).max(FLOWCHART_MAX_NODES),
+  edges: z.array(flowchartDraftEdgeSchema).max(FLOWCHART_MAX_EDGES),
+}).strict()
+const flowchartSpecSchema = z.object({
+  type: z.literal('flowchart'), schema_version: z.literal(FLOWCHART_SCHEMA_VERSION), id: z.string().regex(/^FLOW-[A-Za-z0-9_-]+$/u),
+  title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(), direction: z.enum(['TB', 'LR']),
+  nodes: z.array(z.object({ id: z.string().regex(/^N\d+$/u), type: flowchartNodeTypeSchema, text: z.string().trim().min(1).max(200) }).strict()).min(1).max(FLOWCHART_MAX_NODES),
+  edges: z.array(flowchartDraftEdgeSchema).max(FLOWCHART_MAX_EDGES),
+}).strict()
+const flowchartInputSchema = z.union([flowchartDraftSchema, flowchartSpecSchema])
+
+function flowchartInput(value: unknown): FlowchartDraft | FlowchartSpec {
+  return flowchartInputSchema.parse(value) as FlowchartDraft | FlowchartSpec
+}
+
 const chapterMetadataFields = {
   section_id: z.string().min(1),
   covered_must_answer: z.array(z.string().min(1)),
@@ -50,6 +76,7 @@ const chapterMetadataFields = {
   web_materials_used: z.array(webEvidenceMaterialSchema),
   unresolved_topics: z.array(z.string().min(1)),
   handoff: chapterHandoffSchema,
+  flowcharts: z.array(flowchartSpecSchema).default([]),
 } as const
 
 function addDurableEvidenceIssues(
@@ -77,6 +104,7 @@ export const chapterMetadataSchema = z.object(chapterMetadataFields).strict().su
 const chapterCandidateMetadataSchema = z.object({
   ...chapterMetadataFields,
   additional_web_materials: z.array(transientWebEvidenceMaterialSchema),
+  flowcharts: z.array(flowchartInputSchema).default([]).transform(values => values.map(flowchartInput)),
 }).strict().superRefine((metadata, context) => {
   addDurableEvidenceIssues(metadata, context)
   const urls = metadata.additional_web_materials.map(material => normalizeWebEvidenceUrl(material.url) ?? material.url)

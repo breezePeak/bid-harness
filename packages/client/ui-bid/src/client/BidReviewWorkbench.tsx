@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
+import { renderFlowchartSvg, type FlowchartSpec } from '@deepseek-ai/dsh-bid/flowchart'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import { CHAPTER_DRAG_TYPE, selectedParagraphReference, type createBidRevisionStore, type BidRevisionReference } from './revision-reference.ts'
@@ -427,6 +428,7 @@ export function BidReviewWorkbench({
                   text={chapter.markdown.replace(/^# [^\n]*(?:\n|$)\s*/u, '')}
                   paragraphSourceOffset={chapter.markdown.match(/^# [^\n]*(?:\n|$)\s*/u)?.[0].length ?? 0}
                 />
+                {(chapter.flowcharts ?? []).map(flowchart => <FlowchartPreview key={flowchart.id} spec={flowchart} />)}
               </div>
             </article>
           )}
@@ -566,6 +568,18 @@ export function BidReviewWorkbench({
       </div>}
     </section>
   )
+}
+
+function FlowchartPreview({ spec }: { spec: FlowchartSpec }): JSX.Element {
+  try {
+    const rendered = renderFlowchartSvg(spec)
+    return <figure className={css.flowchart} aria-label={spec.title}>
+      <figcaption>{spec.title}</figcaption>
+      <div className={css.flowchartCanvas} dangerouslySetInnerHTML={{ __html: rendered.svg }} />
+    </figure>
+  } catch (error: unknown) {
+    return <p role="alert" className={css.flowchartError}>流程图暂时无法渲染：{error instanceof Error ? error.message : String(error)}</p>
+  }
 }
 
 

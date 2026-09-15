@@ -23,6 +23,10 @@
       "types": "./lib/types/control-plane.d.ts",
       "default": "./lib/types/control-plane.js"
     },
+    "./flowchart": {
+      "types": "./lib/types/flowchart.d.ts",
+      "default": "./lib/types/flowchart.js"
+    },
     "./typert": {
       "types": "./lib/typert.host.d.ts",
       "default": "./lib/typert.host.js"

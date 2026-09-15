@@ -283,4 +283,21 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect(JSON.stringify(pack)).not.toContain('整本 tender 不得注入')
     expect(pack.map(item => item.source_ref)).toEqual(pack.map((_, index) => `E${index + 1}`))
   })
+
+  it('流程图由 Host 分配身份并保留为章节 metadata，旧候选仍可投影给 Writer 修复', async () => {
+    const { bind, refs } = await fixture()
+    const candidate = await bind({ flowcharts: [{
+      title: '质量检查闭环', nodes: [
+        { key: 'start', type: 'start', text: '开始' }, { key: 'check', type: 'decision', text: '质量检查' },
+        { key: 'fix', type: 'process', text: '整改' }, { key: 'end', type: 'end', text: '提交' },
+      ], edges: [
+        { from: 'start', to: 'check' }, { from: 'check', to: 'fix', label: '不通过' },
+        { from: 'fix', to: 'check' }, { from: 'check', to: 'end', label: '通过' },
+      ],
+    }] })
+    expect(candidate.metadata.flowcharts[0]?.id).toBe('FLOW-SEC-1-1')
+    expect(candidate.metadata.flowcharts[0]?.nodes.map(node => node.id)).toEqual(['N1', 'N2', 'N3', 'N4'])
+    const projected = projectChapterWriterCandidate(candidate, refs) as { metadata: { flowcharts: Array<{ nodes: Array<{ key: string }> }> } }
+    expect(projected.metadata.flowcharts[0]?.nodes[1]?.key).toBe('N2')
+  })
 })

@@ -247,6 +247,9 @@ interface ActiveRun {
 /** Persist one Run transition before the coordinator grants execution authority. */
 export type BidRunCheckpoint = () => Promise<number>
 
+/** Observe a Run after its running checkpoint is durable and before execution starts. */
+export type BidRunAdmissionObserver = (run: BidRunContext) => void
+
 /** Owns one-at-a-time Run identity, durable admission, cancellation, and settlement. */
 export class BidRunCoordinator {
   private epoch = 0
@@ -263,6 +266,7 @@ export class BidRunCoordinator {
     private readonly parentSignal?: AbortSignal,
     private readonly publication?: { readonly workspaceRoot: string; readonly projectRoot: string },
     private readonly executionSessionId?: () => string | undefined,
+    private readonly onAdmitted?: BidRunAdmissionObserver,
   ) {}
 
   /** Current live Run, if any. */
@@ -337,6 +341,7 @@ export class BidRunCoordinator {
         },
       }
       this.active = { snapshot, context, controller, eventStart, mainAgents, activities }
+      this.onAdmitted?.(context)
       return context
     } catch (error) {
       this.session.append('bid.run.start_failed', { runId: snapshot.runId, epoch })

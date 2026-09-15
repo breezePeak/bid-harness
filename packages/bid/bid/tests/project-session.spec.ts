@@ -12,7 +12,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
   BID_INITIAL_CONTROL_STATE, BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   BidRunCoordinator,
@@ -165,7 +165,7 @@ async function persistStageExecutionWork(workspace: BidWorkspace, stage: BidStag
   return work
 }
 
-async function fixture(options: { readonly realOrchestrator?: boolean } = {}) {
+async function fixture(options: { readonly realOrchestrator?: boolean; readonly withPreset?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-project-session-'))
   disposals.push(() => rm(root, { recursive: true, force: true }))
   const ctx = new Context()
@@ -176,6 +176,27 @@ async function fixture(options: { readonly realOrchestrator?: boolean } = {}) {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'test' })
   await ctx.plugin(ToolRuntime)
+  const webOutput = { schema: { type: 'object' as const }, render: () => [{ type: 'text' as const, text: '{}' }] }
+  const webTool = (name: 'web_search' | 'web_fetch'): ToolDefinition => ({
+    name, description: name, parameters: { type: 'object' }, output: webOutput,
+    execute: async () => ({}),
+  })
+  if (options.withPreset === true) {
+    ctx.tools.register(webTool('web_search'))
+    ctx.tools.register(webTool('web_fetch'))
+    ctx.provide('agentPresets', {
+      composeFrom(agentCtx: Context): string {
+        agentCtx.tools.register(webTool('web_search'))
+        agentCtx.tools.register(webTool('web_fetch'))
+        return 'bid'
+      },
+      mount(agentCtx: Context): Promise<{ id: string }> {
+        agentCtx.tools.register(webTool('web_search'))
+        agentCtx.tools.register(webTool('web_fetch'))
+        return Promise.resolve({ id: 'bid' })
+      },
+    } as never)
+  }
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
@@ -1194,6 +1215,52 @@ describe('Workspace 项目与独立 Session', () => {
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
   })
 
+  it('公开回合的 tool restriction 不污染独立 S4 execution lane', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture({ withPreset: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('resume-during-public-turn')
+    const saved = await readBidProjectState(workspace)
+    if (saved?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 S4 Run')
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const publicToolViews: string[][] = []
+    const executionToolViews: string[][] = []
+    adapter.onRequest = () => {
+      publicToolViews.push(ctx.tools.schemas(agent).map(tool => tool.name).sort())
+      const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === agent.id)
+      if (execution !== undefined) executionToolViews.push(ctx.tools.schemas(execution).map(tool => tool.name).sort())
+    }
+    adapter.script.push(
+      toolCall('bid_resume_current_run', {
+        suspended_run_id: saved.run.runId,
+        expected_project_revision: saved.revision,
+      }),
+      answer('已接纳恢复任务，继续处理当前对话。'),
+    )
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '恢复当前 S4，同时回答我这条消息。' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === agent.id)
+    if (execution === undefined) throw new Error('S4 execution lane 未创建')
+    expect(publicToolViews.some(names => !names.includes('web_search') && !names.includes('web_fetch'))).toBe(true)
+    expect(executionToolViews).not.toHaveLength(0)
+    expect(executionToolViews.every(names => names.includes('web_search') && names.includes('web_fetch'))).toBe(true)
+    const admitted = await readBidProjectState(workspace)
+    expect(admitted?.run).toMatchObject({
+      status: 'running', interactionSessionId: agent.id, executionSessionId: execution.id,
+    })
+    const namesWhileRunning = ctx.tools.schemas(execution).map(tool => tool.name).sort()
+    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+    adapter.script.push(answer('第二条消息也可以继续处理。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '再聊一句' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(ctx.tools.schemas(execution).map(tool => tool.name).sort()).toEqual(namesWhileRunning)
+    stageGate.resolve([])
+    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+  })
+
   it('阶段失败只回收当前运行登记的 continuable 子代理，不关闭恢复会话', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
@@ -1324,6 +1391,7 @@ describe('Workspace 项目与独立 Session', () => {
     responseGate.resolve(undefined)
     await agent.whenIdle()
 
+    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
     const run = executeStage.mock.calls[0]?.[1]
     if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
     await vi.waitFor(() => { expect(run.signal.aborted).toBe(true) })
@@ -1331,6 +1399,10 @@ describe('Workspace 项目与独立 Session', () => {
     await retry
     expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'suspended', failureReason: undefined })
     expect(host.inFlight.size).toBe(0)
+    adapter.script.push(answer('停止后仍可继续聊天。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '停止后继续聊天' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(JSON.stringify(agent.session.deriveMessages())).toContain('停止后仍可继续聊天')
   })
 
   it('同项目任一 Interaction Session 的 Stop 都挂起唯一 Run', async () => {
@@ -1343,6 +1415,7 @@ describe('Workspace 项目与独立 Session', () => {
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const resumed = resumeRun(ctx, agent.session)
     await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
     const run = executeStage.mock.calls[0]?.[1]
     if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
 

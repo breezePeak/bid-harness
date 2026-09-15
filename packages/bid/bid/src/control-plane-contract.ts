@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { DocxTemplateId } from './docx-format-contract.ts'
+import type { FlowchartSpec } from './flowchart.ts'
 
 /** The ordered Bid Harness stages owned by the control plane. */
 export const BID_STAGES = [
@@ -647,6 +648,8 @@ export interface BidReviewChapterView {
   readonly heading_path: readonly string[]
   readonly writable: boolean
   readonly markdown: string | null
+  /** Host-validated structured flowcharts; legacy chapters return an empty list. */
+  readonly flowcharts?: readonly FlowchartSpec[]
   /** 完整 markdown 的 SHA-256；正文尚未生成时为 null。 */
   readonly content_sha256: string | null
   readonly requirement_ids: readonly string[]

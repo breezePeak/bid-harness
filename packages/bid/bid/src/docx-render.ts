@@ -25,9 +25,11 @@ import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
 import { applyHeadingRestartRules, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
+import { renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
 type Node = {
   type: string
   value?: string | undefined
+  lang?: string | null | undefined
   url?: string
   alt?: string | null | undefined
   identifier?: string
@@ -42,6 +44,7 @@ type Node = {
     }
   } | undefined
 }
+const SVG_FALLBACK_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/Scx9WQAAAABJRU5ErkJggg==', 'base64')
 const escape = (value: string): string => value.replaceAll('&',
   '&amp;').replaceAll('<',
   '&lt;').replaceAll('>',
@@ -300,6 +303,22 @@ export async function renderDocx(
     for (const [index, node] of nodes.entries()) {
       if (node.type === 'definition')
         continue
+      if (node.type === 'code' && node.lang === 'flowchart') {
+        let spec: FlowchartSpec
+        try { spec = JSON.parse(node.value ?? '') as FlowchartSpec } catch { throw new Error('流程图数据不是有效 JSON。') }
+        const rendered = renderFlowchartSvg(spec)
+        const ratio = Math.min(1, 500 / rendered.width, 700 / rendered.height)
+        const caption = numberCaption('figureCaption')
+        doc.push(new Paragraph({ ...paragraph('figureCaption'), keepNext: true,
+          numbering: { reference: 'dsh-figureCaption', level: 0 },
+          children: [new TextRun({ ...run('figureCaption'), text: `${caption}${spec.title}` })] }))
+        doc.push(new Paragraph({ ...paragraph('figureCaption'), alignment: 'center', keepLines: true,
+          children: [new ImageRun({ type: 'svg', data: Buffer.from(rendered.svg), fallback: { type: 'png', data: SVG_FALLBACK_PNG },
+            transformation: { width: rendered.width * ratio, height: rendered.height * ratio },
+            altText: { name: spec.title, title: spec.title, description: spec.purpose ?? spec.title } })] }))
+        html.push(`<figure><figcaption style="${style('figureCaption')}">${escape(caption)}${escape(spec.title)}</figcaption>${rendered.svg}</figure>`)
+        continue
+      }
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
         const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}`
           : node.type === 'paragraph' ? captionRole(content(node)) ?? 'body' : 'body'

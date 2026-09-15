@@ -16,8 +16,10 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
+import type {} from '@deepseek-ai/dsh-tools'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -78,6 +80,8 @@ import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, coll
 import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-estimate.ts'
 import { parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
+import { validateFlowchartSpec } from './flowchart.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -264,6 +268,7 @@ export { validateOutlineGenerationQuality } from './outline-generation-quality-v
 export { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 export { validateConfirmedOutline } from './outline-confirmation-validator.ts'
 export * from './chapter-writing-artifacts.ts'
+export * from './flowchart.ts'
 export * from './chapter-writing-review-artifacts.ts'
 export * from './chapter-writing-global-review-artifacts.ts'
 export { parseChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
@@ -1438,6 +1443,16 @@ export class BidHostRuntime extends TypertRemoteService {
       controller.signal,
       { workspaceRoot: workspace.root, projectRoot: workspace.projectRoot },
       () => holder.current?.executionSessionId,
+      (run) => {
+        const current = holder.current
+        if (current === undefined) return
+        try {
+          this.recordRunAdmission(current, run)
+        } catch {
+          // Admission diagnostics must never turn a durably admitted Run into a failed Run.
+          this.ctx.logger.warn('Bid Run admission diagnostics unavailable.')
+        }
+      },
     )
     const operation: ActiveBidOperation = {
       key,
@@ -1464,6 +1479,11 @@ export class BidHostRuntime extends TypertRemoteService {
     if (operation.executionHandle !== undefined) return operation.executionHandle.agent
     const interaction = this.ctx.agents.get(operation.session.id)
     if (interaction === undefined) throw new Error('Bid interaction Session has no live Agent.')
+    const presets = typeof (this.ctx as unknown as { get?: unknown }).get === 'function'
+      ? this.ctx.get('agentPresets')
+      : undefined
+    const agentPreset = resolveSessionPreset(operation.session)
+    if (presets !== undefined && agentPreset === undefined) throw new Error('Bid execution Session has no preset.')
     const executionSessionId = SessionId(randomUUID())
     operation.executionSessionId = executionSessionId
     try {
@@ -1472,12 +1492,21 @@ export class BidHostRuntime extends TypertRemoteService {
         agentOptions: interaction.options,
         meta: {
           cwd: operation.workspace.root,
-          ...(operation.session.header.agentPreset === undefined ? {} : {
-            agentPreset: operation.session.header.agentPreset,
+          ...(agentPreset === undefined ? {} : {
+            agentPreset,
           }),
           parentSession: operation.session.id,
           origin: 'subagent',
         },
+        ...(presets === undefined ? {} : {
+          setup: async (agentCtx: Context) => {
+            const joinedPreset = presets.composeFrom(agentCtx, interaction.ctx)
+            if (joinedPreset === undefined) {
+              if (agentPreset === undefined) throw new Error('Bid execution Session has no preset.')
+              await presets.mount(agentCtx, agentPreset)
+            }
+          },
+        }),
       })
       handle.agent.ctx.on('agent/pre-step', async ({ agent }, next) => {
         const decision = await next()
@@ -1493,6 +1522,29 @@ export class BidHostRuntime extends TypertRemoteService {
       delete operation.executionSessionId
       throw error
     }
+  }
+
+  /** Record the exact identities and model-visible tool surface granted at Run admission. */
+  private recordRunAdmission(operation: ActiveBidOperation, run: BidRunContext): void {
+    const execution = operation.executionHandle?.agent
+    const tools = typeof (this.ctx as unknown as { get?: unknown }).get === 'function'
+      ? this.ctx.get('tools')
+      : undefined
+    const toolNames = execution === undefined || tools === undefined ? [] : tools.schemas(execution).map(tool => tool.name)
+    this.ctx.logger.info(`Bid Run admission ${JSON.stringify({
+      conversationId: operation.session.id,
+      sessionId: operation.session.id,
+      conversationSessionId: operation.session.id,
+      interactionSessionId: operation.session.id,
+      interactionAgentId: this.ctx.agents.get(operation.session.id)?.id ?? operation.session.id,
+      executionSessionId: execution?.session.id ?? operation.executionSessionId ?? null,
+      executionAgentId: execution?.id ?? null,
+      runId: run.runId,
+      resumeOf: run.resumeOf ?? null,
+      stage: run.work.stage,
+      'resumePolicy.webAccess': run.resumePolicy?.webAccess ?? 'inherit',
+      executionAgentToolNames: toolNames,
+    })}`)
   }
 
   /** 先持久化稳定状态，再释放项目；重置接管期间保留锁。 */
@@ -1988,7 +2040,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (runtime.status !== 'pending' || runtime.stage === 'file_intake') return
       driven = true
       const executionAgent = await this.executionAgent(operation)
-      const orchestrator = this.automaticOrchestrator(executionAgent, workspace, operation.controller.signal)
+      const orchestrator = this.automaticOrchestrator(executionAgent, workspace, operation.controller.signal, operation)
       const next = runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace)
         ? await orchestrator.runConfirmedStage()
         : await orchestrator.drive()
@@ -2005,12 +2057,16 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /** Build the production executor and Validator for implemented automatic stages. */
-  private automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator {
+  private automaticOrchestrator(
+    agent: Agent,
+    workspace: BidWorkspace,
+    signal: AbortSignal | undefined,
+    operation: ActiveBidOperation,
+  ): BidOrchestrator {
     let intakeFiles: IncomingFile[] = []
     let importedFiles: ImportedFile[] = []
-    const operation = this.inFlight.get(projectKey(agent.session))
     return new BidOrchestrator(
-      operation?.session ?? agent.session,
+      operation.session,
       {
         canExecute: stage => stage === 'file_intake' || stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
         execute: async (task, run) => {
@@ -2036,13 +2092,13 @@ export class BidHostRuntime extends TypertRemoteService {
               maxRepairAttempts: this.config.modelStageRepairAttempts, run,
             })
             case 'chapter_writing': {
-              if (operation !== undefined) await operation.writingControl.bind(workspace, run.work.workId, run.commits)
+              await operation.writingControl.bind(workspace, run.work.workId, run.commits)
               return executeChapterWriting(agent, workspace, task, {
                 maxRepairAttempts: this.config.modelStageRepairAttempts,
                 maxConcurrency: this.config.chapterWritingMaxConcurrency,
                 maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
                 run,
-                ...(operation === undefined ? {} : { control: operation.writingControl }),
+                control: operation.writingControl,
               })
             }
           }
@@ -2061,8 +2117,13 @@ export class BidHostRuntime extends TypertRemoteService {
         },
       },
       signal,
-      (fromStage, toStage) => prepareBidStageContextTransition(agent.session, workspace, fromStage, toStage),
-      this.inFlight.get(projectKey(agent.session))?.runs,
+      (fromStage, toStage) => prepareBidStageContextTransition(
+        operation.session,
+        workspace,
+        fromStage,
+        toStage,
+      ),
+      operation.runs,
       async (stage) => {
         return persistHostWork(workspace, 'stage_execution', stage, { stage })
       },
@@ -2258,7 +2319,7 @@ export class BidHostRuntime extends TypertRemoteService {
         workflow: { stage: 'chapter_writing', gate: 'ready' },
       })
       session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
-      const next = await this.automaticOrchestrator(agent, operation.workspace, operation.controller.signal).runConfirmedStage()
+      const next = await this.automaticOrchestrator(agent, operation.workspace, operation.controller.signal, operation).runConfirmedStage()
       await this.ctx.sessions.flush(session)
       return chapterWritingGateResult({ ok: true, value: next })
     } catch {
@@ -2289,7 +2350,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const agent = await this.executionAgent(operation)
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
-      const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).startResetStage()
+      const next = await this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation).startResetStage()
       await this.ctx.sessions.flush(session)
       return stageStartResult({ ok: true, value: next })
     } catch (error: unknown) {
@@ -2623,7 +2684,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (runtime.stage === 'chapter_writing') recoverOverflowedBidStageContext(session, runtime.stage)
       admitted = true
       const next = suspended.work.kind === 'stage_execution' || suspended.work.kind === 'file_intake'
-        ? await this.automaticOrchestrator(agent, workspace, operation.controller.signal)
+        ? await this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation)
           .resume(suspendedRunId, resumePolicy, onAccepted)
         : await this.resumeDedicatedWork(agent, operation, suspended, resumePolicy, onAccepted)
       await this.ctx.sessions.flush(session)
@@ -2696,7 +2757,7 @@ export class BidHostRuntime extends TypertRemoteService {
           }
           case 'chapter_revision': {
             const request = chapterRevisionRequestSchema.parse(payload)
-            await this.executeChapterRevisionCandidate(operation.session, operation.workspace, request, run)
+            await this.executeChapterRevisionCandidate(operation.session, agent, operation.workspace, request, run)
             return
           }
           case 'stage_execution':
@@ -2706,7 +2767,7 @@ export class BidHostRuntime extends TypertRemoteService {
       })
       if (operation.runs.current === run) await operation.runs.complete(run)
       if (confirmedArtifacts !== undefined) {
-        await this.automaticOrchestrator(agent, operation.workspace, operation.controller.signal)
+        await this.automaticOrchestrator(agent, operation.workspace, operation.controller.signal, operation)
           .commitPrevalidatedStage(run.work.stage, confirmedArtifacts)
       }
       if (run.work.kind === 'evidence_remap' || run.work.kind === 'outline_regeneration') {
@@ -2952,12 +3013,14 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
         return reject('BID_CHAPTER_REVISION_NOT_ALLOWED', '正文编写完成后才能提交修订意见。')
       }
+      const executionAgent = await this.executionAgent(operation)
       const work = await persistHostWork(operation.workspace, 'chapter_revision', runtime.stage, parsed.data)
       const admittedRun = await operation.runs.start(work)
       run = admittedRun
       onAccepted?.(admittedRun)
       await admittedRun.activities.track(() => this.executeChapterRevisionCandidate(
         session,
+        executionAgent,
         operation.workspace,
         parsed.data,
         admittedRun,
@@ -2985,6 +3048,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   private async executeChapterRevisionCandidate(
     session: Session,
+    executionAgent: Agent,
     canonical: BidWorkspace,
     request: BidChapterRevisionRequest,
     run: BidRunContext,
@@ -3005,14 +3069,20 @@ export class BidHostRuntime extends TypertRemoteService {
       throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
     }
     let resumedParent: AgentHandle | undefined
-    let parent = this.ctx.agents.get(parentId)
+    let parent = parentId === executionAgent.id ? executionAgent : this.ctx.agents.get(parentId)
     try {
       if (parent === undefined) {
+        const parentSession = await persistence.inspect(SessionId(parentId), run.signal)
+        const presets = this.ctx.get('agentPresets')
         resumedParent = await this.ctx.agents.resume({
           resumeSessionId: parentId,
           signal: run.signal,
-          setup(parentContext) {
+          async setup(parentContext) {
             parentContext.on('agent/pre-step', () => Promise.resolve({ kind: 'reject' }))
+            if (presets !== undefined) await presets.mount(parentContext, resolveSessionPreset({
+              header: parentSession.meta,
+              events: parentSession.events,
+            }))
           },
         })
         parent = resumedParent.agent
@@ -3241,12 +3311,17 @@ export class BidHostRuntime extends TypertRemoteService {
     const section = outline.sections.find(item => item.id === sectionId)
     if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const chain = reviewHeadingPath(outline, section.id)
-    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
+    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, flowcharts: [], content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const serial = String(index + 1).padStart(4, '0')
     let markdown: string | null = null
     try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
+    let flowcharts: import('./flowchart.ts').FlowchartSpec[] = []
+    try {
+      const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/meta/${serial}.json`), 'utf8')))
+      flowcharts = metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
+    } catch { /* 旧章节没有流程图 metadata，或章节仍在写作。 */ }
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await assertNoLinkedPath(workspace.root, logPath)
     let execution: ChapterExecutionLog['sections'][number] | undefined
@@ -3286,7 +3361,7 @@ export class BidHostRuntime extends TypertRemoteService {
         ]
       }
     } catch { evidenceStatus = 'missing' }
-    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
+    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, flowcharts, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
   }
 
   /** Admit the S5 workbench while writing is running or after its last result. */
@@ -3465,7 +3540,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!validation.ok) {
         return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: validation.issues } }
       }
-      const confirmation = await this.automaticOrchestrator(agent, workspace, operation.controller.signal).confirmValidatedStage('tender_analysis', artifacts)
+      const confirmation = await this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation).confirmValidatedStage('tender_analysis', artifacts)
       if (!confirmation.ok) {
         return { ok: false, error: { code: 'BID_INVALID_TENDER_ANALYSIS_EDIT', message: 'The edited tender analysis does not satisfy S2 validation.', issues: confirmation.validation.issues } }
       }
@@ -3591,7 +3666,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return { ok: false, error: { code: 'BID_INVALID_USER_OUTLINE', message: 'The persisted draft does not satisfy outline validation.', issues: candidate.issues } }
       }
       const next = await this
-        .automaticOrchestrator(agent, workspace, operation.controller.signal)
+        .automaticOrchestrator(agent, workspace, operation.controller.signal, operation)
         .commitPrevalidatedStage(
           runtime.stage,
           candidate.artifacts,

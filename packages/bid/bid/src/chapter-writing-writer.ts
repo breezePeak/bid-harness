@@ -13,6 +13,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
+import { normalizeFlowchartInputs } from './flowchart.ts'
 
 const text = z.string().trim().min(1)
 const strings = z.array(text).optional()
@@ -33,6 +34,11 @@ const writerInput = z.object({
     additional_web_materials: z.array(transientWebEvidenceMaterialSchema).optional(),
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
+    flowcharts: z.array(z.object({
+      type: z.literal('flowchart').optional(), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
+      nodes: z.array(z.object({ key: text, type: z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess']), text }).strict()),
+      edges: z.array(z.object({ from: text, to: text, label: text.optional() }).strict()),
+    }).strict()).max(100).optional(),
   }).strict(),
 }).strict()
 
@@ -55,6 +61,14 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
         additional_web_materials: { type: 'array', items: { type: 'object', properties: { url: stringParameter, ...webProperties }, required: ['url', 'usage', 'summary', 'supports'], additionalProperties: false } },
         unresolved_topics: stringArray,
         handoff: { type: 'object', properties: Object.fromEntries(Object.keys(handoffFields).map(key => [key, stringArray])), additionalProperties: false },
+        flowcharts: { type: 'array', items: { type: 'object', properties: {
+          type: { type: 'string', enum: ['flowchart'] }, title: stringParameter, purpose: stringParameter,
+          direction: { type: 'string', enum: ['TB', 'LR'] },
+          nodes: { type: 'array', items: { type: 'object', properties: {
+            key: stringParameter, type: { type: 'string', enum: ['start', 'end', 'process', 'decision', 'document', 'subprocess'] }, text: stringParameter,
+          }, required: ['key', 'type', 'text'], additionalProperties: false } },
+          edges: { type: 'array', items: { type: 'object', properties: { from: stringParameter, to: stringParameter, label: stringParameter }, required: ['from', 'to'], additionalProperties: false } },
+        }, required: ['title', 'nodes', 'edges'], additionalProperties: false } },
       }, additionalProperties: false,
     },
   }, required: ['markdown', 'metadata'], additionalProperties: false,
@@ -318,6 +332,7 @@ export async function bindChapterWriterInput(
           key, input.metadata.handoff?.[key as keyof typeof handoffFields] ?? [],
         ])),
       },
+      flowcharts: normalizeFlowchartInputs(context.section.id, input.metadata.flowcharts ?? []),
     },
   })
 }
@@ -343,6 +358,14 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
         web_ref: [...refs.web].find(([, value]) => value.source_id === material.source_id)?.[0],
         usage: material.usage, summary: material.summary, supports: material.supports })),
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
+      flowcharts: candidate.metadata.flowcharts.map(flowchart => ({
+        type: 'flowchart' as const,
+        title: flowchart.title,
+        ...(flowchart.purpose === undefined ? {} : { purpose: flowchart.purpose }),
+        direction: flowchart.direction,
+        nodes: flowchart.nodes.map(node => ({ key: node.id, type: node.type, text: node.text })),
+        edges: flowchart.edges,
+      })),
     },
   }
 }

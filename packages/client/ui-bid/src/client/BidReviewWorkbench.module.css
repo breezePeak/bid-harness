@@ -107,6 +107,34 @@
   font: var(--dsw-font-xs-13);
 }
 
+.flowchart {
+  margin: 24px 0;
+  text-align: center;
+}
+
+.flowchart figcaption {
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.flowchartCanvas {
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: #fff;
+}
+
+.flowchartCanvas svg {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+}
+
+.flowchartError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
 /* 三栏主体容器 */
 .columns {
   min-height: 0;

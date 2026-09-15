@@ -31,10 +31,9 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
-        .filter(event => event.data.name === 'web_search' || event.data.name === 'fetch_web_source')
-      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['fetch_web_source', 1]])
+        .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
+      expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 1]])
       expect(childLog).toContain('web_materials.0.chunk_refs')
-      expect(childLog).not.toContain('"name":"web_fetch"')
       expect(childLog).toContain('search-unknown-scope')
       expect(childLog).toContain('read-forged-path')
       expect(childLog).toContain('search_sources')
@@ -119,7 +118,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
           structure_invalidated: number
         }>
       }
-      expect(checkpoint.schema_version).toBe(11)
+      expect(checkpoint.schema_version).toBe(12)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
           sufficient_for_blueprint: true,
