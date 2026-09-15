@@ -31,6 +31,17 @@ const suspendedWork = {
   inputFingerprint: '0'.repeat(64),
 }
 
+const savedProgress = {
+  total: 41,
+  initial: 41,
+  supplemental: 0,
+  completed: 34,
+  running: 1,
+  not_started: 4,
+  failed: 2,
+  failed_section_ids: ['SEC-1', 'SEC-2'],
+}
+
 function projection(patch: Partial<BidClientProjection> = {}): BidClientProjection {
   return {
     workflow: { stage: 'file_intake', gate: 'ready' },
@@ -447,6 +458,59 @@ describe('BidStagePanel', () => {
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
     fireEvent.click(screen.getByRole('button', { name: '继续未完成任务' }))
     await waitFor(() => { expect(resumeRun).toHaveBeenCalledOnce() })
+  })
+
+  it('S4 同一工作身份读取失败时保留最后一次成功进度并继续同步', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempt = 0
+      const getEvidenceMappingProgress = vi.fn(async () => {
+        attempt++
+        if (attempt === 2) throw new Error('temporary read failure')
+        return savedProgress
+      })
+      render(<BidStagePanel {...props(projection({
+        workflow: { stage: 'evidence_mapping', gate: 'ready' },
+        run: {
+          runId: 'run-interrupted', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+          work: suspendedWork, status: 'suspended', cause: 'user_stop', startedAt: 10, updatedAt: 20,
+        },
+        runtime: { stage: 'evidence_mapping', status: 'suspended' },
+        allowedActions: ['send_message'], composer: { enabled: true },
+      }), { getEvidenceMappingProgress })} />)
+
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(screen.getByText('34 / 41 (83%)')).toBeTruthy()
+      expect(screen.getByText('待恢复 1')).toBeTruthy()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(2)
+      expect(screen.getByText('34 / 41 (83%)')).toBeTruthy()
+      expect(screen.getByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeTruthy()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(3)
+      expect(screen.queryByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('取消收尾独立显示，不把 raw cancelling 投影成正常执行', () => {
+    render(<BidStagePanel {...props(projection({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: {
+        runId: 'run-cancelling', stage: 'evidence_mapping', epoch: 2, baseProjectRevision: 4,
+        work: suspendedWork, status: 'cancelling', startedAt: 10, updatedAt: 20,
+      },
+      runtime: { stage: 'evidence_mapping', status: 'running' },
+      allowedActions: ['send_message'], composer: { enabled: true },
+    }), { getEvidenceMappingProgress: async () => null })} />)
+
+    expect(screen.getByText('正在停止执行器并保存已完成进度')).toBeTruthy()
+    expect(screen.getByText('正在停止…')).toBeTruthy()
+    expect(screen.queryByText('正在处理…')).toBeNull()
+    expect(screen.queryByText('收尾中 1')).toBeNull()
   })
 
   it.each([
@@ -966,6 +1030,8 @@ describe('ui-bid browser plugin', () => {
         ok: true as const,
         value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'running' as const } },
       })
+    const remoteGetEvidenceMappingProgress = vi.fn<(_sessionId: string, _observed?: BidClientProjection) => Promise<unknown>>()
+      .mockResolvedValue({ ok: true as const, value: null })
     const resumeMessage = vi.fn(async () => {})
     const conversationRegister = vi.fn(() => () => {})
     const ctx = {
@@ -978,6 +1044,7 @@ describe('ui-bid browser plugin', () => {
         startStage: remoteStart,
         requestWritingRequirements: remoteRequestWritingRequirements,
         autoStartChapterWriting: remoteAutoStartChapterWriting,
+        getEvidenceMappingProgress: remoteGetEvidenceMappingProgress,
       } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
@@ -1006,6 +1073,7 @@ describe('ui-bid browser plugin', () => {
         resumeRun: () => Promise<void>
         requestWritingRequirements: () => Promise<void>
         autoStartChapterWriting: () => Promise<void>
+        getEvidenceMappingProgress: (observed?: BidClientProjection) => Promise<unknown>
       }
     }
     const injected = options.inject('session_bid')
@@ -1071,6 +1139,9 @@ describe('ui-bid browser plugin', () => {
     expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
     await injected.autoStartChapterWriting()
     expect(remoteAutoStartChapterWriting).toHaveBeenCalledWith('session_bid')
+    const observed = projection({ runtime: { stage: 'evidence_mapping', status: 'suspended' } })
+    await injected.getEvidenceMappingProgress(observed)
+    expect(remoteGetEvidenceMappingProgress).toHaveBeenCalledWith('session_bid', observed)
   })
 
   it('supports direct editing of the selected S2 review item and submits the change', async () => {

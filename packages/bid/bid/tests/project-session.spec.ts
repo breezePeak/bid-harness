@@ -1484,6 +1484,39 @@ describe('Workspace 项目与独立 Session', () => {
     })
   })
 
+  it('S4 进度读取会用更新的项目检查点校准落后的 Session 投影', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
+      schema_version: 5,
+      max_concurrency: 3,
+      observed_max_concurrency: 2,
+      tasks: [{
+        task_id: 'MAP-INIT-SEC-1', phase: 'initial', title: '技术方案', status: 'failed',
+        attempts: [], final_child_session_id: null,
+      }],
+    }))
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
+    const agent = await fresh('stale-s4-progress')
+    const oldView = getBidClientProjection(agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE))
+    const unchanged = structuredClone(oldView)
+    const before = agent.session.events.length
+
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    await expect(ctx.bid.getEvidenceMappingProgress(agent.session, oldView)).resolves.toBeNull()
+
+    const correction = agent.session.events.at(-1)
+    expect(agent.session.events.length).toBe(before + 1)
+    expect(correction).toMatchObject({ type: 'bid.project.resumed', data: { run: { status: 'suspended' } } })
+    expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
+    expect(oldView).toEqual(unchanged)
+
+    const current = getBidClientProjection(agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE))
+    await expect(ctx.bid.getEvidenceMappingProgress(agent.session, current)).resolves.toMatchObject({
+      total: 1, completed: 0, running: 0, failed: 1,
+    })
+  })
+
   it('S4 挂起 Run 允许普通消息继续对话', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)

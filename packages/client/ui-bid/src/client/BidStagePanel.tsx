@@ -224,7 +224,19 @@ export function BidStagePanel({
   const [reviewContext, setReviewContext] = useState<OutlineReviewContext | null>(null)
   const [draft, setDraft] = useState<OutlineDraftView | null>(null)
   const [tenderAnalysis, setTenderAnalysis] = useState<TenderAnalysisConfirmationView | null>(null)
-  const [mappingProgress, setMappingProgress] = useState<BidEvidenceMappingProgress | null>(null)
+  const [mappingSnapshot, setMappingSnapshot] = useState<{
+    sessionId: typeof sessionId
+    workId: string | null
+    progress: BidEvidenceMappingProgress
+  } | null>(null)
+  const [mappingReadState, setMappingReadState] = useState<'loading' | 'ready' | 'stale'>('loading')
+
+  const progressStage = projection?.runtime.stage
+  const progressStatus = projection?.runtime.status
+  const progressRunId = projection?.run?.runId ?? null
+  const progressWorkId = projection?.run?.work.workId ?? null
+  const progressReaderAvailable = getEvidenceMappingProgress !== undefined
+  const progressInput = useRef({ projection, getEvidenceMappingProgress })
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
   const tenderFileInput = useRef<HTMLInputElement>(null)
@@ -275,30 +287,96 @@ export function BidStagePanel({
   }, [])
 
   useEffect(() => {
-    if (isSubagent || projection?.runtime.stage !== 'evidence_mapping'
-      || projection.runtime.status !== 'running'
-        && projection.runtime.status !== 'waiting_user'
-        && projection.runtime.status !== 'suspended'
-        && projection.runtime.status !== 'completed'
-      || getEvidenceMappingProgress === undefined) {
-      setMappingProgress(null)
+    progressInput.current = { projection, getEvidenceMappingProgress }
+  }, [projection, getEvidenceMappingProgress])
+
+  const mappingProgress = mappingSnapshot?.sessionId === sessionId
+    && progressStage === 'evidence_mapping'
+    && progressStatus !== 'pending'
+    && progressStatus !== 'waiting_start'
+    && (progressWorkId === null || mappingSnapshot.workId === progressWorkId)
+    ? mappingSnapshot.progress
+    : null
+
+  useEffect(() => {
+    if (isSubagent || !isBidSession
+      || progressStage !== 'evidence_mapping'
+      || progressStatus === 'pending'
+      || progressStatus === 'waiting_start'
+      || !progressReaderAvailable) {
+      setMappingSnapshot(null)
+      setMappingReadState('loading')
       return
     }
+
+    setMappingSnapshot(previous => previous !== null
+      && previous.sessionId === sessionId
+      && (progressWorkId === null || previous.workId === progressWorkId)
+      ? previous
+      : null)
+    setMappingReadState('loading')
+
     let active = true
-    const refresh = (): void => {
-      void getEvidenceMappingProgress().then((progress) => {
-        if (active) setMappingProgress(progress)
-      }).catch(() => {
-        if (active) setMappingProgress(null)
-      })
+    let inFlight = false
+    let timer: number | undefined
+
+    const refresh = async (): Promise<void> => {
+      if (!active || inFlight) return
+      window.clearTimeout(timer)
+      inFlight = true
+      const input = progressInput.current
+      const observed = input.projection
+      const read = input.getEvidenceMappingProgress
+
+      try {
+        if (observed === undefined || read === undefined) return
+        const progress = await read(observed)
+        if (!active) return
+
+        if (progress !== null) {
+          setMappingSnapshot(previous => ({
+            sessionId,
+            workId: observed.run?.work.workId ?? progressWorkId
+              ?? (previous?.sessionId === sessionId ? previous.workId : null),
+            progress,
+          }))
+          setMappingReadState('ready')
+        } else {
+          // A resync or temporarily absent log is not permission to erase progress.
+          setMappingReadState('loading')
+        }
+      } catch {
+        if (active) setMappingReadState('stale')
+      } finally {
+        inFlight = false
+        if (active) {
+          const status = progressInput.current.projection?.runtime.status
+          timer = window.setTimeout(() => { void refresh() }, status === 'running' ? 1000 : 5000)
+        }
+      }
     }
-    refresh()
-    const timer = projection.runtime.status === 'running' ? window.setInterval(refresh, 1000) : undefined
+
+    const refreshNow = (): void => { void refresh() }
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'visible') refreshNow()
+    }
+
+    refreshNow()
+    window.addEventListener('focus', refreshNow)
+    window.addEventListener('online', refreshNow)
+    document.addEventListener('visibilitychange', onVisibility)
+
     return () => {
       active = false
-      window.clearInterval(timer)
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', refreshNow)
+      window.removeEventListener('online', refreshNow)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [getEvidenceMappingProgress, isSubagent, projection])
+  }, [
+    sessionId, isSubagent, isBidSession, progressStage, progressStatus,
+    progressRunId, progressWorkId, progressReaderAvailable,
+  ])
 
   const blockedReason = useMemo(
     () => projection === undefined ? undefined : composerReason(projection, t),
@@ -614,8 +692,21 @@ export function BidStagePanel({
   const hostFailureIssues = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
     ? projection.runtime.failureIssues ?? []
     : []
-  const dotState = statusDot(projection.runtime.status)
+  const runCancelling = projection.run?.status === 'cancelling'
+  const progressSyncFailed = projection.runtime.stage === 'evidence_mapping'
+    && mappingReadState === 'stale'
+  const dotState = runCancelling || progressSyncFailed
+    ? 'warning'
+    : statusDot(projection.runtime.status)
   const displayStage = projection.runtime.stage === 'docx_export' ? 'chapter_writing' : projection.runtime.stage
+  const mappingActivelyRunning = projection.runtime.status === 'running' && !runCancelling
+  const mappingRunningLabel = runCancelling
+    ? 'mapping.tasks.settling'
+    : projection.runtime.status === 'suspended'
+      ? 'mapping.tasks.interrupted'
+      : mappingActivelyRunning
+        ? 'mapping.tasks.running'
+        : 'mapping.tasks.unfinished'
 
   const persistOperation = (operation: OutlineEditOperation): void => {
     if (applyOutlineDraftOperations === undefined) return
@@ -764,10 +855,27 @@ export function BidStagePanel({
             : <StateDot state={dotState} />}
           <span className={css.stage}>{t(stageKey(displayStage))}</span>
           <span className={css.message} role="status">
-            {t(promptKey(displayStage, projection.runtime.status))}
+            {runCancelling
+              ? t('prompt.stage_cancelling')
+              : t(promptKey(displayStage, projection.runtime.status))}
           </span>
-          <span className={css.runtimeStatus}>{t(statusKey(projection.runtime.status))}</span>
+          <span className={css.runtimeStatus}>
+            {runCancelling
+              ? t('status.cancelling')
+              : progressSyncFailed
+                ? t('status.sync_unavailable')
+                : t(statusKey(projection.runtime.status))}
+          </span>
         </div>
+
+        {projection.runtime.stage === 'evidence_mapping'
+          && mappingReadState !== 'ready' && (
+          <p className={css.agentStatus} role="status">
+            {mappingReadState === 'stale'
+              ? t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')
+              : t(mappingProgress === null ? 'mapping.sync_waiting' : 'mapping.sync_waiting_cached')}
+          </p>
+        )}
 
         {projection.runtime.status === 'suspended' && mainAgentRunning && (
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
@@ -794,7 +902,7 @@ export function BidStagePanel({
           <div
             className={css.mappingCard}
             role="status"
-            aria-label={t('mapping.progress', {
+            aria-label={t(mappingActivelyRunning ? 'mapping.progress' : 'mapping.progress_inactive', {
               total: mappingProgress.total,
               initial: mappingProgress.initial,
               supplemental: mappingProgress.supplemental,
@@ -804,7 +912,7 @@ export function BidStagePanel({
             })}
           >
             <span className={css.srOnly}>
-              {t('mapping.progress', {
+              {t(mappingActivelyRunning ? 'mapping.progress' : 'mapping.progress_inactive', {
                 total: mappingProgress.total,
                 initial: mappingProgress.initial,
                 supplemental: mappingProgress.supplemental,
@@ -830,9 +938,9 @@ export function BidStagePanel({
                   </span>
                 )}
                 {mappingProgress.running > 0 && (
-                  <span className={`${css.pill} ${css.pillRunning}`}>
-                    <span className={css.runningDot} />
-                    {t('mapping.tasks.running', { count: mappingProgress.running })}
+                  <span className={`${css.pill} ${mappingActivelyRunning ? css.pillRunning : css.pillPending}`}>
+                    {mappingActivelyRunning && <span className={css.runningDot} />}
+                    {t(mappingRunningLabel, { count: mappingProgress.running })}
                   </span>
                 )}
                 {mappingProgress.completed > 0 && (

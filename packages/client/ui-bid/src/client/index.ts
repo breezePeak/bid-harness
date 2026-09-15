@@ -6,7 +6,7 @@
  * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -83,7 +83,7 @@ export interface BidStagePanelInjected {
   /** Host outline-regeneration action, installed when the Bid action API is composed. */
   regenerateOutline?: (request: { feedback: string; expected_revision: number; expected_draft_sha256: string }) => Promise<void>
   /** Host S4 progress and tender-analysis review actions, installed when the Bid action API is composed. */
-  getEvidenceMappingProgress?: () => Promise<BidEvidenceMappingProgress | null>
+  getEvidenceMappingProgress?: (observed?: BidClientProjection) => Promise<BidEvidenceMappingProgress | null>
   getTenderAnalysisForConfirmation?: () => Promise<TenderAnalysisConfirmationView>
   /** Persist one S2 scoring item inclusion decision. */
   setTenderScoringSelection?: (scoringId: string, selected: boolean) => Promise<TenderAnalysisConfirmationView>
@@ -232,8 +232,8 @@ export function apply(ctx: ClientContext): void {
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
-      getEvidenceMappingProgress: async () => {
-        const result = await ctx.remote.bid.getEvidenceMappingProgress(sessionId)
+      getEvidenceMappingProgress: async (observed) => {
+        const result = await ctx.remote.bid.getEvidenceMappingProgress(sessionId, observed)
         if (!result.ok) throw actionFailure(result.error)
         return result.value
       },

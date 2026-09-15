@@ -11,6 +11,7 @@ import { realpathSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, extname, relative, resolve, sep } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
@@ -118,6 +119,7 @@ import type {
   BidChapterRevisionResult,
   BidChapterWritingGateErrorCode,
   BidChapterWritingGateResult,
+  BidClientProjection,
   BidControlState,
   BidEvidenceMappingProgress,
   BidDocxExportErrorCode,
@@ -1410,6 +1412,71 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       this.docxInFlight.delete(key)
     }
+  }
+
+  private async syncEvidenceMappingProjection(
+    session: Session,
+    workspace: BidWorkspace,
+    observed?: BidClientProjection,
+  ): Promise<{ runtime: BidRuntimeState; observedMatches: boolean }> {
+    const key = projectKey(session)
+    let selected: { control: BidControlState; revision: number } | undefined
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const active = this.inFlight.get(key)
+      if (active !== undefined) {
+        if (!active.ready) throw new Error('BID_PROGRESS_STATE_NOT_READY')
+        selected = {
+          control: bidSessionControlState(active.session),
+          revision: active.projectRevision,
+        }
+        break
+      }
+
+      const eventCount = session.events.length
+      const saved = await readBidProjectState(workspace)
+      if (this.inFlight.has(key) || session.events.length !== eventCount) continue
+
+      const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
+      const sessionRevision = resumed?.type === 'bid.project.resumed'
+        ? resumed.data.revision
+        : 0
+
+      // Equal revisions keep live Session events that may follow the checkpoint.
+      // Only a newer disk checkpoint replaces an already resumed Session.
+      selected = saved !== undefined && (resumed === undefined || saved.revision > sessionRevision)
+        ? {
+          control: {
+            workflow: saved.workflow,
+            run: saved.run,
+            lastRun: saved.last_run,
+          },
+          revision: saved.revision,
+        }
+        : { control: bidSessionControlState(session), revision: sessionRevision }
+      break
+    }
+
+    if (selected === undefined) throw new Error('BID_PROGRESS_STATE_CHANGED')
+
+    const { control, revision } = selected
+    const current = getBidClientProjection(control)
+    const observedMatches = observed === undefined || isDeepStrictEqual(
+      { workflow: observed.workflow, run: observed.run, runtime: observed.runtime },
+      { workflow: current.workflow, run: current.run, runtime: current.runtime },
+    )
+
+    if (!isDeepStrictEqual(bidSessionControlState(session), control) || !observedMatches) {
+      session.append('bid.project.resumed', {
+        workflow: control.workflow,
+        run: control.run,
+        lastRun: control.lastRun,
+        revision,
+      })
+      await this.ctx.sessions.flush(session)
+    }
+
+    return { runtime: current.runtime, observedMatches }
   }
 
   /** 在第一次异步操作前占用项目，直到落盘和所有执行器完成。 */
@@ -3383,13 +3450,18 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
    */
   @Remote('getEvidenceMappingProgress')
-  async getEvidenceMappingProgress(session: Session): Promise<BidEvidenceMappingProgress | null> {
+  async getEvidenceMappingProgress(
+    session: Session,
+    observed?: BidClientProjection,
+  ): Promise<BidEvidenceMappingProgress | null> {
     if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
-    const runtime = bidSessionRuntime(session)
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const { runtime, observedMatches } = await this.syncEvidenceMappingProjection(session, workspace, observed)
+    if (!observedMatches) return null
     if (runtime.stage !== 'evidence_mapping'
-      || runtime.status !== 'running' && runtime.status !== 'waiting_user'
-        && runtime.status !== 'suspended' && runtime.status !== 'completed') return null
-    return readEvidenceMappingProgress(new BidWorkspace(session.header.cwd, workspaceConfig(this.config)))
+      || runtime.status === 'pending'
+      || runtime.status === 'waiting_start') return null
+    return readEvidenceMappingProgress(workspace)
   }
 
   /**
