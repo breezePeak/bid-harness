@@ -86,7 +86,7 @@ const sectionTaskPatchSchema = z.object({
 /** Main Agent 首次建立完整 Writing Plan 时使用的输入协议。 */
 export const initialWritingPlanInputSchema = z.object({
   update_kind: z.literal('initial'),
-  user_message_refs: z.array(writingRequirementMessageRefSchema).min(1),
+  user_message_refs: z.array(writingRequirementMessageRefSchema),
   global_instructions: z.array(z.string().trim().min(1)).min(1),
   document_acceptance: z.array(acceptanceCriterionInputSchema),
   sections: z.array(sectionTaskInputSchema),

@@ -20,7 +20,7 @@ async function workspace(): Promise<BidWorkspace> {
   return { root, projectRoot: root, config: { font: '宋体', bodySize: 24, headingSize: 32 } } as BidWorkspace
 }
 
-async function template(): Promise<Buffer> {
+async function template(includeTableCaption = true, tableCaptionStyle?: string): Promise<Buffer> {
   const header = new Header({ children: [new Paragraph({ children: [
     new ImageRun({ data: pixel, type: 'png', transformation: { width: 12, height: 12 } }),
     new TextRun(' 固定页眉'),
@@ -43,7 +43,12 @@ async function template(): Promise<Buffer> {
   return Packer.toBuffer(new Document({ sections: [
     { headers: { default: header }, footers: { default: footer }, children: [paragraph('固定封面'), paragraph('{{正文}}')] },
     { properties: { page: { size: { orientation: 'landscape' } } }, headers: { default: header }, footers: { default: footer },
-      children: [paragraph('技术偏离表'), table, paragraph('固定说明')] },
+      children: [
+        ...(includeTableCaption ? [tableCaptionStyle === undefined
+          ? paragraph('技术偏离表')
+          : new Paragraph({ style: tableCaptionStyle, children: [new TextRun('技术偏离表')] })] : []),
+        table, paragraph('固定说明'),
+      ] },
   ] }))
 }
 
@@ -87,5 +92,34 @@ describe('DOCX 模板合成', () => {
     expect(templateMedia.length).toBeGreaterThan(0)
     for (const path of templateMedia) expect(await after.file(path)!.async('nodebuffer')).toEqual(await before.file(path)!.async('nodebuffer'))
     expect(Object.keys(after.files).filter(path => path.startsWith('word/media/dsh-'))).toHaveLength(1)
+  })
+
+  it('模板没有表题时把源表题移到目标表格上方并保留表前说明', async () => {
+    const original = await template(false)
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const markdown = '# 技术标\n\n表前说明。\n\n表 响应表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 完整响应 | 无偏离 |\n'
+    const result = await composeDocxFromTemplate(project, original, markdown, values)
+    const zip = await JSZip.loadAsync(result.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    const captionStart = document.indexOf('<w:pStyle w:val="DshTableCaption"/>')
+    const tableStart = document.indexOf('<w:tbl>')
+    expect(captionStart).toBeGreaterThan(-1)
+    expect(captionStart).toBeLessThan(tableStart)
+    expect(document.slice(captionStart, tableStart)).toContain('响应表')
+    expect(document.match(/响应表/gu)).toHaveLength(1)
+    expect(document).toContain('表前说明。')
+  })
+
+  it('模板已有明确表题时保留目标题注并删除重复源题注', async () => {
+    const original = await template(true, 'DshTableCaption')
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const markdown = '# 技术标\n\n表 响应表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 完整响应 | 无偏离 |\n'
+    const result = await composeDocxFromTemplate(project, original, markdown, values)
+    const zip = await JSZip.loadAsync(result.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    expect(document).not.toContain('响应表')
+    expect(document).toContain('技术偏离表')
   })
 })

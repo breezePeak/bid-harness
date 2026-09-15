@@ -25,6 +25,7 @@ export type ComposerSubmitHandler = (
   text: string,
   imageIds: readonly DraftAttachmentId[],
   signal: AbortSignal | undefined,
+  mode?: InputSubmitMode,
 ) => Promise<ComposerSubmitOutcome> | undefined
 
 /** 每个会话最多一个业务提交处理器，由注册方释放。 */

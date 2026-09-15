@@ -2317,4 +2317,32 @@ describe('chapter-writing executor', () => {
     expect((await validateChapterCandidate(workspace, context, candidate, [])).map(issue => issue.code))
       .toContain('CHAPTER_WRITING_INTERNAL_ID_VISIBLE')
   })
+
+  it('在 S5 提交校验入口拒绝没有表题的表格', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-table-caption-')))
+    await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
+      schema_version: 2, stage: 'evidence_mapping', sources: [],
+    }))
+    const section = outlineFixture().sections[1]!
+    const candidate: ChapterCandidate = {
+      section_id: section.id,
+      markdown: `# ${section.title}\n\n表内数据如下。\n\n| 表头 |\n| --- |\n| 内容 |`,
+      metadata: {
+        section_id: section.id,
+        covered_must_answer: section.must_answer,
+        covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+        covered_scoring_response_points: section.scoring_response_points,
+        local_materials_used: [],
+        web_materials_used: [],
+        additional_web_materials: [],
+        flowcharts: [],
+        unresolved_topics: [],
+        handoff: emptyHandoff(section.id),
+      },
+    }
+
+    expect((await validateChapterCandidate(workspace, emptyChapterContext(section), candidate, [])).map(issue => issue.code))
+      .toContain('CHAPTER_WRITING_TABLE_CAPTION_INVALID')
+  })
 })

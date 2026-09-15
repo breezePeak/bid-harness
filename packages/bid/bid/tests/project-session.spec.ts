@@ -1090,6 +1090,71 @@ describe('Workspace 项目与独立 Session', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('S4 未完成时 steer 在主聊天后续 step 接收且不取消运行', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('steer-during-s4')
+    const suspended = await readBidProjectState(workspace)
+    if (suspended?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 S4 Run')
+
+    const stageGate = Promise.withResolvers<never[]>()
+    void stageGate.promise.catch(() => {})
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = resumeRun(ctx, agent.session)
+    await vi.waitFor(() => {
+      expect(host.inFlight.size).toBe(1)
+      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
+    })
+    const beforeSteer = await readBidProjectState(workspace)
+    if (beforeSteer?.run?.status !== 'running') throw new Error('S4 Run 未进入运行态')
+    const active = host.inFlight.values().next().value as { controller: AbortController }
+    const requestStarted = Promise.withResolvers<undefined>()
+    const releaseChatStep = Promise.withResolvers<undefined>()
+    adapter.onRequest = () => { requestStarted.resolve(undefined) }
+    adapter.requestGate = releaseChatStep.promise
+    adapter.script.push(toolCall('bid_stage_inspect', { view: 'summary' }), answer('已在后续步骤接收插话。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '先开始多步检查。' }], source: { kind: 'user' } }))
+    await requestStarted.promise
+
+    const cancelEvents: unknown[] = []
+    const stopCancelCapture = ctx.on('agent/cancel-requested', (payload) => {
+      if (payload.agent === agent) cancelEvents.push(payload)
+    })
+    const admission = await ctx.serial('session/prompt-admission', {
+      session: agent.session,
+      mode: 'steer',
+      content: [{ type: 'text', text: '这条插话应在下一步接收。' }],
+    })
+    expect(admission).toBeUndefined()
+    agent.steer(createUserMessage({
+      content: [{ type: 'text', text: '这条插话应在下一步接收。' }],
+      source: { kind: 'user' },
+    }))
+    expect(cancelEvents).toHaveLength(0)
+    expect(agent.session.events.some(event => event.type === 'bid.run.cancelling')).toBe(false)
+
+    releaseChatStep.resolve(undefined)
+    await agent.whenIdle()
+    expect(JSON.stringify(agent.session.deriveMessages())).toContain('这条插话应在下一步接收。')
+    expect(adapter.script).toEqual([])
+    const duringSteer = await readBidProjectState(workspace)
+    expect(duringSteer?.run).toMatchObject({
+      runId: beforeSteer.run.runId,
+      work: { workId: beforeSteer.run.work.workId },
+      status: 'running',
+    })
+    expect(executeStage).toHaveBeenCalledOnce()
+    expect(active.controller.signal.aborted).toBe(false)
+
+    expect(agent.session.events.some(event => event.type === 'bid.run.cancelling')).toBe(false)
+    expect(cancelEvents).toHaveLength(0)
+    stopCancelCapture()
+    stageGate.resolve([])
+    await retry
+  })
+
   it.each(['tender_analysis', 'outline_generation'] as const)(
     '%s 运行任务未完成时任一项目聊天 Session 都能立即回答',
     async (stage: BidStage) => {

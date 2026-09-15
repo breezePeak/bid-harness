@@ -933,7 +933,7 @@ async function ensureWritingRequirementsRequested(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   const message = createUserMessage({
-    content: [{ type: 'text', text: '目录已确认。正式开始写作前，请在当前对话主动询问用户是否有额外写作要求；用户也可以回复“没有特殊要求，直接开始”。此时只询问，不得启动章节写作。' }],
+    content: [{ type: 'text', text: '目录已确认。正式开始写作前，请调用 ask_user_question，询问“开始正文编写前，是否还有其他整体写作要求？”，提供“没有，开始编写”选项并允许用户输入自定义要求。获取回答后，将其写入整体 Writing Plan 的 global_instructions；此时只询问，不得启动章节写作。' }],
     source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
   })
   const persisted = Promise.withResolvers<WritingRequirementMessageRef>()

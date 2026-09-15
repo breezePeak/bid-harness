@@ -38,11 +38,13 @@ export interface IConversation {
   /** 为有业务引用的输入注册专用提交动作。 */
   readonly submitHandlers: ComposerSubmitHandlers
   /**
-   * Send a prompt into the caller scope's session (queued turn).
+   * Send a prompt into the caller scope's session.
    * @param text - prompt text, sent verbatim as one text block.
-   * @returns completion; business failures reject (and land in promptError).
+   * @param mode - explicit queue/steer delivery; omitted for legacy queue delivery.
+   * @param signal - optional cancellation for Host admission.
+   * @returns admission completion; does not wait for model replies or stage completion.
    */
-  send(text: string): Promise<void>
+  send(text: string, mode?: InputSubmitMode, signal?: AbortSignal): Promise<void>
   /**
    * Apply one edit, remove, or strict steer operation to a pending queue occurrence.
    * @param itemId - agent-owned inbox occurrence identity.
@@ -156,10 +158,16 @@ export class ConversationController extends Service implements IConversation {
    * session snapshot's promptError (object-layer state); the rejection here
    * exists for caller choreography (the composer restores the draft on it).
    * @param text - prompt text, sent verbatim as one text block.
+   * @param mode - explicit queue/steer delivery; omitted for legacy queue delivery.
+   * @param signal - optional cancellation for Host admission.
    */
-  async send(text: string): Promise<void> {
+  async send(
+    text: string,
+    mode: InputSubmitMode = 'queue',
+    signal?: AbortSignal,
+  ): Promise<void> {
     const session = this.scopedSession('send')
-    const result = await session.prompt([{ type: 'text', text }], 'queue')
+    const result = await session.prompt([{ type: 'text', text }], mode, signal)
     if (!result.ok) throw new Error(`conversation.send failed: ${result.error.code}: ${result.error.message}`)
   }
 
@@ -179,7 +187,7 @@ export class ConversationController extends Service implements IConversation {
     mode: InputSubmitMode,
     signal?: AbortSignal,
   ): Promise<SubmitOutcome> {
-    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal)
+    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode)
     if (submitted !== undefined) return submitted
     const attachments = this.draftImages(imageIds)
     if (attachments.length !== imageIds.length) {

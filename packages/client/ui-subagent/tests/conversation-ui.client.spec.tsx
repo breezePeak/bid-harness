@@ -188,6 +188,22 @@ describe('SubagentHeaderLineage', () => {
     expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
   })
 
+  it('keeps summary-known running children visible beside catalog diagnostics', () => {
+    const missing = 'running-child' as SessionId
+    const input = props(catalog({ entries: [{
+      kind: 'diagnostic', id: CHILD, reason: 'corrupt',
+    }] }), {}, {
+      [CHILD]: { ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent', running: true },
+      [missing]: { ...summary(missing, 1), parentId: PARENT, origin: 'subagent', running: true },
+    })
+    render(<SubagentHeaderLineage {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: '2 个子代理，正在运行' }))
+
+    expect(screen.getByRole('heading', { name: '运行中（2）' })).toBeTruthy()
+    expect(screen.getAllByRole('treeitem', { name: '正在加载子代理' })).toHaveLength(2)
+    expect(screen.getByRole('treeitem', { name: /会话记录损坏/ })).toBeTruthy()
+  })
+
   it('moves a single catalog row between sections as activity changes without duplicates', () => {
     const activeEntry: ChildEntry = {
       kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',

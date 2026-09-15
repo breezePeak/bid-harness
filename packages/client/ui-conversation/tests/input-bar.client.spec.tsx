@@ -629,6 +629,21 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('running Send follows the busy-state preference and never invokes Stop', () => {
+    const { button, interruptButton, sink, stop } = bench({ running: true, busyEnter: 'steer', draft: '直接插话' })
+    fireEvent.click(button)
+    expect(sink).toHaveBeenCalledWith('直接插话', [], 'steer', expect.any(AbortSignal))
+    expect(stop).not.toHaveBeenCalled()
+    expect(interruptButton).not.toBeNull()
+  })
+
+  it('running with an empty draft exposes only the Stop action', () => {
+    const { view, button } = bench({ running: true })
+    expect(button.getAttribute('aria-label')).toBe('停止生成')
+    expect(view.getAllByRole('button', { name: '停止生成' })).toHaveLength(1)
+    expect(view.queryByRole('button', { name: '发送消息' })).toBeNull()
+  })
+
   it('running plain Enter follows the busy-state Steer preference', () => {
     const { textarea, sink } = bench({ running: true, busyEnter: 'steer', draft: '直接插话' })
     fireEvent.keyDown(textarea, { key: 'Enter' })

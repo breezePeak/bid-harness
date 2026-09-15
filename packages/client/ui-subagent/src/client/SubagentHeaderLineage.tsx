@@ -99,6 +99,24 @@ function catalogNodeCount(nodes: readonly CatalogTreeNode[]): number {
   return nodes.reduce((count, node) => count + 1 + catalogNodeCount(node.children), 0)
 }
 
+/** Count direct summary children not represented by the loaded catalog. */
+function missingSummaryCount(
+  parentSessionId: SessionId,
+  catalog: SubagentCatalogSnapshot | undefined,
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+  activity?: ChildCatalogEntry['activity'],
+): number {
+  const known = new Set(catalog?.entries
+    .filter(entry => entry.kind === 'child')
+    .map(entry => entry.id))
+  return Object.values(summaries).filter(summary => (
+    summary.origin === 'subagent'
+    && summary.parentId === parentSessionId
+    && !known.has(summary.id)
+    && (activity === undefined || summary.running === (activity === 'running'))
+  )).length
+}
+
 function diagnosticReason(
   entry: Extract<CatalogEntry, { kind: 'diagnostic' }>,
   t: TranslateNS<typeof NS>,
@@ -254,20 +272,26 @@ function SubagentSwitcherIcon() {
 
 /** Render the known direct-child shape while its authoritative catalog hydrates. */
 function CatalogLoadingRows({
-  parentSessionId,
-  summaries,
-  level,
-  t,
+  parentSessionId, catalog, summaries, level, activity, showEmptyNotice = false, t,
 }: {
   parentSessionId: SessionId
+  catalog?: SubagentCatalogSnapshot
   summaries: Readonly<Record<SessionId, SessionSummary>>
   level: number
+  activity?: ChildCatalogEntry['activity']
+  showEmptyNotice?: boolean
   t: TranslateNS<typeof NS>
 }) {
+  const known = new Set(catalog?.entries
+    .filter(entry => entry.kind === 'child')
+    .map(entry => entry.id))
   const children = Object.values(summaries).filter(summary => (
-    summary.origin === 'subagent' && summary.parentId === parentSessionId
+    summary.origin === 'subagent'
+    && summary.parentId === parentSessionId
+    && !known.has(summary.id)
+    && (activity === undefined || summary.running === (activity === 'running'))
   ))
-  if (children.length === 0) return <div className={css.notice}>{t('loading.label')}</div>
+  if (children.length === 0) return showEmptyNotice ? <div className={css.notice}>{t('loading.label')}</div> : null
   return children.map(summary => (
     <div key={summary.id} className={css.node}>
       <div
@@ -289,23 +313,30 @@ function CatalogLoadingRows({
 
 /** Render loading, failure, and diagnostic entries outside the two task groups. */
 function CatalogFeedback({
-  parentSessionId, catalog, summaries, level, refresh, t,
+  parentSessionId, catalog, summaries, level, activity, refresh, t,
 }: {
   parentSessionId: SessionId
   catalog: SubagentCatalogSnapshot
   summaries: Readonly<Record<SessionId, SessionSummary>>
   level: number
+  activity?: ChildCatalogEntry['activity']
   refresh: (parentSessionId: SessionId) => void
   t: TranslateNS<typeof NS>
 }) {
-  const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
+  const showLoading = (
+    (catalog.state === 'loading' && catalog.entries.length === 0)
+    || missingSummaryCount(parentSessionId, catalog, summaries, activity) > 0
+  )
   return (
     <>
-      {emptyLoading && (
+      {showLoading && (
         <CatalogLoadingRows
           parentSessionId={parentSessionId}
+          catalog={catalog}
           summaries={summaries}
           level={level}
+          {...(activity === undefined ? {} : { activity })}
+          showEmptyNotice={catalog.state === 'loading' && catalog.entries.length === 0}
           t={t}
         />
       )}
@@ -508,7 +539,13 @@ function CatalogRow({
             />
           )}
           {childCatalog === undefined && (
-            <CatalogLoadingRows parentSessionId={entry.id} summaries={summaries} level={level + 1} t={t} />
+            <CatalogLoadingRows
+              parentSessionId={entry.id}
+              summaries={summaries}
+              level={level + 1}
+              showEmptyNotice
+              t={t}
+            />
           )}
         </div>
       )}
@@ -645,7 +682,9 @@ function CatalogDropdown({
     [catalogs, rootSessionId],
   )
   const runningCount = catalogNodeCount(runningNodes)
+    + missingSummaryCount(rootSessionId, catalog, summaries, 'running')
   const historyCount = catalogNodeCount(historyNodes)
+    + missingSummaryCount(rootSessionId, catalog, summaries, 'inactive')
 
   useEffect(() => {
     if (
@@ -919,6 +958,14 @@ function CatalogDropdown({
                   closeCatalog={() => { changeOpen(false) }}
                   t={t}
                 />
+                <CatalogLoadingRows
+                  parentSessionId={rootSessionId}
+                  {...(catalog === undefined ? {} : { catalog })}
+                  summaries={summaries}
+                  level={1}
+                  activity="running"
+                  t={t}
+                />
               </div>
             </section>
           )}
@@ -944,6 +991,7 @@ function CatalogDropdown({
                 catalog={presentedCatalog}
                 summaries={summaries}
                 level={1}
+                activity="inactive"
                 refresh={refresh}
                 t={t}
               />

@@ -63,7 +63,7 @@ export interface ChapterWritingPageEstimate extends PageEstimateResult {
 }
 
 /** 正式 Renderer 的版本；影响分页的生成规则变化时递增。 */
-export const DOCX_PAGE_RENDERER_VERSION = 1
+export const DOCX_PAGE_RENDERER_VERSION = 2
 
 /** 测试可替换 PDF 转换器；生产环境默认调用本机 LibreOffice headless。 */
 export interface RenderedPageEstimateOptions {

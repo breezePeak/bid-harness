@@ -48,6 +48,7 @@ describe('ConversationController', () => {
     b.shell.setDraft('仅修改引用段落')
     b.shell.submit()
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
+    expect(handler).toHaveBeenCalledWith('仅修改引用段落', [], expect.any(AbortSignal), 'queue')
     expect(b.prompt).not.toHaveBeenCalled()
     pending.reject(new Error('正文已更新，请重新选择。'))
     await vi.waitFor(() => {
@@ -94,10 +95,37 @@ describe('ConversationController', () => {
     await b.scoped.updateQueue('item-1' as never, { kind: 'remove' })
     await b.scoped.cancel()
     await b.scoped.loadOlder()
-    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue')
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', undefined)
     expect(b.updateQueue).toHaveBeenCalledWith('item-1', { kind: 'remove' })
     expect(b.cancel).toHaveBeenCalledOnce()
     expect(b.loadOlder).toHaveBeenCalledOnce()
+    await b.runtime.dispose()
+  })
+
+  it('send forwards explicit steer and signal and resolves at prompt admission', async () => {
+    const b = await bench()
+    const signal = new AbortController().signal
+    await b.scoped.send('插话消息', 'steer', signal)
+    expect(b.prompt).toHaveBeenCalledTimes(1)
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '插话消息' }], 'steer', signal)
+    await b.runtime.dispose()
+  })
+
+  it('sendSession forwards mode and signal to a business submitter without ordinary fallback', async () => {
+    const b = await bench()
+    const sessionId = b.runtime.sessions.behavior('s1').sessionId
+    const signal = new AbortController().signal
+    const handler = vi.fn((_text: string, _imageIds: readonly unknown[], receivedSignal: AbortSignal | undefined, mode?: 'queue' | 'steer') => {
+      expect(receivedSignal).toBe(signal)
+      expect(mode).toBe('steer')
+      return Promise.resolve({ kind: 'success' as const })
+    })
+    const dispose = b.root.submitHandlers.register(sessionId, handler)
+    b.shell.setDraft('业务插话')
+    b.shell.submit('steer')
+    await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
+    expect(b.prompt).not.toHaveBeenCalled()
+    dispose()
     await b.runtime.dispose()
   })
 

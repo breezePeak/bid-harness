@@ -560,22 +560,18 @@ export function InputBar({
     if (el !== null) toggleCommandMenu?.(selectionOf(el))
   }
 
-  // An ordinary running session keeps Stop as the only primary action while
-  // the draft is empty. Once the user has typed a follow-up, Send becomes the
-  // primary action and Stop stays beside it, so pointer users do not have to
-  // discover that Enter queues the message.
+  // Keep sending available while busy whenever the draft has content.
+  // Stop remains a separate composer action; sending never invokes it.
   const primaryStops = running && subagent === null && empty
-  const stopBesideSend = running && subagent === null && !primaryStops
-  const interruptible = running && continuable
+  const interruptible = running && (continuable || (subagent === null && !empty))
   const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
   const onPrimary = (): void => {
     if (primaryStops) {
       stop?.()
       return
     }
-    if (inputActions === undefined) return // absent machine: the button is disabled
-    /* v8 ignore next -- defensive: the primary button is disabled while empty||disabled, so a click cannot reach the false arm. */
-    if (!empty && !disabled && !machineBusy) inputActions.submit()
+    if (keyboard === undefined || empty || disabled || machineBusy) return
+    keyboard.submit(resolveSubmitMode(running, 'enter', subagent === null))
   }
 
   // The Access seat: the projection-fed permission chip (renders nothing
@@ -799,7 +795,7 @@ export function InputBar({
             {rightItems}
             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             <ContextMeter useProjection={useProjection} t={t} />
-            {(interruptible || stopBesideSend) && (
+            {interruptible && (
               <Tooltip label={t('input.stop')} side="top" delayMs={500}>
                 <button
                   type="button"

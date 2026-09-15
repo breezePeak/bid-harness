@@ -73,6 +73,10 @@ describe('S5 通用写作任务契约', () => {
   it('Main Agent 只提交真实消息引用和语义契约，Host 字段不出现在工具输入中', () => {
     const prompt = renderStageInteractionPrompt('chapter_writing')
     expect(prompt).toContain('user_message_refs')
+    expect(prompt).toContain('ask_user_question')
+    expect(prompt).toContain('开始正文编写前，是否还有其他整体写作要求？')
+    expect(prompt).toContain('没有，开始编写')
+    expect(prompt).toContain('global_instructions')
     expect(prompt).toContain('条件 ID、作用域、计划版本和执行状态由 Host 生成')
     expect(prompt).toContain('update_kind=patch')
     const input = inputFixture()
@@ -83,6 +87,14 @@ describe('S5 通用写作任务契约', () => {
       ...input,
       document_acceptance: [{ ...semantic('正式表达。'), id: 'MODEL-ID' }],
     })).toThrow()
+  })
+
+  it('原生问答直接开始时允许首次计划没有传统用户消息引用', () => {
+    const input = inputFixture()
+    input.user_message_refs = []
+    const parsed = stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input })
+    expect(parsed).toMatchObject({ action: 'bid_confirm_writing_plan', user_message_refs: [] })
+    expect(validateWritingPlanInput(input, outlineFixture())).toEqual([])
   })
 
   it('不同自然语言要求使用同一任务与验收协议', () => {

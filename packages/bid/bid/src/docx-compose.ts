@@ -109,6 +109,11 @@ interface TableInfo {
   editable: LogicalCell[]
 }
 
+interface FilledTemplateTables {
+  consumed: Map<XmlNode, XmlNode>
+  movedCaptions: XmlNode[]
+}
+
 function tableInfo(node: XmlNode): TableInfo | undefined {
   const rows = children(node, 'tr')
   if (rows.length === 0) return undefined
@@ -247,12 +252,53 @@ function tableScore(target: TableInfo, source: TableInfo): number {
   return editableMatches === 0 ? -1 : editableMatches * 10 + shared
 }
 
-function fillTemplateTables(templateBody: XmlNode, sourceElements: XmlNode[]): Set<XmlNode> {
+function siblingLocation(root: XmlNode, target: XmlNode): { parent: XmlNode; index: number } | undefined {
+  const elements = root.elements ?? []
+  const index = elements.indexOf(target)
+  if (index >= 0) return { parent: root, index }
+  for (const element of elements) {
+    const found = siblingLocation(element, target)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+function previousSibling(root: XmlNode, target: XmlNode): XmlNode | undefined {
+  const location = siblingLocation(root, target)
+  return location === undefined || location.index === 0 ? undefined : location.parent.elements?.[location.index - 1]
+}
+
+function insertBefore(root: XmlNode, target: XmlNode, value: XmlNode): void {
+  const location = siblingLocation(root, target)
+  if (location === undefined) throw new Error('DOCX 模板表格不在正文结构中。')
+  location.parent.elements = [...(location.parent.elements ?? []).slice(0, location.index), value,
+    ...(location.parent.elements ?? []).slice(location.index)]
+}
+
+function paragraphStyleIds(node: XmlNode): string[] {
+  return children(child(node, 'pPr') ?? {}, 'pStyle').flatMap((style) => {
+    const value = attr(style, 'val')
+    return value === undefined ? [] : [value]
+  })
+}
+
+function isTableCaptionParagraph(node: XmlNode | undefined, mapping: DocxFormatInterpretation['mapping']): node is XmlNode {
+  if (node === undefined || local(node.name) !== 'p' || text(node).trim() === '') return false
+  const tableCaptionStyle = mapping.tableCaption
+  return paragraphStyleIds(node).some(style => style === 'DshTableCaption' || style === tableCaptionStyle)
+}
+
+function fillTemplateTables(
+  templateBody: XmlNode,
+  sourceElements: XmlNode[],
+  mapping: DocxFormatInterpretation['mapping'],
+): FilledTemplateTables {
   const targets = descendants(templateBody, 'tbl').map(tableInfo).filter((item): item is TableInfo => item !== undefined)
   const sources = sourceElements.flatMap(element => descendants({ elements: [element] }, 'tbl'))
     .map(tableInfo).filter((item): item is TableInfo => item !== undefined)
   const unusedSources = new Set(sources)
-  const consumed = new Set<XmlNode>()
+  const consumed = new Map<XmlNode, XmlNode>()
+  const movedCaptions: XmlNode[] = []
   for (const target of targets) {
     const source = [...unusedSources].map(candidate => ({ candidate, score: tableScore(target, candidate) }))
       .sort((left, right) => right.score - left.score)[0]
@@ -274,14 +320,24 @@ function fillTemplateTables(templateBody: XmlNode, sourceElements: XmlNode[]): S
       }
     }
     unusedSources.delete(source.candidate)
-    if (sourceRows.size === 0) consumed.add(source.candidate.node)
+    if (sourceRows.size === 0) {
+      consumed.set(source.candidate.node, target.node)
+      const sourceIndex = sourceElements.indexOf(source.candidate.node)
+      const sourceCaption = sourceIndex <= 0 ? undefined : sourceElements[sourceIndex - 1]
+      if (isTableCaptionParagraph(sourceCaption, { tableCaption: 'DshTableCaption' })) {
+        if (!isTableCaptionParagraph(previousSibling(templateBody, target.node), mapping)) {
+          insertBefore(templateBody, target.node, sourceCaption)
+          movedCaptions.push(sourceCaption)
+        }
+      }
+    }
   }
-  return consumed
+  return { consumed, movedCaptions }
 }
 
-function removeConsumedBlocks(elements: XmlNode[], consumed: Set<XmlNode>): XmlNode[] {
+function removeConsumedBlocks(elements: XmlNode[], consumed: Map<XmlNode, XmlNode>): XmlNode[] {
   const omitted = new Set<number>()
-  for (const table of consumed) {
+  for (const table of consumed.keys()) {
     const index = elements.indexOf(table)
     if (index < 0) continue
     omitted.add(index)
@@ -547,13 +603,15 @@ export async function applyTemplateContent(
   const targetBody = documentBody(targetDocument)
   const sourceBody = documentBody(sourceDocument)
   const sourceElements = (sourceBody.elements ?? []).filter(node => local(node.name) !== 'sectPr')
-  const inserted = removeConsumedBlocks(sourceElements, fillTemplateTables(targetBody, sourceElements))
+  const filled = fillTemplateTables(targetBody, sourceElements, mapping)
+  const inserted = removeConsumedBlocks(sourceElements, filled.consumed)
+  const merged = [...inserted, ...filled.movedCaptions]
   await mergeStyles(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
-    targetRelationships, sourceRelationships, inserted, mapping)
+    targetRelationships, sourceRelationships, merged, mapping)
   await mergeNumbering(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
-    targetRelationships, sourceRelationships, inserted)
+    targetRelationships, sourceRelationships, merged)
   await mergeBodyRelationships(targetZip, sourceZip, targetRelationships, sourceRelationships,
-    targetContentTypes, sourceContentTypes, inserted)
+    targetContentTypes, sourceContentTypes, merged)
   insertBody(targetBody, inserted)
   clearTableParagraphFirstLineIndent(targetBody)
   targetZip.file('word/document.xml', js2xml(targetDocument, { compact: false }))

@@ -63,7 +63,7 @@ Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包
 
 普通消息只由模型判断问答、受控修改或恢复，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。Main Agent 检查挂起状态后，可携带精确 Run ID 与项目 revision 调用 `bid_resume_current_run`。
 
-S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，Main Agent 在当前对话询问整体写作要求；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录、S4 Blueprint 与 Evidence 解释自然语言要求，只追问影响执行的歧义或冲突，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
+S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，唤醒 Main Agent 调用原生 `ask_user_question` 询问“开始正文编写前，是否还有其他整体写作要求？”，并提供“没有，开始编写”及自定义输入；刷新或换 Session 不会重复询问，也不会启动 Writer。Main Agent 结合招标要求、确认目录、S4 Blueprint 与 Evidence 解释原生问答答案，只追问影响执行的歧义或冲突，并将整体要求写入 `global_instructions`，获得确认或直接开始授权后通过 `bid_confirm_writing_plan` 保存用户原话及 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
 
 全自动模式只在 `chapter_writing/waiting_user` 调用 `auto_start_chapter_writing`。Host 读取最终确认目录，生成覆盖全部可写叶节且 `user_message_refs`、`user_requirements` 均为空的 schema v3 默认 Writing Plan，运行 `validateWritingPlan()` 后原子写入，并追加既有确认事件；正文仍由 `runConfirmedStage()` 启动。该路径不创建询问标记、不伪造用户原话，也不直接伪造阶段启动事件。确认模式只由客户端 Session store 持有；Host 仍拒绝在 `failed`、`waiting_start` 或其他阶段状态调用自动启动。
 

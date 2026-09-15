@@ -9,22 +9,67 @@ import type { FormatValues } from './docx-format-contract.ts'
 
 function markdownText(node: Nodes): string {
   if (node.type === 'text' || node.type === 'inlineCode') return node.value
+  if (node.type === 'break') return '\n'
   return 'children' in node ? node.children.map(markdownText).join('') : ''
 }
 
-/** 识别 S5 尚未编号的表题；正式编号由 DOCX/HTML 按正文顺序补入。 */
-export function isTableCaptionText(value: string): boolean {
-  return /^\s*表格?\s*(?:(?:\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)\s*)?\S/u.test(value)
+/** 表题正文及其输入前缀在原始 Markdown 中占用的字符数。 */
+export interface ParsedTableCaption {
+  title: string
+  prefixLength: number
 }
 
-/** 找出没有紧邻表格上方显式表题的 Markdown 表格。 */
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+const captionNumeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
+const captionBoundary = '[\\s:：、.．\\-]'
+
+function tableCaptionMarker(labels: readonly string[]): RegExp {
+  const alternatives = [...new Set(labels)].filter(Boolean).sort((left, right) => right.length - left.length).map(escapeRegExp).join('|')
+  return new RegExp(`^\\s*(?:${alternatives})(?:(?:\\s*${captionNumeral})(?=${captionBoundary})[\\s:：、.．\\-]*|[\\s:：、])[\\S]`, 'u')
+}
+
+function parseTableCaptionWithLabels(value: string, labels: readonly string[]): ParsedTableCaption | undefined {
+  if (/[\r\n]/u.test(value)) return undefined
+  const marker = tableCaptionMarker(labels)
+  const match = marker.exec(value)
+  if (match === null) return undefined
+  const prefixLength = match[0].length - 1
+  return { title: value.slice(prefixLength).trim(), prefixLength }
+}
+
+/**
+ * 解析紧邻表格上方的标准表题。
+ * @param value Markdown 段落文本。
+ * @param prefix 当前模板使用的表题前缀；标准的“表”和“表格”始终有效。
+ * @returns 完整标题及应移除的前缀长度；非独立单行表题返回 undefined。
+ */
+export function parseTableCaption(value: string, prefix = ''): ParsedTableCaption | undefined {
+  return parseTableCaptionWithLabels(value, [prefix, '表', '表格'])
+}
+
+/**
+ * 识别 S5 尚未编号的表题；正式编号由 DOCX/HTML 按正文顺序补入。
+ * @param value Markdown 段落文本。
+ * @returns 是否为合法的独立表题。
+ */
+export function isTableCaptionText(value: string): boolean {
+  return parseTableCaption(value) !== undefined
+}
+
+/**
+ * 找出没有紧邻表格上方显式表题的 Markdown 表格。
+ * @param markdown Markdown 正文。
+ * @returns 缺题表格的起始行号。
+ */
 export function missingTableCaptionLines(markdown: string): number[] {
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
   const missing: number[] = []
   const visit = (nodes: readonly Nodes[]): void => {
     for (const [index, node] of nodes.entries()) {
       const previous = nodes[index - 1]
-      if (node.type === 'table' && (previous?.type !== 'paragraph' || !isTableCaptionText(markdownText(previous))))
+      if (node.type === 'table' && (previous?.type !== 'paragraph'
+        || previous.position?.start.line !== previous.position?.end.line
+        || !isTableCaptionText(markdownText(previous))))
         missing.push(node.position?.start.line ?? 0)
       if ('children' in node) visit(node.children)
     }
@@ -39,16 +84,16 @@ export function missingTableCaptionLines(markdown: string): number[] {
  * @returns 该角色的题注标记正则。
  */
 export function captionMarker(values: FormatValues, role: 'figureCaption' | 'tableCaption'): RegExp {
-  const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-  const prefix = escaped(String(values[`${role}.numbering.prefix`]))
+  if (role === 'tableCaption')
+    return tableCaptionMarker([String(values['tableCaption.numbering.prefix']), '表', '表格'])
   const prefixSeparator = String(values[`${role}.numbering.prefixIndexSeparator`])
   const titleSeparator = String(values[`${role}.numbering.indexTitleSeparator`])
-  const beforeNumber = prefixSeparator.trim() ? escaped(prefixSeparator) : '\\s*'
-  const afterNumber = titleSeparator.trim() ? escaped(titleSeparator) : '\\s*'
-  const numeral = '(?:\\d+|[A-Za-z]{1,3}|[一二三四五六七八九十百千]+)'
-  const labels = [...new Set([prefix, role === 'tableCaption' ? '表' : '图', ...(role === 'tableCaption' ? ['表格'] : [])])].filter(Boolean)
-  const withoutNumber = labels.map(label => titleSeparator ? `${escaped(label)}${escaped(titleSeparator)}` : `${escaped(label)}\\s+`).join('|')
-  const markers = labels.map(escaped).join('|')
+  const beforeNumber = prefixSeparator.trim() ? escapeRegExp(prefixSeparator) : '\\s*'
+  const afterNumber = titleSeparator.trim() ? escapeRegExp(titleSeparator) : '\\s*'
+  const numeral = captionNumeral
+  const labels = [...new Set([String(values[`${role}.numbering.prefix`]), '图'])].filter(Boolean)
+  const withoutNumber = labels.map(label => titleSeparator ? `${escapeRegExp(label)}${escapeRegExp(titleSeparator)}` : `${escapeRegExp(label)}\\s+`).join('|')
+  const markers = labels.map(escapeRegExp).join('|')
   return new RegExp(`^\\s*(?:(?:${markers})${beforeNumber}${numeral}${afterNumber}|${withoutNumber})`, 'u')
 }
 
@@ -59,6 +104,7 @@ export function captionMarker(values: FormatValues, role: 'figureCaption' | 'tab
  */
 export function captionRole(values: FormatValues, value: string): 'figureCaption' | 'tableCaption' | undefined {
   return (['figureCaption', 'tableCaption'] as const).find((role) => {
+    if (role === 'tableCaption') return parseTableCaption(value, String(values['tableCaption.numbering.prefix'])) !== undefined
     if (!String(values[`${role}.numbering.prefix`])) return false
     return captionMarker(values, role).test(value)
   })

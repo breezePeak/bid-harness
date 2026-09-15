@@ -292,8 +292,6 @@ export function BidStagePanel({
 
   const mappingProgress = mappingSnapshot?.sessionId === sessionId
     && progressStage === 'evidence_mapping'
-    && progressStatus !== 'pending'
-    && progressStatus !== 'waiting_start'
     && (progressWorkId === null || mappingSnapshot.workId === progressWorkId)
     ? mappingSnapshot.progress
     : null
@@ -301,8 +299,6 @@ export function BidStagePanel({
   useEffect(() => {
     if (isSubagent || !isBidSession
       || progressStage !== 'evidence_mapping'
-      || progressStatus === 'pending'
-      || progressStatus === 'waiting_start'
       || !progressReaderAvailable) {
       setMappingSnapshot(null)
       setMappingReadState('loading')
@@ -839,8 +835,19 @@ export function BidStagePanel({
     </div>
   ) : null
 
-  const mappingPercent = mappingProgress !== null && mappingProgress.total > 0
-    ? Math.min(100, Math.round((mappingProgress.completed / mappingProgress.total) * 100))
+  const visibleMappingProgress = mappingProgress ?? {
+    total: 0,
+    initial: 0,
+    supplemental: 0,
+    completed: 0,
+    running: 0,
+    not_started: 0,
+    failed: 0,
+    failed_section_ids: [],
+  }
+  const showMappingProgress = isBidSession && !isSubagent && projection.runtime.stage === 'evidence_mapping'
+  const mappingPercent = visibleMappingProgress.total > 0
+    ? Math.min(100, Math.round((visibleMappingProgress.completed / visibleMappingProgress.total) * 100))
     : 0
   const queuedFiles: readonly (SelectedFile | SelectedTemplate)[] = selectedTemplate === null
     ? selectedFiles
@@ -898,64 +905,64 @@ export function BidStagePanel({
           </div>
         )}
 
-        {mappingProgress !== null && (
+        {showMappingProgress && (
           <div
             className={css.mappingCard}
             role="status"
             aria-label={t(mappingActivelyRunning ? 'mapping.progress' : 'mapping.progress_inactive', {
-              total: mappingProgress.total,
-              initial: mappingProgress.initial,
-              supplemental: mappingProgress.supplemental,
-              completed: mappingProgress.completed,
-              running: mappingProgress.running,
-              notStarted: mappingProgress.not_started,
+              total: visibleMappingProgress.total,
+              initial: visibleMappingProgress.initial,
+              supplemental: visibleMappingProgress.supplemental,
+              completed: visibleMappingProgress.completed,
+              running: visibleMappingProgress.running,
+              notStarted: visibleMappingProgress.not_started,
             })}
           >
             <span className={css.srOnly}>
               {t(mappingActivelyRunning ? 'mapping.progress' : 'mapping.progress_inactive', {
-                total: mappingProgress.total,
-                initial: mappingProgress.initial,
-                supplemental: mappingProgress.supplemental,
-                completed: mappingProgress.completed,
-                running: mappingProgress.running,
-                notStarted: mappingProgress.not_started,
+                total: visibleMappingProgress.total,
+                initial: visibleMappingProgress.initial,
+                supplemental: visibleMappingProgress.supplemental,
+                completed: visibleMappingProgress.completed,
+                running: visibleMappingProgress.running,
+                notStarted: visibleMappingProgress.not_started,
               })}
             </span>
             <div className={css.mappingHeader}>
               <div className={css.mappingTitleGroup}>
                 <span className={css.mappingTitle}>{t('mapping.tasks.title')}</span>
                 <span className={css.mappingRatio}>
-                  {mappingProgress.completed} / {mappingProgress.total} ({mappingPercent}%)
+                  {visibleMappingProgress.completed} / {visibleMappingProgress.total} ({mappingPercent}%)
                 </span>
               </div>
               <div className={css.mappingPills}>
                 <span className={`${css.pill} ${css.pillDefault}`}>
-                  {t('mapping.tasks.initial', { count: mappingProgress.initial })}
+                  {t('mapping.tasks.initial', { count: visibleMappingProgress.initial })}
                 </span>
-                {mappingProgress.supplemental > 0 && (
+                {visibleMappingProgress.supplemental > 0 && (
                   <span className={`${css.pill} ${css.pillDefault}`}>
-                    {t('mapping.tasks.supplemental', { count: mappingProgress.supplemental })}
+                    {t('mapping.tasks.supplemental', { count: visibleMappingProgress.supplemental })}
                   </span>
                 )}
-                {mappingProgress.running > 0 && (
+                {visibleMappingProgress.running > 0 && (
                   <span className={`${css.pill} ${mappingActivelyRunning ? css.pillRunning : css.pillPending}`}>
                     {mappingActivelyRunning && <span className={css.runningDot} />}
-                    {t(mappingRunningLabel, { count: mappingProgress.running })}
+                    {t(mappingRunningLabel, { count: visibleMappingProgress.running })}
                   </span>
                 )}
-                {mappingProgress.completed > 0 && (
+                {visibleMappingProgress.completed > 0 && (
                   <span className={`${css.pill} ${css.pillCompleted}`}>
-                    {t('mapping.tasks.completed', { count: mappingProgress.completed })}
+                    {t('mapping.tasks.completed', { count: visibleMappingProgress.completed })}
                   </span>
                 )}
-                {mappingProgress.not_started > 0 && (
+                {visibleMappingProgress.not_started > 0 && (
                   <span className={`${css.pill} ${css.pillPending}`}>
-                    {t('mapping.tasks.not_started', { count: mappingProgress.not_started })}
+                    {t('mapping.tasks.not_started', { count: visibleMappingProgress.not_started })}
                   </span>
                 )}
-                {mappingProgress.failed > 0 && (
+                {visibleMappingProgress.failed > 0 && (
                   <span className={`${css.pill} ${css.pillFailed}`}>
-                    {t('mapping.tasks.failed', { count: mappingProgress.failed })}
+                    {t('mapping.tasks.failed', { count: visibleMappingProgress.failed })}
                   </span>
                 )}
               </div>
@@ -966,9 +973,9 @@ export function BidStagePanel({
                 style={{ width: `${mappingPercent}%` }}
               />
             </div>
-            {mappingProgress.failed_section_ids.length > 0 && (
+            {visibleMappingProgress.failed_section_ids.length > 0 && (
               <p className={css.mappingFailureSections}>
-                {t('mapping.failed_sections', { sections: mappingProgress.failed_section_ids.join('、') })}
+                {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
               </p>
             )}
           </div>

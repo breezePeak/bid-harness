@@ -156,10 +156,10 @@ export function apply(ctx: ClientContext): void {
     store: revisionStore,
     inject: (sessionId: SessionId) => ({
       getChapter: (sectionId: string) => getChapter(sessionId, sectionId),
-      sendMessage: (text: string) => {
+      sendMessage: (text: string, mode: 'queue' | 'steer' = 'queue', signal?: AbortSignal) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
-        return conversation.send(text)
+        return conversation.send(text, mode, signal)
       },
       registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
         ctx.conversation.submitHandlers.register(sessionId, handler),
@@ -219,8 +219,9 @@ export function apply(ctx: ClientContext): void {
         if (!result.value.ok) throw actionFailure(result.value.error ?? { code: 'BID_STAGE_START_FAILED', message: '阶段启动失败。' })
       },
       resumeRun: () => {
-        const conversation = ctx.sessions.scope(sessionId)?.get('conversation') as { send?: (text: string) => Promise<void> } | undefined
-        return conversation?.send?.('继续未完成任务。') ?? Promise.reject(new Error('当前会话不可用。'))
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        return conversation?.send('继续未完成任务。', 'steer')
+          ?? Promise.reject(new Error('当前会话不可用。'))
       },
       requestWritingRequirements: async () => {
         const result = await ctx.remote.bid.requestWritingRequirements(sessionId)

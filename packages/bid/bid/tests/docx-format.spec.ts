@@ -15,7 +15,7 @@ import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from '../src/do
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
 import { suggestDocxFormat, validateFormatSuggestion } from '../src/docx-format-suggestions.ts'
-import { createCaptionNumberer, createHeadingNumberer, missingTableCaptionLines } from '../src/docx-numbering.ts'
+import { createCaptionNumberer, createHeadingNumberer, missingTableCaptionLines, parseTableCaption } from '../src/docx-numbering.ts'
 
 const defaults = { font: '宋体', bodySize: 24, headingSize: 32 }
 async function workspace(): Promise<BidWorkspace> {
@@ -360,6 +360,27 @@ describe('项目 Word 格式链路', () => {
     expect(missingTableCaptionLines('| 表头 |\n| --- |\n| 内容 |')).toEqual([1])
     expect(missingTableCaptionLines('表 技术偏离表\n\n| 表头 |\n| --- |\n| 内容 |')).toEqual([])
     expect(missingTableCaptionLines('表 技术偏离表\n\n> | 表头 |\n> | --- |\n> | 内容 |')).toEqual([3])
+    expect(missingTableCaptionLines('表内数据如下。\n\n| 表头 |\n| --- |\n| 内容 |')).toEqual([3])
+    expect(missingTableCaptionLines('表\n\n| 表头 |\n| --- |\n| 内容 |')).toEqual([3])
+    expect(missingTableCaptionLines('表 标题\n说明\n\n| 表头 |\n| --- |\n| 内容 |')).toEqual([4])
+    expect(parseTableCaption('表 三维成果清单')).toMatchObject({ title: '三维成果清单', prefixLength: 2 })
+    expect(parseTableCaption('表 GIS数据清单')).toMatchObject({ title: 'GIS数据清单', prefixLength: 2 })
+    expect(parseTableCaption('表 1 技术偏离表')).toMatchObject({ title: '技术偏离表', prefixLength: 4 })
+  })
+
+  it('表题保留中文及英文开头，模板分隔符只影响生成编号', async () => {
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    const table = '| 表头 |\n| --- |\n| 内容 |'
+    const rendered = await renderDocx(project,
+      `表 三维成果清单\n\n${table}\n\n表 GIS数据清单\n\n${table}`, values)
+    expect(rendered.html).toContain('表1 三维成果清单</p><table')
+    expect(rendered.html).toContain('表2 GIS数据清单</p><table')
+
+    values['tableCaption.numbering.prefixIndexSeparator'] = '：'
+    values['tableCaption.numbering.indexTitleSeparator'] = '：'
+    const separated = await renderDocx(project, `表 技术偏离表\n\n${table}`, values)
+    expect(separated.html).toContain('表：1：技术偏离表</p><table')
   })
 
   it('自动模型请求包含实际模板正文和多角色候选并记录到会话', async () => {

@@ -24,7 +24,7 @@ import { Document,
 import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
-import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
+import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, parseTableCaption, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
 import { flowchartPlaceholder, renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
 type Node = {
   type: string
@@ -79,8 +79,8 @@ function splitDocumentSections(nodes: Node[]): Array<{ landscape: boolean; nodes
   flush()
   return sections
 }
-function withoutLeadingText(nodes: Node[], marker: RegExp): Node[] {
-  let remaining = marker.exec(nodes.map(content).join(''))?.[0].length ?? 0
+function withoutLeadingText(nodes: Node[], marker: RegExp | number): Node[] {
+  let remaining = typeof marker === 'number' ? marker : marker.exec(nodes.map(content).join(''))?.[0].length ?? 0
   const visit = (items: Node[]): Node[] => items.map((node) => {
     if (!remaining) return node
     if (node.value !== undefined) {
@@ -310,6 +310,9 @@ export async function renderDocx(
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
         const caption = node.type === 'paragraph' ? captionRole(values, content(node)) : undefined
         const tableCaption = caption === 'tableCaption' && nodes[index + 1]?.type === 'table'
+        const parsedTableCaption = tableCaption
+          ? parseTableCaption(content(node), String(values['tableCaption.numbering.prefix']))
+          : undefined
         const role = node.type === 'heading' ? node.depth === 1 && node === root.children[0] ? 'title' : `heading${node.depth ?? 1}`
           : node.type === 'paragraph' ? caption === 'tableCaption' ? tableCaption ? 'tableCaption' : 'body' : caption ?? 'body' : 'body'
         let contents: Node[] = node.type === 'code' ? [{ type: 'text', value: node.value ?? '' }] : node.children ?? []
@@ -329,7 +332,8 @@ export async function renderDocx(
         if (numberedHeading)
           contents = withoutLeadingText(contents, /^\d+(?:\.\d+)*\s+/u)
         const numberedCaption = role === 'figureCaption' || role === 'tableCaption'
-        if (numberedCaption) contents = withoutLeadingText(contents, captionMarker(values, role))
+        if (numberedCaption) contents = withoutLeadingText(contents,
+          role === 'tableCaption' ? parsedTableCaption?.prefixLength ?? 0 : captionMarker(values, role))
         const rendered = await inline(contents, role)
         const prefix = index === 0 ? listPrefix : ''
         doc.push(new Paragraph({ ...paragraph(role),

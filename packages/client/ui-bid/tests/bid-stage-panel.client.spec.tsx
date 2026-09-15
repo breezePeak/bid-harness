@@ -381,6 +381,34 @@ describe('BidStagePanel', () => {
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
+  it('S4 等待启动且尚无日志时仍显示占位进度条', () => {
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      allowedActions: ['start_stage'],
+      composer: { enabled: false, reason: 'bid.stage_start_required' },
+    }))} />)
+
+    expect(screen.getByText('研究任务')).toBeTruthy()
+    expect(screen.getByText('0 / 0 (0%)')).toBeTruthy()
+    expect(document.querySelector('[class*="mappingProgressTrack"]')).toBeTruthy()
+    expect(screen.getByText('正在同步映射进度…')).toBeTruthy()
+  })
+
+  it('S4 复核失败时仍显示已读取的完成与失败进度', async () => {
+    const getEvidenceMappingProgress = vi.fn(async () => ({
+      total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
+      failed_section_ids: ['SEC-401'],
+    }))
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'failed', failureReason: '复核未通过' },
+      allowedActions: [], composer: { enabled: false, reason: 'bid.stage_failed' },
+    }), { getEvidenceMappingProgress })} />)
+
+    expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
+    expect(screen.getByText('失败 18')).toBeTruthy()
+    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+  })
+
   it('shows reset completion and starts only after the user confirms', async () => {
     const startStage = vi.fn(async () => {})
     render(<BidStagePanel {...props(projection({
@@ -1063,6 +1091,14 @@ describe('ui-bid browser plugin', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.left', id: 'bid-confirmation-mode', order: 20,
     }), BidConfirmationModeControl)
+    const contextRegistration = register.mock.calls.find(([definition]) => (definition as { name: string }).name === 'conversation.input.context')
+    if (contextRegistration === undefined) throw new Error('Bid composer context registration is unavailable')
+    const context = (contextRegistration[0] as {
+      inject: (sessionId: string) => { sendMessage: (text: string, mode?: 'queue' | 'steer', signal?: AbortSignal) => Promise<void> }
+    }).inject('session_bid')
+    const contextSignal = new AbortController().signal
+    await context.sendMessage('章节插话', 'steer', contextSignal)
+    expect(resumeMessage).toHaveBeenCalledWith('章节插话', 'steer', contextSignal)
     const registration = register.mock.calls.find(([definition]) => (definition as { name: string }).name === 'conversation.input.dock')
     if (registration === undefined) throw new Error('Bid dock registration is unavailable')
     const options = registration[0] as {
@@ -1134,7 +1170,7 @@ describe('ui-bid browser plugin', () => {
     await injected.startStage()
     expect(remoteStart).toHaveBeenCalledWith('session_bid')
     await injected.resumeRun()
-    expect(resumeMessage).toHaveBeenCalledWith('继续未完成任务。')
+    expect(resumeMessage).toHaveBeenCalledWith('继续未完成任务。', 'steer')
     await injected.requestWritingRequirements()
     expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
     await injected.autoStartChapterWriting()

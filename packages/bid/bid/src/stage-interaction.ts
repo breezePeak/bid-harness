@@ -381,7 +381,7 @@ export function inspectBidStage(
 /**
  * 渲染等待用户阶段的模型交互规则。
  * @param stage 当前阶段。
- * @returns 通过 user/message 入日志的交互规则。
+ * @returns 阶段提示及其可持久化的交互规则。
  */
 export function renderStageInteractionPrompt(stage: string): string {
   if (stage === 'chapter_writing') return [
@@ -389,7 +389,8 @@ export function renderStageInteractionPrompt(stage: string): string {
     '正式写作尚未开始。先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
     '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；需要改变目录时，引导用户重置并重新确认 S4，不得偷偷改目录。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
-    '有特殊要求时，先用简短中文说明你的理解、重点和篇幅安排并请用户确认；用户已明确说“按这些要求直接开始”或“没有特殊要求，直接开始”时无需再次确认。',
+    '开始制定首次 Writing Plan 前，必须调用 ask_user_question，且只询问：“开始正文编写前，是否还有其他整体写作要求？”提供“没有，开始编写”选项，并允许用户输入自定义要求；不要用普通聊天消息替代这个问题，也不要重复询问。',
+    '将 ask_user_question 的回答作为整体写作要求保存到 global_instructions；没有特殊要求时使用默认整体指令。若回答来自原生问答而不是 user/message，不要伪造 user_message_refs；已有真实用户消息仍可按语义引用。',
     '把自然语言要求统一拆成 global_instructions、每个可写叶节的 task、相关 user_message_refs、writing_instructions、章节 acceptance_criteria 和 document_acceptance。程序不会按用户措辞选择任务结构；由你根据语义决定作用范围、required/preferred 和验收方式。',
     'semantic 条件交给 Reviewer 根据正文判断；只有要求能直接绑定工具 schema 已列出的 Host metric 时才使用 deterministic，数值由 Host 测量，不自行计算。条件 ID、作用域、计划版本和执行状态由 Host 生成，不得在描述中伪造这些字段。',
     '获得确认或直接开始授权后调用 bid_confirm_writing_plan。只引用 task_contract_context.user_messages 中确实构成写作要求或确认语境的 ref；Host 从 Session Log 回查并持久化准确原文，进度询问等普通消息不得引用。',
@@ -499,7 +500,11 @@ export function installStageInteractionTools(
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
-        if (runtime.status === 'waiting_user') disposers.push(tools.restrict({ allow: [] }))
+        if (runtime.status === 'waiting_user') {
+          const allow = stage === 'chapter_writing' && tools.get('ask_user_question') !== undefined
+            ? ['ask_user_question'] : []
+          disposers.push(tools.restrict({ allow }))
+        }
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
@@ -641,8 +646,10 @@ export function installStageInteractionTools(
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
       const runtime = bidRuntimeView(control)
+      const isInitialWritingQuestion = runtime.stage === 'chapter_writing'
+        && runtime.status === 'waiting_user' && exec.name === 'ask_user_question'
       if ((runtime.status === 'waiting_user' || control.run?.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
-        && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
+        && !names.includes(exec.name as typeof names[number]) && !isInitialWritingQuestion) return 'BID_STAGE_TOOL_REQUIRED'
     }))
     toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       if (!isBidMainSession(agent.session)) return
