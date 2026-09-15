@@ -8,9 +8,9 @@ S4 Child 在尚未锁定目录子树或尚未提交全部章节映射时提前�
 
 ## Decision
 
-S4 修复轮次根据当前 Host 状态生成有序清单：未完成研究、缺失 Blueprint、旧结构判断、未锁定目录、缺失章节 Mapping、Final Check 总述和待审项依次列出，最后才允许调用完成工具。清单保留既有 Child 状态和工具权限，不替模型编造研究、结构或材料结论。
+S4 修复轮次根据当前 Host 状态生成有序清单：未完成研究、缺失 Blueprint、旧结构判断、未锁定目录、缺失章节 Mapping、Final Check 总述和待审项依次列出，最后才允许调用完成工具。Final Check 的待审项必须通过 `list_review_items` 读取当前引用；可修问题由 `review_items` 的 `correct` 立即改变产物，随后删除旧引用、生成新指纹并重新复核，新版本不能继承旧结论。清单保留既有 Child 状态和工具权限，不替模型编造研究、结构或材料结论。
 
-阶段栏在 Run 挂起时提供“继续未完成任务”。该按钮仅发送明确的继续消息，保持 [Bid Workflow 与 Run 使用统一生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md) 所有权：Main Agent 读取挂起 Run 身份和项目 revision 后调用既有恢复工具，Host 仍执行 CAS 与 checkpoint reconciliation。
+阶段栏在 Run 挂起时提供“继续未完成任务”。该按钮仅发送明确的继续消息，保持 [Bid Workflow 与 Run 使用统一生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md) 所有权：Main Agent 读取挂起 Run 身份和项目 revision 后调用既有恢复工具，Host 仍执行 CAS 与 checkpoint reconciliation。`finish_final_check` 在存在待审项时返回 `review_pending`、引用列表和结构化诊断；存在 `block` 时终止当前 Final Check，不进入无意义的普通重试。
 
 ## Alternatives considered
 

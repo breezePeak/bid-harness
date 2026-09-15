@@ -1234,6 +1234,13 @@ function pendingReviews(state: MappingSubmissionState, task: EvidenceMappingTask
     }))
 }
 
+function reviewPendingIssues(items: readonly Pick<ReviewItem, 'review_ref' | 'section_id' | 'kind' | 'conclusion'>[]): StageValidationIssue[] {
+  return items.map(item => ({
+    code: item.conclusion?.decision === 'block' ? 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED' : 'EVIDENCE_MAPPING_REVIEW_PENDING',
+    message: `${item.review_ref} / ${item.section_id} / ${item.kind}：${item.conclusion?.reason ?? '当前版本尚未复核。'}`,
+  }))
+}
+
 function reviewProgress(state: MappingSubmissionState, task: EvidenceMappingTask) {
   const reviews = refreshReviewItems(state, task)
   const reused = reviews.filter(item => item.conclusion?.decision === 'keep').length
@@ -1760,6 +1767,10 @@ function attachMappingSubmissionRuntime(
             )
             draft.mappings.set(item.section_id, replacement)
           }
+          const updated = refreshReviewItems(draft, task).find(candidate => candidate.review_key === item.review_key)
+          if (updated?.fingerprint === item.fingerprint) {
+            throw new ToolArgsError(['correction: 必须实际改变当前 S4 产物，不能提交等价修正。'])
+          }
           // 修正产生的新版本必须再次复核，不能继承被修正版本的结论。
           for (const [key, candidate] of draft.reviews) if (candidate.review_ref === item.review_ref) draft.reviews.delete(key)
         }
@@ -1802,11 +1813,14 @@ function attachMappingSubmissionRuntime(
       }
       const pendingItems = task.phase === 'final_check' ? pendingReviews(state, task) : []
       if (pendingItems.length > 0) {
-        state.lastIncompleteIssues = pendingItems.map(item => ({
-          code: item.conclusion?.decision === 'block' ? 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED' : 'EVIDENCE_MAPPING_REVIEW_PENDING',
-          message: `${item.review_ref} / ${item.section_id} / ${item.kind}：${item.conclusion?.reason ?? '当前版本尚未复核。'}`,
-        }))
-        return { completed: false, review_progress: reviewProgress(state, task) }
+        state.lastIncompleteIssues = reviewPendingIssues(pendingItems)
+        return {
+          completed: false,
+          reason: 'review_pending',
+          pending_review_refs: pendingItems.map(item => item.review_ref),
+          issues: toolIssues(state.lastIncompleteIssues),
+          review_progress: reviewProgress(state, task),
+        }
       }
       if (taskOwnsOutlineRefinement(task)) {
         assertResearchReady(state)
@@ -2250,8 +2264,8 @@ export function renderEvidenceMappingSubagentTask(
     ] : task.phase === 'final_check' ? [
       '先对照 S3 已确认任务、S2 要求、用户修改、S4 调整前后差异及全书职责，判断任务调整本身是否合理，再判断材料能否支持该任务。不能先扩大任务，再以材料符合扩大后的任务为由通过。空材料章节和职责内缺口也必须复核。',
       '待审任务中的 identified_issues 是目录复核发现的阻断问题，必须逐项核对并通过任务修正解决；只有能够引用原始业务依据说明问题不成立时才可 keep，并写明理由。仍未解决或超出当前编辑权限时必须 block，不能仅登记为建议。在本章职责内可以设计作业方法，但不得把参考方案写成本项目既定事实。',
-      '提示末尾的 pending_review_items 提供当前待审引用；开始时不得重复调用 list_review_items。review_items 批量提交 keep、remove、correct 或 block 及具体理由；修正产生新版本或工具进度仍有待审但现有引用已处理时，再调用 list_review_items 刷新。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。correct 的新版本须再次复核。',
-      '最后调用无参数 finish_final_check，由程序计算漏项、过期结论及阻断项。Final Check 不能新增、删除、移动、拆分、合并章节或修改标题；遇到超出权限的问题用 block 说明具体原因，沿用有限修复流程处理。',
+      '提示末尾的 pending_review_items 提供首轮待审引用；首轮可直接使用这些引用，不必重复调用 list_review_items。修复轮次必须先调用 list_review_items 读取当前 pending_items。review_items 批量提交 keep、remove、correct 或 block 及具体理由；correct 必须立即修改当前 S4 产物，不能只记录意见。修正会使旧 review_ref 失效，必须再次读取新 review item、重新审核并在确认正确后提交 keep。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。',
+      'Final Check 不是只报告问题：可修问题必须 correct，不得用 block 代替自动修正；只有确实无法在当前任务边界内修复的问题才允许 block。只有 pending_items 清空后才能调用无参数 finish_final_check；不得连续调用 finish_final_check 代替修改。程序仍会计算漏项、过期结论及阻断项。Final Check 不能新增、删除、移动、拆分、合并章节或修改标题。',
     ] : [
       '逐章调用 submit_section_mapping，并按 remaining_section_ids 继续；最后调用 finish_mapping_task。若返回缺失列表或 issues，只处理明确章节，直到 completed=true。',
     ]),
@@ -2297,6 +2311,17 @@ function renderEvidenceMappingSubagentRepairTask(
   task: EvidenceMappingTask,
   state: MappingSubmissionState,
 ): string {
+  const finalCheckReviewPending = task.phase === 'final_check'
+    && issues.some(issue => issue.code === 'EVIDENCE_MAPPING_REVIEW_PENDING')
+  if (finalCheckReviewPending) return [
+    basePrompt,
+    '',
+    '这是 Final Check 的复核修复回合，不是普通结果重试。必须先调用 list_review_items 读取当前 pending_items。',
+    '对当前版本正确的项提交 keep；对可修正问题使用 review_items 的 correct 和具体 correction 立即修改 S4 产物。每次 correct 后旧 review_ref 失效，必须再次调用 list_review_items，重新审核新版本，并对新 review_ref 提交 keep。',
+    '不得只报告问题、连续调用 finish_final_check 或用 block 代替能够完成的修正。只有确实无法在当前任务边界内修复的问题才提交 block；存在 block 时本轮不能完成 Final Check。pending_items 清空后才能调用 finish_final_check。',
+    ...renderStageRepairIssues(issues).slice(0, 24),
+    ...renderEvidenceMappingRepairChecklist(task, state).map((step, index) => `${String(index + 1)}. ${step}`),
+  ].join('\n')
   return [
     basePrompt,
     '',
@@ -3931,6 +3956,10 @@ async function executeEvidenceMappingRun(
                 }
               }
               latestIssues = issues
+              if (mappingTask.phase === 'final_check'
+                && latestIssues.some(issue => issue.code === 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED')) {
+                throw new BidStageExecutionError(latestIssues)
+              }
             } catch (error: unknown) {
               if (signal.aborted) throw error
               if (error instanceof BidStageExecutionError) throw error
@@ -4166,7 +4195,9 @@ async function executeEvidenceMappingRun(
             const old = mappings.get(fresh.section_id)
             mappings.set(fresh.section_id, options.remap.mode === 'replace' || old === undefined ? fresh : { ...fresh,
               local_materials: uniqueMaterials([...old.local_materials, ...fresh.local_materials]),
-              web_materials: [...new Map([...old.web_materials, ...fresh.web_materials].map(item => [webMaterialIdentity(item), item])).values()],
+              web_materials: [...new Map(
+                [...old.web_materials, ...fresh.web_materials].map(item => [webMaterialIdentity(item), item]),
+              ).values()],
             })
           }
           currentEvidence = { ...previous, section_mappings: [...mappings.values()] }

@@ -936,7 +936,16 @@ describe('evidence-mapping Agent executor', () => {
     expect(JSON.stringify(refs)).not.toContain(material.fileId)
     expect(promptText(final.request.request)).toContain('current_section_baseline：')
     expect(promptText(final.request.request)).toContain('scoped_diffs：')
-    await expect(call('finish_final_check', {})).resolves.toMatchObject({ isError: false, value: { completed: false } })
+    expect(promptText(final.request.request)).toContain('correct 必须立即修改当前 S4 产物')
+    await expect(call('finish_final_check', {})).resolves.toMatchObject({
+      isError: false,
+      value: {
+        completed: false,
+        reason: 'review_pending',
+        pending_review_refs: expect.arrayContaining(refs.map(item => item.review_ref)),
+        issues: expect.arrayContaining([expect.objectContaining({ code: 'EVIDENCE_MAPPING_REVIEW_PENDING' })]),
+      },
+    })
     const valid = { section_id: 'SEC-1', local_materials: [{ material_ref: `M1:${material.chunk}`, usage: 'background', summary: '支持业务范围说明，仅概括适用对象，不展开实施步骤。' }], web_materials: [refs.find(item => item.kind === 'web_material')!.value] }
     for (const field of ['purpose', 'must_answer', 'writing_notes', 'suggested_tables', 'suggested_figures', 'writing_dimensions', 'requirement_ids', 'scoring_ids', 'scoring_response_point_ids', 'writing_brief', 'coverage_override', 'missing_topics']) {
       await expect(call('replace_section_mapping', { ...valid, [field]: ['夹带任务'] })).resolves.toMatchObject({ isError: true })
@@ -957,6 +966,8 @@ describe('evidence-mapping Agent executor', () => {
     await expect(call('replace_section_mapping', { ...valid, local_materials: [{ ...valid.local_materials[0], material_ref: 'M2:chunk_0001', usage: 'adapt' }] }))
       .resolves.toMatchObject({ isError: false })
     const replaced = (await pending())[0]!
+    await expect(call('review_items', { items: [{ review_ref: replaced.review_ref, decision: 'correct', reason: '重复当前材料修正。', correction: { material_ref: 'M2:chunk_0001', usage: 'adapt' } }] }))
+      .resolves.toMatchObject({ isError: true })
     await expect(call('review_items', { items: [{ review_ref: replaced.review_ref, decision: 'correct', reason: '采用业务范围资料，保持本章展开限度。', correction: { material_ref: `M1:${material.chunk}`, usage: 'background' } }] }))
       .resolves.toMatchObject({ isError: false })
     expect((await pending())[0]!.review_ref).not.toBe(replaced.review_ref)
@@ -975,7 +986,11 @@ describe('evidence-mapping Agent executor', () => {
       expect.objectContaining({ review_ref: taskRef, conclusion: { decision: 'block', reason: '已识别的实施任务越界必须修正，不能写成非阻断建议。' } }),
     ]))
     await expect(call('finish_final_check', {})).resolves.toMatchObject({
-      isError: false, value: { completed: false, review_progress: { review_pending: 3 } },
+      isError: false, value: {
+        completed: false, reason: 'review_pending', review_progress: { review_pending: 3 },
+        pending_review_refs: expect.arrayContaining([taskRef]),
+        issues: expect.arrayContaining([expect.objectContaining({ code: 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED' })]),
+      },
     })
     await expect(call('review_items', { items: [{ review_ref: taskRef, decision: 'correct', reason: '将任务明确限制在业务范围概述。', correction: { task: { ...taskChange, writing_dimensions: ['概述业务范围，不展开实施流程'] } } }] }))
       .resolves.toMatchObject({ isError: false })
@@ -1607,7 +1622,7 @@ describe('evidence-mapping Agent executor', () => {
       statistics: {
         tools: {
           web_search: Record<string, unknown>
-           web_fetch: Record<string, unknown>
+          web_fetch: Record<string, unknown>
         }
       }
     }
