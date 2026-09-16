@@ -475,6 +475,10 @@ export const TOOL_ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH'
 export interface ToolErrorInfo {
   name: string
   code: string
+  /** HTTP response status retained from provider failures when available. */
+  statusCode?: number
+  /** Provider retry guidance retained verbatim without exposing request credentials. */
+  retryAfter?: string
 }
 
 /** Canonical failure detail; internal routing information remains optional. */
@@ -638,10 +642,19 @@ function materializePresentation<T>(candidate: T): T {
   return deepFreeze(detached)
 }
 
-/** Structured `{ name, code }` for a thrown HarnessError, else undefined. */
+/** Structured routing metadata for a thrown HarnessError, else undefined. */
 function errorInfo(error: unknown): ToolErrorInfo | undefined {
   try {
-    return error instanceof HarnessError ? { name: error.name, code: error.code } : undefined
+    if (!(error instanceof HarnessError)) return undefined
+    const details = error as HarnessError & { readonly statusCode?: unknown; readonly retryAfter?: unknown }
+    return {
+      name: error.name,
+      code: error.code,
+      ...(typeof details.statusCode === 'number' && Number.isInteger(details.statusCode)
+        ? { statusCode: details.statusCode }
+        : {}),
+      ...(typeof details.retryAfter === 'string' ? { retryAfter: details.retryAfter } : {}),
+    }
   } catch {
     return undefined
   }

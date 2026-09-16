@@ -114,6 +114,18 @@ describe('Tavily request and failure mapping', () => {
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_SEARCH_TIMEOUT' }))
   })
 
+  it('classifies credential resolution failure without exposing its detail', async () => {
+    const provider = new TavilySearchProvider(
+      () => options,
+      async () => { throw new Error('secret backend detail') },
+      async () => true,
+    )
+    await expect(provider.search({ query: 'q' })).rejects.toMatchObject({
+      code: 'WEB_PROVIDER_CREDENTIALS_UNAVAILABLE',
+      message: 'Tavily credentials are unavailable',
+    })
+  })
+
   it.each([
     { response: jsonResponse({ detail: { error: 'bad key' } }, { status: 401 }), message: 'bad key', code: 'WEB_PROVIDER_AUTHENTICATION_FAILED' },
     { response: new Response('gateway', { status: 502 }), message: 'Tavily API error (HTTP 502)', code: 'WEB_PROVIDER_ERROR' },

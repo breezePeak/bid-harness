@@ -1916,6 +1916,29 @@ describe('ToolRuntime', () => {
     })
   })
 
+  it('preserves HTTP retry metadata carried by a HarnessError', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineTool({
+      name: 'failing',
+      description: 'fail with provider metadata',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+      async execute() {
+        throw Object.assign(new HarnessError('slow down', 'WEB_PROVIDER_RATE_LIMITED'), {
+          statusCode: 429,
+          retryAfter: '12',
+        })
+      },
+    }))
+
+    const result = await ctx.tools.execute({ signal: testToolSignal, callId: CallId('c1'), name: 'failing', arguments: {} })
+
+    expect(result).toMatchObject({
+      isError: true,
+      error: { info: { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '12' } },
+    })
+  })
+
   it('schemas() snapshots tool schemas instead of exposing registry objects', async () => {
     const ctx = await setup()
     ctx.tools.register(echoTool)

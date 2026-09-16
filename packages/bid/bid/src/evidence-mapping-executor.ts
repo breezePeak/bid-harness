@@ -166,10 +166,55 @@ class MappingSubagentInfrastructureError extends BidStageExecutionError {
     readonly retryable: boolean,
     readonly contextOverflow = false,
     readonly taskId?: string,
+    readonly retryAfterMs = 0,
   ) {
     super(issues)
     this.name = 'MappingSubagentInfrastructureError'
   }
+}
+
+const PERMANENT_WEB_FAILURE_CODES = new Set([
+  'WEB_PROVIDER_UNAVAILABLE',
+  'WEB_PROVIDER_CONFIGURED_MISSING',
+  'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
+  'WEB_PROVIDER_AMBIGUOUS',
+  'WEB_PROVIDER_CREDENTIALS_UNAVAILABLE',
+  'WEB_PROVIDER_AUTHENTICATION_FAILED',
+  'WEB_PROVIDER_QUOTA_EXCEEDED',
+])
+
+function retryAfterMilliseconds(value: string | undefined): number {
+  if (value === undefined) return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now())
+}
+
+function webInfrastructureFailure(
+  captured: CapturedWebResult,
+  taskId: string,
+): MappingSubagentInfrastructureError | undefined {
+  if (!captured.result.isError || !MAPPING_AGENT_TOOLS.some(name => name === captured.exec.name)) return undefined
+  const info = captured.result.error.info
+  const code = info?.code
+  const statusCode = info?.statusCode
+  const permanent = code !== undefined && PERMANENT_WEB_FAILURE_CODES.has(code)
+    || statusCode === 401 || statusCode === 402 || statusCode === 403
+  const transient = captured.exec.name === 'web_search' && (
+    code === 'WEB_PROVIDER_RATE_LIMITED'
+    || code === 'WEB_SEARCH_TIMEOUT'
+    || code === 'WEB_PROVIDER_ERROR'
+    || statusCode === 429
+    || statusCode !== undefined && statusCode >= 500
+  )
+  if (!permanent && !transient) return undefined
+  const issueCode = code ?? 'EVIDENCE_MAPPING_WEB_PROVIDER_FAILURE'
+  const status = statusCode === undefined ? '' : `（HTTP ${String(statusCode)}）`
+  return new MappingSubagentInfrastructureError([{
+    code: issueCode,
+    message: `${captured.exec.name} 的联网 Provider 失败${status}：${captured.result.error.message}`,
+  }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter))
 }
 
 class FinalReviewTaskTooLargeError extends Error {
@@ -196,12 +241,16 @@ function isRebuildableMappingTaskRuntimeError(error: unknown): boolean {
     .includes(typeof code === 'string' ? code : '')
 }
 
-async function waitForMappingInfrastructureRetry(signal: AbortSignal, attempt: number): Promise<void> {
+async function waitForMappingInfrastructureRetry(
+  signal: AbortSignal,
+  attempt: number,
+  retryAfterMs = 0,
+): Promise<void> {
   signal.throwIfAborted()
-  const delay = Math.min(
+  const delay = Math.max(retryAfterMs, Math.min(
     MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS,
     MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
-  )
+  ))
   let onAbort!: () => void
   const cancelled = new Promise<never>((_resolve, reject) => {
     onAbort = () => { reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason))) }
@@ -1148,6 +1197,19 @@ function buildBranchSummaryTasks(outline: OutlineArtifact, sectionIds: readonly 
     }))
 }
 
+function tasksOwnExactly(
+  tasks: readonly EvidenceMappingTask[],
+  expectedIds: readonly string[],
+  ownedIds: (task: EvidenceMappingTask) => readonly string[],
+): boolean {
+  const expected = new Set(expectedIds)
+  const counts = new Map<string, number>()
+  for (const task of tasks) for (const id of ownedIds(task)) counts.set(id, (counts.get(id) ?? 0) + 1)
+  return counts.size === expected.size
+    && [...expected].every(id => counts.get(id) === 1)
+    && [...counts].every(([id, count]) => expected.has(id) && count === 1)
+}
+
 function reviewFingerprint(value: unknown): string {
   const canonical = JSON.stringify(value, (_key, current: unknown) => {
     if (current === null || Array.isArray(current) || typeof current !== 'object') return current
@@ -1429,6 +1491,84 @@ async function validateCompletedMappingState(
   validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
   if (taskOwnsOutlineRefinement(task)) await validateOutlineFrameworkRefs(workspace, researched, issues)
   return issues
+}
+
+interface MappingCompletion {
+  readonly response: Record<string, unknown>
+  readonly submission?: MappingSubmission
+}
+
+async function completeMappingSubmission(
+  workspace: BidWorkspace,
+  inputs: EvidenceMappingInputs,
+  task: EvidenceMappingTask,
+  state: MappingSubmissionState,
+  persistProgress: (submission: MappingSubmission, completed: boolean) => Promise<void>,
+): Promise<MappingCompletion> {
+  const expected = mappingTaskSections(state.stagedOutline, task).map(section => section.id)
+  const missing = expected.filter(id => !state.submittedMappings.has(id) && !state.baselineMappings.has(id))
+  const missingSummaries = task.phase === 'final_check'
+    ? affectedSummarySections(state.stagedOutline, task)
+      .filter(section => !state.branchSummaries.has(section.id))
+      .map(section => section.id)
+    : []
+  if (!state.locked || missing.length > 0 || missingSummaries.length > 0) {
+    const issues = state.locked ? [] : [{ code: 'EVIDENCE_MAPPING_SECTION_NOT_LOCKED', message: '必须先锁定当前 Section 子树。' }]
+    state.lastIncompleteIssues = [
+      ...issues,
+      ...missing.map(sectionId => ({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING', message: `Section mapping 缺少已分配 ID ${sectionId}。` })),
+      ...missingSummaries.map(sectionId => ({ code: 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', message: `Branch summary 缺少目录节点 ${sectionId}。` })),
+    ]
+    return { response: task.phase === 'final_check'
+      ? { completed: false, missing_mapping_section_ids: missing, missing_summary_section_ids: missingSummaries }
+      : { completed: false, missing_section_ids: missing, issues: toolIssues(issues) } }
+  }
+  const pendingItems = task.phase === 'final_check' ? pendingReviews(state, task) : []
+  if (pendingItems.length > 0) {
+    state.lastIncompleteIssues = reviewPendingIssues(pendingItems)
+    return { response: {
+      completed: false,
+      reason: 'review_pending',
+      pending_review_refs: pendingItems.map(item => item.review_ref),
+      issues: toolIssues(state.lastIncompleteIssues),
+      review_progress: reviewProgress(state, task),
+    } }
+  }
+  if (taskOwnsOutlineRefinement(task)) {
+    assertResearchReady(state)
+    assertStructureCurrent(state, task)
+    assertTopicDispositionsLockable(state.structureAssessment, state, task)
+  }
+  const result = parseEvidenceMappingPartialResult({
+    task_id: task.task_id,
+    section_mappings: expected.map(id => state.mappings.get(id) ?? state.baselineMappings.get(id)),
+    refinement_suggestions: [...state.suggestions],
+    ...(task.phase === 'final_check' ? { branch_summaries: affectedSummarySections(state.stagedOutline, task).map(section => ({
+      section_id: section.id, summary: state.branchSummaries.get(section.id),
+    })) } : {}),
+  })
+  const issues = await validateCompletedMappingState(workspace, inputs, task, state, result)
+  if (issues.length > 0) {
+    state.lastIncompleteIssues = issues
+    return { response: task.phase === 'final_check'
+      ? { completed: false, missing_mapping_section_ids: [], missing_summary_section_ids: [], issues: toolIssues(issues) }
+      : { completed: false, missing_section_ids: [], issues: toolIssues(issues) } }
+  }
+  state.lastIncompleteIssues = []
+  const submission: MappingSubmission = {
+    result,
+    taskOperations: structuredClone(state.taskOperations),
+    outlineOperationBases: structuredClone(state.outlineOperationBases),
+    reviewRecords: structuredClone([...state.reviews.values()]),
+    reviewInvalidated: state.reviewInvalidated,
+    structureInvalidated: state.structureInvalidated,
+    ...(state.structureAssessment === undefined ? {} : { structureAssessment: structuredClone(state.structureAssessment) }),
+    ...(state.researchAssessment === undefined ? {} : { researchAssessment: structuredClone(state.researchAssessment) }),
+    ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
+    ...(taskOwnsOutlineRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
+  }
+  await persistProgress(submission, true)
+  return { response: { completed: true }, submission }
 }
 
 /** Install the phase-specific, repeatable S4 tools in one Child scope. */
@@ -1813,8 +1953,10 @@ function attachMappingSubmissionRuntime(
         state.reviews = draft.reviews
         state.reviewSequence = draft.reviewSequence
         state.reviewInvalidated = draft.reviewInvalidated
+        const pendingItems = pendingReviews(state, task)
+        state.lastIncompleteIssues = reviewPendingIssues(pendingItems)
         await persistProgress(mappingSubmissionSnapshot(state, task), false)
-        return { recorded: true, review_progress: reviewProgress(state, task) }
+        return { recorded: true, pending_items: pendingItems, review_progress: reviewProgress(state, task) }
       },
     })
   }
@@ -1826,75 +1968,14 @@ function attachMappingSubmissionRuntime(
     async execute(_args: unknown, exec: ToolRunContext): Promise<unknown> {
       const violations = validateJsonSchemaValue(closedObject({}), _args)
       if (violations.length > 0) throw new ToolArgsError(violations)
-      const expected = mappingTaskSections(state.stagedOutline, task).map(section => section.id)
-      const missing = expected.filter(id => !state.submittedMappings.has(id) && !state.baselineMappings.has(id))
-      const missingSummaries = task.phase === 'final_check'
-        ? affectedSummarySections(state.stagedOutline, task)
-          .filter(section => !state.branchSummaries.has(section.id))
-          .map(section => section.id)
-        : []
-      if (!state.locked || missing.length > 0 || missingSummaries.length > 0) {
-        const issues = state.locked ? [] : [{ code: 'EVIDENCE_MAPPING_SECTION_NOT_LOCKED', message: '必须先锁定当前 Section 子树。' }]
-        state.lastIncompleteIssues = [
-          ...issues,
-          ...missing.map(sectionId => ({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING', message: `Section mapping 缺少已分配 ID ${sectionId}。` })),
-          ...missingSummaries.map(sectionId => ({ code: 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', message: `Branch summary 缺少目录节点 ${sectionId}。` })),
-        ]
-        return task.phase === 'final_check'
-          ? { completed: false, missing_mapping_section_ids: missing, missing_summary_section_ids: missingSummaries }
-          : { completed: false, missing_section_ids: missing, issues: toolIssues(issues) }
-      }
-      const pendingItems = task.phase === 'final_check' ? pendingReviews(state, task) : []
-      if (pendingItems.length > 0) {
-        state.lastIncompleteIssues = reviewPendingIssues(pendingItems)
-        return {
-          completed: false,
-          reason: 'review_pending',
-          pending_review_refs: pendingItems.map(item => item.review_ref),
-          issues: toolIssues(state.lastIncompleteIssues),
-          review_progress: reviewProgress(state, task),
-        }
-      }
-      if (taskOwnsOutlineRefinement(task)) {
-        assertResearchReady(state)
-        assertStructureCurrent(state, task)
-        assertTopicDispositionsLockable(state.structureAssessment, state, task)
-      }
-      const result = parseEvidenceMappingPartialResult({
-        task_id: task.task_id,
-        section_mappings: expected.map(id => state.mappings.get(id) ?? state.baselineMappings.get(id)),
-        refinement_suggestions: [...state.suggestions],
-        ...(task.phase === 'final_check' ? { branch_summaries: affectedSummarySections(state.stagedOutline, task).map(section => ({
-          section_id: section.id, summary: state.branchSummaries.get(section.id),
-        })) } : {}),
-      })
-      const issues = await validateCompletedMappingState(workspace, inputs, task, state, result)
-      if (issues.length > 0) {
-        state.lastIncompleteIssues = issues
-        return task.phase === 'final_check'
-          ? { completed: false, missing_mapping_section_ids: [], missing_summary_section_ids: [], issues: toolIssues(issues) }
-          : { completed: false, missing_section_ids: [], issues: toolIssues(issues) }
-      }
-      state.lastIncompleteIssues = []
-      const submission: MappingSubmission = {
-        result,
-        taskOperations: structuredClone(state.taskOperations),
-        outlineOperationBases: structuredClone(state.outlineOperationBases),
-        reviewRecords: structuredClone([...state.reviews.values()]),
-        reviewInvalidated: state.reviewInvalidated,
-        structureInvalidated: state.structureInvalidated,
-        ...(state.structureAssessment === undefined ? {} : { structureAssessment: structuredClone(state.structureAssessment) }),
-        ...(state.researchAssessment === undefined ? {} : { researchAssessment: structuredClone(state.researchAssessment) }),
-        ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
-        ...(taskOwnsOutlineRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
-      }
-      await persistProgress(submission, true)
+      const completed = await completeMappingSubmission(workspace, inputs, task, state, persistProgress)
+      if (completed.submission === undefined) return completed.response
       staged.set(exec, {
         generation: state.generation,
-        value: submission,
+        value: completed.submission,
       })
       exec.concludeTurn()
-      return { completed: true }
+      return completed.response
     },
   })
 
@@ -3450,9 +3531,9 @@ async function executeEvidenceMappingRun(
           else item.status = 'pending'
           continue
         }
-        if (saved !== undefined && currentTask !== undefined && scopeExists
+        if (saved !== undefined && scopeExists
           && (saved.input_fingerprint === taskInputFingerprint(currentTask, fingerprintOutline, [...fingerprintMappings.values()])
-            || currentTask.phase === 'final_check' && !saved.completed && saved.review_records.length > 0)) {
+            || currentTask.phase === 'final_check' && saved.review_records.length > 0)) {
           reusable.add(item.task_id)
         }
         if (!scopeExists && currentTask !== undefined) discarded.add(item.task_id)
@@ -3531,8 +3612,20 @@ async function executeEvidenceMappingRun(
       const candidate = parseOutlineArtifact(await readJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH))
       const mappings = partialMappingsFromEvidence(candidate, previous, previousWeb)
       const mapped = new Set(mappings.map(mapping => mapping.section_id))
-      return plan.tasks.filter(item => item.phase === 'final_check').every(item =>
-        item.section_ids.every(sectionId => mapped.has(sectionId)))
+      const sectionIds = options.remap === undefined
+        ? buildWritableSectionWorklist(candidate).map(section => section.id)
+        : uniqueStrings(initial.flatMap(item => checkpointTasks.get(item.task_id)?.result.section_mappings
+          .map(mapping => mapping.section_id) ?? []))
+      const sectionTasks = plan.tasks.filter(item => item.task_kind === 'final_check')
+      if (!tasksOwnExactly(sectionTasks, sectionIds, item => item.section_ids)
+        || sectionIds.some(sectionId => !mapped.has(sectionId))) return false
+      const summaryIds = summaryReviewSectionIds(candidate, sectionIds, options.summarySectionIds ?? [], options.remap === undefined)
+      const summaryTasks = plan.tasks.filter(item => item.task_kind === 'branch_summary')
+      if (summaryTasks.length > 0 && !tasksOwnExactly(summaryTasks, summaryIds, item => item.summary_section_ids ?? [])) return false
+      return [...sectionTasks, ...summaryTasks].every((task) => {
+        const saved = checkpointTasks.get(task.task_id)
+        return saved === undefined || saved.input_fingerprint === taskInputFingerprint(task, candidate, mappings)
+      })
     } catch {
       return false
     }
@@ -3597,6 +3690,7 @@ async function executeEvidenceMappingRun(
   let candidateMappings: CandidateMapping[] = [...previousCandidates, ...checkpoint.tasks.flatMap(item => item.result.section_mappings)]
   const controller = new AbortController()
   const signal = AbortSignal.any([options.run.signal, controller.signal])
+  let fatalWebFailure: MappingSubagentInfrastructureError | undefined
   const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
   const guardFailures = new Map<string, unknown>()
   const liftChildReadGuard = agent.ctx.on('agent/created', ({ agent: child }) => {
@@ -3620,6 +3714,11 @@ async function executeEvidenceMappingRun(
     const request = submissionRequests.get(String(childId))
     const log = executionLog.tasks.find(item => item.task_id === request?.task.task_id)
     if (request === undefined || log === undefined) return
+    const webFailure = webInfrastructureFailure({ exec, result }, request.task.task_id)
+    if (webFailure !== undefined && !webFailure.retryable && fatalWebFailure === undefined) {
+      fatalWebFailure = webFailure
+      controller.abort(webFailure)
+    }
     const state = request.state
     log.research_stats = {
       research_ready: state.researchReady && state.researchAssessment?.sufficient_for_blueprint === true,
@@ -3945,11 +4044,35 @@ async function executeEvidenceMappingRun(
               else await waitForMappingChildReply(child, outputEventStart, signal)
               throwForFailedTurn(child, outputEventStart)
               if (guardFailures.has(String(started.childId))) throw guardFailures.get(String(started.childId))
+              if (mappingTask.phase === 'final_check' && submissionRequest.state.captured === undefined) {
+                const completed = await completeMappingSubmission(
+                  workspace, runInputs, mappingTask, submissionRequest.state,
+                  (submission, completed) => submissionRequest.persistProgress(submission, completed),
+                )
+                if (completed.submission !== undefined) {
+                  submissionRequest.state.captured = {
+                    generation: submissionRequest.state.generation,
+                    value: completed.submission,
+                  }
+                }
+              }
               const captured = capturedByChild.get(String(started.childId)) ?? new Map<string, CapturedWebResult>()
               const fetchedSnapshots: WebEvidenceSnapshot[] = []
               const snapshots = availableSnapshots()
               const newCaptured = [...captured.entries()].filter(([callId]) => !observedCallIds.has(callId))
               for (const [callId] of newCaptured) observedCallIds.add(callId)
+              const webFailure = newCaptured.map(([, result]) => webInfrastructureFailure(result, mappingTask.task_id))
+                .find((error): error is MappingSubagentInfrastructureError => error !== undefined)
+              if (webFailure !== undefined) {
+                log.attempts.push({
+                  child_session_id: String(started.childId), attempt: attemptBase + attempt + 1,
+                  stop_reason: 'infrastructure-error', accepted: false,
+                  issues: webFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [],
+                })
+                log.status = 'failed'
+                await persistLog()
+                throw webFailure
+              }
               const retrievalWarnings = newCaptured.flatMap(([, { exec, result }]: [string, CapturedWebResult]) => result.isError ? [{
                 code: 'EVIDENCE_MAPPING_RETRIEVAL_FAILED', message: `${exec.name} 执行失败：${result.error.message}`,
               }] : [])
@@ -4033,7 +4156,7 @@ async function executeEvidenceMappingRun(
                 throw new BidStageExecutionError(latestIssues)
               }
             } catch (error: unknown) {
-              if (signal.aborted) throw error
+              if (signal.aborted) throw fatalWebFailure ?? error
               if (error instanceof BidStageExecutionError) throw error
               const detail = error instanceof Error ? error.message : String(error)
               latestIssues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: `Mapping Subagent 结果通道发生基础设施错误：${detail}` }]
@@ -4080,7 +4203,7 @@ async function executeEvidenceMappingRun(
           warnings: [],
         })
         await persistLog()
-        if (signal.aborted) throw error
+        if (signal.aborted) throw fatalWebFailure ?? error
         if (error instanceof BidStageExecutionError) throw error
         if (error instanceof FinalReviewTaskTooLargeError) throw error
         const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }]
@@ -4112,7 +4235,7 @@ async function executeEvidenceMappingRun(
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'
         await persistLog()
-        await waitForMappingInfrastructureRetry(signal, retry)
+        await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
       }
     }
   }
@@ -4133,6 +4256,7 @@ async function executeEvidenceMappingRun(
       }
     })
     const settled = await Promise.allSettled(workers)
+    if (fatalWebFailure !== undefined) throw fatalWebFailure
     const failed = settled.find(result => result.status === 'rejected')
     if (failed?.status === 'rejected') throw failed.reason
     return tasks.map((item) => {
@@ -4153,6 +4277,16 @@ async function executeEvidenceMappingRun(
       final_child_session_id: null,
     })))
     await writeMappingState(options.run.commits, planPath, plan)
+    await persistLog()
+  }
+  const discardPlannedTasks = async (taskIds: ReadonlySet<string>): Promise<void> => {
+    if (taskIds.size === 0) return
+    plan = { ...plan, tasks: plan.tasks.filter(task => !taskIds.has(task.task_id)) }
+    executionLog.tasks = executionLog.tasks.filter(task => !taskIds.has(task.task_id))
+    for (const taskId of taskIds) checkpointTasks.delete(taskId)
+    checkpoint = { tasks: checkpoint.tasks.filter(task => !taskIds.has(task.task_id)) }
+    await writeMappingState(options.run.commits, planPath, plan)
+    await writeMappingState(options.run.commits, checkpointPath, checkpoint)
     await persistLog()
   }
   const replaceFinalReviewTask = async (
@@ -4246,16 +4380,14 @@ async function executeEvidenceMappingRun(
       const resumedFinalCheck = resuming && plan.tasks.some(item => item.phase === 'final_check')
         && await finalCheckInputsReusable()
       if (resuming && plan.tasks.some(item => item.phase === 'final_check') && !resumedFinalCheck) {
-        for (const task of plan.tasks.filter(item => item.phase === 'final_check')) {
-          checkpointTasks.delete(task.task_id)
-          const log = executionLog.tasks.find(item => item.task_id === task.task_id)
-          if (log !== undefined) {
-            log.status = 'pending'
-            log.final_child_session_id = null
-          }
-        }
-        checkpoint = { tasks: checkpoint.tasks.filter(item => plan.tasks.some(task => task.task_id === item.task_id && task.phase !== 'final_check')) }
+        const invalidTaskIds = new Set(plan.tasks.filter(item => item.phase === 'final_check').map(item => item.task_id))
+        for (const taskId of invalidTaskIds) checkpointTasks.delete(taskId)
+        plan = { ...plan, tasks: plan.tasks.filter(item => !invalidTaskIds.has(item.task_id)) }
+        executionLog.tasks = executionLog.tasks.filter(item => !invalidTaskIds.has(item.task_id))
+        checkpoint = { tasks: checkpoint.tasks.filter(item => !invalidTaskIds.has(item.task_id)) }
+        await writeMappingState(options.run.commits, planPath, plan)
         await writeMappingState(options.run.commits, checkpointPath, checkpoint)
+        await persistLog()
       }
       if (resumedFinalCheck) {
         finalOutline = parseOutlineArtifact(await readJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH))
@@ -4340,13 +4472,22 @@ async function executeEvidenceMappingRun(
     }
     {
       if (!localRun) await writeJson(join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH), finalOutline, options.run.commits)
+      const sectionIds = finalCheck?.section_ids
+        ?? (options.remap === undefined
+          ? buildWritableSectionWorklist(finalOutline).map(section => section.id)
+          : uniqueStrings(plan.tasks.filter(item => item.phase === 'initial').flatMap(item =>
+            checkpointTasks.get(item.task_id)?.result.section_mappings.map(mapping => mapping.section_id) ?? [])))
       let sectionReviewTasks = plan.tasks.filter(item => item.task_kind === 'final_check')
-      if (sectionReviewTasks.length === 0) {
-        const sectionIds = finalCheck?.section_ids
-          ?? (options.remap === undefined
-            ? buildWritableSectionWorklist(finalOutline).map(section => section.id)
-            : uniqueStrings(plan.tasks.filter(item => item.phase === 'initial').flatMap(item =>
-              checkpointTasks.get(item.task_id)?.result.section_mappings.map(mapping => mapping.section_id) ?? [])))
+      const sectionTasksReusable = sectionReviewTasks.length > 0
+        && tasksOwnExactly(sectionReviewTasks, sectionIds, item => item.section_ids)
+        && sectionReviewTasks.every((task) => {
+          const saved = checkpointTasks.get(task.task_id)
+          return saved === undefined
+            || !saved.completed && saved.review_records.length > 0
+            || saved.input_fingerprint === taskInputFingerprint(task, finalOutline, [...acceptedMappings.values()])
+        })
+      if (!sectionTasksReusable) {
+        await discardPlannedTasks(new Set(plan.tasks.filter(item => item.phase === 'final_check').map(item => item.task_id)))
         sectionReviewTasks = buildFinalReviewTasks(finalOutline, sectionIds)
         await appendPlannedTasks(sectionReviewTasks)
       }
@@ -4355,15 +4496,25 @@ async function executeEvidenceMappingRun(
       for (const mapping of checked.flatMap(item => item.result.section_mappings)) acceptedMappings.set(mapping.section_id, mapping)
 
       let summaryReviewTasks = plan.tasks.filter(item => item.task_kind === 'branch_summary')
-      if (summaryReviewTasks.length === 0) {
-        const reviewedSectionIds = plan.tasks.filter(item => item.task_kind === 'final_check').flatMap(item => item.section_ids)
-        const summaryIds = summaryReviewSectionIds(
-          finalOutline,
-          reviewedSectionIds,
-          finalCheck?.summary_section_ids ?? options.summarySectionIds ?? [],
-          finalCheck === undefined && options.remap === undefined,
-        )
-        summaryReviewTasks = buildBranchSummaryTasks(finalOutline, summaryIds)
+      const reviewedSectionIds = plan.tasks.filter(item => item.task_kind === 'final_check').flatMap(item => item.section_ids)
+      const summaryIds = summaryReviewSectionIds(
+        finalOutline,
+        reviewedSectionIds,
+        finalCheck?.summary_section_ids ?? options.summarySectionIds ?? [],
+        finalCheck === undefined && options.remap === undefined,
+      )
+      const expectedSummaryTasks = buildBranchSummaryTasks(finalOutline, summaryIds)
+      const summaryTasksReusable = tasksOwnExactly(summaryReviewTasks, summaryIds, item => item.summary_section_ids ?? [])
+        && JSON.stringify(summaryReviewTasks) === JSON.stringify(expectedSummaryTasks)
+        && summaryReviewTasks.every((task) => {
+          const saved = checkpointTasks.get(task.task_id)
+          return saved === undefined || saved.input_fingerprint === taskInputFingerprint(
+            task, finalOutline, [...acceptedMappings.values()],
+          )
+        })
+      if (!summaryTasksReusable) {
+        await discardPlannedTasks(new Set(summaryReviewTasks.map(item => item.task_id)))
+        summaryReviewTasks = expectedSummaryTasks
         await appendPlannedTasks(summaryReviewTasks)
       }
       for (const generation of [...new Set(summaryReviewTasks.map(item => item.generation))].sort((a, b) => a - b)) {
@@ -4436,6 +4587,28 @@ async function executeEvidenceMappingRun(
           closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_PENDING', message: `复核项 ${record.review_key} 尚未闭环。` })
         }
       }
+    }
+    const expectedLeafIds = finalCheck?.section_ids
+      ?? (options.remap === undefined
+        ? buildWritableSectionWorklist(finalOutline).map(section => section.id)
+        : plan.tasks.filter(item => item.task_kind === 'final_check').flatMap(item => item.section_ids))
+    for (const sectionId of expectedLeafIds) if (!leafOwners.has(sectionId)) {
+      closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_MISSING', message: `当前可写章节 ${sectionId} 缺少唯一终审归属。` })
+    }
+    for (const sectionId of leafOwners.keys()) if (!expectedLeafIds.includes(sectionId)) {
+      closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_STALE', message: `章节 ${sectionId} 已不属于当前终审范围。` })
+    }
+    const expectedSummaryIds = summaryReviewSectionIds(
+      finalOutline,
+      expectedLeafIds,
+      finalCheck?.summary_section_ids ?? options.summarySectionIds ?? [],
+      finalCheck === undefined && options.remap === undefined,
+    )
+    for (const sectionId of expectedSummaryIds) if (!summaryOwners.has(sectionId)) {
+      closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_MISSING', message: `当前父节点 ${sectionId} 缺少唯一总述复核归属。` })
+    }
+    for (const sectionId of summaryOwners.keys()) if (!expectedSummaryIds.includes(sectionId)) {
+      closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_STALE', message: `父节点 ${sectionId} 已不属于当前总述范围。` })
     }
     if (closureIssues.length > 0) throw new BidStageExecutionError(closureIssues)
     const reviewed = new Set(plan.tasks.filter(item => item.phase === 'final_check').flatMap(task =>

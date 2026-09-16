@@ -14,7 +14,7 @@ import { Document, Packer, Paragraph } from 'docx'
 import * as XLSX from 'xlsx'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG, parseBidDocument, safeFileName, within } from '../src/index.ts'
-import { readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
+import { invalidateDocxLastExports, readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
@@ -342,5 +342,31 @@ describe('BidWorkspace', () => {
     expect((await readDocxFormat(bid, second.templateId)).state.lastExport?.path).toBe('output/b.docx')
     expect((await readDocxTemplateLibrary(bid)).estimateTemplateId).toBe(first.templateId)
     expect((await bid.readManifest()).files).toEqual([])
+
+    const invalidated = await invalidateDocxLastExports(bid, createTestBidRunContext().commits)
+    expect(invalidated).toEqual(expect.arrayContaining([
+      join(bid.projectRoot, 'output/a.docx'),
+      join(bid.projectRoot, 'output/b.docx'),
+    ]))
+    const invalidatedFirst = (await readDocxFormat(bid, first.templateId)).state
+    const invalidatedSecond = (await readDocxFormat(bid, second.templateId)).state
+    expect(invalidatedFirst.lastExport).toBeUndefined()
+    expect(invalidatedFirst.resolved).toMatchObject({ 'body.size': 10 })
+    expect(invalidatedSecond.lastExport).toBeUndefined()
+    expect(invalidatedSecond.resolved).toMatchObject({ 'body.size': 20 })
+  })
+
+  it('拒绝把自定义输出目录外的持久引用当作项目导出', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-custom-output-'))
+    const bid = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, outputDirectory: 'deliverables' })
+    const state = (await readDocxFormat(bid, null)).state
+    await writeDocxFormat(bid, null, {
+      ...state,
+      lastExport: { path: 'uploads/user-owned.docx', fingerprint: 'a'.repeat(64) },
+    })
+
+    await expect(invalidateDocxLastExports(bid, createTestBidRunContext().commits))
+      .rejects.toThrow('BID_DOCX_LAST_EXPORT_PATH_INVALID:')
+    expect((await readDocxFormat(bid, null)).state.lastExport?.path).toBe('uploads/user-owned.docx')
   })
 })

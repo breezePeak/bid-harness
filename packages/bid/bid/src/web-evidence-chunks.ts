@@ -6,8 +6,6 @@ import { gfm } from 'micromark-extension-gfm'
 import { z } from 'zod'
 import { webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 
-/** Version of one Web snapshot's deterministic chunk index. */
-export const WEB_EVIDENCE_CHUNK_INDEX_SCHEMA_VERSION = 1 as const
 /** Soft size used when grouping complete Markdown blocks. */
 export const WEB_EVIDENCE_CHUNK_TARGET_CHARS = 6_000
 /** Hard size that every emitted Web Chunk must obey, including oversized blocks. */
@@ -37,7 +35,6 @@ const chunkSchema = z.object({
 })
 
 const indexSchema = z.object({
-  schema_version: z.literal(WEB_EVIDENCE_CHUNK_INDEX_SCHEMA_VERSION),
   source_id: z.string().regex(/^WEB-[a-f0-9]{16}$/u),
   snapshot_path: z.string().regex(/^analysis\/web-sources\/WEB-[a-f0-9]{16}\.md$/u),
   snapshot_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -167,7 +164,6 @@ export function buildWebEvidenceChunkIndex(source: WebEvidenceSource, content: s
   })
   const fallbackTitle = new URL(source.final_url).hostname
   return parseWebEvidenceChunkIndex({
-    schema_version: WEB_EVIDENCE_CHUNK_INDEX_SCHEMA_VERSION,
     source_id: source.source_id,
     snapshot_path: source.snapshot_path,
     snapshot_sha256: source.content_sha256,

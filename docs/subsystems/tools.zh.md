@@ -334,6 +334,8 @@ interface ToolFailure {
 }
 ```
 
+`ToolErrorInfo` 总是保留 `HarnessError` 的 `name` 与 `code`；Provider 错误还可携带整数 `statusCode` 和原始 `retryAfter`，供重试与停止策略判断。模型只接收 `ToolFailure.message` 渲染的错误文本，这些字段不承载凭据或请求头。
+
 ```ts type-equiv
 /** Successful canonical tool execution, including its Native/model projection. */
 interface ToolExecutionSuccess {

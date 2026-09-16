@@ -1554,6 +1554,26 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executor.execute).toHaveBeenCalledOnce()
   })
 
+  it('重置完成后即使取消先触发 idle 也会提出阶段开始问题', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+    const agent = await fresh('reset-native-question')
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['停止任务'] }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      await expect(ctx.bid.resetStage(agent, 'chapter_writing')).resolves.toEqual({
+        stage: 'chapter_writing', status: 'waiting_start',
+      })
+      await vi.waitFor(() => {
+        expect(asked).toHaveBeenCalledOnce()
+        expect(asked.mock.calls[0]?.[0].questions[0]?.question).toContain('正文编写')
+      })
+    } finally { dispose() }
+  })
+
   it('等待确认投影出现后，目录读取等待操作落盘并返回实际目录', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)

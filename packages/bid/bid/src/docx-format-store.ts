@@ -1,6 +1,7 @@
 /** 项目独立保存 Word 模板 Registry，以及每份模板自己的格式解析与确认状态。 */
 import { createHash } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
+import { isAbsolute, relative, sep } from 'node:path'
 import { z } from 'zod'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { BidWorkspace } from './index.ts'
@@ -252,6 +253,42 @@ export async function writeDocxFormat(
   const value = stateSchema.parse(state)
   if (commits === undefined) await writeFileAtomic(path, `${JSON.stringify(value)}\n`, { mode: 0o600, dirMode: 0o700 })
   else await commits.writeJson(path, value)
+}
+
+/**
+ * 清除默认格式和各模板格式中的导出引用，保留模板、解析结果与用户设置。
+ * @param workspace 格式状态所属项目。
+ * @param commits 与阶段重置共享的发布事务。
+ * @returns 被清除引用指向的项目内绝对路径。
+ */
+export async function invalidateDocxLastExports(
+  workspace: BidWorkspace,
+  commits: Pick<BidCommitScope, 'writeJson'>,
+): Promise<string[]> {
+  const paths = [legacyFormatPath(workspace), formatPath(workspace, null)]
+  const invalidated: string[] = []
+  const templatesRoot = within(workspace.projectRoot, 'word-export/templates')
+  await assertNoLinkedPath(workspace.root, templatesRoot)
+  try {
+    for (const entry of await readdir(templatesRoot)) {
+      if (entry.endsWith('.config.json')) paths.push(within(workspace.projectRoot, `word-export/templates/${entry}`))
+    }
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  for (const path of paths) {
+    await assertNoLinkedPath(workspace.root, path)
+    const state = await parseStateFile(path)
+    if (state?.lastExport === undefined) continue
+    const exportPath = within(workspace.projectRoot, state.lastExport.path)
+    const outputRelative = relative(workspace.outputRoot, exportPath)
+    if (outputRelative === '' || outputRelative === '..' || outputRelative.startsWith(`..${sep}`)
+      || isAbsolute(outputRelative)) throw new Error(`BID_DOCX_LAST_EXPORT_PATH_INVALID:${path}`)
+    invalidated.push(exportPath)
+    const { lastExport: _lastExport, ...retained } = state
+    await commits.writeJson(path, stateSchema.parse({ ...retained, revision: state.revision + 1 }))
+  }
+  return invalidated
 }
 
 async function resolveAndWrite(

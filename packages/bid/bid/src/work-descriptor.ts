@@ -42,45 +42,60 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
   await assertNoLinkedPath(workspace.root, requestsRoot)
   await assertNoLinkedPath(workspace.root, runsRoot)
   const paths: string[] = []
-  const requestStages = new Map<string, BidStage>()
+  const requests = new Map<string, z.infer<typeof resetRequestMetaSchema>>()
+  const requestDirectories: Array<{ workId: string; path: string }> = []
   const requestEntries = await readDirectoryIfPresent(requestsRoot)
   for (const entry of requestEntries) {
     const path = join(requestsRoot, entry)
-    if (entry.endsWith('.json')) {
-      const meta = resetRequestMetaSchema.parse(JSON.parse(await readFile(path, 'utf8')))
-      requestStages.set(meta.work_id, meta.stage)
-      if (BID_STAGES.indexOf(meta.stage) >= stageIndex) paths.push(path)
-    } else {
-      const workStage = requestStages.get(entry)
-      if (workStage !== undefined && BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(path)
+    await assertNoLinkedPath(workspace.root, path)
+    const info = await lstat(path)
+    if (info.isDirectory()) {
+      requestDirectories.push({ workId: entry, path })
+      continue
     }
-  }
-  for (const entry of requestEntries) {
-    if (!entry.endsWith('.json')) continue
-    const workId = entry.slice(0, -'.json'.length)
-    const workStage = requestStages.get(workId)
-    if (workStage !== undefined && BID_STAGES.indexOf(workStage) >= stageIndex) {
-      const payloadDir = join(requestsRoot, workId)
-      if (await pathExists(payloadDir)) paths.push(payloadDir)
-    }
+    if (!info.isFile() || !entry.endsWith('.json')) throw new Error(`BID_RESET_REQUEST_PATH_UNRESOLVED:${path}`)
+    let meta: z.infer<typeof resetRequestMetaSchema>
+    try { meta = resetRequestMetaSchema.parse(JSON.parse(await readFile(path, 'utf8'))) }
+    catch (error: unknown) { throw new Error(`BID_RESET_REQUEST_READ_FAILED:${path}`, { cause: error }) }
+    if (entry !== `${meta.work_id}.json`) throw new Error(`BID_RESET_REQUEST_IDENTITY_MISMATCH:${path}`)
+    requests.set(meta.work_id, meta)
+    if (BID_STAGES.indexOf(meta.stage) >= stageIndex) paths.push(path)
   }
 
+  const runStages = new Map<string, BidStage>()
   const runEntries = await readDirectoryIfPresent(runsRoot)
   for (const entry of runEntries) {
     const runRoot = join(runsRoot, entry)
+    await assertNoLinkedPath(workspace.root, runRoot)
+    if (!(await lstat(runRoot)).isDirectory()) throw new Error(`BID_RESET_WORK_PATH_UNRESOLVED:${runRoot}`)
     const marker = join(runRoot, 'work', 'work-identity.json')
+    await assertNoLinkedPath(workspace.root, marker)
     let descriptor: BidWorkDescriptor | undefined
     try {
       descriptor = bidWorkDescriptorSchema.parse(JSON.parse(await readFile(marker, 'utf8')))
     } catch (error: unknown) {
-      if (recordCode(error) !== 'ENOENT') {
-        if (requestStages.has(entry)) descriptor = undefined
-        else throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`, { cause: error })
-      }
+      if (recordCode(error) !== 'ENOENT') throw new Error(`BID_RESET_WORK_IDENTITY_READ_FAILED:${marker}`, { cause: error })
     }
-    const workStage = descriptor?.stage ?? requestStages.get(entry)
+    if (descriptor !== undefined && descriptor.workId !== entry) throw new Error(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
+    const request = requests.get(entry)
+    if (descriptor !== undefined && request !== undefined
+      && (descriptor.stage !== request.stage || descriptor.kind !== request.kind)) {
+      throw new Error(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
+    }
+    const workStage = descriptor?.stage ?? request?.stage
     if (workStage === undefined) throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+    runStages.set(entry, workStage)
     if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(runRoot)
+  }
+  for (const directory of requestDirectories) {
+    const requestStage = requests.get(directory.workId)?.stage
+    const runStage = runStages.get(directory.workId)
+    if (requestStage !== undefined && runStage !== undefined && requestStage !== runStage) {
+      throw new Error(`BID_RESET_REQUEST_IDENTITY_MISMATCH:${directory.path}`)
+    }
+    const workStage = requestStage ?? runStage
+    if (workStage === undefined) throw new Error(`BID_RESET_REQUEST_DIRECTORY_UNRESOLVED:${directory.path}`)
+    if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(directory.path)
   }
   return [...new Set(paths)]
 }
@@ -88,13 +103,6 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
 async function readDirectoryIfPresent(path: string): Promise<string[]> {
   try { return (await readdir(path)).sort() } catch (error: unknown) {
     if (recordCode(error) === 'ENOENT') return []
-    throw error
-  }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try { await lstat(path); return true } catch (error: unknown) {
-    if (recordCode(error) === 'ENOENT') return false
     throw error
   }
 }

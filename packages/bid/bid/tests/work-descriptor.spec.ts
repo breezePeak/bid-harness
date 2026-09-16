@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -84,5 +84,30 @@ describe('Bid Work Descriptor', () => {
     ]))
     expect(paths).not.toContain(join(workspace.projectRoot, upstream.requestRef))
     expect(paths).not.toContain(join(workspace.projectRoot, 'runs', upstream.workId))
+  })
+
+  it('请求附属目录缺少同名 JSON 时按工作树身份确认归属', async () => {
+    const workspace = await fixture()
+    const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'orphan-payload')
+    await mkdir(join(workspace.projectRoot, 'requests', descriptor.workId), { recursive: true })
+    await mkdir(join(workspace.projectRoot, 'runs', descriptor.workId, 'work'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'runs', descriptor.workId, 'work', 'work-identity.json'), `${JSON.stringify(descriptor)}\n`)
+    await rm(join(workspace.projectRoot, descriptor.requestRef))
+
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping')).resolves.toEqual(expect.arrayContaining([
+      join(workspace.projectRoot, 'requests', descriptor.workId),
+      join(workspace.projectRoot, 'runs', descriptor.workId),
+    ]))
+  })
+
+  it('请求元信息与工作树身份矛盾时报告身份文件路径', async () => {
+    const workspace = await fixture()
+    const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'mismatch')
+    await mkdir(join(workspace.projectRoot, 'runs', descriptor.workId, 'work'), { recursive: true })
+    const marker = join(workspace.projectRoot, 'runs', descriptor.workId, 'work', 'work-identity.json')
+    await writeFile(marker, `${JSON.stringify({ ...descriptor, stage: 'chapter_writing' })}\n`)
+
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping'))
+      .rejects.toThrow(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
   })
 })

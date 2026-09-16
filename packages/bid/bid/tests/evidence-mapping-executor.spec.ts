@@ -119,14 +119,20 @@ interface EvidenceMappingWebObservation {
 
 function observation(
   input: Pick<EvidenceMappingWebObservation, 'callId' | 'name' | 'arguments' | 'callSeq' | 'resultSeq'>
-  & { value?: unknown; content?: string; isError?: boolean; statusMeta?: unknown },
+  & {
+    value?: unknown
+    content?: string
+    isError?: boolean
+    statusMeta?: unknown
+    errorInfo?: { name: string; code: string; statusCode?: number; retryAfter?: string }
+  },
 ): EvidenceMappingWebObservation {
   const isError = input.isError ?? false
   return {
     ...input,
     resultTime: 1_788_134_400_000,
     result: isError
-      ? { isError: true, error: { message: 'failed' }, content: [{ type: 'text', text: 'failed' }] }
+      ? { isError: true, error: { message: 'failed', ...(input.errorInfo === undefined ? {} : { info: input.errorInfo }) }, content: [{ type: 'text', text: 'failed' }] }
       : {
         isError: false,
         value: input.value as never,
@@ -1068,7 +1074,7 @@ describe('evidence-mapping Agent executor', () => {
     const failedRun = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, maxConcurrency: 1,
     })
-    const rejected = expect(failedRun).rejects.toThrow('EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
+    const rejected = expect(failedRun).rejects.toThrow('EVIDENCE_MAPPING_REVIEW_PENDING')
     for (let index = 0; index < leaves.length; index++) {
       await vi.waitFor(() => { expect(first.starts.length).toBeGreaterThan(index) })
       first.starts[index]!.resolve()
@@ -1103,11 +1109,10 @@ describe('evidence-mapping Agent executor', () => {
       })),
     })
     expect(reviewResult).toMatchObject({
-      isError: false, value: { recorded: true, review_progress: {
+      isError: false, value: { recorded: true, pending_items: [{ review_ref: items.at(-1)?.review_ref }], review_progress: {
         review_total: items.length, review_reused: reusedCount, review_pending: 1,
       } },
     })
-    expect(JSON.stringify(reviewResult)).not.toContain('pending_items')
     final.complete()
     await rejected
     const progressCheckpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
@@ -1343,7 +1348,7 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material, false, {}, false)
     const failedRun = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
-    const rejected = expect(failedRun).rejects.toThrow('EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
+    const rejected = expect(failedRun).rejects.toThrow('EVIDENCE_MAPPING_REVIEW_PENDING')
     await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
     first.starts.forEach((start) => { start.resolve() })
     await vi.waitFor(() => { expect(first.finalStarts).toHaveLength(1) })
@@ -1383,6 +1388,41 @@ describe('evidence-mapping Agent executor', () => {
       .resolves.toMatchObject({ isError: false, value: { completed: true } })
     resumedFinal.complete()
     await resumedRun
+  })
+
+  it('Child 已完成全部复核但漏调完成工具时由 Host 确定性收尾', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-host-close-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace), false, {}, false)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    const final = fixture.finalStarts[0]!
+    const listed = await fixture.invokeSubmissionTool(final.request.childId!, 'list_review_items', {})
+    if (listed.isError) throw new Error(listed.error.message)
+    const items = (listed.value as {
+      pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }>
+    }).pending_items
+    for (const item of items.filter(item => item.kind === 'web_material')) {
+      for (const ref of item.value.chunk_refs ?? []) {
+        await fixture.invokeSubmissionTool(final.request.childId!, 'read_source', { source_ref: ref })
+      }
+    }
+    const reviewed = await fixture.invokeSubmissionTool(final.request.childId!, 'review_items', {
+      items: items.map(item => ({ review_ref: item.review_ref, decision: 'keep', reason: '当前任务和用途正确。' })),
+    })
+    if (reviewed.isError) throw new Error(reviewed.error.message)
+    expect(reviewed).toMatchObject({ isError: false, value: { pending_items: [], review_progress: { review_pending: 0 } } })
+
+    final.complete()
+
+    await expect(execution).resolves.toHaveLength(4)
+    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+      tasks: Array<{ phase: string; status: string }>
+    }
+    expect(log.tasks.find(task => task.phase === 'final_check')).toMatchObject({ status: 'completed' })
   })
 
   it('Final Check 完成后发布失败，恢复时不再启动 Child', async () => {
@@ -1709,6 +1749,62 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
   })
 
+  it('Web 认证失败保留结构化根因并停止整批任务', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-auth-failure-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 2,
+      maxRepairAttempts: 1,
+      maxInfrastructureRetryAttempts: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const failed = fixture.starts[0]!
+    const child = fixture.children.get(String(failed.request.childId))!
+    await fixture.emitWeb(child, [observation({
+      callId: 'auth-failed-search', name: 'web_search', arguments: { queries: ['技术依据'] },
+      callSeq: 1, resultSeq: 2, isError: true,
+      errorInfo: { name: 'WebError', code: 'WEB_PROVIDER_AUTHENTICATION_FAILED', statusCode: 401 },
+    })])
+
+    await expect(execution).rejects.toMatchObject({ issues: [{ code: 'WEB_PROVIDER_AUTHENTICATION_FAILED' }] })
+    await expect(execution).rejects.toThrow('HTTP 401')
+    expect(fixture.subagents.startContinuable).toHaveBeenCalledTimes(2)
+    expect(fixture.disposed).toHaveLength(2)
+  })
+
+  it('Web 限流按结构化 retry-after 重试当前任务', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-rate-limit-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 1,
+      maxRepairAttempts: 0,
+      maxInfrastructureRetryAttempts: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const failed = fixture.starts[0]!
+    const child = fixture.children.get(String(failed.request.childId))!
+    await fixture.emitWeb(child, [observation({
+      callId: 'rate-limited-search', name: 'web_search', arguments: { queries: ['技术依据'] },
+      callSeq: 1, resultSeq: 2, isError: true,
+      errorInfo: { name: 'WebError', code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '0' },
+    })])
+    failed.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    fixture.starts[2]!.resolve()
+
+    await execution
+    expect(fixture.taskAttempts.get('MAP-INIT-SEC-1')).toBe(2)
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')?.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'WEB_PROVIDER_RATE_LIMITED' })] }),
+      expect.objectContaining({ accepted: true }),
+    ]))
+  })
+
   it('S4 Host preflight 缺少 Web 工具时只失败一次，修复后可继续整批任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-disabled-')))
     const material = await writeInputs(workspace)
@@ -1840,7 +1936,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(finalOutline.sections.filter(section => section.writable).map(section => section.id)).toEqual(['SEC-1', 'SEC-2'])
   })
 
-  it('Final Check 未成功结构化提交时只修复一次并拒绝阶段', async () => {
+  it('Final Check 提交被拒后以未复核项修复一次并拒绝阶段', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-bad-reference-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
@@ -1858,11 +1954,16 @@ describe('evidence-mapping Agent executor', () => {
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1 })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach((start) => { start.resolve() })
-    await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
+    await expect(execution).rejects.toThrow('EVIDENCE_MAPPING_REVIEW_PENDING')
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as { tasks: Array<{ phase: string; attempts: Array<{ issues: Array<{ code: string }> }> }> }
     const final = log.tasks.find(task => task.phase === 'final_check')!
     expect(final.attempts).toHaveLength(2)
-    expect(final.attempts[1]!.issues.map(issue => issue.code)).toEqual(['EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING'])
+    expect(final.attempts[1]!.issues.map(issue => issue.code)).toEqual([
+      'EVIDENCE_MAPPING_REVIEW_PENDING',
+      'EVIDENCE_MAPPING_REVIEW_PENDING',
+      'EVIDENCE_MAPPING_REVIEW_PENDING',
+      'EVIDENCE_MAPPING_REVIEW_PENDING',
+    ])
   })
 
   it('73 个节点和 54 个可写章节按业务分支复核并自底向上生成总述', async () => {

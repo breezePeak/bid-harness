@@ -70,7 +70,7 @@ import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
 import { composeDocxFromTemplate } from './docx-compose.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
-  readDocxTemplateBytes, saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
+  invalidateDocxLastExports, readDocxTemplateBytes, saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
   DOCX_TEMPLATE_NAME_HEADER,
@@ -2415,6 +2415,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * Rewind to the current or an earlier Bid stage and stop before its Host driver starts.
    * Active work is cancelled and drained before artifacts owned by the selected
    * stage and every later stage are removed.
+   * 清理提交并释放项目锁后重新请求目标阶段的原生开始决策。
    * @param agent - live Bid Agent receiving the scoped command.
    * @param stage - current or earlier stage named by that command.
    * @returns the state at the explicit post-reset start gate.
@@ -2439,6 +2440,7 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     const operation = this.beginOperation(session)
     operation.reservedForReset = true
+    let resetCompleted = false
     try {
       await prior?.runs.retire()
       prior?.controller.abort()
@@ -2448,8 +2450,8 @@ export class BidHostRuntime extends TypertRemoteService {
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const resetPaths: Readonly<Record<BidStage, readonly string[]>> = {
-        file_intake: ['analysis', 'outline', 'chapters', 'output'],
-        tender_analysis: ['analysis', 'outline', 'chapters', 'output'],
+        file_intake: ['analysis', 'outline', 'chapters', 'flowcharts'],
+        tender_analysis: ['analysis', 'outline', 'chapters', 'flowcharts'],
         outline_generation: [
           'analysis/scoring-response-points.candidate.json',
           'analysis/scoring-response-points.json',
@@ -2463,7 +2465,7 @@ export class BidHostRuntime extends TypertRemoteService {
           'analysis/web-sources',
           'outline',
           'chapters',
-          'output',
+          'flowcharts',
         ],
         evidence_mapping: [
           'analysis/evidence-mapping-plan.json',
@@ -2481,10 +2483,10 @@ export class BidHostRuntime extends TypertRemoteService {
           'outline/confirmed-outline.json',
           'outline/confirmation.json',
           'chapters',
-          'output',
+          'flowcharts',
         ],
-        chapter_writing: ['chapters', 'output'],
-        docx_export: ['output'],
+        chapter_writing: ['chapters', 'flowcharts'],
+        docx_export: ['flowcharts'],
       }
       const paths = [...new Set([
         ...resetPaths[stage].map(path => within(workspace.projectRoot, path)),
@@ -2497,15 +2499,28 @@ export class BidHostRuntime extends TypertRemoteService {
         lastRun: session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE).lastRun,
       }
       await this.mutateProject(operation, async (lease) => {
-        await Promise.all(paths.map(path => lease.remove(path, true)))
+        const invalidatedExports = await invalidateDocxLastExports(workspace, lease)
+        const outputPaths = [...new Set(workspace.config.outputDirectory === DEFAULT_BID_CONFIG.outputDirectory
+          ? [workspace.outputRoot]
+          : invalidatedExports)]
+        for (const path of outputPaths) await assertNoLinkedPath(workspace.root, path)
+        await Promise.all([
+          ...paths.map(path => lease.remove(path, true)),
+          ...outputPaths.map(path => lease.remove(path, path === workspace.outputRoot)),
+        ])
       }, resetControl)
       resetBidStageContext(session, stage)
       session.append('bid.stage.reset', { stage, status: stage === 'file_intake' ? 'pending' : 'waiting_start' })
       await this.ctx.sessions.flush(session)
+      resetCompleted = true
       return bidSessionRuntime(session)
     } finally {
       operation.reservedForReset = false
-      await this.finishOperation(session, operation)
+      try {
+        await this.finishOperation(session, operation)
+      } finally {
+        if (resetCompleted) this.ensureRunDecision(agent)
+      }
     }
   }
 

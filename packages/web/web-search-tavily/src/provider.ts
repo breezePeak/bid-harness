@@ -114,7 +114,14 @@ export class TavilySearchProvider implements WebSearchProvider {
     const options = this.options()
     using d = deadline(signal, options.timeoutMs, 'WEB_SEARCH_TIMEOUT')
     throwIfAborted(d.signal)
-    const apiKey = await this.resolveApiKey(options.apiKeyEnv)
+    let apiKey: string
+    try {
+      apiKey = await this.resolveApiKey(options.apiKeyEnv)
+    } catch (error: unknown) {
+      throwIfAborted(d.signal, error)
+      if (error instanceof WebError) throw error
+      throw new WebError('Tavily credentials are unavailable', 'WEB_PROVIDER_CREDENTIALS_UNAVAILABLE', { cause: error })
+    }
     throwIfAborted(d.signal)
     const maxResults = request.maxResults ?? options.maxResults
     let response: Response

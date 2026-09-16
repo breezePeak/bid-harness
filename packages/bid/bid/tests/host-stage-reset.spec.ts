@@ -80,7 +80,12 @@ describe('Bid Host stage reset', () => {
     const flush = vi.fn(async () => {})
     const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { on: vi.fn(() => () => {}), sessions: { flush, list: () => [session] } },
+      ctx: {
+        on: vi.fn(() => () => {}),
+        sessions: { flush, list: () => [session] },
+        userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+        logger: { warn: vi.fn() },
+      },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -90,6 +95,7 @@ describe('Bid Host stage reset', () => {
       } satisfies Config,
       inFlight: new Map([[key, operation]]),
       docxInFlight: new Set(),
+      pendingRunDecisions: new Map(),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 
@@ -149,7 +155,12 @@ describe('Bid Host stage reset', () => {
     } as unknown as Agent
     const drive = vi.fn()
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
-      ctx: { on: vi.fn(() => () => {}), sessions: { flush: vi.fn(async () => {}), list: () => [session] } },
+      ctx: {
+        on: vi.fn(() => () => {}),
+        sessions: { flush: vi.fn(async () => {}), list: () => [session] },
+        userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+        logger: { warn: vi.fn() },
+      },
       config: {
         allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
         docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -159,6 +170,7 @@ describe('Bid Host stage reset', () => {
       } satisfies Config,
       inFlight: new Map(),
       docxInFlight: new Set(),
+      pendingRunDecisions: new Map(),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 

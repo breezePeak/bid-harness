@@ -26,6 +26,7 @@ describe('Web Evidence Markdown chunks', () => {
 
     const index = buildWebEvidenceChunkIndex(source, content)
     expect(buildWebEvidenceChunkIndex(source, content)).toEqual(index)
+    expect(index).not.toHaveProperty('schema_version')
     expect(index.chunks.map(chunk => chunk.chunk_ref)).toEqual(index.chunks.map((_, position) =>
       `W:${source.source_id}:C${String(position + 1).padStart(4, '0')}`))
     expect(index.headings.map(heading => heading.heading_path)).toEqual([['总则'], ['总则', '控制项']])

@@ -4763,7 +4763,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ToolErrorInfo',
-    declaration: 'export interface ToolErrorInfo {\n    name: string;\n    code: string;\n}',
+    declaration: 'export interface ToolErrorInfo {\n    name: string;\n    code: string;\n    statusCode?: number;\n    retryAfter?: string;\n}',
   },
   {
     name: 'ToolExecution',

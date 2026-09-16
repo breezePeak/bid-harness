@@ -14,6 +14,8 @@ Bid Host 复用 `ctx.userQuestions.ask()` 和现有 `QuestionComposer`，为支�
 
 Host 重启或 Session 恢复时从最后一个未被 `bid.run.decision.received` 配对的请求事件重建问题，并再次调用 DSH 原生提供方；原生 Host transport 继续负责刷新、重连和请求回答期间的 pending question。进程内的 single-flight 表只防止同一决策重复请求，不作为持久真相源。
 
+阶段重置成功并释放项目操作后，Host 会重新检查当前阶段的 `waiting_start` 决策。该检查不依赖取消操作产生的 `idle` 事件，因为取消可能在重置状态提交前完成；文件清理、Session 事件和项目锁仍按原有顺序完成后才提出问题。
+
 ## Alternatives considered
 
 **保留阶段卡恢复按钮：** 未采用，因为它绕过 DSH 原生提问、无法与其他 Host 问题共享 pending 生命周期，也会让浏览器本地按钮成为第二个决策协议。
@@ -24,4 +26,4 @@ Host 重启或 Session 恢复时从最后一个未被 `bid.run.decision.received
 
 ## Consequences
 
-未回答的问题由 Session Log 与 DSH Host transport 共同恢复，浏览器刷新、WebSocket/SSE 重连和 Host 进程重启都不会丢失决策身份；同一 Run 不会产生重复问题，回答后也不会因刷新再次出现。恢复继续沿用 Run checkpoint、Work Descriptor、Project revision 和现有 Child 收敛顺序；阶段重跑仍只清理选定阶段及后续产物。由于取消原生提问不等于选择，取消后保留未完成决策记录，下一次恢复边界可再次物化该问题。
+未回答的问题由 Session Log 与 DSH Host transport 共同恢复，浏览器刷新、WebSocket/SSE 重连和 Host 进程重启都不会丢失决策身份；同一 Run 不会产生重复问题，回答后也不会因刷新再次出现。恢复继续沿用 Run checkpoint、Work Descriptor、Project revision 和现有 Child 收敛顺序；阶段重跑仍只清理选定阶段及后续产物。由于取消原生提问不等于选择，取消后保留未完成决策记录，下一次恢复边界可再次物化该问题。重置后的阶段开始问题在取消先触发 `idle` 时仍会出现；若阶段为 S1，其状态为 `pending`，不会错误地产生 `waiting_start` 问题。
