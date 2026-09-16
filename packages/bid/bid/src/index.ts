@@ -142,7 +142,6 @@ import type {
   BidRuntimeState,
   BidRunDecision,
   BidRunDecisionType,
-  BidResumePolicy,
   BidStage,
   BidDocumentRole,
   BidBinaryUploadFile,
@@ -196,7 +195,6 @@ export type {
   BidRunResumeIdentity,
   BidRunDecision,
   BidRunDecisionType,
-  BidResumePolicy,
   BidRunStatus,
   BidRunSuspensionCause,
   BidWorkDescriptor,
@@ -2930,7 +2928,6 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param session - Bid Session that owns the suspended Run.
    * @param suspendedRunId - Exact suspended attempt selected by the client.
    * @param expectedProjectRevision - Project revision observed by the client.
-   * @param resumePolicy - User-selected checkpoint reuse policy.
    * @param onAccepted - Callback invoked after the replacement Run is durable.
    * @returns State reached when the resumed work next settles.
    */
@@ -2938,7 +2935,6 @@ export class BidHostRuntime extends TypertRemoteService {
     session: Session,
     suspendedRunId: string,
     expectedProjectRevision: number,
-    resumePolicy?: BidResumePolicy,
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidRuntimeState> {
     if (!isBidMainSession(session)) {
@@ -2962,8 +2958,8 @@ export class BidHostRuntime extends TypertRemoteService {
       admitted = true
       const next = suspended.work.kind === 'stage_execution' || suspended.work.kind === 'file_intake'
         ? await this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation)
-          .resume(suspendedRunId, resumePolicy, onAccepted)
-        : await this.resumeDedicatedWork(agent, operation, suspended, resumePolicy, onAccepted)
+          .resume(suspendedRunId, onAccepted)
+        : await this.resumeDedicatedWork(agent, operation, suspended, onAccepted)
       await this.ctx.sessions.flush(session)
       return next
     } finally {
@@ -2975,14 +2971,13 @@ export class BidHostRuntime extends TypertRemoteService {
     agent: Agent,
     operation: ActiveBidOperation,
     suspended: import('./control-plane-contract.ts').BidRunSnapshot,
-    resumePolicy?: BidResumePolicy,
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidRuntimeState> {
     const payload = await readHostWork(operation.workspace, suspended.work)
     const run = await operation.runs.start(suspended.work, {
       runId: suspended.runId,
       cause: suspended.cause ?? 'host_restart',
-    }, resumePolicy)
+    })
     onAccepted?.(run)
     let confirmedArtifacts: StageArtifact[] | undefined
     try {

@@ -74,12 +74,6 @@ export interface BidRunResumeIdentity {
   readonly cause: BidRunSuspensionCause
 }
 
-/** Durable execution constraints selected when resuming a suspended Run. */
-export interface BidResumePolicy {
-  /** Whether resumed Subagents outside S4 may receive Web tools; S4 always requires both Web tools. */
-  readonly webAccess?: 'inherit' | 'disabled' | undefined
-}
-
 /** Closed set of durable work admitted by the Bid Host. */
 export const BID_WORK_KINDS = [
   'stage_execution',
@@ -119,7 +113,6 @@ export interface BidRunSnapshot {
   readonly work: BidWorkDescriptor
   /** The prior suspended attempt; a resumed Run always receives a fresh identity. */
   readonly resumeOf?: BidRunResumeIdentity | undefined
-  readonly resumePolicy?: BidResumePolicy | undefined
   readonly status: BidRunStatus
   readonly cause?: BidRunSuspensionCause | undefined
   readonly error?: {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { BidResumePolicy, BidRunResumeIdentity, BidRunSnapshot, BidRunSuspensionCause, BidWorkDescriptor } from './control-plane-contract.ts'
+import type { BidRunResumeIdentity, BidRunSnapshot, BidRunSuspensionCause, BidWorkDescriptor } from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 
@@ -225,7 +225,6 @@ export interface BidRunContext {
   readonly controlRevision: number
   readonly work: BidWorkDescriptor
   readonly resumeOf?: BidRunResumeIdentity | undefined
-  readonly resumePolicy?: BidResumePolicy | undefined
   readonly signal: AbortSignal
   readonly scheduler: BidRunScheduler
   readonly commits: BidCommitScope
@@ -276,11 +275,10 @@ export class BidRunCoordinator {
    * Durably record a running Run before exposing its context to an Executor.
    * @param work - Durable descriptor selecting the exact resume adapter and request.
    * @param resumeOf - Suspended Run identity resumed by this attempt.
-   * @param resumePolicy - User-selected checkpoint reuse policy.
    * @returns Admitted Run authority after its running state is durable.
    * @throws when the running state cannot be persisted; no Executor can then start.
    */
-  async start(work: BidWorkDescriptor, resumeOf?: BidRunResumeIdentity, resumePolicy?: BidResumePolicy): Promise<BidRunContext> {
+  async start(work: BidWorkDescriptor, resumeOf?: BidRunResumeIdentity): Promise<BidRunContext> {
     if (this.active !== undefined || this.starting) throw new Error('BID_RUN_ALREADY_ACTIVE')
     this.suspension = undefined
     this.starting = true
@@ -307,7 +305,6 @@ export class BidRunCoordinator {
       controlRevision,
       status: 'running',
       ...(resumeOf === undefined ? {} : { resumeOf }),
-      ...(resumePolicy === undefined ? {} : { resumePolicy }),
       startedAt: now,
       updatedAt: now,
     }
@@ -329,7 +326,6 @@ export class BidRunCoordinator {
         controlRevision: persistedRevision,
         work,
         ...(resumeOf === undefined ? {} : { resumeOf }),
-        ...(resumePolicy === undefined ? {} : { resumePolicy }),
         signal,
         scheduler: this.scheduler,
         commits,
@@ -489,7 +485,6 @@ export function createTestBidRunContext(options: {
   readonly readProjectRevision?: () => number
   readonly work?: BidWorkDescriptor
   readonly resumeOf?: BidRunResumeIdentity
-  readonly resumePolicy?: BidResumePolicy
 } = {}): BidRunContext {
   const controlRevision = options.controlRevision ?? 0
   const signal = options.signal ?? new AbortController().signal
@@ -509,7 +504,6 @@ export function createTestBidRunContext(options: {
     controlRevision,
     work,
     ...(options.resumeOf === undefined ? {} : { resumeOf: options.resumeOf }),
-    ...(options.resumePolicy === undefined ? {} : { resumePolicy: options.resumePolicy }),
     signal,
     scheduler,
     commits: new BidCommitScope({ runId, epoch: 1, controlRevision, signal }, readProjectRevision),

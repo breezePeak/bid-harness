@@ -67,7 +67,6 @@ export const bidRunSchema = z.object({
     runId: z.string().min(1),
     cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
   }).strict().optional(),
-  resumePolicy: z.object({ webAccess: z.enum(['inherit', 'disabled']).optional() }).strict().optional(),
   status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
   cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
   error: z.object({

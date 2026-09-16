@@ -21,7 +21,7 @@ import {
   reduceBidControlState,
 } from './runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
-import type { BidResumePolicy, BidRunResumeIdentity } from './control-plane-contract.ts'
+import type { BidRunResumeIdentity } from './control-plane-contract.ts'
 import { safeBidRunError } from './safe-error.ts'
 
 function signalAborted(signal: AbortSignal): boolean { return signal.aborted }
@@ -160,13 +160,11 @@ export class BidOrchestrator {
   /**
    * Reconcile a suspended attempt through the stage Executor's durable checkpoints, then continue unfinished work.
    * @param suspendedRunId - Exact suspended attempt to resume.
-   * @param resumePolicy - User-selected checkpoint reuse policy.
    * @param onAccepted - Callback invoked after the replacement Run is durable.
    * @returns State reached when the resumed work next settles.
    */
   resume(
     suspendedRunId: string,
-    resumePolicy?: BidResumePolicy,
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidRuntimeState> {
     this.assertIdle()
@@ -180,7 +178,7 @@ export class BidOrchestrator {
         runId: suspended.runId,
         cause: suspended.cause ?? 'host_restart',
       }
-      const settlement = await this.executeStage(suspended.stage, resumeOf, resumePolicy, suspended.work, onAccepted)
+      const settlement = await this.executeStage(suspended.stage, resumeOf, suspended.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -421,7 +419,6 @@ export class BidOrchestrator {
   private async executeStage(
     stage: BidStage,
     resumeOf?: BidRunResumeIdentity,
-    resumePolicy?: BidResumePolicy,
     resumedWork?: BidWorkDescriptor,
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<StageExecutionSettlement> {
@@ -435,7 +432,7 @@ export class BidOrchestrator {
       inputFingerprint: '0'.repeat(64),
     }))
     if (work.stage !== stage) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the Work Descriptor stage does not match the workflow')
-    const run = await this.runs.start(work, resumeOf, resumePolicy)
+    const run = await this.runs.start(work, resumeOf)
     onAccepted?.(run)
     let artifacts: StageArtifact[]
     try {

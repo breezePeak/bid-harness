@@ -10,7 +10,7 @@ Status: implemented
 
 Bid 控制状态分为持久 Workflow 与一次性 Run。Workflow 只保存业务阶段、确认门和不可恢复失败；Run 保存 UUID、epoch、基线项目 revision、运行状态、停止原因、安全错误摘要及完整 Work Descriptor。`project-state.json` version 3 与 Session 事件使用同一控制模型，扁平 runtime 仅作为浏览器视图。
 
-每个 Long Run 在开始前持久化请求正文及输入摘要，Work Descriptor 用 `kind + workId + requestRef + requestSha256 + inputFingerprint` 绑定其中一种明确工作：完整阶段执行、文件接入、资料重映射、目录重生成、目录确认或独立章节修订。恢复按 `kind` 分派适配器并复用同一 workId 的私有工作树，不能只根据 stage 猜测工作；S4 用稳定 Task ID 和当前版本检查点确认已完成任务，未完成的部分进度另以任务语义范围、确认目录、分析产物、语料身份和 Resume Policy 的局部指纹决定复用。
+每个 Long Run 在开始前持久化请求正文及输入摘要，Work Descriptor 用 `kind + workId + requestRef + requestSha256 + inputFingerprint` 绑定其中一种明确工作：完整阶段执行、文件接入、资料重映射、目录重生成、目录确认或独立章节修订。恢复按 `kind` 分派适配器并复用同一 workId 的私有工作树，不能只根据 stage 猜测工作；S4 用稳定 Task ID 和当前版本检查点确认已完成任务，未完成的部分进度另以任务语义范围、确认目录、分析产物、语料身份和 `webSearchEnabled` 的局部指纹决定复用。
 
 Host 的 `BidRunCoordinator` 是 Long Run 的唯一授权者。它先将 `bid.run.started` checkpoint 到 `project-state.json`，再暴露强制 `BidRunContext`；`baseProjectRevision` 是创建前 CAS 基线，`controlRevision` 是 running 状态已持久化后的提交版本。Operation signal 只参与创建 `run.signal`，执行器、Main Agent、Child、Worker、Parser 和 Renderer 此后只服从 Run 信号。
 
@@ -20,7 +20,7 @@ Long Run 的模型候选只写 `runs/<workId>/work/`，正式产物由 Commit Sc
 
 所有短确定性写入归 ProjectMutation，以项目锁、expected revision、PublicationBatch 和一次 revision bump 共同提交；纯读取口只返回现有文件或派生视图，不初始化、修复或刷新文件。项目 revision 只表示 Run 控制转换或 ProjectMutation，不随同一 Run 的进度 checkpoint 和 steering command 增长。Word 模板、预览与导出属于独立 DOCX Operation；DOCX 和 `lastExport` 在一个 PublicationBatch 中提交。
 
-S5 的运行中计划修改和章节修订先写入 Run command journal，再唤醒内存调度器；命令效果与 applied 状态在同一 PublicationBatch 中提交，Host 重启重载 pending 命令。挂起的主 S5 Run 接受 ProjectMutation 形式的修订意图并保留自身身份；只有不存在挂起主 Run 时，独立章节修订才创建 `chapter_revision` Long Run。恢复旧 Writer 时仍按本次 Resume Policy 安装工具 guard，`webAccess=disabled` 对新旧 Writer 都拒绝 Web 工具。
+S5 的运行中计划修改和章节修订先写入 Run command journal，再唤醒内存调度器；命令效果与 applied 状态在同一 PublicationBatch 中提交，Host 重启重载 pending 命令。挂起的主 S5 Run 接受 ProjectMutation 形式的修订意图并保留自身身份；只有不存在挂起主 Run 时，独立章节修订才创建 `chapter_revision` Long Run。恢复旧 Writer 时沿用 Host 的 `webSearchEnabled` 配置安装工具 guard。
 
 每个 suspended Run 同时产生以 Run ID 派生的 `bid.run.notice`，Host restart 将孤儿 running Run 转为 suspended 时也生成同类通知。浏览器将这一单事件投影为 model-invisible 的聊天时间线行；用户停止使用中性样式，自动中断显示经统一脱敏的 code、message 和 issues。notice 记录被替代的 generic error turn，使同一次失败只显示一个主要错误节点。
 
@@ -28,7 +28,7 @@ S5 的运行中计划修改和章节修订先写入 Run command journal，再唤
 
 挂起后的 Composer 保持可用。扁平 runtime 忠实投影 suspended Run，不以 Workflow 的 ready gate 改写为 pending；Bid 阶段栏只读取该 Host Projection，Main Agent 的运行状态只产生独立恢复检查提示，不能改变阶段文案、状态点或进度卡。`bid.run.suspended` 提供即时更新，持久化后的 `bid.project.resumed` 即使逻辑状态相同也再发布 suspended 权威投影；重连仍以基线 snapshot 补齐，不增加轮询。Host 将挂起恢复、当前阶段重跑和停止作为 DSH 原生用户提问，问题请求与明确选项结果分别写入 `bid.run.decision.required` 和 `bid.run.decision.received`；阶段栏不提供操作按钮，普通消息也不回答该问题。S4 进度在挂起后保留完成数、失败数与失败任务负责的 Section，并停止运行态轮询和动画。Host 持锁重读项目并执行 CAS，身份或 revision 改变就拒绝。Host 启动发现 running 或 cancelling 只写 `host_restart` 挂起，不自动恢复；未回答的决策从 Session Log 重新物化到原生提问提供方。
 
-恢复是执行器级 reconciliation，不是内存续跑。S1 从请求 Artifact 校验并重读原始上传字节；S2 持久化逐条分析记录与 review phase，中断的 reviewing 回到 `review_required`；S3 复用已完整校验的正式 Artifact；S4 只把与当前重建目录的局部输入指纹一致、作用域仍存在且目录操作可重放的 `completed=true` Task 作为完成状态权威来源，指纹同时覆盖 `section_ids` 与 `outline_edit_scope_id`。普通过期 Task 重新调度，作用域消失或过期的 Repair 与动态 Task 从计划和日志中移除后按当前目录重新派生；只有通过该复用检查的完成结果才参与目录与 Evidence 重建，不进入调度或模型调用。首个真正失败 Task 完成当前 Section 子树锁定、资料映射和 Host 校验后解除恢复屏障，其余任务立即恢复配置的并发数。S5 复用计划、章节日志、正文哈希、Reviewer 身份和 pending command。Resume 工具在项目锁、CAS、Work 与输入身份校验及新 Run durable start 完成后才返回 accepted、runId 和 workKind，长任务随后在后台继续。429、Provider 文本和 retry-after 不由 S4 猜测，统一在 Run 边界暴露为可恢复挂起。
+恢复是执行器级 reconciliation，不是内存续跑。S1 从请求 Artifact 校验并重读原始上传字节；S2 持久化逐条分析记录与 review phase，中断的 reviewing 回到 `review_required`；S3 复用已完整校验的正式 Artifact；S4 只把与当前重建目录的局部输入指纹一致、作用域仍存在且目录操作可重放的 `completed=true` Task 作为完成状态权威来源，指纹同时覆盖 `section_ids`、`outline_edit_scope_id` 和 `webSearchEnabled`。普通过期 Task 重新调度，作用域消失或过期的 Repair 与动态 Task 从计划和日志中移除后按当前目录重新派生；只有通过该复用检查的完成结果才参与目录与 Evidence 重建，不进入调度或模型调用。首个真正失败 Task 完成当前 Section 子树锁定、资料映射和 Host 校验后解除恢复屏障，其余任务立即恢复配置的并发数。S5 复用计划、章节日志、正文哈希、Reviewer 身份和 pending command。Resume 工具在项目锁、CAS、Work 与输入身份校验及新 Run durable start 完成后才返回 accepted、runId 和 workKind，长任务随后在后台继续。429、Provider 文本和 retry-after 不由 S4 猜测，统一在 Run 边界暴露为可恢复挂起。
 
 ## Alternatives considered
 

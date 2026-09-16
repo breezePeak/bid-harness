@@ -313,11 +313,24 @@ describe('S5 真实 DSH Child 接入', () => {
         maxRepairAttempts: 1, maxConcurrency: 3, webSearchEnabled: false,
         run: createTestBidRunContext({
           resumeOf: { runId: 'test-suspended-run', cause: 'host_restart' },
-          resumePolicy: { webAccess: 'inherit' },
         }),
       })
       expect([...adapter.requests.values()].filter(request => request.role === 'writer')
         .every(request => request.tools.includes('web_search') === false && request.tools.includes('web_fetch') === false)).toBe(true)
+    } finally { await ctx.fiber.dispose() }
+  }, 30_000)
+
+  it('恢复不改变 webSearchEnabled 开启时 Writer 的 Web 工具权限', async () => {
+    const { ctx, workspace, adapter, agent } = await fixture()
+    try {
+      await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxConcurrency: 3, webSearchEnabled: true,
+        run: createTestBidRunContext({
+          resumeOf: { runId: 'test-suspended-run', cause: 'host_restart' },
+        }),
+      })
+      expect([...adapter.requests.values()].filter(request => request.role === 'writer')
+        .every(request => request.tools.includes('web_search') && request.tools.includes('web_fetch'))).toBeTruthy()
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 

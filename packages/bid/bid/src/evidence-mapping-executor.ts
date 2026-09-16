@@ -3311,7 +3311,7 @@ async function executeEvidenceMappingRun(
           .map(({ writing_brief: _brief, ...mapping }) => mapping)
         : [],
       task: mappingTask,
-      resume_policy: options.run.resumePolicy ?? {},
+      web_search_enabled: webSearchEnabled,
     }
   }
   const taskInputFingerprint = (
@@ -4014,6 +4014,7 @@ async function executeEvidenceMappingRun(
         await persistLog()
         if (signal.aborted) throw error
         if (error instanceof BidStageExecutionError) throw error
+        if (error instanceof FinalReviewTaskTooLargeError) throw error
         const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }]
         throw new MappingSubagentInfrastructureError(
           issues,

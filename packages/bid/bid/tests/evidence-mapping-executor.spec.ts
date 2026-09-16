@@ -1201,6 +1201,38 @@ describe('evidence-mapping Agent executor', () => {
     expect(reviewTasks.every(task => task.section_ids.length === 1 && task.task_id !== oversizedTask)).toBe(true)
   })
 
+  it('Final Review 提示超预算时拆分任务，不记录为基础设施失败', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-review-prompt-too-large-')))
+    const material = await writeInputs(workspace)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections = outline.sections.map(section => ({
+      ...section,
+      purpose: `${section.purpose}${'扩大 Final Review 上下文。'.repeat(1_000)}`,
+    }))
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const fixture = mappingFixture(workspace, material, false, {}, false)
+    const running = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0,
+    })
+
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach(start => { start.resolve() })
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(2) })
+    expect(fixture.finalStarts.every(start => {
+      const taskLine = promptText(start.request.request).split('\n').find(line => line.startsWith('Mapping Task：'))
+      if (taskLine === undefined) return false
+      return (JSON.parse(taskLine.slice('Mapping Task：'.length)) as EvidenceMappingTask).section_ids.length === 1
+    })).toBe(true)
+    fixture.finalStarts.forEach(start => { start.resolve() })
+    await running
+
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(log.tasks.some(task => task.status === 'failed')).toBe(false)
+  })
+
   it('Material 与 Task 指纹变化只失效真实依赖项和祖先总述', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-review-invalidation-')))
     const material = await writeInputs(workspace)
@@ -1367,6 +1399,34 @@ describe('evidence-mapping Agent executor', () => {
       .toBe(checkpoint.tasks.find(task => task.task_id === 'MAP-FINAL-CHECK')?.input_fingerprint)
     expect(resumed.starts).toHaveLength(0)
     expect(resumed.finalStarts).toHaveLength(0)
+  })
+
+  it('webSearchEnabled 变化会使 S4 Task 指纹失效', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-web-fingerprint-')))
+    const material = await writeInputs(workspace)
+    const enabled = mappingFixture(workspace, material)
+    const firstRun = executeEvidenceMapping(enabled.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: true,
+    })
+    await vi.waitFor(() => { expect(enabled.starts).toHaveLength(1) })
+    enabled.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(enabled.starts).toHaveLength(2) })
+    enabled.starts[1]!.resolve()
+    await firstRun
+    const before = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; input_fingerprint: string }>
+    }
+
+    const disabled = mappingFixture(workspace, material)
+    const resumed = executeEvidenceMapping(disabled.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: false, resume: true,
+    })
+    await resumed
+    const after = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; input_fingerprint: string }>
+    }
+    expect(after.tasks.find(task => task.task_id === 'MAP-FINAL-CHECK')?.input_fingerprint)
+      .not.toBe(before.tasks.find(task => task.task_id === 'MAP-FINAL-CHECK')?.input_fingerprint)
   })
 
   it('关键 checkpoint 写入失败会终止 Stage 并保留原始错误', async () => {
@@ -1654,7 +1714,6 @@ describe('evidence-mapping Agent executor', () => {
     const resumed = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxConcurrency: 2, maxRepairAttempts: 0,
       run: createTestBidRunContext({
-        resumePolicy: { webAccess: 'disabled' },
       }),
     })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
