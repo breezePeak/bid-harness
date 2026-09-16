@@ -607,7 +607,6 @@ async function persistChapterWebSnapshots(
     }
   })
   const updated = parseWebEvidenceSourcesArtifact({
-    schema_version: ledger.schema_version,
     stage: ledger.stage,
     sources: uniqueWebEvidenceSources([...ledger.sources, ...bound.map(snapshot => snapshot.source)]),
   })

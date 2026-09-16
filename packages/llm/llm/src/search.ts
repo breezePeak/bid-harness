@@ -3,7 +3,20 @@
 import { HarnessError } from './error.ts'
 
 /** Typed search/fetch failure with an open machine-readable code. */
-export class WebError extends HarnessError {}
+export class WebError extends HarnessError {
+  readonly statusCode: number | undefined
+  readonly retryAfter: string | undefined
+
+  constructor(
+    message: string,
+    code: string,
+    options?: ErrorOptions & { readonly statusCode?: number; readonly retryAfter?: string },
+  ) {
+    super(message, code, options)
+    this.statusCode = options?.statusCode
+    this.retryAfter = options?.retryAfter
+  }
+}
 
 /**
  * What one search-capable backend is asked to search. Each request carries one

@@ -1,4 +1,4 @@
-# Agent Note: 默认独立 Tavily Web Search
+# Agent Note: 独立 Tavily Web Search
 
 Status: implemented
 
@@ -8,9 +8,9 @@ Status: implemented
 
 ## Decision
 
-本记录替代[默认 Web search](2026-07-31-web-default-search.md)中由聊天 Provider 提供默认搜索的选择；其通用工具启用、显式 Provider 选择、Host Plane 所有权和网络权限边界仍然有效。
+本记录保留独立 Tavily Provider 的实现、凭据与失败边界；基础组合的默认路由由[搜索跟随任务模型](../bug-fix/2026-09-13-web-search-follows-task-provider.md)所有。
 
-新增 `@deepseek-ai/dsh-web-search-tavily` 实现现有 `ctx.web` Search Provider 契约，稳定 ID 为 `tavily`。基础组合显式选择该 ID；`@deepseek-ai/dsh-tool-web` 继续独占模型可见的 `web_search`，业务插件只看到通用搜索与抓取工具。DeepSeek hosted-search 适配仍可安装和显式选择，但不再决定基础组合的搜索可用性。
+新增 `@deepseek-ai/dsh-web-search-tavily` 实现现有 `ctx.web` Search Provider 契约，稳定 ID 为 `tavily`。基础组合安装该 Provider，但默认显式选择跟随任务模型的 `deepseek-official`；用户只有在 Web 搜索卡选择独立搜索时才使用 `tavily`。`@deepseek-ai/dsh-tool-web` 继续独占模型可见的 `web_search`，业务插件只看到通用搜索与抓取工具。
 
 Settings 段 `web-search-tavily` 保存端点、超时、搜索深度、主题、摘要模式、结果数和每来源片段数。`apiKeyEnv` 只保存 Credentials 引用名；每次请求通过 Credentials 服务解析当前值，未安装该服务时读取同名启动环境。请求固定关闭 raw content，结果摘要映射到通用 snippet，完整正文仍由 `web_fetch` 获取。凭据不进入 session、Prompt 或 Bid Artifact。
 
@@ -26,6 +26,6 @@ Provider 自身用独立 deadline 约束直接调用：超时为 `WEB_SEARCH_TIM
 
 ## Consequences
 
-基础组合需要为 `TAVILY_API_KEY` 提供 Credentials 值或启动环境值；缺失时工具保持可发现，但首次搜索明确失败。聊天 Provider 无 hosted-search 能力的集成回归通过真实 `ctx.tools.execute()` 调用 Tavily Provider，并只在 HTTP 边界使用固定响应，证明通用工具路由与 `ctx.llm.supports(provider, 'web_search')` 无关。Provider 单元测试覆盖 Settings 热更新、Credentials 轮换、请求映射、取消、超时和失败分类；带真实密钥的 e2e 可验证公开来源。
+选择独立搜索时需要为 `TAVILY_API_KEY` 提供 Credentials 值或启动环境值；缺失时 Provider 保持已注册但不可用，不会取代默认的跟随模型路由。Provider 单元测试覆盖 Settings 热更新、Credentials 轮换、请求映射、取消、超时和失败分类；带真实密钥的 e2e 可验证公开来源。
 
 默认搜索不等于默认信任任意网页。搜索结果只提供候选 URL 和摘要；需要证据正文的 S4 链路仍须成功 `web_fetch`，并由 Host 保存可重建 Snapshot。独立 Provider 解决执行路由，不证明任何具体项目的目录深化质量；该结论必须来自真实 Workspace 回放和验收报告。

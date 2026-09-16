@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
-import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
+import { bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import { prepareBidWorkingTree, publishBidWorkingPaths } from '../src/working-tree.ts'
 
 async function fixture() {
@@ -60,5 +60,29 @@ describe('Bid Work Descriptor', () => {
     }) }
     await publishBidWorkingPaths(run, workspace, reopened, ['outline/outline.json'])
     expect(await readFile(canonical, 'utf8')).toBe('candidate')
+  })
+
+  it('重置阶段时枚举请求、私有工作树及后续阶段，不误删上游工作', async () => {
+    const workspace = await fixture()
+    const upstream = await persistBidWorkRequest(workspace, 'outline_regeneration', 'outline_generation', {}, {}, 'upstream')
+    const target = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'target')
+    const downstream = await persistBidWorkRequest(workspace, 'chapter_revision', 'chapter_writing', {}, {}, 'downstream')
+    await mkdir(join(workspace.projectRoot, 'requests', target.workId), { recursive: true })
+    await mkdir(join(workspace.projectRoot, 'runs', target.workId, 'work'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'runs', target.workId, 'work', 'work-identity.json'), `${JSON.stringify(target)}\n`)
+    await mkdir(join(workspace.projectRoot, 'runs', downstream.workId, 'work'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'runs', downstream.workId, 'work', 'work-identity.json'), `${JSON.stringify(downstream)}\n`)
+
+    const paths = await bidResetWorkPaths(workspace, 'evidence_mapping')
+
+    expect(paths).toEqual(expect.arrayContaining([
+      join(workspace.projectRoot, target.requestRef),
+      join(workspace.projectRoot, 'requests', target.workId),
+      join(workspace.projectRoot, 'runs', target.workId),
+      join(workspace.projectRoot, downstream.requestRef),
+      join(workspace.projectRoot, 'runs', downstream.workId),
+    ]))
+    expect(paths).not.toContain(join(workspace.projectRoot, upstream.requestRef))
+    expect(paths).not.toContain(join(workspace.projectRoot, 'runs', upstream.workId))
   })
 })

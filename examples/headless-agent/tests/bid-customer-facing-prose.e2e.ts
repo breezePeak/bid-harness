@@ -19,7 +19,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  BidWorkspace, EVIDENCE_MAPPING_SCHEMA_VERSION, buildBidStageTask,
+  BidWorkspace, buildBidStageTask,
   executeChapterWriting, executeOutlineGeneration, outlineArtifactSha256, parseChapterReviewArtifact,
   parseChapterWritingManifest, parseOutlineArtifact, validateChapterWriting, validateOutlineGeneration,
   createTestBidRunContext,
@@ -134,14 +134,13 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
           confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
         })}\n`),
         writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), `${JSON.stringify({
-          schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
           section_mappings: outline.sections.filter(section => section.writable).map(section => ({
             section_id: section.id, local_materials: [], web_materials: [], missing_topics: [],
             writing_dimensions: ['实施方法', '职责分工', '质量控制', '交付成果'],
           })),
         })}\n`),
         writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-          schema_version: 2, stage: 'evidence_mapping', sources: [],
+          stage: 'evidence_mapping', sources: [],
         })}\n`),
       ])
 

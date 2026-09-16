@@ -532,6 +532,9 @@ export class SessionInputShell implements SessionInput {
       },
       (error: unknown) => {
         if (this.dead(attempt)) return
+        if (this.handedOff.has(attempt.seq)) {
+          this.deps.localHandoffFailed?.(attempt, error instanceof Error ? error.message : String(error))
+        }
         this.run(this.core.dispatch({
           type: 'submit-settled',
           attempt,

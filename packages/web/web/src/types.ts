@@ -20,6 +20,20 @@ export interface WebFetchRequest {
   readonly url: string
 }
 
+/** Secret-free local availability facts exposed to orchestration diagnostics. */
+export interface WebProviderDiagnostic {
+  /** Whether the provider can serve requests with its current local state. */
+  readonly available: boolean
+  /** Why a provider is unavailable, when the provider can classify it. */
+  readonly reason?: 'credentials' | 'configuration' | 'unknown'
+  /** Credential reference used by the provider, never the credential value. */
+  readonly credentialRef?: string
+  /** Where the credential was found, when the provider can disclose it safely. */
+  readonly credentialSource?: string
+  /** Provider endpoint, without credential material. */
+  readonly endpoint?: string
+}
+
 /**
  * Normalized fetch outcome. A successful network fetch of a non-2xx response is
  * a result, not an error: the status code is part of the fetched resource
@@ -58,6 +72,8 @@ export interface WebSearchProvider {
   readonly id: string
   /** Local usability check; must not make network calls. */
   available(): boolean | Promise<boolean>
+  /** Optional secret-free explanation used by host preflight diagnostics. */
+  diagnose?(): WebProviderDiagnostic | Promise<WebProviderDiagnostic>
   /** Run one search; honor `signal` for cancellation. */
   search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
 }
@@ -70,6 +86,8 @@ export interface WebFetchProvider {
   readonly id: string
   /** Local usability check; must not make network calls. */
   available(): boolean | Promise<boolean>
+  /** Optional secret-free explanation used by host preflight diagnostics. */
+  diagnose?(): WebProviderDiagnostic | Promise<WebProviderDiagnostic>
   /** Retrieve one URL; honor `signal` for cancellation. */
   fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>
 }

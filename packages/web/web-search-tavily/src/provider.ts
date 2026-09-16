@@ -1,7 +1,7 @@
 /** Tavily implementation of the provider-neutral Web search contract. */
 
 import { WebError } from '@deepseek-ai/dsh-web'
-import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
+import type { WebProviderDiagnostic, WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { TavilyError, TavilyResult, TavilySearchResponse } from './types.ts'
 
@@ -36,6 +36,12 @@ export interface TavilySearchProviderOptions {
   includeAnswer: boolean | 'basic' | 'advanced'
   maxResults?: number
   chunksPerSource?: number
+}
+
+/** Secret-free credential state used by provider diagnostics. */
+export interface TavilyCredentialDiagnostic {
+  readonly configured: boolean
+  readonly source?: string
 }
 
 /**
@@ -80,11 +86,28 @@ export class TavilySearchProvider implements WebSearchProvider {
     private readonly options: () => TavilySearchProviderOptions,
     private readonly resolveApiKey: (ref: string) => Promise<string>,
     private readonly credentialReady: (ref: string) => Promise<boolean>,
+    private readonly credentialInfo?: (ref: string) => Promise<TavilyCredentialDiagnostic>,
   ) {}
 
   async available(): Promise<boolean> {
     const ref = this.options().apiKeyEnv
     return ref.length > 0 && await this.credentialReady(ref)
+  }
+
+  async diagnose(): Promise<WebProviderDiagnostic> {
+    const options = this.options()
+    const ref = options.apiKeyEnv
+    const available = ref.length > 0 && await this.credentialReady(ref)
+    const info = this.credentialInfo === undefined || ref.length === 0
+      ? undefined
+      : await this.credentialInfo(ref)
+    return {
+      available: available && (info?.configured ?? true),
+      ...(available && (info?.configured ?? true) ? {} : { reason: 'credentials' as const }),
+      ...(ref.length === 0 ? {} : { credentialRef: ref }),
+      ...(info?.source === undefined ? {} : { credentialSource: info.source }),
+      endpoint: options.baseURL,
+    }
   }
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
@@ -140,7 +163,18 @@ async function tavilyHttpError(response: Response, signal: AbortSignal): Promise
   } catch (error: unknown) {
     if (signal.aborted) return translateAbortOrFailure(error, signal)
   }
-  return new WebError(message, 'WEB_PROVIDER_ERROR')
+  const code = response.status === 401 || response.status === 403
+    ? 'WEB_PROVIDER_AUTHENTICATION_FAILED'
+    : response.status === 429
+      ? 'WEB_PROVIDER_RATE_LIMITED'
+      : response.status === 402
+        ? 'WEB_PROVIDER_QUOTA_EXCEEDED'
+        : 'WEB_PROVIDER_ERROR'
+  const retryAfter = response.headers.get('retry-after')
+  return new WebError(message, code, {
+    statusCode: response.status,
+    ...(retryAfter === null ? {} : { retryAfter }),
+  })
 }
 
 function translateAbortOrFailure(error: unknown, signal: AbortSignal): WebError {

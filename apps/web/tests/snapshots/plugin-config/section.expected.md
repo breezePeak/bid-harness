@@ -31,5 +31,5 @@
           - img
       - listitem:
         - 'button "展开设置: 网页搜索"':
-          - text: 网页搜索 DeepSeek 搜索提供方。
+          - text: 网页搜索 默认跟随当前任务的模型 Provider；也可选择下方配置的独立网页搜索 Provider。
           - img

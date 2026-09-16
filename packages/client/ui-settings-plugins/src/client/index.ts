@@ -29,7 +29,7 @@ import { WebSearchCard } from './WebSearchCard.tsx'
 import { AGENT_LOOP_NS, AgentLoopCardController } from './agent-loop-card-controller.ts'
 import { SHELL_NS, BashCardController } from './bash-card-controller.ts'
 import { ConfigurablePluginsTabController } from './tab-store.ts'
-import { WEB_SEARCH_NS, WebSearchCardController } from './web-search-card-controller.ts'
+import { TAVILY_NS, WEB_NS, WEB_SEARCH_NS, WebSearchCardController } from './web-search-card-controller.ts'
 import { en, zh } from './locales.ts'
 
 export type { PluginsSettingsSectionInjected, PluginsSettingsSectionProps } from './PluginsSettingsSection.tsx'
@@ -62,13 +62,24 @@ export function apply(ctx: ClientContext): void {
 
   const bash = new BashCardController(ctx.settingsScope.bind({ namespace: SHELL_NS }))
   const agentLoop = new AgentLoopCardController(ctx.settingsScope.bind({ namespace: AGENT_LOOP_NS }))
-  const webSearch = new WebSearchCardController(ctx.settingsScope.bind({ namespace: WEB_SEARCH_NS }), api)
+  const webSearch = new WebSearchCardController(
+    ctx.settingsScope.bind({ namespace: WEB_NS }),
+    ctx.settingsScope.bind({ namespace: WEB_SEARCH_NS }),
+    ctx.settingsScope.bind({ namespace: TAVILY_NS }),
+    api,
+  )
 
   ctx.effect(
     () => ctx.remote.$on('llm/adapters-updated', () => { void webSearch.refreshProviders() }),
     'ui-settings-plugins: provider capabilities',
   )
   ctx.on('connection/reset', () => { void webSearch.refreshProviders() })
+  ctx.effect(
+    () => ctx.remote.$on('credentials/reference-updated', (ref) => {
+      if (ref === webSearch.inject().hooks.webSearchCard.getSnapshot().tavily.apiKeyEnv) void webSearch.refreshCredential()
+    }),
+    'ui-settings-plugins: Tavily credentials',
+  )
 
   // Which namespaces the Host serves comes from the shared describe mirror,
   // whose owning plugin already refreshes it on document commits and
@@ -156,7 +167,7 @@ export function apply(ctx: ClientContext): void {
     }, AgentLoopCard)
     yield ctx.slots.register({
       name: 'settings.plugin.item',
-      key: WEB_SEARCH_NS,
+      key: WEB_NS,
       locale: NS,
       inject: () => webSearch.inject(),
     }, WebSearchCard)

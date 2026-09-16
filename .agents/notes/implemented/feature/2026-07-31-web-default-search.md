@@ -4,7 +4,7 @@ Status: implemented
 
 English | [中文](2026-07-31-web-default-search.zh.md)
 
-默认搜索 Provider、凭据归属和 fetch 启用状态由[默认独立 Tavily Web Search](2026-09-12-independent-tavily-web-search.md)取代；本文的显式 Provider 选择、工具启用、Host Plane 所有权和网络权限边界继续适用。
+默认搜索路由由[搜索跟随任务模型](../bug-fix/2026-09-13-web-search-follows-task-provider.md)所有；[独立 Tavily Web Search](2026-09-12-independent-tavily-web-search.md)保留为显式可选 Provider。本文的工具启用、Host Plane 所有权和网络权限边界继续适用。
 
 ## Problem
 

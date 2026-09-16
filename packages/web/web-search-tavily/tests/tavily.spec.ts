@@ -115,12 +115,22 @@ describe('Tavily request and failure mapping', () => {
   })
 
   it.each([
-    { response: jsonResponse({ detail: { error: 'bad key' } }, { status: 401 }), message: 'bad key' },
-    { response: new Response('gateway', { status: 502 }), message: 'Tavily API error (HTTP 502)' },
-  ])('maps HTTP failures: $message', async ({ response, message }) => {
+    { response: jsonResponse({ detail: { error: 'bad key' } }, { status: 401 }), message: 'bad key', code: 'WEB_PROVIDER_AUTHENTICATION_FAILED' },
+    { response: new Response('gateway', { status: 502 }), message: 'Tavily API error (HTTP 502)', code: 'WEB_PROVIDER_ERROR' },
+  ])('maps HTTP failures: $message', async ({ response, message, code }) => {
     vi.stubGlobal('fetch', vi.fn(async () => response))
     await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).search({ query: 'q' }))
-      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR', message }))
+      .rejects.toThrow(expect.objectContaining({ code, message }))
+  })
+
+  it('preserves rate-limit status and retry metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('slow down', {
+      status: 429, headers: { 'retry-after': '12' },
+    })))
+    await expect(new TavilySearchProvider(() => options, async () => 'key', async () => true).search({ query: 'q' }))
+      .rejects.toThrow(expect.objectContaining({
+        code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '12',
+      }))
   })
 
   it('maps malformed success responses to WEB_PROVIDER_ERROR', async () => {

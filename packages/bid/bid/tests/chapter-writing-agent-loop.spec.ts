@@ -210,7 +210,7 @@ describe('S5 真实 DSH Child 接入', () => {
       await writeFile(join(workspace.projectRoot, sources[2]!.snapshot_path), content)
       const mappedIndex = buildWebEvidenceChunkIndex(sources[2]!, content)
       await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(sources[2]!.source_id)), JSON.stringify(mappedIndex))
-      await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources }))
+      await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ stage: 'evidence_mapping', sources }))
       const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
       const evidence = JSON.parse(await readFile(evidencePath, 'utf8')) as { section_mappings: Array<{ section_id: string; web_materials: unknown[] }> }
       evidence.section_mappings.find(mapping => mapping.section_id === 'SEC-2')!.web_materials = [{

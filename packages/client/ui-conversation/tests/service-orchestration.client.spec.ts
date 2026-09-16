@@ -48,7 +48,7 @@ describe('ConversationController', () => {
     b.shell.setDraft('仅修改引用段落')
     b.shell.submit()
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
-    expect(handler).toHaveBeenCalledWith('仅修改引用段落', [], expect.any(AbortSignal), 'queue')
+    expect(handler).toHaveBeenCalledWith('仅修改引用段落', [], expect.any(AbortSignal), 'queue', expect.any(String))
     expect(b.prompt).not.toHaveBeenCalled()
     pending.reject(new Error('正文已更新，请重新选择。'))
     await vi.waitFor(() => {
@@ -59,7 +59,7 @@ describe('ConversationController', () => {
     dispose()
     b.shell.submit()
     await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
-    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '仅修改引用段落' }], 'queue', expect.any(AbortSignal))
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '仅修改引用段落' }], 'queue', expect.any(AbortSignal), expect.any(String))
     await b.runtime.dispose()
   })
 
@@ -95,7 +95,7 @@ describe('ConversationController', () => {
     await b.scoped.updateQueue('item-1' as never, { kind: 'remove' })
     await b.scoped.cancel()
     await b.scoped.loadOlder()
-    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', undefined)
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', undefined, undefined)
     expect(b.updateQueue).toHaveBeenCalledWith('item-1', { kind: 'remove' })
     expect(b.cancel).toHaveBeenCalledOnce()
     expect(b.loadOlder).toHaveBeenCalledOnce()
@@ -107,7 +107,7 @@ describe('ConversationController', () => {
     const signal = new AbortController().signal
     await b.scoped.send('插话消息', 'steer', signal)
     expect(b.prompt).toHaveBeenCalledTimes(1)
-    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '插话消息' }], 'steer', signal)
+    expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '插话消息' }], 'steer', signal, undefined)
     await b.runtime.dispose()
   })
 
@@ -126,6 +126,26 @@ describe('ConversationController', () => {
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
     expect(b.prompt).not.toHaveBeenCalled()
     dispose()
+    await b.runtime.dispose()
+  })
+
+  it('does not hold a later queue submission behind an unfinished admission', async () => {
+    const b = await bench()
+    const first = Promise.withResolvers<{ ok: true; value: { accepted: true } }>()
+    b.prompt.mockImplementationOnce(() => first.promise)
+    const session = b.runtime.sessions.behavior('s1')
+
+    const firstSend = b.root.sendSession(session, '第一条', [], 'queue')
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+    const secondSend = b.root.sendSession(session, '第二条', [], 'queue')
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledTimes(2) })
+    expect(b.prompt).toHaveBeenNthCalledWith(2, [{ type: 'text', text: '第二条' }], 'queue', undefined, expect.any(String))
+
+    first.resolve({ ok: true, value: { accepted: true } })
+    await expect(Promise.all([firstSend, secondSend])).resolves.toEqual([
+      { kind: 'success' },
+      { kind: 'success' },
+    ])
     await b.runtime.dispose()
   })
 

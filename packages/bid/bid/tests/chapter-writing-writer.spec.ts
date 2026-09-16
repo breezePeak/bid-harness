@@ -19,7 +19,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 async function ledger(workspace: BidWorkspace, snapshots: WebEvidenceSnapshot[]) {
   await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
-    schema_version: 2, stage: 'evidence_mapping', sources: snapshots.map(value => value.source),
+    stage: 'evidence_mapping', sources: snapshots.map(value => value.source),
   }))
 }
 
@@ -223,7 +223,10 @@ describe('S5 Writer 短引用与语义输入', () => {
     const content = `# 依据\n\n${'A'.repeat(4000)}\n\n${'B'.repeat(4000)}`
     const large = snapshot(content, 'https://official.example/multi-chunk')
     await writeFile(join(workspace.projectRoot, large.source.snapshot_path), large.content)
-    await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(large.source.source_id)), JSON.stringify(buildWebEvidenceChunkIndex(large.source, large.content)))
+    await writeFile(
+      join(workspace.projectRoot, webEvidenceChunkIndexPath(large.source.source_id)),
+      JSON.stringify(buildWebEvidenceChunkIndex(large.source, large.content)),
+    )
     await ledger(workspace, [large])
     const chunks = buildWebEvidenceChunkIndex(large.source, large.content).chunks
     expect(chunks).toHaveLength(2)
@@ -302,7 +305,10 @@ describe('S5 Writer 短引用与语义输入', () => {
     const { workspace, manifest, context, refs, bind } = await fixture()
     const newWeb = snapshot('新 fetch 的实际技术正文', 'https://official.example/new')
     await writeFile(join(workspace.projectRoot, newWeb.source.snapshot_path), newWeb.content)
-    await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(newWeb.source.source_id)), JSON.stringify(buildWebEvidenceChunkIndex(newWeb.source, newWeb.content)))
+    await writeFile(
+      join(workspace.projectRoot, webEvidenceChunkIndexPath(newWeb.source.source_id)),
+      JSON.stringify(buildWebEvidenceChunkIndex(newWeb.source, newWeb.content)),
+    )
     await ledger(workspace, [newWeb])
     await appendChapterWebReferences(workspace, refs, [newWeb.source])
     context.webMaterials.push({
@@ -334,7 +340,9 @@ describe('S5 Writer 短引用与语义输入', () => {
     }] })
     expect(candidate.metadata.flowcharts[0]?.id).toBe('FLOW-SEC-1-1')
     expect(candidate.metadata.flowcharts[0]?.nodes.map(node => node.id)).toEqual(['N1', 'N2', 'N3', 'N4'])
-    const projected = projectChapterWriterCandidate(candidate, refs) as { metadata: { flowcharts: Array<{ nodes: Array<{ key: string }> }> } }
+    const projected = projectChapterWriterCandidate(candidate, refs) as {
+      metadata: { flowcharts: Array<{ nodes: Array<{ key: string }> }> }
+    }
     expect(projected.metadata.flowcharts[0]?.nodes[1]?.key).toBe('N2')
   })
 })

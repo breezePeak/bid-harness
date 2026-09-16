@@ -135,9 +135,11 @@ async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
     content_sha256: webEvidenceContentSha256(snapshot), snapshot_path: `analysis/web-sources/${sourceId}.md`,
   }
   await writeFile(join(workspace.projectRoot, webSource.snapshot_path), snapshot)
-  await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(sourceId)), JSON.stringify(buildWebEvidenceChunkIndex(webSource, snapshot)))
+  await writeFile(
+    join(workspace.projectRoot, webEvidenceChunkIndexPath(sourceId)),
+    JSON.stringify(buildWebEvidenceChunkIndex(webSource, snapshot)),
+  )
   await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-    schema_version: 2,
     stage: 'evidence_mapping',
     sources: [webSource],
   })}\n`)
@@ -1127,7 +1129,6 @@ describe('chapter-writing executor', () => {
         severity: 'mandatory', source_refs: source,
       }] }),
       evidence: parseEvidenceMapArtifact({
-        schema_version: 11,
         section_mappings: [{
           section_id: 'SEC-1',
 
@@ -1451,7 +1452,7 @@ describe('chapter-writing executor', () => {
     const outline = await writeInputs(workspace)
     await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-      schema_version: 2, stage: 'evidence_mapping', sources: [],
+      stage: 'evidence_mapping', sources: [],
     })}\n`)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, undefined, true)
 
@@ -2245,7 +2246,7 @@ describe('chapter-writing executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-web-')))
     await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
-      schema_version: 2, stage: 'evidence_mapping', sources: [],
+      stage: 'evidence_mapping', sources: [],
     })}\n`)
     const section = outlineFixture().sections[1]!
     const context = emptyChapterContext(section)
@@ -2286,7 +2287,7 @@ describe('chapter-writing executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-internal-id-')))
     await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
-      schema_version: 2, stage: 'evidence_mapping', sources: [],
+      stage: 'evidence_mapping', sources: [],
     }))
     const section = outlineFixture().sections[1]!
     const context = emptyChapterContext(section)
@@ -2322,7 +2323,7 @@ describe('chapter-writing executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-table-caption-')))
     await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
-      schema_version: 2, stage: 'evidence_mapping', sources: [],
+      stage: 'evidence_mapping', sources: [],
     }))
     const section = outlineFixture().sections[1]!
     const candidate: ChapterCandidate = {

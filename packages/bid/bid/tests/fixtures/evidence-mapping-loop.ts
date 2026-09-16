@@ -14,7 +14,7 @@ import {
   executeOutlineGeneration, validateOutlineGeneration,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
-  parseTenderScoringArtifact, parseTenderScoringSelection, EVIDENCE_MAPPING_SCHEMA_VERSION,
+  parseTenderScoringArtifact, parseTenderScoringSelection,
   webEvidenceContentSha256, webEvidenceSourceId, createTestBidRunContext,
 } from '@deepseek-ai/dsh-bid'
 
@@ -502,7 +502,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
   await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
   await writeFile(join(workspace.projectRoot, unavailableSources[1]!.snapshot_path), '与账本 Hash 不符的正文')
-  const evidenceBefore = JSON.stringify({ schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION, section_mappings: [{
+  const evidenceBefore = JSON.stringify({ section_mappings: [{
     section_id: section.id, local_materials: [], web_materials: [{ source_id: missing.source_id, snapshot_path: missing.snapshot_path,
       chunk_refs: [`W:${missing.source_id}:C0001`],
       usage: 'reference', summary: 'S4 已映射的公开审计资料。', supports: '安全审计要求' }],
@@ -515,7 +515,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
     })),
     writeFile(evidencePath, evidenceBefore),
-    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: unavailableSources })),
+    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ stage: 'evidence_mapping', sources: unavailableSources })),
     writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
       schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineHash,

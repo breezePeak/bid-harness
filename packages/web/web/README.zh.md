@@ -26,6 +26,10 @@
 
 提供方注册的是**能力**而非工具。`dsh-tool-web` 是面向模型的名称、描述、提示词指引、JSON Schema 和呈现的唯一归属方。
 
+## 设置
+
+`WebRuntime` 通过 `web` settings 命名空间暴露 `searchProvider` 与 `fetchProvider`。浏览器设置页可据此选择实际的 Web 提供方；未设置时仍使用下面的自动选择规则。
+
 ## 选择
 
 选择绝不依赖注册、配置或 HMR（热模块替换）顺序。能力要么具有显式提供方 id（配置 `searchProvider`／`fetchProvider`，或由环境变量 `$DSH_WEB_SEARCH_PROVIDER`／`$DSH_WEB_FETCH_PROVIDER` 提供相同字段），要么在恰好只注册一个可用提供方时自动选择。`search()`／`fetch()` 会在执行时解析提供方：

@@ -37,7 +37,6 @@ const writingBrief: SectionWritingBrief = {
 
 function evidenceMap(value: Partial<EvidenceMapArtifact> = {}): EvidenceMapArtifact {
   return {
-    schema_version: 11,
     section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['总体技术架构'] }],
     ...value,
   }
@@ -80,7 +79,6 @@ async function fixture(options: { onlyTender?: boolean } = {}) {
       points: [{ id: 'RP-000001', scoring_id: 'S-1', order: 1, text: '说明总体技术架构' }],
     })),
     writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
-      schema_version: 2,
       stage: 'evidence_mapping',
       sources: [],
     })),
@@ -129,11 +127,11 @@ async function writeWebSource(workspace: BidWorkspace, content = 'Fetched https:
   const index = buildWebEvidenceChunkIndex(source, content)
   await writeFile(join(workspace.projectRoot, snapshot_path), content)
   await writeFile(join(workspace.projectRoot, webEvidenceChunkIndexPath(source_id)), JSON.stringify(index))
-  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ schema_version: 2, stage: 'evidence_mapping', sources: [source] }))
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ stage: 'evidence_mapping', sources: [source] }))
   return { source_id, snapshot_path, chunk_refs: index.chunks.map(chunk => chunk.chunk_ref), usage: 'reference', summary: '说明安全控制措施。', supports: '支持安全控制措施的设计。' }
 }
 
-describe('evidence-map v11 schema', () => {
+describe('evidence-map current schema', () => {
   it('rejects the previous schema version and preserves local-material permissions', () => {
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), schema_version: 7 })).toThrow()
     expect(() => parseEvidenceMapArtifact({ ...evidenceMap(), section_mappings: [{ ...evidenceMap().section_mappings[0]!, local_materials: [{ source_kind: 'reference', file_id: 'file', chunk: 'chunk_0001', usage: 'adapt', summary: '资料。' }] }] })).toThrow()

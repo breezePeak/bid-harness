@@ -28,7 +28,7 @@ const finalDetails: BidDetailsView = {
   ...details, body: true,
   outline: { ...details.outline!, sections: details.outline!.sections.map(section => ({ ...section, title: 'S4 最终目录', must_answer: ['交付前完成质量核验'] })) },
   outlinePresentation: { source: 'final_confirmed', baseline: details.outline, errors: [], evidence: {
-    schema_version: 11, section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['验收清单'], writing_dimensions: ['已有资料中的质量核验流程'] }],
+    section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['验收清单'], writing_dimensions: ['已有资料中的质量核验流程'] }],
   } },
 }
 
@@ -100,7 +100,7 @@ it.each(['unchanged', 'must_answer', 'evidence'] as const)('结构相同且 %s �
   value.outline = structuredClone(details.outline)
   if (kind === 'must_answer') value.outline!.sections[0]!.must_answer = ['深化后的核验要求']
   if (kind === 'evidence') value.outlinePresentation!.evidence!.section_mappings[0]!.local_materials = [{ source_kind: 'reference', file_id: 'FILE-QUALITY', chunk: 'chunk_0001', usage: 'reference', summary: '核验流程资料' }]
-  if (kind === 'unchanged') value.outlinePresentation!.evidence = { schema_version: 11, section_mappings: [] }
+  if (kind === 'unchanged') value.outlinePresentation!.evidence = { section_mappings: [] }
   render(<BidDetails {...props({ stage: 'chapter_writing', status: 'running' }, { getDetails: async () => value })} />)
   await screen.findByText('最终目录已确认 / 只读')
   expect(screen.getByLabelText('S3 已确认目录')).toBeTruthy()

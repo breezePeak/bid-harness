@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
+import type { WebDiagnosticsView } from './api/web.ts'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -3345,6 +3346,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { settingsNs, ...baseURL === undefined ? {} : { baseURL } },
           })
         }
+      },
+    },
+
+    web: {
+      async diagnose(request) {
+        const web = ctx.get('web') as { diagnose(): Promise<WebDiagnosticsView> } | undefined
+        return ok(request, web === undefined
+          ? { search: { providers: [] }, fetch: { providers: [] } }
+          : await web.diagnose())
       },
     },
 

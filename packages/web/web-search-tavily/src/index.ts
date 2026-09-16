@@ -118,5 +118,16 @@ export function apply(ctx: Context, entry: Config): void {
       ? (launchEnvironmentOf(ctx).get(ref)?.value.length ?? 0) > 0
       : (await credentials.describe(ref)).configured
   }
-  ctx.web.registerSearchProvider(new TavilySearchProvider(options, resolveApiKey, credentialReady))
+  const credentialInfo = async (name: string) => {
+    const ref = credentialRef(name)
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined) {
+      const value = launchEnvironmentOf(ctx).get(ref)?.value
+      return { configured: value !== undefined && value.length > 0,
+        ...(value === undefined ? {} : { source: 'launch-environment' }) }
+    }
+    const info = await credentials.describe(ref)
+    return { configured: info.configured, ...(info.source === undefined ? {} : { source: info.source }) }
+  }
+  ctx.web.registerSearchProvider(new TavilySearchProvider(options, resolveApiKey, credentialReady, credentialInfo))
 }

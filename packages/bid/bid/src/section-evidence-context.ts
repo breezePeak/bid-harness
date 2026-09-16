@@ -1,6 +1,6 @@
 /** S4 与 S5 共用的章节遍历、检索上下文及证据集合校验。 */
 import { BidStageExecutionError, type StageValidationIssue } from './control-plane-contract.ts'
-import { EVIDENCE_MAPPING_SCHEMA_VERSION, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
+import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
 
@@ -156,7 +156,6 @@ export function validateSectionEvidenceCoverage(outline: OutlineArtifact, eviden
 export function reconcileSectionEvidence(outline: OutlineArtifact, evidence: EvidenceMapArtifact): EvidenceMapArtifact {
   const mappings = new Map(evidence.section_mappings.map(mapping => [mapping.section_id, mapping]))
   return {
-    schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION,
     section_mappings: buildWritableSectionWorklist(outline).map((section) => {
       const existing = mappings.get(section.id)
       if (existing !== undefined) return existing

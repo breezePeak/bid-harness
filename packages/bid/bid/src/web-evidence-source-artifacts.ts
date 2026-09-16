@@ -1,9 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
-/** Version of the Host-owned Bid Web evidence source ledger. */
-export const WEB_EVIDENCE_SOURCES_SCHEMA_VERSION = 2 as const
-
 const httpUrl = z.url().refine(value => normalizeWebEvidenceUrl(value) !== undefined, {
   message: 'Web evidence URL must use http or https',
 })
@@ -29,7 +26,6 @@ const sourceSchema = z.object({
 })
 
 const ledgerSchema = z.object({
-  schema_version: z.literal(WEB_EVIDENCE_SOURCES_SCHEMA_VERSION),
   stage: z.literal('evidence_mapping'),
   sources: z.array(sourceSchema),
 }).strict().superRefine((ledger, context) => {

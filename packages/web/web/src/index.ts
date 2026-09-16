@@ -8,12 +8,15 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import { WebError } from '@deepseek-ai/dsh-llm'
 import type { WebSearchRequest, WebSearchResult } from '@deepseek-ai/dsh-llm'
 import type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebProviderDiagnostic,
   WebSearchProvider,
 } from './types.ts'
 
@@ -25,6 +28,7 @@ export type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebProviderDiagnostic,
   WebSearchProvider,
   WebSearchRequest,
   WebSearchResult,
@@ -58,6 +62,9 @@ export interface WebRuntimeConfig {
   readonly fetchProvider?: string
 }
 
+/** Settings namespace for the Web search/fetch route selection. */
+export const WEB_SETTINGS_NAMESPACE = settingsNamespace('web')
+
 /**
  * The web access service. Registered as `ctx.web` (one instance per context).
  *
@@ -83,13 +90,16 @@ export class WebRuntime extends Service {
 
   private searchProviders = new Map<string, WebSearchProvider>()
   private fetchProviders = new Map<string, WebFetchProvider>()
-  private readonly searchProviderId: string | undefined
-  private readonly fetchProviderId: string | undefined
+  private readonly config: () => WebRuntimeConfig
 
   constructor(ctx: Context, config: WebRuntimeConfig = {}) {
     super(ctx, 'web')
-    this.searchProviderId = config.searchProvider ?? process.env.DSH_WEB_SEARCH_PROVIDER
-    this.fetchProviderId = config.fetchProvider ?? process.env.DSH_WEB_FETCH_PROVIDER
+    let current = () => config
+    this.config = () => current()
+    installSettingsSection(ctx, WEB_SETTINGS_NAMESPACE, WebRuntime.Config, config, {
+      setSource: (source) => { current = source },
+      onChange: () => {},
+    })
   }
 
   /**
@@ -137,9 +147,10 @@ export class WebRuntime extends Service {
    * @returns the provider's results, capped to `request.maxResults`.
    */
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
+    const configuredId = this.searchProviderId()
     const provider = await resolveProvider({
       providers: this.searchProviders,
-      ...this.searchProviderId !== undefined ? { configuredId: this.searchProviderId } : {},
+      ...configuredId === undefined ? {} : { configuredId },
     })
     const result = await provider.search(request, signal)
     return capSources(result, request.maxResults)
@@ -154,17 +165,56 @@ export class WebRuntime extends Service {
    * @returns the retrieval outcome; non-2xx responses resolve descriptively.
    */
   async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult> {
+    const configuredId = this.fetchProviderId()
     const provider = await resolveProvider({
       providers: this.fetchProviders,
-      ...this.fetchProviderId !== undefined ? { configuredId: this.fetchProviderId } : {},
+      ...configuredId === undefined ? {} : { configuredId },
     })
     return provider.fetch(request, signal)
+  }
+
+  /**
+   * Resolve both capabilities with secret-free local provider diagnostics.
+   * @returns the current search and fetch provider diagnostics.
+   */
+  async diagnose(): Promise<WebRuntimeDiagnostics> {
+    return {
+      search: await diagnoseCapability(this.searchProviders, this.searchProviderId()),
+      fetch: await diagnoseCapability(this.fetchProviders, this.fetchProviderId()),
+    }
+  }
+
+  private searchProviderId(): string | undefined {
+    return this.config().searchProvider ?? process.env.DSH_WEB_SEARCH_PROVIDER
+  }
+
+  private fetchProviderId(): string | undefined {
+    return this.config().fetchProvider ?? process.env.DSH_WEB_FETCH_PROVIDER
   }
 }
 
 interface ResolvableProvider {
   readonly id: string
   available(): boolean | Promise<boolean>
+  diagnose?(): WebProviderDiagnostic | Promise<WebProviderDiagnostic>
+}
+
+/** Secret-free provider selection facts for one Web capability. */
+export interface WebCapabilityDiagnostic {
+  /** Explicitly configured provider id, if the capability is pinned. */
+  readonly configuredId?: string
+  /** Provider selected by the runtime, if it is currently usable. */
+  readonly selectedProviderId?: string
+  /** All registered providers with secret-free local diagnostics. */
+  readonly providers: readonly { readonly id: string; readonly diagnostic: WebProviderDiagnostic }[]
+}
+
+/** Secret-free Web diagnostics for search and fetch in one execution context. */
+export interface WebRuntimeDiagnostics {
+  /** Search provider registry and route selection. */
+  readonly search: WebCapabilityDiagnostic
+  /** Fetch provider registry and route selection. */
+  readonly fetch: WebCapabilityDiagnostic
 }
 
 /** Resolve the selected provider or throw the matching {@link WebError}. */
@@ -192,6 +242,35 @@ async function resolveProvider<P extends ResolvableProvider>(selection: Selectio
     throw new WebError(`multiple usable web providers are registered (${ids}); configure one explicitly`, 'WEB_PROVIDER_AMBIGUOUS')
   }
   return single
+}
+
+async function diagnoseCapability<P extends ResolvableProvider>(
+  providers: ReadonlyMap<string, P>,
+  configuredId: string | undefined,
+): Promise<WebCapabilityDiagnostic> {
+  const entries = await Promise.all([...providers.values()].map(async (provider) => {
+    try {
+      const diagnostic = provider.diagnose === undefined
+        ? { available: await provider.available(), reason: 'unknown' as const }
+        : await provider.diagnose()
+      return { id: provider.id, diagnostic }
+    } catch (error: unknown) {
+      return {
+        id: provider.id,
+        diagnostic: { available: false, reason: 'configuration' as const,
+          endpoint: error instanceof Error ? error.message : String(error) },
+      }
+    }
+  }))
+  const selected = configuredId === undefined
+    ? entries.filter(entry => entry.diagnostic.available)
+    : entries.filter(entry => entry.id === configuredId && entry.diagnostic.available)
+  const selectedProvider = selected.length === 1 ? selected[0] : undefined
+  return {
+    ...(configuredId === undefined ? {} : { configuredId }),
+    ...(selectedProvider === undefined ? {} : { selectedProviderId: selectedProvider.id }),
+    providers: entries,
+  }
 }
 
 /** Enforce `maxResults` on a search result: truncate `sources[]` and flag it. */

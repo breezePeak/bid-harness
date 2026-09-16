@@ -17,7 +17,6 @@ import { webEvidenceSnapshotFromFetch, type WebEvidenceSnapshot } from './web-ev
 import {
   normalizeWebEvidenceUrl,
   parseWebEvidenceSourcesArtifact,
-  WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   webEvidenceContentSha256,
   uniqueWebEvidenceSources,
   type WebEvidenceSource,
@@ -142,7 +141,6 @@ export class S4WebResearchPool {
       await assertNoLinkedPath(this.workspace.root, snapshotPath)
       await assertNoLinkedPath(this.workspace.root, indexPath)
       const ledger = parseWebEvidenceSourcesArtifact({
-        schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
         stage: 'evidence_mapping',
         sources: uniqueWebEvidenceSources([...this.assets.values()].map(item => item.snapshot.source).concat(snapshot.source)),
       })

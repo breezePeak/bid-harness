@@ -18,16 +18,16 @@ const source = {
   snapshot_path: 'analysis/web-sources/WEB-0123456789abcdef.md',
 }
 
-const ledger = (candidate: unknown = source) => ({ schema_version: 2, stage: 'evidence_mapping', sources: candidate === undefined ? [] : [candidate] })
+const ledger = (candidate: unknown = source) => ({ stage: 'evidence_mapping', sources: candidate === undefined ? [] : [candidate] })
 
 describe('Web evidence source Artifact schema', () => {
   it('accepts an empty ledger and one complete verified source', () => {
-    expect(parseWebEvidenceSourcesArtifact({ schema_version: 2, stage: 'evidence_mapping', sources: [] }).sources).toEqual([])
+    expect(parseWebEvidenceSourcesArtifact({ stage: 'evidence_mapping', sources: [] }).sources).toEqual([])
     expect(parseWebEvidenceSourcesArtifact(ledger()).sources).toHaveLength(1)
   })
 
   it.each([
-    ['schema version', { ...ledger(), schema_version: 1 }],
+    ['schema field', { ...ledger(), schema_version: 1 }],
     ['stage', { ...ledger(), stage: 'outline_generation' }],
     ['source id', ledger({ ...source, source_id: '' })],
     ['URL protocol', ledger({ ...source, requested_url: 'file:///tmp/source' })],

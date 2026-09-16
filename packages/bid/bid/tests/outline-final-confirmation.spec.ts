@@ -8,7 +8,6 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import {
   BidHostRuntime, BidOrchestrator, BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog,
-  EVIDENCE_MAPPING_SCHEMA_VERSION, WEB_EVIDENCE_SOURCES_SCHEMA_VERSION,
   getOrCreateOutlineDraft, parseEvidenceMapArtifact, parseOutlineArtifact, validateEvidenceMapping,
   type BidRunContext, type BidStageTask, type Config, type OutlineArtifact, type OutlineDraftView,
 } from '@deepseek-ai/dsh-bid'
@@ -47,10 +46,10 @@ async function fixture() {
     'analysis/scoring.json': scoring,
     'analysis/scoring-response-points.json': createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [] }),
     'analysis/compliance.json': { schema_version: 1, compliance_items: [] },
-    'analysis/evidence-map.json': { schema_version: EVIDENCE_MAPPING_SCHEMA_VERSION, section_mappings: outline.sections.map(section => ({
+    'analysis/evidence-map.json': { section_mappings: outline.sections.map(section => ({
       section_id: section.id, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['交付安排'],
     })) },
-    'analysis/web-evidence-sources.json': { schema_version: WEB_EVIDENCE_SOURCES_SCHEMA_VERSION, stage: 'evidence_mapping', sources: [] },
+    'analysis/web-evidence-sources.json': { stage: 'evidence_mapping', sources: [] },
     'outline/outline.json': outline,
     'outline/initial-confirmed-outline.json': outline,
     'outline/quality-report.json': { schema_version: 4, scope: 'technical_bid', checked_requirement_ids: [], checked_scoring_ids: [],
@@ -71,9 +70,17 @@ async function fixture() {
   const runtimeCtx = {
     on: ctx.on.bind(ctx),
     get: (name: string) => name === 'sessions' ? ctx.sessions : undefined,
-    agents: { get: () => agent, list: () => [agent] },
+    logger: { info: vi.fn(), warn: vi.fn() },
+    agents: {
+      get: () => agent,
+      list: () => [agent],
+      create: async () => ({ agent, dispose: async () => {} }),
+    },
     sessions: ctx.sessions,
-    subagents: { drainContinuableDescendants: async () => {} },
+    subagents: {
+      drainContinuableDescendants: async () => {},
+      drainContinuableChildren: async () => {},
+    },
   }
   const agent = { id: session.id, session, followup, ctx: runtimeCtx } as unknown as Agent
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {

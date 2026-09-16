@@ -12,7 +12,8 @@ import {
   SettingsDescribeMirror, type SettingsMirrorSnapshot,
 } from '@deepseek-ai/dsh-client-ui-settings/src/client/settings-mirror.ts'
 import { ConfigurablePluginsTabController } from '../src/client/tab-store.ts'
-import { WebSearchCardController, type WebSearchSettings } from '../src/client/web-search-card-controller.ts'
+import { WebSearchCardController, type WebSearchSettings, type WebSettings } from '../src/client/web-search-card-controller.ts'
+import { TavilyCardController, type TavilySettings } from '../src/client/tavily-card-controller.ts'
 
 /** Make the stub behave like a Host that accepts every write. */
 function acceptWrites<T>(host: StubSettingsScope<T>): void {
@@ -376,47 +377,95 @@ describe('AgentLoopCardController', () => {
 
 describe('WebSearchCardController', () => {
   function providerApi() {
-    const providers = vi.fn(async () => ({ result: { ok: true, value: { providers: [
-      { provider: 'gpt', displayName: 'GPT', active: true, capabilities: ['chat', 'tools', 'web_search'] },
-      { provider: 'chat-only', displayName: 'Chat', active: true, capabilities: ['chat'] },
-      { provider: 'disabled', displayName: 'Disabled', active: false, capabilities: ['web_search'] },
-    ] } } }))
-    return { api: { llm: { providers } } as never, providers }
+    const providers = vi.fn(async () => ({ result: { ok: true, value: { search: {
+      selectedProviderId: 'deepseek-official', providers: [
+        { id: 'tavily', diagnostic: { available: true } },
+        { id: 'deepseek-official', diagnostic: { available: true } },
+      ],
+    }, fetch: { providers: [] } } } }))
+    const describe = vi.fn(async () => ({ result: { ok: true as const, value: { credentials: {} } } }))
+    return {
+      api: { web: { diagnose: providers }, credentials: { describe, set: vi.fn() }, llm: { providers: vi.fn() } } as never,
+      providers,
+    }
   }
 
-  it('offers only active Providers with hosted-search capability', async () => {
-    const host = stubSettingsScope<WebSearchSettings>()
+  it('offers the registered Web providers and reports the active selection', async () => {
+    const web = stubSettingsScope<WebSettings>()
+    const model = stubSettingsScope<WebSearchSettings>()
+    const tavily = stubSettingsScope<TavilySettings>()
     const { api } = providerApi()
-    const controller = new WebSearchCardController(host.scope, api)
-    await vi.waitFor(() => { expect(controller.inject().hooks.webSearchCard.getSnapshot().providers).toEqual([{ id: 'gpt', name: 'GPT' }]) })
+    const controller = new WebSearchCardController(web.scope, model.scope, tavily.scope, api)
+    await vi.waitFor(() => { expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      providers: [
+        { id: 'tavily', name: 'Tavily', available: true },
+        { id: 'deepseek-official', name: 'deepseek-official', available: true },
+      ],
+    }) })
+    const face = controller.inject()
+    face.edit('searchProvider', 'deepseek-official')
+    expect(face.hooks.webSearchCard.getSnapshot()).toMatchObject({
+      searchProvider: { text: 'deepseek-official' },
+    })
   })
 
   it('saves provider and budget through settings and clears the override to follow the task', async () => {
-    const host = stubSettingsScope<WebSearchSettings>()
-    acceptWrites(host)
+    const web = stubSettingsScope<WebSettings>(); acceptWrites(web)
+    const model = stubSettingsScope<WebSearchSettings>(); acceptWrites(model)
+    const tavily = stubSettingsScope<TavilySettings>(); acceptWrites(tavily)
     const { api } = providerApi()
-    const face = new WebSearchCardController(host.scope, api).inject()
-    host.publish({ status: 'ready', writable: true, value: {}, base: {}, user: {} })
-    face.edit('provider', 'gpt')
+    const face = new WebSearchCardController(web.scope, model.scope, tavily.scope, api).inject()
+    web.publish({ status: 'ready', writable: true, value: { searchProvider: 'tavily' }, base: {}, user: { searchProvider: 'tavily' } })
+    model.publish({ status: 'ready', writable: true, value: {}, base: {}, user: {} })
+    tavily.publish({ status: 'ready', writable: true, value: {}, base: {}, user: {} })
     face.edit('maxUses', '3')
-    expect(host.set).not.toHaveBeenCalled()
+    expect(model.set).not.toHaveBeenCalled()
     face.save()
     await vi.waitFor(() => { expect(face.hooks.webSearchCard.getSnapshot().dirty).toBe(false) })
-    expect(host.set.mock.calls).toEqual([['provider', 'gpt'], ['maxUses', 3]])
-    face.edit('provider', '')
+    expect(model.set.mock.calls).toEqual([['maxUses', 3]])
+    face.edit('searchProvider', '')
     face.save()
-    await vi.waitFor(() => { expect(host.unset).toHaveBeenCalledWith('provider') })
-    expect(() =>{  face.edit('apiKey', 'secret') }).toThrow('plugin card has no field apiKey')
+    await vi.waitFor(() => { expect(web.unset).toHaveBeenCalledWith('searchProvider') })
+    expect(() => { face.edit('apiKey', 'secret') }).toThrow('web search card has no field apiKey')
   })
 
   it('reports directory failures and recovers when topology is refreshed', async () => {
-    const host = stubSettingsScope<WebSearchSettings>()
+    const web = stubSettingsScope<WebSettings>()
+    const model = stubSettingsScope<WebSearchSettings>()
+    const tavily = stubSettingsScope<TavilySettings>()
     const { api, providers } = providerApi()
     providers.mockRejectedValueOnce(new Error('offline'))
-    const controller = new WebSearchCardController(host.scope, api)
+    const controller = new WebSearchCardController(web.scope, model.scope, tavily.scope, api)
     await vi.waitFor(() => { expect(controller.inject().hooks.webSearchCard.getSnapshot().providerError).toBe(true) })
     await controller.refreshProviders()
     expect(controller.inject().hooks.webSearchCard.getSnapshot().providerError).toBe(false)
+  })
+})
+
+describe('TavilyCardController', () => {
+  it('saves settings and a write-only API key through their owning services', async () => {
+    const host = stubSettingsScope<TavilySettings>()
+    acceptWrites(host)
+    const describe = vi.fn(async ({ refs }: { refs: string[] }) => ({ result: {
+      ok: true as const,
+      value: { credentials: Object.fromEntries(refs.map(ref => [ref, { configured: false, writable: true }])) },
+    } }))
+    const set = vi.fn(async () => ({ result: { ok: true as const, value: {} } }))
+    const face = new TavilyCardController(host.scope, { credentials: { describe, set } } as never).inject()
+    host.publish({
+      status: 'ready', writable: true,
+      value: { apiKeyEnv: 'TAVILY_API_KEY', baseURL: 'https://api.tavily.com', timeoutMs: 30_000 },
+      base: { apiKeyEnv: 'TAVILY_API_KEY', baseURL: 'https://api.tavily.com', timeoutMs: 30_000 }, user: {},
+    })
+    await vi.waitFor(() => { expect(describe).toHaveBeenCalled() })
+
+    face.edit('baseURL', 'https://proxy.test')
+    face.edit('apiKey', 'secret')
+    face.save()
+    await vi.waitFor(() => { expect(face.hooks.tavilyCard.getSnapshot().dirty).toBe(false) })
+
+    expect(host.set).toHaveBeenCalledWith('baseURL', 'https://proxy.test')
+    expect(set).toHaveBeenCalledWith({ ref: 'TAVILY_API_KEY', value: 'secret' })
   })
 })
 

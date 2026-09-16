@@ -685,9 +685,17 @@ function mappingFixture(
           scopedGuards.push(guard)
           return () => { scopedGuards.splice(scopedGuards.indexOf(guard), 1) }
         }),
+        schemas: vi.fn(() => [...new Set(['web_search', 'web_fetch', ...definitions.keys()])].map(name => ({ name }))),
+      }
+      const childWeb = {
+        diagnose: vi.fn(async () => ({
+          search: { selectedProviderId: 'fixture-web-search', providers: [] },
+          fetch: { selectedProviderId: 'fixture-web-fetch', providers: [] },
+        })),
       }
       const childCtx = {
         tools: childTools,
+        get: vi.fn((name: string) => name === 'tools' ? childTools : name === 'web' ? childWeb : undefined),
         on: vi.fn((event: string, observer: (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => void) => {
           if (event !== 'tools/result') throw new Error(`unexpected child event ${event}`)
           observers.push(observer)
@@ -762,6 +770,12 @@ function mappingFixture(
     restrict: vi.fn(() => () => {}),
     guard: vi.fn(() => () => {}),
   }
+  const web = {
+    diagnose: vi.fn(async () => ({
+      search: { selectedProviderId: 'fixture-web-search', providers: [] },
+      fetch: { selectedProviderId: 'fixture-web-fetch', providers: [] },
+    })),
+  }
   const followup = vi.fn((message: unknown) => { pendingMain = JSON.stringify(message) })
   const whenIdle = vi.fn(async () => {
     if (pendingMain.includes('Main-Agent Planning')) {
@@ -787,7 +801,7 @@ function mappingFixture(
   const sandboxPolicy = new SandboxPolicyService(filesystemContext, { mode: 'workspace-write' })
   const filesystem = new SandboxedFileSystem(filesystemContext, { cwd: workspace.root, diffBasisMaxBytes: 10 * 1024 * 1024 })
   const logger = { warn: vi.fn(), info: vi.fn() }
-  const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
+  const agent = { id: 'session', session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents, web } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
   return {
     agent, filesystem, starts, finalStarts, summaryStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
     childGuards, disposed, maxActive: () => maxActive, taskAttempts, on, onReply, onFinalReply, serializeReply, submissionCandidates,
@@ -869,7 +883,6 @@ function executionLogFixture(
   taskTools: readonly Record<string, unknown>[] = [],
 ) {
   return {
-    schema_version: 5,
     max_concurrency: 1,
     observed_max_concurrency: 0,
     statistics: {
@@ -1217,14 +1230,14 @@ describe('evidence-mapping Agent executor', () => {
     })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
-    fixture.starts.forEach(start => { start.resolve() })
+    fixture.starts.forEach((start) => { start.resolve() })
     await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(2) })
-    expect(fixture.finalStarts.every(start => {
+    expect(fixture.finalStarts.every((start) => {
       const taskLine = promptText(start.request.request).split('\n').find(line => line.startsWith('Mapping Task：'))
       if (taskLine === undefined) return false
       return (JSON.parse(taskLine.slice('Mapping Task：'.length)) as EvidenceMappingTask).section_ids.length === 1
     })).toBe(true)
-    fixture.finalStarts.forEach(start => { start.resolve() })
+    fixture.finalStarts.forEach((start) => { start.resolve() })
     await running
 
     const log = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(
@@ -1421,6 +1434,10 @@ describe('evidence-mapping Agent executor', () => {
     const resumed = executeEvidenceMapping(disabled.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: false, resume: true,
     })
+    for (let index = 0; index < 3; index++) {
+      await vi.waitFor(() => { expect(disabled.starts.length + disabled.finalStarts.length).toBeGreaterThan(index) })
+      ;([...disabled.starts, ...disabled.finalStarts][index]!).resolve()
+    }
     await resumed
     const after = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
       tasks: Array<{ task_id: string; input_fingerprint: string }>
@@ -1547,7 +1564,6 @@ describe('evidence-mapping Agent executor', () => {
     fixture.starts[1]!.resolve()
     await execution
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
-      schema_version: number
       tasks: Array<{
         task_id: string
         structure_assessment: unknown
@@ -1556,7 +1572,7 @@ describe('evidence-mapping Agent executor', () => {
       }>
     }
     const saved = checkpoint.tasks.find((task: { task_id: string }) => task.task_id === 'MAP-INIT-SEC-1')!
-    expect(checkpoint.schema_version).toBe(12)
+    expect(checkpoint).not.toHaveProperty('schema_version')
     expect(saved.structure_assessment).toMatchObject({ stale: false, decision: 'keep' })
     expect(saved.structure_invalidated).toBe(changes.length + 1)
     expect(saved.research_assessment).not.toHaveProperty('outline_capacity')
@@ -2287,10 +2303,9 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.tasks.every(item => item.prompt_context_stats?.global_index_section_count === 2)).toBe(true)
     expect(log.tasks.at(-1)?.review_progress).toMatchObject({ review_pending: 0, review_invalidated: 0 })
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
-      schema_version: number
       tasks: Array<{ task_id: string; refinement_conclusion?: string; research_assessment?: ReturnType<typeof branchResearchAssessment> }>
     }
-    expect(checkpoint.schema_version).toBe(12)
+    expect(checkpoint).not.toHaveProperty('schema_version')
     expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => Boolean(item.refinement_conclusion))).toBe(true)
     expect(checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-')).every(item => item.research_assessment?.sufficient_for_blueprint === true)).toBe(true)
     expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
@@ -2371,7 +2386,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(repairPrompt.text).toContain('finish_mapping_task；不要直接结束本轮')
   })
 
-  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])('重跑只接受 v12 checkpoint，当前版本为 %s', async (version) => {
+  it('不迁移带有废弃版本字段的旧 checkpoint', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-resume-')))
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material)
@@ -2388,14 +2403,14 @@ describe('evidence-mapping Agent executor', () => {
     expect(await rejection).toBeInstanceOf(Error)
 
     const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
-    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { schema_version: number }
-    expect(checkpoint.schema_version).toBe(12)
-    await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: version }))
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: unknown[] }
+    expect(checkpoint).not.toHaveProperty('schema_version')
+    await writeFile(checkpointPath, JSON.stringify({ ...checkpoint, schema_version: 12 }))
     const resumed = mappingFixture(workspace, material)
     const completedRun = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, maxConcurrency: 2, resume: true,
     })
-    await expect(completedRun).rejects.toThrow('EVIDENCE_MAPPING_CHECKPOINT_VERSION_UNSUPPORTED')
+    await expect(completedRun).rejects.toBeInstanceOf(Error)
     expect(resumed.starts).toHaveLength(0)
   })
 
@@ -2427,7 +2442,6 @@ describe('evidence-mapping Agent executor', () => {
     expect(completedTaskIds.size).toBe(14)
     const logPath = join(workspace.projectRoot, 'analysis/evidence-mapping-log.json')
     const interruptedLog = JSON.parse(await readFile(logPath, 'utf8')) as {
-      schema_version: number
       statistics?: { tools?: Record<string, unknown> }
       tasks: Array<{
         task_id: string
@@ -2455,10 +2469,8 @@ describe('evidence-mapping Agent executor', () => {
     expect(resumed.starts[0]!.request.request).toMatchObject({ toolFilter: { allow: ['web_search', 'web_fetch'] } })
     expect(String(resumed.starts[0]!.request.childId)).not.toBe('interrupted-child')
     const normalizedLog = JSON.parse(await readFile(logPath, 'utf8')) as {
-      schema_version: number
       statistics?: { tools?: Record<string, unknown> }
     }
-    expect(normalizedLog.schema_version).toBe(5)
     expect(normalizedLog.statistics?.tools).toHaveProperty('web_fetch')
     for (const taskId of completedTaskIds) {
       expect(resumed.starts.some(start => promptText(start.request.request).includes(`Mapping Task：{"task_id":"${taskId}"`))).toBe(false)
@@ -2856,13 +2868,13 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
-  it('保留 v5 当前工具统计格式', () => {
+  it('保留当前工具统计格式', () => {
     const current = { calls: 2, succeeded: 1, failed: 1, hits: 4, failure_reasons: ['current', 'shared'] }
     const currentLog = executionLogFixture(executionLogTools({ web_fetch: current }))
     expect(parseEvidenceMappingExecutionLog(currentLog)).toEqual(currentLog)
   })
 
-  it('拒绝不支持的 S4 私有执行日志版本', async () => {
+  it('拒绝带有旧版本字段的 S4 私有执行日志', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-log-v2-')))
     await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
@@ -3043,10 +3055,8 @@ describe('S4 Host 准入与最终确认', () => {
     await execution
 
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
-      schema_version: number
       tasks: Array<{ attempts: Array<{ accepted: boolean; issues: unknown[] }> }>
     }
-    expect(log.schema_version).toBe(5)
     expect(log.tasks.every(task => task.attempts.length === 1
       && task.attempts[0]!.accepted && task.attempts[0]!.issues.length === 0)).toBe(true)
     expect(fixture.submissionResults.filter(result => result.isError)).toHaveLength(4)

@@ -9,8 +9,15 @@ export type PluginsSettingsLocaleKey =
   | 'bashMaxOutputBytes' | 'bashMaxOutputBytesHint'
   | 'agentLoopTitle' | 'agentLoopDescription' | 'agentLoopMaxParallel' | 'agentLoopMaxParallelHint'
   | 'webSearchTitle' | 'webSearchDescription'
-  | 'webSearchApiKey' | 'webSearchApiKeyHint' | 'webSearchApiKeySet' | 'webSearchApiKeyUnset'
-  | 'webSearchBaseUrl' | 'webSearchBaseUrlHint' | 'webSearchMaxUses' | 'webSearchMaxUsesHint'
+  | 'webSearchProvider' | 'webSearchProviderHint' | 'webSearchFollowModel'
+  | 'webSearchUnavailable' | 'webSearchProviderError'
+  | 'webSearchIndependentTitle' | 'webSearchIndependentHint'
+  | 'webSearchMaxUses' | 'webSearchMaxUsesHint'
+  | 'tavilyApiKey' | 'tavilyApiKeyHint' | 'tavilyApiKeyRef'
+  | 'tavilyApiKeySet' | 'tavilyApiKeyUnset' | 'tavilyBaseUrl' | 'tavilyBaseUrlHint'
+  | 'tavilyTimeoutMs' | 'tavilyTimeoutMsHint' | 'tavilySearchDepth' | 'tavilySearchDepthHint'
+  | 'tavilyTopic' | 'tavilyTopicHint' | 'tavilyIncludeAnswer' | 'tavilyIncludeAnswerHint'
+  | 'tavilyMaxResults' | 'tavilyMaxResultsHint' | 'tavilyChunksPerSource' | 'tavilyChunksPerSourceHint'
 
 /** English copy. */
 export const en: Record<PluginsSettingsLocaleKey, string> = {
@@ -42,15 +49,35 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   agentLoopMaxParallel: 'Parallel tool calls',
   agentLoopMaxParallelHint: 'Upper bound on parallel-safe calls running at once within one step.',
   webSearchTitle: 'Web search',
-  webSearchDescription: 'Discover pages through the selected model Provider.',
-  webSearchApiKey: 'API key',
-  webSearchApiKeyHint: 'Stored outside the settings file. Leave blank to keep the current key.',
-  webSearchApiKeySet: 'A key is configured.',
-  webSearchApiKeyUnset: 'No key is configured; search is unavailable until one is.',
-  webSearchBaseUrl: 'Endpoint',
-  webSearchBaseUrlHint: 'Leave blank to use the provider default.',
+  webSearchDescription: 'Follow the current model provider by default, or select an independently configured web search provider.',
+  webSearchProvider: 'Web search provider',
+  webSearchProviderHint: 'Choose whether searches follow the current model provider or use an independent provider configured below.',
+  webSearchFollowModel: 'Follow model provider',
+  webSearchUnavailable: 'unavailable',
+  webSearchProviderError: 'Unable to read Web search providers.',
+  webSearchIndependentTitle: 'Independent web search',
+  webSearchIndependentHint: 'Configure the independent provider offered by the selector above. Its settings are retained while model-provider search is selected.',
   webSearchMaxUses: 'Max searches per request',
-  webSearchMaxUsesHint: 'How many times one request may search before it must answer.',
+  webSearchMaxUsesHint: 'Search budget used when web search follows the model provider.',
+  tavilyApiKey: 'API key',
+  tavilyApiKeyHint: 'Stored outside the settings file. Leave blank to keep the current key.',
+  tavilyApiKeyRef: 'Credential reference',
+  tavilyApiKeySet: 'A key is configured.',
+  tavilyApiKeyUnset: 'No key is configured; search is unavailable until one is.',
+  tavilyBaseUrl: 'Endpoint',
+  tavilyBaseUrlHint: 'HTTP(S) API root; /search is appended.',
+  tavilyTimeoutMs: 'Request timeout (ms)',
+  tavilyTimeoutMsHint: 'Maximum time allowed for one independent search request.',
+  tavilySearchDepth: 'Search depth',
+  tavilySearchDepthHint: 'Basic is faster; advanced keeps more retrieval detail.',
+  tavilyTopic: 'Topic',
+  tavilyTopicHint: 'The independent provider result category.',
+  tavilyIncludeAnswer: 'Generated answer',
+  tavilyIncludeAnswerHint: 'Whether the independent provider should return an answer summary.',
+  tavilyMaxResults: 'Default result count',
+  tavilyMaxResultsHint: 'Used when the web search request does not specify a result count.',
+  tavilyChunksPerSource: 'Chunks per source',
+  tavilyChunksPerSourceHint: 'Only valid with advanced search depth.',
 }
 
 /** Simplified Chinese copy. */
@@ -83,13 +110,33 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   agentLoopMaxParallel: '并行工具调用数',
   agentLoopMaxParallelHint: '同一步内最多同时运行多少个可并行的调用。',
   webSearchTitle: '网页搜索',
-  webSearchDescription: '通过所选模型 Provider 发现网页，再由网页读取工具获取正文。',
-  webSearchApiKey: 'API Key',
-  webSearchApiKeyHint: '不写入设置文件。留空表示保持当前密钥。',
-  webSearchApiKeySet: '已配置密钥。',
-  webSearchApiKeyUnset: '未配置密钥；配置之前搜索不可用。',
-  webSearchBaseUrl: '接口地址',
-  webSearchBaseUrlHint: '留空则使用提供方默认地址。',
+  webSearchDescription: '默认跟随当前任务的模型 Provider；也可选择下方配置的独立网页搜索 Provider。',
+  webSearchProvider: '网页搜索提供方',
+  webSearchProviderHint: '选择跟随当前模型 Provider，或使用下方已配置的独立搜索 Provider。',
+  webSearchFollowModel: '跟随模型 Provider',
+  webSearchUnavailable: '不可用',
+  webSearchProviderError: '读取网页搜索 Provider 失败。',
+  webSearchIndependentTitle: '独立 Web Search',
+  webSearchIndependentHint: '配置上方下拉框可选的独立搜索 Provider；选择跟随模型时保留这些配置。',
   webSearchMaxUses: '单次请求最多搜索次数',
-  webSearchMaxUsesHint: '一次请求在必须作答前最多可以搜索多少次。',
+  webSearchMaxUsesHint: '跟随模型 Provider 搜索时，一次请求最多可以搜索多少次。',
+  tavilyApiKey: 'API Key',
+  tavilyApiKeyHint: '密钥不会写入设置文件。留空表示保留当前密钥。',
+  tavilyApiKeyRef: '凭据引用',
+  tavilyApiKeySet: '已配置密钥。',
+  tavilyApiKeyUnset: '未配置密钥；配置前搜索不可用。',
+  tavilyBaseUrl: '接口地址',
+  tavilyBaseUrlHint: 'HTTP(S) API 根地址；系统会追加 /search。',
+  tavilyTimeoutMs: '请求超时（毫秒）',
+  tavilyTimeoutMsHint: '单次独立搜索请求允许的最长时间。',
+  tavilySearchDepth: '搜索深度',
+  tavilySearchDepthHint: 'basic 更快；advanced 保留更多检索细节。',
+  tavilyTopic: '主题',
+  tavilyTopicHint: '独立搜索 Provider 返回结果的分类。',
+  tavilyIncludeAnswer: '生成答案',
+  tavilyIncludeAnswerHint: '是否让独立搜索 Provider 返回答案摘要。',
+  tavilyMaxResults: '默认结果数',
+  tavilyMaxResultsHint: 'Web 搜索请求未指定结果数时使用。',
+  tavilyChunksPerSource: '每个来源的片段数',
+  tavilyChunksPerSourceHint: '只有搜索深度为 advanced 时有效。',
 }

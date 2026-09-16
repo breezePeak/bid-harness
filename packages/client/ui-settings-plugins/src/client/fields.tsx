@@ -48,6 +48,8 @@ export function ValueField(props: FieldProps & {
   numeric?: boolean
   /** Placeholder shown while the draft is empty. */
   placeholder?: string
+  /** Optional native choices for fields with a finite set of accepted values. */
+  choices?: readonly string[]
 }) {
   return (
     <div className={css.field}>
@@ -69,17 +71,28 @@ export function ValueField(props: FieldProps & {
           )
           : null}
       </div>
-      <input
-        id={props.id}
-        className={props.invalid ? css.inputInvalid : css.input}
-        type="text"
-        {...props.numeric === true ? { inputMode: 'numeric' as const } : {}}
-        {...props.invalid ? { 'aria-invalid': true } : {}}
-        value={props.text}
-        placeholder={props.placeholder ?? ''}
-        disabled={props.disabled}
-        onChange={(event) => { props.onEdit(event.target.value) }}
-      />
+      {props.choices === undefined
+        ? <input
+          id={props.id}
+          className={props.invalid ? css.inputInvalid : css.input}
+          type="text"
+          {...props.numeric === true ? { inputMode: 'numeric' as const } : {}}
+          {...props.invalid ? { 'aria-invalid': true } : {}}
+          value={props.text}
+          placeholder={props.placeholder ?? ''}
+          disabled={props.disabled}
+          onChange={(event) => { props.onEdit(event.target.value) }}
+        />
+        : <select
+          id={props.id}
+          className={props.invalid ? css.inputInvalid : css.input}
+          {...props.invalid ? { 'aria-invalid': true } : {}}
+          value={props.text}
+          disabled={props.disabled}
+          onChange={(event) => { props.onEdit(event.target.value) }}
+        >
+          {props.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
+        </select>}
       <p className={props.invalid ? css.invalid : css.hint}>
         {props.invalid ? props.invalidLabel : props.hint}
       </p>

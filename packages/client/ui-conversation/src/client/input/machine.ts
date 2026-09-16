@@ -574,6 +574,9 @@ export class InputMachine {
     if (!detached && (this.phase !== 'submitting' || this.inflight?.attempt.seq !== ev.attempt.seq)) return []
     if (!detached) this.inflight = undefined
     if (detached) {
+      if (!ev.ok && this.draft === '') {
+        this.adopt(flight.attempt.draftSnapshot)
+      }
       return ev.ok && ev.outcome?.text === undefined
         ? []
         : ev.outcome?.text !== undefined || ev.message !== undefined

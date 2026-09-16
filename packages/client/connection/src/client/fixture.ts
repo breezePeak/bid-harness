@@ -3060,6 +3060,12 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         models: fixtureModelGroups().flatMap(group => group.models.map(model => ({ id: model.id, name: model.name }))),
       }),
     },
+    web: {
+      diagnose: request => ok(request, {
+        search: { configuredId: 'tavily', selectedProviderId: 'tavily', providers: [{ id: 'tavily', diagnostic: { available: true } }] },
+        fetch: { providers: [] },
+      }),
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3231,6 +3237,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'web.diagnose': return this.api.web.diagnose(request)
     }
   }
 

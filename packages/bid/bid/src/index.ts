@@ -98,7 +98,7 @@ import { BID_INITIAL_CONTROL_STATE, bidRuntimeView, reduceBidControlState } from
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
-import { bidInputFingerprint, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
+import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
 import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
@@ -2486,7 +2486,10 @@ export class BidHostRuntime extends TypertRemoteService {
         chapter_writing: ['chapters', 'output'],
         docx_export: ['output'],
       }
-      const paths = resetPaths[stage].map(path => within(workspace.projectRoot, path))
+      const paths = [...new Set([
+        ...resetPaths[stage].map(path => within(workspace.projectRoot, path)),
+        ...(await bidResetWorkPaths(workspace, stage)),
+      ])]
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
       const resetControl: BidControlState = {
         workflow: { stage, gate: stage === 'file_intake' ? 'ready' : 'waiting_start' },

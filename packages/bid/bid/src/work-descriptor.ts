@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile, readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import { BID_STAGES, BID_WORK_KINDS, type BidStage, type BidWorkDescriptor, type BidWorkKind } from './control-plane-contract.ts'
@@ -28,6 +29,79 @@ const bidWorkRequestSchema = z.object({
 }).strict()
 
 type WorkWorkspace = { readonly root: string; readonly projectRoot: string }
+
+const resetRequestMetaSchema = z.object({
+  schema_version: z.literal(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
+}).passthrough()
+
+/** Find only request and private-run roots owned by the selected stage or a later stage. */
+export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStage): Promise<string[]> {
+  const stageIndex = BID_STAGES.indexOf(stage)
+  const requestsRoot = within(workspace.projectRoot, 'requests')
+  const runsRoot = within(workspace.projectRoot, 'runs')
+  await assertNoLinkedPath(workspace.root, requestsRoot)
+  await assertNoLinkedPath(workspace.root, runsRoot)
+  const paths: string[] = []
+  const requestStages = new Map<string, BidStage>()
+  const requestEntries = await readDirectoryIfPresent(requestsRoot)
+  for (const entry of requestEntries) {
+    const path = join(requestsRoot, entry)
+    if (entry.endsWith('.json')) {
+      const meta = resetRequestMetaSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+      requestStages.set(meta.work_id, meta.stage)
+      if (BID_STAGES.indexOf(meta.stage) >= stageIndex) paths.push(path)
+    } else {
+      const workStage = requestStages.get(entry)
+      if (workStage !== undefined && BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(path)
+    }
+  }
+  for (const entry of requestEntries) {
+    if (!entry.endsWith('.json')) continue
+    const workId = entry.slice(0, -'.json'.length)
+    const workStage = requestStages.get(workId)
+    if (workStage !== undefined && BID_STAGES.indexOf(workStage) >= stageIndex) {
+      const payloadDir = join(requestsRoot, workId)
+      if (await pathExists(payloadDir)) paths.push(payloadDir)
+    }
+  }
+
+  const runEntries = await readDirectoryIfPresent(runsRoot)
+  for (const entry of runEntries) {
+    const runRoot = join(runsRoot, entry)
+    const marker = join(runRoot, 'work', 'work-identity.json')
+    let descriptor: BidWorkDescriptor | undefined
+    try {
+      descriptor = bidWorkDescriptorSchema.parse(JSON.parse(await readFile(marker, 'utf8')))
+    } catch (error: unknown) {
+      if (recordCode(error) !== 'ENOENT') {
+        if (requestStages.has(entry)) descriptor = undefined
+        else throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`, { cause: error })
+      }
+    }
+    const workStage = descriptor?.stage ?? requestStages.get(entry)
+    if (workStage === undefined) throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+    if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(runRoot)
+  }
+  return [...new Set(paths)]
+}
+
+async function readDirectoryIfPresent(path: string): Promise<string[]> {
+  try { return (await readdir(path)).sort() } catch (error: unknown) {
+    if (recordCode(error) === 'ENOENT') return []
+    throw error
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await lstat(path); return true } catch (error: unknown) {
+    if (recordCode(error) === 'ENOENT') return false
+    throw error
+  }
+}
+
+function recordCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : undefined
+}
 
 /**
  * Return a stable SHA-256 identity for JSON-compatible input.

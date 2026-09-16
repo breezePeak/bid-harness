@@ -122,8 +122,6 @@ export class ConversationController extends Service implements IConversation {
   readonly blocks: ComposerBlocks
   private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
   private readonly pendingOutgoing = new Map<SessionId, { text: string; imageCount: number; submissionId: string }[]>()
-  /** Serialize only same-session queue admission; model execution remains asynchronous. */
-  private readonly admissionTails = new Map<SessionId, Promise<void>>()
   /** @inheritdoc */
   readonly submitHandlers: ComposerSubmitHandlers = {
     register: (sessionId, handler) => {
@@ -247,8 +245,7 @@ export class ConversationController extends Service implements IConversation {
       ?? `client-${session.sessionId}-${Date.now()}`
     if (submissionId !== undefined && index >= 0) pending?.splice(index, 1)
     if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
-    const previous = mode === 'queue' ? this.admissionTails.get(session.sessionId) : undefined
-    const operation = (previous ?? Promise.resolve()).catch(() => {}).then(() => this.sendSessionNow(
+    return this.sendSessionNow(
       session,
       text,
       imageIds,
@@ -256,15 +253,7 @@ export class ConversationController extends Service implements IConversation {
       signal,
       resolvedSubmissionId,
       index >= 0,
-    ))
-    if (mode !== 'queue') return operation
-    const tail = operation.then(() => undefined, () => undefined)
-    this.admissionTails.set(session.sessionId, tail)
-    try {
-      return await operation
-    } finally {
-      if (this.admissionTails.get(session.sessionId) === tail) this.admissionTails.delete(session.sessionId)
-    }
+    )
   }
 
   private async sendSessionNow(

@@ -64,6 +64,22 @@ describe('WebRuntime registration', () => {
     expect(() => web.registerFetchProvider(makeFetchProvider('shared', available, fetchResult('shared')))).not.toThrow()
   })
 
+  it('reports registered providers and the effective configured selection', async () => {
+    const { web } = await mountWeb({ searchProvider: 'perplexity' })
+    web.registerSearchProvider(makeSearchProvider('exa', available, () => Promise.resolve(searchResult('exa'))))
+    web.registerSearchProvider(makeSearchProvider('perplexity', available, () => Promise.resolve(searchResult('perplexity'))))
+
+    await expect(web.diagnose()).resolves.toMatchObject({
+      search: {
+        configuredId: 'perplexity', selectedProviderId: 'perplexity',
+        providers: [
+          { id: 'exa', diagnostic: { available: true, reason: 'unknown' } },
+          { id: 'perplexity', diagnostic: { available: true, reason: 'unknown' } },
+        ],
+      },
+    })
+  })
+
   it('disposes provider registrations when the contributing fiber is disposed (HMR safety)', async () => {
     const { ctx, web } = await mountWeb()
     const fiber = await ctx.plugin(Object.assign((inner: Context) => {

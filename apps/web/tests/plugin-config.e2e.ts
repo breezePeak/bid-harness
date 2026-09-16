@@ -19,6 +19,7 @@ import { ZH_BROWSER_LOCALE, saveFailureShot } from './support.ts'
 const SNAPSHOT_DIR = fileURLToPath(new URL('./snapshots/plugin-config', import.meta.url))
 const SECTION_EXPECTED = join(SNAPSHOT_DIR, 'section.expected.md')
 const MODE = webSnapshotMode()
+const SHIPPED_SHELL_TIMEOUT = process.platform === 'win32' ? '120000' : '60000'
 
 describe('web e2e: plugin configuration section', () => {
   let scaffold: WebScaffold
@@ -76,15 +77,24 @@ describe('web e2e: plugin configuration section', () => {
     const dialog = await openPlugins()
 
     // Every card the shipped web composition exposes: the shell executor, the
-    // agent loop, and the DeepSeek search provider.
+    // agent loop, and the single Web search card.
     await dialog.getByText('终端', { exact: true }).waitFor({ timeout: 10_000 })
     expect(await dialog.getByText('Agent 循环', { exact: true }).count()).toBe(1)
     expect(await dialog.getByText('网页搜索', { exact: true }).count()).toBe(1)
+    expect(await dialog.getByText('Tavily 搜索', { exact: true }).count()).toBe(0)
     // Collapsed: a card's fields appear only once it is expanded.
     expect(await dialog.getByLabel('命令超时（毫秒）').count()).toBe(0)
 
     const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(SECTION_EXPECTED, snapshot, MODE)
+    await dialog.getByText('网页搜索', { exact: true }).click()
+    const provider = dialog.getByLabel('网页搜索提供方')
+    await provider.waitFor({ timeout: 10_000 })
+    expect(await provider.inputValue()).toBe('deepseek-official')
+    expect(await provider.locator('option:checked').textContent()).toBe('跟随模型 Provider')
+    expect(await dialog.getByText('独立 Web Search', { exact: true }).count()).toBe(1)
+    expect(await dialog.getByText('模型搜索策略', { exact: true }).count()).toBe(0)
+    expect(await dialog.getByText('Tavily 设置', { exact: true }).count()).toBe(0)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
 
@@ -96,7 +106,7 @@ describe('web e2e: plugin configuration section', () => {
     const timeout = dialog.getByLabel('命令超时（毫秒）')
     await timeout.waitFor({ timeout: 10_000 })
     // The composed default this deployment ships, before any user layer.
-    expect(await timeout.inputValue()).toBe('60000')
+    expect(await timeout.inputValue()).toBe(SHIPPED_SHELL_TIMEOUT)
     await timeout.fill('12000')
     await timeout.blur()
 
@@ -160,14 +170,14 @@ describe('web e2e: plugin configuration section', () => {
     // The reset stages the composed default; the document still carries the
     // override until the save lands.
     await dialog.getByRole('button', { name: '恢复默认' }).click()
-    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe('60000')
+    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe(SHIPPED_SHELL_TIMEOUT)
     expect(await settingsDocument()).toContain('timeoutMs: 12000')
 
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
 
     await expect.poll(async () => (await settingsDocument()).includes('timeoutMs'), { timeout: 10_000 })
       .toBe(false)
-    expect(await timeout.inputValue()).toBe('60000')
+    expect(await timeout.inputValue()).toBe(SHIPPED_SHELL_TIMEOUT)
     expect(await dialog.getByText('已覆盖').count()).toBe(0)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)

@@ -1,8 +1,5 @@
 import { z } from 'zod'
 
-/** Version of the technical-evidence mapping Artifact. */
-export const EVIDENCE_MAPPING_SCHEMA_VERSION = 11 as const
-
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
 
@@ -93,12 +90,8 @@ export const sectionEvidenceMappingSchema = mappingSchema.extend({
 }).strict()
 
 const evidenceMapSchema = z.object({
-  schema_version: z.literal(EVIDENCE_MAPPING_SCHEMA_VERSION),
   section_mappings: z.array(sectionEvidenceMappingSchema),
 }).strict()
-
-/** Version of the Host-private S4 task plan. */
-export const EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION = 7 as const
 
 const evidenceMappingTaskSchema = z.object({
   task_id: z.string().min(1),
@@ -145,7 +138,6 @@ const evidenceMappingTaskSchema = z.object({
 })
 
 const evidenceMappingPlanSchema = z.object({
-  schema_version: z.literal(EVIDENCE_MAPPING_PLAN_SCHEMA_VERSION),
   tasks: z.array(evidenceMappingTaskSchema),
 }).strict()
 

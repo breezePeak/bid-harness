@@ -352,8 +352,14 @@ describe('AgentLoopCard', () => {
 describe('WebSearchCard', () => {
   function renderWebSearch(state: Partial<WebSearchCardState> = {}) {
     const store = createSnapshotStore<WebSearchCardState>({
-      ...settled, provider: field(''), maxUses: field('5'),
-      providers: [{ id: 'gpt', name: 'GPT' }], providerError: false, ...state,
+      ...settled,
+      searchProvider: field('deepseek-official'),
+      providers: [{ id: 'deepseek-official', name: 'deepseek-official', available: true }, { id: 'tavily', name: 'Tavily', available: true }], providerError: false,
+      modelSearch: { available: true, maxUses: field('5') },
+      tavily: { ...settled, apiKeyEnv: 'TAVILY_API_KEY', apiKey: field(''), apiKeyConfigured: false,
+        apiKeyWritable: true, baseURL: field(''), timeoutMs: field(''), searchDepth: field('basic'), topic: field('general'),
+        includeAnswer: field('false'), maxResults: field(''), chunksPerSource: field('') },
+      ...state,
     })
     const actions = cardActions()
     const props = { ...actions, t, useWebSearchCard: bindSnapshotSelector(store) } as unknown as WebSearchCardProps
@@ -362,31 +368,32 @@ describe('WebSearchCard', () => {
     return actions
   }
 
-  it('shows policy controls and directs connection configuration to Models', () => {
+  it('defaults to the model Provider and keeps independent search configuration below it', () => {
     const actions = renderWebSearch()
-    expect(screen.queryByLabelText(en.webSearchApiKey)).toBeNull()
-    expect(screen.queryByLabelText(en.webSearchBaseUrl)).toBeNull()
-    expect(screen.getByRole('option', { name: '跟随当前任务 Provider' })).toBeTruthy()
-    expect(screen.getByText('未指定时，Web 搜索使用发起本次搜索的 Agent 所使用的 Provider 和模型。API Key、接口地址和模型请在“模型”中配置。')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('搜索 Provider'), { target: { value: 'gpt' } })
+    expect(screen.getByRole('option', { name: en.webSearchFollowModel })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Tavily' })).toBeTruthy()
+    expect(screen.getByText(en.webSearchIndependentTitle)).toBeTruthy()
+    expect(screen.queryByText('模型搜索策略')).toBeNull()
+    expect(screen.queryByText('Tavily 设置')).toBeNull()
+    fireEvent.change(screen.getByLabelText(en.webSearchProvider), { target: { value: 'tavily' } })
     fireEvent.change(screen.getByLabelText(en.webSearchMaxUses), { target: { value: '4' } })
-    expect(actions.edit.mock.calls).toEqual([['provider', 'gpt'], ['maxUses', '4']])
+    expect(actions.edit.mock.calls).toEqual([['searchProvider', 'tavily'], ['maxUses', '4']])
   })
 
   it('keeps an unavailable saved Provider visible without substituting another', () => {
-    renderWebSearch({ provider: field('removed') })
-    expect(screen.getByRole('option', { name: 'removed（不可用）' })).toBeTruthy()
-    expect(screen.getByLabelText('搜索 Provider')).toHaveProperty('value', 'removed')
+    renderWebSearch({ searchProvider: field('removed') })
+    expect(screen.getByRole('option', { name: `removed（${en.webSearchUnavailable}）` })).toBeTruthy()
+    expect(screen.getByLabelText(en.webSearchProvider)).toHaveProperty('value', 'removed')
   })
 
   it('disables policy editing on a read-only document', () => {
     renderWebSearch({ writable: false })
-    expect(screen.getByLabelText('搜索 Provider')).toHaveProperty('disabled', true)
+    expect(screen.getByLabelText(en.webSearchProvider)).toHaveProperty('disabled', true)
     expect(screen.getByLabelText(en.webSearchMaxUses)).toHaveProperty('disabled', true)
   })
 
   it('resets the per-request search budget', () => {
-    const actions = renderWebSearch({ maxUses: field('3', { overridden: true }) })
+    const actions = renderWebSearch({ modelSearch: { available: true, maxUses: field('3', { overridden: true }) } })
     fireEvent.click(screen.getByRole('button', { name: en.reset }))
     expect(actions.resetField).toHaveBeenCalledWith('maxUses')
   })
