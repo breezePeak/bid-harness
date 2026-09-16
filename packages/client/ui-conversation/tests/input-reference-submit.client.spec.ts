@@ -166,6 +166,28 @@ describe('reference submission', () => {
     expect(shell.snapshot.draft).toBe('')
   })
 
+  it('finishes detached reference preparation after the input shell is disposed', async () => {
+    let resolveReference!: (value: string) => void
+    const serializeReference = new Promise<string>((resolve) => { resolveReference = resolve })
+    const sink = vi.fn(() => Promise.resolve<SubmitOutcome>({ kind: 'success' }))
+    const shell = new SessionInputShell({
+      actx: {} as ClientContext,
+      inputTriggers: () => ({
+        serializeReference: () => serializeReference,
+        track: vi.fn(),
+      } as unknown as InputTriggerController),
+      defaultSink: sink,
+      commandImages,
+    })
+    chip(shell)
+    shell.submit()
+    shell.dispose()
+    resolveReference(mention)
+    await vi.waitFor(() => {
+      expect(sink).toHaveBeenCalledWith(mention, [], 'queue', expect.any(AbortSignal))
+    })
+  })
+
   it('retains a rejected default message without duplicating its prompt error notice', async () => {
     const shell = new SessionInputShell({
       actx: {} as ClientContext,

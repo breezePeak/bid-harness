@@ -106,6 +106,8 @@ export class SessionInputShell implements SessionInput {
   private noticeSeq = 0
   private lastMirroredDraft = ''
   private imageIds: readonly DraftAttachmentId[] = []
+  /** Ordinary submissions that must outlive this shell's React scope. */
+  private readonly handedOff = new Set<number>()
   /** One image-only send at a time: Enter during the Host round-trip is a no-op. */
   private imageSendInFlight = false
   private disposed = false
@@ -449,6 +451,7 @@ export class SessionInputShell implements SessionInput {
         return
       }
       case 'local-commit': {
+        this.handedOff.add(fx.attempt.seq)
         this.deps.localHandoff?.(fx.attempt)
         this.commitSend(fx.attempt.imageIds ?? [])
         return
@@ -483,7 +486,7 @@ export class SessionInputShell implements SessionInput {
       }
     })).then(
       (parts) => {
-        if (this.disposed) return
+        if (this.disposed && !this.handedOff.has(attempt.seq)) return
         // Splice model forms over their display ranges (offsets are draft-time;
         // parts arrive offset-sorted since the table is).
         let out = ''
@@ -501,6 +504,7 @@ export class SessionInputShell implements SessionInput {
         const message = error instanceof Error ? error.message : String(error)
         this.deps.localHandoffFailed?.(attempt, message)
         this.run(this.core.dispatch({ type: 'submit-settled', attempt, ok: false, message }))
+        this.handedOff.delete(attempt.seq)
       },
     )
   }
@@ -524,6 +528,7 @@ export class SessionInputShell implements SessionInput {
           ok: outcome.kind === 'success',
           outcome,
         }))
+        this.handedOff.delete(attempt.seq)
       },
       (error: unknown) => {
         if (this.dead(attempt)) return
@@ -533,6 +538,7 @@ export class SessionInputShell implements SessionInput {
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         }))
+        this.handedOff.delete(attempt.seq)
       },
     )
   }
@@ -598,7 +604,7 @@ export class SessionInputShell implements SessionInput {
 
   /** Late-settlement guard: superseded attempts and disposed facades drop silently. */
   private dead(attempt: SubmitAttempt): boolean {
-    return this.disposed || attempt.signal.aborted
+    return attempt.signal.aborted || (this.disposed && !this.handedOff.has(attempt.seq))
   }
 
   private compose(): InputState {

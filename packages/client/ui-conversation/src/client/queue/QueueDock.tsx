@@ -45,8 +45,12 @@ function isOutgoing(row: QueueRow): row is OutgoingMessage {
  * collapsible count header; an empty queue renders nothing.
  */
 export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps) {
-  const inbox = useSession(s => s.queue)
-  const queue = useMemo(() => inbox.filter(row => isOutgoing(row) || row.placement === 'queued'), [inbox])
+  const hostQueue = useSession(s => s.queue)
+  const outgoing = useSession(s => s.outgoing)
+  const queue = useMemo(
+    () => [...outgoing ?? [], ...hostQueue.filter(row => row.placement === 'queued')],
+    [hostQueue, outgoing],
+  )
   const running = useSession(s => s.running)
   const queueMutable = useSession(s => s.subagent === null)
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)

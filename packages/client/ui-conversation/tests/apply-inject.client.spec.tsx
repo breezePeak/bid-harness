@@ -164,6 +164,7 @@ describe('conversation slot inject API', () => {
     actions.submit()
     await vi.waitFor(() => {
       expect(state.getSnapshot().draft).toBe('')
+      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(1)
     })
     expect(b.sessionFake.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', expect.any(AbortSignal), 'client-1')
     // Failure: the outgoing row records failure; the editable draft stays clear.
@@ -194,6 +195,31 @@ describe('conversation slot inject API', () => {
     b.composerApi(ROOT).stop!()
     await new Promise(r => setTimeout(r, 0))
     expect(b.sessionFake.cancel).toHaveBeenCalledTimes(1)
+    await b.runtime.dispose()
+  })
+
+  it('keeps default queue admission ordered while later drafts are already handed off', async () => {
+    const b = await bench()
+    let releaseFirst!: () => void
+    const firstAdmission = new Promise<void>((resolve) => { releaseFirst = resolve })
+    b.sessionFake.prompt.mockImplementationOnce(async () => {
+      await firstAdmission
+      return { ok: true, value: { accepted: true } }
+    })
+    const { state, actions } = b.inputApi(ROOT)
+    actions.setDraft('first')
+    actions.submit()
+    actions.setDraft('second')
+    actions.submit()
+    await vi.waitFor(() => {
+      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(1)
+      expect(state.getSnapshot().draft).toBe('')
+    })
+    releaseFirst()
+    await vi.waitFor(() => {
+      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(2)
+      expect(b.sessionFake.prompt.mock.calls[1]?.[0]).toEqual([{ type: 'text', text: 'second' }])
+    })
     await b.runtime.dispose()
   })
 

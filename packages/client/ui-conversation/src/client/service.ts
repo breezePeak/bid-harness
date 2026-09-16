@@ -114,6 +114,8 @@ export class ConversationController extends Service implements IConversation {
   readonly blocks: ComposerBlocks
   private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
   private readonly pendingOutgoing = new Map<SessionId, { text: string; imageCount: number; submissionId: string }[]>()
+  /** Serialize only same-session queue admission; model execution remains asynchronous. */
+  private readonly admissionTails = new Map<SessionId, Promise<void>>()
   /** @inheritdoc */
   readonly submitHandlers: ComposerSubmitHandlers = {
     register: (sessionId, handler) => {
@@ -224,16 +226,48 @@ export class ConversationController extends Service implements IConversation {
     submissionId?: string,
   ): Promise<SubmitOutcome> {
     const pending = this.pendingOutgoing.get(session.sessionId)
-    const index = pending?.findIndex(item => item.text === text && item.imageCount === imageIds.length) ?? -1
+    const index = pending?.findIndex(item => submissionId === undefined
+      ? item.text === text && item.imageCount === imageIds.length
+      : item.submissionId === submissionId) ?? -1
     const resolvedSubmissionId = submissionId ?? (index >= 0 ? pending?.splice(index, 1)[0]?.submissionId : undefined)
       ?? `client-${session.sessionId}-${Date.now()}`
+    if (submissionId !== undefined && index >= 0) pending?.splice(index, 1)
     if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
-    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, resolvedSubmissionId)
+    const previous = mode === 'queue' ? this.admissionTails.get(session.sessionId) : undefined
+    const operation = (previous ?? Promise.resolve()).catch(() => {}).then(() => this.sendSessionNow(
+      session,
+      text,
+      imageIds,
+      mode,
+      signal,
+      resolvedSubmissionId,
+      index >= 0,
+    ))
+    if (mode !== 'queue') return operation
+    const tail = operation.then(() => undefined, () => undefined)
+    this.admissionTails.set(session.sessionId, tail)
+    try {
+      return await operation
+    } finally {
+      if (this.admissionTails.get(session.sessionId) === tail) this.admissionTails.delete(session.sessionId)
+    }
+  }
+
+  private async sendSessionNow(
+    session: SessionFace,
+    text: string,
+    imageIds: readonly DraftAttachmentId[],
+    mode: InputSubmitMode,
+    signal: AbortSignal | undefined,
+    submissionId: string,
+    hasLocalHandoff: boolean,
+  ): Promise<SubmitOutcome> {
+    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, submissionId)
     if (submitted !== undefined) return submitted
     const owner = session as SessionFace & {
       beginOutgoing?: (id: string, content: readonly PromptContentPart[]) => void
     }
-    if (index < 0) owner.beginOutgoing?.(resolvedSubmissionId, text === '' ? [] : [{ type: 'text', text }])
+    if (!hasLocalHandoff) owner.beginOutgoing?.(submissionId, text === '' ? [] : [{ type: 'text', text }])
     try {
       const attachments = this.draftImages(imageIds)
       if (attachments.length !== imageIds.length) {
@@ -241,14 +275,14 @@ export class ConversationController extends Service implements IConversation {
       }
       const uploaded = await this.serializeImages(attachments.map(attachment => attachment.file))
       const content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
-      const result = await session.prompt(content, mode, signal, resolvedSubmissionId)
+      const result = await session.prompt(content, mode, signal, submissionId)
       if (!result.ok) return { kind: 'error' }
       this.releaseDraftImages(attachments)
       return { kind: 'success' }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       const updater = owner as SessionFace & { updateOutgoing?: (id: string, status: 'failed', error: string) => void }
-      updater.updateOutgoing?.(resolvedSubmissionId, 'failed', message)
+      updater.updateOutgoing?.(submissionId, 'failed', message)
       throw error
     }
   }

@@ -10,7 +10,7 @@ import {
   EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
-  ConversationSnapshot, QueuedMessage, SessionId, SessionListState,
+  ConversationSnapshot, OutgoingMessage, QueuedMessage, SessionId, SessionListState,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
@@ -39,6 +39,17 @@ function snapshotWith(queue: QueuedMessage[]): ConversationSnapshot {
     nodes: [], turnTimings: new Map(), turnEnds: new Map(), partial: null, runningCalls: [],
     pending: [], queue, running: true, composerPhase: 'active', removed: false, openState: 'open', openError: null,
     hasMore: false, loadingOlder: false, promptError: null, blank: false, subagent: null, lastAgentError: null,
+  }
+}
+
+function outgoing(localId: string, preview: string, status: OutgoingMessage['status'] = 'preparing'): OutgoingMessage {
+  return {
+    localId,
+    clientSubmissionId: `client-${localId}`,
+    content: [{ type: 'text', text: preview }],
+    preview,
+    text: preview,
+    status,
   }
 }
 
@@ -87,6 +98,13 @@ function kitFor(snapshot: ConversationSnapshot, injected: Partial<QueueDockInjec
 }
 
 describe('QueueDock', () => {
+  it('renders Session-owned outgoing rows before Host queue admission', () => {
+    const snap = { ...snapshotWith([]), outgoing: [outgoing('local-1', '本地准备中')] }
+    const source = liveSession(snap)
+    const view = render(<QueueDock {...kitFor(snap)} useSession={source.useSession} />)
+    expect(view.getByText('本地准备中 · 准备中')).toBeTruthy()
+  })
+
   it('renders null while the queue is empty', () => {
     const snap = snapshotWith([])
     const source = liveSession(snap)
