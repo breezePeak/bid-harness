@@ -1,8 +1,15 @@
 import { z } from 'zod'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 
 /** S5 通用写作任务契约的当前磁盘格式。 */
 export const WRITING_PLAN_SCHEMA_VERSION = 3 as const
+
+/** S5 初始原生询问的业务记录格式。 */
+export const WRITING_REQUEST_SCHEMA_VERSION = 1 as const
+
+/** 初始原生询问的唯一选项；自定义输入由 user-questions 组件提供。 */
+export const WRITING_REQUIREMENT_NONE_OPTION = '没有，开始编写' as const
 
 /** 一条由 Main Agent 选择、由 Host 回查原文的用户消息身份。 */
 export const writingRequirementMessageRefSchema = z.object({
@@ -86,6 +93,8 @@ const sectionTaskPatchSchema = z.object({
 /** Main Agent 首次建立完整 Writing Plan 时使用的输入协议。 */
 export const initialWritingPlanInputSchema = z.object({
   update_kind: z.literal('initial'),
+  /** 从 task_contract_context 原样带回的 Host 询问身份。 */
+  writing_request_id: z.string().min(1),
   user_message_refs: z.array(writingRequirementMessageRefSchema),
   global_instructions: z.array(z.string().trim().min(1)).min(1),
   document_acceptance: z.array(acceptanceCriterionInputSchema),
@@ -125,23 +134,87 @@ export const writingPlanSchema = z.object({
   revision: writingPlanRevisionSchema.nullable(),
 }).strict()
 
-/** 已发出 S5 询问的项目标记；用户要求身份由计划提交中的消息引用确定。 */
-export const writingRequestSchema = z.object({
-  schema_version: z.literal(WRITING_PLAN_SCHEMA_VERSION),
-  confirmed_outline_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  prompt_event: writingRequirementMessageRefSchema,
+const writingRequestAnswerSchema = z.object({
+  question_id: z.string().min(1),
+  kind: z.enum(['no_additional_requirements', 'custom']),
+  selected: z.array(z.string()),
+  custom: z.string().optional(),
 }).strict()
 
-/** Main-Agent-authored S5 initial plan or versioned patch. */
+/** 已发出 S5 原生询问的项目记录；在线 Promise 不写入此文件。 */
+export const writingRequestSchema = z.object({
+  schema_version: z.literal(WRITING_REQUEST_SCHEMA_VERSION),
+  request_id: z.string().min(1),
+  confirmed_outline_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  owner_session_id: z.string().min(1),
+  attempt_id: z.string().min(1),
+  state: z.enum(['awaiting_answer', 'answered', 'consumed', 'dismissed']),
+  answer: writingRequestAnswerSchema.optional(),
+  applied_plan_version: z.number().int().positive().optional(),
+  processing_message_id: z.string().min(1).optional(),
+  error: z.object({ code: z.string().min(1), message: z.string().min(1) }).strict().optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.state === 'answered' || value.state === 'consumed') && value.answer === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'answered writing request requires an answer' })
+  }
+  if (value.state === 'consumed' && value.applied_plan_version === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'consumed writing request requires applied_plan_version' })
+  }
+  if (value.answer?.question_id !== undefined && value.answer.question_id !== value.request_id) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'writing request answer must match request_id' })
+  }
+  if (value.answer?.kind === 'custom' && value.answer.custom?.trim().length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'custom writing requirement must not be blank' })
+  }
+})
+
+/** Main Agent 编写的 S5 初始计划或版本化 patch。 */
 export type WritingPlanInput = z.infer<typeof writingPlanInputSchema>
-/** Confirmed, versioned S5 contract persisted by the Host. */
+/** Host 持久化的已确认版本化 S5 契约。 */
 export type WritingPlan = z.infer<typeof writingPlanSchema>
-/** One model-authored criterion without Host identity or scope. */
+/** 模型编写的、尚未绑定 Host 身份和作用域的验收条件。 */
 export type AcceptanceCriterionInput = z.infer<typeof acceptanceCriterionInputSchema>
-/** One Host-bound criterion consumed by Writers and Reviewers. */
+/** Writer 与 Reviewer 消费的 Host 绑定验收条件。 */
 export type AcceptanceCriterion = z.infer<typeof acceptanceCriterionSchema>
-/** Stable reference to an exact human message in the Session Log. */
+/** Session Log 中一条用户原话的稳定引用。 */
 export type WritingRequirementMessageRef = z.infer<typeof writingRequirementMessageRefSchema>
+
+/** 一个 S5 初始原生问题的 Host 持久身份。 */
+export type WritingRequest = z.infer<typeof writingRequestSchema>
+
+/** S5 初始问题 wire 回答的业务语义。 */
+export type WritingRequirementAnswer =
+  | { readonly kind: 'no_additional_requirements'; readonly selected: readonly string[] }
+  | { readonly kind: 'custom'; readonly selected: readonly string[]; readonly custom: string }
+  | { readonly kind: 'dismissed' }
+
+/** 校验并归类一条原生 S5 回答，不把插件消息或模型摘要当作用户要求。
+ * @param requestId 预期的逻辑问题身份。
+ * @param answer user-questions 服务返回的 wire 回答。
+ * @returns 回答的业务含义。
+ * @throws 回答身份或单选结构非法时抛出错误。
+ */
+export function classifyWritingRequirementAnswer(
+  requestId: string,
+  answer: AskUserQuestionAnswer,
+): WritingRequirementAnswer {
+  if (answer.answers.length !== 1 || answer.answers[0]?.id !== requestId) {
+    throw new Error('BID_WRITING_QUESTION_ANSWER_ID_MISMATCH')
+  }
+  const item = answer.answers[0]
+  if (item.selected.length > 1) throw new Error('BID_WRITING_QUESTION_MULTIPLE_SELECTIONS')
+  if (item.selected.some(value => value !== WRITING_REQUIREMENT_NONE_OPTION)) {
+    throw new Error('BID_WRITING_QUESTION_UNKNOWN_OPTION')
+  }
+  if (item.custom !== undefined) {
+    if (item.custom.trim().length === 0) return { kind: 'dismissed' }
+    return { kind: 'custom', selected: item.selected, custom: item.custom }
+  }
+  if (item.selected[0] === WRITING_REQUIREMENT_NONE_OPTION) {
+    return { kind: 'no_additional_requirements', selected: item.selected }
+  }
+  return { kind: 'dismissed' }
+}
 
 /** Host 按稳定引用从 Session Log 解析的用户原话。 */
 export interface ResolvedWritingRequirementMessage {
