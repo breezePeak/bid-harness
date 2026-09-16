@@ -2625,6 +2625,22 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
+  /** Stop the active background Bid Run, including work that outlived the Main Agent turn. */
+  @Remote('stopRun')
+  async stopRun(session: Session): Promise<{ accepted: true }> {
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
+    const operation = this.inFlight.get(projectKey(session))
+    if (operation === undefined) return { accepted: true }
+    if (operation.runs.current !== undefined) {
+      operation.suspension ??= operation.runs.suspend('user_stop')
+      await operation.suspension
+    } else {
+      operation.controller.abort({ kind: 'hook', reason: 'bid-run-user-stop' })
+    }
+    await this.ctx.sessions.flush(session)
+    return { accepted: true }
+  }
+
   /**
    * Import and validate one browser-selected file batch for the current Bid stage.
    * @param session - Host-resolved live Session; only its header supplies workspace identity.

@@ -554,6 +554,26 @@ describe('prompt and cancel errors', () => {
     expect(session.getSnapshot().composerPhase).toBe('engaging')
   })
 
+  it('keeps an accepted queue submission visible as queued until the durable user event arrives', async () => {
+    const { session } = makeSession()
+    const result = await session.prompt([{ type: 'text', text: '稍后处理' }], 'queue')
+    expect(result).toEqual({ ok: true, value: { accepted: true } })
+    expect(session.getSnapshot().outgoing).toMatchObject([
+      { text: '稍后处理', status: 'queued' },
+    ])
+  })
+
+  it('keeps a transport-uncertain submission instead of marking it as a definitive failure', async () => {
+    const api = new FakeApiClient()
+    api.onPrompt = () => Promise.reject(new Error('connection lost'))
+    const { session } = makeSession(api)
+    const result = await session.prompt([{ type: 'text', text: '不确定是否送达' }], 'queue')
+    expect(result).toMatchObject({ ok: false, error: { code: 'internal' } })
+    expect(session.getSnapshot().outgoing).toMatchObject([
+      { text: '不确定是否送达', status: 'unknown', error: 'connection lost' },
+    ])
+  })
+
   it('lands cancel failures in promptError with op=stop', async () => {
     const { api, session } = makeSession()
     api.onCancel = () => Promise.reject(new Error('cancel transport down'))

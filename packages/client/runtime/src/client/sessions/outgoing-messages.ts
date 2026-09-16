@@ -4,12 +4,19 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 const PREVIEW_CHARS = 200
 
 /** Local lifecycle before a durable Host user message is visible. */
-export type OutgoingMessageStatus = 'preparing' | 'submitting' | 'submitted' | 'failed'
+export type OutgoingMessageStatus =
+  | 'preparing'
+  | 'submitting'
+  | 'queued'
+  | 'delivering'
+  | 'unknown'
+  | 'failed'
 
 /** Client-owned admission record; it is a display handoff, never a Host queue. */
 export interface OutgoingMessage {
   readonly localId: string
   readonly clientSubmissionId: string
+  readonly mode: 'queue' | 'steer'
   readonly content: readonly PromptContentPart[]
   readonly preview: string
   readonly text: string | null
@@ -42,11 +49,17 @@ export class OutgoingMessages {
    * @param clientSubmissionId - identity shared with the Host user message.
    * @param content - prompt content captured before asynchronous preparation.
    */
-  begin(localId: string, clientSubmissionId: string, content: readonly PromptContentPart[]): void {
+  begin(
+    localId: string,
+    clientSubmissionId: string,
+    content: readonly PromptContentPart[],
+    mode: 'queue' | 'steer',
+  ): void {
     if (this.records.has(clientSubmissionId)) return
     this.records.set(clientSubmissionId, {
       localId,
       clientSubmissionId,
+      mode,
       content,
       preview: previewOf(content),
       text: textOf(content),
@@ -63,12 +76,18 @@ export class OutgoingMessages {
   update(clientSubmissionId: string, status: OutgoingMessageStatus, error?: string): boolean {
     const current = this.records.get(clientSubmissionId)
     if (current === undefined) return false
-    this.records.set(clientSubmissionId, {
-      ...current,
-      status,
-      ...(error === undefined ? {} : { error }),
-    })
+    if (error === undefined) {
+      const { error: _error, ...withoutError } = current
+      this.records.set(clientSubmissionId, { ...withoutError, status })
+    } else {
+      this.records.set(clientSubmissionId, { ...current, status, error })
+    }
     return true
+  }
+
+  /** Explicitly discard one local outgoing row without synthesizing a failure. */
+  discard(clientSubmissionId: string): boolean {
+    return this.records.delete(clientSubmissionId)
   }
 
   /**

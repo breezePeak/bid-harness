@@ -24,7 +24,13 @@ interface CommandFace {
 
 /** Attachment-send face resolved lazily to keep hub/service construction acyclic. */
 interface ConversationAttachmentFace {
-  beginOutgoing(session: SessionFace, text: string, imageIds: readonly DraftAttachmentId[], submissionId: string): void
+  beginOutgoing(
+    session: SessionFace,
+    text: string,
+    imageIds: readonly DraftAttachmentId[],
+    submissionId: string,
+    mode?: InputSubmitMode,
+  ): void
   updateOutgoing(session: SessionFace, submissionId: string, error: string): void
   sendSession(
     session: SessionFace,
@@ -85,12 +91,14 @@ export class InputHub implements SessionInputResolver {
         attempt.draftSnapshot,
         attempt.imageIds ?? [],
         attempt.submissionId ?? `client-${attempt.seq}`,
+        attempt.mode,
       ),
       localImageHandoff: imageIds => this.conversation().beginOutgoing(
         session,
         '',
         imageIds,
         `client-${id}-${Date.now()}`,
+        'queue',
       ),
       localHandoffFailed: (attempt, error) => this.conversation().updateOutgoing(
         session,
@@ -210,7 +218,10 @@ export class InputHub implements SessionInputResolver {
     if (queued.length === 0) return
     for (const item of queued) {
       const result = await session.updateQueue(item.id, { kind: 'steer' })
-      if (result.ok) continue
+      if (result.ok) {
+        if (item.clientSubmissionId !== undefined) session.discardOutgoing(item.clientSubmissionId)
+        continue
+      }
       if (result.error.code === 'steer-unavailable' || result.error.code === 'queue-item-not-found') return
       shell.notify('error', this.t('queue.steerFailed'))
       return

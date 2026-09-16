@@ -381,6 +381,37 @@ describe('BidStagePanel', () => {
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
+  it('同步 S4 进度时不把未知状态显示成 0 / 0', async () => {
+    const progress = {
+      total: 10,
+      initial: 10,
+      supplemental: 0,
+      completed: 2,
+      running: 3,
+      not_started: 5,
+      failed: 0,
+      failed_section_ids: [],
+    } as const
+    let resolveProgress: ((value: typeof progress) => void) | undefined
+    const getEvidenceMappingProgress = vi.fn(() => new Promise<typeof progress>((resolve) => {
+      resolveProgress = resolve
+    }))
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'running' },
+      composer: { enabled: false, reason: 'bid.stage_running' },
+    }), { getEvidenceMappingProgress })} />)
+
+    expect(screen.queryByText('0 / 0 (0%)')).toBeNull()
+    expect(screen.getByRole('status', { name: '研究任务：进度同步中…' })).toBeTruthy()
+    expect(screen.getByText('同步中')).toBeTruthy()
+
+    await act(async () => {
+      resolveProgress?.(progress)
+      await Promise.resolve()
+    })
+    expect(screen.getByText('2 / 10 (20%)')).toBeTruthy()
+  })
+
   it('S4 等待启动且尚无日志时仍显示占位进度条', () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
@@ -389,7 +420,9 @@ describe('BidStagePanel', () => {
     }))} />)
 
     expect(screen.getByText('研究任务')).toBeTruthy()
-    expect(screen.getByText('0 / 0 (0%)')).toBeTruthy()
+    expect(screen.queryByText('0 / 0 (0%)')).toBeNull()
+    expect(screen.getByRole('status', { name: '研究任务：进度同步中…' })).toBeTruthy()
+    expect(screen.getByText('同步中')).toBeTruthy()
     expect(document.querySelector('[class*="mappingProgressTrack"]')).toBeTruthy()
     expect(screen.getByText('正在同步映射进度…')).toBeTruthy()
   })

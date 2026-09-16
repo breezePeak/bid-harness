@@ -59,6 +59,8 @@ export interface ISession {
    * @returns acceptance, or a business/transport error.
    */
   updateQueue(itemId: MessageId, action: QueueAction): Promise<RpcResult<{ accepted: true }>>
+  /** Explicitly discard one local outgoing row; this does not send a Host mutation. */
+  discardOutgoing(clientSubmissionId: string): void
   /**
    * Cancel the running turn. Pending queued work remains and resumes in FIFO
    * order after the Host reaches cancellation quiescence.

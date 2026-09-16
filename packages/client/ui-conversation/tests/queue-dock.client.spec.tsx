@@ -46,6 +46,7 @@ function outgoing(localId: string, preview: string, status: OutgoingMessage['sta
   return {
     localId,
     clientSubmissionId: `client-${localId}`,
+    mode: 'queue',
     content: [{ type: 'text', text: preview }],
     preview,
     text: preview,
@@ -92,6 +93,7 @@ function kitFor(snapshot: ConversationSnapshot, injected: Partial<QueueDockInjec
     session: snapshot,
     input: INPUT_STATE,
     updateQueue: vi.fn(() => Promise.resolve()),
+    discardOutgoing: vi.fn(),
     notify: vi.fn(),
     ...injected,
   }

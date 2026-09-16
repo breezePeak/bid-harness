@@ -39,9 +39,17 @@ export interface IConversation {
   /** 为有业务引用的输入注册专用提交动作。 */
   readonly submitHandlers: ComposerSubmitHandlers
   /** Register a local outgoing row before asynchronous message preparation. */
-  beginOutgoing(session: SessionFace, text: string, imageIds: readonly DraftAttachmentId[], submissionId: string): void
+  beginOutgoing(
+    session: SessionFace,
+    text: string,
+    imageIds: readonly DraftAttachmentId[],
+    submissionId: string,
+    mode?: InputSubmitMode,
+  ): void
   /** Mark a local outgoing row that failed before Host admission. */
   updateOutgoing(session: SessionFace, submissionId: string, error: string): void
+  /** Explicitly discard one local outgoing row without changing Host state. */
+  discardOutgoing(clientSubmissionId: string): void
   /**
    * Send a prompt into the caller scope's session.
    * @param text - prompt text, sent verbatim as one text block.
@@ -133,14 +141,15 @@ export class ConversationController extends Service implements IConversation {
     text: string,
     imageIds: readonly DraftAttachmentId[],
     submissionId: string,
+    mode: InputSubmitMode = 'queue',
   ): void {
     const pending = this.pendingOutgoing.get(session.sessionId) ?? []
     pending.push({ text, imageCount: imageIds.length, submissionId })
     this.pendingOutgoing.set(session.sessionId, pending)
     const owner = session as SessionFace & {
-      beginOutgoing?: (id: string, content: readonly PromptContentPart[]) => void
+      beginOutgoing?: (id: string, content: readonly PromptContentPart[], mode?: InputSubmitMode) => void
     }
-    owner.beginOutgoing?.(submissionId, text === '' ? [] : [{ type: 'text', text }])
+    owner.beginOutgoing?.(submissionId, text === '' ? [] : [{ type: 'text', text }], mode)
   }
   /** Update a local row when preparation failed before Session.prompt ran. */
   updateOutgoing(session: SessionFace, submissionId: string, error: string): void {
@@ -152,6 +161,11 @@ export class ConversationController extends Service implements IConversation {
       updateOutgoing?: (id: string, status: 'failed', error: string) => void
     }
     owner.updateOutgoing?.(submissionId, 'failed', error)
+  }
+
+  /** Explicitly discard one local outgoing row without changing Host state. */
+  discardOutgoing(clientSubmissionId: string): void {
+    this.scopedSession('discardOutgoing').discardOutgoing(clientSubmissionId)
   }
   private readonly draftAttachments = new Map<DraftAttachmentId, ComposerAttachment>()
   private readonly imageUrls = new Map<string, ImageUrlEntry>()

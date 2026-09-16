@@ -2483,7 +2483,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         return ok(request, { selected })
       },
       prompt: (request) => {
-        const { sessionId: id, mode, content } = request.payload
+        const { sessionId: id, mode, content, clientSubmissionId } = request.payload
         const summary = summaryOf(id)
         if (summary === undefined) {
           return err(request, { code: 'session-not-found', message: `no session ${id}`, details: { sessionId: id } })
@@ -2506,6 +2506,10 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         // First accepted prompt appends events: the summary stops being blank.
         summary.blank = false
         const userText = content.map(b => (b.type === 'text' ? b.text : '')).join('')
+        const source: MessageSource = {
+          kind: 'user',
+          ...(clientSubmissionId === undefined ? {} : { clientSubmissionId }),
+        }
         const durable: ContentBlock[] = content.map((block) => {
           if (block.type === 'text') return block
           const attachment: ImageAttachmentRef = {
@@ -2525,7 +2529,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         })
         if (mode === 'steer' && replays.has(id)) {
           // Steering: the durable user/message lands inside the current turn; the replay continues.
-          append(id, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable) })
+          append(id, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable, source) })
           return ok(request, { accepted: true as const })
         }
         const turn = nextTurn.get(id) ?? 0
@@ -2538,7 +2542,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         if (plan.wanted !== null && plan.wanted !== plan.active) {
           append(id, { type: 'plan/mode', data: { active: plan.wanted } })
         }
-        append(id, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable) })
+        append(id, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable, source) })
         // Capacity parallel of the host token-meter's request/context record:
         // log-only, appended inside the open turn, and deduplicated against the
         // route already recorded (the fixture never varies contextWindow).

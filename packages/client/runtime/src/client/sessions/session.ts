@@ -209,6 +209,7 @@ export class Session implements SessionFace {
     this.beginOutgoing(submissionId, content)
     this.outgoing.update(submissionId, 'submitting')
     let result: RpcResult<{ accepted: true }>
+    let transportFailed = false
     try {
       if (this.address === undefined) {
         result = (await this.api.sessions.prompt({
@@ -249,10 +250,11 @@ export class Session implements SessionFace {
         }
       }
     } catch (error) {
+      transportFailed = true
       result = transportError(error)
     }
     if (!result.ok) {
-      this.outgoing.update(submissionId, 'failed', result.error.message)
+      this.outgoing.update(submissionId, transportFailed ? 'unknown' : 'failed', result.error.message)
       this.promptError = { op: 'send', error: result.error }
       this.notifier.markDirty()
       return result
@@ -270,7 +272,7 @@ export class Session implements SessionFace {
       this.options.onEngaged?.(this)
       this.notifier.markDirty()
     }
-    this.outgoing.update(submissionId, 'submitted')
+    this.outgoing.update(submissionId, mode === 'queue' ? 'queued' : 'delivering')
     this.notifier.markDirty()
     return result
   }
@@ -280,11 +282,16 @@ export class Session implements SessionFace {
    * @param clientSubmissionId - identity shared with the Host user message.
    * @param content - prompt content captured at local handoff.
    */
-  beginOutgoing(clientSubmissionId: string, content: readonly PromptContentPart[]): void {
+  beginOutgoing(
+    clientSubmissionId: string,
+    content: readonly PromptContentPart[],
+    mode: 'queue' | 'steer' = 'queue',
+  ): void {
     this.outgoing.begin(
       `outgoing-${clientSubmissionId}`,
       clientSubmissionId,
       content,
+      mode,
     )
     this.notifier.markDirty()
   }
@@ -297,6 +304,11 @@ export class Session implements SessionFace {
    */
   updateOutgoing(clientSubmissionId: string, status: OutgoingMessageStatus, error?: string): void {
     if (this.outgoing.update(clientSubmissionId, status, error)) this.notifier.markDirty()
+  }
+
+  /** Explicitly remove one local outgoing row after the user abandons it. */
+  discardOutgoing(clientSubmissionId: string): void {
+    if (this.outgoing.discard(clientSubmissionId)) this.notifier.markDirty()
   }
 
   /**
@@ -697,6 +709,7 @@ export class Session implements SessionFace {
     this.hasMore = hasMore
     if (this.events.some(event => event.type === 'turn/start')) this.firstPromptPendingTurn = false
     this.conversation.replaceWindow(entries.map(conversationInput), hasMore)
+    for (const event of this.events) this.outgoing.acceptDurable(event)
     if (projections !== undefined) this.projections.seed(projections)
     const buffered = this.liveBuffer
     this.liveBuffer = []

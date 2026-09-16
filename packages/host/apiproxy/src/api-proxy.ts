@@ -2543,6 +2543,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
+        const bid = ctx.get('bid') as unknown as {
+          stopRun?: (session: Session) => Promise<unknown>
+        } | undefined
+        const stopping = bid?.stopRun?.(agent.session)
+        void stopping?.catch(() => {
+          // The session cancel already succeeded; Bid projection reconciliation
+          // will surface a later stop failure as its durable run state.
+        })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
     },

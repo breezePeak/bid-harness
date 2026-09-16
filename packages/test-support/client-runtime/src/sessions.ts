@@ -106,6 +106,11 @@ export class FixtureSession implements SessionFace {
     throw new Error(`test session "${this.sessionId}": updateQueue is not stubbed — supply it on the fixture's session face`)
   }
 
+  /** Fail-loud stub; supply `discardOutgoing` when testing local-row disposal. */
+  discardOutgoing(): never {
+    throw new Error(`test session "${this.sessionId}": discardOutgoing is not stubbed — supply it on the fixture's session face`)
+  }
+
   /**
    * Fail-loud stub; supply `cancel` on the fixture's session face to exercise it.
    * @returns never — always throws.

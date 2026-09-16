@@ -21,6 +21,7 @@ import css from './QueueDock.module.css'
 /** Queue operations injected by the session-scoped registration. */
 export interface QueueDockInjected {
   updateQueue: (itemId: QueueItemId, action: QueueAction) => Promise<void>
+  discardOutgoing: (clientSubmissionId: string) => void
   notify: (level: 'info' | 'error', text: string) => void
 }
 
@@ -31,7 +32,9 @@ function statusLabel(t: QueueDockProps['t'], status: OutgoingMessageStatus): str
   switch (status) {
     case 'preparing': return t('queue.status.preparing')
     case 'submitting': return t('queue.status.submitting')
-    case 'submitted': return t('queue.status.submitted')
+    case 'queued': return t('queue.status.queued')
+    case 'delivering': return t('queue.status.delivering')
+    case 'unknown': return t('queue.status.unknown')
     case 'failed': return t('queue.status.failed')
   }
 }
@@ -44,17 +47,26 @@ function isOutgoing(row: QueueRow): row is OutgoingMessage {
  * Queue strip: one item renders directly; multiple items default to a
  * collapsible count header; an empty queue renders nothing.
  */
-export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps) {
+export function QueueDock({ useSession, updateQueue, discardOutgoing, notify, t }: QueueDockProps) {
   const hostQueue = useSession(s => s.queue)
   const outgoing = useSession(s => s.outgoing)
   const queue = useMemo(
-    () => [...outgoing ?? [], ...hostQueue.filter(row => row.placement === 'queued')],
+    () => {
+      const hostQueued = hostQueue.filter(row => row.placement === 'queued')
+      const hostSubmissionIds = new Set(
+        hostQueued.flatMap(row => row.clientSubmissionId === undefined ? [] : [row.clientSubmissionId]),
+      )
+      return [
+        ...(outgoing ?? []).filter(row => row.mode === 'queue' && !hostSubmissionIds.has(row.clientSubmissionId)),
+        ...hostQueued,
+      ]
+    },
     [hostQueue, outgoing],
   )
   const running = useSession(s => s.running)
   const queueMutable = useSession(s => s.subagent === null)
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)
-  const [busy, setBusy] = useState<QueueItemId | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(true)
   const listId = useId()
 
@@ -83,6 +95,17 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
       return false
     } finally {
       setBusy(current => current === itemId ? null : current)
+    }
+  }
+
+  const applyHostAction = async (
+    row: Extract<QueueRow, { id: QueueItemId }>,
+    action: QueueAction,
+    failure: string,
+  ): Promise<void> => {
+    if (!await applyAction(row.id, action, failure)) return
+    if (row.clientSubmissionId !== undefined && (action.kind === 'remove' || action.kind === 'steer')) {
+      discardOutgoing(row.clientSubmissionId)
     }
   }
 
@@ -122,7 +145,26 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
               {/* Single-item strip has no count header, so the row itself carries the queue glyph. */}
               {queue.length === 1 && <span className={css.lead} aria-hidden><IconQueueOutline14 /></span>}
               {local
-                ? <span className={css.preview}>{row.preview} · {statusLabel(t, row.status)}</span>
+                ? <>
+                  <span className={css.preview} title={row.error}>{row.preview} · {statusLabel(t, row.status)}{row.error === undefined ? '' : ` · ${row.error}`}</span>
+                  <div className={css.actions}>
+                    <Tooltip label={t('queue.discard')} side="bottom" delayMs={500}>
+                      <button
+                        type="button"
+                        className={css.action}
+                        aria-label={t('queue.discard')}
+                        disabled={busy !== null}
+                        onClick={() => {
+                          setBusy(row.localId)
+                          discardOutgoing(row.clientSubmissionId)
+                          setBusy(null)
+                        }}
+                      >
+                        <IconTrashOutline16 size={14} />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </>
                 : editing?.id === row.id
                   ? (
                     <input
@@ -197,8 +239,8 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                           aria-label={t('queue.remove')}
                           disabled={busy !== null}
                           onClick={() => {
-                            void applyAction(
-                              row.id,
+                            void applyHostAction(
+                              row,
                               { kind: 'remove' },
                               t('queue.removeFailed'),
                             )
@@ -215,8 +257,8 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                           title={running ? undefined : t('queue.steer.unavailable')}
                           disabled={busy !== null || !running}
                           onClick={() => {
-                            void applyAction(
-                              row.id,
+                            void applyHostAction(
+                              row,
                               { kind: 'steer' },
                               t('queue.steerFailed'),
                             )
@@ -260,6 +302,7 @@ export const queueDockEntry = {
         if (conversation === undefined) throw new Error('queue dock: conversation service unavailable')
         return {
           updateQueue: (itemId, action) => conversation.updateQueue(itemId, action),
+          discardOutgoing: clientSubmissionId => conversation.discardOutgoing(clientSubmissionId),
           notify: (level, text) => { conversation.input.for(actx).notify(level, text) },
         }
       },
