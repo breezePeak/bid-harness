@@ -7,7 +7,7 @@ import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
 import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -691,7 +691,14 @@ function mappingFixture(
           scopedGuards.push(guard)
           return () => { scopedGuards.splice(scopedGuards.indexOf(guard), 1) }
         }),
-        schemas: vi.fn(() => [...new Set(['web_search', 'web_fetch', ...definitions.keys()])].map(name => ({ name }))),
+        schemas: vi.fn(() => [
+          { name: 'web_search' }, ...(definitions.has('web_fetch') ? [] : [{ name: 'web_fetch' }]),
+          ...[...definitions.values()].map((definition) => {
+            const parameters = snapshotJsonValue(definition.parameters)
+            if (parameters === undefined) throw new Error(`tool "${definition.name}" parameters must be lossless JSON before schema projection`)
+            return { name: definition.name, parameters }
+          }),
+        ]),
       }
       const childWeb = {
         diagnose: vi.fn(async () => ({
@@ -814,6 +821,11 @@ function mappingFixture(
     submissionResults, logger, tools,
     setParentSession: (id: string) => { parentSessionId = id },
     serializeQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
+    submissionTool: (childId: SessionId, name: string) => {
+      const definition = submissionTools.get(String(childId))?.get(name)
+      if (definition === undefined) throw new Error(`missing submission tool ${name}`)
+      return definition
+    },
     invokeSubmissionTool: async (childId: SessionId, name: string, args: unknown) => {
       const definition = submissionTools.get(String(childId))?.get(name)
       const child = children.get(String(childId))
@@ -939,6 +951,24 @@ describe('evidence-mapping Agent executor', () => {
     const final = fixture.finalStarts[0]!
     const childId = final.request.childId!
     const call = (name: string, args: unknown) => fixture.invokeSubmissionTool(childId, name, args)
+    expect(fixture.submissionTool(childId, 'review_items').parameters).toMatchObject({
+      type: 'object',
+      properties: { items: { type: 'array', items: { oneOf: [{
+        type: 'object',
+        properties: {
+          review_ref: { type: 'string' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
+        },
+        required: ['review_ref', 'decision', 'reason'], additionalProperties: false,
+      }, {
+        type: 'object',
+        properties: {
+          review_ref: { type: 'string' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
+          correction: { type: 'object' },
+        },
+        required: ['review_ref', 'decision', 'reason', 'correction'], additionalProperties: false,
+      }] } } },
+      required: ['items'], additionalProperties: false,
+    })
     type Pending = {
       review_ref: string
       section_id: string
@@ -1805,6 +1835,26 @@ describe('evidence-mapping Agent executor', () => {
     ]))
   })
 
+  it('Web 临时故障耗尽共享预算后不再派发排队任务', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-budget-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 1,
+      maxRepairAttempts: 0,
+      maxInfrastructureRetryAttempts: 0,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const failed = fixture.starts[0]!
+    await fixture.emitWeb(fixture.children.get(String(failed.request.childId))!, [observation({
+      callId: 'rate-limited-search', name: 'web_search', arguments: { queries: ['技术依据'] }, callSeq: 1, resultSeq: 2,
+      isError: true, errorInfo: { name: 'WebError', code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '0' },
+    })])
+    failed.resolve()
+
+    await expect(execution).rejects.toMatchObject({ issues: [{ code: 'WEB_PROVIDER_RATE_LIMITED' }] })
+    expect(fixture.starts).toHaveLength(1)
+  })
+
   it('S4 Host preflight 缺少 Web 工具时只失败一次，修复后可继续整批任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-web-disabled-')))
     const material = await writeInputs(workspace)
@@ -2018,6 +2068,7 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach((start) => { start.resolve() })
     await initial
+    expect(fixture.tools.execute).toHaveBeenCalledWith(expect.objectContaining({ name: 'web_fetch', agent: fixture.agent }))
     const before = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     const snapshot = before.section_mappings[0]!.web_materials[0]!.snapshot_path
     const snapshotContent = await readFile(join(workspace.projectRoot, snapshot), 'utf8')

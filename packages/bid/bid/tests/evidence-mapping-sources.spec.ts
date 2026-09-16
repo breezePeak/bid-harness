@@ -9,6 +9,7 @@ import { createMappingSourceTools, mappingSourceCatalog } from '../src/evidence-
 import type { S4WebResearchPool } from '../src/web-research-pool.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DocumentChunkEntry } from '../src/document-chunk.ts'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 
 function entry(id: string, start: number, end: number): DocumentChunkEntry {
   return { id, path: `${id}.md`, order: 1, heading_path: ['不作为范围依据'], page_start: null, page_end: null,
@@ -20,6 +21,14 @@ function toolExec(): ToolRunContext {
 }
 
 describe('S4 真实资料位置与受控引用', () => {
+  it('生成的工具参数可无损投影为 JSON', () => {
+    const tools = createMappingSourceTools([], {} as S4WebResearchPool, 'child')
+    for (const tool of tools) {
+      expect(snapshotJsonValue(tool.parameters), tool.name).toBeDefined()
+      expect(tool.parameters).not.toHaveProperty('~standard')
+    }
+  })
+
   it('按实际位置区分重复标题、直接正文、子节和跨标题分块', () => {
     const markdown = ['无标题正文', '# 总体', '总述正文', '## 重复', '第一次正文', '## 重复', '第二次正文', '# 相邻', '相邻正文'].join('\n')
     const outline = [

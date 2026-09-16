@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
+import { zodJsonSchema } from './zod-json-schema.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
@@ -75,7 +76,7 @@ export async function generateScopedOutlineOperations(
       `当前 Draft：${JSON.stringify(draft)}`,
       `只允许修改以下章节及其子树：${JSON.stringify(sectionIds)}。保留选中根的 ID、父节点和位置；不得修改范围外节点。拆分叶子使用 split_section，合并同级叶子使用 merge_sections。`,
       '不得写文件。最终只返回原始 JSON 编辑操作数组，新增 ID 由 Host 分配。操作必须符合：',
-      JSON.stringify(z.toJSONSchema(z.array(outlineEditOperationSchema))),
+      JSON.stringify(zodJsonSchema(z.array(outlineEditOperationSchema))),
     ].join('\n') }],
   })
   try {
@@ -276,7 +277,7 @@ export function renderOutlineGenerationRepairTask(
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
     '只返回局部编辑操作，不得重写 outline.json 或质量报告。scoring_response_point_ids 是章节最终选定的完整列表，保留已有合理关联。新增 ID 由 Host 分配。',
     '唯一输出：' + root + '/outline/repair-operations.json',
-    JSON.stringify(z.toJSONSchema(z.array(context.associations === undefined
+    JSON.stringify(zodJsonSchema(z.array(context.associations === undefined
       ? outlineRepairOperationSchema : outlineAssociationRepairOperationSchema))),
   ].join('\n')
 }
@@ -423,7 +424,7 @@ export async function executeOutlineGeneration(
     const definition = {
       name: QUALITY_REPORT_TOOL,
       description: '提交当前 Blueprint Quality Review 的非阻断语义建议；Host 生成并持久化正式质量报告。',
-      parameters: z.toJSONSchema(qualityReportSubmissionSchema, { target: 'draft-7' }),
+      parameters: zodJsonSchema(qualityReportSubmissionSchema),
       output: {
         schema: { type: 'object' },
         render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
@@ -537,7 +538,7 @@ export async function executeOutlineGeneration(
           '原始候选（只读）：\n' + raw,
           candidate.kind === 'format'
             ? '只修复 JSON 序列化标点和空白，保留字符串、数值、字面值及其顺序；禁止调整章节、拆解评分、重分配 RP 或重生成目录。无法在此范围内恢复时说明原因。输出恢复后的 JSON。'
-            : '只输出已定位字段的局部操作。section_index 指原始数组下标，section_id 与 path 供核对；禁止整章或整本替换。未知 ID 必须根据原文重新明确选择合法关联，不能删除未知 ID 了事、模糊替换或默认挂到某章。RP 快照由 Host 派生，修复快照错误时只选择 scoring_response_point_ids。删除额外字段用 remove=true。\n' + JSON.stringify(z.toJSONSchema(outlineCandidateRepairSchema)),
+            : '只输出已定位字段的局部操作。section_index 指原始数组下标，section_id 与 path 供核对；禁止整章或整本替换。未知 ID 必须根据原文重新明确选择合法关联，不能删除未知 ID 了事、模糊替换或默认挂到某章。RP 快照由 Host 派生，修复快照错误时只选择 scoring_response_point_ids。删除额外字段用 remove=true。\n' + JSON.stringify(zodJsonSchema(outlineCandidateRepairSchema)),
           ...(candidate.kind === 'format' ? [] : ['权威输入（只读，不得修改）：' + JSON.stringify({ catalog, scoring, requirements, compliance, frameworks })]),
           '唯一可写输出：' + relative(workspace.root, path(output)).replaceAll('\\', '/'),
         ].join('\n')

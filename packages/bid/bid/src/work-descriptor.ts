@@ -83,7 +83,20 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
       throw new Error(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
     }
     const workStage = descriptor?.stage ?? request?.stage
-    if (workStage === undefined) throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+    if (workStage === undefined) {
+      const entries = await readDirectoryIfPresent(runRoot)
+      if (!z.uuid().safeParse(entry).success || entries.length === 0
+        || entries.some(name => name !== 'scratch' && name !== 'staging')) {
+        throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+      }
+      for (const name of entries) {
+        const path = join(runRoot, name)
+        await assertNoLinkedPath(workspace.root, path)
+        if (!(await lstat(path)).isDirectory()) throw new Error(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+      }
+      paths.push(runRoot)
+      continue
+    }
     runStages.set(entry, workStage)
     if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(runRoot)
   }

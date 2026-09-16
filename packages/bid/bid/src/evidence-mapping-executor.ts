@@ -46,6 +46,7 @@ import {
   type OutlineQualityReport,
 } from './outline-generation-artifacts.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { zodJsonSchema } from './zod-json-schema.ts'
 import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
@@ -167,6 +168,7 @@ class MappingSubagentInfrastructureError extends BidStageExecutionError {
     readonly contextOverflow = false,
     readonly taskId?: string,
     readonly retryAfterMs = 0,
+    readonly provider?: typeof MAPPING_AGENT_TOOLS[number],
   ) {
     super(issues)
     this.name = 'MappingSubagentInfrastructureError'
@@ -201,20 +203,17 @@ function webInfrastructureFailure(
   const statusCode = info?.statusCode
   const permanent = code !== undefined && PERMANENT_WEB_FAILURE_CODES.has(code)
     || statusCode === 401 || statusCode === 402 || statusCode === 403
-  const transient = captured.exec.name === 'web_search' && (
-    code === 'WEB_PROVIDER_RATE_LIMITED'
-    || code === 'WEB_SEARCH_TIMEOUT'
-    || code === 'WEB_PROVIDER_ERROR'
-    || statusCode === 429
-    || statusCode !== undefined && statusCode >= 500
-  )
+  const transient = code === 'WEB_PROVIDER_RATE_LIMITED'
+    || captured.exec.name === 'web_search' && code === 'WEB_SEARCH_TIMEOUT'
+    || code === 'WEB_PROVIDER_ERROR' && (statusCode === undefined || statusCode === 429 || statusCode >= 500)
+    || statusCode === 429 || statusCode !== undefined && statusCode >= 500
   if (!permanent && !transient) return undefined
   const issueCode = code ?? 'EVIDENCE_MAPPING_WEB_PROVIDER_FAILURE'
   const status = statusCode === undefined ? '' : `（HTTP ${String(statusCode)}）`
   return new MappingSubagentInfrastructureError([{
     code: issueCode,
     message: `${captured.exec.name} 的联网 Provider 失败${status}：${captured.result.error.message}`,
-  }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter))
+  }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter), captured.exec.name as typeof MAPPING_AGENT_TOOLS[number])
 }
 
 class FinalReviewTaskTooLargeError extends Error {
@@ -1567,7 +1566,8 @@ async function completeMappingSubmission(
     ...(state.refinementConclusion === undefined ? {} : { refinementConclusion: state.refinementConclusion }),
     ...(taskOwnsOutlineRefinement(task) ? { outlineOperations: [...state.acceptedOperations] } : {}),
   }
-  await persistProgress(submission, true)
+  // 工具完成只证明候选满足局部条件；外层验收后才提交任务完成状态。
+  await persistProgress(submission, false)
   return { response: { completed: true }, submission }
 }
 
@@ -1614,7 +1614,7 @@ function attachMappingSubmissionRuntime(
   if (task.task_kind !== 'branch_summary') register({
     name: 'web_fetch',
     description: '通过 Host 获取一个 HTTP(S) 网页并立即注册到共享 Research Pool。返回标题、目录和少量 Chunk Catalog，不返回整篇正文。',
-    parameters: z.toJSONSchema(z.object({ url: z.url() }).strict(), { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(z.object({ url: z.url() }).strict()), output,
     async execute(raw: unknown, exec: ToolRunContext): Promise<unknown> {
       const { url } = z.object({ url: z.url() }).strict().parse(raw)
       return pool.fetch(url, exec)
@@ -1623,7 +1623,7 @@ function attachMappingSubmissionRuntime(
   if (taskOwnsOutlineRefinement(task)) register({
     name: 'submit_section_research_assessment',
     description: '提交研究充分性与中性 key_findings，不在这里决定目录归位。每项发现区分项目事实与专业方案设计，引用真实招标/评分/资料依据并说明推演边界。研究充分后先完成 Blueprint，再判断结构。Host 保存引用；调用方使用返回的 finding_index。',
-    parameters: z.toJSONSchema(sectionResearchAssessmentInputSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(sectionResearchAssessmentInputSchema), output,
     execute(raw: unknown): Promise<unknown> {
       const submitted = sectionResearchAssessmentInputSchema.parse(raw)
       const assessment = sectionResearchAssessmentSchema.parse({
@@ -1654,7 +1654,7 @@ function attachMappingSubmissionRuntime(
   if (task.task_kind !== 'branch_summary') register({
     name: 'update_section_task',
     description: '研究充分性判断通过后，独立记录或修改章节 Writing Brief、展开维度、职责内缺口或覆盖关联；材料仍须锁定后另行提交。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
-    parameters: z.toJSONSchema(sectionTaskOperationSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(sectionTaskOperationSchema), output,
     async execute(args: unknown): Promise<unknown> {
       const change = applySectionTaskOperation(state, task, args)
       if (task.phase === 'final_check') await persistProgress(mappingSubmissionSnapshot(state, task), false)
@@ -1672,7 +1672,7 @@ function attachMappingSubmissionRuntime(
     register({
       name: 'submit_section_structure_assessment',
       description: '完整 Blueprint 后判断目录承载能力。假设 S5 不得自建正式标题，分析业务对象、方法、成果责任和评审定位，说明 Hidden Heading Pressure。逐项引用 finding_index 决定归位；新增章节目标由结构操作自动绑定，无需回填。Host 绑定当前 Blueprint 指纹。',
-      parameters: z.toJSONSchema(sectionStructureAssessmentInputSchema, { target: 'draft-7' }), output,
+      parameters: zodJsonSchema(sectionStructureAssessmentInputSchema), output,
       execute(raw: unknown): Promise<unknown> {
         assertResearchReady(state)
         assertBlueprintReady(state, task)
@@ -1692,8 +1692,13 @@ function attachMappingSubmissionRuntime(
           decision: submitted.decision, finding_bindings: state.outlineOperationBases })
       },
     })
-    const editSchema = closedObject({ operation: z.toJSONSchema(outlineEditOperationSchema, { target: 'draft-7' }) as JsonSchemaNode,
-      basis: z.toJSONSchema(z.object({ explanation: z.string().trim().min(1), finding_indices: z.array(z.number().int().positive()).min(1) }).strict(), { target: 'draft-7' }) as JsonSchemaNode })
+    const editSchema = closedObject({
+      operation: zodJsonSchema(outlineEditOperationSchema),
+      basis: zodJsonSchema(z.object({
+        explanation: z.string().trim().min(1),
+        finding_indices: z.array(z.number().int().positive()).min(1),
+      }).strict()),
+    })
     register({
       name: 'apply_section_outline_edit', description: '完成 Blueprint 和 Structure Assessment 后修改当前 Section 子树。basis 只需研究发现的 finding_indices 和业务理由；Host 分配 Section ID、保存 finding→章节绑定并返回实际节点。编辑完成后重新判断当前结构再锁定，无需重交 Research Assessment。',
       parameters: editSchema as unknown as Record<string, unknown>, output,
@@ -1843,10 +1848,14 @@ function attachMappingSubmissionRuntime(
       usage: z.enum(['reuse', 'adapt', 'reference', 'background']).optional(), summary: z.string().trim().min(1).optional(),
       supports: z.string().trim().min(1).optional(), task: sectionTaskOperationSchema.optional(),
     }).strict()
-    const reviewSchema = z.object({ items: z.array(z.object({
-      review_ref: z.string().min(1), decision: z.enum(['keep', 'remove', 'correct', 'block']), reason: z.string().trim().min(1),
-      correction: correctionSchema.optional(),
-    }).strict()).min(1) }).strict()
+    const reviewSchema = z.object({ items: z.array(z.discriminatedUnion('decision', [
+      z.object({
+        review_ref: z.string().min(1), decision: z.enum(['keep', 'remove', 'block']), reason: z.string().trim().min(1),
+      }).strict(),
+      z.object({
+        review_ref: z.string().min(1), decision: z.literal('correct'), reason: z.string().trim().min(1), correction: correctionSchema,
+      }).strict(),
+    ])).min(1) }).strict()
     register({
       name: 'list_review_items', description: '列出当前版本的待审章节任务、材料用途关联和父节点总述；空材料章节也有任务复核项。',
       parameters: closedObject({}) as unknown as Record<string, unknown>, output,
@@ -1857,8 +1866,8 @@ function attachMappingSubmissionRuntime(
       },
     })
     register({
-      name: 'review_items', description: '按运行内引用批量提交语义复核结论。先对照 S3、S2、用户修改和全书职责判断任务调整是否合理，再判断材料用途。correct 应用修改并产生新待审项；越界且无法修正时 block，不能作为非阻断建议放行。',
-      parameters: z.toJSONSchema(reviewSchema, { target: 'draft-7' }), output,
+      name: 'review_items', description: '按运行内引用批量提交语义复核结论。先对照 S3、S2、用户修改和全书职责判断任务调整是否合理，再判断材料用途。keep、remove、block 不携带 correction；correct 必须携带具体 correction，应用修改并产生新待审项。越界且无法修正时 block，不能作为非阻断建议放行。',
+      parameters: zodJsonSchema(reviewSchema), output,
       async execute(raw: unknown): Promise<unknown> {
         const { items } = reviewSchema.parse(raw)
         if (new Set(items.map(item => item.review_ref)).size !== items.length) throw new ToolArgsError(['items: 复核引用不能重复。'])
@@ -1883,7 +1892,6 @@ function attachMappingSubmissionRuntime(
         for (const decision of items) {
           const item = refreshReviewItems(draft, task).find(item => item.review_ref === decision.review_ref)
           if (item === undefined) throw new ToolArgsError([`review_ref: ${decision.review_ref} 未知或已过期，请读取当前待审项。`])
-          if (decision.decision !== 'correct' && decision.correction !== undefined) throw new ToolArgsError(['correction: 仅 correct 结论可携带修正。'])
           if (decision.decision === 'keep' || decision.decision === 'block') {
             if (decision.decision === 'keep' && item.kind === 'branch_summary' && item.value === null) throw new ToolArgsError(['review_ref: 父节点总述为空，必须先提交正文。'])
             if (decision.decision === 'keep' && item.kind === 'web_material') {
@@ -1894,8 +1902,8 @@ function attachMappingSubmissionRuntime(
             item.conclusion = { decision: decision.decision, reason: decision.reason }
             continue
           }
-          const correction = decision.correction
-          if (decision.decision === 'correct' && (correction === undefined || Object.keys(correction).length === 0)) throw new ToolArgsError(['correction: 必须提供具体修正。'])
+          if (decision.decision === 'correct' && Object.keys(decision.correction).length === 0) throw new ToolArgsError(['correction: 必须提供具体修正。'])
+          const correction = decision.decision === 'correct' ? decision.correction : undefined
           if (item.kind === 'task') {
             if (decision.decision === 'remove' || correction?.task?.section_id !== item.section_id || Object.keys(correction).length !== 1) {
               throw new ToolArgsError(['correction.task: 任务只能通过同章的独立章节任务操作修正；Final Check 不能删除章节。'])
@@ -3487,7 +3495,9 @@ async function executeEvidenceMappingRun(
       for (const item of savedLog.tasks) {
         const saved = savedCheckpoints.get(item.task_id)
         const currentTask = plan.tasks.find(task => task.task_id === item.task_id)
-        if (item.status === 'completed' && saved?.completed !== true) throw new Error(`evidence-mapping-resume-checkpoint-missing:${item.task_id}`)
+        // 完成日志与未完成检查点冲突时，该候选可以恢复复核进度，
+        // 但不能作为完成事实跳过本轮验收。
+        if (item.status === 'completed' && saved?.completed !== true) item.status = 'pending'
         const dependsOnDiscarded = currentTask?.research_candidate_task_ids?.some(id => discarded.has(id)) === true
         const scopeExists = currentTask !== undefined && !dependsOnDiscarded
           && uniqueStrings([
@@ -3597,6 +3607,7 @@ async function executeEvidenceMappingRun(
     callId: CallId(`s4-web-fetch-${randomUUID()}`),
     name: 'web_fetch',
     arguments: { url },
+    agent,
     signal: exec.signal,
     parent: exec.token,
   }))
@@ -3691,13 +3702,29 @@ async function executeEvidenceMappingRun(
   const controller = new AbortController()
   const signal = AbortSignal.any([options.run.signal, controller.signal])
   let fatalWebFailure: MappingSubagentInfrastructureError | undefined
+  const infrastructureRetries = new Map<string, number>()
+  const providerCooldownUntil = new Map<string, number>()
+  const providerFor = (name: typeof MAPPING_AGENT_TOOLS[number]): string => name === 'web_search'
+    ? webPreflight?.search.selectedProviderId ?? 'web_search'
+    : webPreflight?.fetch.selectedProviderId ?? 'web_fetch'
+  const waitForProviderCooldown = async (): Promise<void> => {
+    const waits = [...providerCooldownUntil.values()].map(until => Math.max(0, until - Date.now()))
+    const delay = Math.max(0, ...waits)
+    if (delay > 0) await waitForMappingInfrastructureRetry(signal, 0, delay)
+    signal.throwIfAborted()
+  }
   const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
   const guardFailures = new Map<string, unknown>()
   const liftChildReadGuard = agent.ctx.on('agent/created', ({ agent: child }) => {
     if (child.session.header.origin !== 'subagent' || child.session.header.parentSession !== agent.id) return
     child.ctx.tools.guard((exec) => {
       try {
-        return mappingCorpusToolGuard(locations, String(agent.session.id), exec)
+        const corpusFailure = mappingCorpusToolGuard(locations, String(agent.session.id), exec)
+        if (corpusFailure !== undefined) return corpusFailure
+        if (!MAPPING_AGENT_TOOLS.some(name => name === exec.name)) return undefined
+        const provider = providerFor(exec.name as typeof MAPPING_AGENT_TOOLS[number])
+        const remaining = (providerCooldownUntil.get(provider) ?? 0) - Date.now()
+        return remaining > 0 ? `EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF:${provider}` : undefined
       } catch (error) {
         guardFailures.set(String(child.session.id), error)
         controller.abort(error)
@@ -3715,6 +3742,12 @@ async function executeEvidenceMappingRun(
     const log = executionLog.tasks.find(item => item.task_id === request?.task.task_id)
     if (request === undefined || log === undefined) return
     const webFailure = webInfrastructureFailure({ exec, result }, request.task.task_id)
+    if (webFailure?.retryable) {
+      const provider = providerFor(exec.name as typeof MAPPING_AGENT_TOOLS[number])
+      const delay = Math.max(webFailure.retryAfterMs, MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS)
+      providerCooldownUntil.set(provider, Math.max(providerCooldownUntil.get(provider) ?? 0, Date.now() + delay))
+      if (typeof exec.agent?.cancel === 'function') exec.agent.cancel({ kind: 'hook', reason: 'evidence-mapping-web-provider-backoff' })
+    }
     if (webFailure !== undefined && !webFailure.retryable && fatalWebFailure === undefined) {
       fatalWebFailure = webFailure
       controller.abort(webFailure)
@@ -3774,6 +3807,7 @@ async function executeEvidenceMappingRun(
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
     signal.throwIfAborted()
+    await waitForProviderCooldown()
     const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
     if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
     if (log.status === 'completed') return completedTaskFromCheckpoint(mappingTask)
@@ -4044,18 +4078,6 @@ async function executeEvidenceMappingRun(
               else await waitForMappingChildReply(child, outputEventStart, signal)
               throwForFailedTurn(child, outputEventStart)
               if (guardFailures.has(String(started.childId))) throw guardFailures.get(String(started.childId))
-              if (mappingTask.phase === 'final_check' && submissionRequest.state.captured === undefined) {
-                const completed = await completeMappingSubmission(
-                  workspace, runInputs, mappingTask, submissionRequest.state,
-                  (submission, completed) => submissionRequest.persistProgress(submission, completed),
-                )
-                if (completed.submission !== undefined) {
-                  submissionRequest.state.captured = {
-                    generation: submissionRequest.state.generation,
-                    value: completed.submission,
-                  }
-                }
-              }
               const captured = capturedByChild.get(String(started.childId)) ?? new Map<string, CapturedWebResult>()
               const fetchedSnapshots: WebEvidenceSnapshot[] = []
               const snapshots = availableSnapshots()
@@ -4072,6 +4094,18 @@ async function executeEvidenceMappingRun(
                 log.status = 'failed'
                 await persistLog()
                 throw webFailure
+              }
+              if (mappingTask.phase === 'final_check' && submissionRequest.state.captured === undefined) {
+                const completed = await completeMappingSubmission(
+                  workspace, runInputs, mappingTask, submissionRequest.state,
+                  (submission, completed) => submissionRequest.persistProgress(submission, completed),
+                )
+                if (completed.submission !== undefined) {
+                  submissionRequest.state.captured = {
+                    generation: submissionRequest.state.generation,
+                    value: completed.submission,
+                  }
+                }
               }
               const retrievalWarnings = newCaptured.flatMap(([, { exec, result }]: [string, CapturedWebResult]) => result.isError ? [{
                 code: 'EVIDENCE_MAPPING_RETRIEVAL_FAILED', message: `${exec.name} 执行失败：${result.error.message}`,
@@ -4229,8 +4263,15 @@ async function executeEvidenceMappingRun(
         return await runTaskAttempt(mappingTask, runInputs)
       } catch (error) {
         if (error instanceof MappingSubagentInfrastructureError && error.contextOverflow) throw error
-        if (!(error instanceof MappingSubagentInfrastructureError) || !error.retryable
-          || retry >= maxInfrastructureRetryAttempts || signal.aborted) throw error
+        if (!(error instanceof MappingSubagentInfrastructureError) || !error.retryable || signal.aborted) throw error
+        const provider = error.provider === undefined ? 'subagent' : providerFor(error.provider)
+        const retries = infrastructureRetries.get(provider) ?? 0
+        if (retries >= maxInfrastructureRetryAttempts) {
+          fatalWebFailure ??= error
+          controller.abort(error)
+          throw error
+        }
+        infrastructureRetries.set(provider, retries + 1)
         const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'

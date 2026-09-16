@@ -38,7 +38,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       })
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
-  it('Main Agent 在等待态咨询、拆分、局部重生成和 remap，且不能裸写或隐式确认', async () => {
+  it('Main Agent 在等待态咨询、拆分和局部重生成，且不能裸写或隐式确认', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-interaction-loop-'))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -54,11 +54,10 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     try {
       expect(await runStageInteractionLoop(ctx, root, true)).toMatchObject({
         state: { stage: 'evidence_mapping', status: 'waiting_user' },
-        confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 4, disposed: true,
+        confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
-        target: { local_materials: [], web_materials: [], writing_dimensions: ['资源核查'] },
         visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'],
-        concurrent: Array(4).fill('BID_OPERATION_IN_PROGRESS'), failures: 3,
+        concurrent: Array(1).fill('BID_OPERATION_IN_PROGRESS'), failures: 1,
       })
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
@@ -76,8 +75,27 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
-      const { agent, workspace, sourceUrl, outcome } = await runEvidenceMappingLoop(ctx, root, repair)
+      const { agent, workspace, sourceUrl, outcome, requests } = await runEvidenceMappingLoop(ctx, root, repair)
       expect(outcome).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
+      const reviewTool = requests.flatMap(request => request.tools ?? []).find(tool => tool.name === 'review_items')
+      expect(reviewTool?.parameters).toMatchObject({
+        type: 'object',
+        properties: { items: { type: 'array', items: { oneOf: [{
+          type: 'object',
+          properties: {
+            review_ref: { type: 'string' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
+          },
+          required: ['review_ref', 'decision', 'reason'], additionalProperties: false,
+        }, {
+          type: 'object',
+          properties: {
+            review_ref: { type: 'string' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
+            correction: { type: 'object' },
+          },
+          required: ['review_ref', 'decision', 'reason', 'correction'], additionalProperties: false,
+        }] } } },
+        required: ['items'], additionalProperties: false,
+      })
       const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
       expect(ledger.sources).toHaveLength(1)
       expect(ledger.sources[0]?.requested_url).toBe(sourceUrl)

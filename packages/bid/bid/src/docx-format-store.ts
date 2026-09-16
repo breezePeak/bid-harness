@@ -68,6 +68,7 @@ const stateSchema = z.strictObject({ version: z.literal(2),
   resolved: valuesSchema,
   userConfirmed: valuesSchema,
   lastExport: z.strictObject({ path: z.string().max(500), fingerprint: hashSchema }).optional() })
+const exportArtifactsSchema = z.strictObject({ paths: z.array(z.string().min(1).max(500)).max(10_000) })
 const templateRecordSchema = z.strictObject({
   id: templateIdSchema,
   hash: templateIdSchema,
@@ -100,6 +101,7 @@ const emptyRegistry = (): DocxTemplateRegistry => ({
   templates: [],
 })
 const registryPath = (workspace: BidWorkspace): string => within(workspace.projectRoot, 'word-export/templates.json')
+const exportArtifactsPath = (workspace: BidWorkspace): string => within(workspace.projectRoot, 'word-export/generated-artifacts.json')
 const legacyFormatPath = (workspace: BidWorkspace): string => within(workspace.projectRoot, 'word-export/config.json')
 const formatPath = (workspace: BidWorkspace, templateId: DocxTemplateId | null): string => templateId === null
   ? within(workspace.projectRoot, 'word-export/default.config.json')
@@ -130,6 +132,31 @@ async function parseStateFile(path: string): Promise<DocxFormatState | undefined
   const parsed = stateSchema.safeParse(value)
   if (!parsed.success) throw new Error('保存的 Word 格式配置版本过旧或已损坏，请重新上传模板。')
   return parsed.data
+}
+
+async function readExportArtifacts(workspace: BidWorkspace): Promise<string[]> {
+  const path = exportArtifactsPath(workspace)
+  await assertNoLinkedPath(workspace.root, path)
+  let raw: string
+  try { raw = await readFile(path, 'utf8') } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  let value: unknown
+  try { value = JSON.parse(raw) } catch { throw new Error('保存的 Word 导出记录不是有效 JSON，请恢复项目。') }
+  const parsed = exportArtifactsSchema.safeParse(value)
+  if (!parsed.success) throw new Error('保存的 Word 导出记录已损坏，请恢复项目。')
+  return parsed.data.paths
+}
+
+function checkedExportPath(workspace: BidWorkspace, path: string): string {
+  const absolute = within(workspace.projectRoot, path)
+  const outputRelative = relative(workspace.outputRoot, absolute)
+  const inOutput = outputRelative !== '' && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`)
+    && !isAbsolute(outputRelative)
+  const projectRelative = relative(workspace.projectRoot, absolute).replaceAll('\\', '/')
+  if (!inOutput && !projectRelative.startsWith('flowcharts/')) throw new Error(`BID_DOCX_EXPORT_PATH_INVALID:${path}`)
+  return absolute
 }
 
 async function writeRegistry(workspace: BidWorkspace, registry: DocxTemplateRegistry): Promise<void> {
@@ -289,6 +316,44 @@ export async function invalidateDocxLastExports(
     await commits.writeJson(path, stateSchema.parse({ ...retained, revision: state.revision + 1 }))
   }
   return invalidated
+}
+
+/**
+ * 在同一发布事务中登记一次 Word 导出实际生成的受控文件。
+ * @param workspace 导出所属项目。
+ * @param paths 本次实际生成的项目相对路径。
+ * @param commits 承载导出发布的事务。
+ */
+export async function registerDocxExportArtifacts(
+  workspace: BidWorkspace,
+  paths: readonly string[],
+  commits: Pick<BidCommitScope, 'writeJson'>,
+): Promise<void> {
+  const registered = await readExportArtifacts(workspace)
+  for (const path of paths) {
+    const absolute = checkedExportPath(workspace, path)
+    await assertNoLinkedPath(workspace.root, absolute)
+  }
+  await commits.writeJson(exportArtifactsPath(workspace), exportArtifactsSchema.parse({
+    paths: [...new Set([...registered, ...paths])],
+  }))
+}
+
+/**
+ * 清空已登记的 Word 导出归属。
+ * @param workspace 导出所属项目。
+ * @param commits 承载阶段重置的事务。
+ * @returns 可由阶段重置删除的受控文件绝对路径。
+ */
+export async function clearDocxExportArtifacts(
+  workspace: BidWorkspace,
+  commits: Pick<BidCommitScope, 'writeJson'>,
+): Promise<string[]> {
+  const paths = await readExportArtifacts(workspace)
+  const absolute = paths.map(path => checkedExportPath(workspace, path))
+  for (const path of absolute) await assertNoLinkedPath(workspace.root, path)
+  await commits.writeJson(exportArtifactsPath(workspace), exportArtifactsSchema.parse({ paths: [] }))
+  return absolute
 }
 
 async function resolveAndWrite(

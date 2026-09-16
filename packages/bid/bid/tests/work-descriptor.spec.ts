@@ -100,6 +100,22 @@ describe('Bid Work Descriptor', () => {
     ]))
   })
 
+  it('重置时清理仅含 staging 或 scratch 的未提交 Run，但拒绝其他无身份目录', async () => {
+    const workspace = await fixture()
+    const runId = '5b7193e3-9a7a-4a09-b7f1-f1ab8c3a699d'
+    const runRoot = join(workspace.projectRoot, 'runs', runId)
+    await mkdir(join(runRoot, 'staging'), { recursive: true })
+
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping')).resolves.toContain(runRoot)
+
+    await mkdir(join(runRoot, 'scratch'), { recursive: true })
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping')).resolves.toContain(runRoot)
+
+    await writeFile(join(runRoot, 'unknown'), 'unowned')
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping'))
+      .rejects.toThrow(`BID_RESET_ORPHAN_WORK_UNRESOLVED:${runRoot}`)
+  })
+
   it('请求元信息与工作树身份矛盾时报告身份文件路径', async () => {
     const workspace = await fixture()
     const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'mismatch')

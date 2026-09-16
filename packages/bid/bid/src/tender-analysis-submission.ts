@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
+import { zodJsonSchema } from './zod-json-schema.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
@@ -199,7 +200,7 @@ const finishSchema = z.object({
 }).strict()
 
 function schema(value: z.ZodType): Record<string, unknown> {
-  return z.toJSONSchema(value, { target: 'draft-7' })
+  return zodJsonSchema(value)
 }
 
 function toolArgs<T>(input: unknown, parser: z.ZodType<T>): T {

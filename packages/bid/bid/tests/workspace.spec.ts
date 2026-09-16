@@ -14,7 +14,7 @@ import { Document, Packer, Paragraph } from 'docx'
 import * as XLSX from 'xlsx'
 import { describe, expect, it } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG, parseBidDocument, safeFileName, within } from '../src/index.ts'
-import { invalidateDocxLastExports, readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
+import { clearDocxExportArtifacts, invalidateDocxLastExports, readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
@@ -368,5 +368,20 @@ describe('BidWorkspace', () => {
     await expect(invalidateDocxLastExports(bid, createTestBidRunContext().commits))
       .rejects.toThrow('BID_DOCX_LAST_EXPORT_PATH_INVALID:')
     expect((await readDocxFormat(bid, null)).state.lastExport?.path).toBe('uploads/user-owned.docx')
+  })
+
+  it('登记自定义目录中的每次导出，仅交给阶段重置清理项目生成物', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-custom-exports-'))
+    const bid = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, outputDirectory: 'deliverables' })
+    await mkdir(join(bid.projectRoot, 'drafts'), { recursive: true })
+    await writeFile(join(bid.projectRoot, 'drafts', '技术标.md'), '# 技术标\n\n正文。\n')
+    const exports = ['first.docx', 'second.docx', 'third.docx']
+    for (const name of exports) await bid.exportDocx('drafts/技术标.md', `deliverables/${name}`)
+    await writeFile(join(bid.projectRoot, 'deliverables', '用户文件.txt'), '保留')
+
+    const registered = await clearDocxExportArtifacts(bid, createTestBidRunContext().commits)
+    expect(registered).toEqual(exports.map(name => join(bid.projectRoot, 'deliverables', name)))
+    expect(await readFile(join(bid.projectRoot, 'deliverables', '用户文件.txt'), 'utf8')).toBe('保留')
+    expect((await readDocxFormat(bid, null)).state.lastExport?.path).toBe('deliverables/third.docx')
   })
 })

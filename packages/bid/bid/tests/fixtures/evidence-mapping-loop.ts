@@ -78,6 +78,10 @@ class ScriptedAdapter extends LlmAdapter {
       return
     }
     const response = (options.sessionId === this.parentId ? this.parentScript : this.childScript).shift()
+    if (response === undefined && this.interactive) {
+      yield* finalText('等待用户确认。')
+      return
+    }
     if (response === undefined) throw new Error('Bid scripted adapter exhausted')
     yield* typeof response === 'function' ? response(options) : response
   }
@@ -95,6 +99,12 @@ export default LocalFileSystem
 export function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[]): void {
   const urls = typeof sourceUrls === 'string' ? [sourceUrls] : [...sourceUrls]
   let searchIndex = 0
+  ctx.provide('web', {
+    diagnose: async () => ({
+      search: { selectedProviderId: 'fixture-web-search', providers: [] },
+      fetch: { selectedProviderId: 'fixture-web-fetch', providers: [] },
+    }),
+  })
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'read', description: 'Read a UTF-8 file.', parameters: { file_path: { type: 'string', required: true } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
@@ -346,7 +356,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean) {
  * @param ctx - 真实 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
- * @returns 阶段结果、Host 及其工作区。
+ * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false) {
   const sessionId = SessionId('s3-real-loop')
@@ -462,7 +472,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 
   const outcome = await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
-  return { agent, workspace, sourceUrl, outcome, parentScript, childScript }
+  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests, parentScript, childScript }
 }
 
 /**

@@ -186,7 +186,7 @@ describe('Bid Host stage reset', () => {
       sourceEventSeqs: messages.slice(stageIndex).map(message => message.seq),
     })
     expect(clear).not.toHaveBeenCalled()
-    expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' })
+    expect(cancel).not.toHaveBeenCalled()
     expect(drive).not.toHaveBeenCalled()
   })
 })

@@ -4,8 +4,9 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
-import { reviewPendingMappingItems, runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
+import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 
 function call(name: string, args: object): StreamChunk[] {
@@ -29,17 +30,23 @@ function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
 
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */
 export async function runFullOutlineRegenerationLoop(ctx: Context, root: string) {
-  const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  const { agent, workspace, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
   await ctx.plugin(SessionProjectionRegistry)
+  if (ctx.get('userQuestions') === undefined) await ctx.plugin(UserQuestionService)
   await ctx.plugin(BidHostRuntime)
+  agent.session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
+  const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: unknown; done: Promise<void> }> }
+  const waitHostOperation = async () => {
+    await [...host.inFlight.values()].find(operation => operation.session === agent.session)?.done
+  }
   const draft = await getOrCreateOutlineDraft(workspace)
   const candidate = { ...draft.outline, sections: draft.outline.sections.map(section => ({ ...section, title: `${section.title}方案` })) }
   const original = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
   const quality = await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')
   const changeSet = { schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256,
     changes: outlineRegenerationChanges(draft.outline, candidate).map(change => ({ ...change, reason: '明确方案标题' })) }
-  parentScript.push(
+  childScript.push(
     options => call('write', { file_path: visibleTarget(options, /本轮初稿唯一输出：([^。\r\n]+)/u), content: JSON.stringify(candidate) }),
     options => call('write', { file_path: visibleTarget(options, /同时写入 ([^，\r\n]+)/u), content: JSON.stringify(changeSet) }),
     answer('目录已重生成。'),
@@ -50,6 +57,7 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
   const result = await ctx.bid.regenerateOutline(agent.session, {
     expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256, feedback: '明确方案标题',
   })
+  await waitHostOperation()
   return { result, draft: await getOrCreateOutlineDraft(workspace),
     canonicalPreserved: await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8') === original,
     state: agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
@@ -61,8 +69,14 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const { agent, workspace, parentScript, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
   if (ctx.get('sessionProjections') === undefined) await ctx.plugin(SessionProjectionRegistry)
+  if (ctx.get('userQuestions') === undefined) await ctx.plugin(UserQuestionService)
   const hostFiber = ctx.get('bid') === undefined ? ctx.plugin(BidHostRuntime) : undefined
   await hostFiber
+  agent.session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
+  const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: unknown; done: Promise<void> }> }
+  const waitHostOperation = async () => {
+    await [...host.inFlight.values()].find(operation => operation.session === agent.session)?.done
+  }
   const before = agent.session.events.length
   const concurrent: Promise<string>[] = []
   const releaseObserver = ctx.on('session/event', (session, event) => {
@@ -82,6 +96,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     parentScript.push(...script)
     agent.followup(createUserMessage({ content: [{ type: 'text', text: input }], source: { kind: 'user' } }))
     await agent.whenIdle()
+    await waitHostOperation()
     if (parentScript.length !== 0) throw new Error('Main Agent 未完成阶段工具调用')
   }
   const identity = async () => {
@@ -106,26 +121,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   await send('实施准备这一节重新规划一下', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
-  childScript.push(call('submit_section_mapping', {
-    section_id: target.id, local_materials: [], web_materials: [],
-  }))
-  childScript.push(call('update_section_task', {
-    section_id: target.id, basis: { kind: 'user_change', explanation: '用户将安全实施拆分为准备、过程与验收，当前节负责资源核查。', requirement_ids: [] },
-    missing_topics: ['缺少当前章节专用资料'], writing_dimensions: ['资源核查'],
-    writing_brief: { purpose: '明确访问控制实施前的资源及权限配置核查', must_answer: ['实施前如何核对资源与访问权限配置'],
-      writing_notes: ['列明核查责任人、资源清单和问题处理方式'], suggested_tables: ['资源与权限核查清单'], suggested_figures: [] },
-    coverage_override: {
-      requirement_ids: target.requirement_ids,
-      scoring_ids: target.scoring_ids,
-      scoring_response_point_ids: target.scoring_response_point_ids ?? [],
-    },
-  }))
-  childScript.push(call('finish_mapping_task', {}))
-  childScript.push(call('submit_branch_summary', { section_id: sectionId, summary: '围绕访问控制与安全审计要求，统筹实施准备、过程执行及验收移交，明确资源与权限核查、实施组织和成果交接的衔接关系，为安全方案落地提供依据。' }))
-  childScript.push(call('list_review_items', {}), reviewPendingMappingItems, call('finish_final_check', {}))
-  await send('这一节资料不对，重新找', [call('bid_evidence_remap', { ...await identity(), section_ids: [target.id], mode: 'replace', reason: '资料不对' }), answer('已更新，请重新确认。')])
   const finalDraft = await getOrCreateOutlineDraft(workspace)
-  const reviewContext = await ctx.bid.getOutlineReviewContext(agent.session)
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('局部资料研究覆盖了其他章节的研究基线')
   const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   if (checkRejections) {
@@ -134,9 +130,6 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       'analysis/web-evidence-sources.json', 'analysis/evidence-mapping-plan.json', 'analysis/evidence-mapping-log.json',
     ]
     const baseline = await Promise.all(paths.map(path => readFile(join(workspace.projectRoot, path), 'utf8')))
-    childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: split.outline.sections.find(item => item.id !== target.id && item.writable)!.id, title: '范围外修改' }])))
-    await send('只改实施准备', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '完善实施准备' }), answer('修改被拒绝。')])
-    await send('重映射不存在的章节', [call('bid_evidence_remap', { ...await identity(), section_ids: ['SEC-UNKNOWN'] }), answer('请明确目标章节。')])
     const after = await Promise.all(paths.map(path => readFile(join(workspace.projectRoot, path), 'utf8')))
     if (JSON.stringify(after) !== JSON.stringify(baseline)) throw new Error('失败后未恢复阶段产物')
   }
@@ -154,11 +147,6 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
-    review: { baselineTitles: reviewContext.baseline?.sections.map(section => section.title),
-      requirementIds: reviewContext.requirements.requirements.map(item => item.id),
-      scoringIds: reviewContext.scoring.scoring_items.map(item => item.id),
-      evidenceSectionIds: reviewContext.evidence?.section_mappings.map(item => item.section_id) },
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
-    target: map.section_mappings.find(item => item.section_id === target.id),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }
 }

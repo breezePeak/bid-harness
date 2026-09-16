@@ -3,6 +3,7 @@ import { ToolArgsError, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { MappingCorpusLocation } from './evidence-mapping-corpus.ts'
 import type { S4WebResearchPool } from './web-research-pool.ts'
+import { zodJsonSchema } from './zod-json-schema.ts'
 
 /**
  * 为当前资料目录中的真实分块生成运行内引用。
@@ -101,7 +102,7 @@ export function createMappingSourceTools(
   const output = { schema: { type: 'object' as const }, render: (_args: unknown, result: unknown) => [{ type: 'text' as const, text: JSON.stringify(result) }] }
   return [{
     name: 'read_source', description: '读取目录、材料、命中或后续引用。结果保留真实来源及整块实际覆盖范围；可直接读取，不必先搜索。',
-    parameters: z.toJSONSchema(readSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(readSchema), output,
     async execute(raw: unknown): Promise<unknown> {
       const { source_ref: ref } = await readSchema.parseAsync(raw)
       const page = pages.get(ref)
@@ -114,7 +115,7 @@ export function createMappingSourceTools(
     },
   }, {
     name: 'search_sources', description: '在程序提供的范围中按关键词作字面搜索（任一关键词命中）；ALL 表示全部资料。返回原文位置及可读引用，后续页用 read_source。',
-    parameters: z.toJSONSchema(searchSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(searchSchema), output,
     async execute(raw: unknown): Promise<unknown> {
       const { scope_ref: ref, keywords } = await searchSchema.parseAsync(raw)
       const scope = sources.get(ref)
@@ -141,14 +142,14 @@ export function createMappingSourceTools(
     },
   }, {
     name: 'list_research_sources', description: '分页列出当前 S4 Research Pool 中已持久化的 Web Source；可用字面过滤辅助导航，不自动判断章节相关性。',
-    parameters: z.toJSONSchema(sourceListSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(sourceListSchema), output,
     async execute(raw: unknown): Promise<unknown> {
       const { offset, limit, filter } = await sourceListSchema.parseAsync(raw)
       return pool.listSources(offset, limit, filter)
     },
   }, {
     name: 'list_web_chunks', description: '分页列出一个 Web Source 的 Chunk 引用、标题路径和原文预览；列表命中不等于已经阅读正文。',
-    parameters: z.toJSONSchema(chunkListSchema, { target: 'draft-7' }), output,
+    parameters: zodJsonSchema(chunkListSchema), output,
     async execute(raw: unknown): Promise<unknown> {
       const { source_ref, offset, limit, heading } = await chunkListSchema.parseAsync(raw)
       return pool.listChunks(source_ref, offset, limit, heading)

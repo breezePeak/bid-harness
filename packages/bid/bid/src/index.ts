@@ -70,7 +70,8 @@ import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
 import { composeDocxFromTemplate } from './docx-compose.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
-  invalidateDocxLastExports, readDocxTemplateBytes, saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
+  clearDocxExportArtifacts, invalidateDocxLastExports, readDocxTemplateBytes, registerDocxExportArtifacts,
+  saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
   DOCX_TEMPLATE_NAME_HEADER,
@@ -2442,10 +2443,12 @@ export class BidHostRuntime extends TypertRemoteService {
     operation.reservedForReset = true
     let resetCompleted = false
     try {
-      await prior?.runs.retire()
-      prior?.controller.abort()
-      agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
-      await Promise.all([prior?.done ?? Promise.resolve(), agent.whenIdle()])
+      if (prior !== undefined) {
+        await prior.runs.retire()
+        prior.controller.abort()
+        agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+        await Promise.all([prior.done, agent.whenIdle()])
+      }
       const runtime = await this.prepareOperation(operation)
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
@@ -2500,9 +2503,10 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       await this.mutateProject(operation, async (lease) => {
         const invalidatedExports = await invalidateDocxLastExports(workspace, lease)
+        const registeredExports = await clearDocxExportArtifacts(workspace, lease)
         const outputPaths = [...new Set(workspace.config.outputDirectory === DEFAULT_BID_CONFIG.outputDirectory
           ? [workspace.outputRoot]
-          : invalidatedExports)]
+          : [...invalidatedExports, ...registeredExports])]
         for (const path of outputPaths) await assertNoLinkedPath(workspace.root, path)
         await Promise.all([
           ...paths.map(path => lease.remove(path, true)),
@@ -4703,6 +4707,8 @@ export class BidWorkspace {
           await lease.writeText(within(this.projectRoot, sourceSnapshot), markdown)
         }
         await writeDocxFormat(this, view.templateId, nextFormat, lease)
+        await registerDocxExportArtifacts(this, [destination, ...nativeFlowchartFiles.map(file => file.path),
+          ...(sourceSnapshot === undefined ? [] : [sourceSnapshot])], lease)
       })
     } else await commits.publish(async (lease) => {
       for (const file of nativeFlowchartFiles) {
@@ -4715,6 +4721,8 @@ export class BidWorkspace {
         await lease.writeText(within(this.projectRoot, sourceSnapshot), markdown)
       }
       await writeDocxFormat(this, view.templateId, nextFormat, lease)
+      await registerDocxExportArtifacts(this, [destination, ...nativeFlowchartFiles.map(file => file.path),
+        ...(sourceSnapshot === undefined ? [] : [sourceSnapshot])], lease)
     })
     return this.relative(destination)
   }
