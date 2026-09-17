@@ -1,14 +1,27 @@
+import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
   applyWritingPlanInput,
   createAutomaticWritingPlan,
   validateWritingPlan,
   validateWritingPlanInput,
+  writingRequestSchema,
   type AcceptanceCriterionInput,
   type ResolvedWritingRequirementMessage,
   type WritingPlan,
   type WritingPlanInput,
 } from '../src/writing-requirements.ts'
+import {
+  WRITING_ENTRY_STOP_PATH,
+  type WritingEntryStop,
+} from '../src/writing-entry-contract.ts'
+import {
+  readWritingEntryStop,
+  writeWritingEntryStop,
+  removeWritingEntryStop,
+} from '../src/writing-entry-state.ts'
 import { assessBoundedMetric, evaluateHostAcceptanceCriteria } from '../src/acceptance-criteria.ts'
 import { outlineFixture, writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
 import { renderStageInteractionPrompt, stageInteractionSchema } from '../src/stage-interaction.ts'
@@ -210,5 +223,85 @@ describe('S5 通用写作任务契约', () => {
     expect(below.difference).toBeCloseTo(0.001)
     expect(above.status).toBe('above')
     expect(above.difference).toBeCloseTo(0.001)
+  })
+
+  it('custom 类型缺少 custom 文本或为空白时解析失败', () => {
+    expect(() => writingRequestSchema.parse({
+      schema_version: 1,
+      request_id: 'req-1',
+      confirmed_outline_sha256: 'a'.repeat(64),
+      owner_session_id: 'session-1',
+      attempt_id: 'att-1',
+      state: 'answered',
+      continuation: 'allowed',
+      answer: {
+        question_id: 'req-1',
+        kind: 'custom',
+        selected: [],
+      },
+    })).toThrow('custom writing requirement must not be blank')
+
+    expect(() => writingRequestSchema.parse({
+      schema_version: 1,
+      request_id: 'req-1',
+      confirmed_outline_sha256: 'a'.repeat(64),
+      owner_session_id: 'session-1',
+      attempt_id: 'att-1',
+      state: 'answered',
+      continuation: 'allowed',
+      answer: {
+        question_id: 'req-1',
+        kind: 'custom',
+        selected: [],
+        custom: '   ',
+      },
+    })).toThrow('custom writing requirement must not be blank')
+  })
+
+  it('停止记录读写保持字段，区分 ENOENT 与 JSON 错误', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-stop-test-'))
+    try {
+      const ws = { root, projectRoot: root }
+      await mkdir(join(root, 'chapters'), { recursive: true })
+
+      // ENOENT
+      const notFound = await readWritingEntryStop(ws)
+      expect(notFound).toBeUndefined()
+
+      // 写入有效停止记录
+      const stopRecord: WritingEntryStop = {
+        stop_id: 'stop-123',
+        confirmed_outline_sha256: 'a'.repeat(64),
+        request_id: 'req-1',
+        attempt_id: 'att-1',
+        plan_version: 2,
+      }
+      const fakeLease = {
+        writeJson: async (path: string, value: unknown) => {
+          await writeFile(path, `${JSON.stringify(value)}\n`, 'utf8')
+        },
+        remove: async (path: string) => {
+          await rm(path, { force: true })
+        },
+      } as unknown as {
+        writeJson: (path: string, value: unknown) => Promise<void>
+        remove: (path: string) => Promise<void>
+        writeText: (path: string, value: string) => Promise<void>
+        writeBytes: (path: string, value: Uint8Array) => Promise<void>
+      }
+      await writeWritingEntryStop(ws, stopRecord, fakeLease)
+      const readBack = await readWritingEntryStop(ws)
+      expect(readBack).toEqual(stopRecord)
+
+      // 移除
+      await removeWritingEntryStop(ws, fakeLease)
+      expect(await readWritingEntryStop(ws)).toBeUndefined()
+
+      // 损坏 JSON
+      await writeFile(join(root, WRITING_ENTRY_STOP_PATH), 'not valid json', 'utf8')
+      await expect(readWritingEntryStop(ws)).rejects.toThrow()
+    } finally {
+      await rm(root, { recursive: true, force: true }).catch(() => {})
+    }
   })
 })

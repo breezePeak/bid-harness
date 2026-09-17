@@ -93,3 +93,5 @@ export type { OutlineConfirmationIssueCode, OutlineConfirmationRepairAction } fr
 export { applyTenderAnalysisEdits } from './tender-analysis-confirmation.ts'
 export type { TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from './tender-analysis-confirmation.ts'
 export type { TenderProjectArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
+export { BID_WRITING_ENTRY_PROJECTION_KEY } from './writing-entry-contract.ts'
+export type { WritingEntryView, WritingEntryIntent, WritingEntryExpected, WritingEntryStop } from './writing-entry-contract.ts'

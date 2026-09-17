@@ -429,6 +429,8 @@ export type BidChapterWritingGateErrorCode =
   | 'BID_OPERATION_IN_PROGRESS'
   | 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED'
   | 'BID_CHAPTER_WRITING_GATE_FAILED'
+  | 'BID_WRITING_ENTRY_CONFLICT'
+  | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
 /** Result of requesting manual requirements or starting S5 with the automatic default plan. */
 export type BidChapterWritingGateResult =
