@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -106,13 +106,11 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
 
       await vi.waitFor(() => { expect(ask).toHaveBeenCalledOnce() })
       expect(receivedAgent).toBe(agent)
-      expect(receivedQuestion).toMatchObject({
-        id: expect.any(String),
-        header: '整体写作要求',
-        question: '开始正文编写前，是否还有其他整体写作要求？',
-        options: [{ label: '没有，开始编写' }],
-        multiSelect: false,
-      })
+      expect(typeof receivedQuestion?.id).toBe('string')
+      expect(receivedQuestion?.header).toBe('整体写作要求')
+      expect(receivedQuestion?.question).toBe('开始正文编写前，是否还有其他整体写作要求？')
+      expect(receivedQuestion?.options).toEqual([{ label: '没有，开始编写' }])
+      expect(receivedQuestion?.multiSelect).toBe(false)
 
       const requestFile = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
       expect(requestFile.state).toBe('awaiting_answer')
@@ -334,6 +332,7 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
       confirmed_outline_sha256: sha256,
       owner_session_id: 'h14-agent',
       attempt_id: 'attempt-1',
+      continuation: 'allowed',
       state: 'answered',
       answer: {
         question_id: 'answered-req-123',
@@ -401,20 +400,75 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
     }
   })
 
-  it('H19: 提交首次计划时若 writing_request_id 不匹配或未回答，严格拒绝', () => {
-    const invalidPlan = {
+  it('H19: 提交首次计划时若 writing_request_id 不匹配、未回答或处于 paused，严格拒绝', async () => {
+    const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+    const sha256 = outlineArtifactSha256(outline)
+    const agent = await createMainAgent('h19-agent')
+    const hostWithCommit = host as unknown as {
+      commitWritingPlan: (
+        agent: Agent,
+        workspace: BidWorkspace,
+        request: unknown,
+      ) => Promise<{ ok: boolean; error?: { code: string; issues: string[] } }>
+    }
+
+    const invalidSchemaPlan = {
       action: 'bid_confirm_writing_plan',
       update_kind: 'initial',
       writing_request_id: '', // 空 ID
+      attempt_id: 'att-1',
       user_message_refs: [],
       global_instructions: ['按目录编写'],
       document_acceptance: [],
       sections: [{ section_id: 'SEC-1', task: '任务', user_message_refs: [], writing_instructions: [], acceptance_criteria: [] }],
     }
-    expect(() => stageInteractionSchema.parse(invalidPlan)).toThrow()
+    expect(() => stageInteractionSchema.parse(invalidSchemaPlan)).toThrow()
+
+    // 处于 paused 状态时，commitWritingPlan 拒绝
+    const pausedRecord: WritingRequest = {
+      schema_version: 1,
+      request_id: 'req-h19',
+      confirmed_outline_sha256: sha256,
+      owner_session_id: String(agent.session.id),
+      attempt_id: 'att-original',
+      state: 'answered',
+      continuation: 'paused',
+      answer: { question_id: 'req-h19', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
+    }
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(pausedRecord))
+
+    const pausedRes = await hostWithCommit.commitWritingPlan(agent, workspace, {
+      action: 'bid_confirm_writing_plan',
+      update_kind: 'initial',
+      writing_request_id: 'req-h19',
+      attempt_id: 'att-original',
+      user_message_refs: [],
+      global_instructions: ['按目录编写'],
+      document_acceptance: [],
+      sections: [{ section_id: 'SEC-1', task: '任务', user_message_refs: [], writing_instructions: [], acceptance_criteria: [] }],
+    })
+    expect(pausedRes.ok).toBe(false)
+    expect(pausedRes.error?.issues.some(i => i.includes('写作计划处理已暂停'))).toBe(true)
+
+    // attempt_id 不匹配时拒绝
+    pausedRecord.continuation = 'allowed'
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(pausedRecord))
+
+    const wrongAttemptRes = await hostWithCommit.commitWritingPlan(agent, workspace, {
+      action: 'bid_confirm_writing_plan',
+      update_kind: 'initial',
+      writing_request_id: 'req-h19',
+      attempt_id: 'wrong-attempt',
+      user_message_refs: [],
+      global_instructions: ['按目录编写'],
+      document_acceptance: [],
+      sections: [{ section_id: 'SEC-1', task: '任务', user_message_refs: [], writing_instructions: [], acceptance_criteria: [] }],
+    })
+    expect(wrongAttemptRes.ok).toBe(false)
+    expect(wrongAttemptRes.error?.issues.some(i => i.includes('attempt_id 已失效'))).toBe(true)
   })
 
-  it('H24: 自动开始与待回答路径互斥，自动开始会将待回答置为 dismissed', async () => {
+  it('H24: 自动开始与待回答路径互斥，存在未消费请求时拒绝自动开始', async () => {
     const { ctx, workspace, createMainAgent, outline } = await setupS5Fixture()
     const sha256 = outlineArtifactSha256(outline)
 
@@ -424,53 +478,85 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
       confirmed_outline_sha256: sha256,
       owner_session_id: 'h24-agent',
       attempt_id: 'att-1',
+      continuation: 'allowed',
       state: 'awaiting_answer',
     }
     await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(awaitingRecord))
 
     const agent = await createMainAgent('h24-agent')
-    // autoStartChapterWriting
+    // autoStartChapterWriting 发现已有未消费请求，必须拒绝
     const res = await ctx.bid.autoStartChapterWriting(agent.session)
-    expect(res).toMatchObject({ ok: true })
-
-    const updated = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
-    expect(updated.state).toBe('dismissed')
-    // 且已生成默认 writing-plan.json
-    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8'))).toMatchObject({
-      confirmed: true,
-      user_requirements: [],
+    expect(res).toMatchObject({
+      ok: false,
+      error: {
+        code: 'BID_CHAPTER_WRITING_GATE_FAILED',
+        message: '已有待回答的写作要求提问，不能直接自动开始。',
+      },
     })
+
+    const unchanged = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+    expect(unchanged.state).toBe('awaiting_answer')
   })
 
-  it('H10: 已 consumed 的 writing_request 不能再次用于提交 initial 计划', async () => {
-    const { workspace, outline } = await setupS5Fixture()
+  it('H10: 已 consumed 的 writing_request 不能再次用于提交 initial 计划，合法首次提交正常消费并落盘', async () => {
+    const { ctx, workspace, createMainAgent, host, outline } = await setupS5Fixture()
     const sha256 = outlineArtifactSha256(outline)
+    const agent = await createMainAgent('h10-agent')
+    const hostWithCommit = host as unknown as {
+      commitWritingPlan: (
+        agent: Agent,
+        workspace: BidWorkspace,
+        request: unknown,
+      ) => Promise<{ ok: boolean; plan_version?: number; error?: { code: string; issues: string[] } }>
+    }
 
     const consumedRecord: WritingRequest = {
       schema_version: 1,
       request_id: 'consumed-req-1',
       confirmed_outline_sha256: sha256,
-      owner_session_id: 'h10-agent',
+      owner_session_id: String(agent.session.id),
       attempt_id: 'att-1',
+      continuation: 'allowed',
       state: 'consumed',
       applied_plan_version: 1,
       answer: { question_id: 'consumed-req-1', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
     }
     await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(consumedRecord))
 
-    const validInitialPlan = {
-      action: 'bid_confirm_writing_plan',
-      update_kind: 'initial',
+    const planPayload = {
+      action: 'bid_confirm_writing_plan' as const,
+      update_kind: 'initial' as const,
       writing_request_id: 'consumed-req-1',
+      attempt_id: 'att-1',
       user_message_refs: [],
       global_instructions: ['按目录编写'],
       document_acceptance: [],
       sections: [{ section_id: 'SEC-1', task: '任务', user_message_refs: [], writing_instructions: [], acceptance_criteria: [] }],
     }
-    // stageInteractionSchema 校验通过，但业务 commit 时会校验 state 必须为 answered
-    expect(stageInteractionSchema.parse(validInitialPlan)).toBeDefined()
-    // 验证 state 不为 answered 时被拒绝
-    expect(consumedRecord.state).not.toBe('answered')
+
+    // 真实业务 commit 拦截 consumed
+    const consumedRes = await hostWithCommit.commitWritingPlan(agent, workspace, planPayload)
+    expect(consumedRes.ok).toBe(false)
+    expect(consumedRes.error?.issues.some(i => i.includes('首次 Writing Plan 必须绑定当前 Session 已保存的真实原生回答'))).toBe(true)
+
+    // 变为 answered 状态时允许提交，且通过阶段工具执行后转为 consumed 并落盘
+    consumedRecord.state = 'answered'
+    delete consumedRecord.applied_plan_version
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(consumedRecord))
+
+    const commitRes = await ctx.tools.execute({
+      agent,
+      name: 'bid_confirm_writing_plan',
+      arguments: planPayload,
+      callId: CallId('h10-commit'),
+      signal: new AbortController().signal,
+    })
+    expect(commitRes.isError, JSON.stringify(commitRes)).toBe(false)
+    expect(commitRes.value).toMatchObject({ ok: true, plan_version: 1 })
+
+    const updated = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+    expect(updated.state).toBe('consumed')
+    expect(updated.applied_plan_version).toBe(1)
   })
 
   it('H18: 旧 wait 退出时的 finally 不删除被替换的新 active 提问句柄', async () => {
@@ -532,5 +618,93 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
       user_message_refs: [], // patch 要求至少一个引用
     }
     expect(() => stageInteractionSchema.parse(invalidPatchPlan)).toThrow()
+  })
+
+  it('F1 & F8: S5 waiting_user 下暴露阶段工具 (bid_stage_inspect, bid_confirm_writing_plan)，严格屏蔽全局工具', async () => {
+    const { ctx, createMainAgent } = await setupS5Fixture()
+    const agent = await createMainAgent('f1-agent')
+
+    // 检查 agent 视角的可用工具
+    const inspectTool = ctx.tools.get('bid_stage_inspect', agent)
+    const confirmTool = ctx.tools.get('bid_confirm_writing_plan', agent)
+    expect(inspectTool).toBeDefined()
+    expect(confirmTool).toBeDefined()
+
+    // 检查全局工具（如 ask_user_question）已被 tools.restrict 屏蔽
+    const askTool = ctx.tools.get('ask_user_question', agent)
+    expect(askTool).toBeUndefined()
+
+    // 执行 bid_stage_inspect 并验证返回当前的 task_contract_context
+    const inspectResult = await ctx.tools.execute({
+      agent,
+      name: 'bid_stage_inspect',
+      arguments: { view: 'task_contract_context' },
+      callId: CallId('f1-inspect'),
+      signal: new AbortController().signal,
+    })
+    expect(inspectResult.isError).toBe(false)
+    expect(inspectResult.value).toBeDefined()
+  })
+
+  it('F2 & F5: 用户停止时将 answered 状态置为 continuation: paused 并刷新 attempt_id，且 resume 跳过执行', async () => {
+    const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+    const sha256 = outlineArtifactSha256(outline)
+    const agent = await createMainAgent('f2-agent')
+
+    const answeredRecord: WritingRequest = {
+      schema_version: 1,
+      request_id: 'stop-req-1',
+      confirmed_outline_sha256: sha256,
+      owner_session_id: String(agent.session.id),
+      attempt_id: 'att-before-stop',
+      continuation: 'allowed',
+      state: 'answered',
+      answer: { question_id: 'stop-req-1', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
+    }
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(answeredRecord))
+
+    // 模拟停止
+    const hostWithInternal = host as unknown as {
+      handleUserStop: (session: typeof agent.session) => Promise<void>
+      resumeWritingPlanProcessing: (agent: Agent, workspace: BidWorkspace) => Promise<void>
+    }
+    await hostWithInternal.handleUserStop(agent.session)
+
+    const pausedRecord = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+    expect(pausedRecord.continuation).toBe('paused')
+    expect(pausedRecord.attempt_id).not.toBe('att-before-stop')
+
+    // 处于 paused 状态时调用 resumeWritingPlanProcessing 应当跳过处理（不派发任何新事件）
+    const initialEventsCount = agent.session.events.length
+    await hostWithInternal.resumeWritingPlanProcessing(agent, workspace)
+    expect(agent.session.events.length).toBe(initialEventsCount)
+  })
+
+  it('F4: 原生提问取消 (ASK_CANCELLED) 归入 dismissed 状态，不污染为 error', async () => {
+    const { ctx, workspace, createMainAgent } = await setupS5Fixture()
+    const questionDeferred = Promise.withResolvers<AskUserQuestionAnswer>()
+    let questionId = ''
+    const dispose = ctx.userQuestions.registerProvider({
+      ask: async ({ questions }) => {
+        questionId = questions[0]!.id
+        return questionDeferred.promise
+      },
+    })
+    try {
+      const agent = await createMainAgent('f4-agent')
+      await ctx.bid.requestWritingRequirements(agent.session)
+      await vi.waitFor(() => { expect(questionId).not.toBe('') })
+
+      // 模拟组件取消/关闭
+      questionDeferred.reject(Object.assign(new Error('User cancelled question'), { code: 'ASK_CANCELLED' }))
+
+      await vi.waitFor(async () => {
+        const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        expect(record.state).toBe('dismissed')
+        expect(record.error).toBeUndefined()
+      })
+    } finally {
+      dispose()
+    }
   })
 })

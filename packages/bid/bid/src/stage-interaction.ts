@@ -495,10 +495,7 @@ export function installStageInteractionTools(
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
         if (runtime.status === 'waiting_user') {
-          const allow = stage === 'chapter_writing'
-            ? ['bid_stage_inspect', 'bid_confirm_writing_plan', ...(tools.get('ask_user_question') === undefined ? [] : ['ask_user_question'])]
-            : []
-          disposers.push(tools.restrict({ allow }))
+          disposers.push(tools.restrict({ allow: [] }))
         }
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
@@ -582,10 +579,10 @@ export function installStageInteractionTools(
             } }
             parameters = { oneOf: [{
               type: 'object', properties: {
-                update_kind: { type: 'string', enum: ['initial'] }, writing_request_id: text, user_message_refs: messageRefs,
+                update_kind: { type: 'string', enum: ['initial'] }, writing_request_id: text, attempt_id: text, user_message_refs: messageRefs,
                 global_instructions: strings, document_acceptance: { type: 'array', items: acceptanceCriterion },
                 sections: initialSections,
-              }, required: ['update_kind', 'writing_request_id', 'user_message_refs', 'global_instructions', 'document_acceptance', 'sections'], additionalProperties: false,
+              }, required: ['update_kind', 'writing_request_id', 'attempt_id', 'user_message_refs', 'global_instructions', 'document_acceptance', 'sections'], additionalProperties: false,
             }, {
               type: 'object', properties: {
                 update_kind: { type: 'string', enum: ['patch'] }, base_plan_version: { type: 'integer' },
@@ -632,10 +629,8 @@ export function installStageInteractionTools(
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
       const runtime = bidRuntimeView(control)
-      const isInitialWritingQuestion = runtime.stage === 'chapter_writing'
-        && runtime.status === 'waiting_user' && exec.name === 'ask_user_question'
       if ((runtime.status === 'waiting_user' || control.run?.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
-        && !names.includes(exec.name as typeof names[number]) && !isInitialWritingQuestion) return 'BID_STAGE_TOOL_REQUIRED'
+        && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
     }))
     toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       if (!isBidMainSession(agent.session)) return

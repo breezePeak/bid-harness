@@ -479,6 +479,7 @@ export function BidStagePanel({
     return () => { active = false }
   }, [canConfirm, getOutlineReviewContext, sessionId, projection?.runtime.stage])
 
+
   useEffect(() => {
     if (!canConfirm || getOutlineDraft === undefined) return
     let active = true
@@ -543,7 +544,9 @@ export function BidStagePanel({
       || requestPending !== null) return
     const automatic = confirmationMode === 'automatic'
     const key = automatic ? chapterAutomaticKey : chapterManualKey
-    const action = automatic ? autoStartChapterWriting : requestWritingRequirements
+    const action = automatic
+      ? autoStartChapterWriting
+      : requestWritingRequirements ? () => requestWritingRequirements({ mode: 'ensure' }) : undefined
     const admitted = projection.allowedActions.includes(
       automatic ? 'auto_start_chapter_writing' : 'request_writing_requirements',
     )
@@ -558,6 +561,9 @@ export function BidStagePanel({
   if (!hasProjection) return null
 
   const canUpload = projection.allowedActions.includes('upload_files')
+  const s5WaitingUser = isBidSession
+    && projection.runtime.stage === 'chapter_writing'
+    && projection.runtime.status === 'waiting_user'
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -1204,6 +1210,34 @@ export function BidStagePanel({
                 onClick={() => { invoke('upload', uploadSelectedFiles) }}
               >
                 {requestPending === 'upload' ? t('action.uploading') : t('action.upload')}
+              </Button>
+            </>
+          )}
+          {s5WaitingUser && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={requestPending !== null || requestWritingRequirements === undefined}
+                onClick={() => {
+                  invoke('request_requirements', async () => {
+                    await requestWritingRequirements?.({ mode: 'reopen' })
+                  })
+                }}
+              >
+                {requestPending === 'request_requirements' ? t('status.running') : t('action.request_requirements')}
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={requestPending !== null || autoStartChapterWriting === undefined}
+                onClick={() => {
+                  invoke('auto_start', async () => {
+                    await autoStartChapterWriting?.()
+                  })
+                }}
+              >
+                {requestPending === 'auto_start' ? t('status.running') : t('action.auto_start_chapters')}
               </Button>
             </>
           )}

@@ -160,8 +160,8 @@ export type { DocumentMetadata, DocumentParseStatus, DocumentSection, ExtractDoc
 export { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, parseDocumentChunkIndex } from './document-chunk.ts'
 export type { ChunkDocumentInput, ChunkDocumentResult, DocumentChunkConfig, DocumentChunkEntry, DocumentChunkIndex } from './document-chunk.ts'
 export { BID_CLIENT_ACTIONS, BID_DOCUMENT_ROLES, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WORK_KINDS, BID_WORKFLOW_GATES, STAGE_RUN_STATUSES, isBidDocumentRole, parseBidReviewWorkbenchView } from './control-plane-contract.ts'
-export { createAutomaticWritingPlan, parseWritingPlan, validateWritingPlan, writingPlanInputSchema, writingPlanSchema, WRITING_PLAN_SCHEMA_VERSION } from './writing-requirements.ts'
-export type { WritingPlan, WritingPlanInput } from './writing-requirements.ts'
+export { createAutomaticWritingPlan, parseWritingPlan, validateWritingPlan, writingPlanInputSchema, writingPlanSchema, writingRequestSchema, WRITING_PLAN_SCHEMA_VERSION, WRITING_REQUIREMENT_NONE_OPTION } from './writing-requirements.ts'
+export type { WritingPlan, WritingPlanInput, WritingRequest } from './writing-requirements.ts'
 export type {
   BidChapterRevisionReference,
   BidChapterRevisionRequest,
@@ -990,7 +990,7 @@ async function ensureWritingRequirementsRequested(
   sessionId: string,
   workspace: BidWorkspace,
   publish: (request: WritingRequest) => Promise<void>,
-  reopenDismissed = false,
+  intentMode: 'ensure' | 'reopen' | 'resume' | 'takeover' = 'ensure',
 ): Promise<WritingRequest | undefined> {
   const { sha256 } = await confirmedOutline(workspace)
   const path = within(workspace.projectRoot, WRITING_REQUEST_PATH)
@@ -1005,11 +1005,42 @@ async function ensureWritingRequirementsRequested(
   if (raw !== undefined && isLegacyWritingRequest(raw)) raw = undefined
   if (raw !== undefined) {
     const existing = writingRequestSchema.parse(raw)
-    if (existing.confirmed_outline_sha256 === sha256
-      && (existing.state === 'awaiting_answer' || existing.state === 'answered')) {
-      return existing
+    if (existing.confirmed_outline_sha256 === sha256) {
+      if (intentMode === 'ensure') return existing
+      if (intentMode === 'reopen') {
+        const reopened = writingRequestSchema.parse({
+          schema_version: WRITING_REQUEST_SCHEMA_VERSION,
+          request_id: randomUUID(),
+          confirmed_outline_sha256: sha256,
+          owner_session_id: sessionId,
+          attempt_id: randomUUID(),
+          state: 'awaiting_answer',
+          continuation: 'allowed',
+        })
+        await publish(reopened)
+        return reopened
+      }
+      if (intentMode === 'resume') {
+        if (existing.state === 'answered' && existing.continuation === 'paused') {
+          const resumed = writingRequestSchema.parse({
+            ...existing,
+            continuation: 'allowed',
+            attempt_id: randomUUID(),
+          })
+          await publish(resumed)
+          return resumed
+        }
+        return existing
+      }
+      const taken = writingRequestSchema.parse({
+        ...existing,
+        owner_session_id: sessionId,
+        attempt_id: randomUUID(),
+        continuation: 'allowed',
+      })
+      await publish(taken)
+      return taken
     }
-    if (existing.confirmed_outline_sha256 === sha256 && existing.state === 'dismissed' && !reopenDismissed) return existing
   }
   const request = writingRequestSchema.parse({
     schema_version: WRITING_REQUEST_SCHEMA_VERSION,
@@ -1018,6 +1049,7 @@ async function ensureWritingRequirementsRequested(
     owner_session_id: sessionId,
     attempt_id: randomUUID(),
     state: 'awaiting_answer',
+    continuation: 'allowed',
   })
   await publish(request)
   return request
@@ -1473,7 +1505,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly processingWritingPlans = new Map<BidProjectKey, string>()
 
   private isContextActive(): boolean {
-    return this.ctx.fiber === undefined || this.ctx.fiber.state === FiberState.ACTIVE
+    return this.ctx.fiber.state === FiberState.ACTIVE
   }
 
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
@@ -1925,7 +1957,7 @@ export class BidHostRuntime extends TypertRemoteService {
       signal: controller.signal,
     }).then(answer => this.acceptWritingQuestionAnswer(pending, answer), (error: unknown) => {
       const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined
-      if (code === 'ASK_ABORTED' || controller.signal.aborted) {
+      if (code === 'ASK_ABORTED' || code === 'ASK_CANCELLED' || controller.signal.aborted) {
         return this.dismissWritingQuestion(pending)
       }
       return this.recordWritingQuestionError(pending, error)
@@ -1969,10 +2001,11 @@ export class BidHostRuntime extends TypertRemoteService {
         || request.state !== 'awaiting_answer') return
       const classified = classifyWritingRequirementAnswer(request.request_id, answer)
       const next: WritingRequest = classified.kind === 'dismissed'
-        ? { ...request, state: 'dismissed', error: undefined }
+        ? { ...request, state: 'dismissed', continuation: 'allowed', error: undefined }
         : {
           ...request,
           state: 'answered',
+          continuation: 'allowed',
           error: undefined,
           answer: {
             question_id: request.request_id,
@@ -1987,7 +2020,7 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       await this.finishOperation(pending.agent.session, operation)
     }
-    if (accepted && request !== undefined) this.scheduleWritingPlanProcessing(pending.agent, request)
+    if (accepted) this.scheduleWritingPlanProcessing(pending.agent, request)
   }
 
   /** Keep provider failures recoverable without claiming that the question was answered. */
@@ -2040,12 +2073,14 @@ export class BidHostRuntime extends TypertRemoteService {
     const key = projectKey(agent.session)
     if (this.processingWritingPlans.get(key) === request.request_id) return
     this.processingWritingPlans.set(key, request.request_id)
+    const message = createUserMessage({
+      content: [{ type: 'text', text: `Host 已保存 S5 初始原生问答，writing_request_id=${request.request_id}。请读取 bid_stage_inspect(view=task_contract_context) 中的 writing_request，结合其真实回答制定首次 Writing Plan；不要再次询问这个初始问题。` }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+    })
     try {
-      agent.followup(createUserMessage({
-        content: [{ type: 'text', text: `Host 已保存 S5 初始原生问答，writing_request_id=${request.request_id}。请读取 bid_stage_inspect(view=task_contract_context) 中的 writing_request，结合其真实回答制定首次 Writing Plan；不要再次询问这个初始问题。` }],
-        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-      }))
+      agent.followup(message)
     } catch (error: unknown) {
+      this.processingWritingPlans.delete(key)
       this.ctx.logger.warn(`Bid 写入计划引导消息派发失败：${String(error)}`)
     }
   }
@@ -2054,16 +2089,16 @@ export class BidHostRuntime extends TypertRemoteService {
   private async resumeWritingPlanProcessing(agent: Agent, workspace: BidWorkspace): Promise<void> {
     if (!this.isContextActive()) return
     const request = await readWritingRequest(workspace)
-    if (request?.state !== 'answered' || await hasCurrentWritingPlan(workspace)) return
+    if (request?.state !== 'answered' || request.continuation === 'paused' || await hasCurrentWritingPlan(workspace)) return
     this.scheduleWritingPlanProcessing(agent, request)
   }
 
   /** Invalidate an online question when reset or an explicit automatic start takes over. */
   private invalidateWritingQuestion(key: BidProjectKey): void {
-    const pending = this.pendingWritingQuestions?.get(key)
+    const pending = this.pendingWritingQuestions.get(key)
     pending?.controller.abort(new Error('BID_WRITING_QUESTION_INVALIDATED'))
-    if (pending !== undefined && this.pendingWritingQuestions?.get(key) === pending) this.pendingWritingQuestions?.delete(key)
-    this.processingWritingPlans?.delete(key)
+    if (pending !== undefined && this.pendingWritingQuestions.get(key) === pending) this.pendingWritingQuestions.delete(key)
+    this.processingWritingPlans.delete(key)
   }
 
   /** 执行器启动前及 Host 操作结束后共用的原子项目检查点。 */
@@ -2148,11 +2183,8 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     ctx.on('agent/cancel-requested', ({ agent, cause }) => {
       if (cause.kind !== 'user' || !isBidMainSession(agent.session)) return
-      this.invalidateWritingQuestion(projectKey(agent.session))
-      const operation = this.inFlight.get(projectKey(agent.session))
-      if (operation?.runs.current === undefined) return
-      operation.suspension ??= operation.runs.suspend('user_stop').catch((error: unknown) => {
-        ctx.logger.warn(`Bid Run 停止收敛失败：${String(error)}`)
+      void this.handleUserStop(agent.session).catch((error: unknown) => {
+        ctx.logger.warn(`Bid 用户停止处理失败：${String(error)}`)
       })
     }, { global: true })
     ctx.inject(['webServer'], (webCtx) => {
@@ -2185,25 +2217,34 @@ export class BidHostRuntime extends TypertRemoteService {
     | { ok: true; plan: ReturnType<typeof parseWritingPlan>; plan_version: number; request?: WritingRequest; message: string }
   > {
     const { action: _action, ...submitted } = request
-    const markerPath = within(workspace.projectRoot, WRITING_REQUEST_PATH)
     const appliedPath = within(workspace.projectRoot, WRITING_PLAN_APPLIED_PATH)
-    await Promise.all([markerPath, appliedPath].map(path => assertNoLinkedPath(workspace.root, path)))
-    const marker = submitted.update_kind === 'initial'
-      ? writingRequestSchema.parse(JSON.parse(await readFile(markerPath, 'utf8')))
-      : await readWritingRequest(workspace)
+    await assertNoLinkedPath(workspace.root, appliedPath)
     const current = await confirmedOutline(workspace)
-    if (marker !== undefined && marker.confirmed_outline_sha256 !== current.sha256) throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
     const previous = await currentWritingPlan(workspace)
-    const input = submitted
+    let marker: WritingRequest | undefined
     if (submitted.update_kind === 'initial') {
-      if (marker === undefined || submitted.writing_request_id !== marker.request_id) {
-        return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: ['writing_request_id 已失效，请重新读取 S5 任务上下文。'] } }
+      const markerPath = within(workspace.projectRoot, WRITING_REQUEST_PATH)
+      await assertNoLinkedPath(workspace.root, markerPath)
+      try {
+        marker = writingRequestSchema.parse(JSON.parse(await readFile(markerPath, 'utf8')))
+      } catch {
+        return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: ['未找到有效的 S5 初始询问记录，请重新读取 S5 任务上下文。'] } }
+      }
+      if (marker.confirmed_outline_sha256 !== current.sha256) {
+        throw new Error('写作要求询问与当前确认目录不一致，请重新进入 S5。')
+      }
+      if (submitted.writing_request_id !== marker.request_id || submitted.attempt_id !== marker.attempt_id) {
+        return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: ['writing_request_id 或 attempt_id 已失效，请重新读取 S5 任务上下文。'] } }
+      }
+      if (marker.continuation === 'paused') {
+        return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: ['写作计划处理已暂停，请在界面显式恢复后再提交计划。'] } }
       }
       if (marker.owner_session_id !== String(agent.session.id)
         || marker.state !== 'answered' || marker.answer === undefined) {
         return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: ['首次 Writing Plan 必须绑定当前 Session 已保存的真实原生回答。'] } }
       }
     }
+    const input = submitted
     const inputIssues = validateWritingPlanInput(input, current.outline, previous)
     if (inputIssues.length > 0) return { ok: false, error: { code: 'BID_WRITING_PLAN_INVALID', issues: inputIssues } }
     let resolved: ReturnType<typeof resolveWritingRequirementMessages>
@@ -2524,33 +2565,24 @@ export class BidHostRuntime extends TypertRemoteService {
         return
       }
       if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') {
-        const request = await ensureWritingRequirementsRequested(String(session.id), workspace, request => this.mutateProject(
-          operation,
-          lease => writeWritingRequest(workspace, request, lease),
-        ))
+        const existing = await readWritingRequest(workspace)
+        if (existing !== undefined) {
+          void operation.done.then(async () => {
+            if (existing.state === 'awaiting_answer') this.startWritingQuestion(agent, existing)
+            else if (existing.state === 'answered' && existing.continuation !== 'paused') await this.resumeWritingPlanProcessing(agent, workspace)
+          }).catch((error: unknown) => { this.ctx.logger.warn(`Bid S5 原生提问恢复失败：${String(error)}`) })
+        }
         await this.ctx.sessions.flush(session)
-        if (request !== undefined) void operation.done.then(async () => {
-          if (request.state === 'awaiting_answer') this.startWritingQuestion(agent, request)
-          else await this.resumeWritingPlanProcessing(agent, workspace)
-        }).catch((error: unknown) => { this.ctx.logger.warn(`Bid S5 原生提问恢复失败：${String(error)}`) })
         return
       }
       if (runtime.status !== 'pending' || runtime.stage === 'file_intake') return
       driven = true
       const executionAgent = await this.executionAgent(operation)
       const orchestrator = this.automaticOrchestrator(executionAgent, workspace, operation.controller.signal, operation)
-      const next = runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace)
-        ? await orchestrator.runConfirmedStage()
-        : await orchestrator.drive()
-      if (next.stage === 'chapter_writing' && next.status === 'waiting_user') {
-        const request = await ensureWritingRequirementsRequested(String(session.id), workspace, request => this.mutateProject(
-          operation,
-          lease => writeWritingRequest(workspace, request, lease),
-        ))
-        if (request !== undefined) void operation.done.then(async () => {
-          if (request.state === 'awaiting_answer') this.startWritingQuestion(agent, request)
-          else await this.resumeWritingPlanProcessing(agent, workspace)
-        }).catch((error: unknown) => { this.ctx.logger.warn(`Bid S5 原生提问恢复失败：${String(error)}`) })
+      if (runtime.stage === 'chapter_writing' && await hasCurrentWritingPlan(workspace)) {
+        await orchestrator.runConfirmedStage()
+      } else {
+        await orchestrator.drive()
       }
       await this.ctx.sessions.flush(session)
       if (bidSessionRuntime(session).status === 'suspended') this.ensureRunDecision(agent)
@@ -2782,7 +2814,10 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns the unchanged waiting state after the request is durably queued.
    */
   @Remote('requestWritingRequirements')
-  async requestWritingRequirements(session: Session): Promise<BidChapterWritingGateResult> {
+  async requestWritingRequirements(
+    session: Session,
+    intent?: { mode?: 'ensure' | 'reopen' | 'resume' | 'takeover' },
+  ): Promise<BidChapterWritingGateResult> {
     if (!isBidMainSession(session)) {
       return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Writing requirements require a Bid Session with a Host workspace.' })
     }
@@ -2793,6 +2828,7 @@ export class BidHostRuntime extends TypertRemoteService {
     operation.interaction = true
     let request: WritingRequest | undefined
     let result: BidChapterWritingGateResult
+    const intentMode = intent?.mode ?? 'ensure'
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('request_writing_requirements')) {
@@ -2805,7 +2841,7 @@ export class BidHostRuntime extends TypertRemoteService {
           request = await ensureWritingRequirementsRequested(String(session.id), operation.workspace, request => this.mutateProject(
             operation,
             lease => writeWritingRequest(operation.workspace, request, lease),
-          ), true)
+          ), intentMode)
           await this.ctx.sessions.flush(session)
           result = chapterWritingGateResult({ ok: true, value: runtime })
         }
@@ -2818,7 +2854,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (request !== undefined) {
       const agent = this.ctx.agents.get(session.id)
       if (agent !== undefined) void operation.done.then(async () => {
-        if (request?.state === 'awaiting_answer') this.startWritingQuestion(agent, request)
+        if (request.state === 'awaiting_answer') this.startWritingQuestion(agent, request)
         else await this.resumeWritingPlanProcessing(agent, operation.workspace)
       }).catch((error: unknown) => { this.ctx.logger.warn(`Bid S5 原生提问启动失败：${String(error)}`) })
     }
@@ -2851,13 +2887,16 @@ export class BidHostRuntime extends TypertRemoteService {
         return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED', message: 'Automatic chapter writing is not allowed in the current Bid stage state.' })
       }
       const writingRequest = await readWritingRequest(operation.workspace)
-      if (writingRequest?.state === 'answered') {
-        return chapterWritingGateResult({ ok: false, code: 'BID_CHAPTER_WRITING_GATE_FAILED', message: '已有自定义写作要求待处理，请先提交其 Writing Plan。' })
-      }
-      if (writingRequest?.state === 'awaiting_answer') {
-        this.invalidateWritingQuestion(projectKey(session))
-        const dismissed = { ...writingRequest, state: 'dismissed' as const, error: undefined }
-        await this.mutateProject(operation, lease => writeWritingRequest(operation.workspace, dismissed, lease))
+      if (writingRequest !== undefined && writingRequest.state !== 'consumed') {
+        return chapterWritingGateResult({
+          ok: false,
+          code: 'BID_CHAPTER_WRITING_GATE_FAILED',
+          message: writingRequest.state === 'awaiting_answer'
+            ? '已有待回答的写作要求提问，不能直接自动开始。'
+            : writingRequest.state === 'answered'
+              ? '已有自定义写作要求待处理，请先提交其 Writing Plan。'
+              : '初始写作提问已被关闭，如需开始请重新提出要求或提交写作计划。',
+        })
       }
       const agent = await this.executionAgent(operation)
       const current = await confirmedOutline(operation.workspace)
@@ -2921,19 +2960,52 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
+  /** 统一用户停止处理：覆盖运行中 Run、在线提问以及已回答但尚未启动写作的窗口。 */
+  private async handleUserStop(session: Session): Promise<void> {
+    if (!isBidMainSession(session)) return
+    const key = projectKey(session)
+    this.invalidateWritingQuestion(key)
+    const operation = this.inFlight.get(key)
+    if (operation?.runs.current !== undefined) {
+      operation.suspension ??= operation.runs.suspend('user_stop').catch((error: unknown) => {
+        this.ctx.logger.warn(`Bid Run 停止收敛失败：${String(error)}`)
+      })
+      await operation.suspension
+    } else if (operation !== undefined) {
+      operation.controller.abort({ kind: 'hook', reason: 'bid-run-user-stop' })
+    }
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const writingRequest = await readWritingRequest(workspace)
+    if (writingRequest !== undefined && writingRequest.state === 'answered' && writingRequest.continuation !== 'paused' && !await hasCurrentWritingPlan(workspace)) {
+      const active = this.inFlight.get(key)
+      if (active === undefined) {
+        const stopOperation = this.beginOperation(session)
+        try {
+          await this.prepareOperation(stopOperation)
+          const current = await readWritingRequest(workspace)
+          if (current?.state === 'answered' && current.continuation !== 'paused' && !await hasCurrentWritingPlan(workspace)) {
+            const paused: WritingRequest = {
+              ...current,
+              continuation: 'paused',
+              attempt_id: randomUUID(),
+            }
+            await this.mutateProject(stopOperation, lease => writeWritingRequest(workspace, paused, lease))
+          }
+        } catch (error: unknown) {
+          this.ctx.logger.warn(`Bid 暂停写入计划处理失败：${String(error)}`)
+        } finally {
+          await this.finishOperation(session, stopOperation)
+        }
+      }
+    }
+    await this.ctx.sessions.flush(session)
+  }
+
   /** Stop the active background Bid Run, including work that outlived the Main Agent turn. */
   @Remote('stopRun')
   async stopRun(session: Session): Promise<{ accepted: true }> {
     if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
-    const operation = this.inFlight.get(projectKey(session))
-    if (operation === undefined) return { accepted: true }
-    if (operation.runs.current !== undefined) {
-      operation.suspension ??= operation.runs.suspend('user_stop')
-      await operation.suspension
-    } else {
-      operation.controller.abort({ kind: 'hook', reason: 'bid-run-user-stop' })
-    }
-    await this.ctx.sessions.flush(session)
+    await this.handleUserStop(session)
     return { accepted: true }
   }
 
@@ -3998,7 +4070,10 @@ export class BidHostRuntime extends TypertRemoteService {
       readContext('outline/initial-confirmed-outline.json', parseOutlineArtifact),
       readContext('analysis/evidence-map.json', parseEvidenceMapArtifact),
     ]) : [null, null]
-    return { tender, outline, body, outlinePresentation: outline === null ? null : { source, baseline, evidence, errors } }
+    const writingRequest = runtime.stage === 'chapter_writing'
+      ? (await readWritingRequest(workspace)) ?? null
+      : null
+    return { tender, outline, body, outlinePresentation: outline === null ? null : { source, baseline, evidence, errors }, writingRequest }
   }
 
   /**
@@ -4220,7 +4295,6 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
-    let enteredWritingGate = false
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
@@ -4251,7 +4325,6 @@ export class BidHostRuntime extends TypertRemoteService {
           candidate.artifacts,
           commitWorkflow => operation.runs.complete(admittedRun, commitWorkflow),
         )
-      enteredWritingGate = next.stage === 'chapter_writing' && next.status === 'waiting_user'
       await this.ctx.sessions.flush(session)
       return { ok: true, value: next }
     } catch (error) {
@@ -4264,9 +4337,6 @@ export class BidHostRuntime extends TypertRemoteService {
         })
       }
       await this.finishOperation(session, operation)
-      if (enteredWritingGate) void operation.done.then(() => this.requestWritingRequirements(session)).catch((error: unknown) => {
-        this.ctx.logger.warn(`Bid S5 原生提问启动失败：${String(error)}`)
-      })
     }
   }
 

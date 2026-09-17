@@ -25,6 +25,7 @@ function inputFixture(): WritingPlanInput {
   return {
     update_kind: 'initial',
     writing_request_id: 'request-1',
+    attempt_id: 'attempt-1',
     user_message_refs: [firstRef],
     global_instructions: plan.global_instructions,
     document_acceptance: [],

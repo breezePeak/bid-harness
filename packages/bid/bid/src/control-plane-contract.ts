@@ -312,6 +312,7 @@ export interface BidDetailsView {
     errors: string[]
   } | null
   body: boolean
+  writingRequest?: import('./writing-requirements.ts').WritingRequest | null
 }
 
 /** One browser-selected file encoded for the dedicated Bid Host action. */

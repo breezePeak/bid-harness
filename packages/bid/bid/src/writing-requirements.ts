@@ -95,6 +95,7 @@ export const initialWritingPlanInputSchema = z.object({
   update_kind: z.literal('initial'),
   /** 从 task_contract_context 原样带回的 Host 询问身份。 */
   writing_request_id: z.string().min(1),
+  attempt_id: z.string().min(1),
   user_message_refs: z.array(writingRequirementMessageRefSchema),
   global_instructions: z.array(z.string().trim().min(1)).min(1),
   document_acceptance: z.array(acceptanceCriterionInputSchema),
@@ -149,22 +150,23 @@ export const writingRequestSchema = z.object({
   owner_session_id: z.string().min(1),
   attempt_id: z.string().min(1),
   state: z.enum(['awaiting_answer', 'answered', 'consumed', 'dismissed']),
+  continuation: z.enum(['allowed', 'paused']).default('allowed'),
   answer: writingRequestAnswerSchema.optional(),
   applied_plan_version: z.number().int().positive().optional(),
   processing_message_id: z.string().min(1).optional(),
   error: z.object({ code: z.string().min(1), message: z.string().min(1) }).strict().optional(),
 }).strict().superRefine((value, context) => {
   if ((value.state === 'answered' || value.state === 'consumed') && value.answer === undefined) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'answered writing request requires an answer' })
+    context.addIssue({ code: 'custom', message: 'answered writing request requires an answer' })
   }
   if (value.state === 'consumed' && value.applied_plan_version === undefined) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'consumed writing request requires applied_plan_version' })
+    context.addIssue({ code: 'custom', message: 'consumed writing request requires applied_plan_version' })
   }
   if (value.answer?.question_id !== undefined && value.answer.question_id !== value.request_id) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'writing request answer must match request_id' })
+    context.addIssue({ code: 'custom', message: 'writing request answer must match request_id' })
   }
   if (value.answer?.kind === 'custom' && value.answer.custom?.trim().length === 0) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'custom writing requirement must not be blank' })
+    context.addIssue({ code: 'custom', message: 'custom writing requirement must not be blank' })
   }
 })
 

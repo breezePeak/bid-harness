@@ -68,7 +68,7 @@ export interface BidStagePanelInjected {
   getDocxLibrary: () => Promise<DocxTemplateLibraryView>
   uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   /** Ask the Main Agent for manual S5 writing requirements. */
-  requestWritingRequirements?: () => Promise<void>
+  requestWritingRequirements?: (intent?: { mode?: 'ensure' | 'reopen' | 'resume' | 'takeover' }) => Promise<void>
   /** Create the default S5 writing plan and start the confirmed stage. */
   autoStartChapterWriting?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
@@ -204,8 +204,10 @@ export function apply(ctx: ClientContext): void {
         } | undefined
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
-      requestWritingRequirements: async () => {
-        const result = await ctx.remote.bid.requestWritingRequirements(sessionId)
+      requestWritingRequirements: async (intent) => {
+        const result = intent !== undefined
+          ? await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
+          : await ctx.remote.bid.requestWritingRequirements(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
