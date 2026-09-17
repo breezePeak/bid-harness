@@ -12,6 +12,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   BidWorkspace,
   checkpointBidProjectState,
+  BID_WRITING_ENTRY_PROJECTION_KEY,
   type WritingRequest,
 } from '@deepseek-ai/dsh-bid'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
@@ -155,7 +156,12 @@ describe('web e2e: S5 native writing requirements question', () => {
     for (let i = 0; i < 150 && host.inFlight.size > 0; i++) {
       await new Promise(r => setTimeout(r, 100))
     }
-    const reopenRes = await scaffold.ctx.bid.requestWritingRequirements(agent.session, { mode: 'reopen' })
+    const currentEntry = scaffold.ctx.sessionProjections.snapshot(agent.session).values[BID_WRITING_ENTRY_PROJECTION_KEY]
+    if (currentEntry === null || currentEntry === undefined) throw new Error('Missing writing entry projection')
+    const reopenRes = await scaffold.ctx.bid.requestWritingRequirements(agent.session, {
+      mode: 'reopen',
+      expected: currentEntry.expected,
+    })
     expect(reopenRes).toMatchObject({ ok: true })
 
     const composer = page.locator('[data-question-key]')

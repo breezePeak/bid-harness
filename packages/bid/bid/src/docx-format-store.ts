@@ -67,7 +67,13 @@ const stateSchema = z.strictObject({ version: z.literal(2),
   conflicts: z.array(conflictSchema).max(1000),
   resolved: valuesSchema,
   userConfirmed: valuesSchema,
-  lastExport: z.strictObject({ path: z.string().max(500), fingerprint: hashSchema }).optional() })
+  lastExport: z.strictObject({
+    path: z.string().max(500),
+    fingerprint: hashSchema,
+    mode: z.enum(['editable', 'image_fallback']).optional(),
+    reasons: z.array(z.string().max(500)).max(20).optional(),
+    summary: z.string().max(1000).optional(),
+  }).optional() })
 const exportArtifactsSchema = z.strictObject({ paths: z.array(z.string().min(1).max(500)).max(10_000) })
 const templateRecordSchema = z.strictObject({
   id: templateIdSchema,

@@ -261,3 +261,40 @@ try {
 export function createNativeVisioExport(): NativeVisioExport {
   return { visio: new NativeVisioBackend(), word: new NativeWordVisioEmbedder() }
 }
+
+/** 流程图导出支持的运行模式。 */
+export type FlowchartExportMode = 'editable' | 'image_fallback'
+
+/** 流程图导出环境检测结果与决策详情。 */
+export interface FlowchartExportEnvironment {
+  readonly mode: FlowchartExportMode
+  readonly hasVisio: boolean
+  readonly hasWord: boolean
+  readonly reasons: readonly string[]
+  readonly summary: string
+}
+
+/**
+ * 检测当前环境的 Visio 与 Word 支持能力，并判定走可编辑还是图片兼容模式。
+ * @param office 可选的能力接口注入；未提供时检测真实系统 COM 能力。
+ * @returns 模式判定结果与具体说明。
+ */
+export async function detectFlowchartExportEnvironment(
+  office: NativeVisioExport = createNativeVisioExport(),
+): Promise<FlowchartExportEnvironment> {
+  const [hasVisio, hasWord] = await Promise.all([
+    office.visio.isAvailable(),
+    office.word.isAvailable(),
+  ])
+  const reasons: string[] = []
+  if (!hasVisio) reasons.push('未检测到 Microsoft Visio')
+  if (!hasWord) reasons.push('未检测到 Microsoft Word')
+  if (process.platform !== 'win32') reasons.push('当前运行环境非 Windows 平台，不支持 Office COM 自动化')
+
+  const mode: FlowchartExportMode = (hasVisio && hasWord) ? 'editable' : 'image_fallback'
+  const summary = mode === 'editable'
+    ? '检测到 Microsoft Visio 与 Word 环境，流程图以可编辑 OLE 形式嵌入。'
+    : `检测到当前环境缺少 Office 组件（${reasons.join('；')}），已自动切换为图片兼容模式导出；流程图以高清图片形式插入文档并保留源数据。`
+
+  return { mode, hasVisio, hasWord, reasons, summary }
+}

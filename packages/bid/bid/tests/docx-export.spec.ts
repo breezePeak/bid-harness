@@ -12,7 +12,7 @@ import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/out
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
-import type { NativeVisioExport } from '../src/native-visio.ts'
+import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src/native-visio.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -39,17 +39,19 @@ const executeDocxExport = (
   nativeExport,
 )
 
-const fakeNativeVisioExport = (): NativeVisioExport => ({
+const fakeNativeVisioExport = (options?: { visioAvailable?: boolean; wordAvailable?: boolean }): NativeVisioExport => ({
   visio: {
-    isAvailable: async () => true,
+    isAvailable: async () => options?.visioAvailable ?? true,
     createDiagram: async (spec, path) => {
+      if (options?.visioAvailable === false) throw new Error('VISIO_RUNTIME_UNAVAILABLE')
       await writeFile(path, `fake-vsdx:${spec.id}`)
       return { path, nodeCount: spec.nodes.length, connectorCount: spec.edges.length }
     },
   },
   word: {
-    isAvailable: async () => true,
+    isAvailable: async () => options?.wordAvailable ?? true,
     embed: async (docxPath, replacements) => {
+      if (options?.wordAvailable === false) throw new Error('WORD_RUNTIME_UNAVAILABLE')
       const zip = await JSZip.loadAsync(await readFile(docxPath))
       const document = zip.file('word/document.xml')
       if (document === null) throw new Error('document.xml missing')
@@ -159,6 +161,115 @@ describe('Bid DOCX export', () => {
     expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(false)
     expect(await zip.file('word/document.xml')?.async('string')).not.toContain('BID_VISIO_OBJECT_FLOW-RESOURCE-1-1')
     expect(await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.vsdx'), 'utf8')).toBe('fake-vsdx:FLOW-RESOURCE-1-1')
+    const format = await readDocxFormat(workspace)
+    expect(format.state.lastExport?.mode).toBe('editable')
+  })
+
+  it('S6 流程图在缺少 Visio 时自动降级为图片模式导出并保留源数据', async () => {
+    const { workspace } = await exportFixture()
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    const flowchartSpec = {
+      type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', key: 'quality-control-flow', title: '质量检查闭环', direction: 'TB',
+      nodes: [
+        { id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交' },
+      ], edges: [{ from: 'N1', to: 'N2', label: '通过' }],
+    }
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: {
+        section_id: 'resource', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
+      },
+      flowcharts: [flowchartSpec],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n图 1 普通图片\n\n质量控制总体流程如下。\n\n{{flow_ref:quality-control-flow}}\n\n{{flowchart:quality-control-flow}}\n')
+
+    const artifacts = await executeDocxExport(
+      workspace, undefined, undefined, undefined, fakeNativeVisioExport({ visioAvailable: false, wordAvailable: true }),
+    )
+    expect(artifacts).toEqual([{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }])
+    await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
+
+    // DOCX 内部包含内嵌的 SVG 图片
+    const zip = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'bid.docx')))
+    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(true)
+
+    // 生成了 SVG 流程图图片产物与保留的原始 JSON 数据
+    const svgContent = await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.svg'), 'utf8')
+    expect(svgContent).toContain('<svg')
+    expect(svgContent).toContain('质量检查闭环')
+
+    const jsonContent = await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.json'), 'utf8')
+    expect(JSON.parse(jsonContent)).toEqual(flowchartSpec)
+
+    // 格式状态正确记录了降级模式和原因
+    const format = await readDocxFormat(workspace)
+    expect(format.state.lastExport?.mode).toBe('image_fallback')
+    expect(format.state.lastExport?.reasons).toContain('未检测到 Microsoft Visio')
+    expect(format.state.lastExport?.summary).toContain('已自动切换为图片兼容模式')
+  })
+
+  it('S6 流程图在缺少 Word 或两者均缺时自动降级为图片模式导出', async () => {
+    const { workspace } = await exportFixture()
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: {
+        section_id: 'resource', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
+      },
+      flowcharts: [{
+        type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', key: 'quality-control-flow', title: '质量检查闭环', direction: 'TB',
+        nodes: [
+          { id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交' },
+        ], edges: [{ from: 'N1', to: 'N2', label: '通过' }],
+      }],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n流程如下。\n\n{{flow_ref:quality-control-flow}}\n\n{{flowchart:quality-control-flow}}\n')
+
+    // 仅缺少 Word
+    const artifactsWordMissing = await executeDocxExport(
+      workspace, undefined, undefined, undefined, fakeNativeVisioExport({ visioAvailable: true, wordAvailable: false }),
+    )
+    await expect(validateDocxExport(workspace, 'docx_export', artifactsWordMissing)).resolves.toEqual({ ok: true })
+    const formatWordMissing = await readDocxFormat(workspace)
+    expect(formatWordMissing.state.lastExport?.mode).toBe('image_fallback')
+    expect(formatWordMissing.state.lastExport?.reasons).toContain('未检测到 Microsoft Word')
+
+    // 两者均缺少
+    const artifactsBothMissing = await executeDocxExport(
+      workspace, undefined, undefined, undefined, fakeNativeVisioExport({ visioAvailable: false, wordAvailable: false }),
+    )
+    await expect(validateDocxExport(workspace, 'docx_export', artifactsBothMissing)).resolves.toEqual({ ok: true })
+    const formatBothMissing = await readDocxFormat(workspace)
+    expect(formatBothMissing.state.lastExport?.mode).toBe('image_fallback')
+    expect(formatBothMissing.state.lastExport?.reasons).toContain('未检测到 Microsoft Visio')
+    expect(formatBothMissing.state.lastExport?.reasons).toContain('未检测到 Microsoft Word')
+  })
+
+  it('detectFlowchartExportEnvironment 正确判断环境并给出决策原因', async () => {
+    const full = await detectFlowchartExportEnvironment(fakeNativeVisioExport({ visioAvailable: true, wordAvailable: true }))
+    expect(full.mode).toBe('editable')
+    expect(full.hasVisio).toBe(true)
+    expect(full.hasWord).toBe(true)
+    expect(full.reasons).toEqual(process.platform === 'win32' ? [] : ['当前运行环境非 Windows 平台，不支持 Office COM 自动化'])
+
+    const noVisio = await detectFlowchartExportEnvironment(fakeNativeVisioExport({ visioAvailable: false, wordAvailable: true }))
+    expect(noVisio.mode).toBe('image_fallback')
+    expect(noVisio.hasVisio).toBe(false)
+    expect(noVisio.reasons).toContain('未检测到 Microsoft Visio')
+
+    const noWord = await detectFlowchartExportEnvironment(fakeNativeVisioExport({ visioAvailable: true, wordAvailable: false }))
+    expect(noWord.mode).toBe('image_fallback')
+    expect(noWord.hasWord).toBe(false)
+    expect(noWord.reasons).toContain('未检测到 Microsoft Word')
+
+    const none = await detectFlowchartExportEnvironment(fakeNativeVisioExport({ visioAvailable: false, wordAvailable: false }))
+    expect(none.mode).toBe('image_fallback')
+    expect(none.reasons).toContain('未检测到 Microsoft Visio')
+    expect(none.reasons).toContain('未检测到 Microsoft Word')
   })
 
   it('renderer 在 Run 退休后返回时不能覆盖正式 DOCX 或导出记录', async () => {
