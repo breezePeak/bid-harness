@@ -309,6 +309,7 @@ export class BidRunCoordinator {
       updatedAt: now,
     }
     try {
+      signal.throwIfAborted()
       const eventStart = this.session.events.length
       this.session.append('bid.run.started', { run: snapshot })
       const persistedRevision = await (this.checkpoint?.() ?? Promise.resolve(this.readProjectRevision()))

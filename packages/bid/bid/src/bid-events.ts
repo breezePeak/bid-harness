@@ -11,6 +11,7 @@ import type {
   StageArtifact,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import type { WritingEntryView } from './writing-entry-contract.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
@@ -31,6 +32,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.run.decision.received',
   'bid.user_confirmation.required',
   'bid.user_confirmation.received',
+  'bid.writing_entry.changed',
 ] as const
 
 /** One Bid Harness event type persisted in the shared DSH session log. */
@@ -111,6 +113,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.user_confirmation.received':
       | { stage: BidStage; confirmed: true }
       | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
+    /** S5 写作入口状态变更；广播安全摘要，不包含答案原文。 */
+    'bid.writing_entry.changed': { view: WritingEntryView }
   }
 }
 

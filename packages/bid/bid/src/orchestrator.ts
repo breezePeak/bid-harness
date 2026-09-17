@@ -81,6 +81,12 @@ export type BidOrchestratorErrorCode =
   | 'BID_RESUME_NOT_ALLOWED'
   | 'BID_STAGE_START_NOT_ALLOWED'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
+  | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
+
+export type BidBeforeStageStart = (
+  stage: BidStage,
+  resumeOf?: BidRunResumeIdentity,
+) => Promise<boolean>
 
 /** Host-side rejection for an operation that is invalid in current session state. */
 export class BidOrchestratorError extends Error {
@@ -116,6 +122,7 @@ export class BidOrchestrator {
     private readonly prepareContextTransition?: BidStageContextTransition,
     runs?: BidRunCoordinator,
     private readonly prepareWork?: BidStageWorkFactory,
+    private readonly beforeStageStart?: BidBeforeStageStart,
   ) {
     this.runs = runs ?? new BidRunCoordinator(
       session,
@@ -432,7 +439,16 @@ export class BidOrchestrator {
       inputFingerprint: '0'.repeat(64),
     }))
     if (work.stage !== stage) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the Work Descriptor stage does not match the workflow')
+    if (this.isAborted()) return 'aborted'
+    if (this.beforeStageStart !== undefined && !await this.beforeStageStart(stage, resumeOf)) {
+      return 'aborted'
+    }
+    if (this.isAborted()) return 'aborted'
     const run = await this.runs.start(work, resumeOf)
+    if (signalAborted(run.signal)) {
+      await this.runs.suspend('user_stop')
+      return 'aborted'
+    }
     onAccepted?.(run)
     let artifacts: StageArtifact[]
     try {

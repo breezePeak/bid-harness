@@ -6,7 +6,7 @@
  * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap and ctx.conversation merges.
@@ -68,7 +68,7 @@ export interface BidStagePanelInjected {
   getDocxLibrary: () => Promise<DocxTemplateLibraryView>
   uploadDocxTemplate: (file: File, revision: number) => Promise<DocxFormatView>
   /** Ask the Main Agent for manual S5 writing requirements. */
-  requestWritingRequirements?: (intent?: { mode?: 'ensure' | 'reopen' | 'resume' | 'takeover' }) => Promise<void>
+  requestWritingRequirements?: (intent: WritingEntryIntent) => Promise<void>
   /** Create the default S5 writing plan and start the confirmed stage. */
   autoStartChapterWriting?: () => Promise<void>
   /** Host outline-confirmation action, installed when the Bid action API is composed. */
@@ -205,9 +205,7 @@ export function apply(ctx: ClientContext): void {
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
       requestWritingRequirements: async (intent) => {
-        const result = intent !== undefined
-          ? await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
-          : await ctx.remote.bid.requestWritingRequirements(sessionId)
+        const result = await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },

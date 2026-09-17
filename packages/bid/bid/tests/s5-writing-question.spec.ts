@@ -21,9 +21,24 @@ import {
   checkpointBidProjectState,
   outlineArtifactSha256,
 } from '@deepseek-ai/dsh-bid'
-import type { WritingRequest } from '../src/writing-requirements.ts'
+import {
+  createAutomaticWritingPlan,
+  type WritingRequest,
+} from '../src/writing-requirements.ts'
+import { readWritingEntryStop } from '../src/writing-entry-state.ts'
+
 import { stageInteractionSchema } from '../src/stage-interaction.ts'
 import { seedProjectArtifacts } from './fixtures/project-session.ts'
+
+type HostInternals = {
+  beginOperation: (session: unknown) => { controller: { signal: { addEventListener: (type: string, cb: () => void) => void } } }
+  finishOperation: (session: unknown, op: unknown) => Promise<void>
+  handleUserStop: (session: unknown) => Promise<void>
+  driveStartedSession: (agent: unknown, cwd: string) => Promise<void>
+  autoStartChapterWriting: (session: unknown) => Promise<{ ok: boolean; error?: { code: string } }>
+  prepareOperation: (op: unknown) => Promise<unknown>
+  createBeforeStageStart: (op: unknown, ws: unknown) => unknown
+}
 
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -706,5 +721,222 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
     } finally {
       dispose()
     }
+  })
+
+  describe('子任务 01: 有效计划优先与 inspect 独立性', () => {
+    it('有效计划 + 旧 prompt_event marker: inspect 成功，返回原计划，writing_request 为 null', async () => {
+      const { ctx, workspace, outline, createMainAgent } = await setupS5Fixture()
+      const agent = await createMainAgent('t01-1-agent')
+      const sha256 = outlineArtifactSha256(outline)
+
+      const plan = createAutomaticWritingPlan(outline, sha256)
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+
+      const oldMarker: WritingRequest = {
+        schema_version: 1,
+        request_id: 'old-req',
+        confirmed_outline_sha256: sha256,
+        owner_session_id: 'old-session',
+        attempt_id: 'old-att',
+        state: 'answered',
+        continuation: 'allowed',
+        answer: {
+          question_id: 'old-req',
+          kind: 'custom',
+          selected: [],
+          custom: 'old custom text',
+        },
+      }
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(oldMarker, null, 2), 'utf8')
+
+      const inspectResult = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'task_contract_context' },
+        callId: CallId('t01-inspect-1'),
+        signal: new AbortController().signal,
+      })
+
+      expect(inspectResult.isError).toBe(false)
+      const val = inspectResult.value as Record<string, Record<string, unknown>>
+      expect(val.writing_plan).toMatchObject({ plan_version: 1 })
+      expect(val.task_contract_context?.writing_request).toBeNull()
+    })
+
+    it('有效计划 + 损坏 marker: inspect 仍成功，证明根本不依赖该文件', async () => {
+      const { ctx, workspace, outline, createMainAgent } = await setupS5Fixture()
+      const agent = await createMainAgent('t01-2-agent')
+      const sha256 = outlineArtifactSha256(outline)
+
+      const plan = createAutomaticWritingPlan(outline, sha256)
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+
+      // 写入损坏的 writing-request.json
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), '{ invalid json corrupt: true', 'utf8')
+
+      const inspectResult = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'task_contract_context' },
+        callId: CallId('t01-inspect-2'),
+        signal: new AbortController().signal,
+      })
+
+      expect(inspectResult.isError).toBe(false)
+      const val = inspectResult.value as Record<string, Record<string, unknown>>
+      expect(val.writing_plan).toMatchObject({ plan_version: 1 })
+      expect(val.task_contract_context?.writing_request).toBeNull()
+    })
+
+    it('无计划 + 损坏 marker: inspect 明确失败，不默认无要求', async () => {
+      const { ctx, workspace, createMainAgent } = await setupS5Fixture()
+      const agent = await createMainAgent('t01-3-agent')
+
+      // 确保没有 writing-plan.json
+      await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
+
+      // 写入损坏的 writing-request.json
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), '{ invalid json corrupt: true', 'utf8')
+
+      const inspectResult = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'task_contract_context' },
+        callId: CallId('t01-inspect-3'),
+        signal: new AbortController().signal,
+      })
+
+      expect(inspectResult.isError).toBe(true)
+    })
+  })
+
+  describe('子任务 02: 停止先封住入口与启动检查', () => {
+    it('阻塞一个短 operation，点击停止，再释放短操作：停止必须最后落盘', async () => {
+      const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+      const sha256 = outlineArtifactSha256(outline)
+      const agent = await createMainAgent('t02-1-agent')
+
+      const answeredRecord: WritingRequest = {
+        schema_version: 1,
+        request_id: 'stop-req-t1',
+        confirmed_outline_sha256: sha256,
+        owner_session_id: String(agent.session.id),
+        attempt_id: 'att-before-stop',
+        continuation: 'allowed',
+        state: 'answered',
+        answer: { question_id: 'stop-req-t1', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
+      }
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(answeredRecord))
+
+      const hostAny = host as unknown as HostInternals
+      // 模拟一个短 operation 占锁
+      const deferred = Promise.withResolvers<undefined>()
+      const shortOp = hostAny.beginOperation(agent.session)
+      shortOp.controller.signal.addEventListener('abort', () => {})
+      const shortOpTask = (async () => {
+        await deferred.promise
+        await hostAny.finishOperation(agent.session, shortOp)
+      })()
+
+      // 点击停止
+      const stopPromise = hostAny.handleUserStop(agent.session)
+      // 此时停止尚未落盘，因为短操作还在持锁
+      expect(await readWritingEntryStop(workspace)).toBeUndefined()
+
+      // 释放短操作
+      deferred.resolve(undefined)
+      await shortOpTask
+      await stopPromise
+
+      // 停止最终落盘
+      const stop = await readWritingEntryStop(workspace)
+      expect(stop).toBeDefined()
+      expect(stop?.request_id).toBe('stop-req-t1')
+
+      const updated = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+      expect(updated.continuation).toBe('paused')
+    })
+
+    it('plan 与 consumed 已落盘但还没有 Run，点击停止：stop 文件存在且阻止新 Run 启动', async () => {
+      const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+      const sha256 = outlineArtifactSha256(outline)
+      const agent = await createMainAgent('t02-2-agent')
+
+      const plan = createAutomaticWritingPlan(outline, sha256)
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+
+      const consumedRecord: WritingRequest = {
+        schema_version: 1,
+        request_id: 'stop-req-t2',
+        confirmed_outline_sha256: sha256,
+        owner_session_id: String(agent.session.id),
+        attempt_id: 'att-consumed',
+        continuation: 'allowed',
+        state: 'consumed',
+        applied_plan_version: 1,
+        answer: { question_id: 'stop-req-t2', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
+      }
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(consumedRecord))
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'pending' })
+
+      const hostAny = host as unknown as HostInternals
+      await hostAny.handleUserStop(agent.session)
+
+      const stop = await readWritingEntryStop(workspace)
+      expect(stop).toBeDefined()
+      expect(stop?.plan_version).toBe(1)
+
+      // 触发 driveStartedSession
+      await hostAny.driveStartedSession(agent, workspace.root)
+
+      // 验证没有 Run 启动
+      const runsCount = agent.session.events.filter((e: { type: string }) => e.type === 'bid.run.started').length
+      expect(runsCount).toBe(0)
+    })
+
+    it('无问答的自动计划已保存、Run 尚未创建时停止：阻止启动', async () => {
+      const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+      const sha256 = outlineArtifactSha256(outline)
+      const agent = await createMainAgent('t02-3-agent')
+
+      const plan = createAutomaticWritingPlan(outline, sha256)
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+
+      const hostAny = host as unknown as HostInternals
+      await hostAny.handleUserStop(agent.session)
+
+      const stop = await readWritingEntryStop(workspace)
+      expect(stop).toBeDefined()
+      expect(stop?.request_id).toBeNull()
+      expect(stop?.plan_version).toBe(1)
+
+      // 尝试自动启动
+      const res = await hostAny.autoStartChapterWriting(agent.session)
+      expect(res.ok).toBe(false)
+      expect(res.error?.code).toBe('BID_CHAPTER_WRITING_GATE_FAILED')
+    })
+
+    it('beforeStageStart 检测到停止屏障直接拒绝 Run 创建', async () => {
+      const { workspace, createMainAgent, host, outline } = await setupS5Fixture()
+      const sha256 = outlineArtifactSha256(outline)
+      const agent = await createMainAgent('t02-4-agent')
+
+      const plan = createAutomaticWritingPlan(outline, sha256)
+      await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+
+      const hostAny = host as unknown as HostInternals
+      await hostAny.handleUserStop(agent.session)
+
+      const operation = hostAny.beginOperation(agent.session)
+      try {
+        await hostAny.prepareOperation(operation)
+        const check = hostAny.createBeforeStageStart(operation, workspace) as (stage: string) => Promise<boolean>
+        const allowed = await check('chapter_writing')
+        expect(allowed).toBe(false)
+      } finally {
+        await hostAny.finishOperation(agent.session, operation)
+      }
+    })
   })
 })

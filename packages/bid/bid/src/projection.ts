@@ -10,11 +10,25 @@ import {
   getBidClientProjection,
   reduceBidControlState,
 } from './runtime-state.ts'
+import {
+  BID_WRITING_ENTRY_PROJECTION_KEY,
+  writingEntryViewSchema,
+  type WritingEntryView,
+} from './writing-entry-contract.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** Client-visible Bid runtime projection. */
+    [BID_RUNTIME_PROJECTION_KEY]: BidClientProjection
+    /** Client-visible S5 writing entry view. */
+    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
+  }
+
   interface SessionProjectionStateMap {
     /** Replayable Bid state derived from the shared session log. */
     [BID_RUNTIME_PROJECTION_KEY]: BidControlState
+    /** Replayable S5 writing entry view derived from bid.writing_entry.changed events. */
+    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
   }
 
 }
@@ -75,5 +89,26 @@ export function registerBidRuntimeProjection(
       view: state => getBidClientProjection(state, fileLimits),
     },
     stateVersion: 11,
+  })
+}
+/**
+ * Register the S5 writing entry projection with the shared session projection registry.
+ * @param registry - host projection registry that owns event driving and client delivery.
+ * @returns the registration disposer.
+ */
+export function registerBidWritingEntryProjection(
+  registry: SessionProjectionRegistry,
+): () => void {
+  return registry.register({
+    key: BID_WRITING_ENTRY_PROJECTION_KEY,
+    stateSchema: writingEntryViewSchema.nullable(),
+    init: () => null,
+    apply: (state: WritingEntryView | null, event): WritingEntryView | null =>
+      event.type === 'bid.writing_entry.changed' ? event.data.view : state,
+    wire: {
+      viewSchema: writingEntryViewSchema.nullable(),
+      view: (state: WritingEntryView | null) => state,
+    },
+    stateVersion: 1,
   })
 }

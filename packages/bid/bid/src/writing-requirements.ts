@@ -140,7 +140,23 @@ const writingRequestAnswerSchema = z.object({
   kind: z.enum(['no_additional_requirements', 'custom']),
   selected: z.array(z.string()),
   custom: z.string().optional(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (value.kind === 'custom' && (value.custom === undefined || value.custom.trim().length === 0)) {
+    context.addIssue({ code: 'custom', message: 'custom writing requirement must not be blank' })
+  }
+})
+
+export const writingPlanProcessingSchema = z.object({
+  message_id: z.string().min(1),
+  state: z.enum(['queued', 'running', 'failed']),
+  turn: z.number().int().nonnegative().nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.state === 'running' && value.turn === null) {
+    context.addIssue({ code: 'custom', message: 'running processing requires turn' })
+  }
+})
+
+export type WritingPlanProcessing = z.infer<typeof writingPlanProcessingSchema>
 
 /** 已发出 S5 原生询问的项目记录；在线 Promise 不写入此文件。 */
 export const writingRequestSchema = z.object({
@@ -154,6 +170,7 @@ export const writingRequestSchema = z.object({
   answer: writingRequestAnswerSchema.optional(),
   applied_plan_version: z.number().int().positive().optional(),
   processing_message_id: z.string().min(1).optional(),
+  processing: writingPlanProcessingSchema.optional(),
   error: z.object({ code: z.string().min(1), message: z.string().min(1) }).strict().optional(),
 }).strict().superRefine((value, context) => {
   if ((value.state === 'answered' || value.state === 'consumed') && value.answer === undefined) {
@@ -165,7 +182,7 @@ export const writingRequestSchema = z.object({
   if (value.answer?.question_id !== undefined && value.answer.question_id !== value.request_id) {
     context.addIssue({ code: 'custom', message: 'writing request answer must match request_id' })
   }
-  if (value.answer?.kind === 'custom' && value.answer.custom?.trim().length === 0) {
+  if (value.answer?.kind === 'custom' && (value.answer.custom === undefined || value.answer.custom.trim().length === 0)) {
     context.addIssue({ code: 'custom', message: 'custom writing requirement must not be blank' })
   }
 })

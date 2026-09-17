@@ -16,6 +16,7 @@ import { readEvidenceMappingLog, readEvidenceMappingProgress } from './evidence-
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
+import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import {
   BID_INITIAL_CONTROL_STATE,
   bidRuntimeView,
@@ -23,10 +24,10 @@ import {
 } from './runtime-state.ts'
 import {
   initialWritingPlanInputSchema,
-  parseWritingPlan,
   writingRequestSchema,
   writingPlanPatchInputSchema,
 } from './writing-requirements.ts'
+import { readCurrentWritingPlan } from './writing-entry-state.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
@@ -217,9 +218,15 @@ async function inspectBidStageValue(
       progress_summary: { completed_tasks: 0, running_tasks: 0, pending_tasks: 0, failed_tasks: 0 },
       current_artifacts_summary: { outline: 'pending' as const, writing_plan: 'pending' as const, execution_log: 'pending' as const },
     }
+    const confirmedSha256 = outlineArtifactSha256(outline)
+    const writing_plan = await readCurrentWritingPlan(workspace, confirmedSha256)
+    const writing_request = view === 'task_contract_context' && writing_plan === undefined
+      ? await readOptionalStageJson(workspace, 'chapters/writing-request.json',
+        value => writingRequestSchema.parse(value))
+      : null
     const taskContext = view === 'task_contract_context'
       ? {
-        writing_request: await readOptionalStageJson(workspace, 'chapters/writing-request.json', value => writingRequestSchema.parse(value)),
+        writing_request,
         requirements,
         scoring,
         compliance,
@@ -234,10 +241,6 @@ async function inspectBidStageValue(
           : []),
       }
       : undefined
-    let writing_plan = null
-    try { writing_plan = parseWritingPlan(await readStageJson(workspace, 'chapters/writing-plan.json')) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    }
     let execution_log: ReturnType<typeof parseOrMigrateChapterExecutionLog> | null = null
     try { execution_log = parseOrMigrateChapterExecutionLog(await readStageJson(workspace, 'chapters/execution-log.json')) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -302,7 +305,7 @@ async function inspectBidStageValue(
         title: section.title,
         writable: section.writable,
       })),
-      ...(view === 'task_contract_context' ? { writing_plan } : {}),
+      ...(view === 'task_contract_context' ? { writing_plan: writing_plan ?? null } : {}),
       writing_progress,
       chapter,
       ...(taskContext === undefined ? {} : { task_contract_context: taskContext }),
