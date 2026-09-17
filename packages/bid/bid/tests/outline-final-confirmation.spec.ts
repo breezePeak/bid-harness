@@ -161,6 +161,9 @@ describe('S4 Draft 最终确认', () => {
       expect(writingRequest.owner_session_id).toBe(String(f.session.id))
       expect(writingRequest.attempt_id).toEqual(expect.any(String))
       expect(writingRequest.state).toBe('awaiting_answer')
+      await vi.waitFor(() => {
+        expect((f.host as unknown as { inFlight: Map<unknown, unknown> }).inFlight.size).toBe(0)
+      })
       await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
       expect(f.followup).not.toHaveBeenCalled()
       expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({

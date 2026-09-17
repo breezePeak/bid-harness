@@ -14,7 +14,7 @@ import { basename, extname, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
-import type { Context } from '@deepseek-ai/cordis'
+import { FiberState, type Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
@@ -1472,6 +1472,10 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
   private readonly processingWritingPlans = new Map<BidProjectKey, string>()
 
+  private isContextActive(): boolean {
+    return this.ctx.fiber === undefined || this.ctx.fiber.state === FiberState.ACTIVE
+  }
+
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
   private async withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T> {
     assertBidMainSession(session)
@@ -1707,7 +1711,7 @@ export class BidHostRuntime extends TypertRemoteService {
           })
         }
         await operation.suspension
-        if (operation.suspension === undefined) await this.checkpoint(operation)
+        if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
       }
     } finally {
       try {
@@ -1758,8 +1762,11 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 只广播控制状态；每个 Session 保留独立的聊天、工具及模型上下文。 */
   private async publishProjectState(operation: ActiveBidOperation, state: BidProjectState): Promise<void> {
+    if (!this.isContextActive()) return
     const key = operation.key
-    const sessions = [operation.session, ...this.ctx.sessions.list().filter((session) => {
+    const sessionsService = this.ctx.get('sessions')
+    if (sessionsService === undefined) return
+    const sessions = [operation.session, ...sessionsService.list().filter((session) => {
       if (session === operation.session) return false
       if (!isBidMainSession(session)) return false
       try { return projectKey(session) === key } catch (error) {
@@ -1887,7 +1894,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Start one Host-owned native S5 question after the project operation is free. */
   private startWritingQuestion(agent: Agent, request: WritingRequest): void {
-    if (request.owner_session_id !== String(agent.session.id)) return
+    if (!this.isContextActive() || request.owner_session_id !== String(agent.session.id)) return
     const key = projectKey(agent.session)
     const existing = this.pendingWritingQuestions.get(key)
     if (existing !== undefined) {
@@ -1922,6 +1929,8 @@ export class BidHostRuntime extends TypertRemoteService {
         return this.dismissWritingQuestion(pending)
       }
       return this.recordWritingQuestionError(pending, error)
+    }).catch((error: unknown) => {
+      this.ctx.logger.warn(`Bid S5 原生提问处理未完成：${String(error)}`)
     }).finally(() => {
       if (this.pendingWritingQuestions.get(key) === pending) this.pendingWritingQuestions.delete(key)
     })
@@ -1933,9 +1942,11 @@ export class BidHostRuntime extends TypertRemoteService {
     pending: ActiveWritingQuestion,
     answer: AskUserQuestionAnswer,
   ): Promise<void> {
+    if (!this.isContextActive()) return
     const active = this.inFlight.get(pending.key)
     if (active !== undefined) {
       await active.done
+      if (!this.isContextActive()) return
       return this.acceptWritingQuestionAnswer(pending, answer)
     }
     const operation = this.beginOperation(pending.agent.session)
@@ -1944,7 +1955,13 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const runtime = await this.prepareOperation(operation)
       request = await readWritingRequest(operation.workspace)
-      const current = await confirmedOutline(operation.workspace)
+      let current: { outline: OutlineArtifact; sha256: string } | undefined
+      try {
+        current = await confirmedOutline(operation.workspace)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
+      }
       if (request?.request_id !== pending.requestId || request.attempt_id !== pending.attemptId
         || request.owner_session_id !== pending.ownerSessionId
         || request.confirmed_outline_sha256 !== current.sha256
@@ -1975,9 +1992,11 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Keep provider failures recoverable without claiming that the question was answered. */
   private async recordWritingQuestionError(pending: ActiveWritingQuestion, error: unknown): Promise<void> {
+    if (!this.isContextActive()) return
     const active = this.inFlight.get(pending.key)
     if (active !== undefined) {
       await active.done
+      if (!this.isContextActive()) return
       return this.recordWritingQuestionError(pending, error)
     }
     const operation = this.beginOperation(pending.agent.session)
@@ -1995,9 +2014,11 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** A closed question is a dismissed business state, not an authorization to start. */
   private async dismissWritingQuestion(pending: ActiveWritingQuestion): Promise<void> {
+    if (!this.isContextActive()) return
     const active = this.inFlight.get(pending.key)
     if (active !== undefined) {
       await active.done
+      if (!this.isContextActive()) return
       return this.dismissWritingQuestion(pending)
     }
     const operation = this.beginOperation(pending.agent.session)
@@ -2015,17 +2036,23 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** Queue the model continuation only after a real native answer is durable. */
   private scheduleWritingPlanProcessing(agent: Agent, request: WritingRequest): void {
+    if (!this.isContextActive()) return
     const key = projectKey(agent.session)
     if (this.processingWritingPlans.get(key) === request.request_id) return
     this.processingWritingPlans.set(key, request.request_id)
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: `Host 已保存 S5 初始原生问答，writing_request_id=${request.request_id}。请读取 bid_stage_inspect(view=task_contract_context) 中的 writing_request，结合其真实回答制定首次 Writing Plan；不要再次询问这个初始问题。` }],
-      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
-    }))
+    try {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: `Host 已保存 S5 初始原生问答，writing_request_id=${request.request_id}。请读取 bid_stage_inspect(view=task_contract_context) 中的 writing_request，结合其真实回答制定首次 Writing Plan；不要再次询问这个初始问题。` }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+      }))
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`Bid 写入计划引导消息派发失败：${String(error)}`)
+    }
   }
 
   /** Re-drive an answered request after Host restart without reopening the question. */
   private async resumeWritingPlanProcessing(agent: Agent, workspace: BidWorkspace): Promise<void> {
+    if (!this.isContextActive()) return
     const request = await readWritingRequest(workspace)
     if (request?.state !== 'answered' || await hasCurrentWritingPlan(workspace)) return
     this.scheduleWritingPlanProcessing(agent, request)
@@ -2041,6 +2068,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   /** 执行器启动前及 Host 操作结束后共用的原子项目检查点。 */
   private async checkpoint(operation: ActiveBidOperation): Promise<void> {
+    if (!this.isContextActive()) return
     const control = operation.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
     const state = await checkpointBidProjectState(operation.workspace, control)
     operation.projectRevision = state.revision

@@ -249,7 +249,6 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
-    const agent = await fresh('s5-native-writing-question')
     const response = Promise.withResolvers<AskUserQuestionAnswer>()
     let question: AskUserQuestionItem | undefined
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => {
@@ -258,6 +257,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
     const dispose = ctx.userQuestions.registerProvider({ ask: asked })
     try {
+      const agent = await fresh('s5-native-writing-question')
       await expect(ctx.bid.requestWritingRequirements(agent.session)).resolves.toMatchObject({ ok: true })
       await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
       expect(question).toMatchObject({
