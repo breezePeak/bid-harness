@@ -323,6 +323,11 @@ export {
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export {
+  assessDocxExportPageTarget,
+  executeDocxExport,
+  validateDocxExport,
+} from './docx-export.ts'
+export {
   createNativeVisioExport,
   detectFlowchartExportEnvironment,
   flowchartPlaceholder,
@@ -3349,12 +3354,12 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('requestWritingRequirements')
   async requestWritingRequirements(
     session: Session,
-    intent: WritingEntryIntent = { mode: 'ensure' },
+    intent?: WritingEntryIntent,
   ): Promise<BidChapterWritingGateResult> {
     if (!isBidMainSession(session)) {
       return chapterWritingGateResult({ ok: false, code: 'BID_SESSION_REQUIRED', message: 'Writing requirements require a Bid Session with a Host workspace.' })
     }
-    const parsedIntent = writingEntryIntentSchema.parse(intent)
+    const parsedIntent = writingEntryIntentSchema.parse(intent ?? { mode: 'ensure' })
     const key = projectKey(session)
     if (this.inFlight.has(key)) {
       return chapterWritingGateResult({ ok: false, code: 'BID_OPERATION_IN_PROGRESS', message: 'A Bid operation is already running for this Session.' })

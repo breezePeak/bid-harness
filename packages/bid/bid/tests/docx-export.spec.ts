@@ -1,10 +1,14 @@
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import mammoth from 'mammoth'
 import JSZip from 'jszip'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BidWorkspace, DEFAULT_BID_CONFIG } from '../src/index.ts'
+import { BidWorkspace, DEFAULT_BID_CONFIG,
+  assessDocxExportPageTarget as assessFromIndex,
+  executeDocxExport as executeFromIndex,
+  validateDocxExport as validateFromIndex } from '../src/index.ts'
 import { assessDocxExportPageTarget, executeDocxExport as executeDocxExportImplementation, validateDocxExport } from '../src/docx-export.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
@@ -13,6 +17,7 @@ import { parseWritingPlan } from '../src/writing-requirements.ts'
 import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src/native-visio.ts'
+import { renderFlowchartImage } from '../src/flowchart-image.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -191,9 +196,23 @@ describe('Bid DOCX export', () => {
     expect(artifacts).toEqual([{ stage: 'docx_export', type: 'docx', path: 'deliverables/bid.docx' }])
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
 
-    // DOCX 内部包含内嵌的 SVG 图片
+    // DOCX 内部直接嵌入真实 PNG，无 SVG 且无 Visio 占位
     const zip = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'bid.docx')))
-    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(true)
+    expect(Object.keys(zip.files).some(path => path.endsWith('.svg'))).toBe(false)
+    const pngMediaFiles = Object.keys(zip.files).filter(path => path.startsWith('word/media/') && path.endsWith('.png'))
+    expect(pngMediaFiles.length).toBeGreaterThan(0)
+    const pngData = await zip.file(pngMediaFiles[0]!)!.async('nodebuffer')
+    // 验证真实 PNG 魔数与尺寸非 1x1 占位图
+    expect(pngData.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    const pngWidth = pngData.readUInt32BE(16)
+    const pngHeight = pngData.readUInt32BE(20)
+    expect(pngWidth).toBeGreaterThan(10)
+    expect(pngHeight).toBeGreaterThan(10)
+
+    const relsContent = await zip.file('word/_rels/document.xml.rels')?.async('string')
+    expect(relsContent).toContain('image')
+    const documentXml = await zip.file('word/document.xml')?.async('string')
+    expect(documentXml).not.toContain('BID_VISIO_OBJECT_')
 
     // 生成了 SVG 流程图图片产物与保留的原始 JSON 数据
     const svgContent = await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.svg'), 'utf8')
@@ -491,5 +510,127 @@ describe('Bid DOCX export', () => {
     await expect(validateDocxExport(workspace, 'docx_export', [{
       stage: 'docx_export', type: 'docx', path: 'deliverables/../escaped.docx',
     }])).resolves.toMatchObject({ ok: false })
+  })
+
+  it('公开 API assessDocxExportPageTarget / executeDocxExport / validateDocxExport 可从 index.ts 导出', () => {
+    expect(typeof assessFromIndex).toBe('function')
+    expect(typeof executeFromIndex).toBe('function')
+    expect(typeof validateFromIndex).toBe('function')
+    expect(assessFromIndex).toBe(assessDocxExportPageTarget)
+    expect(executeFromIndex).toBe(executeDocxExportImplementation)
+    expect(validateFromIndex).toBe(validateDocxExport)
+  })
+
+  it('不同流程图生成不同内容的真实 PNG，绝非固定占位图', async () => {
+    const specA: import('../src/flowchart.ts').FlowchartSpec = {
+      type: 'flowchart', schema_version: 1, id: 'FLOW-A', key: 'flow-a', title: '流程A', direction: 'TB',
+      nodes: [{ id: 'N1', type: 'start', text: '开始节点' }, { id: 'N2', type: 'end', text: '提交' }],
+      edges: [{ from: 'N1', to: 'N2', label: '通过' }],
+    }
+    const specB: import('../src/flowchart.ts').FlowchartSpec = {
+      type: 'flowchart', schema_version: 1, id: 'FLOW-B', key: 'flow-b', title: '流程B', direction: 'TB',
+      nodes: [{ id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'decision', text: '审核' }, { id: 'N3', type: 'end', text: '结束' }],
+      edges: [{ from: 'N1', to: 'N2' }, { from: 'N2', to: 'N3', label: '是' }, { from: 'N2', to: 'N1', label: '否' }],
+    }
+    const [resultA, resultB] = await Promise.all([renderFlowchartImage(specA), renderFlowchartImage(specB)])
+    expect(resultA.png.length).toBeGreaterThan(100)
+    expect(resultB.png.length).toBeGreaterThan(100)
+    const hashA = createHash('sha256').update(resultA.png).digest('hex')
+    const hashB = createHash('sha256').update(resultB.png).digest('hex')
+    expect(hashA).not.toBe(hashB)
+  })
+
+  it('流程图降级为图片模式时不调用任何 Visio 或 Word COM 自动化方法', async () => {
+    const { workspace } = await exportFixture()
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: {
+        section_id: 'resource', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
+      },
+      flowcharts: [{
+        type: 'flowchart', schema_version: 1, id: 'FLOW-RESOURCE-1-1', key: 'quality-control-flow', title: '质量检查闭环', direction: 'TB',
+        nodes: [{ id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交' }],
+        edges: [{ from: 'N1', to: 'N2' }],
+      }],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n{{flowchart:quality-control-flow}}\n')
+
+    const createDiagramSpy = vi.fn()
+    const embedSpy = vi.fn()
+    const countSpy = vi.fn()
+
+    const nativeExport: NativeVisioExport = {
+      visio: {
+        isAvailable: async () => false,
+        createDiagram: createDiagramSpy,
+      },
+      word: {
+        isAvailable: async () => false,
+        embed: embedSpy,
+        countVisioObjects: countSpy,
+      },
+    }
+
+    const artifacts = await executeDocxExport(workspace, undefined, undefined, undefined, nativeExport)
+    expect(artifacts).toHaveLength(1)
+    expect(createDiagramSpy).not.toHaveBeenCalled()
+    expect(embedSpy).not.toHaveBeenCalled()
+    expect(countSpy).not.toHaveBeenCalled()
+  })
+
+  it('更窄版心下流程图图片自动等比缩放且尺寸小于常规版心', async () => {
+    const { workspace } = await exportFixture()
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: {
+        section_id: 'resource', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [],
+      },
+      flowcharts: [{
+        type: 'flowchart', schema_version: 1, id: 'FLOW-WIDE', key: 'wide-flow', title: '长流程图', direction: 'LR',
+        nodes: [
+          { id: 'N1', type: 'start', text: '阶段一启动' },
+          { id: 'N2', type: 'process', text: '阶段二实施与开发阶段' },
+          { id: 'N3', type: 'process', text: '阶段三全面集成测试' },
+          { id: 'N4', type: 'end', text: '阶段四系统验收交付' },
+        ],
+        edges: [{ from: 'N1', to: 'N2' }, { from: 'N2', to: 'N3' }, { from: 'N3', to: 'N4' }],
+      }],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n{{flowchart:wide-flow}}\n')
+
+    // Case A: 正常边距（如左 25mm, 右 25mm）
+    const formatA = await readDocxFormat(workspace)
+    await (await import('../src/docx-format-store.ts')).writeDocxFormat(workspace, null, {
+      ...formatA.state,
+      resolved: { ...formatA.state.resolved, 'page.left': 25, 'page.right': 25 },
+      userConfirmed: { ...formatA.state.userConfirmed, 'page.left': 25, 'page.right': 25 },
+    })
+    await executeDocxExport(workspace, undefined, 'deliverables/wide.docx', null, fakeNativeVisioExport({ visioAvailable: false }))
+
+    // Case B: 窄版心（大幅增加左右边距，如左 60mm, 右 60mm）
+    const formatB = await readDocxFormat(workspace)
+    await (await import('../src/docx-format-store.ts')).writeDocxFormat(workspace, null, {
+      ...formatB.state,
+      resolved: { ...formatB.state.resolved, 'page.left': 60, 'page.right': 60 },
+      userConfirmed: { ...formatB.state.userConfirmed, 'page.left': 60, 'page.right': 60 },
+    })
+    await executeDocxExport(workspace, undefined, 'deliverables/narrow.docx', null, fakeNativeVisioExport({ visioAvailable: false }))
+
+    const zipWide = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'wide.docx')))
+    const zipNarrow = await JSZip.loadAsync(await readFile(join(workspace.outputRoot, 'narrow.docx')))
+    const xmlWide = await zipWide.file('word/document.xml')?.async('string') ?? ''
+    const xmlNarrow = await zipNarrow.file('word/document.xml')?.async('string') ?? ''
+
+    const cxWide = Number(/<wp:extent cx="(\d+)"/u.exec(xmlWide)?.[1] ?? 0)
+    const cxNarrow = Number(/<wp:extent cx="(\d+)"/u.exec(xmlNarrow)?.[1] ?? 0)
+    expect(cxWide).toBeGreaterThan(0)
+    expect(cxNarrow).toBeGreaterThan(0)
+    expect(cxNarrow).toBeLessThan(cxWide)
   })
 })

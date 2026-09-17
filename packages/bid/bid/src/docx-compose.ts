@@ -354,7 +354,9 @@ function styleIds(styles: XmlNode): Set<string> {
 
 function mappedStyle(value: string, mapping: DocxFormatInterpretation['mapping'], available: Set<string>): string {
   const role = value === 'Title' ? 'title' : value === 'Normal' ? 'body'
-    : /^Heading[1-6]$/u.test(value) ? `heading${value.slice(7)}` as keyof typeof mapping : undefined
+    : value === 'DshFigureCaption' ? 'figureCaption'
+      : value === 'DshTableCaption' ? 'tableCaption'
+        : /^Heading[1-6]$/u.test(value) ? `heading${value.slice(7)}` as keyof typeof mapping : undefined
   const candidate = role === undefined ? undefined : mapping[role]
   return candidate !== undefined && available.has(candidate) ? candidate : value
 }

@@ -61,8 +61,10 @@ const estimateLabel = (value: BidPageEstimate | undefined): string => value?.sta
 const templateEstimateKey = (id: DocxTemplateId | null): string => id ?? 'default'
 
 /** 项目级模板库、冲突确认和样式预览。 */
-export function BidWordExport({ sessionId, useSessions, useProjection, getLibrary, getFormat, saveFormat,
-  uploadTemplate, preview, estimatePages, setEstimateTemplate, generate, download }: ConvViewProps & BidWordExportInjected) {
+export function BidWordExport({
+  sessionId, useSessions, useProjection, getLibrary, getFormat, saveFormat,
+  uploadTemplate, preview, estimatePages, setEstimateTemplate: _setEstimateTemplate, generate, download,
+}: ConvViewProps & BidWordExportInjected) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const [library, setLibrary] = useState<DocxTemplateLibraryView | null>(null)
@@ -76,23 +78,32 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
   const [formatVisible, setFormatVisible] = useState(false)
   const [activeConflict, setActiveConflict] = useState<FormatConflict | null>(null)
   const [selected, setSelected] = useState<FormatValue | undefined>()
+  const [savingConflict, setSavingConflict] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [exportFeedback, setExportFeedback] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
   const firstConflict = useRef<HTMLButtonElement | null>(null)
   const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.runtime.status === 'completed' && ['chapter_writing',
     'docx_export'].includes(projection.runtime.stage))
+
+  const triggerEstimate = useCallback((templateId: DocxTemplateId | null): void => {
+    void estimatePages(templateId).then((value) => {
+      setEstimates(current => new Map(current).set(templateEstimateKey(templateId), value))
+    }).catch(() => {})
+  }, [estimatePages])
 
   const loadTemplate = useCallback(async (
     templateId: DocxTemplateId | null,
     active: () => boolean = () => true,
   ): Promise<void> => {
-    const [next, rendered, estimate] = await Promise.all([getFormat(templateId), preview(templateId), estimatePages(templateId)])
+    const [next, rendered] = await Promise.all([getFormat(templateId), preview(templateId)])
     if (!active()) return
     setSelectedId(templateId)
     setView(next)
     setLibrary(next.library)
     setPreviewHtml(rendered.previewHtml ?? '')
-    setEstimates(current => new Map(current).set(templateEstimateKey(templateId), estimate))
     setFormatVisible(true)
-  }, [estimatePages, getFormat, preview])
+    triggerEstimate(templateId)
+  }, [getFormat, preview, triggerEstimate])
 
   useEffect(() => {
     if (!isBid) return
@@ -104,13 +115,12 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
       await loadTemplate(initial, () => !disposed)
       for (const template of next.templates) {
         if (template.id === initial) continue
-        void estimatePages(template.id).then((value) => {
-          if (!disposed) setEstimates(current => new Map(current).set(templateEstimateKey(template.id), value))
-        }).catch(() => {})
+        if (!disposed) triggerEstimate(template.id)
       }
+      if (initial !== null && !disposed) triggerEstimate(null)
     }).catch((reason: unknown) => { if (!disposed) setError(reason instanceof Error ? reason.message : 'Word 模板库读取失败。') })
     return () => { disposed = true }
-  }, [estimatePages, getLibrary, isBid, loadTemplate, sessionId])
+  }, [getLibrary, isBid, loadTemplate, sessionId, triggerEstimate])
   if (!isBid) return null
 
   const perform = (label: string, action: () => Promise<void>): void => {
@@ -125,11 +135,6 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
       setFormatVisible(false); setPreviewHtml(''); setActiveConflict(null)
       await loadTemplate(templateId)
     })
-  }
-  const refreshPreviewAndEstimate = async (templateId: DocxTemplateId | null): Promise<void> => {
-    const [rendered, estimate] = await Promise.all([preview(templateId), estimatePages(templateId)])
-    setPreviewHtml(rendered.previewHtml ?? '')
-    setEstimates(current => new Map(current).set(templateEstimateKey(templateId), estimate))
   }
   const unresolved = view?.state.conflicts.filter(conflict => conflict.status === 'conflict') ?? []
   const otherConflicts = unresolved.filter(conflict => !SUMMARY_KEYS.has(conflict.key))
@@ -149,16 +154,40 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
   }
 
   return <section className={css.root} aria-label="导出 Word" data-conversation-composer-overlay="">
-    <header className={css.header}><strong>导出 Word</strong>
-      <Button variant="primary" size="sm" disabled={!ready || !view || !formatVisible || Boolean(busy)} onClick={() => {
+    <header className={css.header}>
+      <div className={css.headerTitleRow}>
+        <strong>导出 Word</strong>
+        {exportFeedback && (
+          <span
+            role="status"
+            className={exportFeedback.status === 'success' ? css.exportFeedbackSuccess : css.exportFeedbackError}
+          >
+            {exportFeedback.text}
+          </span>
+        )}
+      </div>
+      <Button variant="primary" size="sm" disabled={!ready || !view || !formatVisible || Boolean(busy) || uploading} onClick={() => {
         if (unresolved.length) {
-          setError(`当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`); firstConflict.current?.focus(); return
+          const message = `当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`
+          setError(message)
+          setExportFeedback({ status: 'error', text: message })
+          firstConflict.current?.focus()
+          return
         }
+        setExportFeedback(null)
         perform('正在导出 Word…', async () => {
-          const result = await generate(selectedId)
-          await download(selectedId)
-          setView(await getFormat(selectedId))
-          setStatus(result.warnings?.map(warning => warning.message).join('；') || 'Word 导出完成')
+          try {
+            const result = await generate(selectedId)
+            await download(selectedId)
+            setView(await getFormat(selectedId))
+            const message = result.warnings?.map(warning => warning.message).join('；') || 'Word 导出完成'
+            setStatus(message)
+            setExportFeedback({ status: 'success', text: message })
+          } catch (reason: unknown) {
+            const message = reason instanceof Error ? reason.message : 'Word 导出失败，请重试。'
+            setExportFeedback({ status: 'error', text: message })
+            throw reason
+          }
         })
       }}>导出 Word</Button>
     </header>
@@ -166,7 +195,58 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
       <div className={css.left}>
         <section className={css.templateLibrary} aria-label="Word 模板">
           <h2>Word 模板</h2>
-          <p>模板只提供解析后的排版格式，不会进入招标资料库，也不保证复刻复杂封面、Logo 或多分节结构。</p>
+          <div className={css.actionGroup}>
+            <label
+              className={`${css.uploadTrigger} ${uploading || Boolean(busy) ? css.uploadTriggerDisabled : ''}`}
+              title={uploading ? '正在上传模板…' : '上传新模板'}
+              onClick={(event) => {
+                if (uploading || Boolean(busy)) {
+                  event.preventDefault()
+                }
+              }}
+            >
+              {uploading ? (
+                <span className={css.uploadSpinner} aria-hidden="true" />
+              ) : (
+                <IconPlusOutline16 size={14} className={css.uploadIcon} />
+              )}
+              <strong>{uploading ? '正在上传模板…' : '上传新模板'}</strong>
+              <input
+                aria-label="上传 Word 模板"
+                className={css.hiddenFileInput}
+                type="file"
+                accept=".docx"
+                disabled={uploading || Boolean(busy)}
+                onClick={(event) => {
+                  if (uploading || Boolean(busy)) {
+                    event.preventDefault()
+                    return
+                  }
+                  event.currentTarget.value = ''
+                }}
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (!file || !library || uploading || Boolean(busy)) return
+                  setUploading(true)
+                  perform('正在解析模板…', async () => {
+                    try {
+                      if (file.size > templateMaxBytes) throw new Error(`模板文件不能超过 ${String(templateMaxMiB)} MiB。`)
+                      const next = await uploadTemplate(file, library.revision)
+                      setLibrary(next.library); setSelectedId(next.templateId); setView(next)
+                      setFormatVisible(true); setActiveConflict(null)
+                      const rendered = await preview(next.templateId)
+                      setPreviewHtml(rendered.previewHtml ?? '')
+                      triggerEstimate(next.templateId)
+                      setStatus(next.warnings.find(warning => warning.startsWith('模板解析完成；自动格式解释未应用')) ?? '模板已加入项目模板库')
+                    } finally {
+                      setUploading(false)
+                    }
+                  })
+                }}
+              />
+            </label>
+            <span className={css.uploadHint}>选择 .docx 文件（最多 {templateMaxMiB} MiB）</span>
+          </div>
           <label className={`${css.templateOption} ${selectedId === null ? css.templateOptionSelected : ''}`}>
             <input type="radio" name="word-template" checked={selectedId === null} onChange={() => { choose(null) }}/>
             <div className={css.templateInfo}>
@@ -200,38 +280,10 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
               </label>
             )
           })}
-          <div className={css.templateActions}>
-            <div className={css.actionGroup}>
-              <label className={css.uploadTrigger} title="上传新模板">
-                <IconPlusOutline16 size={14} className={css.uploadIcon} />
-                <strong>上传新模板</strong>
-                <input aria-label="上传 Word 模板" className={css.hiddenFileInput} type="file" accept=".docx" disabled={Boolean(busy)} onClick={(event) => {
-                  event.currentTarget.value = ''
-                }} onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (!file || !library) return
-                  perform('正在解析模板…', async () => {
-                    if (file.size > templateMaxBytes) throw new Error(`模板文件不能超过 ${String(templateMaxMiB)} MiB。`)
-                    const next = await uploadTemplate(file, library.revision)
-                    setLibrary(next.library); setSelectedId(next.templateId); setView(next); setFormatVisible(true); setActiveConflict(null)
-                    await refreshPreviewAndEstimate(next.templateId)
-                    setStatus(next.warnings.find(warning => warning.startsWith('模板解析完成；自动格式解释未应用')) ?? '模板已加入项目模板库')
-                  })
-                }}/>
-              </label>
-              <span className={css.uploadHint}>选择 .docx 文件（最多 {templateMaxMiB} MiB）</span>
-            </div>
-            {library && library.estimateTemplateId !== selectedId && <Button size="sm" variant="outline" disabled={Boolean(busy)} onClick={() => {
-              perform('正在设置页数基准…', async () => {
-                const next = await setEstimateTemplate(selectedId, library.revision)
-                setLibrary(next); setView(current => current === null ? null : { ...current, library: next }); setStatus('已设为 S5 页数基准模板')
-              })
-            }}>设为页数基准模板</Button>}
-          </div>
         </section>
-        <p role="status" className={css.status}>{busy || status || [
-          estimateLabel(estimates.get(templateEstimateKey(selectedId))), partialExportMessage,
-        ].filter(Boolean).join('；')}</p>
+        {(busy || status || partialExportMessage) && (
+          <p role="status" className={css.status}>{busy || status || partialExportMessage}</p>
+        )}
         {error && <p role="alert" className={css.error}>{error}</p>}
         {formatVisible && view && <table className={css.summary}>
           <caption>当前模板主要格式</caption>
@@ -268,12 +320,25 @@ export function BidWordExport({ sessionId, useSessions, useProjection, getLibrar
         return <label key={`${typeof option}:${String(option)}`}><input type="radio" name="word-conflict" checked={selected !== undefined && sameValue(selected, option)} onChange={() => { setSelected(option) }}/>
           <span>{displayValue(option)}<small>来源：{sources.join('、')}</small></span></label>
       })}
-      <div className={css.dialogActions}><Button onClick={() => { setActiveConflict(null) }}>取消</Button><Button variant="primary" disabled={selected === undefined || !view || Boolean(busy)} onClick={() => {
-        if (selected === undefined || !view) return
-        perform('正在确认格式…', async () => {
-          const next = await saveFormat(selectedId, { revision: view.state.revision,
-            userConfirmed: { ...view.state.userConfirmed, [activeConflict.key]: selected } })
-          setView(next); setLibrary(next.library); setActiveConflict(null); await refreshPreviewAndEstimate(selectedId); setStatus('格式已确认')
+      <div className={css.dialogActions}><Button onClick={() => { setActiveConflict(null) }}>取消</Button><Button variant="primary" disabled={selected === undefined || !view || savingConflict} onClick={() => {
+        if (selected === undefined || !view || savingConflict) return
+        setSavingConflict(true)
+        setError('')
+        void saveFormat(selectedId, {
+          revision: view.state.revision,
+          userConfirmed: { ...view.state.userConfirmed, [activeConflict.key]: selected },
+        }).then(async (next) => {
+          setView(next)
+          setLibrary(next.library)
+          setActiveConflict(null)
+          setStatus('格式已确认')
+          void preview(selectedId).then((rendered) => {
+            setPreviewHtml(rendered.previewHtml ?? '')
+          }).catch(() => {})
+        }).catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : '操作失败，请重试。')
+        }).finally(() => {
+          setSavingConflict(false)
         })
       }}>确认</Button></div>
     </div></div>}
