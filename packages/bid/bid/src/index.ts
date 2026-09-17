@@ -85,8 +85,15 @@ import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-e
 import { parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
-import { validateFlowchartSpec } from './flowchart.ts'
-import { createNativeVisioExport, extractFlowchartSpecs, flowchartPlaceholder, VISIO_RUNTIME_UNAVAILABLE, WORD_RUNTIME_UNAVAILABLE, type NativeVisioExport } from './native-visio.ts'
+import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
+import {
+  createNativeVisioExport,
+  detectFlowchartExportEnvironment,
+  extractFlowchartSpecs,
+  flowchartPlaceholder,
+  type FlowchartExportMode,
+  type NativeVisioExport,
+} from './native-visio.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -315,8 +322,17 @@ export {
 } from './chapter-writing-executor.ts'
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
-export { assessDocxExportPageTarget, executeDocxExport, validateDocxExport } from './docx-export.ts'
-export { createNativeVisioExport, flowchartPlaceholder, type NativeVisioExport, type VisioBackend, type VisioDiagramResult, type WordVisioEmbedder } from './native-visio.ts'
+export {
+  createNativeVisioExport,
+  detectFlowchartExportEnvironment,
+  flowchartPlaceholder,
+  type FlowchartExportEnvironment,
+  type FlowchartExportMode,
+  type NativeVisioExport,
+  type VisioBackend,
+  type VisioDiagramResult,
+  type WordVisioEmbedder,
+} from './native-visio.ts'
 export { registerBidRuntimeProjection } from './projection.ts'
 export { readBidProjectState, writeBidProjectState, checkpointBidProjectState } from './project-state.ts'
 export type { BidProjectState } from './project-state.ts'
@@ -4374,10 +4390,15 @@ export class BidHostRuntime extends TypertRemoteService {
       const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
+      const formatView = await readDocxFormat(workspace, templateId)
+      const exportReportWarnings = formatView.state.lastExport?.summary ? [{
+        code: formatView.state.lastExport.mode === 'editable' ? 'DOCX_EXPORT_MODE_EDITABLE' : 'DOCX_EXPORT_MODE_FALLBACK',
+        message: formatView.state.lastExport.summary,
+      }] : []
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
         message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
-      }, ...await assessDocxExportPageTarget(workspace, templateId)]
+      }, ...exportReportWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
     try {
@@ -5816,6 +5837,9 @@ export class BidWorkspace {
     let finalBytes: Buffer
     let assetHash: string
     const nativeFlowchartFiles: Array<{ path: string; bytes: Buffer }> = []
+    let exportMode: FlowchartExportMode | undefined
+    let exportReasons: readonly string[] | undefined
+    let exportSummary: string | undefined
     if (flowcharts.length === 0) {
       const rendered = view.templateId === null
         ? await renderDocx(this, markdown, view.state.resolved)
@@ -5826,35 +5850,56 @@ export class BidWorkspace {
       assetHash = rendered.assetHash
     } else {
       const office = nativeExport ?? createNativeVisioExport()
-      if (!(await office.visio.isAvailable())) throw new Error(`${VISIO_RUNTIME_UNAVAILABLE}: 当前环境未检测到 Microsoft Visio，无法生成 Word 内可编辑流程图。`)
-      if (!(await office.word.isAvailable())) throw new Error(`${WORD_RUNTIME_UNAVAILABLE}: 当前环境未检测到 Microsoft Word，无法嵌入 Visio 对象。`)
-      const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-visio-export-'))
-      try {
-        const replacements: Array<{ placeholder: string; visioPath: string }> = []
+      const env = await detectFlowchartExportEnvironment(office)
+      exportMode = env.mode
+      exportReasons = env.reasons
+      exportSummary = env.summary
+      if (env.mode === 'editable') {
+        const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-visio-export-'))
+        try {
+          const replacements: Array<{ placeholder: string; visioPath: string }> = []
+          for (const flowchart of flowcharts) {
+            const visioPath = resolve(temporaryRoot, `${flowchart.id}.vsdx`)
+            await office.visio.createDiagram(flowchart, visioPath)
+            nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
+            replacements.push({ placeholder: flowchartPlaceholder(flowchart), visioPath })
+          }
+          const rendered = view.templateId === null
+            ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'visio-placeholder')
+            : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
+              view.state.resolved, view.state.modelInterpreted.mapping, 'visio-placeholder')
+          const temporaryDocx = resolve(temporaryRoot, 'rendered.docx')
+          await writeFile(temporaryDocx, rendered.bytes, { flag: 'wx' })
+          await office.word.embed(temporaryDocx, replacements)
+          const embeddedCount = await office.word.countVisioObjects(temporaryDocx)
+          if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
+          finalBytes = await readFile(temporaryDocx)
+          assetHash = rendered.assetHash
+        } finally {
+          await rm(temporaryRoot, { recursive: true, force: true })
+        }
+        await readDocxXml(finalBytes)
+      } else {
         for (const flowchart of flowcharts) {
-          const visioPath = resolve(temporaryRoot, `${flowchart.id}.vsdx`)
-          await office.visio.createDiagram(flowchart, visioPath)
-          nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
-          replacements.push({ placeholder: flowchartPlaceholder(flowchart), visioPath })
+          const renderedSvg = renderFlowchartSvg(flowchart)
+          nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.svg`, bytes: Buffer.from(renderedSvg.svg, 'utf8') })
+          nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.json`, bytes: Buffer.from(JSON.stringify(flowchart, null, 2), 'utf8') })
         }
         const rendered = view.templateId === null
-          ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'visio-placeholder')
+          ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'svg')
           : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
-            view.state.resolved, view.state.modelInterpreted.mapping, 'visio-placeholder')
-        const temporaryDocx = resolve(temporaryRoot, 'rendered.docx')
-        await writeFile(temporaryDocx, rendered.bytes, { flag: 'wx' })
-        await office.word.embed(temporaryDocx, replacements)
-        const embeddedCount = await office.word.countVisioObjects(temporaryDocx)
-        if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
-        finalBytes = await readFile(temporaryDocx)
+            view.state.resolved, view.state.modelInterpreted.mapping, 'svg')
+        finalBytes = rendered.bytes
+        await readDocxXml(finalBytes)
         assetHash = rendered.assetHash
-      } finally {
-        await rm(temporaryRoot, { recursive: true, force: true })
       }
-      await readDocxXml(finalBytes)
     }
     const nextFormat = { ...view.state,
-      lastExport: { path: destination, fingerprint: docxFingerprint(markdown, view, assetHash) },
+      lastExport: {
+        path: destination,
+        fingerprint: docxFingerprint(markdown, view, assetHash),
+        ...(exportMode !== undefined ? { mode: exportMode, reasons: exportReasons, summary: exportSummary } : {}),
+      },
     }
     if (commits === undefined) {
       await publishBidBatch(this.root, this.projectRoot, async (lease) => {

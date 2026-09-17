@@ -133,10 +133,15 @@ export interface DocxFormatState {
   conflicts: FormatConflict[]
   resolved: FormatValues
   userConfirmed: FormatValues
-  lastExport?: {
-    path: string
-    fingerprint: string
-  } | undefined
+  lastExport?: DocxLastExport | undefined
+}
+/** 最近一次 Word 导出的状态记录。 */
+export interface DocxLastExport {
+  path: string
+  fingerprint: string
+  mode?: 'editable' | 'image_fallback' | undefined
+  reasons?: readonly string[] | undefined
+  summary?: string | undefined
 }
 /** 解析及确认结果；浏览器和 DOCX 生成器只读取 values 指向的 resolved。 */
 export interface DocxFormatCoreView {
