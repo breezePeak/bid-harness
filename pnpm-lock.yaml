@@ -975,6 +975,9 @@ importers:
       pdfjs-dist:
         specifier: ^5.4.530
         version: 5.7.284
+      sharp:
+        specifier: ^0.35.3
+        version: 0.35.3(@types/node@22.20.0)
       word-extractor:
         specifier: 1.0.4
         version: 1.0.4

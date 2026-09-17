@@ -233,7 +233,7 @@ export function resolveCaptionNumbering(values: FormatValues): Array<{
       text: `${String(values[`${role}.numbering.prefix`])}${String(values[`${role}.numbering.prefixIndexSeparator`])}%1${String(values[`${role}.numbering.indexTitleSeparator`])}`,
       start: 1,
       suffix: 'nothing',
-      alignment: 'left',
+      alignment: values[`${role}.alignment`] === 'center' ? 'center' : 'left',
     },
   }))
 }

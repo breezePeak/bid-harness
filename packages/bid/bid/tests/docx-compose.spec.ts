@@ -122,4 +122,57 @@ describe('DOCX 模板合成', () => {
     expect(document).not.toContain('响应表')
     expect(document).toContain('技术偏离表')
   })
+
+  it('渲染流程图时图片在图题之前且图题使用 DshFigureCaption，无重复编号', async () => {
+    const original = await template(false)
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const spec = {
+      type: 'flowchart' as const,
+      schema_version: 1 as const,
+      id: 'FLOW-SEC-1-1',
+      title: '项目实施组织架构图',
+      direction: 'TB' as const,
+      nodes: [
+        { id: 'N1', type: 'start' as const, text: '启动' },
+        { id: 'N2', type: 'end' as const, text: '结束' },
+      ],
+      edges: [{ from: 'N1', to: 'N2' }],
+    }
+    const markdown = `# 技术标\n\n\`\`\`flowchart\n${JSON.stringify(spec)}\n\`\`\`\n`
+    const result = await composeDocxFromTemplate(project, original, markdown, values)
+    const zip = await JSZip.loadAsync(result.bytes)
+    const document = await zip.file('word/document.xml')!.async('string')
+    const imagePos = document.indexOf('<w:drawing>')
+    const captionPos = document.indexOf('<w:pStyle w:val="DshFigureCaption"/>')
+    expect(imagePos).toBeGreaterThan(-1)
+    expect(captionPos).toBeGreaterThan(-1)
+    expect(imagePos).toBeLessThan(captionPos)
+    expect(document).toContain('项目实施组织架构图')
+    expect(document).not.toContain('图 1 项目实施组织架构图')
+  })
+
+  it('模板合成时在 styles.xml 中补齐 DshFigureCaption 与 DshTableCaption', async () => {
+    const original = await template(false)
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const spec = {
+      type: 'flowchart' as const,
+      schema_version: 1 as const,
+      id: 'FLOW-SEC-1-1',
+      title: '测试图',
+      direction: 'TB' as const,
+      nodes: [
+        { id: 'N1', type: 'start' as const, text: '启动' },
+        { id: 'N2', type: 'end' as const, text: '结束' },
+      ],
+      edges: [{ from: 'N1', to: 'N2' }],
+    }
+    const markdown = `# 技术标\n\n\`\`\`flowchart\n${JSON.stringify(spec)}\n\`\`\`\n\n表 测试表\n\n| 列 |\n| --- |\n| 内容 |\n`
+    const result = await composeDocxFromTemplate(project, original, markdown, values)
+    const zip = await JSZip.loadAsync(result.bytes)
+    const styles = await zip.file('word/styles.xml')!.async('string')
+    expect(styles).toContain('DshFigureCaption')
+    expect(styles).toContain('DshTableCaption')
+  })
 })

@@ -25,7 +25,8 @@ import type { FormatValues } from './docx-format-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { within, assertNoLinkedPath } from './workspace-path.ts'
 import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, parseTableCaption, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
-import { flowchartPlaceholder, renderFlowchartSvg, type FlowchartSpec } from './flowchart.ts'
+import { flowchartPlaceholder, type FlowchartSpec } from './flowchart.ts'
+import { renderFlowchartImage } from './flowchart-image.ts'
 type Node = {
   type: string
   value?: string | undefined
@@ -44,7 +45,6 @@ type Node = {
     }
   } | undefined
 }
-const SVG_FALLBACK_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/Scx9WQAAAABJRU5ErkJggg==', 'base64')
 const escape = (value: string): string => value.replaceAll('&',
   '&amp;').replaceAll('<',
   '&lt;').replaceAll('>',
@@ -199,6 +199,8 @@ export async function renderDocx(
   const definitions = new Map(root.children.filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const num = (key: string): number => Number(values[key])
   const str = (key: string): string => String(values[key])
+  const page: readonly [number, number] = pageBasis === 'a4' ? [210, 297]
+    : values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
   const run = (role: string): IRunOptions => ({ font: { eastAsia: str(`${role}.font`),
     ascii: str(`${role}.latinFont`),
     hAnsi: str(`${role}.latinFont`) },
@@ -208,9 +210,11 @@ export async function renderDocx(
   bold: Boolean(values[`${role}.bold`]) })
   const paragraph = (role: string): IParagraphOptions => ({
     alignment: str(`${role}.alignment`) as 'left' | 'center' | 'right' | 'both',
-    indent: values[`${role}.firstLineUnit`] === 'chars'
-      ? { firstLineChars: Math.round(num(`${role}.firstLine`) * 100) }
-      : { firstLine: mm(num(`${role}.firstLine`)) },
+    indent: num(`${role}.firstLine`) === 0
+      ? { firstLine: 0, firstLineChars: 0 }
+      : values[`${role}.firstLineUnit`] === 'chars'
+        ? { firstLineChars: Math.round(num(`${role}.firstLine`) * 100) }
+        : { firstLine: mm(num(`${role}.firstLine`)) },
     spacing: { before: num(`${role}.before`) * 20,
       after: num(`${role}.after`) * 20,
       line: num(`${role}.line`) * (values[`${role}.lineRule`] === 'auto' ? 240 : 20),
@@ -280,7 +284,7 @@ export async function renderDocx(
     }
     return { runs, html: html.join('') }
   }
-  async function blocks(nodes: Node[], level = 0, listPrefix = ''): Promise<{
+  async function blocks(nodes: Node[], level = 0, listPrefix = '', sectionLandscape = false): Promise<{
     doc: (Paragraph | Table)[]
     html: string
   }> {
@@ -291,20 +295,26 @@ export async function renderDocx(
       if (node.type === 'code' && node.lang === 'flowchart') {
         let spec: FlowchartSpec
         try { spec = JSON.parse(node.value ?? '') as FlowchartSpec } catch { throw new Error('流程图数据不是有效 JSON。') }
-        const rendered = renderFlowchartSvg(spec)
-        const ratio = Math.min(1, 500 / rendered.width, 700 / rendered.height)
+        const rendered = await renderFlowchartImage(spec)
+        const isLandscape = pageBasis !== 'a4' && (sectionLandscape || str('page.orientation') === 'landscape')
+        const pageWidthMm = isLandscape ? page[1] : page[0]
+        const maxContentWidthPx = Math.max(0, (pageWidthMm - num('page.left') - num('page.right')) * 96 / 25.4)
+        const ratio = Math.min(1, maxContentWidthPx / rendered.width)
         const caption = numberCaption('figureCaption')
-        doc.push(new Paragraph({ ...paragraph('figureCaption'), keepNext: true,
-          numbering: { reference: 'dsh-figureCaption', level: 0 },
-          children: [new TextRun({ ...run('figureCaption'), text: `${caption}${spec.title}` })] }))
         doc.push(flowchartMode === 'visio-placeholder'
-          ? new Paragraph({ ...paragraph('body'), alignment: 'center', keepLines: true,
+          ? new Paragraph({ ...paragraph('body'), alignment: 'center', keepLines: true, keepNext: true,
             children: [new TextRun({ ...run('body'), text: flowchartPlaceholder(spec), size: 2, color: 'FFFFFF' })] })
-          : new Paragraph({ ...paragraph('figureCaption'), alignment: 'center', keepLines: true,
-            children: [new ImageRun({ type: 'svg', data: Buffer.from(rendered.svg), fallback: { type: 'png', data: SVG_FALLBACK_PNG },
-              transformation: { width: rendered.width * ratio, height: rendered.height * ratio },
-              altText: { name: spec.title, title: spec.title, description: spec.purpose ?? spec.title } })] }))
-        html.push(`<figure><figcaption style="${style('figureCaption')}">${escape(caption)}${escape(spec.title)}</figcaption>${rendered.svg}</figure>`)
+          : new Paragraph({ ...paragraph('figureCaption'), alignment: 'center', keepLines: true, keepNext: true,
+            children: [new ImageRun({
+              type: 'png',
+              data: rendered.png,
+              transformation: { width: Math.round(rendered.width * ratio), height: Math.round(rendered.height * ratio) },
+              altText: { name: spec.title, title: spec.title, description: spec.purpose ?? spec.title },
+            })] }))
+        doc.push(new Paragraph({ ...paragraph('figureCaption'), style: 'DshFigureCaption',
+          numbering: { reference: 'dsh-figureCaption', level: 0 },
+          children: [new TextRun({ ...run('figureCaption'), text: spec.title })] }))
+        html.push(`<figure>${rendered.svg}<figcaption style="${style('figureCaption')}">${escape(caption)}${escape(spec.title)}</figcaption></figure>`)
         continue
       }
       if (node.type === 'heading' || node.type === 'paragraph' || node.type === 'code') {
@@ -342,7 +352,7 @@ export async function renderDocx(
           ...(node.type === 'heading' && !numberedHeading ? { numbering: false } : {}),
           ...(numberedHeading && headingLevels.length ? { numbering: headingNumbering((node.depth ?? 1) - 1) } : {}),
           ...(numberedCaption ? { numbering: { reference: `dsh-${role}`, level: 0 },
-            ...(role === 'tableCaption' ? { style: 'DshTableCaption' } : {}),
+            style: role === 'tableCaption' ? 'DshTableCaption' : 'DshFigureCaption',
             ...(role === 'tableCaption' && nodes[index + 1]?.type === 'table' ? { keepNext: true } : {}) } : {}),
           children: [...(prefix ? [new TextRun({ ...run(role),
             text: prefix })] : []),
@@ -406,7 +416,7 @@ export async function renderDocx(
   }
   const renderedSections: Array<{ landscape: boolean; doc: (Paragraph | Table)[]; html: string }> = []
   for (const section of pageBasis === 'a4' ? [{ landscape: false, nodes: root.children }] : splitDocumentSections(root.children))
-    renderedSections.push({ landscape: section.landscape, ...await blocks(section.nodes) })
+    renderedSections.push({ landscape: section.landscape, ...await blocks(section.nodes, 0, '', section.landscape) })
   let html = renderedSections.map(section => section.html).join('')
   if (preview) {
     const all: Node[] = []
@@ -437,8 +447,6 @@ export async function renderDocx(
   const title = root.children[0]?.type === 'heading' ? content(root.children[0]) : ''
   const headerText = str('header.text') || title, footerText = str('footer.text')
   const pageNumber = str('footer.pageNumber')
-  const page = pageBasis === 'a4' ? [210, 297]
-    : values['page.paper'] === 'A3' ? [297, 420] : values['page.paper'] === 'Letter' ? [215.9, 279.4] : [210, 297]
   const document = new Document({ numbering: { config: [...(headingLevels.length ? headingConfigs.map(({ reference, levels }) => ({
     reference,
     levels: levels.map(level => ({ ...level,
@@ -455,9 +463,10 @@ export async function renderDocx(
     { id: 'Normal', name: 'Normal', run: run('body'), paragraph: paragraph('body') },
     { id: 'DshHeadingBase', name: '标题基准', run: run('body') },
     { id: 'DshTableCaption', name: '表题', run: run('tableCaption'), paragraph: paragraph('tableCaption') },
+    { id: 'DshFigureCaption', name: '图题', run: run('figureCaption'), paragraph: paragraph('figureCaption') },
   ] }, sections: renderedSections.map((section, index) => ({
-    properties: { ...(index === 0 ? {} : { type: SectionType.NEXT_PAGE }), page: { size: { width: mm(page[0] as number),
-      height: mm(page[1] as number),
+    properties: { ...(index === 0 ? {} : { type: SectionType.NEXT_PAGE }), page: { size: { width: mm(page[0]),
+      height: mm(page[1]),
       orientation: pageBasis === 'a4' ? 'portrait'
         : section.landscape ? 'landscape' : str('page.orientation') as 'portrait' | 'landscape' },
     margin: Object.fromEntries(['top',

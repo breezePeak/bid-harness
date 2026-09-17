@@ -251,7 +251,9 @@ describe('Word 导出页面', () => {
 
   it('模板文件仍通过独立二进制请求发送', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
-    const ctx = { effect: (factory: () => unknown) => factory(), conversationEvents: { register: vi.fn(() => () => {}) }, locale: { register: vi.fn(() => () => {}) },
+    const ctx = {
+      effect: (factory: () => unknown) => factory(),
+      conversationEvents: { register: vi.fn(() => () => {}) }, locale: { register: vi.fn(() => () => {}) },
       conversation: { blocks: { set: vi.fn() }, submitHandlers: { register: vi.fn() } }, remote: { bid: {} },
       sessions: { scope: () => undefined },
       slots: { inject: vi.fn((_name: string, factory: () => unknown) => factory()), register } } as unknown as ClientContext
@@ -301,5 +303,109 @@ describe('Word 导出页面', () => {
     expect(screen.getByLabelText('其他格式冲突')).toBeDefined()
     expect(screen.getByTitle('Word 效果预览')).toBeDefined()
     expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', false)
+  })
+
+  it('确认格式冲突时不重新触发页数测算且不阻塞连续确认', async () => {
+    const conflicts: FormatConflict[] = [
+      { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
+        { key: 'tableCaption.size', value: 12, source: 'template_instruction' },
+        { key: 'tableCaption.size', value: 16, source: 'named_style' },
+      ] },
+      { key: 'heading3.bold', resolvedValue: true, status: 'conflict', evidence: [
+        { key: 'heading3.bold', value: true, source: 'direct_format' },
+        { key: 'heading3.bold', value: false, source: 'named_style' },
+      ] },
+    ]
+    const { props, actions } = fixture(conflicts)
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+    const initialEstimateCalls = vi.mocked(actions.estimatePages).mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: '小四（12pt）' }))
+    const firstDialog = screen.getByRole('dialog')
+    fireEvent.click(within(firstDialog).getByRole('radio', { name: /16/u }))
+    fireEvent.click(within(firstDialog).getByRole('button', { name: '确认' }))
+    await screen.findByText('格式已确认')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(vi.mocked(actions.estimatePages).mock.calls.length).toBe(initialEstimateCalls)
+
+    const secondConflictButton = screen.getByRole('button', { name: 'heading3.bold：是' })
+    fireEvent.click(secondConflictButton)
+    const secondDialog = screen.getByRole('dialog')
+    const confirmButton = within(secondDialog).getByRole('button', { name: '确认' })
+    expect(confirmButton).toHaveProperty('disabled', false)
+    fireEvent.click(confirmButton)
+    await screen.findByText('格式已确认')
+  })
+
+  it('页数测算未完成时不阻碍直接导出 Word', async () => {
+    const { props, actions } = fixture()
+    vi.mocked(actions.estimatePages).mockImplementation(() => new Promise(() => {}))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+    const exportButton = screen.getByRole('button', { name: '导出 Word' })
+    expect(exportButton).toHaveProperty('disabled', false)
+    fireEvent.click(exportButton)
+    await screen.findByText('Word 导出完成')
+    expect(actions.generate).toHaveBeenCalledOnce()
+  })
+
+  it('上传按钮位于模板列表前且不显示冗余说明，上传过程中呈现加载效果与禁用状态', async () => {
+    const { props, actions } = fixture()
+    let finishUpload: (view: DocxFormatView) => void = () => {}
+    vi.mocked(actions.uploadTemplate).mockImplementationOnce(async () => new Promise((resolve) => { finishUpload = resolve }))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    expect(screen.queryByText(/模板只提供解析后的排版格式/u)).toBeNull()
+    const uploadInput = screen.getByLabelText('上传 Word 模板')
+    const uploadTrigger = uploadInput.closest('label')
+    expect(uploadTrigger).not.toBeNull()
+    expect(uploadTrigger?.textContent).toContain('上传新模板')
+
+    const file = new File([Uint8Array.of(1, 2, 3)], '新模板.docx')
+    fireEvent.change(uploadInput, { target: { files: [file] } })
+
+    expect(uploadTrigger?.className).toContain('uploadTriggerDisabled')
+    expect(uploadTrigger?.textContent).toContain('正在上传模板…')
+    expect(uploadInput).toHaveProperty('disabled', true)
+
+    finishUpload(await actions.getFormat('b'.repeat(64) as DocxTemplateId))
+    await waitFor(() => {
+      expect(uploadInput).toHaveProperty('disabled', false)
+      expect(uploadTrigger?.textContent).toContain('上传新模板')
+    })
+  })
+
+  it('导出完成后降级等提示展示在“导出 Word”标题后方且成功为绿色', async () => {
+    const { props, actions } = fixture()
+    const downgradeMsg = 'Visio 不可用，流程图已自动降级为图片模式导出；缺失正文的章节已标注。'
+    vi.mocked(actions.generate).mockResolvedValueOnce({
+      path: 'output/bid.docx',
+      warnings: [{ code: 'DOCX_EXPORT_MODE_FALLBACK', message: downgradeMsg }],
+    })
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    const exportButton = screen.getByRole('button', { name: '导出 Word' })
+    fireEvent.click(exportButton)
+
+    const feedback = await screen.findByText(downgradeMsg)
+    expect(feedback.closest('header')).not.toBeNull()
+    expect(feedback.className).toContain('exportFeedbackSuccess')
+  })
+
+  it('导出失败时错误提示展示在“导出 Word”标题后方且失败为红色', async () => {
+    const { props, actions } = fixture()
+    vi.mocked(actions.generate).mockRejectedValueOnce(new Error('生成 Word 异常：IO 错误'))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    const exportButton = screen.getByRole('button', { name: '导出 Word' })
+    fireEvent.click(exportButton)
+
+    const feedback = await screen.findByText('生成 Word 异常：IO 错误')
+    expect(feedback.closest('header')).not.toBeNull()
+    expect(feedback.className).toContain('exportFeedbackError')
   })
 })
