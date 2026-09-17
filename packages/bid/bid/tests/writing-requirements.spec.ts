@@ -24,6 +24,8 @@ function inputFixture(): WritingPlanInput {
   const plan = writingPlanFixture(outlineFixture())
   return {
     update_kind: 'initial',
+    writing_request_id: 'request-1',
+    attempt_id: 'attempt-1',
     user_message_refs: [firstRef],
     global_instructions: plan.global_instructions,
     document_acceptance: [],
@@ -73,9 +75,9 @@ describe('S5 通用写作任务契约', () => {
   it('Main Agent 只提交真实消息引用和语义契约，Host 字段不出现在工具输入中', () => {
     const prompt = renderStageInteractionPrompt('chapter_writing')
     expect(prompt).toContain('user_message_refs')
-    expect(prompt).toContain('ask_user_question')
-    expect(prompt).toContain('开始正文编写前，是否还有其他整体写作要求？')
-    expect(prompt).toContain('没有，开始编写')
+    expect(prompt).toContain('原生提问')
+    expect(prompt).toContain('writing_request_id')
+    expect(prompt).not.toContain('必须调用 ask_user_question')
     expect(prompt).toContain('global_instructions')
     expect(prompt).toContain('条件 ID、作用域、计划版本和执行状态由 Host 生成')
     expect(prompt).toContain('update_kind=patch')
@@ -95,6 +97,22 @@ describe('S5 通用写作任务契约', () => {
     const parsed = stageInteractionSchema.parse({ action: 'bid_confirm_writing_plan', ...input })
     expect(parsed).toMatchObject({ action: 'bid_confirm_writing_plan', user_message_refs: [] })
     expect(validateWritingPlanInput(input, outlineFixture())).toEqual([])
+  })
+
+  it('只把真实原生回答分类为授权或补充要求', async () => {
+    const { classifyWritingRequirementAnswer } = await import('../src/writing-requirements.ts')
+    expect(classifyWritingRequirementAnswer('request-1', {
+      answers: [{ id: 'request-1', selected: ['没有，开始编写'] }],
+    })).toEqual({ kind: 'no_additional_requirements', selected: ['没有，开始编写'] })
+    expect(classifyWritingRequirementAnswer('request-1', {
+      answers: [{ id: 'request-1', selected: [], custom: '正式语言\n重点展开质量控制。' }],
+    })).toEqual({ kind: 'custom', selected: [], custom: '正式语言\n重点展开质量控制。' })
+    expect(classifyWritingRequirementAnswer('request-1', {
+      answers: [{ id: 'request-1', selected: [] }],
+    })).toEqual({ kind: 'dismissed' })
+    expect(() => classifyWritingRequirementAnswer('other', {
+      answers: [{ id: 'request-1', selected: [] }],
+    })).toThrow('BID_WRITING_QUESTION_ANSWER_ID_MISMATCH')
   })
 
   it('不同自然语言要求使用同一任务与验收协议', () => {

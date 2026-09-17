@@ -244,6 +244,46 @@ async function fixture(options: { readonly realOrchestrator?: boolean; readonly 
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('S5 由 Host 在释放项目锁后建立原生写作要求问题并保存真实回答', async () => {
+    const { ctx, workspace, fresh, host, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+    const response = Promise.withResolvers<AskUserQuestionAnswer>()
+    let question: AskUserQuestionItem | undefined
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => {
+      question = questions[0]
+      return response.promise
+    })
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('s5-native-writing-question')
+      await expect(ctx.bid.requestWritingRequirements(agent.session)).resolves.toMatchObject({ ok: true })
+      await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
+      expect(question).toMatchObject({
+        question: '开始正文编写前，是否还有其他整体写作要求？',
+        options: [{ label: '没有，开始编写' }],
+        multiSelect: false,
+      })
+      expect(host.inFlight.size).toBe(0)
+      expect(executeStage).not.toHaveBeenCalled()
+      response.resolve({ answers: [{ id: question?.id ?? '', selected: [], custom: '正式语言\n重点展开质量控制。' }] })
+      await vi.waitFor(async () => {
+        const saved = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as {
+          state: string
+          answer?: { kind: string; custom?: string }
+        }
+        expect(saved.state).toBe('answered')
+        expect(saved.answer).toEqual(expect.objectContaining({ kind: 'custom', custom: '正式语言\n重点展开质量控制。' }))
+      })
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+      await agent.whenIdle()
+    } finally {
+      response.resolve({ answers: [{ id: question?.id ?? 'cancelled', selected: [] }] })
+      dispose()
+    }
+  })
+
   it('继承 Bid preset 与 cwd 的 live Subagent 不获得项目控制权', async () => {
     const { ctx, workspace, fresh, host } = await fixture()
     const main = await fresh('upload-main')

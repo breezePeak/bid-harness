@@ -145,24 +145,31 @@ describe('S4 Draft 最终确认', () => {
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
       expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
       expect(f.followup).not.toHaveBeenCalled()
-      await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
-      await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
-      expect(f.followup).toHaveBeenCalledOnce()
+      await vi.waitFor(async () => { await expect(f.read('chapters/writing-request.json')).resolves.toContain('request_id') })
+      expect(f.followup).not.toHaveBeenCalled()
       const writingRequest = JSON.parse(await f.read('chapters/writing-request.json')) as {
         schema_version: number
+        request_id: string
         confirmed_outline_sha256: string
-        prompt_event: { session_id: string; message_id: string; seq: number }
+        owner_session_id: string
+        attempt_id: string
+        state: string
       }
-      expect(writingRequest.schema_version).toBe(3)
+      expect(writingRequest.schema_version).toBe(1)
+      expect(writingRequest.request_id).toEqual(expect.any(String))
       expect(writingRequest.confirmed_outline_sha256).toMatch(/^[a-f0-9]{64}$/u)
-      await writeFile(join(f.workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify({
-        ...writingRequest, prompt_event: { ...writingRequest.prompt_event, session_id: 'stale-session' },
-      }))
-      f.followup.mockClear()
+      expect(writingRequest.owner_session_id).toBe(String(f.session.id))
+      expect(writingRequest.attempt_id).toEqual(expect.any(String))
+      expect(writingRequest.state).toBe('awaiting_answer')
+      await vi.waitFor(() => {
+        expect((f.host as unknown as { inFlight: Map<unknown, unknown> }).inFlight.size).toBe(0)
+      })
       await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
-      expect(f.followup).toHaveBeenCalledOnce()
+      expect(f.followup).not.toHaveBeenCalled()
       expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
-        prompt_event: { session_id: String(f.session.id) },
+        request_id: writingRequest.request_id,
+        owner_session_id: String(f.session.id),
+        state: 'awaiting_answer',
       })
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
       const s5Context = JSON.stringify(f.session.deriveMessages())
@@ -215,7 +222,7 @@ describe('S4 Draft 最终确认', () => {
 
       expect(result).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
       expect(f.followup).not.toHaveBeenCalled()
-      await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({ state: 'dismissed' })
       expect(JSON.parse(await f.read('chapters/writing-plan.json'))).toMatchObject({
         schema_version: 3,
         confirmed: true,
