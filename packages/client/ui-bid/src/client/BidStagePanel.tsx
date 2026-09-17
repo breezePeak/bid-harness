@@ -566,7 +566,8 @@ export function BidStagePanel({
   const canUpload = projection.allowedActions.includes('upload_files')
   const s5WaitingUser = isBidSession
     && projection.runtime.stage === 'chapter_writing'
-    && projection.runtime.status === 'waiting_user'
+    && projection.run === null
+    && (projection.runtime.status === 'waiting_user' || projection.runtime.status === 'pending')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -1218,7 +1219,7 @@ export function BidStagePanel({
           )}
           {s5WaitingUser && writingEntry !== null && writingEntry !== undefined && (
             <>
-              {writingEntry.phase === 'empty' && (
+              {projection.runtime.status === 'waiting_user' && writingEntry.phase === 'empty' && (
                 <>
                   <Button
                     size="sm"
@@ -1247,47 +1248,61 @@ export function BidStagePanel({
                 </>
               )}
               {writingEntry.phase === 'dismissed' && (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={requestPending !== null || requestWritingRequirements === undefined}
-                    onClick={() => {
-                      invoke('request_requirements', async () => {
-                        await requestWritingRequirements?.({ mode: 'reopen', expected: writingEntry.expected })
-                      })
-                    }}
-                  >
-                    {requestPending === 'request_requirements' ? t('status.running') : t('action.reopen_requirements')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={requestPending !== null || autoStartChapterWriting === undefined}
-                    onClick={() => {
-                      invoke('auto_start', async () => {
-                        await autoStartChapterWriting?.()
-                      })
-                    }}
-                  >
-                    {requestPending === 'auto_start' ? t('status.running') : t('action.auto_start_chapters')}
-                  </Button>
-                </>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={requestPending !== null || requestWritingRequirements === undefined}
+                  onClick={() => {
+                    invoke('request_requirements', async () => {
+                      await requestWritingRequirements?.({ mode: 'reopen', expected: writingEntry.expected })
+                    })
+                  }}
+                >
+                  {requestPending === 'request_requirements' ? t('status.running') : t('action.reopen_requirements')}
+                </Button>
               )}
               {writingEntry.phase === 'paused' && (
                 <>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={requestPending !== null || requestWritingRequirements === undefined}
-                    onClick={() => {
-                      invoke('resume_requirements', async () => {
-                        await requestWritingRequirements?.({ mode: 'resume', expected: writingEntry.expected })
-                      })
-                    }}
-                  >
-                    {requestPending === 'resume_requirements' ? t('status.running') : t('action.resume_requirements')}
-                  </Button>
+                  {writingEntry.has_plan ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={requestPending !== null || requestWritingRequirements === undefined}
+                      onClick={() => {
+                        invoke('resume_requirements', async () => {
+                          await requestWritingRequirements?.({ mode: 'resume', expected: writingEntry.expected })
+                        })
+                      }}
+                    >
+                      {requestPending === 'resume_requirements' ? t('status.running') : t('action.resume_plan')}
+                    </Button>
+                  ) : writingEntry.has_answer ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={requestPending !== null || requestWritingRequirements === undefined}
+                      onClick={() => {
+                        invoke('resume_requirements', async () => {
+                          await requestWritingRequirements?.({ mode: 'resume', expected: writingEntry.expected })
+                        })
+                      }}
+                    >
+                      {requestPending === 'resume_requirements' ? t('status.running') : t('action.resume_requirements')}
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={requestPending !== null || requestWritingRequirements === undefined}
+                      onClick={() => {
+                        invoke('request_requirements', async () => {
+                          await requestWritingRequirements?.({ mode: 'reopen', expected: writingEntry.expected })
+                        })
+                      }}
+                    >
+                      {requestPending === 'request_requirements' ? t('status.running') : t('action.reopen_requirements')}
+                    </Button>
+                  )}
                   {writingEntry.owner_session_id !== null
                     && writingEntry.owner_session_id !== String(sessionId) && (
                     <Button
@@ -1304,6 +1319,21 @@ export function BidStagePanel({
                     </Button>
                   )}
                 </>
+              )}
+              {writingEntry.phase === 'planning' && writingEntry.owner_session_id !== null
+                && writingEntry.owner_session_id !== String(sessionId) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={requestPending !== null || requestWritingRequirements === undefined}
+                  onClick={() => {
+                    invoke('takeover_requirements', async () => {
+                      await requestWritingRequirements?.({ mode: 'takeover', expected: writingEntry.expected })
+                    })
+                  }}
+                >
+                  {requestPending === 'takeover_requirements' ? t('status.running') : t('action.takeover_requirements')}
+                </Button>
               )}
               {writingEntry.phase === 'failed' && (
                 <>
@@ -1346,7 +1376,7 @@ export function BidStagePanel({
                     })
                   }}
                 >
-                  {requestPending === 'resume_requirements' ? t('status.running') : t('action.resume_requirements')}
+                  {requestPending === 'resume_requirements' ? t('status.running') : t('action.resume_plan')}
                 </Button>
               )}
               {writingEntry.answer_save_status === 'unconfirmed' && (
