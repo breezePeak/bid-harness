@@ -2934,7 +2934,26 @@ export class BidHostRuntime extends TypertRemoteService {
             issues,
           }
         })
+        const taskStatusMap = new Map<string, RevisionBatchTask['status']>()
+        const taskFailureMap = new Map<string, RevisionBatchTaskFailure | null>()
+        const staleIssueIdSet = new Set<string>()
+
+        for (const task of batch.tasks) {
+          if (task.status === 'conflict') {
+            taskStatusMap.set(task.task_id, 'conflict')
+            taskFailureMap.set(task.task_id, task.failure)
+            for (const issueId of task.issue_ids) staleIssueIdSet.add(issueId)
+          } else if (task.status === 'blocked') {
+            taskStatusMap.set(task.task_id, 'blocked')
+            taskFailureMap.set(task.task_id, task.failure)
+          } else {
+            taskStatusMap.set(task.task_id, 'queued')
+            taskFailureMap.set(task.task_id, null)
+          }
+        }
+
         for (const task of batchTasks) {
+          if (taskStatusMap.get(task.task_id) !== 'queued') continue
           const serial = sectionSerials.get(task.section_id)
           if (serial === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
           const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
@@ -2949,29 +2968,92 @@ export class BidHostRuntime extends TypertRemoteService {
             currentSha,
           )
           if (staleIssueIds.length > 0) {
-            throw new Error(`BID_REVISION_BATCH_STALE_HASH: task ${task.task_id} 的 issue ${staleIssueIds.join(', ')} base version 已过期`)
+            taskStatusMap.set(task.task_id, 'conflict')
+            taskFailureMap.set(task.task_id, {
+              code: 'STALE_BASE',
+              message: '正文在审批意见创建后已发生变化，请重新选择该条内容。',
+              phase: null,
+            })
+            for (const issueId of task.issue_ids) {
+              staleIssueIdSet.add(issueId)
+            }
           }
         }
-        const batchExecutionInput: RevisionBatchExecutionInput = {
-          batchId: batch.batch_id,
-          tasks: batchTasks,
+
+        let dependencyChanged = true
+        while (dependencyChanged) {
+          dependencyChanged = false
+          for (const task of batch.tasks) {
+            if (taskStatusMap.get(task.task_id) !== 'queued') continue
+            const isBlocked = task.depends_on.some((depId) => {
+              const depStatus = taskStatusMap.get(depId)
+              return depStatus === 'conflict' || depStatus === 'blocked'
+            })
+            if (isBlocked) {
+              taskStatusMap.set(task.task_id, 'blocked')
+              taskFailureMap.set(task.task_id, {
+                code: 'DEPENDENCY_BLOCKED',
+                message: '依赖的任务存在冲突或已被阻塞',
+                phase: null,
+              })
+              dependencyChanged = true
+            }
+          }
         }
+
         const now = Date.now()
-        const runningBatch = startRevisionBatchExecution(batch, now)
+        let currentQueue = queue
+        if (staleIssueIdSet.size > 0) {
+          currentQueue = {
+            ...queue,
+            issues: queue.issues.map(issue =>
+              staleIssueIdSet.has(issue.issue_id)
+                ? { ...issue, status: 'conflict' as const, updated_at: now }
+                : issue,
+            ),
+          }
+          await writeRevisionQueue(workspace, currentQueue)
+        }
+
+        const initialTasks: RevisionBatchTask[] = batch.tasks.map(task => ({
+          ...task,
+          status: taskStatusMap.get(task.task_id) ?? task.status,
+          failure: taskFailureMap.get(task.task_id) ?? task.failure,
+        }))
+        const preparedBatch: RevisionBatchArtifact = {
+          ...batch,
+          tasks: initialTasks,
+          updated_at: now,
+        }
+
+        const runnableTasks = batchTasks.filter(task => taskStatusMap.get(task.task_id) === 'queued')
+        const runningBatch = startRevisionBatchExecution(preparedBatch, now)
         await writeRevisionBatch(workspace, runningBatch)
-        const executionAgent = await this.executionAgent(operation)
-        const work = await persistHostWork(workspace, 'chapter_revision_batch', runtime.stage, { batch_id: request.batch_id })
-        const admittedRun = await operation.runs.start(work)
-        run = admittedRun
-        await admittedRun.activities.track(async () => {
-          await this.executeChapterRevisionBatchCandidate(operation.session, executionAgent, workspace, batchExecutionInput, admittedRun)
-          const settledQueue = await this.settleBatchRevisionIssues(workspace, batch, queue, sectionSerials)
-          await writeRevisionQueue(workspace, settledQueue)
-        })
+
+        if (runnableTasks.length > 0) {
+          const batchExecutionInput: RevisionBatchExecutionInput = {
+            batchId: batch.batch_id,
+            tasks: runnableTasks,
+          }
+          const executionAgent = await this.executionAgent(operation)
+          const work = await persistHostWork(workspace, 'chapter_revision_batch', runtime.stage, { batch_id: request.batch_id })
+          const admittedRun = await operation.runs.start(work)
+          run = admittedRun
+          await admittedRun.activities.track(async () => {
+            await this.executeChapterRevisionBatchCandidate(
+              operation.session, executionAgent, workspace, batchExecutionInput, admittedRun,
+            )
+            const settledQueue = await this.settleBatchRevisionIssues(
+              workspace, runningBatch, currentQueue, sectionSerials,
+            )
+            await writeRevisionQueue(workspace, settledQueue)
+          })
+          await operation.runs.complete(admittedRun)
+        }
+
         const latestBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
         const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
         await writeRevisionBatch(workspace, completedBatch)
-        await operation.runs.complete(admittedRun)
         return {
           batch_id: completedBatch.batch_id,
           status: completedBatch.status,
@@ -4690,10 +4772,16 @@ export class BidHostRuntime extends TypertRemoteService {
                 issues,
               }
             })
-            await this.executeChapterRevisionBatchCandidate(
-              operation.session, agent, operation.workspace,
-              { batchId: batch.batch_id, tasks: batchTasks }, run,
-            )
+            const runnableTasks = batchTasks.filter((task) => {
+              const taskArtifact = batch.tasks.find(t => t.task_id === task.task_id)
+              return taskArtifact === undefined || (taskArtifact.status !== 'conflict' && taskArtifact.status !== 'blocked')
+            })
+            if (runnableTasks.length > 0) {
+              await this.executeChapterRevisionBatchCandidate(
+                operation.session, agent, operation.workspace,
+                { batchId: batch.batch_id, tasks: runnableTasks }, run,
+              )
+            }
             const outlineForSettle = parseConfirmedOutlineArtifact(JSON.parse(await readFile(
               within(operation.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
             )))
@@ -5152,6 +5240,10 @@ export class BidHostRuntime extends TypertRemoteService {
     } catch {}
     let currentBatch = await readRevisionBatch(workspace, batch.batch_id) ?? batch
     for (const task of batch.tasks) {
+      const currentTask = currentBatch.tasks.find(t => t.task_id === task.task_id)
+      if (currentTask?.status === 'conflict' || currentTask?.status === 'blocked') {
+        continue
+      }
       const serial = sectionSerials.get(task.section_id)
       if (serial === undefined) {
         throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 缺少章节序号 ${task.section_id}`)

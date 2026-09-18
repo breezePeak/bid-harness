@@ -226,7 +226,8 @@ export function addRevisionIssue(
 }
 
 /**
- * 编辑一条 `pending` 意见的 instruction/suggestion/reference；其他状态拒绝。
+ * 编辑一条 `pending` 或 `conflict` 意见的 instruction/suggestion/reference；其他状态拒绝。
+ * 编辑后状态重置为 `pending`，可供下一批重新规划执行。
  * @param queue 当前队列。
  * @param input 浏览器提交的编辑。
  * @param now 当前时间戳。
@@ -239,8 +240,9 @@ export function updateRevisionIssue(
 ): RevisionQueueArtifact {
   const index = queue.issues.findIndex(issue => issue.issue_id === input.issue_id)
   if (index < 0) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
-  const current = queue.issues[index]!
-  if (current.status !== 'pending') throw new Error('BID_REVISION_ISSUE_NOT_EDITABLE')
+  const current = queue.issues[index]
+  if (current === undefined) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
+  if (current.status !== 'pending' && current.status !== 'conflict') throw new Error('BID_REVISION_ISSUE_NOT_EDITABLE')
   const nextScope = input.scope ?? current.scope
   const nextReference = input.reference ?? current.reference
   if (nextScope !== nextReference.scope) throw new Error('BID_REVISION_ISSUE_SCOPE_MISMATCH')
@@ -253,6 +255,8 @@ export function updateRevisionIssue(
     reference: nextReference,
     instruction,
     suggestion,
+    status: 'pending',
+    batch_id: null,
     updated_at: now,
   }
   const issues = queue.issues.slice()
@@ -276,7 +280,8 @@ export function deleteRevisionIssue(
 ): RevisionQueueArtifact {
   const index = queue.issues.findIndex(issue => issue.issue_id === input.issue_id)
   if (index < 0) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
-  const current = queue.issues[index]!
+  const current = queue.issues[index]
+  if (current === undefined) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
   if (current.status !== 'pending') throw new Error('BID_REVISION_ISSUE_NOT_DELETABLE')
   const issues = queue.issues.slice()
   issues.splice(index, 1)

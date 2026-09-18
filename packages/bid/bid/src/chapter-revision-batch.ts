@@ -281,12 +281,17 @@ export function validateRevisionBatchPlan(
 
   const staleIssues: string[] = []
   for (const task of tasks) {
-    for (const issueId of task.issue_ids) {
+    const hasStaleIssue = task.issue_ids.some((issueId) => {
       const issue = pendingMap.get(issueId)
-      if (issue === undefined) continue
+      if (issue === undefined) return false
       const currentHash = sectionHashes.get(issue.section_id)
-      if (currentHash !== undefined && issue.reference.base_content_sha256 !== currentHash) {
-        staleIssues.push(issueId)
+      return currentHash !== undefined && issue.reference.base_content_sha256 !== currentHash
+    })
+    if (hasStaleIssue) {
+      for (const issueId of task.issue_ids) {
+        if (!staleIssues.includes(issueId)) {
+          staleIssues.push(issueId)
+        }
       }
     }
   }
@@ -340,6 +345,42 @@ export function createRevisionBatch(
     revision: queue.revision + 1,
     issues: updatedIssues,
   }
+  const taskStatusMap = new Map<string, RevisionBatchTask['status']>()
+  const taskFailureMap = new Map<string, RevisionBatchTaskFailure | null>()
+  for (const task of input.tasks) {
+    const isTaskStale = task.issue_ids.some(id => staleSet.has(id))
+    if (isTaskStale) {
+      taskStatusMap.set(task.task_id, 'conflict')
+      taskFailureMap.set(task.task_id, {
+        code: 'STALE_BASE',
+        message: '正文在审批意见创建后已发生变化，请重新选择该条内容。',
+        phase: null,
+      })
+    } else {
+      taskStatusMap.set(task.task_id, 'queued')
+      taskFailureMap.set(task.task_id, null)
+    }
+  }
+  let dependencyChanged = true
+  while (dependencyChanged) {
+    dependencyChanged = false
+    for (const task of input.tasks) {
+      if (taskStatusMap.get(task.task_id) !== 'queued') continue
+      const isBlocked = task.depends_on.some((depId) => {
+        const depStatus = taskStatusMap.get(depId)
+        return depStatus === 'conflict' || depStatus === 'blocked'
+      })
+      if (isBlocked) {
+        taskStatusMap.set(task.task_id, 'blocked')
+        taskFailureMap.set(task.task_id, {
+          code: 'DEPENDENCY_BLOCKED',
+          message: '依赖的任务存在冲突或已被阻塞',
+          phase: null,
+        })
+        dependencyChanged = true
+      }
+    }
+  }
   const batch: RevisionBatchArtifact = {
     schema_version: REVISION_BATCH_SCHEMA_VERSION,
     batch_id: batchId,
@@ -352,8 +393,8 @@ export function createRevisionBatch(
       issue_ids: [...task.issue_ids],
       depends_on: [...task.depends_on],
       ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
-      status: 'queued' as const,
-      failure: null,
+      status: taskStatusMap.get(task.task_id) ?? 'queued',
+      failure: taskFailureMap.get(task.task_id) ?? null,
       started_at: null,
       completed_at: null,
     })),

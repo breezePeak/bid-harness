@@ -8,6 +8,7 @@ import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import {
   addRevisionIssue,
   emptyRevisionQueue,
+  updateRevisionIssue,
   type RevisionIssue,
   type RevisionIssueReference,
   type RevisionQueueArtifact,
@@ -1368,5 +1369,250 @@ describe('任务 03: 给 RevisionTask 增加真实 durable 状态', () => {
     // 幂等调用允许
     const idempotent = updateRevisionBatchTaskStatus(completed, 'T-1', { status: 'completed' }, 6000)
     expect(idempotent.tasks[0]?.status).toBe('completed')
+  })
+})
+
+describe('任务 04: stale/conflict 局部隔离与依赖传播', () => {
+  const currentSha = 'a'.repeat(64)
+  const staleSha = 'b'.repeat(64)
+
+  function setupFiveTasksQueue() {
+    let queue = emptyRevisionQueue()
+    const sections = [
+      { sectionId: 'SEC-A', title: '章节A', sha: currentSha },
+      { sectionId: 'SEC-B', title: '章节B', sha: currentSha },
+      { sectionId: 'SEC-C', title: '章节C', sha: staleSha },
+      { sectionId: 'SEC-D', title: '章节D', sha: currentSha },
+      { sectionId: 'SEC-E', title: '章节E', sha: currentSha },
+    ]
+    let time = 1000
+    for (const sec of sections) {
+      queue = addRevisionIssue(queue, {
+        section_id: sec.sectionId,
+        scope: 'chapter',
+        reference: { scope: 'chapter', base_content_sha256: sec.sha },
+        instruction: `针对 ${sec.title} 的修改意见`,
+        suggestion: null,
+      }, sec.title, time)
+      time += 1000
+    }
+    const currentHashes = new Map([
+      ['SEC-A', currentSha],
+      ['SEC-B', currentSha],
+      ['SEC-C', currentSha],
+      ['SEC-D', currentSha],
+      ['SEC-E', currentSha],
+    ])
+    return { queue, currentHashes }
+  }
+
+  it('1. 5 task 中 1 stale，其余 4 个继续', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const issueC = queue.issues.find(item => item.section_id === 'SEC-C')
+    expect(issueC).toBeDefined()
+    const input = planInput(issueIds, [
+      { task_id: 'T-A', section_id: 'SEC-A', issue_ids: [issueIds[0] ?? ''] },
+      { task_id: 'T-B', section_id: 'SEC-B', issue_ids: [issueIds[1] ?? ''] },
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [issueIds[2] ?? ''] },
+      { task_id: 'T-D', section_id: 'SEC-D', issue_ids: [issueIds[3] ?? ''] },
+      { task_id: 'T-E', section_id: 'SEC-E', issue_ids: [issueIds[4] ?? ''] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    expect(validated.staleIssues).toEqual([issueC?.issue_id])
+
+    const { queue: batchQueue, batch } = createRevisionBatch(queue, input, 'BATCH-004-1', 5000, validated.staleIssues)
+    const taskMap = new Map(batch.tasks.map(t => [t.task_id, t]))
+    expect(taskMap.get('T-C')?.status).toBe('conflict')
+    expect(taskMap.get('T-A')?.status).toBe('queued')
+    expect(taskMap.get('T-B')?.status).toBe('queued')
+    expect(taskMap.get('T-D')?.status).toBe('queued')
+    expect(taskMap.get('T-E')?.status).toBe('queued')
+
+    const issueStatusMap = new Map(batchQueue.issues.map(i => [i.section_id, i.status]))
+    expect(issueStatusMap.get('SEC-C')).toBe('conflict')
+    expect(issueStatusMap.get('SEC-A')).toBe('scheduled')
+    expect(issueStatusMap.get('SEC-B')).toBe('scheduled')
+    expect(issueStatusMap.get('SEC-D')).toBe('scheduled')
+    expect(issueStatusMap.get('SEC-E')).toBe('scheduled')
+  })
+
+  it('2. stale task = conflict 包含正确的 failure 信息与文案', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const idC = issueIds[2] ?? ''
+    const input = planInput([idC], [
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [idC] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-004-2', 5000, validated.staleIssues)
+    const taskC = batch.tasks[0]
+    expect(taskC?.status).toBe('conflict')
+    expect(taskC?.failure).toEqual({
+      code: 'STALE_BASE',
+      message: '正文在审批意见创建后已发生变化，请重新选择该条内容。',
+      phase: null,
+    })
+  })
+
+  it('3. 依赖 stale → blocked 传播', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const ids = [issueIds[0] ?? '', issueIds[2] ?? '', issueIds[3] ?? '', issueIds[4] ?? '']
+    const input = planInput(ids, [
+      { task_id: 'T-A', section_id: 'SEC-A', issue_ids: [ids[0] ?? ''] },
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [ids[1] ?? ''] },
+      { task_id: 'T-D', section_id: 'SEC-D', issue_ids: [ids[2] ?? ''], depends_on: ['T-C'] },
+      { task_id: 'T-E', section_id: 'SEC-E', issue_ids: [ids[3] ?? ''], depends_on: ['T-D'] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-004-3', 5000, validated.staleIssues)
+    const taskMap = new Map(batch.tasks.map(t => [t.task_id, t]))
+
+    expect(taskMap.get('T-A')?.status).toBe('queued')
+    expect(taskMap.get('T-C')?.status).toBe('conflict')
+    expect(taskMap.get('T-D')?.status).toBe('blocked')
+    expect(taskMap.get('T-D')?.failure?.code).toBe('DEPENDENCY_BLOCKED')
+    expect(taskMap.get('T-E')?.status).toBe('blocked')
+    expect(taskMap.get('T-E')?.failure?.code).toBe('DEPENDENCY_BLOCKED')
+  })
+
+  it('4. 无关 task 完成: settleRevisionBatchIssues 正常结算无关 task，不因 conflict/blocked 抛错', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const idA = issueIds[0] ?? ''
+    const idC = issueIds[2] ?? ''
+    const idD = issueIds[3] ?? ''
+    const input = planInput([idA, idC, idD], [
+      { task_id: 'T-A', section_id: 'SEC-A', issue_ids: [idA] },
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [idC] },
+      { task_id: 'T-D', section_id: 'SEC-D', issue_ids: [idD], depends_on: ['T-C'] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { queue: scheduledQueue } = createRevisionBatch(queue, input, 'BATCH-004-4', 5000, validated.staleIssues)
+
+    const checks: RevisionIssueCheck[] = [{ issue_id: idA, status: 'satisfied' }]
+    const result = settleRevisionBatchIssues(scheduledQueue, [idA], checks, 6000)
+    expect(result.taskStatus).toBe('completed')
+
+    const settledA = result.queue.issues.find(i => i.issue_id === idA)
+    const conflictC = result.queue.issues.find(i => i.issue_id === idC)
+    expect(settledA?.status).toBe('completed')
+    expect(conflictC?.status).toBe('conflict')
+  })
+
+  it('5. batch 不因单 task conflict 直接 failed', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const ids = [issueIds[0] ?? '', issueIds[2] ?? '']
+    const input = planInput(ids, [
+      { task_id: 'T-A', section_id: 'SEC-A', issue_ids: [ids[0] ?? ''] },
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [ids[1] ?? ''] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-004-5', 5000, validated.staleIssues)
+
+    const running = startRevisionBatchExecution(batch, 5500)
+    expect(running.status).toBe('running')
+
+    const taskRunning = updateRevisionBatchTaskStatus(running, 'T-A', { status: 'running' }, 5600)
+    const taskReviewing = updateRevisionBatchTaskStatus(taskRunning, 'T-A', { status: 'reviewing' }, 5800)
+    const updated = updateRevisionBatchTaskStatus(taskReviewing, 'T-A', { status: 'completed' }, 6000)
+    const completedBatch = completeRevisionBatchExecution(updated, 7000)
+    expect(completedBatch.status).toBe('completed')
+    const tC = completedBatch.tasks.find(t => t.task_id === 'T-C')
+    expect(tC?.status).toBe('conflict')
+  })
+
+  it('6. stale task 不启动 Writer: runnableTasks 严格排除 conflict 和 blocked', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const ids = [issueIds[0] ?? '', issueIds[1] ?? '', issueIds[2] ?? '', issueIds[3] ?? '']
+    const input = planInput(ids, [
+      { task_id: 'T-A', section_id: 'SEC-A', issue_ids: [ids[0] ?? ''] },
+      { task_id: 'T-B', section_id: 'SEC-B', issue_ids: [ids[1] ?? ''] },
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [ids[2] ?? ''] },
+      { task_id: 'T-D', section_id: 'SEC-D', issue_ids: [ids[3] ?? ''], depends_on: ['T-C'] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-004-6', 5000, validated.staleIssues)
+
+    const runnableTasks = batch.tasks.filter(t => t.status === 'queued')
+    const runnableTaskIds = runnableTasks.map(t => t.task_id)
+
+    expect(runnableTaskIds).toContain('T-A')
+    expect(runnableTaskIds).toContain('T-B')
+    expect(runnableTaskIds).not.toContain('T-C')
+    expect(runnableTaskIds).not.toContain('T-D')
+  })
+
+  it('7. 重新选择后下一批可执行: updateRevisionIssue 从 conflict 恢复为 pending 后可再次规划', () => {
+    const { queue, currentHashes } = setupFiveTasksQueue()
+    const issueIds = queue.issues.map(item => item.issue_id)
+    const input = planInput([issueIds[2] ?? ''], [
+      { task_id: 'T-C', section_id: 'SEC-C', issue_ids: [issueIds[2] ?? ''] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    const { queue: batchQueue } = createRevisionBatch(queue, input, 'BATCH-004-7', 5000, validated.staleIssues)
+
+    const staleIssueId = issueIds[2] ?? ''
+    const conflictIssue = batchQueue.issues.find(i => i.issue_id === staleIssueId)
+    expect(conflictIssue?.status).toBe('conflict')
+
+    const updatedQueue = updateRevisionIssue(batchQueue, {
+      issue_id: staleIssueId,
+      expected_queue_revision: batchQueue.revision,
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+    }, 6000)
+
+    const recoveredIssue = updatedQueue.issues.find(i => i.issue_id === staleIssueId)
+    expect(recoveredIssue?.status).toBe('pending')
+    expect(recoveredIssue?.batch_id).toBeNull()
+
+    const nextInput = planInput([staleIssueId], [
+      { task_id: 'T-C-NEXT', section_id: 'SEC-C', issue_ids: [staleIssueId] },
+    ], updatedQueue.revision)
+    const nextValidated = validateRevisionBatchPlan(nextInput, updatedQueue, currentHashes)
+    expect(nextValidated.staleIssues).toEqual([])
+    const { batch: nextBatch } = createRevisionBatch(
+      updatedQueue, nextInput, 'BATCH-004-8', 7000, nextValidated.staleIssues,
+    )
+    expect(nextBatch.tasks[0]?.status).toBe('queued')
+  })
+
+  it('8. 同 task 一条 stale 时整 section task 不部分执行', () => {
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-A',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '正常意见',
+      suggestion: null,
+    }, '章节A', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-A',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: staleSha },
+      instruction: '过期意见',
+      suggestion: null,
+    }, '章节A', 2000)
+
+    const issueIds = queue.issues.map(i => i.issue_id)
+    const input = planInput(issueIds, [
+      { task_id: 'T-SEC-A', section_id: 'SEC-A', issue_ids: issueIds },
+    ])
+    const currentHashes = new Map([['SEC-A', currentSha]])
+
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    expect(validated.staleIssues).toHaveLength(2)
+    expect(validated.staleIssues).toContain(issueIds[0])
+    expect(validated.staleIssues).toContain(issueIds[1])
+
+    const { queue: batchQueue, batch } = createRevisionBatch(
+      queue, input, 'BATCH-004-9', 5000, validated.staleIssues,
+    )
+    expect(batch.tasks[0]?.status).toBe('conflict')
+    expect(batchQueue.issues[0]?.status).toBe('conflict')
+    expect(batchQueue.issues[1]?.status).toBe('conflict')
   })
 })

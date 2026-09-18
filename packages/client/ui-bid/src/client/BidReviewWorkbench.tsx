@@ -892,6 +892,9 @@ const REVISION_TASK_STATUS_LABEL: Record<BidRevisionTaskStatus, string> = {
 }
 
 function getRevisionTaskTitle(revision: NonNullable<BidReviewWorkbenchView['outline'][number]['revision']>): string {
+  if (revision.status === 'conflict') {
+    return '正文在审批意见创建后已发生变化，请重新选择该条内容。'
+  }
   return `批量修订：${REVISION_TASK_STATUS_LABEL[revision.status]}（${revision.issue_count} 条意见）`
 }
 
