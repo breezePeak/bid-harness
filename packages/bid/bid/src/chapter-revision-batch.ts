@@ -239,11 +239,14 @@ export function validateRevisionBatchPlan(
   }
 
   const taskIds = new Set<string>()
+  const taskSectionIds = new Set<string>()
   const coveredIssueIds = new Set<string>()
   const tasks: RevisionBatchTask[] = []
   for (const task of input.tasks) {
     if (taskIds.has(task.task_id)) throw new Error('BID_REVISION_BATCH_TASK_DUPLICATE')
     taskIds.add(task.task_id)
+    if (taskSectionIds.has(task.section_id)) throw new Error('BID_REVISION_BATCH_SECTION_DUPLICATE')
+    taskSectionIds.add(task.section_id)
     for (const issueId of task.issue_ids) {
       if (coveredIssueIds.has(issueId)) throw new Error('BID_REVISION_BATCH_ISSUE_DUPLICATE')
       coveredIssueIds.add(issueId)

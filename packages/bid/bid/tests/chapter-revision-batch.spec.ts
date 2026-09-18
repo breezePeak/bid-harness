@@ -1775,3 +1775,118 @@ describe('任务 05: Batch 暂停恢复状态机 (suspend/resume/fail)', () => {
     expect(completed.status).toBe('completed')
   })
 })
+
+describe('任务 06: Host 强制同章节单 Task', () => {
+  const currentSha = 'a'.repeat(64)
+
+  function setupMultiIssuesQueue() {
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-203',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '意见 1',
+      suggestion: null,
+    }, '第二章第三节', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-203',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '意见 2',
+      suggestion: null,
+    }, '第二章第三节', 2000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-203',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '意见 3',
+      suggestion: null,
+    }, '第二章第三节', 3000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-204',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '章节 204 意见',
+      suggestion: null,
+    }, '第二章第四节', 4000)
+    return queue
+  }
+
+  it('1. 同 section 两 task → 拒绝: 抛出 BID_REVISION_BATCH_SECTION_DUPLICATE', () => {
+    const queue = setupMultiIssuesQueue()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id2 = queue.issues[1]?.issue_id ?? ''
+    // 错误规划：将同一章节 SEC-203 拆分为两个不同的 task
+    const input = planInput([id1, id2], [
+      { task_id: 'TASK-A', section_id: 'SEC-203', issue_ids: [id1] },
+      { task_id: 'TASK-B', section_id: 'SEC-203', issue_ids: [id2] },
+    ])
+
+    expect(() => validateRevisionBatchPlan(input, queue, new Map()))
+      .toThrow('BID_REVISION_BATCH_SECTION_DUPLICATE')
+  })
+
+  it('2. 同 section 三 issue 一个 task → 成功', () => {
+    const queue = setupMultiIssuesQueue()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id2 = queue.issues[1]?.issue_id ?? ''
+    const id3 = queue.issues[2]?.issue_id ?? ''
+    // 正确规划：同章节 SEC-203 的所有 issue 强制聚合在单个 task 中
+    const input = planInput([id1, id2, id3], [
+      { task_id: 'TASK-SEC-203', section_id: 'SEC-203', issue_ids: [id1, id2, id3] },
+    ])
+
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    expect(validated.tasks).toHaveLength(1)
+    expect(validated.tasks[0]?.task_id).toBe('TASK-SEC-203')
+    expect(validated.tasks[0]?.issue_ids).toEqual([id1, id2, id3])
+  })
+
+  it('3. 不同 section 多 task → 成功', () => {
+    const queue = setupMultiIssuesQueue()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id4 = queue.issues[3]?.issue_id ?? ''
+    const input = planInput([id1, id4], [
+      { task_id: 'TASK-SEC-203', section_id: 'SEC-203', issue_ids: [id1] },
+      { task_id: 'TASK-SEC-204', section_id: 'SEC-204', issue_ids: [id4] },
+    ])
+
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    expect(validated.tasks).toHaveLength(2)
+    expect(validated.tasks[0]?.section_id).toBe('SEC-203')
+    expect(validated.tasks[1]?.section_id).toBe('SEC-204')
+  })
+
+  it('4. issue/task section 不匹配仍拒绝: 抛出 BID_REVISION_BATCH_SECTION_MISMATCH', () => {
+    const queue = setupMultiIssuesQueue()
+    const id4 = queue.issues[3]?.issue_id ?? '' // 所属 section_id 为 SEC-204
+    // 错误规划：task.section_id 是 SEC-203，但包含了 SEC-204 的 issue
+    const input = planInput([id4], [
+      { task_id: 'TASK-SEC-203', section_id: 'SEC-203', issue_ids: [id4] },
+    ])
+
+    expect(() => validateRevisionBatchPlan(input, queue, new Map()))
+      .toThrow('BID_REVISION_BATCH_SECTION_MISMATCH')
+  })
+
+  it('5. DAG 校验不回归: 自依赖与环形依赖继续被拒绝', () => {
+    const queue = setupMultiIssuesQueue()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id4 = queue.issues[3]?.issue_id ?? ''
+
+    // 自依赖拒绝
+    const selfDepInput = planInput([id1], [
+      { task_id: 'TASK-SEC-203', section_id: 'SEC-203', issue_ids: [id1], depends_on: ['TASK-SEC-203'] },
+    ])
+    expect(() => validateRevisionBatchPlan(selfDepInput, queue, new Map()))
+      .toThrow('BID_REVISION_BATCH_SELF_DEPENDENCY')
+
+    // 环形依赖拒绝
+    const cycleInput = planInput([id1, id4], [
+      { task_id: 'TASK-SEC-203', section_id: 'SEC-203', issue_ids: [id1], depends_on: ['TASK-SEC-204'] },
+      { task_id: 'TASK-SEC-204', section_id: 'SEC-204', issue_ids: [id4], depends_on: ['TASK-SEC-203'] },
+    ])
+    expect(() => validateRevisionBatchPlan(cycleInput, queue, new Map()))
+      .toThrow('BID_REVISION_BATCH_CYCLE')
+  })
+})
