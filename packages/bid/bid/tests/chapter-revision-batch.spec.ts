@@ -1500,7 +1500,7 @@ describe('任务 04: stale/conflict 局部隔离与依赖传播', () => {
     const validated = validateRevisionBatchPlan(input, queue, currentHashes)
     const { queue: scheduledQueue } = createRevisionBatch(queue, input, 'BATCH-004-4', 5000, validated.staleIssues)
 
-    const checks: RevisionIssueCheck[] = [{ issue_id: idA, status: 'satisfied' }]
+    const checks: RevisionIssueCheck[] = [{ issue_id: idA, status: 'satisfied', reason: '已按要求修改' }]
     const result = settleRevisionBatchIssues(scheduledQueue, [idA], checks, 6000)
     expect(result.taskStatus).toBe('completed')
 
@@ -1973,7 +1973,7 @@ describe('任务 07: 用户一次开始自动规划并立即执行', () => {
     const id1 = queue.issues[0]?.issue_id ?? ''
     const appliedQueue: RevisionQueueArtifact = {
       ...queue,
-      issues: queue.issues.map(issue => (issue.issue_id === id1 ? { ...issue, status: 'applied' } : issue)),
+      issues: queue.issues.map(issue => (issue.issue_id === id1 ? { ...issue, status: 'completed' } : issue)),
     }
     const pendingInput = planInput([id1], [
       { task_id: 'TASK-1', section_id: 'SEC-203', issue_ids: [id1] },

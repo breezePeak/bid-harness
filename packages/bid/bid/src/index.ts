@@ -128,7 +128,9 @@ import {
   type PlanRevisionBatchInput,
   type RevisionBatchArtifact,
   type RevisionBatchExecutionInput,
+  type RevisionBatchTask,
   type RevisionBatchTaskExecution,
+  type RevisionBatchTaskFailure,
   type RevisionIssueCheck,
 } from './chapter-revision-batch.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
