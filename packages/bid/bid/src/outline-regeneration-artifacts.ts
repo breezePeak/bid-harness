@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 
 /** Version of the S5 regeneration change declaration. */
@@ -11,7 +12,7 @@ const changeSchema = z.object({
 }).strict()
 
 const changeSetSchema = z.object({
-  schema_version: z.literal(OUTLINE_REGENERATION_CHANGE_SET_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(OUTLINE_REGENERATION_CHANGE_SET_SCHEMA_VERSION),
   base_revision: z.number().int().positive(),
   base_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   changes: z.array(changeSchema),

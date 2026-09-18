@@ -5,6 +5,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import { BID_STAGES, BID_WORK_KINDS, type BidStage, type BidWorkDescriptor, type BidWorkKind } from './control-plane-contract.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const workIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)
@@ -20,7 +21,7 @@ export const bidWorkDescriptorSchema = z.object({
 }).strict()
 
 const bidWorkRequestSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: recordOnlySchemaVersion(1),
   kind: z.enum(BID_WORK_KINDS),
   work_id: workIdSchema,
   stage: z.enum(BID_STAGES),
@@ -31,7 +32,7 @@ const bidWorkRequestSchema = z.object({
 type WorkWorkspace = { readonly root: string; readonly projectRoot: string }
 
 const resetRequestMetaSchema = z.object({
-  schema_version: z.literal(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
+  schema_version: recordOnlySchemaVersion(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
 }).passthrough()
 
 /** Find only request and private-run roots owned by the selected stage or a later stage. */

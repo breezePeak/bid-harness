@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 
@@ -16,7 +17,7 @@ const sectionReferenceSchema = z.object({
 
 /** Main-Agent-authored dependency and consistency plan for S6. */
 export const chapterExecutionPlanSchema = z.object({
-  schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(CHAPTER_EXECUTION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   writing_plan_version: z.number().int().positive(),
@@ -51,7 +52,7 @@ const executionAttemptSchema = z.object({
 }).strict()
 
 const legacyChapterExecutionLogSchema = z.object({
-  schema_version: z.literal(CHAPTER_EXECUTION_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(CHAPTER_EXECUTION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   writing_plan_version: z.number().int().positive(),
@@ -71,7 +72,7 @@ const legacyChapterExecutionLogSchema = z.object({
 
 /** Host-owned record of the Child Sessions that produced each chapter. */
 export const chapterExecutionLogSchema = z.object({
-  schema_version: z.literal(CHAPTER_EXECUTION_LOG_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(CHAPTER_EXECUTION_LOG_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   writing_plan_version: z.number().int().positive(),
@@ -101,7 +102,7 @@ export type ChapterExecutionAttempt = z.infer<typeof executionAttemptSchema>
 /**
  * Parse a strict S6 relation plan.
  * @param value - decoded execution-plan value.
- * @returns strict current-version relation plan.
+ * @returns Strict relation-plan business structure.
  */
 export function parseChapterExecutionPlan(value: unknown): ChapterExecutionPlan {
   return chapterExecutionPlanSchema.parse(value)
@@ -110,16 +111,16 @@ export function parseChapterExecutionPlan(value: unknown): ChapterExecutionPlan 
 /**
  * Parse a strict Host-owned S6 execution log.
  * @param value - decoded execution-log value.
- * @returns strict current-version execution log.
+ * @returns Strict execution-log business structure.
  */
 export function parseChapterExecutionLog(value: unknown): ChapterExecutionLog {
   return chapterExecutionLogSchema.parse(value)
 }
 
 /**
- * Read a current execution log or deterministically upgrade the v3 format.
+ * Read a current execution log or deterministically upgrade the legacy format.
  * @param value - decoded execution-log value read from a project workspace.
- * @returns strict current-version execution log.
+ * @returns Strict current execution-log business structure after legacy completion.
  */
 export function parseOrMigrateChapterExecutionLog(value: unknown): ChapterExecutionLog {
   try {

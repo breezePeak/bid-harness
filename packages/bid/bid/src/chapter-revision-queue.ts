@@ -4,11 +4,12 @@ import { readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { publishBidBatch } from './publication-batch.ts'
 import { chapterContentSha256, validateChapterParagraphReference } from './chapter-revision.ts'
 
-/** `queue.json` 的 schema 版本；后端拒绝旧磁盘格式。 */
+/** `queue.json` 的 schema 版本；仅用于记录，不阻断业务读取。 */
 export const REVISION_QUEUE_SCHEMA_VERSION = 1 as const
 
 /** `queue.json` 在项目内的相对路径。 */
@@ -57,7 +58,7 @@ export const revisionIssueSchema = z.object({
 
 /** `queue.json` 的完整结构；revision 是 CAS 计数器。 */
 export const revisionQueueArtifactSchema = z.object({
-  schema_version: z.literal(REVISION_QUEUE_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(REVISION_QUEUE_SCHEMA_VERSION),
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   issues: z.array(revisionIssueSchema),
 }).strict()
@@ -103,9 +104,9 @@ export interface RevisionQueueWorkspace {
 }
 
 /**
- * 解析 `queue.json`；格式无效或版本不符时拒绝读取。
+ * 解析 `queue.json`；格式无效时拒绝读取，schema_version 仅作为记录字段。
  * @param value 已解码的 JSON 值。
- * @returns 严格当前版本的审批意见队列。
+ * @returns 严格业务结构的审批意见队列。
  */
 export function parseRevisionQueueArtifact(value: unknown): RevisionQueueArtifact {
   return revisionQueueArtifactSchema.parse(value)

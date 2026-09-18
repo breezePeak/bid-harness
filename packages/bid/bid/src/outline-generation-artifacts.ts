@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Version of the technical-writing blueprint Artifact. */
 export const OUTLINE_GENERATION_SCHEMA_VERSION = 3 as const
@@ -45,7 +46,7 @@ export const outlineSectionSchema = z.object({
 
 /** Strict schema shared by generated and user-confirmed technical-bid outlines. */
 export const outlineArtifactSchema = z.object({
-  schema_version: z.literal(OUTLINE_GENERATION_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(OUTLINE_GENERATION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   document_title: z.string().min(1),
   global_compliance_ids: z.array(z.string().min(1)),
@@ -69,7 +70,7 @@ export const outlineQualityIssueSchema = z.object({
 
 /** Strict record of the mandatory quality review performed after S3 drafting. */
 export const outlineQualityReportSchema = z.object({
-  schema_version: z.literal(OUTLINE_QUALITY_REPORT_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(OUTLINE_QUALITY_REPORT_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   checked_requirement_ids: z.array(z.string().min(1)),
   checked_scoring_ids: z.array(z.string().min(1)),

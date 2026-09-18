@@ -4,13 +4,14 @@ import { relative, resolve, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const entrySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('write'), path: z.string().min(1), staged: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('remove'), path: z.string().min(1), recursive: z.boolean() }).strict(),
 ])
 const manifestSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: recordOnlySchemaVersion(1),
   publication_id: z.string().min(1),
   entries: z.array(entrySchema),
 }).strict()

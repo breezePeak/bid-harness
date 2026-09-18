@@ -9,6 +9,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidWorkspace } from './index.ts'
 import { BidStageExecutionError, type BidEvidenceMappingProgress, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
@@ -423,6 +424,7 @@ const researchStatsSchema = z.object({
 }).strict()
 type ResearchStats = z.infer<typeof researchStatsSchema>
 const evidenceMappingExecutionLogSchema = z.object({
+  schema_version: recordOnlySchemaVersion(5),
   outline_reviews: z.array(z.object({
     blocking_issues: z.array(z.object({ code: z.string(), section_id: z.string(), reason: z.string() }).strict()),
   }).strict()).optional(),
@@ -3100,7 +3102,7 @@ function buildEvidenceMap(
 function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSchema {
   const ids = (values: readonly string[]): JsonSchemaNode => ({ type: 'array', items: stringChoice(values) })
   return closedObject({
-    schema_version: { type: 'integer', const: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION },
+    schema_version: { type: 'integer' },
     scope: { type: 'string', const: 'technical_bid' },
     checked_requirement_ids: ids(inputs.requirements.requirements.map(item => item.id)),
     checked_scoring_ids: ids(inputs.scoring.scoring_items.map(item => item.id)),
@@ -3116,7 +3118,7 @@ function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSc
       section_id: stringChoice(inputs.outline.sections.map(section => section.id), '问题所在的当前章节；Host 据此定位 Section 子树。'),
       reason: { type: 'string', description: '具体结构问题及业务理由。' },
     }), description: '目录过粗、任务越界、扩展缺少依据或职责冲突等必须返回相关章节；不能以资料符合修改后任务为由放行。' },
-  })
+  }, ['scope', 'checked_requirement_ids', 'checked_scoring_ids', 'checked_scoring_response_point_ids', 'issues', 'blocking_issues'])
 }
 
 type OutlineStructureIssue = { code: string; section_id: string; reason: string }
@@ -3239,7 +3241,11 @@ export async function reviewRefinedOutline(
         if (violations.length > 0) throw new ToolArgsError(violations)
         const { blocking_issues: blocking, ...report } = result.structured as Record<string, unknown>
         blockingIssues = blocking as OutlineStructureIssue[]
-        quality = parseOutlineQualityReport({ ...report, reviewed_section_ids: inputs.outline.sections.map(section => section.id) })
+        quality = parseOutlineQualityReport({
+          schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
+          ...report,
+          reviewed_section_ids: inputs.outline.sections.map(section => section.id),
+        })
       } catch (error) {
         if (error instanceof ToolArgsError) {
           issues.push({ code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: error.message, artifact: QUALITY_PATH })
@@ -3578,6 +3584,7 @@ async function executeEvidenceMappingRun(
     await removeAttemptPath(planPath)
     await removeAttemptPath(logPath)
     executionLog = {
+      schema_version: 5,
       max_concurrency: maxConcurrency,
       observed_max_concurrency: 0,
       tasks: plan.tasks.map(item => ({ task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending', attempts: [], final_child_session_id: null })),
@@ -4747,6 +4754,7 @@ export async function executeEvidenceMapping(
       } catch (readError) {
         if (record(readError)?.code !== 'ENOENT') throw readError
         log = {
+          schema_version: 5,
           max_concurrency: options.maxConcurrency ?? DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
           observed_max_concurrency: 0, tasks: [],
         }

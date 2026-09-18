@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { FlowchartSpec } from './flowchart.ts'
 
@@ -500,7 +501,7 @@ export type BidPageTargetStatus =
 
 /** S5 工作台使用的浏览器安全目录及实时章节摘要。 */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 6
+  readonly schema_version: number
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -608,7 +609,7 @@ const pageTargetStatusSchema = z.discriminatedUnion('status', [
   }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(6),
+  schema_version: recordOnlySchemaVersion(6),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
@@ -754,7 +755,7 @@ export interface BidRevisionIssueView {
 
 /** 浏览器安全的审批意见队列视图。 */
 export interface BidRevisionQueueView {
-  readonly schema_version: 1
+  readonly schema_version: number
   readonly revision: number
   readonly issues: readonly BidRevisionIssueView[]
 }

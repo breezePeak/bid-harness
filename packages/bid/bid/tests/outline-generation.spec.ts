@@ -197,17 +197,16 @@ function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneratio
 }
 
 describe('S3 候选错误分流', () => {
-  const defects = ['rp', 'scoring', 'schema', 'required', 'json'] as const
+  const defects = ['rp', 'scoring', 'required', 'json'] as const
   function broken(kind: typeof defects[number]): string {
     const outline = structuredClone(reviewedOutline)
     if (kind === 'rp') outline.sections[2]!.scoring_response_point_ids = ['RP-999999']
     if (kind === 'scoring') outline.sections[2]!.scoring_ids = ['SCORE-UNKNOWN']
     if (kind === 'required') delete (outline.sections[2] as Partial<OutlineArtifact['sections'][number]>).purpose
-    const raw = JSON.stringify(kind === 'schema' ? { ...outline, schema_version: 0 } : outline)
+    const raw = JSON.stringify(outline)
     return kind === 'json' ? raw.slice(0, -1) + ',}' : raw
   }
   function fieldOperations(kind: typeof defects[number]) {
-    if (kind === 'schema') return [{ section_index: null, field: 'schema_version', value: 3 }]
     const field = kind === 'rp' ? 'scoring_response_point_ids' : kind === 'scoring' ? 'scoring_ids' : 'purpose'
     return [{ section_index: 2, field, value: reviewedOutline.sections[2]![field] }]
   }
@@ -568,7 +567,12 @@ describe('outline-generation Blueprint Quality Review', () => {
 
   it('错误 Schema 在有限字段修复失败后保留候选，不要求模型重写整本目录', async () => {
     const workspace = await fixture()
-    const invalid = { ...reviewedOutline, schema_version: 0 }
+    const invalid = {
+      ...reviewedOutline,
+      sections: reviewedOutline.sections.map((section, index) => (
+        index === 2 ? { ...section, purpose: undefined } : section
+      )),
+    }
     const { agent, followup } = modelAgent(workspace, async () => {
       await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
       await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(invalid))
@@ -612,8 +616,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       reviewed_section_ids: reviewedOutline.sections.map(item => item.id),
       issues: [],
     }))
-    expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts)))
-      .toContain('OUTLINE_GENERATION_ARTIFACT_INVALID')
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
     await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
       schema_version: 4,

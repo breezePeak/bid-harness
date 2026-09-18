@@ -39,7 +39,6 @@ describe('chunkDocument', () => {
     expect(parseDocumentChunkIndex(index)).toEqual(index)
     for (const invalid of [
       null,
-      { ...index, schema_version: 2 },
       { ...index, chunk_count: 0 },
       { ...index, chunk_config: { minChars: 20, targetChars: 10, maxChars: 30 } },
       { ...index, chunks: [{ ...index.chunks[0], order: 2 }] },
@@ -47,6 +46,9 @@ describe('chunkDocument', () => {
       { ...index, chunks: [{ ...index.chunks[0], page_start: 3 }] },
       { ...index, unexpected: true },
     ]) expect(() => parseDocumentChunkIndex(invalid)).toThrow('document-chunk-invalid-index')
+    expect(parseDocumentChunkIndex({ ...index, schema_version: 999 }).schema_version).toBe(999)
+    expect(parseDocumentChunkIndex({ ...index, schema_version: 'old' }).schema_version).toBe(1)
+    expect(parseDocumentChunkIndex({ ...index, schema_version: undefined }).schema_version).toBe(1)
   })
 
   it('preserves headings, pages, lists, tables, source coverage, and deterministic adjacency', async () => {

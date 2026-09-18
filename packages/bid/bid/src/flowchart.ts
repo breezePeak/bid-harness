@@ -28,7 +28,7 @@ export interface FlowchartEdge {
 /** Persisted flowchart envelope shared by S5, preview, and S6 export. */
 export interface FlowchartBlock {
   readonly type: 'flowchart'
-  readonly schema_version: typeof FLOWCHART_SCHEMA_VERSION
+  readonly schema_version: number
   readonly id: string
   /** Stable semantic key written by the model and used by正文 anchors. */
   readonly key?: string | undefined
@@ -187,7 +187,7 @@ export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
   for (const level of orderedLevels) {
     const nodes = groups.get(level) ?? []
     mainCoordinates.set(level, main)
-    main += Math.max(...nodes.map(node => {
+    main += Math.max(...nodes.map((node) => {
       const size = nodeSize(node)
       return spec.direction === 'LR' ? size.width : size.height
     })) + mainGap
@@ -286,7 +286,7 @@ export function validateFlowchartSpec(spec: unknown): string[] {
     readonly nodes?: unknown
     readonly edges?: unknown
   }
-  if (value.type !== 'flowchart' || value.schema_version !== FLOWCHART_SCHEMA_VERSION) issues.push('流程图 schema 版本无效。')
+  if (value.type !== 'flowchart') issues.push('流程图类型无效。')
   if (typeof value.id !== 'string' || !/^FLOW-[A-Za-z0-9_-]+$/u.test(value.id)) issues.push('流程图 ID 不合法。')
   if (value.key !== undefined && (typeof value.key !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/u.test(value.key))) issues.push('流程图语义 key 不合法。')
   if (typeof value.title !== 'string' || value.title.trim().length === 0) issues.push('流程图标题不能为空。')

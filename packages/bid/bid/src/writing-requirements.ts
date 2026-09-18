@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 
@@ -122,7 +123,7 @@ export const writingPlanInputSchema = z.discriminatedUnion('update_kind', [
 
 /** 已确认且可供 S5 子任务消费的 Host 任务契约。 */
 export const writingPlanSchema = z.object({
-  schema_version: z.literal(WRITING_PLAN_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(WRITING_PLAN_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   plan_version: z.number().int().positive(),
   confirmed: z.literal(true),
@@ -160,7 +161,7 @@ export type WritingPlanProcessing = z.infer<typeof writingPlanProcessingSchema>
 
 /** 已发出 S5 原生询问的项目记录；在线 Promise 不写入此文件。 */
 export const writingRequestSchema = z.object({
-  schema_version: z.literal(WRITING_REQUEST_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(WRITING_REQUEST_SCHEMA_VERSION),
   request_id: z.string().min(1),
   confirmed_outline_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   owner_session_id: z.string().min(1),
