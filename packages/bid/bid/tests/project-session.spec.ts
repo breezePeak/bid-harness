@@ -837,6 +837,26 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).toMatchObject({ markdown: '![远程图](https://example.com/image.png)' })
   })
 
+  it('getReviewWorkbench 出现新 schema warning 时持久化 flush 且多次调用不重复 flush', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('schema-warning-flush')
+
+    const flushSpy = vi.spyOn(ctx.sessions, 'flush')
+    await ctx.bid.getReviewWorkbench(agent.session)
+    expect(flushSpy).not.toHaveBeenCalled()
+
+    const outlinePath = join(workspace.projectRoot, 'outline/confirmed-outline.json')
+    await writeFile(outlinePath, JSON.stringify({ ...outline, schema_version: 999 }))
+
+    await ctx.bid.getReviewWorkbench(agent.session)
+    expect(flushSpy).toHaveBeenCalledTimes(1)
+
+    await ctx.bid.getReviewWorkbench(agent.session)
+    expect(flushSpy).toHaveBeenCalledTimes(1)
+  }, 20000)
+
   it('旧 S6 已完成项目仍保留审核工作台和按需导出动作', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)

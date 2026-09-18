@@ -3102,7 +3102,6 @@ function buildEvidenceMap(
 function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSchema {
   const ids = (values: readonly string[]): JsonSchemaNode => ({ type: 'array', items: stringChoice(values) })
   return closedObject({
-    schema_version: { type: 'integer' },
     scope: { type: 'string', const: 'technical_bid' },
     checked_requirement_ids: ids(inputs.requirements.requirements.map(item => item.id)),
     checked_scoring_ids: ids(inputs.scoring.scoring_items.map(item => item.id)),
@@ -3242,8 +3241,8 @@ export async function reviewRefinedOutline(
         const { blocking_issues: blocking, ...report } = result.structured as Record<string, unknown>
         blockingIssues = blocking as OutlineStructureIssue[]
         quality = parseOutlineQualityReport({
-          schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
           ...report,
+          schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
           reviewed_section_ids: inputs.outline.sections.map(section => section.id),
         })
       } catch (error) {

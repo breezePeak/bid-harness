@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -125,5 +126,46 @@ describe('Bid Work Descriptor', () => {
 
     await expect(bidResetWorkPaths(workspace, 'evidence_mapping'))
       .rejects.toThrow(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
+  })
+
+  it('request schema_version 为 999 时 readBidWorkRequest 仍正常 resume', async () => {
+    const workspace = await fixture()
+    const descriptor = await persistBidWorkRequest(
+      workspace,
+      'outline_regeneration',
+      'evidence_mapping',
+      { feedback: '测试 payload' },
+      { outline_sha256: 'a'.repeat(64) },
+      'resume-v999',
+    )
+    const requestPath = join(workspace.projectRoot, descriptor.requestRef)
+    const raw = JSON.parse(await readFile(requestPath, 'utf8')) as Record<string, unknown>
+    raw.schema_version = 999
+    const updatedBytes = `${JSON.stringify(raw, null, 2)}\n`
+    await writeFile(requestPath, updatedBytes)
+    const updatedSha256 = createHash('sha256').update(updatedBytes).digest('hex')
+    const updatedDescriptor = { ...descriptor, requestSha256: updatedSha256 }
+
+    await expect(readBidWorkRequest(workspace, updatedDescriptor))
+      .resolves.toEqual({ feedback: '测试 payload' })
+  })
+
+  it('requests 中 schema_version 为 999 时 bidResetWorkPaths 仍正常重置不抛 READ_FAILED', async () => {
+    const workspace = await fixture()
+    const workId = 'reset-v999'
+    const requestsDir = join(workspace.projectRoot, 'requests')
+    await mkdir(requestsDir, { recursive: true })
+    const requestPath = join(requestsDir, `${workId}.json`)
+    await writeFile(requestPath, `${JSON.stringify({
+      schema_version: 999,
+      kind: 'stage_execution',
+      work_id: workId,
+      stage: 'evidence_mapping',
+      input_fingerprint: '0'.repeat(64),
+      payload: {},
+    }, null, 2)}\n`)
+
+    const paths = await bidResetWorkPaths(workspace, 'evidence_mapping')
+    expect(paths).toContain(requestPath)
   })
 })
