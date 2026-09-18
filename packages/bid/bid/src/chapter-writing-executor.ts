@@ -50,8 +50,22 @@ import {
   type ChapterExecutionPlan,
 } from './chapter-writing-plan-artifacts.ts'
 import { BidStageAttentionRequiredError, type BidChapterRevisionRequest, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
-import { assertChapterRevisionBatchScope, assertChapterRevisionScope, chapterContentSha256, chapterRevisionRequestSchema, renderChapterRevisionTask, validateChapterRevisionReference, type BatchRevisionScope } from './chapter-revision.ts'
-import { renderRevisionBatchSectionPrompt, type RevisionBatchExecutionInput, type RevisionBatchTaskExecution } from './chapter-revision-batch.ts'
+import {
+  assertChapterRevisionBatchScope,
+  assertChapterRevisionScope,
+  chapterContentSha256,
+  chapterRevisionRequestSchema,
+  renderChapterRevisionTask,
+  validateChapterRevisionReference,
+  type BatchRevisionScope,
+} from './chapter-revision.ts'
+import {
+  persistRevisionBatchTaskStatus,
+  renderRevisionBatchSectionPrompt,
+  type RevisionBatchExecutionInput,
+  type RevisionBatchTaskExecution,
+  type UpdateRevisionBatchTaskOptions,
+} from './chapter-revision-batch.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import {
@@ -1816,6 +1830,19 @@ async function runChapterWriting(
       checkpoint.completed.delete(task.section_id)
     }
   }
+  const updateBatchTask = async (
+    sectionId: string,
+    update: UpdateRevisionBatchTaskOptions,
+  ): Promise<void> => {
+    if (revisionBatch === undefined) return
+    const task = batchTaskBySection.get(sectionId)
+    if (task === undefined) return
+    try {
+      await persistRevisionBatchTaskStatus(workspace, revisionBatch.batchId, task.task_id, update, Date.now())
+    } catch {
+      // 批次状态更新落盘异常不中断执行
+    }
+  }
   await mkdir(join(chaptersRoot, 'sections'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'meta'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'reviews'), { recursive: true, mode: 0o700 })
@@ -2102,6 +2129,7 @@ async function runChapterWriting(
   const writeSection = async (sectionId: string): Promise<CompletedChapter> => {
     let writer: ChapterWriterChild | undefined
     signal.throwIfAborted()
+    const batchTask = batchTaskBySection.get(sectionId)
     const inputEpoch = sectionEpochs.get(sectionId) ?? 0
     const inputPlanVersion = writingPlan.plan_version
     const context = contexts.get(sectionId)
@@ -2172,7 +2200,6 @@ async function runChapterWriting(
       const serial = context.contentPath.slice(-7, -3)
       const commandRevision = pendingRevisions.get(sectionId)
       const effectiveRevision = revision?.request ?? commandRevision
-      const batchTask = batchTaskBySection.get(sectionId)
       const revisionOriginal = revision?.original ?? (effectiveRevision === undefined && batchTask === undefined
         ? undefined : await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
       const finishChapter = async (
@@ -2404,6 +2431,11 @@ async function runChapterWriting(
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
         await persistLog()
+        if (revisionBatch !== undefined && batchTask !== undefined) {
+          await updateBatchTask(sectionId, {
+            status: attempt === 0 ? 'running' : 'repairing',
+          })
+        }
         let retryInfrastructure = false
         let stopAfterReview = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
@@ -2511,6 +2543,9 @@ async function runChapterWriting(
             await appendChapterWebReferences(workspace, references, chapterWebSources())
             rejectedCandidate = projectChapterWriterCandidate(candidate, references)
             await persistLog()
+            if (revisionBatch !== undefined && batchTask !== undefined) {
+              await updateBatchTask(sectionId, { status: 'reviewing' })
+            }
             const reviewed = await reviewCandidate(candidate)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
               reviewedFallback = {
@@ -2579,12 +2614,16 @@ async function runChapterWriting(
         infrastructureRetries = 0
       }
       if (reviewedFallback !== undefined) {
-        return await finishChapter(
+        const finished = await finishChapter(
           reviewedFallback.candidate,
           reviewedFallback.review,
           reviewedFallback.writerChildSessionId,
           reviewedFallback.reviewerChildSessionId,
         )
+        if (revisionBatch !== undefined && batchTask !== undefined) {
+          await updateBatchTask(sectionId, { status: 'completed' })
+        }
+        return finished
       }
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
@@ -2593,6 +2632,16 @@ async function runChapterWriting(
       log.failure_phase = log.phase
       log.phase = null
       await persistLog()
+      if (revisionBatch !== undefined && batchTask !== undefined) {
+        await updateBatchTask(sectionId, {
+          status: 'failed',
+          failure: {
+            code: 'CHAPTER_WRITING_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+            phase: log.failure_phase,
+          },
+        })
+      }
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
       throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`, { cause: error })
     } finally {
@@ -2633,6 +2682,16 @@ async function runChapterWriting(
             blockedLog.status = 'failed'
             blockedLog.phase = null
             blockedLog.failure_phase = 'blocked'
+          }
+          if (revisionBatch !== undefined) {
+            await updateBatchTask(sectionId, {
+              status: 'blocked',
+              failure: {
+                code: 'DEPENDENCY_FAILED',
+                message: error.message,
+                phase: 'blocked',
+              },
+            })
           }
         }
         pending.clear()

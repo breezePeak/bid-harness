@@ -8,10 +8,30 @@ import { publishBidBatch } from './publication-batch.ts'
 import type { RevisionIssue, RevisionQueueArtifact, RevisionQueueWorkspace } from './chapter-revision-queue.ts'
 
 /** `batches/<batch_id>.json` 的 schema 版本。 */
-export const REVISION_BATCH_SCHEMA_VERSION = 1 as const
+export const REVISION_BATCH_SCHEMA_VERSION = 2 as const
 
 /** batches 目录在项目内的相对路径。 */
 export const REVISION_BATCHES_PATH = 'chapters/revisions/batches'
+
+/** 批次任务状态枚举。 */
+export const revisionBatchTaskStatusSchema = z.enum([
+  'queued',
+  'running',
+  'reviewing',
+  'repairing',
+  'completed',
+  'conflict',
+  'needs_input',
+  'failed',
+  'blocked',
+])
+
+/** 批次任务失败信息。 */
+export const revisionBatchTaskFailureSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  phase: z.string().nullable(),
+}).strict()
 
 /** 批次任务：同章节的 issue 聚合体。 */
 export const revisionBatchTaskSchema = z.object({
@@ -20,6 +40,10 @@ export const revisionBatchTaskSchema = z.object({
   issue_ids: z.array(z.string().min(1)).min(1),
   depends_on: z.array(z.string().min(1)),
   dependency_reason: z.string().optional(),
+  status: revisionBatchTaskStatusSchema.default('queued'),
+  failure: revisionBatchTaskFailureSchema.nullable().default(null),
+  started_at: z.number().int().nonnegative().nullable().default(null),
+  completed_at: z.number().int().nonnegative().nullable().default(null),
 }).strict()
 
 /** 批次状态。 */
@@ -39,6 +63,10 @@ export const revisionBatchArtifactSchema = z.object({
   updated_at: z.number().int().nonnegative(),
 }).strict()
 
+/** 批次任务状态类型。 */
+export type RevisionBatchTaskStatus = z.infer<typeof revisionBatchTaskStatusSchema>
+/** 批次任务失败信息类型。 */
+export type RevisionBatchTaskFailure = z.infer<typeof revisionBatchTaskFailureSchema>
 /** 批次任务。 */
 export type RevisionBatchTask = z.infer<typeof revisionBatchTaskSchema>
 /** 批次状态。 */
@@ -84,12 +112,66 @@ export function createRevisionBatchId(): string {
   return `BATCH-${randomUUID()}`
 }
 
+const legacyRevisionBatchTaskSchema = z.object({
+  task_id: z.string().min(1),
+  section_id: z.string().min(1),
+  issue_ids: z.array(z.string().min(1)).min(1),
+  depends_on: z.array(z.string().min(1)),
+  dependency_reason: z.string().optional(),
+  status: revisionBatchTaskStatusSchema.optional(),
+  failure: revisionBatchTaskFailureSchema.nullable().optional(),
+  started_at: z.number().int().nonnegative().nullable().optional(),
+  completed_at: z.number().int().nonnegative().nullable().optional(),
+}).strict()
+
+const legacyRevisionBatchArtifactSchema = z.object({
+  schema_version: z.union([z.literal(1), z.literal(2)]),
+  batch_id: z.string().min(1),
+  queue_revision: z.number().int().nonnegative(),
+  issue_ids: z.array(z.string().min(1)).min(1),
+  status: revisionBatchStatusSchema,
+  tasks: z.array(legacyRevisionBatchTaskSchema).min(1),
+  created_at: z.number().int().nonnegative(),
+  updated_at: z.number().int().nonnegative(),
+}).strict()
+
 /**
- * 解析 batch artifact；格式无效时拒绝读取。
+ * 解析 batch artifact；自动将 v1 legacy 快照平滑迁移为 v2 格式。
  * @param value 已解码的 JSON 值。
  */
 export function parseRevisionBatchArtifact(value: unknown): RevisionBatchArtifact {
-  return revisionBatchArtifactSchema.parse(value)
+  try {
+    return revisionBatchArtifactSchema.parse(value)
+  } catch {
+    const legacy = legacyRevisionBatchArtifactSchema.parse(value)
+    return {
+      schema_version: REVISION_BATCH_SCHEMA_VERSION,
+      batch_id: legacy.batch_id,
+      queue_revision: legacy.queue_revision,
+      issue_ids: [...legacy.issue_ids],
+      status: legacy.status,
+      tasks: legacy.tasks.map((task) => {
+        const fallbackStatus: RevisionBatchTaskStatus = legacy.status === 'completed'
+          ? 'completed'
+          : legacy.status === 'failed'
+            ? 'failed'
+            : 'queued'
+        return {
+          task_id: task.task_id,
+          section_id: task.section_id,
+          issue_ids: [...task.issue_ids],
+          depends_on: [...task.depends_on],
+          ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
+          status: task.status ?? fallbackStatus,
+          failure: task.failure ?? null,
+          started_at: task.started_at ?? null,
+          completed_at: task.completed_at ?? null,
+        }
+      }),
+      created_at: legacy.created_at,
+      updated_at: legacy.updated_at,
+    }
+  }
 }
 
 /**
@@ -175,6 +257,10 @@ export function validateRevisionBatchPlan(
       issue_ids: [...task.issue_ids],
       depends_on: [...task.depends_on],
       ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
+      status: 'queued',
+      failure: null,
+      started_at: null,
+      completed_at: null,
     })
   }
 
@@ -266,6 +352,10 @@ export function createRevisionBatch(
       issue_ids: [...task.issue_ids],
       depends_on: [...task.depends_on],
       ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
+      status: 'queued' as const,
+      failure: null,
+      started_at: null,
+      completed_at: null,
     })),
     created_at: now,
     updated_at: now,
@@ -376,6 +466,122 @@ export function failRevisionBatchExecution(
   if (batch.status === 'failed') return batch
   return { ...batch, status: 'failed', updated_at: now }
 }
+
+/** 任务合法状态迁移表。 */
+export const VALID_TASK_TRANSITIONS: Readonly<Record<RevisionBatchTaskStatus, readonly RevisionBatchTaskStatus[]>> = {
+  queued: ['running', 'blocked', 'conflict', 'failed'],
+  running: ['reviewing', 'needs_input', 'failed'],
+  reviewing: ['repairing', 'completed', 'needs_input', 'failed', 'conflict'],
+  repairing: ['reviewing', 'needs_input', 'failed'],
+  completed: [],
+  conflict: ['queued'],
+  needs_input: ['queued'],
+  failed: ['queued'],
+  blocked: ['queued'],
+}
+
+/** 更新批次任务状态时的可选参数。 */
+export interface UpdateRevisionBatchTaskOptions {
+  readonly status: RevisionBatchTaskStatus
+  readonly failure?: RevisionBatchTaskFailure | null
+  readonly started_at?: number | null
+  readonly completed_at?: number | null
+}
+
+/**
+ * 更新批次内指定任务的状态；严格校验合法状态迁移，维护开始与完成时间戳。
+ * @param batch 当前批次快照。
+ * @param taskId 目标任务 ID。
+ * @param update 状态更新内容。
+ * @param now 当前时间戳。
+ * @returns 迁移后的新批次快照。
+ */
+export function updateRevisionBatchTaskStatus(
+  batch: RevisionBatchArtifact,
+  taskId: string,
+  update: UpdateRevisionBatchTaskOptions,
+  now: number,
+): RevisionBatchArtifact {
+  const taskIndex = batch.tasks.findIndex(t => t.task_id === taskId)
+  if (taskIndex < 0) {
+    throw new Error(`BID_REVISION_TASK_NOT_FOUND: 未找到任务 ${taskId}`)
+  }
+  const currentTask = batch.tasks[taskIndex]
+  if (currentTask === undefined) {
+    throw new Error(`BID_REVISION_TASK_NOT_FOUND: 未找到任务 ${taskId}`)
+  }
+
+  const currentStatus = currentTask.status
+  const nextStatus = update.status
+
+  if (currentStatus !== nextStatus) {
+    const allowed = VALID_TASK_TRANSITIONS[currentStatus]
+    if (!allowed.includes(nextStatus)) {
+      throw new Error(`BID_REVISION_TASK_INVALID_TRANSITION: 任务 ${taskId} 无法从 ${currentStatus} 迁移到 ${nextStatus}`)
+    }
+  }
+
+  const startedAt = update.started_at !== undefined
+    ? update.started_at
+    : nextStatus === 'running' && currentTask.started_at === null
+      ? now
+      : currentTask.started_at
+
+  const completedAt = update.completed_at !== undefined
+    ? update.completed_at
+    : nextStatus === 'completed'
+      ? (currentTask.completed_at ?? now)
+      : null
+
+  const failure = update.failure !== undefined
+    ? update.failure
+    : nextStatus === 'failed'
+      ? currentTask.failure
+      : null
+
+  const updatedTasks = batch.tasks.map((t, idx) => {
+    if (idx !== taskIndex) return t
+    return {
+      ...t,
+      status: nextStatus,
+      failure,
+      started_at: startedAt,
+      completed_at: completedAt,
+    }
+  })
+
+  return {
+    ...batch,
+    tasks: updatedTasks,
+    updated_at: now,
+  }
+}
+
+/**
+ * 原子读取、更新指定任务状态并持久化批次 artifact。
+ * @param workspace 项目工作区。
+ * @param batchId 批次 ID。
+ * @param taskId 目标任务 ID。
+ * @param update 状态更新内容。
+ * @param now 当前时间戳。
+ * @returns 持久化成功后的新批次快照。
+ */
+export async function persistRevisionBatchTaskStatus(
+  workspace: RevisionQueueWorkspace,
+  batchId: string,
+  taskId: string,
+  update: UpdateRevisionBatchTaskOptions,
+  now: number,
+): Promise<RevisionBatchArtifact> {
+  const batch = await readRevisionBatch(workspace, batchId)
+  if (batch === null) {
+    throw new Error(`BID_REVISION_BATCH_NOT_FOUND: 未找到批次 ${batchId}`)
+  }
+  const updated = updateRevisionBatchTaskStatus(batch, taskId, update, now)
+  await writeRevisionBatch(workspace, updated)
+  return updated
+}
+
 /** Reviewer 对单条审批意见的完成度判定。 */
 export interface RevisionIssueCheck {
   readonly issue_id: string

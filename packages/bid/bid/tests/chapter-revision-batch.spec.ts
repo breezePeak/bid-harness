@@ -13,6 +13,7 @@ import {
   type RevisionQueueArtifact,
 } from '../src/chapter-revision-queue.ts'
 import {
+  REVISION_BATCH_SCHEMA_VERSION,
   createRevisionBatch,
   createRevisionBatchId,
   parseRevisionBatchArtifact,
@@ -25,6 +26,8 @@ import {
   completeRevisionBatchExecution,
   suspendRevisionBatchExecution,
   failRevisionBatchExecution,
+  updateRevisionBatchTaskStatus,
+  persistRevisionBatchTaskStatus,
   settleRevisionBatchIssues,
   detectStaleBaseVersions,
   type PlanRevisionBatchInput,
@@ -397,9 +400,10 @@ describe('批次执行提示渲染 renderRevisionBatchSectionPrompt', () => {
 describe('批次状态流转', () => {
   function makeBatch(status: RevisionBatchArtifact['status']): RevisionBatchArtifact {
     return {
-      schema_version: 1, batch_id: 'BATCH-1', queue_revision: 0,
+      schema_version: REVISION_BATCH_SCHEMA_VERSION, batch_id: 'BATCH-1', queue_revision: 0,
       issue_ids: ['REV-1'], status, tasks: [{
         task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'], depends_on: [],
+        status: 'queued', failure: null, started_at: null, completed_at: null,
       }], created_at: 1000, updated_at: 1000,
     }
   }
@@ -1127,12 +1131,21 @@ describe('任务 02: 章节级成功隔离与禁止全批回滚', () => {
 
   it('9 & 10. 批次生命周期状态流转与单章修订兼容：complete 幂等且 fail 覆盖所有运行状态', () => {
     const batch: RevisionBatchArtifact = {
-      schema_version: 1,
+      schema_version: REVISION_BATCH_SCHEMA_VERSION,
       batch_id: 'BATCH-001',
       queue_revision: 1,
       issue_ids: ['REV-1'],
       status: 'running',
-      tasks: [{ task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'], depends_on: [] }],
+      tasks: [{
+        task_id: 'T-1',
+        section_id: 'SEC-1',
+        issue_ids: ['REV-1'],
+        depends_on: [],
+        status: 'running',
+        failure: null,
+        started_at: 1000,
+        completed_at: null,
+      }],
       created_at: 1000,
       updated_at: 1000,
     }
@@ -1143,5 +1156,217 @@ describe('任务 02: 章节级成功隔离与禁止全批回滚', () => {
 
     // 失败状态覆盖
     expect(failRevisionBatchExecution(batch, 4000).status).toBe('failed')
+  })
+})
+
+describe('任务 03: 给 RevisionTask 增加真实 durable 状态', () => {
+  function makeBaseBatch(tasks?: readonly {
+    readonly task_id: string
+    readonly section_id: string
+    readonly issue_ids: readonly string[]
+  }[]): RevisionBatchArtifact {
+    const taskList = tasks ?? [{ task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'] }]
+    return {
+      schema_version: REVISION_BATCH_SCHEMA_VERSION,
+      batch_id: 'BATCH-003',
+      queue_revision: 1,
+      issue_ids: taskList.flatMap(t => t.issue_ids),
+      status: 'running',
+      tasks: taskList.map(t => ({
+        task_id: t.task_id,
+        section_id: t.section_id,
+        issue_ids: [...t.issue_ids],
+        depends_on: [],
+        status: 'queued',
+        failure: null,
+        started_at: null,
+        completed_at: null,
+      })),
+      created_at: 1000,
+      updated_at: 1000,
+    }
+  }
+
+  it('1. 初始 queued: 新创建批次任务状态全部为 queued 且时间戳为空', () => {
+    const queue = makeQueueWithIssues(
+      { sectionId: 'SEC-1', title: '第 1 章' },
+      { sectionId: 'SEC-2', title: '第 2 章' },
+    )
+    const plan = planInput(queue.issues.map(i => i.issue_id), [
+      { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [queue.issues[0]?.issue_id ?? ''] },
+      { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [queue.issues[1]?.issue_id ?? ''] },
+    ])
+    const { batch } = createRevisionBatch(queue, plan, 'BATCH-001', 1000, [])
+    expect(batch.schema_version).toBe(2)
+    expect(batch.tasks[0]?.status).toBe('queued')
+    expect(batch.tasks[0]?.started_at).toBeNull()
+    expect(batch.tasks[0]?.completed_at).toBeNull()
+    expect(batch.tasks[0]?.failure).toBeNull()
+    expect(batch.tasks[1]?.status).toBe('queued')
+  })
+
+  it('2. 获槽位 running: 从 queued 转为 running 时记录 started_at', () => {
+    const batch = makeBaseBatch()
+    const updated = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    expect(updated.tasks[0]?.status).toBe('running')
+    expect(updated.tasks[0]?.started_at).toBe(2000)
+    expect(updated.tasks[0]?.completed_at).toBeNull()
+    expect(updated.updated_at).toBe(2000)
+  })
+
+  it('3. reviewing: 写作完成后从 running 迁移到 reviewing', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const reviewing = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'reviewing' }, 3000)
+    expect(reviewing.tasks[0]?.status).toBe('reviewing')
+    expect(reviewing.tasks[0]?.started_at).toBe(2000)
+  })
+
+  it('4. repairing: 审查未通过要求修补时从 reviewing 迁移到 repairing', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const reviewing = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'reviewing' }, 3000)
+    const repairing = updateRevisionBatchTaskStatus(reviewing, 'T-1', { status: 'repairing' }, 4000)
+    expect(repairing.tasks[0]?.status).toBe('repairing')
+  })
+
+  it('5. repairing → reviewing: 修补完成后再次进入审查', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const reviewing1 = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'reviewing' }, 3000)
+    const repairing = updateRevisionBatchTaskStatus(reviewing1, 'T-1', { status: 'repairing' }, 4000)
+    const reviewing2 = updateRevisionBatchTaskStatus(repairing, 'T-1', { status: 'reviewing' }, 5000)
+    expect(reviewing2.tasks[0]?.status).toBe('reviewing')
+  })
+
+  it('6. completed: 审查通过且提交成功后从 reviewing 转为 completed', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const reviewing = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'reviewing' }, 3000)
+    const completed = updateRevisionBatchTaskStatus(reviewing, 'T-1', { status: 'completed' }, 6000)
+    expect(completed.tasks[0]?.status).toBe('completed')
+    expect(completed.tasks[0]?.completed_at).toBe(6000)
+  })
+
+  it('7. conflict: base stale 时从 queued 迁移到 conflict', () => {
+    const batch = makeBaseBatch()
+    const conflict = updateRevisionBatchTaskStatus(batch, 'T-1', {
+      status: 'conflict',
+      failure: { code: 'STALE_BASE', message: '章节正文已变更', phase: null },
+    }, 2500)
+    expect(conflict.tasks[0]?.status).toBe('conflict')
+    expect(conflict.tasks[0]?.failure?.code).toBe('STALE_BASE')
+  })
+
+  it('8. needs_input: 缺少输入时从 running 或 reviewing 迁移到 needs_input', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const needsInput = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'needs_input' }, 3000)
+    expect(needsInput.tasks[0]?.status).toBe('needs_input')
+  })
+
+  it('9. blocked: 依赖任务失败时从 queued 迁移到 blocked', () => {
+    const batch = makeBaseBatch([
+      { task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'] },
+      { task_id: 'T-2', section_id: 'SEC-2', issue_ids: ['REV-2'] },
+    ])
+    const blocked = updateRevisionBatchTaskStatus(batch, 'T-2', {
+      status: 'blocked',
+      failure: { code: 'DEPENDENCY_FAILED', message: '前置章节 SEC-1 失败', phase: 'blocked' },
+    }, 2000)
+    expect(blocked.tasks[1]?.status).toBe('blocked')
+    expect(blocked.tasks[1]?.failure?.code).toBe('DEPENDENCY_FAILED')
+  })
+
+  it('10. Workbench 显示真实状态: Workbench 视图直接反映章节所属真实 task.status', () => {
+    const view = {
+      schema_version: 6,
+      outline: [
+        {
+          section_id: 'SEC-1', parent_id: null, order: 1, title: '第 1 章', writable: true,
+          writing_status: 'writing' as const, review_status: 'reviewing' as const,
+          chapter_indicator: { status: 'reviewing' as const, tooltip: '审查中' },
+          content_available: true,
+          revision: { batch_id: 'BATCH-001', task_id: 'T-1', status: 'reviewing' as const, issue_count: 1 },
+        },
+        {
+          section_id: 'SEC-2', parent_id: null, order: 2, title: '第 2 章', writable: true,
+          writing_status: 'not_started' as const, review_status: 'not_started' as const,
+          chapter_indicator: { status: 'queued' as const, tooltip: '排队中' },
+          content_available: false,
+          revision: { batch_id: 'BATCH-001', task_id: 'T-2', status: 'queued' as const, issue_count: 2 },
+        },
+        {
+          section_id: 'SEC-3', parent_id: null, order: 3, title: '第 3 章', writable: true,
+          writing_status: 'writing' as const, review_status: 'needs_attention' as const,
+          chapter_indicator: { status: 'repairing' as const, tooltip: '修复中' },
+          content_available: true,
+          revision: { batch_id: 'BATCH-001', task_id: 'T-3', status: 'repairing' as const, issue_count: 1 },
+        },
+        {
+          section_id: 'SEC-4', parent_id: null, order: 4, title: '第 4 章', writable: true,
+          writing_status: 'failed' as const, review_status: 'not_started' as const,
+          chapter_indicator: { status: 'failed' as const, tooltip: '依赖阻塞' },
+          content_available: false,
+          revision: { batch_id: 'BATCH-001', task_id: 'T-4', status: 'blocked' as const, issue_count: 1 },
+        },
+      ],
+      summary: {
+        chapter_count: 4, content_count: 2, reviewed_count: 1, needs_attention_count: 1,
+        page_estimate: { status: 'unavailable' as const }, page_target: { status: 'not_set' as const },
+      },
+      global_compliance: {
+        status: 'not_required' as const,
+        reviewed_count: 0,
+        total_count: 0,
+        document_issues: [],
+        delivery_todos: [],
+      },
+    }
+    const parsed = parseBidReviewWorkbenchView(view)
+    expect(parsed.outline[0]?.revision?.status).toBe('reviewing')
+    expect(parsed.outline[1]?.revision?.status).toBe('queued')
+    expect(parsed.outline[2]?.revision?.status).toBe('repairing')
+    expect(parsed.outline[3]?.revision?.status).toBe('blocked')
+  })
+
+  it('11. Host 重启状态不丢: persistRevisionBatchTaskStatus 写入后重新读取完整还原', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'dsh-task03-'))
+    try {
+      const workspace = new BidWorkspace(tmp)
+      const batch = makeBaseBatch()
+      await writeRevisionBatch(workspace, batch)
+
+      // 模拟执行流中原子更新落盘
+      await persistRevisionBatchTaskStatus(workspace, 'BATCH-003', 'T-1', {
+        status: 'running',
+        started_at: 1500,
+      }, 1500)
+
+      // 模拟 Host 重启：再次读取 artifact
+      const restored = await readRevisionBatch(workspace, 'BATCH-003')
+      expect(restored).not.toBeNull()
+      expect(restored?.tasks[0]?.status).toBe('running')
+      expect(restored?.tasks[0]?.started_at).toBe(1500)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('12. completed 不恢复成 queued: 禁止向后非法退化，但幂等保持成功', () => {
+    const batch = makeBaseBatch()
+    const running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2000)
+    const reviewing = updateRevisionBatchTaskStatus(running, 'T-1', { status: 'reviewing' }, 3000)
+    const completed = updateRevisionBatchTaskStatus(reviewing, 'T-1', { status: 'completed' }, 4000)
+
+    // 非法退化回 queued 或 running 拒绝
+    expect(() => updateRevisionBatchTaskStatus(completed, 'T-1', { status: 'queued' }, 5000))
+      .toThrow('BID_REVISION_TASK_INVALID_TRANSITION')
+    expect(() => updateRevisionBatchTaskStatus(completed, 'T-1', { status: 'running' }, 5000))
+      .toThrow('BID_REVISION_TASK_INVALID_TRANSITION')
+
+    // 幂等调用允许
+    const idempotent = updateRevisionBatchTaskStatus(completed, 'T-1', { status: 'completed' }, 6000)
+    expect(idempotent.tasks[0]?.status).toBe('completed')
   })
 })

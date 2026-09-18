@@ -260,29 +260,29 @@ export function BidReviewWorkbench({
     if (instruction === '') { setReviewError('请填写修改意见。'); return }
     const request: BidAddRevisionIssueRequest = reviewModal.kind === 'paragraphs'
       ? (() => {
-          const ref = reviewModal.reference.reference
-          if (ref.scope !== 'paragraphs') throw new Error('引用范围不匹配。')
-          return {
-            section_id: ref.section_id,
+        const ref = reviewModal.reference.reference
+        if (ref.scope !== 'paragraphs') throw new Error('引用范围不匹配。')
+        return {
+          section_id: ref.section_id,
+          scope: 'paragraphs' as const,
+          reference: {
             scope: 'paragraphs' as const,
-            reference: {
-              scope: 'paragraphs' as const,
-              base_content_sha256: ref.content_sha256,
-              start: ref.start,
-              end: ref.end,
-              text: ref.text,
-            },
-            instruction,
-            suggestion: reviewSuggestion.trim() === '' ? null : reviewSuggestion.trim(),
-          }
-        })()
-      : {
-          section_id: reviewModal.sectionId,
-          scope: 'chapter' as const,
-          reference: { scope: 'chapter' as const, base_content_sha256: reviewModal.baseContentSha256 },
+            base_content_sha256: ref.content_sha256,
+            start: ref.start,
+            end: ref.end,
+            text: ref.text,
+          },
           instruction,
           suggestion: reviewSuggestion.trim() === '' ? null : reviewSuggestion.trim(),
         }
+      })()
+      : {
+        section_id: reviewModal.sectionId,
+        scope: 'chapter' as const,
+        reference: { scope: 'chapter' as const, base_content_sha256: reviewModal.baseContentSha256 },
+        instruction,
+        suggestion: reviewSuggestion.trim() === '' ? null : reviewSuggestion.trim(),
+      }
     setReviewSaving(true)
     setReviewError(null)
     void addRevisionIssue(request).then(
@@ -327,7 +327,10 @@ export function BidReviewWorkbench({
               <span title={targetInfo.title}>{targetInfo.label}</span>
             </Pill>
             {batchInfo !== null && (
-              <Pill className={classes(css.statPill, css.revisionBatchPill, batchInfo.warning && css.statPillWarning)} title={batchInfo.title}>
+              <Pill
+                className={classes(css.statPill, css.revisionBatchPill, batchInfo.warning && css.statPillWarning)}
+                title={batchInfo.title}
+              >
                 {batchInfo.label}
               </Pill>
             )}
@@ -885,6 +888,7 @@ const REVISION_TASK_STATUS_LABEL: Record<BidRevisionTaskStatus, string> = {
   conflict: '正文冲突',
   failed: '修订失败',
   needs_input: '待补资料',
+  blocked: '依赖阻塞',
 }
 
 function getRevisionTaskTitle(revision: NonNullable<BidReviewWorkbenchView['outline'][number]['revision']>): string {

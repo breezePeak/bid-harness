@@ -552,7 +552,16 @@ export interface BidReviewWorkbenchView {
 }
 
 /** 批量修订中单个 task 的浏览器安全状态。 */
-export type BidRevisionTaskStatus = 'queued' | 'running' | 'reviewing' | 'repairing' | 'completed' | 'conflict' | 'failed' | 'needs_input'
+export type BidRevisionTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'reviewing'
+  | 'repairing'
+  | 'completed'
+  | 'conflict'
+  | 'failed'
+  | 'needs_input'
+  | 'blocked'
 
 /** Browser-safe document-level compliance finding or project-delivery todo. */
 export interface BidGlobalComplianceIssueView {
@@ -612,7 +621,7 @@ const reviewWorkbenchSchema = z.strictObject({
     content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
     revision: z.strictObject({
       batch_id: z.string(), task_id: z.string(),
-      status: z.enum(['queued', 'running', 'reviewing', 'repairing', 'completed', 'conflict', 'failed', 'needs_input']),
+      status: z.enum(['queued', 'running', 'reviewing', 'repairing', 'completed', 'conflict', 'failed', 'needs_input', 'blocked']),
       issue_count: z.number().int().positive(),
     }).optional(),
   })),

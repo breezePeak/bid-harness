@@ -117,6 +117,7 @@ import {
   startRevisionBatchExecution,
   completeRevisionBatchExecution,
   failRevisionBatchExecution,
+  updateRevisionBatchTaskStatus,
   settleRevisionBatchIssues,
   detectStaleBaseVersions,
   type PlanRevisionBatchInput,
@@ -2967,7 +2968,8 @@ export class BidHostRuntime extends TypertRemoteService {
           const settledQueue = await this.settleBatchRevisionIssues(workspace, batch, queue, sectionSerials)
           await writeRevisionQueue(workspace, settledQueue)
         })
-        const completedBatch = completeRevisionBatchExecution(runningBatch, Date.now())
+        const latestBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
+        const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
         await writeRevisionBatch(workspace, completedBatch)
         await operation.runs.complete(admittedRun)
         return {
@@ -4699,7 +4701,8 @@ export class BidHostRuntime extends TypertRemoteService {
             const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
             const settledQueue = await this.settleBatchRevisionIssues(operation.workspace, batch, queue, serialsForSettle)
             await writeRevisionQueue(operation.workspace, settledQueue)
-            const completedBatch = completeRevisionBatchExecution(batch, Date.now())
+            const latestBatch = await readRevisionBatch(operation.workspace, batch.batch_id) ?? batch
+            const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
             await writeRevisionBatch(operation.workspace, completedBatch)
             return
           }
@@ -5147,6 +5150,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const logRaw = JSON.parse(await readFile(within(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))
       log = parseOrMigrateChapterExecutionLog(logRaw)
     } catch {}
+    let currentBatch = await readRevisionBatch(workspace, batch.batch_id) ?? batch
     for (const task of batch.tasks) {
       const serial = sectionSerials.get(task.section_id)
       if (serial === undefined) {
@@ -5162,6 +5166,14 @@ export class BidHostRuntime extends TypertRemoteService {
               : issue,
           ),
         }
+        currentBatch = updateRevisionBatchTaskStatus(currentBatch, task.task_id, {
+          status: sectionLog.failure_phase === 'blocked' ? 'blocked' : 'failed',
+          failure: {
+            code: 'SECTION_FAILED',
+            message: '章节执行失败',
+            phase: sectionLog.failure_phase,
+          },
+        }, now)
         continue
       }
       let checks: RevisionIssueCheck[] = []
@@ -5176,7 +5188,11 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const result = settleRevisionBatchIssues(currentQueue, task.issue_ids, checks, now)
       currentQueue = result.queue
+      currentBatch = updateRevisionBatchTaskStatus(currentBatch, task.task_id, {
+        status: result.taskStatus,
+      }, now)
     }
+    await writeRevisionBatch(workspace, currentBatch)
     return currentQueue
   }
 
@@ -5258,20 +5274,11 @@ export class BidHostRuntime extends TypertRemoteService {
         const batch = await readRevisionBatch(workspace, batchId)
         if (batch === null) continue
         if (batch.status === 'running' || batch.status === 'suspended' || batch.status === 'planning') {
-          const issueMap = new Map(revisionQueue.issues.map(issue => [issue.issue_id, issue]))
           for (const task of batch.tasks) {
-            const issueStatuses = task.issue_ids.map(id => issueMap.get(id)?.status ?? 'pending')
-            const taskStatus: BidRevisionTaskStatus = batch.status === 'running'
-              ? issueStatuses.every(s => s === 'completed') ? 'completed'
-                : issueStatuses.some(s => s === 'failed') ? 'failed'
-                  : issueStatuses.some(s => s === 'needs_input') ? 'needs_input'
-                    : issueStatuses.some(s => s === 'conflict') ? 'conflict'
-                      : 'running'
-              : 'queued'
             revisionOverlayBySection.set(task.section_id, {
               batch_id: batch.batch_id,
               task_id: task.task_id,
-              status: taskStatus,
+              status: task.status,
               issue_count: task.issue_ids.length,
             })
           }
