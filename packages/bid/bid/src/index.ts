@@ -44,7 +44,7 @@ import {
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
 import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, executeEvidenceMappingFinalCheck, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
-import { changedWritableSectionIds, reconcileSectionEvidence } from './section-evidence-context.ts'
+import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -52,7 +52,7 @@ import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation
 import { assertBidMainSession, inspectBidStage, installStageInteractionTools, isBidHostSession, isBidMainSession, readStageJson, renderStageInteractionPrompt, stageInteractionSchema } from './stage-interaction.ts'
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
-import { outlineArtifactSha256, parseOutlineConfirmationArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
+import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseConfirmedOutlineArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
 import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
@@ -97,6 +97,42 @@ import {
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
+import {
+  addRevisionIssue as addRevisionIssueToQueue,
+  commitRevisionQueueMutation,
+  deleteRevisionIssue as deleteRevisionIssueFromQueue,
+  readRevisionQueue,
+  revisionIssueSchema,
+  updateRevisionIssue as updateRevisionIssueInQueue,
+  validateRevisionIssueReference,
+  writeRevisionQueue,
+  type RevisionQueueArtifact,
+} from './chapter-revision-queue.ts'
+import {
+  createRevisionBatchId,
+  createRevisionBatch as createRevisionBatchArtifact,
+  validateRevisionBatchPlan,
+  writeRevisionBatch,
+  commitRevisionBatchPlan,
+  commitRevisionBatchExecutionSettlement,
+  detectRevisionBatchIntegrity,
+  readRevisionBatch,
+  startRevisionBatchExecution,
+  resumeRevisionBatchExecution,
+  suspendRevisionBatchExecution,
+  completeRevisionBatchExecution,
+  failRevisionBatchExecution,
+  updateRevisionBatchTaskStatus,
+  settleRevisionBatchIssues,
+  detectStaleBaseVersions,
+  type PlanRevisionBatchInput,
+  type RevisionBatchArtifact,
+  type RevisionBatchExecutionInput,
+  type RevisionBatchTask,
+  type RevisionBatchTaskExecution,
+  type RevisionBatchTaskFailure,
+  type RevisionIssueCheck,
+} from './chapter-revision-batch.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type StageSchedulerControl } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
@@ -160,6 +196,7 @@ import type {
   BidReviewChapterView,
   BidReviewIssueView,
   BidReviewMaterialView,
+  BidRevisionTaskStatus,
   BidRuntimeState,
   BidRunDecision,
   BidRunDecisionType,
@@ -167,6 +204,12 @@ import type {
   BidDocumentRole,
   BidBinaryUploadFile,
   BidUploadFile,
+  BidAddRevisionIssueRequest,
+  BidUpdateRevisionIssueRequest,
+  BidDeleteRevisionIssueRequest,
+  BidRevisionQueueResult,
+  BidRevisionQueueView,
+  BidRevisionQueueErrorCode,
   StageArtifact,
   StageValidationIssue,
 } from './control-plane-contract.ts'
@@ -229,6 +272,15 @@ export type {
   StageValidationIssue,
   StageValidationResult,
   BidUploadFile,
+  BidAddRevisionIssueRequest,
+  BidUpdateRevisionIssueRequest,
+  BidDeleteRevisionIssueRequest,
+  BidRevisionQueueResult,
+  BidRevisionQueueView,
+  BidRevisionIssueView,
+  BidRevisionIssueStatus,
+  BidRevisionIssueReference,
+  BidRevisionQueueErrorCode,
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES } from './bid-events.ts'
 export type { BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
@@ -307,6 +359,33 @@ export { parseChapterWritingCompletionState } from './chapter-writing-completion
 export type { ChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
+export {
+  REVISION_QUEUE_PATH,
+  REVISION_QUEUE_SCHEMA_VERSION,
+  addRevisionIssue,
+  commitRevisionQueueMutation,
+  createRevisionIssueId,
+  deleteRevisionIssue,
+  emptyRevisionQueue,
+  parseRevisionQueueArtifact,
+  readRevisionQueue,
+  revisionIssueSchema,
+  revisionIssueStatusSchema,
+  revisionQueueArtifactSchema,
+  updateRevisionIssue,
+  validateRevisionIssueReference,
+  writeRevisionQueue,
+} from './chapter-revision-queue.ts'
+export type {
+  AddRevisionIssueInput,
+  DeleteRevisionIssueInput,
+  RevisionIssue,
+  RevisionIssueReference,
+  RevisionIssueStatus,
+  RevisionQueueArtifact,
+  RevisionQueueWorkspace,
+  UpdateRevisionIssueInput,
+} from './chapter-revision-queue.ts'
 export {
   DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
@@ -2767,6 +2846,251 @@ export class BidHostRuntime extends TypertRemoteService {
         scheduling_paused: active?.stageControl.paused() ?? false,
       }
     }
+    if (request.action === 'bid_plan_revision_batch') {
+      if (!isBidMainSession(session)) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '批次规划只供 Bid Main Agent 使用。')
+      if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目仍有操作正在执行。')
+      const operation = this.beginOperation(session)
+      try {
+        const runtime = await this.prepareOperation(operation)
+        if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
+          throw new Error('BID_REVISION_QUEUE_NOT_ALLOWED')
+        }
+        const workspace = operation.workspace
+        const queue = await readRevisionQueue(workspace)
+        const outline = (await confirmedOutline(workspace)).outline
+        const worklist = buildWritableSectionWorklist(outline)
+        const sectionHashes = new Map<string, string>()
+        for (const [index, section] of worklist.entries()) {
+          try {
+            const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`), 'utf8')
+            sectionHashes.set(section.id, chapterContentSha256(markdown))
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        const batchInput: PlanRevisionBatchInput = {
+          expected_queue_revision: request.expected_queue_revision,
+          issue_ids: [...request.issue_ids],
+          tasks: request.tasks.map(task => ({
+            task_id: task.task_id,
+            section_id: task.section_id,
+            issue_ids: [...task.issue_ids],
+            depends_on: [...task.depends_on],
+            ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
+          })),
+        }
+        if (queue.revision !== batchInput.expected_queue_revision) {
+          throw new Error('BID_REVISION_BATCH_QUEUE_CONFLICT')
+        }
+        await detectRevisionBatchIntegrity(workspace, queue)
+        const validated = validateRevisionBatchPlan(batchInput, queue, sectionHashes)
+        const batchId = createRevisionBatchId()
+        const now = Date.now()
+        const { queue: updatedQueue, batch } = createRevisionBatchArtifact(queue, batchInput, batchId, now, validated.staleIssues)
+        await commitRevisionBatchPlan(workspace, updatedQueue, batch)
+        return {
+          batch_id: batch.batch_id,
+          status: batch.status,
+          issue_ids: batch.issue_ids,
+          tasks: batch.tasks,
+          stale_issues: validated.staleIssues,
+          queue_revision: updatedQueue.revision,
+        }
+      } finally { await this.finishOperation(session, operation) }
+    }
+    if (request.action === 'bid_execute_revision_batch') {
+      if (!isBidMainSession(session)) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '批次执行只供 Bid Main Agent 使用。')
+      if (this.inFlight.has(projectKey(session))) throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目仍有操作正在执行。')
+      const operation = this.beginOperation(session)
+      let run: BidRunContext | undefined
+      try {
+        const runtime = await this.prepareOperation(operation)
+        if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
+          throw new Error('BID_REVISION_QUEUE_NOT_ALLOWED')
+        }
+        const workspace = operation.workspace
+        const batch = await readRevisionBatch(workspace, request.batch_id)
+        if (batch === null) throw new Error('BID_REVISION_BATCH_NOT_FOUND')
+        if (batch.status !== 'planning') throw new Error('BID_REVISION_BATCH_NOT_PLANNING')
+        const queue = await readRevisionQueue(workspace)
+        const issueMap = new Map(queue.issues.map(issue => [issue.issue_id, issue]))
+        const outline = parseConfirmedOutlineArtifact(JSON.parse(await readFile(
+          within(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
+        )))
+        const worklist = buildChapterWorklist(outline)
+        const sectionSerials = new Map(worklist.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+        const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
+          const issues = task.issue_ids.map((id) => {
+            const issue = issueMap.get(id)
+            if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
+            return {
+              issue_id: id,
+              instruction: issue.instruction,
+              suggestion: issue.suggestion,
+              scope: issue.scope,
+              reference_text: issue.reference.scope === 'paragraphs' ? issue.reference.text : null,
+              start: issue.reference.scope === 'paragraphs' ? issue.reference.start : null,
+              end: issue.reference.scope === 'paragraphs' ? issue.reference.end : null,
+            }
+          })
+          return {
+            task_id: task.task_id,
+            section_id: task.section_id,
+            issue_ids: [...task.issue_ids],
+            depends_on: [...task.depends_on],
+            issues,
+          }
+        })
+        const taskStatusMap = new Map<string, RevisionBatchTask['status']>()
+        const taskFailureMap = new Map<string, RevisionBatchTaskFailure | null>()
+        const staleIssueIdSet = new Set<string>()
+
+        for (const task of batch.tasks) {
+          if (task.status === 'conflict') {
+            taskStatusMap.set(task.task_id, 'conflict')
+            taskFailureMap.set(task.task_id, task.failure)
+            for (const issueId of task.issue_ids) staleIssueIdSet.add(issueId)
+          } else if (task.status === 'blocked') {
+            taskStatusMap.set(task.task_id, 'blocked')
+            taskFailureMap.set(task.task_id, task.failure)
+          } else {
+            taskStatusMap.set(task.task_id, 'queued')
+            taskFailureMap.set(task.task_id, null)
+          }
+        }
+
+        for (const task of batchTasks) {
+          if (taskStatusMap.get(task.task_id) !== 'queued') continue
+          const serial = sectionSerials.get(task.section_id)
+          if (serial === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+          const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+          const currentSha = chapterContentSha256(markdown)
+          const taskIssues = task.issue_ids.map((id) => {
+            const issue = issueMap.get(id)
+            if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
+            return issue
+          })
+          const staleIssueIds = detectStaleBaseVersions(
+            taskIssues.map(issue => ({ issue_id: issue.issue_id, reference: issue.reference })),
+            currentSha,
+          )
+          if (staleIssueIds.length > 0) {
+            taskStatusMap.set(task.task_id, 'conflict')
+            taskFailureMap.set(task.task_id, {
+              code: 'STALE_BASE',
+              message: '正文在审批意见创建后已发生变化，请重新选择该条内容。',
+              phase: null,
+            })
+            for (const issueId of task.issue_ids) {
+              staleIssueIdSet.add(issueId)
+            }
+          }
+        }
+
+        let dependencyChanged = true
+        while (dependencyChanged) {
+          dependencyChanged = false
+          for (const task of batch.tasks) {
+            if (taskStatusMap.get(task.task_id) !== 'queued') continue
+            const isBlocked = task.depends_on.some((depId) => {
+              const depStatus = taskStatusMap.get(depId)
+              return depStatus === 'conflict' || depStatus === 'blocked'
+            })
+            if (isBlocked) {
+              taskStatusMap.set(task.task_id, 'blocked')
+              taskFailureMap.set(task.task_id, {
+                code: 'DEPENDENCY_BLOCKED',
+                message: '依赖的任务存在冲突或已被阻塞',
+                phase: null,
+              })
+              dependencyChanged = true
+            }
+          }
+        }
+
+        const now = Date.now()
+        let currentQueue = queue
+        if (staleIssueIdSet.size > 0) {
+          currentQueue = {
+            ...queue,
+            issues: queue.issues.map(issue =>
+              staleIssueIdSet.has(issue.issue_id)
+                ? { ...issue, status: 'conflict' as const, updated_at: now }
+                : issue,
+            ),
+          }
+          await writeRevisionQueue(workspace, currentQueue)
+        }
+
+        const initialTasks: RevisionBatchTask[] = batch.tasks.map(task => ({
+          ...task,
+          status: taskStatusMap.get(task.task_id) ?? task.status,
+          failure: taskFailureMap.get(task.task_id) ?? task.failure,
+        }))
+        const preparedBatch: RevisionBatchArtifact = {
+          ...batch,
+          tasks: initialTasks,
+          updated_at: now,
+        }
+
+        const runnableTasks = batchTasks.filter(task => taskStatusMap.get(task.task_id) === 'queued')
+        const runningBatch = startRevisionBatchExecution(preparedBatch, now)
+        await writeRevisionBatch(workspace, runningBatch)
+
+        if (runnableTasks.length > 0) {
+          const batchExecutionInput: RevisionBatchExecutionInput = {
+            batchId: batch.batch_id,
+            tasks: runnableTasks,
+          }
+          const executionAgent = await this.executionAgent(operation)
+          const work = await persistHostWork(workspace, 'chapter_revision_batch', runtime.stage, { batch_id: request.batch_id })
+          const admittedRun = await operation.runs.start(work)
+          run = admittedRun
+          await admittedRun.activities.track(async () => {
+            await this.executeChapterRevisionBatchCandidate(
+              operation.session, executionAgent, workspace, batchExecutionInput, admittedRun,
+            )
+            const settled = await this.settleBatchRevisionIssues(
+              workspace, runningBatch, currentQueue, sectionSerials,
+            )
+            const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
+            await commitRevisionBatchExecutionSettlement(workspace, settled.queue, completedBatch)
+          })
+          await operation.runs.complete(admittedRun)
+        } else {
+          const latestBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
+          const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
+          await commitRevisionBatchExecutionSettlement(workspace, currentQueue, completedBatch)
+        }
+
+        const finalBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
+        return {
+          batch_id: finalBatch.batch_id,
+          status: finalBatch.status,
+          tasks: finalBatch.tasks,
+        }
+      } catch (error: unknown) {
+        if (run !== undefined && operation.runs.current === run) {
+          await operation.runs.suspend(
+            run.signal.aborted ? 'user_stop' : 'executor_error',
+            { code: 'BID_REVISION_BATCH_FAILED', message: error instanceof Error ? error.message : String(error) },
+          )
+        }
+        try {
+          const batch = await readRevisionBatch(operation.workspace, request.batch_id)
+          if (batch !== null) {
+            const isFatal = error instanceof Error && error.message.includes('FATAL_CORRUPTION')
+            const nextBatch = isFatal
+              ? failRevisionBatchExecution(batch, Date.now())
+              : suspendRevisionBatchExecution(batch, Date.now())
+            await writeRevisionBatch(operation.workspace, nextBatch)
+          }
+        } catch { /* batch 状态更新失败不掩盖原始错误 */ }
+        throw error
+      } finally {
+        await this.finishOperation(session, operation)
+      }
+    }
     if (active !== undefined) {
       const activeRuntime = bidSessionRuntime(active.session)
       if (activeRuntime.stage === 'chapter_writing' && activeRuntime.status === 'running') {
@@ -4434,6 +4758,61 @@ export class BidHostRuntime extends TypertRemoteService {
             await this.executeChapterRevisionCandidate(operation.session, agent, operation.workspace, request, run)
             return
           }
+          case 'chapter_revision_batch': {
+            const parsed = zod.object({ batch_id: zod.string().min(1) }).strict().parse(payload)
+            const batch = await readRevisionBatch(operation.workspace, parsed.batch_id)
+            if (batch === null) throw new Error('BID_REVISION_BATCH_NOT_FOUND')
+            const runningBatch = resumeRevisionBatchExecution(batch, Date.now())
+            await writeRevisionBatch(operation.workspace, runningBatch)
+            const queue = await readRevisionQueue(operation.workspace)
+            const issueMap = new Map(queue.issues.map(issue => [issue.issue_id, issue]))
+            const batchTasks: RevisionBatchTaskExecution[] = runningBatch.tasks.map((task) => {
+              const issues = task.issue_ids.map((id) => {
+                const issue = issueMap.get(id)
+                if (issue === undefined) {
+                  throw new Error(`FATAL_CORRUPTION: BID_REVISION_BATCH_CORRUPTED_MISSING_ISSUE: 队列缺失审批意见 ${id}`)
+                }
+                return {
+                  issue_id: id,
+                  instruction: issue.instruction,
+                  suggestion: issue.suggestion,
+                  scope: issue.scope,
+                  reference_text: issue.reference.scope === 'paragraphs' ? issue.reference.text : null,
+                  start: issue.reference.scope === 'paragraphs' ? issue.reference.start : null,
+                  end: issue.reference.scope === 'paragraphs' ? issue.reference.end : null,
+                }
+              })
+              return {
+                task_id: task.task_id,
+                section_id: task.section_id,
+                issue_ids: [...task.issue_ids],
+                depends_on: [...task.depends_on],
+                issues,
+              }
+            })
+            const runnableTasks = batchTasks.filter((task) => {
+              const taskArtifact = runningBatch.tasks.find(t => t.task_id === task.task_id)
+              return taskArtifact !== undefined
+                && taskArtifact.status !== 'completed'
+                && taskArtifact.status !== 'conflict'
+                && taskArtifact.status !== 'blocked'
+            })
+            if (runnableTasks.length > 0) {
+              await this.executeChapterRevisionBatchCandidate(
+                operation.session, agent, operation.workspace,
+                { batchId: runningBatch.batch_id, tasks: runnableTasks }, run,
+              )
+            }
+            const outlineForSettle = parseConfirmedOutlineArtifact(JSON.parse(await readFile(
+              within(operation.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
+            )))
+            const worklistForSettle = buildChapterWorklist(outlineForSettle)
+            const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+            const settled = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
+            const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
+            await commitRevisionBatchExecutionSettlement(operation.workspace, settled.queue, completedBatch)
+            return
+          }
           case 'stage_execution':
           case 'file_intake':
             throw new Error('BID_DEDICATED_WORK_KIND_REQUIRED')
@@ -4459,6 +4838,21 @@ export class BidHostRuntime extends TypertRemoteService {
             ? { code: 'BID_WORK_VALIDATION_FAILED', message: error.message, issues: error.issues }
             : { code: 'BID_WORK_RESUME_FAILED', message: error instanceof Error ? error.message : String(error) },
         )
+      }
+      if (run.work.kind === 'chapter_revision_batch') {
+        try {
+          const parsed = zod.object({ batch_id: zod.string().min(1) }).safeParse(payload)
+          if (parsed.success) {
+            const batch = await readRevisionBatch(operation.workspace, parsed.data.batch_id)
+            if (batch !== null) {
+              const isFatal = error instanceof Error && error.message.includes('FATAL_CORRUPTION')
+              const nextBatch = isFatal
+                ? failRevisionBatchExecution(batch, Date.now())
+                : suspendRevisionBatchExecution(batch, Date.now())
+              await writeRevisionBatch(operation.workspace, nextBatch)
+            }
+          }
+        } catch { /* 批次状态更新失败不掩盖原始错误 */ }
       }
       return bidSessionRuntime(operation.session)
     }
@@ -4784,6 +5178,150 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 恢复批次中各 section 原 Writer 的 parent agent，执行批量修订后发布结果。
+   * 原 Writer 不可恢复时抛出 BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE。
+   * @param session Bid Main Session。
+   * @param executionAgent 当前执行 agent。
+   * @param canonical 规范工作区。
+   * @param batchExecutionInput 批次执行输入。
+   * @param run 当前 Run 上下文。
+   */
+  private async executeChapterRevisionBatchCandidate(
+    session: Session,
+    executionAgent: Agent,
+    canonical: BidWorkspace,
+    batchExecutionInput: RevisionBatchExecutionInput,
+    run: BidRunContext,
+  ): Promise<void> {
+    const candidate = await prepareWorkingWorkspace(canonical, run)
+    const logPath = within(candidate.workspace.projectRoot, 'chapters/execution-log.json')
+    await assertNoLinkedPath(candidate.workspace.root, logPath)
+    const log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    const sectionIds = new Set(batchExecutionInput.tasks.map(task => task.section_id))
+    const writerIds = new Map<string, string>()
+    for (const sectionId of sectionIds) {
+      const writerId = log.sections.find(section => section.section_id === sectionId)
+        ?.final_writer_child_session_id
+      if (writerId == null) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      writerIds.set(sectionId, writerId)
+    }
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+    const parentIds = new Set<SessionId>()
+    for (const writerId of writerIds.values()) {
+      const writer = await persistence.inspect(SessionId(writerId), run.signal)
+      const parentId = writer.meta.parentSession
+      if (parentId === undefined || writer.meta.cwd === undefined
+        || projectKey({ header: writer.meta }) !== projectKey(session)) {
+        throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      }
+      parentIds.add(parentId)
+    }
+    const resumedParents: AgentHandle[] = []
+    try {
+      const presets = this.ctx.get('agentPresets')
+      for (const parentId of parentIds) {
+        if (parentId === executionAgent.id) continue
+        if (this.ctx.agents.get(parentId) !== undefined) continue
+        const parentSession = await persistence.inspect(parentId, run.signal)
+        const resumedParent = await this.ctx.agents.resume({
+          resumeSessionId: parentId,
+          signal: run.signal,
+          async setup(parentContext) {
+            parentContext.on('agent/pre-step', () => Promise.resolve({ kind: 'reject' }))
+            if (presets !== undefined) await presets.mount(parentContext, resolveSessionPreset({
+              header: parentSession.meta,
+              events: parentSession.events,
+            }))
+          },
+        })
+        resumedParents.push(resumedParent)
+      }
+      await executeChapterWriting(executionAgent, candidate.workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: this.config.modelStageRepairAttempts,
+        maxConcurrency: this.config.chapterWritingMaxConcurrency,
+        maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+        webSearchEnabled: this.config.webSearchEnabled,
+        run: candidate.run,
+        revisionBatch: batchExecutionInput,
+      })
+      await publishBidWorkingPaths(run, canonical, candidate.workspace, ['chapters'])
+    } finally {
+      for (const parent of resumedParents) await parent.dispose()
+    }
+  }
+
+  /**
+   * 读取批次中各 section 的 review artifact，提取 revision_issue_checks 并结算 issue 状态。
+   * @param workspace 项目工作区。
+   * @param batch 批次 artifact。
+   * @param queue 当前队列。
+   * @param sectionSerials section_id → serial 映射。
+   * @returns 结算后的队列。
+   */
+  private async settleBatchRevisionIssues(
+    workspace: BidWorkspace,
+    batch: RevisionBatchArtifact,
+    queue: RevisionQueueArtifact,
+    sectionSerials: ReadonlyMap<string, string>,
+  ): Promise<{ readonly queue: RevisionQueueArtifact; readonly batch: RevisionBatchArtifact }> {
+    let currentQueue = queue
+    const now = Date.now()
+    let log: ChapterExecutionLog | undefined
+    try {
+      const logRaw = JSON.parse(await readFile(within(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))
+      log = parseOrMigrateChapterExecutionLog(logRaw)
+    } catch {}
+    let currentBatch = await readRevisionBatch(workspace, batch.batch_id) ?? batch
+    for (const task of batch.tasks) {
+      const currentTask = currentBatch.tasks.find(t => t.task_id === task.task_id)
+      if (currentTask?.status === 'conflict' || currentTask?.status === 'blocked') {
+        continue
+      }
+      const serial = sectionSerials.get(task.section_id)
+      if (serial === undefined) {
+        throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 缺少章节序号 ${task.section_id}`)
+      }
+      const sectionLog = log?.sections.find(s => s.section_id === task.section_id)
+      if (sectionLog !== undefined && sectionLog.status === 'failed') {
+        currentQueue = {
+          ...currentQueue,
+          issues: currentQueue.issues.map(issue =>
+            task.issue_ids.includes(issue.issue_id)
+              ? { ...issue, status: 'failed' as const, updated_at: now }
+              : issue,
+          ),
+        }
+        currentBatch = updateRevisionBatchTaskStatus(currentBatch, task.task_id, {
+          status: sectionLog.failure_phase === 'blocked' ? 'blocked' : 'failed',
+          failure: {
+            code: 'SECTION_FAILED',
+            message: '章节执行失败',
+            phase: sectionLog.failure_phase,
+          },
+        }, now)
+        continue
+      }
+      let checks: RevisionIssueCheck[] = []
+      try {
+        const reviewRaw = JSON.parse(await readFile(
+          within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8',
+        ))
+        const review = parseChapterReviewArtifact(reviewRaw)
+        checks = review.revision_issue_checks ?? []
+      } catch {
+        throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 无法读取审查报告 ${serial}`)
+      }
+      const result = settleRevisionBatchIssues(currentQueue, task.issue_ids, checks, now)
+      currentQueue = result.queue
+      currentBatch = updateRevisionBatchTaskStatus(currentBatch, task.task_id, {
+        status: result.taskStatus,
+      }, now)
+    }
+    return { queue: currentQueue, batch: currentBatch }
+  }
+
+  /**
    * Read the live S5 writing and per-chapter review state without disclosing workspace paths.
    * @param session Bid Session whose writing workbench is requested.
    * @returns Browser-safe chapter workbench rows and aggregate progress.
@@ -4848,7 +5386,48 @@ export class BidHostRuntime extends TypertRemoteService {
         content_available: contentAvailable,
       } }
     }))
-    let rows = rowContents.map(item => item.row)
+    type SectionOverlay = { batch_id: string; task_id: string; status: BidRevisionTaskStatus; issue_count: number }
+    const revisionOverlayBySection = new Map<string, SectionOverlay>()
+    let revisionBatchSummary: BidReviewWorkbenchView['revision_batch'] | undefined
+    try {
+      const revisionQueue = await readRevisionQueue(workspace)
+      const batchIssues = revisionQueue.issues.filter(issue => issue.batch_id !== null)
+      const batchIds = [...new Set(
+        revisionQueue.issues.map(issue => issue.batch_id).filter((id): id is string => id !== null),
+      )]
+      for (const batchId of batchIds) {
+        const batch = await readRevisionBatch(workspace, batchId)
+        if (batch === null) continue
+        if (batch.status === 'running' || batch.status === 'suspended' || batch.status === 'planning') {
+          for (const task of batch.tasks) {
+            revisionOverlayBySection.set(task.section_id, {
+              batch_id: batch.batch_id,
+              task_id: task.task_id,
+              status: task.status,
+              issue_count: task.issue_ids.length,
+            })
+          }
+          const statusCounts = { completed: 0, running: 0, pending: 0, needs_input: 0, failed: 0 }
+          for (const issue of batchIssues.filter(issue => issue.batch_id === batchId)) {
+            if (issue.status === 'completed') statusCounts.completed += 1
+            else if (issue.status === 'failed') statusCounts.failed += 1
+            else if (issue.status === 'needs_input') statusCounts.needs_input += 1
+            else if (issue.status === 'scheduled' || issue.status === 'running') statusCounts.running += 1
+            else statusCounts.pending += 1
+          }
+          revisionBatchSummary = {
+            batch_id: batch.batch_id,
+            status: batch.status,
+            total_issues: batch.issue_ids.length,
+            ...statusCounts,
+          }
+        }
+      }
+    } catch { /* revision queue/batch 不可读时不阻塞 workbench。 */ }
+    let rows = rowContents.map((item) => {
+      const revision = revisionOverlayBySection.get(item.row.section_id)
+      return revision === undefined ? item.row : { ...item.row, revision }
+    })
     let pageEstimate: BidReviewWorkbenchView['summary']['page_estimate'] = { status: 'unavailable' }
     let writingPlan: Awaited<ReturnType<typeof currentWritingPlan>>
     let pageTarget: BidReviewWorkbenchView['summary']['page_target']
@@ -4959,7 +5538,7 @@ export class BidHostRuntime extends TypertRemoteService {
       } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
     }
     return {
-      schema_version: 5,
+      schema_version: 6,
       outline: rows,
       summary: {
         chapter_count: writable.length,
@@ -4972,6 +5551,7 @@ export class BidHostRuntime extends TypertRemoteService {
         page_target: pageTarget,
       },
       global_compliance: globalCompliance,
+      ...(revisionBatchSummary !== undefined ? { revision_batch: revisionBatchSummary } : {}),
     }
   }
 
@@ -5050,6 +5630,164 @@ export class BidHostRuntime extends TypertRemoteService {
     const runtime = bidSessionRuntime(session)
     if (runtime.stage !== 'chapter_writing' && runtime.stage !== 'docx_export') throw new Error('BID_REVIEW_NOT_ALLOWED')
     return new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+  }
+
+  /** 读取当前章节正文与可写性；审批意见队列与单次修订共用。 */
+  private async readChapterMarkdownForRevision(
+    workspace: BidWorkspace,
+    sectionId: string,
+  ): Promise<{ section: OutlineArtifact['sections'][number]; markdown: string; serial: string }> {
+    const outline = (await confirmedOutline(workspace)).outline
+    const section = outline.sections.find(item => item.id === sectionId)
+    if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
+    if (!section.writable) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+    const index = buildChapterWorklist(outline).findIndex(item => item.id === sectionId)
+    if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
+    const serial = String(index + 1).padStart(4, '0')
+    const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+    return { section, markdown, serial }
+  }
+
+  /** 把持久化队列投影为浏览器安全视图。 */
+  private projectRevisionQueueView(queue: RevisionQueueArtifact): BidRevisionQueueView {
+    return {
+      schema_version: 1,
+      revision: queue.revision,
+      issues: queue.issues.map(issue => ({
+        issue_id: issue.issue_id,
+        section_id: issue.section_id,
+        section_title: issue.section_title,
+        scope: issue.scope,
+        reference: issue.reference,
+        instruction: issue.instruction,
+        suggestion: issue.suggestion,
+        status: issue.status,
+        batch_id: issue.batch_id,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+      })),
+    }
+  }
+
+  /** 在项目锁内执行审批意见队列变更并返回浏览器安全视图。 */
+  private async executeRevisionQueueMutation(
+    session: Session,
+    expectedRevision: number | undefined,
+    mutate: (queue: RevisionQueueArtifact, workspace: BidWorkspace) => RevisionQueueArtifact | Promise<RevisionQueueArtifact>,
+  ): Promise<BidRevisionQueueResult> {
+    const reject = (code: BidRevisionQueueErrorCode, message: string): BidRevisionQueueResult =>
+      ({ ok: false, error: { code, message } })
+    if (!isBidMainSession(session)) return reject('BID_SESSION_REQUIRED', '审批意见需要标书项目会话。')
+    if (this.inFlight.has(projectKey(session))) return reject('BID_OPERATION_IN_PROGRESS', '当前项目仍有操作正在执行。')
+    const operation = this.beginOperation(session)
+    try {
+      const runtime = await this.prepareOperation(operation)
+      if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
+        return reject('BID_REVISION_QUEUE_NOT_ALLOWED', '正文编写完成后才能收集审批意见。')
+      }
+      const queue = await commitRevisionQueueMutation(operation.workspace, expectedRevision, current =>
+        mutate(current, operation.workspace))
+      return { ok: true, value: this.projectRevisionQueueView(queue) }
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : ''
+      if (reason.includes('BID_REVISION_QUEUE_CONFLICT')) return reject('BID_REVISION_QUEUE_CONFLICT', '审批意见队列已被更新，请刷新后重试。')
+      if (reason.includes('BID_REVISION_ISSUE_NOT_FOUND')) return reject('BID_REVISION_ISSUE_NOT_FOUND', '审批意见不存在或已被删除。')
+      if (reason.includes('BID_REVISION_ISSUE_NOT_EDITABLE')) return reject('BID_REVISION_ISSUE_NOT_EDITABLE', '只有待处理意见可以编辑。')
+      if (reason.includes('BID_REVISION_ISSUE_NOT_DELETABLE')) return reject('BID_REVISION_ISSUE_NOT_DELETABLE', '只有待处理意见可以删除。')
+      if (reason.includes('BID_REVISION_ISSUE_SCOPE_MISMATCH')) return reject('BID_REVISION_ISSUE_SCOPE_MISMATCH', '选区类型与引用类型不一致。')
+      if (reason.includes('BID_REVISION_ISSUE_INSTRUCTION_EMPTY')) return reject('BID_REVISION_ISSUE_INSTRUCTION_EMPTY', '修改意见不能为空。')
+      if (reason.includes('BID_CHAPTER_REVISION_CONFLICT')) return reject('BID_CHAPTER_REVISION_CONFLICT', '章节正文已变化，请重新选择章节或段落。')
+      if (reason.includes('BID_CHAPTER_REVISION_SELECTION_INVALID')) return reject('BID_CHAPTER_REVISION_SELECTION_INVALID', '请选择同一章节中的一个或相邻多个完整段落。')
+      if (reason.includes('BID_CHAPTER_REVISION_NOT_WRITABLE')) return reject('BID_CHAPTER_REVISION_NOT_WRITABLE', '目录分组标题不能编写，请选择有正文的章节。')
+      if (reason.includes('BID_REVIEW_SECTION_UNKNOWN')) return reject('BID_REVIEW_SECTION_UNKNOWN', '章节不存在或尚未生成正文。')
+      return reject('BID_REVISION_ISSUE_INVALID', '审批意见校验未通过，请重新选择章节或段落。')
+    } finally {
+      await this.finishOperation(session, operation)
+    }
+  }
+
+  /**
+   * 读取当前审批意见队列；不持有项目锁，仅读取持久化文件。
+   * @param session Bid 会话。
+   * @returns 浏览器安全的审批意见队列视图。
+   */
+  @Remote('getRevisionQueue')
+  async getRevisionQueue(session: Session): Promise<BidRevisionQueueView> {
+    const workspace = this.requireReviewWorkspace(session)
+    const queue = await readRevisionQueue(workspace)
+    return this.projectRevisionQueueView(queue)
+  }
+
+  /**
+   * 向队列追加一条 `pending` 审批意见；不启动任何 Writer。
+   * @param session Bid 会话。
+   * @param request 浏览器提交的意见输入。
+   * @returns 更新后的队列视图，或可重新选择原文后重试的业务错误。
+   */
+  @Remote('addRevisionIssue')
+  async addRevisionIssue(session: Session, request: BidAddRevisionIssueRequest): Promise<BidRevisionQueueResult> {
+    const parsed = revisionIssueSchema.safeParse({
+      issue_id: 'pending',
+      section_id: request.section_id,
+      section_title: 'pending',
+      scope: request.scope,
+      reference: request.reference,
+      instruction: request.instruction,
+      suggestion: request.suggestion,
+      status: 'pending',
+      batch_id: null,
+      created_at: 0,
+      updated_at: 0,
+    })
+    if (!parsed.success) return { ok: false, error: { code: 'BID_REVISION_ISSUE_INVALID', message: '审批意见校验未通过，请重新选择章节或段落。' } }
+    return this.executeRevisionQueueMutation(session, undefined, async (queue, workspace) => {
+      const { section, markdown } = await this.readChapterMarkdownForRevision(workspace, request.section_id)
+      validateRevisionIssueReference(request.reference, markdown)
+      return addRevisionIssueToQueue(queue, {
+        section_id: request.section_id,
+        scope: request.scope,
+        reference: request.reference,
+        instruction: request.instruction,
+        suggestion: request.suggestion,
+      }, section.title, Date.now())
+    })
+  }
+
+  /**
+   * 编辑一条 `pending` 审批意见的 instruction/suggestion/reference。
+   * @param session Bid 会话。
+   * @param request 浏览器提交的编辑输入。
+   * @returns 更新后的队列视图，或可重新选择原文后重试的业务错误。
+   */
+  @Remote('updateRevisionIssue')
+  async updateRevisionIssue(session: Session, request: BidUpdateRevisionIssueRequest): Promise<BidRevisionQueueResult> {
+    return this.executeRevisionQueueMutation(session, request.expected_queue_revision, async (queue, workspace) => {
+      const current = queue.issues.find(issue => issue.issue_id === request.issue_id)
+      if (current === undefined) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
+      if (current.status !== 'pending') throw new Error('BID_REVISION_ISSUE_NOT_EDITABLE')
+      const nextScope = request.scope ?? current.scope
+      const nextReference = request.reference ?? current.reference
+      if (nextScope !== nextReference.scope) throw new Error('BID_REVISION_ISSUE_SCOPE_MISMATCH')
+      const instruction = request.instruction !== undefined ? request.instruction.trim() : current.instruction
+      if (instruction.length === 0) throw new Error('BID_REVISION_ISSUE_INSTRUCTION_EMPTY')
+      if (request.reference !== undefined) {
+        const { markdown } = await this.readChapterMarkdownForRevision(workspace, current.section_id)
+        validateRevisionIssueReference(request.reference, markdown)
+      }
+      return updateRevisionIssueInQueue(queue, request, Date.now())
+    })
+  }
+
+  /**
+   * 物理删除一条 `pending` 审批意见；其他状态拒绝浏览器直接删除。
+   * @param session Bid 会话。
+   * @param request 浏览器提交的删除输入。
+   * @returns 更新后的队列视图，或可重新选择原文后重试的业务错误。
+   */
+  @Remote('deleteRevisionIssue')
+  async deleteRevisionIssue(session: Session, request: BidDeleteRevisionIssueRequest): Promise<BidRevisionQueueResult> {
+    return this.executeRevisionQueueMutation(session, request.expected_queue_revision, queue =>
+      deleteRevisionIssueFromQueue(queue, request))
   }
 
   /**

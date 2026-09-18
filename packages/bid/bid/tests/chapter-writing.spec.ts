@@ -194,7 +194,7 @@ function reviewFrom(request: SubagentStartRequest) {
   const quote = Object.entries(quoteOptions).find(([, text]) => candidate.markdown.includes(text) && !text.startsWith('#'))![0]
   const coverage = (item: string) => ({ item, status: 'covered' as const, evidence_quotes: [quote], issue: null })
   return {
-    schema_version: 7 as const, section_id: section.id, verdict: 'pass' as const,
+    schema_version: 8 as const, section_id: section.id, verdict: 'pass' as const,
     must_answer_coverage: section.must_answer.map(coverage),
     requirement_coverage: section.requirement_ids.map(requirement_id => ({ requirement_id, ...coverage(requirement_id) })),
     response_point_coverage: section.scoring_response_point_ids.map(response_point_id => (

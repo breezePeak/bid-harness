@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /** Version of an independent Chapter Reviewer report. */
-export const CHAPTER_REVIEW_SCHEMA_VERSION = 7 as const
+export const CHAPTER_REVIEW_SCHEMA_VERSION = 8 as const
 
 const coverageSchema = z.object({
   item: z.string().min(1),
@@ -60,6 +60,13 @@ const claimCheckSchema = z.object({
   issue: z.string().min(1).nullable(),
 }).strict()
 
+/** 批量修订中单条审批意见的完成度检查结果。 */
+const revisionIssueCheckSchema = z.object({
+  issue_id: z.string().min(1),
+  status: z.enum(['satisfied', 'unsatisfied', 'needs_input']),
+  reason: z.string().trim().min(1),
+}).strict()
+
 /** Strict structured result returned by the isolated Chapter Reviewer Child. */
 export const chapterReviewSchema = z.object({
   schema_version: z.literal(CHAPTER_REVIEW_SCHEMA_VERSION),
@@ -83,6 +90,7 @@ export const chapterReviewSchema = z.object({
     obvious_repetition_free: z.boolean(),
   }).strict(),
   blocking_issues: z.array(z.string().trim().min(1)),
+  revision_issue_checks: z.array(revisionIssueCheckSchema).optional(),
 }).strict()
 
 /** Persisted reviewer report bound to the accepted chapter bytes. */

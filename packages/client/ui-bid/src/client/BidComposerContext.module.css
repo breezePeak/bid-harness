@@ -52,3 +52,146 @@
 
 .remove:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .remove:disabled { cursor: default; opacity: 0.5; }
+.queue {
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queueHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queueTitle {
+  font: var(--dsw-font-xs-12);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.queueItem {
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  font: var(--dsw-font-xs-12);
+}
+
+.queueItem[data-status="scheduled"], .queueItem[data-status="running"] {
+  opacity: 0.7;
+}
+
+.queueItemHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.queueItemId {
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.queueItemSection {
+  color: var(--dsw-alias-label-secondary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queueItemStatus {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
+
+.queueItemRef {
+  margin-bottom: 4px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queueItemField {
+  color: var(--dsw-alias-label-primary);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.queueFieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 600;
+}
+
+.queueItemActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.queueActionBtn {
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.queueActionBtn:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.queueActionBtn:disabled { cursor: default; opacity: 0.5; }
+
+.editModalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.editField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.editFieldLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.editRequired {
+  color: var(--dsw-alias-label-error, #e5484d);
+}
+
+.editTextarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-primary);
+  resize: vertical;
+}
+
+.editTextarea:focus {
+  outline: 2px solid var(--dsw-alias-interactive-border-focus, #4c9aff);
+  outline-offset: -1px;
+}
+
+.editTextarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

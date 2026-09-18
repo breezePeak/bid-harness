@@ -82,6 +82,7 @@ export const BID_WORK_KINDS = [
   'outline_regeneration',
   'outline_confirmation',
   'chapter_revision',
+  'chapter_revision_batch',
 ] as const
 
 /** One resumable unit of work, independent of its individual Run attempts. */
@@ -499,7 +500,7 @@ export type BidPageTargetStatus =
 
 /** S5 工作台使用的浏览器安全目录及实时章节摘要。 */
 export interface BidReviewWorkbenchView {
-  readonly schema_version: 5
+  readonly schema_version: 6
   readonly outline: readonly {
     readonly section_id: string
     readonly parent_id: string | null
@@ -513,6 +514,13 @@ export interface BidReviewWorkbenchView {
     readonly content_available: boolean
     /** Non-leaf section estimate; omitted for a leaf whose status dot remains interactive. */
     readonly page_estimate?: (BidPageEstimate & { readonly incomplete?: boolean }) | undefined
+    /** 批量修订叠加状态；不存在时表示该章节未参与当前批次。 */
+    readonly revision?: {
+      readonly batch_id: string
+      readonly task_id: string
+      readonly status: BidRevisionTaskStatus
+      readonly issue_count: number
+    }
   }[]
   readonly summary: {
     readonly chapter_count: number
@@ -530,7 +538,30 @@ export interface BidReviewWorkbenchView {
     readonly document_issues: readonly BidGlobalComplianceIssueView[]
     readonly delivery_todos: readonly BidGlobalComplianceIssueView[]
   }
+  /** 当前活跃的批量修订进度摘要；不存在时表示无批次正在执行。 */
+  readonly revision_batch?: {
+    readonly batch_id: string
+    readonly status: 'planning' | 'running' | 'suspended' | 'completed' | 'failed'
+    readonly total_issues: number
+    readonly completed: number
+    readonly running: number
+    readonly pending: number
+    readonly needs_input: number
+    readonly failed: number
+  }
 }
+
+/** 批量修订中单个 task 的浏览器安全状态。 */
+export type BidRevisionTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'reviewing'
+  | 'repairing'
+  | 'completed'
+  | 'conflict'
+  | 'failed'
+  | 'needs_input'
+  | 'blocked'
 
 /** Browser-safe document-level compliance finding or project-delivery todo. */
 export interface BidGlobalComplianceIssueView {
@@ -577,7 +608,7 @@ const pageTargetStatusSchema = z.discriminatedUnion('status', [
   }),
 ])
 const reviewWorkbenchSchema = z.strictObject({
-  schema_version: z.literal(5),
+  schema_version: z.literal(6),
   outline: z.array(z.strictObject({
     section_id: z.string(), parent_id: z.string().nullable(), order: z.number().int(), title: z.string(),
     summary: z.string().optional(), writable: z.boolean(),
@@ -588,6 +619,11 @@ const reviewWorkbenchSchema = z.strictObject({
       tooltip: z.string().min(1),
     }),
     content_available: z.boolean(), page_estimate: chapterPageEstimateSchema.optional(),
+    revision: z.strictObject({
+      batch_id: z.string(), task_id: z.string(),
+      status: z.enum(['queued', 'running', 'reviewing', 'repairing', 'completed', 'conflict', 'failed', 'needs_input', 'blocked']),
+      issue_count: z.number().int().positive(),
+    }).optional(),
   })),
   summary: z.strictObject({
     chapter_count: z.number().int().nonnegative(), content_count: z.number().int().nonnegative(),
@@ -605,6 +641,16 @@ const reviewWorkbenchSchema = z.strictObject({
       compliance_id: z.string(), status: z.enum(['fail', 'pending']), detail: z.string(), affected_section_ids: z.array(z.string()),
     })),
   }),
+  revision_batch: z.strictObject({
+    batch_id: z.string(),
+    status: z.enum(['planning', 'running', 'suspended', 'completed', 'failed']),
+    total_issues: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    running: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    needs_input: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  }).optional(),
 })
 
 /**
@@ -681,6 +727,84 @@ export interface BidChapterRevisionRequest {
 export type BidChapterRevisionResult =
   | { readonly ok: true; readonly value: BidReviewChapterView }
   | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } }
+
+/** 浏览器安全的审批意见状态；与后端 RevisionIssueStatus 一一对应。 */
+export type BidRevisionIssueStatus =
+  | 'pending' | 'scheduled' | 'running' | 'completed' | 'needs_input' | 'conflict' | 'failed'
+
+/** 浏览器安全的章节或连续段落引用。 */
+export type BidRevisionIssueReference =
+  | { readonly scope: 'chapter'; readonly base_content_sha256: string }
+  | { readonly scope: 'paragraphs'; readonly base_content_sha256: string; readonly start: number; readonly end: number; readonly text: string }
+
+/** 浏览器安全的一条审批意见。 */
+export interface BidRevisionIssueView {
+  readonly issue_id: string
+  readonly section_id: string
+  readonly section_title: string
+  readonly scope: 'paragraphs' | 'chapter'
+  readonly reference: BidRevisionIssueReference
+  readonly instruction: string
+  readonly suggestion: string | null
+  readonly status: BidRevisionIssueStatus
+  readonly batch_id: string | null
+  readonly created_at: number
+  readonly updated_at: number
+}
+
+/** 浏览器安全的审批意见队列视图。 */
+export interface BidRevisionQueueView {
+  readonly schema_version: 1
+  readonly revision: number
+  readonly issues: readonly BidRevisionIssueView[]
+}
+
+/** 浏览器提交的新建审批意见输入。 */
+export interface BidAddRevisionIssueRequest {
+  readonly section_id: string
+  readonly scope: 'paragraphs' | 'chapter'
+  readonly reference: BidRevisionIssueReference
+  readonly instruction: string
+  readonly suggestion: string | null
+}
+
+/** 浏览器提交的编辑审批意见输入。 */
+export interface BidUpdateRevisionIssueRequest {
+  readonly issue_id: string
+  readonly expected_queue_revision: number
+  readonly instruction?: string
+  readonly suggestion?: string | null
+  readonly reference?: BidRevisionIssueReference
+  readonly scope?: 'paragraphs' | 'chapter'
+}
+
+/** 浏览器提交的删除审批意见输入。 */
+export interface BidDeleteRevisionIssueRequest {
+  readonly issue_id: string
+  readonly expected_queue_revision: number
+}
+
+/** 审批意见队列操作的稳定错误码。 */
+export type BidRevisionQueueErrorCode =
+  | 'BID_SESSION_REQUIRED'
+  | 'BID_OPERATION_IN_PROGRESS'
+  | 'BID_REVISION_QUEUE_NOT_ALLOWED'
+  | 'BID_REVISION_QUEUE_CONFLICT'
+  | 'BID_REVISION_ISSUE_INVALID'
+  | 'BID_REVISION_ISSUE_NOT_FOUND'
+  | 'BID_REVISION_ISSUE_NOT_EDITABLE'
+  | 'BID_REVISION_ISSUE_NOT_DELETABLE'
+  | 'BID_REVISION_ISSUE_SCOPE_MISMATCH'
+  | 'BID_REVISION_ISSUE_INSTRUCTION_EMPTY'
+  | 'BID_CHAPTER_REVISION_CONFLICT'
+  | 'BID_CHAPTER_REVISION_SELECTION_INVALID'
+  | 'BID_CHAPTER_REVISION_NOT_WRITABLE'
+  | 'BID_REVIEW_SECTION_UNKNOWN'
+
+/** 审批意见队列操作结果。 */
+export type BidRevisionQueueResult =
+  | { readonly ok: true; readonly value: BidRevisionQueueView }
+  | { readonly ok: false; readonly error: { readonly code: BidRevisionQueueErrorCode; readonly message: string } }
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidAddRevisionIssueRequest, BidRevisionQueueView, BidRevisionTaskStatus, BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
 import { renderFlowchartSvg, type FlowchartSpec } from '@deepseek-ai/dsh-bid/flowchart'
 import { Fragment } from 'react'
 import type { JSX } from 'react'
@@ -59,9 +59,18 @@ export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
   openWordExport?: () => Promise<void>
+  /** Read the current revision issue queue from the Host. */
+  getRevisionQueue?: () => Promise<BidRevisionQueueView>
+  /** Submit a new revision issue to the Host queue; does not start a Writer. */
+  addRevisionIssue?: (request: BidAddRevisionIssueRequest) => Promise<BidRevisionQueueView>
 }
 
 export type BidReviewWorkbenchProps = ConvViewProps & BidReviewWorkbenchInjected & PropsStore<ReturnType<typeof createBidRevisionStore>>
+
+/** Discriminated state for the review-comment modal: paragraph selection or whole chapter. */
+type ReviewModalState =
+  | { readonly kind: 'paragraphs'; readonly reference: BidRevisionReference }
+  | { readonly kind: 'chapter'; readonly sectionId: string; readonly baseContentSha256: string; readonly title: string; readonly number: string }
 
 
 const MATERIAL_USAGE_LABEL: Record<string, string> = {
@@ -79,7 +88,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, actions, useStore,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport, getRevisionQueue, addRevisionIssue, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
@@ -95,6 +104,11 @@ export function BidReviewWorkbench({
   const articleBody = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; reference: BidRevisionReference } | null>(null)
+  const [reviewModal, setReviewModal] = useState<ReviewModalState | null>(null)
+  const [reviewInstruction, setReviewInstruction] = useState('')
+  const [reviewSuggestion, setReviewSuggestion] = useState('')
+  const [reviewSaving, setReviewSaving] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
   const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
   const exportReady = ready && projection.allowedActions.includes('export_docx')
 
@@ -199,6 +213,7 @@ export function BidReviewWorkbench({
     (workbench?.summary.content_count ?? 0) >= (workbench?.summary.chapter_count ?? 1),
   )
   const targetInfo = pageTargetInfo(workbench?.summary.page_target, workbench?.summary.page_estimate)
+  const batchInfo = getRevisionBatchInfo(workbench?.revision_batch)
 
   const exportWord = (): void => {
     if (!exportReady || exporting || openWordExport === undefined) return
@@ -208,6 +223,86 @@ export function BidReviewWorkbench({
       () => {},
       (reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) },
     ).finally(() => { setExporting(false) })
+  }
+
+  const openParagraphReview = (reference: BidRevisionReference): void => {
+    setReviewModal({ kind: 'paragraphs', reference })
+    setReviewInstruction('')
+    setReviewSuggestion('')
+    setReviewError(null)
+    setSelectionMenu(null)
+    window.getSelection()?.removeAllRanges()
+  }
+
+  const openChapterReview = (): void => {
+    if (chapter === null || chapter.content_sha256 === null || !chapter.writable) return
+    setReviewModal({
+      kind: 'chapter',
+      sectionId: chapter.section_id,
+      baseContentSha256: chapter.content_sha256,
+      title: chapter.title,
+      number: chapter.number,
+    })
+    setReviewInstruction('')
+    setReviewSuggestion('')
+    setReviewError(null)
+  }
+
+  const closeReviewModal = (): void => {
+    if (reviewSaving) return
+    setReviewModal(null)
+    setReviewError(null)
+  }
+
+  const submitReviewIssue = (): void => {
+    if (reviewModal === null || addRevisionIssue === undefined || reviewSaving) return
+    const instruction = reviewInstruction.trim()
+    if (instruction === '') { setReviewError('请填写修改意见。'); return }
+    const request: BidAddRevisionIssueRequest = reviewModal.kind === 'paragraphs'
+      ? (() => {
+        const ref = reviewModal.reference.reference
+        if (ref.scope !== 'paragraphs') throw new Error('引用范围不匹配。')
+        return {
+          section_id: ref.section_id,
+          scope: 'paragraphs' as const,
+          reference: {
+            scope: 'paragraphs' as const,
+            base_content_sha256: ref.content_sha256,
+            start: ref.start,
+            end: ref.end,
+            text: ref.text,
+          },
+          instruction,
+          suggestion: reviewSuggestion.trim() === '' ? null : reviewSuggestion.trim(),
+        }
+      })()
+      : {
+        section_id: reviewModal.sectionId,
+        scope: 'chapter' as const,
+        reference: { scope: 'chapter' as const, base_content_sha256: reviewModal.baseContentSha256 },
+        instruction,
+        suggestion: reviewSuggestion.trim() === '' ? null : reviewSuggestion.trim(),
+      }
+    setReviewSaving(true)
+    setReviewError(null)
+    void addRevisionIssue(request).then(
+      () => {
+        setReviewSaving(false)
+        setReviewModal(null)
+        void getRevisionQueue?.().catch(() => {})
+      },
+      (reason: unknown) => {
+        setReviewSaving(false)
+        const code = (reason as { code?: string } | null)?.code
+        if (code === 'BID_CHAPTER_REVISION_CONFLICT') setReviewError('正文已变化，请重新选择内容。')
+        else if (code === 'BID_REVISION_QUEUE_CONFLICT') {
+          void getRevisionQueue?.().catch(() => {})
+          setReviewError('队列已更新，请重试。')
+        }
+        else if (code === 'BID_CHAPTER_REVISION_SELECTION_INVALID') setReviewError('请选择完整段落。')
+        else setReviewError(reason instanceof Error ? reason.message : String(reason))
+      },
+    )
   }
 
   return (
@@ -231,6 +326,14 @@ export function BidReviewWorkbench({
             <Pill className={classes(css.statPill, targetInfo.warning && css.statPillWarning)}>
               <span title={targetInfo.title}>{targetInfo.label}</span>
             </Pill>
+            {batchInfo !== null && (
+              <Pill
+                className={classes(css.statPill, css.revisionBatchPill, batchInfo.warning && css.statPillWarning)}
+                title={batchInfo.title}
+              >
+                {batchInfo.label}
+              </Pill>
+            )}
             {workbench !== null && (
               <Pill
                 className={classes(
@@ -386,6 +489,16 @@ export function BidReviewWorkbench({
                         {dotInfo.label === undefined
                           ? <span className={dotInfo.className} />
                           : <span className={css.overviewIndicator}>{dotInfo.label}</span>}
+                        {section.revision !== undefined && (
+                          <span className={css.revisionBadge} title={getRevisionTaskTitle(section.revision)}>
+                            修
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {hasChildren && section.revision !== undefined && (
+                      <span className={css.revisionBadge} title={getRevisionTaskTitle(section.revision)}>
+                        修
                       </span>
                     )}
                   </button>
@@ -413,6 +526,11 @@ export function BidReviewWorkbench({
                 <div className={titleRowClass(chapter.number)}>
                   {chapter.number && <span className={css.chapterNumber}>{chapter.number}</span>}
                   <h1 className={css.articleTitle}>{chapter.title}</h1>
+                  {addRevisionIssue !== undefined && chapter.writable && chapter.content_sha256 !== null && (
+                    <Button variant="ghost" size="sm" className={css.chapterReviewBtn} onClick={openChapterReview}>
+                      对本章添加审批意见
+                    </Button>
+                  )}
                 </div>
               </header>
               <div className={css.articleBody} ref={articleBody}
@@ -563,7 +681,68 @@ export function BidReviewWorkbench({
           setSelectionMenu(null)
           window.getSelection()?.removeAllRanges()
         }}>添加到对话框</button>
+        {addRevisionIssue !== undefined && (
+          <button type="button" role="menuitem" onClick={() => { openParagraphReview(selectionMenu.reference) }}>
+            添加审批意见
+          </button>
+        )}
       </div>}
+      {reviewModal !== null && (
+        <Modal
+          open={reviewModal !== null}
+          onClose={closeReviewModal}
+          title="添加审批意见"
+          closeLabel="关闭"
+          className={css.reviewModal ?? ''}
+          contentClassName={css.reviewModalContent ?? ''}
+          footer={
+            <>
+              <Button variant="ghost" size="sm" disabled={reviewSaving} onClick={closeReviewModal}>取消</Button>
+              <Button variant="primary" size="sm" disabled={reviewSaving} onClick={submitReviewIssue}>
+                {reviewSaving ? '正在保存…' : '添加到待处理意见'}
+              </Button>
+            </>
+          }
+        >
+          <div className={css.reviewModalBody}>
+            <div className={css.reviewReference}>
+              <span className={css.reviewReferenceLabel}>
+                {reviewModal.kind === 'chapter'
+                  ? `${reviewModal.number} ${reviewModal.title} · 整个章节`
+                  : reviewModal.reference.label}
+              </span>
+              {reviewModal.kind === 'paragraphs' && (
+                <pre className={css.reviewReferencePreview}>{reviewModal.reference.preview}</pre>
+              )}
+            </div>
+            <div className={css.reviewField}>
+              <label className={css.reviewFieldLabel} htmlFor="review-instruction">修改意见 <span className={css.reviewRequired}>*</span></label>
+              <textarea
+                id="review-instruction"
+                className={css.reviewTextarea}
+                value={reviewInstruction}
+                disabled={reviewSaving}
+                onChange={(event) => { setReviewInstruction(event.target.value); setReviewError(null) }}
+                placeholder="例如：这里结构太散，改成分步骤描述。"
+                rows={3}
+              />
+            </div>
+            <div className={css.reviewField}>
+              <label className={css.reviewFieldLabel} htmlFor="review-suggestion">修复建议</label>
+              <textarea
+                id="review-suggestion"
+                className={css.reviewTextarea}
+                value={reviewSuggestion}
+                disabled={reviewSaving}
+                onChange={(event) => { setReviewSuggestion(event.target.value) }}
+                placeholder="例如：建议按照准备、执行、检查、交付四步组织。"
+                rows={3}
+              />
+            </div>
+            {reviewError !== null && <p role="alert" className={css.reviewError}>{reviewError}</p>}
+          </div>
+        </Modal>
+      )}
     </section>
   )
 }
@@ -699,4 +878,48 @@ function getDocumentPageInfo(
   }
   if (estimate?.status === 'empty') return { label: '正文尚未生成', title: `${pageEstimateBasis(estimate)}；正文尚未生成` }
   return { label: '页数暂不可用', title: pageEstimateBasis(estimate) }
+}
+const REVISION_TASK_STATUS_LABEL: Record<BidRevisionTaskStatus, string> = {
+  queued: '排队中',
+  running: '修订中',
+  reviewing: '审核中',
+  repairing: '修复中',
+  completed: '修订完成',
+  conflict: '正文冲突',
+  failed: '修订失败',
+  needs_input: '待补资料',
+  blocked: '依赖阻塞',
+}
+
+function getRevisionTaskTitle(revision: NonNullable<BidReviewWorkbenchView['outline'][number]['revision']>): string {
+  if (revision.status === 'conflict') {
+    return '正文在审批意见创建后已发生变化，请重新选择该条内容。'
+  }
+  return `批量修订：${REVISION_TASK_STATUS_LABEL[revision.status]}（${revision.issue_count} 条意见）`
+}
+
+function getRevisionBatchInfo(
+  batch: BidReviewWorkbenchView['revision_batch'] | undefined,
+): { label: string; title: string; warning: boolean } | null {
+  if (batch === undefined) return null
+  const statusLabel: Record<typeof batch.status, string> = {
+    planning: '规划中',
+    running: '执行中',
+    suspended: '已暂停',
+    completed: '已完成',
+    failed: '已失败',
+  }
+  const progress = `已完成 ${batch.completed}/${batch.total_issues}`
+  const active = [batch.running, batch.pending, batch.needs_input, batch.failed]
+    .filter(n => n > 0).length
+  const parts = [progress]
+  if (batch.running > 0) parts.push(`进行中 ${batch.running}`)
+  if (batch.pending > 0) parts.push(`待处理 ${batch.pending}`)
+  if (batch.needs_input > 0) parts.push(`待补资料 ${batch.needs_input}`)
+  if (batch.failed > 0) parts.push(`失败 ${batch.failed}`)
+  return {
+    label: `批量修订 ${statusLabel[batch.status]} · ${progress}`,
+    title: `批量修订 ${statusLabel[batch.status]}；${parts.join('；')}${active > 0 ? '' : '，全部完成'}`,
+    warning: batch.status === 'failed' || batch.failed > 0 || batch.status === 'suspended',
+  }
 }

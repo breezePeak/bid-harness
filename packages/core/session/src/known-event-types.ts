@@ -42,6 +42,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'bid.user_confirmation.required',
   'bid.word-format.request',
   'bid.workflow.failed',
+  'bid.writing_entry.changed',
   'command/done',
   'command/run',
   'compaction/end',

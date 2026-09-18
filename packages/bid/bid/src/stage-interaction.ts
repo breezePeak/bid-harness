@@ -32,6 +32,8 @@ import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
+import { readRevisionQueue } from './chapter-revision-queue.ts'
+import { revisionBatchTaskSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -53,6 +55,16 @@ export const stageInteractionSchema = z.union([
   initialWritingPlanInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),
   writingPlanPatchInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),
   chapterRevisionRequestSchema.extend({ action: z.literal('bid_revise_chapter') }).strict(),
+  z.object({
+    action: z.literal('bid_plan_revision_batch'),
+    expected_queue_revision: z.number().int().nonnegative(),
+    issue_ids: z.array(z.string().min(1)).min(1),
+    tasks: z.array(revisionBatchTaskSchema).min(1),
+  }).strict(),
+  z.object({
+    action: z.literal('bid_execute_revision_batch'),
+    batch_id: z.string().min(1),
+  }).strict(),
 ])
 
 const names = [
@@ -62,6 +74,8 @@ const names = [
   'bid_evidence_remap',
   'bid_confirm_writing_plan',
   'bid_revise_chapter',
+  'bid_plan_revision_batch',
+  'bid_execute_revision_batch',
   'bid_pause_stage',
   'bid_resume_stage',
 ] as const
@@ -290,6 +304,24 @@ async function inspectBidStageValue(
         truncated: selected.length > MAX_INSPECT_CHAPTER_CHARS,
       }
     }
+    const revisionQueue = await readRevisionQueue(workspace)
+    const revision_queue = {
+      revision: revisionQueue.revision,
+      pending_count: revisionQueue.issues.filter(issue => issue.status === 'pending').length,
+      issues: revisionQueue.issues.map(issue => ({
+        issue_id: issue.issue_id,
+        section_id: issue.section_id,
+        section_title: issue.section_title,
+        scope: issue.scope,
+        instruction: issue.instruction,
+        suggestion: issue.suggestion,
+        status: issue.status,
+        batch_id: issue.batch_id,
+        reference_summary: issue.reference.scope === 'chapter'
+          ? '整个章节'
+          : issue.reference.text.slice(0, 200),
+      })),
+    }
     return {
       ...base,
       progress_summary: progress,
@@ -308,6 +340,7 @@ async function inspectBidStageValue(
       ...(view === 'task_contract_context' ? { writing_plan: writing_plan ?? null } : {}),
       writing_progress,
       chapter,
+      revision_queue,
       ...(taskContext === undefined ? {} : { task_contract_context: taskContext }),
     }
   }
@@ -420,6 +453,15 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'atten
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
+    '当存在 pending revision issues 且用户明确要求开始处理（如"开始处理这些建议""把这些都改掉""现在修""执行上面的意见"等）时：'
+      + '1. 调用 bid_stage_inspect 读取待处理审批意见；'
+      + '2. 规划 tasks（同一章节的本批意见强制聚合为一个 task，不同章节默认并行，真实语义依赖才设 depends_on）；'
+      + '3. 调用 bid_plan_revision_batch 创建并保存不可变批次快照；'
+      + '4. 规划成功且有可执行任务时，在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行，绝不向用户发起二次确认或询问是否执行；'
+      + '5. 部分 task 若出现 conflict 或 needs_input，直接执行其余独立任务，绝不因局部冲突阻断其他章节或询问用户。',
+    '用户若只是讨论、咨询或明确要求暂缓（如"这些意见你怎么看""先总结一下""还有哪些地方值得改""先别动"等），严禁调用批次规划或执行工具。',
+    '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；'
+      + '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
     status === 'running'
       ? '用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已经运行的 Writer/Reviewer 自然收敛。停止任务只使用聊天界面的原生停止。'
       : '当前阶段没有运行中的任务，不得调用 pause、resume 或 stop 阶段工具。',
@@ -486,9 +528,9 @@ export function installStageInteractionTools(
           ? [names[0], names[4], names[5]]
           : [names[0]]
         : runtime.status !== 'waiting_user'
-          ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], ...(runtime.status === 'running' ? names.slice(6, 8) : [])]
-            : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5]]
-              : runtime.status === 'running' ? [names[0], ...names.slice(6, 8)] : [names[0]]
+          ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(runtime.status === 'running' ? names.slice(8, 10) : [])]
+            : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5], names[6], names[7]]
+              : runtime.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
           : stage === 'tender_analysis' ? names.slice(0, 1)
             : stage === 'outline_generation' ? names.slice(0, 3)
               : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
@@ -502,7 +544,7 @@ export function installStageInteractionTools(
         }
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
-            || name === 'bid_revise_chapter' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
+            || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
             ? {} : { ...cas }
           const required = Object.keys(properties)
           let parameters: JsonSchemaNode | undefined
@@ -594,6 +636,26 @@ export function installStageInteractionTools(
               }, required: ['update_kind', 'base_plan_version', 'user_message_refs', 'summary', 'affected_section_ids', 'sections'], additionalProperties: false,
             }] }
           }
+          if (name === 'bid_plan_revision_batch') {
+            const batchTask: JsonSchemaNode = {
+              type: 'object', properties: {
+                task_id: text, section_id: text, issue_ids: strings, depends_on: strings, dependency_reason: text,
+              }, required: ['task_id', 'section_id', 'issue_ids', 'depends_on'], additionalProperties: false,
+            }
+            parameters = {
+              type: 'object', properties: {
+                expected_queue_revision: { type: 'integer' },
+                issue_ids: strings,
+                tasks: { type: 'array', items: batchTask },
+              }, required: ['expected_queue_revision', 'issue_ids', 'tasks'], additionalProperties: false,
+            }
+          }
+          if (name === 'bid_execute_revision_batch') {
+            parameters = {
+              type: 'object', properties: { batch_id: text },
+              required: ['batch_id'], additionalProperties: false,
+            }
+          }
           const definition: ToolDefinition = {
             name,
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
@@ -601,9 +663,11 @@ export function installStageInteractionTools(
                 : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
                   : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
                     : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                      : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                        : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                          : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                      : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
+                        : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
+                          : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                            : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                              : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {

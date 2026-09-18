@@ -17,7 +17,16 @@ import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceCh
 import { assertNoLinkedPath } from './workspace-path.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
-export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_acceptance_criteria', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review'] as const
+export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_acceptance_criteria', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review', 'review_revision_issues'] as const
+
+/** 批量修订时传递给 Reviewer 的审批意见规范。 */
+export interface ChapterRevisionReviewIssue {
+  readonly issue_id: string
+  readonly scope: 'chapter' | 'paragraphs'
+  readonly instruction: string
+  readonly suggestion: string | null
+  readonly reference_text: string | null
+}
 
 /** Checklist 的种类及其在当前章节的规范位置。 */
 export interface ChapterReviewItem {
@@ -128,6 +137,11 @@ const globalCheckInput = z.object({
   issue: text.nullable(),
 }).strict()
 const acceptanceInput = semanticAcceptanceSubmissionSchema
+const revisionIssueCheckInput = z.object({
+  issue_id: text,
+  status: z.enum(['satisfied', 'unsatisfied', 'needs_input']),
+  reason: text,
+}).strict()
 const summaryInput = chapterReviewSchema.pick({
   quality_checks: true, blocking_issues: true, assignment_conflicts: true, external_input_gaps: true,
 }).extend({
@@ -145,12 +159,14 @@ const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.sha
  * @param evidence 当前候选只读 E 引用。
  * @param maxContinuations 未 finish 时同一 Child 的有限续行次数。
  * @param hostAcceptanceResults 当前章节确定性条件的 Host 测量。
+ * @param revisionIssues 当前任务的用户审批意见清单（如为批量修订）。
  * @returns 仅在权威 finish 结果成功后可读的报告。
  */
 export function attachChapterReview(
   agent: Agent, context: ChapterContext, quotes: ReadonlyMap<string, string>,
   evidence: readonly ChapterReviewEvidence[], maxContinuations: number,
   hostAcceptanceResults: readonly HostAcceptanceResult[] = [],
+  revisionIssues: readonly ChapterRevisionReviewIssue[] = [],
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
@@ -158,6 +174,7 @@ export function attachChapterReview(
   const acceptance = new Map<string, z.infer<typeof acceptanceInput>>()
   const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
   const claims = new Map<string, z.infer<typeof claimInput>>()
+  const revisionChecks = new Map<string, z.infer<typeof revisionIssueCheckInput>>()
   let summary: z.infer<typeof summaryInput> | undefined
   const quote = (ref: string): string => {
     const content = quotes.get(ref)
@@ -306,6 +323,32 @@ export function attachChapterReview(
         return Promise.resolve({ recorded: true })
       },
     })
+    if (revisionIssues.length > 0) {
+      runtime.register({
+        name: 'review_revision_issues', description: '逐项审核当前章节分配的用户审批意见（RevisionIssue）。每项独立判定，同 issue 后续合法记录覆盖前项。',
+        parameters: {
+          type: 'object', properties: {
+            items: {
+              type: 'array', items: {
+                type: 'object', properties: {
+                  issue_id: stringParameter,
+                  status: { type: 'string', enum: ['satisfied', 'unsatisfied', 'needs_input'] },
+                  reason: stringParameter,
+                }, required: ['issue_id', 'status', 'reason'], additionalProperties: false,
+              },
+            },
+          }, required: ['items'], additionalProperties: false,
+        },
+        execute: args => batch(args, (value) => {
+          const item = chapterToolArgs(revisionIssueCheckInput, value)
+          if (!revisionIssues.some(entry => entry.issue_id === item.issue_id)) {
+            throw new ToolArgsError([`issue_id: 未知审批意见 ${item.issue_id}。`])
+          }
+          revisionChecks.set(item.issue_id, item)
+          return item.issue_id
+        }),
+      })
+    }
     runtime.register({
       name: 'finish_chapter_review', description: '检查是否记录全部 R、全局约束与质量总结，再生成报告并结束；repair 或 attention 也可正常提交。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -315,12 +358,15 @@ export function attachChapterReview(
         const missingAcceptance = context.sectionWritingPlan.acceptance_criteria
           .filter(item => item.evaluator.kind === 'semantic' && !acceptance.has(item.id)).map(item => item.id)
         const missingGlobal = context.globalCompliance.filter(item => !globalChecks.has(item.id)).map(item => item.id)
-        if (missing.length > 0 || missingAcceptance.length > 0 || missingGlobal.length > 0 || summary === undefined) {
+        const missingRevisionIssues = revisionIssues.filter(item => !revisionChecks.has(item.issue_id)).map(item => item.issue_id)
+        if (missing.length > 0 || missingAcceptance.length > 0 || missingGlobal.length > 0
+          || summary === undefined || missingRevisionIssues.length > 0) {
           return Promise.resolve({
             completed: false,
             missing_items: missing,
             missing_acceptance_criterion_ids: missingAcceptance,
             missing_global_compliance_ids: missingGlobal,
+            ...(missingRevisionIssues.length > 0 ? { missing_revision_issue_ids: missingRevisionIssues } : {}),
             missing_summary: summary === undefined,
           })
         }
@@ -339,6 +385,15 @@ export function attachChapterReview(
           claim_quote: quote(item.claim_quote_ref), kind: item.kind, status: item.status,
           source_reference: evidence.find(source => source.source_ref === item.source_reference)?.locator ?? null, issue: item.issue,
         }))
+        const revisionIssueChecksList = revisionIssues.length > 0
+          ? revisionIssues.map((issue) => {
+            const check = revisionChecks.get(issue.issue_id)
+            if (check === undefined) throw new Error(`S5 review lost revision issue ${issue.issue_id}`)
+            return { issue_id: check.issue_id, status: check.status, reason: check.reason }
+          })
+          : undefined
+        const unsatisfiedRevisionIssues = revisionIssueChecksList?.filter(item => item.status === 'unsatisfied') ?? []
+        const hasRevisionNeedsInput = revisionIssueChecksList?.some(item => item.status === 'needs_input') ?? false
         const blocking = completedSummary.external_input_only ? [] : [...new Set([
           ...completedSummary.blocking_issues,
           ...entries.filter(entry => entry.result.status === 'missing')
@@ -354,6 +409,7 @@ export function attachChapterReview(
           ...hostAcceptanceResults.filter(result => result.status !== 'met'
             && context.sectionWritingPlan.acceptance_criteria.find(item => item.id === result.criterion_id)?.priority === 'required')
             .map(item => `动态验收未通过：${context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)?.description}；${item.message}`),
+          ...unsatisfiedRevisionIssues.map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`),
         ])]
         const globalComplianceChecks = context.globalCompliance.map((item) => {
           const result = globalChecks.get(item.id)
@@ -390,7 +446,7 @@ export function attachChapterReview(
         const review = parseChapterReview({
           schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
           verdict: completedSummary.external_input_only ? 'attention' : blocking.length > 0 ? 'repair'
-            : completedSummary.assignment_conflicts.length > 0 || completedSummary.external_input_gaps.length > 0 ? 'attention' : 'pass',
+            : completedSummary.assignment_conflicts.length > 0 || completedSummary.external_input_gaps.length > 0 || hasRevisionNeedsInput ? 'attention' : 'pass',
           must_answer_coverage: entries.filter(entry => entry.item.kind === 'must_answer').map(entry => entry.value),
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),
           response_point_coverage: entries.filter(entry => entry.item.kind === 'response_point').map(entry => ({ ...entry.value, response_point_id: entry.item.id })),
@@ -400,6 +456,7 @@ export function attachChapterReview(
           assignment_conflicts: completedSummary.assignment_conflicts,
           external_input_gaps: completedSummary.external_input_gaps,
           claim_checks: claimChecks, quality_checks: completedSummary.quality_checks, blocking_issues: blocking,
+          ...(revisionIssueChecksList !== undefined ? { revision_issue_checks: revisionIssueChecksList } : {}),
         })
         return Promise.resolve(runtime.finish(exec, review))
       },
