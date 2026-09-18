@@ -105,7 +105,7 @@ import {
   revisionIssueSchema,
   updateRevisionIssue as updateRevisionIssueInQueue,
   validateRevisionIssueReference,
-  writeRevisionQueue,
+
   type RevisionQueueArtifact,
 } from './chapter-revision-queue.ts'
 import {
@@ -114,6 +114,7 @@ import {
   validateRevisionBatchPlan,
   writeRevisionBatch,
   commitRevisionBatchPlan,
+  commitRevisionBatchState,
   commitRevisionBatchExecutionSettlement,
   detectRevisionBatchIntegrity,
   readRevisionBatch,
@@ -3021,7 +3022,6 @@ export class BidHostRuntime extends TypertRemoteService {
                 : issue,
             ),
           }
-          await writeRevisionQueue(workspace, currentQueue)
         }
 
         const initialTasks: RevisionBatchTask[] = batch.tasks.map(task => ({
@@ -3037,7 +3037,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
         const runnableTasks = batchTasks.filter(task => taskStatusMap.get(task.task_id) === 'queued')
         const runningBatch = startRevisionBatchExecution(preparedBatch, now)
-        await writeRevisionBatch(workspace, runningBatch)
+        await commitRevisionBatchState(workspace, currentQueue, runningBatch)
 
         if (runnableTasks.length > 0) {
           const batchExecutionInput: RevisionBatchExecutionInput = {

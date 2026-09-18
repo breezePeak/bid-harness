@@ -61,7 +61,7 @@ import {
   type BatchRevisionScope,
 } from './chapter-revision.ts'
 import {
-  persistRevisionBatchTaskStatus,
+  createRevisionBatchTaskStatusWriter,
   renderRevisionBatchSectionPrompt,
   type RevisionBatchExecutionInput,
   type RevisionBatchTaskExecution,
@@ -1831,18 +1831,17 @@ async function runChapterWriting(
       checkpoint.completed.delete(task.section_id)
     }
   }
-  const updateBatchTask = async (
+  const batchStatusWriter = revisionBatch !== undefined
+    ? createRevisionBatchTaskStatusWriter(workspace, revisionBatch.batchId)
+    : undefined
+  const updateBatchTask = (
     sectionId: string,
     update: UpdateRevisionBatchTaskOptions,
   ): Promise<void> => {
-    if (revisionBatch === undefined) return
+    if (batchStatusWriter === undefined) return Promise.resolve()
     const task = batchTaskBySection.get(sectionId)
-    if (task === undefined) return
-    try {
-      await persistRevisionBatchTaskStatus(workspace, revisionBatch.batchId, task.task_id, update, Date.now())
-    } catch {
-      // 批次状态更新落盘异常不中断执行
-    }
+    if (task === undefined) return Promise.resolve()
+    return batchStatusWriter.updateTask(task.task_id, update)
   }
   await mkdir(join(chaptersRoot, 'sections'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'meta'), { recursive: true, mode: 0o700 })
@@ -2621,9 +2620,7 @@ async function runChapterWriting(
           reviewedFallback.writerChildSessionId,
           reviewedFallback.reviewerChildSessionId,
         )
-        if (revisionBatch !== undefined && batchTask !== undefined) {
-          await updateBatchTask(sectionId, { status: 'completed' })
-        }
+
         return finished
       }
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
@@ -2726,7 +2723,7 @@ async function runChapterWriting(
     liftObserver()
     liftChildReadGuard()
     liftCommandWake?.()
-    await Promise.all([logWrites, webWrites])
+    await Promise.all([logWrites, webWrites, batchStatusWriter?.settle() ?? Promise.resolve()])
   }
 
   let existingChapters: ChapterManifestEntry[] = []
