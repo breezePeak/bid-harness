@@ -2296,3 +2296,256 @@ describe('任务 08: Queue 与 Batch 原子一致性', () => {
       .toThrow('BID_REVISION_BATCH_ISSUE_NOT_PENDING')
   })
 })
+
+describe('任务 09: b54fe9a385 批量审批修订全链路端到端回归验收', () => {
+  const currentSha = 'a'.repeat(64)
+  const disposals: Array<() => Promise<void>> = []
+
+  afterEach(async () => {
+    for (const dispose of disposals.splice(0)) await dispose()
+  })
+
+  async function createWorkspace() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-revision-e2e-'))
+    disposals.push(() => rm(root, { recursive: true, force: true }))
+    return new BidWorkspace(root)
+  }
+
+  it('全链路核心场景：一次开始规划并执行，Reviewer逐条审核闭环，局部失败隔离，stale隔离与原子落盘', async () => {
+    const ws = await createWorkspace()
+
+    // 1. 准备 6 个章节的意见队列
+    let queue = emptyRevisionQueue()
+    // SEC-A: 2 条意见
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-A', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'A章节修改意见1', suggestion: '详细补充A1',
+    }, '章节A', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-A', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'A章节修改意见2', suggestion: '详细补充A2',
+    }, '章节A', 2000)
+    // SEC-B: 1 条意见
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-B', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'B章节修改意见', suggestion: null,
+    }, '章节B', 3000)
+    // SEC-C: 2 条意见，其中一条制造 stale base hash
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-C', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'C章节修改意见1', suggestion: null,
+    }, '章节C', 4000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-C', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: 'c'.repeat(64) },
+      instruction: 'C章节修改意见2（故意陈旧）', suggestion: null,
+    }, '章节C', 5000)
+    // SEC-D: 1 条意见（依赖 SEC-A）
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-D', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'D章节修改意见', suggestion: null,
+    }, '章节D', 6000)
+    // SEC-E: 1 条意见（独立）
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-E', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: 'E章节修改意见', suggestion: null,
+    }, '章节E', 7000)
+    // SEC-F: 不加入队列，完全不参与本批次
+
+    await writeRevisionQueue(ws, queue)
+
+    // 2. 交互规则验证：一条命令同回合完成规划并在同一回合启动批次，绝无二次确认
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    expect(prompt).toContain('在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行')
+    expect(prompt).toContain('绝不向用户发起二次确认或询问是否执行')
+
+    // 3. 规划并校验批次（SEC-C 中一条 stale 导致整节 task 成为 conflict，SEC-D 依赖 SEC-A）
+    const planIssueIds = queue.issues.map(i => i.issue_id)
+    const currentHashes = new Map([
+      ['SEC-A', currentSha],
+      ['SEC-B', currentSha],
+      ['SEC-C', currentSha],
+      ['SEC-D', currentSha],
+      ['SEC-E', currentSha],
+      ['SEC-F', currentSha],
+    ])
+    const input = planInput(planIssueIds, [
+      { task_id: 'TASK-A', section_id: 'SEC-A', issue_ids: [planIssueIds[0] ?? '', planIssueIds[1] ?? ''] },
+      { task_id: 'TASK-B', section_id: 'SEC-B', issue_ids: [planIssueIds[2] ?? ''] },
+      { task_id: 'TASK-C', section_id: 'SEC-C', issue_ids: [planIssueIds[3] ?? '', planIssueIds[4] ?? ''] },
+      { task_id: 'TASK-D', section_id: 'SEC-D', issue_ids: [planIssueIds[5] ?? ''], depends_on: ['TASK-A'] },
+      { task_id: 'TASK-E', section_id: 'SEC-E', issue_ids: [planIssueIds[6] ?? ''] },
+    ], queue.revision)
+    const validated = validateRevisionBatchPlan(input, queue, currentHashes)
+    expect(validated.staleIssues).toEqual([planIssueIds[3], planIssueIds[4]])
+
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch } = createRevisionBatch(queue, input, batchId, 8000, validated.staleIssues)
+    // 原子提交规划快照
+    await commitRevisionBatchPlan(ws, plannedQueue, batch)
+
+    // 验证批次任务初始状态：TASK-C 为 conflict，其余为 queued
+    const taskMap = new Map(batch.tasks.map(t => [t.task_id, t]))
+    expect(taskMap.get('TASK-A')?.status).toBe('queued')
+    expect(taskMap.get('TASK-B')?.status).toBe('queued')
+    expect(taskMap.get('TASK-C')?.status).toBe('conflict')
+    expect(taskMap.get('TASK-D')?.status).toBe('queued')
+    expect(taskMap.get('TASK-E')?.status).toBe('queued')
+
+    // 4. 同一回合紧接着启动执行：startRevisionBatchExecution
+    const runningBatch = startRevisionBatchExecution(batch, 8500)
+    expect(runningBatch.status).toBe('running')
+
+    // 5. 模拟各章节执行流转与 Reviewer 逐条审核闭环
+    let currentBatch = runningBatch
+    let currentQueueState = plannedQueue
+
+    // 5.1 TASK-A 顺利完成：queued -> running -> reviewing -> completed，Reviewer 真实逐条审核
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-A', { status: 'running' }, 9000)
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-A', { status: 'reviewing' }, 9200)
+    const checksA: RevisionIssueCheck[] = [
+      { issue_id: planIssueIds[0] ?? '', status: 'satisfied', reason: 'A1意见修改已完整体现' },
+      { issue_id: planIssueIds[1] ?? '', status: 'satisfied', reason: 'A2意见修改已通过核验' },
+    ]
+    const settleA = settleRevisionBatchIssues(
+      currentQueueState,
+      [planIssueIds[0] ?? '', planIssueIds[1] ?? ''],
+      checksA,
+      9500,
+    )
+    currentQueueState = settleA.queue
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-A', { status: settleA.taskStatus }, 9500)
+    expect(currentBatch.tasks.find(t => t.task_id === 'TASK-A')?.status).toBe('completed')
+
+    // 5.2 TASK-D 依赖 TASK-A，TASK-A 完成后 TASK-D 启动并完成
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-D', { status: 'running' }, 9600)
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-D', { status: 'reviewing' }, 9800)
+    const checksD: RevisionIssueCheck[] = [
+      { issue_id: planIssueIds[5] ?? '', status: 'satisfied', reason: 'D意见符合要求' },
+    ]
+    const settleD = settleRevisionBatchIssues(currentQueueState, [planIssueIds[5] ?? ''], checksD, 10000)
+    currentQueueState = settleD.queue
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-D', { status: settleD.taskStatus }, 10000)
+    expect(currentBatch.tasks.find(t => t.task_id === 'TASK-D')?.status).toBe('completed')
+
+    // 5.3 TASK-B 人为模拟失败：queued -> running -> failed
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-B', { status: 'running' }, 9600)
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-B', {
+      status: 'failed',
+      failure: { code: 'SECTION_FAILED', message: '章节B的Writer发生异常', phase: 'writing' },
+    }, 10100)
+    currentQueueState = {
+      ...currentQueueState,
+      issues: currentQueueState.issues.map(i =>
+        i.issue_id === planIssueIds[2] ? { ...i, status: 'failed' as const, updated_at: 10100 } : i,
+      ),
+    }
+
+    // 5.4 TASK-E 独立运行成功，不受 TASK-B 失败影响
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-E', { status: 'running' }, 9700)
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-E', { status: 'reviewing' }, 9900)
+    const checksE: RevisionIssueCheck[] = [
+      { issue_id: planIssueIds[6] ?? '', status: 'satisfied', reason: 'E意见核查通过' },
+    ]
+    const settleE = settleRevisionBatchIssues(currentQueueState, [planIssueIds[6] ?? ''], checksE, 10200)
+    currentQueueState = settleE.queue
+    currentBatch = updateRevisionBatchTaskStatus(currentBatch, 'TASK-E', { status: settleE.taskStatus }, 10200)
+    expect(currentBatch.tasks.find(t => t.task_id === 'TASK-E')?.status).toBe('completed')
+
+    // 6. 最终完成并原子提交结算状态
+    const completedBatch = completeRevisionBatchExecution(currentBatch, 10500)
+    await commitRevisionBatchExecutionSettlement(ws, currentQueueState, completedBatch)
+
+    // 7. 全链路综合断言：隔离性、状态真实性、未参与章节完全不受影响
+    const finalQueue = await readRevisionQueue(ws)
+    const finalBatch = await readRevisionBatch(ws, batchId)
+
+    expect(finalBatch?.status).toBe('completed')
+    const finalTaskMap = new Map(finalBatch?.tasks.map(t => [t.task_id, t]))
+
+    // A, D, E 成功，B 失败，C conflict
+    expect(finalTaskMap.get('TASK-A')?.status).toBe('completed')
+    expect(finalTaskMap.get('TASK-D')?.status).toBe('completed')
+    expect(finalTaskMap.get('TASK-E')?.status).toBe('completed')
+    expect(finalTaskMap.get('TASK-B')?.status).toBe('failed')
+    expect(finalTaskMap.get('TASK-C')?.status).toBe('conflict')
+
+    // 验证禁止全批回滚：B 失败绝不回滚 A, D, E
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[0])?.status).toBe('completed')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[1])?.status).toBe('completed')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[5])?.status).toBe('completed')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[6])?.status).toBe('completed')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[2])?.status).toBe('failed')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[3])?.status).toBe('conflict')
+    expect(finalQueue.issues.find(i => i.issue_id === planIssueIds[4])?.status).toBe('conflict')
+
+    // 验证 SEC-F 完全不被触碰
+    expect(finalQueue.issues.some(i => i.section_id === 'SEC-F')).toBe(false)
+    expect(finalBatch?.tasks.some(t => t.section_id === 'SEC-F')).toBe(false)
+  })
+
+  it('暂停与恢复生命周期回归：执行中挂起后恢复，已 completed 的 task 不重跑并最终收敛', async () => {
+    const ws = await createWorkspace()
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-1', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '修改1', suggestion: null,
+    }, '节1', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-2', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '修改2', suggestion: null,
+    }, '节2', 2000)
+
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id2 = queue.issues[1]?.issue_id ?? ''
+    const input = planInput([id1, id2], [
+      { task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: [id1] },
+      { task_id: 'TASK-2', section_id: 'SEC-2', issue_ids: [id2] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch } = createRevisionBatch(queue, input, batchId, 3000, validated.staleIssues)
+    await commitRevisionBatchPlan(ws, plannedQueue, batch)
+
+    // 启动执行
+    const runningBatch = startRevisionBatchExecution(batch, 3500)
+    // TASK-1 顺利完成
+    const task1Running = updateRevisionBatchTaskStatus(runningBatch, 'TASK-1', { status: 'running' }, 4000)
+    const task1Reviewing = updateRevisionBatchTaskStatus(task1Running, 'TASK-1', { status: 'reviewing' }, 4200)
+    const task1Completed = updateRevisionBatchTaskStatus(task1Reviewing, 'TASK-1', { status: 'completed' }, 4500)
+
+    // 模拟运行中用户 stop 或挂起
+    const suspended = suspendRevisionBatchExecution(task1Completed, 5000)
+    expect(suspended.status).toBe('suspended')
+
+    // 恢复执行：从 suspended 安全转为 running
+    const resumed = resumeRevisionBatchExecution(suspended, 6000)
+    expect(resumed.status).toBe('running')
+
+    // 核心断言：恢复后已 completed 的任务排除在重跑范围外
+    const runnableTasksAfterResume = resumed.tasks.filter(t => t.status !== 'completed' && t.status !== 'conflict')
+    expect(runnableTasksAfterResume).toHaveLength(1)
+    expect(runnableTasksAfterResume[0]?.task_id).toBe('TASK-2')
+
+    // TASK-2 顺利完成
+    const task2Running = updateRevisionBatchTaskStatus(resumed, 'TASK-2', { status: 'running' }, 6500)
+    const task2Reviewing = updateRevisionBatchTaskStatus(task2Running, 'TASK-2', { status: 'reviewing' }, 6800)
+    const task2Completed = updateRevisionBatchTaskStatus(task2Reviewing, 'TASK-2', { status: 'completed' }, 7000)
+
+    // 最终收敛完成
+    const finalBatch = completeRevisionBatchExecution(task2Completed, 7500)
+    expect(finalBatch.status).toBe('completed')
+    expect(finalBatch.tasks[0]?.status).toBe('completed')
+    expect(finalBatch.tasks[1]?.status).toBe('completed')
+  })
+
+  it('局部审批意见词汇隔离：段落级修改含"统一加粗"字样绝不走 writing plan patch，未参与章节不变红', () => {
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    // 明确要求：局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部要求
+    expect(prompt).toContain(
+      '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；',
+    )
+    expect(prompt).toContain(
+      '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
+    )
+  })
+})
