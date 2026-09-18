@@ -460,4 +460,217 @@ describe('BidReviewWorkbench', () => {
     const { container } = render(<BidReviewWorkbench {...props({ useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'standard' } } } as never) })} />)
     expect(container.innerHTML).toBe('')
   })
+
+  it('单段右键打开审批意见弹框，填写后保存调用 addRevisionIssue 且不发聊天消息', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('首段内容。')
+    const range = document.createRange()
+    range.setStart(first.firstChild!, 0)
+    range.setEnd(first.lastChild!, first.lastChild!.textContent!.length)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '这里结构太散，改成分步骤描述。' } })
+    fireEvent.change(textareas[1]!, { target: { value: '建议按四步组织。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    const call = addRevisionIssue.mock.calls[0]![0]
+    expect(call.scope).toBe('paragraphs')
+    expect(call.section_id).toBe('SEC-1')
+    expect(call.instruction).toBe('这里结构太散，改成分步骤描述。')
+    expect(call.suggestion).toBe('建议按四步组织。')
+    if (call.reference.scope === 'paragraphs') {
+      expect(call.reference.base_content_sha256).toBe(chapter.content_sha256)
+      expect(call.reference.text).toBe('首段内容。')
+    }
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
+  })
+
+  it('连续三段右键生成连续段落引用，offset 跨段落准确', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('首段内容。')
+    const last = screen.getByText('重复段落。', { selector: 'p:nth-of-type(3)' })
+    const range = document.createRange()
+    range.setStart(first.firstChild!, 0)
+    range.setEnd(last.lastChild!, last.lastChild!.textContent!.length)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '前三段需要重写。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    const call = addRevisionIssue.mock.calls[0]![0]
+    if (call.reference.scope === 'paragraphs') {
+      const expectedStart = markdown.indexOf('首段内容。')
+      const expectedEnd = markdown.indexOf('\n\n尾段内容')
+      expect(call.reference.start).toBe(expectedStart)
+      expect(call.reference.end).toBe(expectedEnd)
+      expect(call.reference.text).toBe(markdown.slice(expectedStart, expectedEnd))
+    }
+  })
+
+  it('章节级审批意见：点击"对本章添加审批意见"按钮，scope 为 chapter', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const chapterBtn = await screen.findByRole('button', { name: '对本章添加审批意见' })
+    fireEvent.click(chapterBtn)
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    expect(screen.getByText(/整个章节/)).toBeTruthy()
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '整章重写。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    const call = addRevisionIssue.mock.calls[0]![0]
+    expect(call.scope).toBe('chapter')
+    expect(call.section_id).toBe('SEC-1')
+    if (call.reference.scope === 'chapter') {
+      expect(call.reference.base_content_sha256).toBe(chapter.content_sha256)
+    }
+  })
+
+  it('空修改意见时显示验证错误，不调用 addRevisionIssue', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    expect((await screen.findByRole('alert')).textContent).toBe('请填写修改意见。')
+    expect(addRevisionIssue).not.toHaveBeenCalled()
+  })
+
+  it('保存成功后正文不变化且不额外调用 getChapter', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const getChapter = vi.fn(async () => chapter)
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue, getChapter,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    expect(await screen.findByText('章节正文')).toBeTruthy()
+    const callsBefore = getChapter.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: '对本章添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '意见' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    expect(screen.getByText('章节正文')).toBeTruthy()
+    expect(getChapter.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('过期正文引用被拒绝时显示"正文已变化，请重新选择内容。"', async () => {
+    const addRevisionIssue = vi.fn(async () => {
+      throw Object.assign(new Error('conflict'), { code: 'BID_CHAPTER_REVISION_CONFLICT' })
+    })
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '意见' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    expect((await screen.findByRole('alert')).textContent).toBe('正文已变化，请重新选择内容。')
+    expect(screen.getByRole('dialog', { name: '添加审批意见' })).toBeTruthy()
+  })
+
+  it('queue revision 冲突时重新拉取队列并提示重试', async () => {
+    const getRevisionQueue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async () => {
+      throw Object.assign(new Error('conflict'), { code: 'BID_REVISION_QUEUE_CONFLICT' })
+    })
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue, getRevisionQueue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '意见' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    expect((await screen.findByRole('alert')).textContent).toBe('队列已更新，请重试。')
+    await waitFor(() => { expect(getRevisionQueue).toHaveBeenCalled() })
+  })
+
+  it('相同文字在章节出现两次时 offset 仍准确', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const duplicates = await screen.findAllByText('重复段落。')
+    const second = duplicates[1]!
+    const range = document.createRange()
+    range.setStart(second.firstChild!, 0)
+    range.setEnd(second.lastChild!, second.lastChild!.textContent!.length)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(second, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '第二处重复段落需改。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    const call = addRevisionIssue.mock.calls[0]![0]
+    if (call.reference.scope === 'paragraphs') {
+      const expectedStart = markdown.lastIndexOf('重复段落。')
+      expect(call.reference.start).toBe(expectedStart)
+      expect(call.reference.text).toBe('重复段落。')
+    }
+  })
+
+  it('取消按钮关闭弹框且不保存', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
+    expect(addRevisionIssue).not.toHaveBeenCalled()
+  })
+
+  it('addRevisionIssue 未注入时不显示"添加审批意见"菜单项和章节按钮', async () => {
+    render(<BidReviewWorkbench {...props({
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    await screen.findByText('章节正文')
+    expect(screen.queryByRole('button', { name: '对本章添加审批意见' })).toBeNull()
+    const first = screen.getByText('章节正文')
+    const range = document.createRange()
+    range.selectNodeContents(first)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
+    expect(screen.queryByRole('menuitem', { name: '添加审批意见' })).toBeNull()
+  })
 })

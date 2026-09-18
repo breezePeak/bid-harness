@@ -50,7 +50,8 @@ import {
   type ChapterExecutionPlan,
 } from './chapter-writing-plan-artifacts.ts'
 import { BidStageAttentionRequiredError, type BidChapterRevisionRequest, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
-import { assertChapterRevisionScope, chapterContentSha256, chapterRevisionRequestSchema, renderChapterRevisionTask, validateChapterRevisionReference } from './chapter-revision.ts'
+import { assertChapterRevisionBatchScope, assertChapterRevisionScope, chapterContentSha256, chapterRevisionRequestSchema, renderChapterRevisionTask, validateChapterRevisionReference, type BatchRevisionScope } from './chapter-revision.ts'
+import { renderRevisionBatchSectionPrompt, type RevisionBatchExecutionInput, type RevisionBatchTaskExecution } from './chapter-revision-batch.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import {
@@ -144,6 +145,8 @@ export interface ChapterWritingExecutionOptions extends ModelStageExecutionOptio
   maxCompletionRepairRounds?: number
   /** 只续用目标章节已保存的 Writer；其余章节保持原文。 */
   revision?: BidChapterRevisionRequest
+  /** 批量修订执行输入；复用现有调度机制处理多 section 修订。 */
+  revisionBatch?: RevisionBatchExecutionInput
   /** 当前 Host 操作的运行中计划及定向修订命令。 */
   control?: ChapterWritingControl
 }
@@ -1384,9 +1387,46 @@ export async function executeChapterWriting(
     return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
   })
   try {
-    if (options.revision === undefined) {
+    if (options.revision === undefined && options.revisionBatch === undefined) {
       const artifacts = await runChapterWriting(agent, workspace, task, options)
       return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
+    }
+    if (options.revisionBatch !== undefined) {
+      const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+      const worklist = buildChapterWorklist(outline)
+      const batchSectionIds = new Set(options.revisionBatch.tasks.map(task => task.section_id))
+      for (const sectionId of batchSectionIds) {
+        if (!worklist.some(section => section.id === sectionId)) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+      }
+      const paths = [
+        LOG_PATH,
+        MANIFEST_PATH,
+        GLOBAL_REVIEW_PATH,
+        COMPLETION_REVIEW_PATH,
+        ...worklist.flatMap((_section, workIndex) => {
+          const workSerial = String(workIndex + 1).padStart(4, '0')
+          return [
+            `chapters/sections/${workSerial}.md`,
+            `chapters/meta/${workSerial}.json`,
+            `chapters/reviews/${workSerial}.json`,
+          ]
+        }),
+      ]
+      const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
+        const absolute = join(workspace.projectRoot, path)
+        await assertNoLinkedPath(workspace.root, absolute)
+        return [absolute, await readFile(absolute, 'utf8')]
+      })))
+      const batchWriting = { writing: false }
+      try {
+        const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch, batchWriting)
+        return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
+      } catch (error: unknown) {
+        if (batchWriting.writing) for (const [path, content] of backup) {
+          await options.run.commits.writeText(path, content)
+        }
+        throw error
+      }
     }
     const request = chapterRevisionRequestSchema.parse(options.revision)
     const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -1653,12 +1693,14 @@ interface ChapterRevisionState {
 async function runChapterWriting(
   agent: Agent, workspace: BidWorkspace, task: BidStageTask, options: ChapterWritingExecutionOptions,
   revision?: ChapterRevisionState,
+  revisionBatch?: RevisionBatchExecutionInput,
+  batchWriting?: { writing: boolean },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'chapter_writing') throw new Error('chapter-writing-executor-stage-invalid')
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
     throw new Error('chapter-writing-max-concurrency-invalid')
   }
-  if (revision === undefined && options.control === undefined) await waitForModelStageIdle(agent, options.run.signal)
+  if (revision === undefined && revisionBatch === undefined && options.control === undefined) await waitForModelStageIdle(agent, options.run.signal)
   const inputs = await Promise.all([
     readJson(workspace, 'outline/confirmed-outline.json'), readJson(workspace, 'outline/confirmation.json'),
     readJson(workspace, 'analysis/project.json'), readJson(workspace, 'analysis/requirements.json'),
@@ -1761,6 +1803,16 @@ async function runChapterWriting(
     }
     checkpoint.completed.delete(revision.request.reference.section_id)
   }
+  const batchTaskBySection = new Map<string, RevisionBatchTaskExecution>()
+  if (revisionBatch !== undefined) {
+    if (checkpoint === undefined || checkpoint.completed.size !== worklist.length) {
+      throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+    }
+    for (const task of revisionBatch.tasks) {
+      batchTaskBySection.set(task.section_id, task)
+      checkpoint.completed.delete(task.section_id)
+    }
+  }
   await mkdir(join(chaptersRoot, 'sections'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'meta'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'reviews'), { recursive: true, mode: 0o700 })
@@ -1815,6 +1867,20 @@ async function runChapterWriting(
   )))
   options.run.signal.throwIfAborted()
   let planSections = new Map(plan.sections.map(section => [section.section_id, section]))
+  if (revisionBatch !== undefined) {
+    const taskIdToSectionId = new Map(revisionBatch.tasks.map(task => [task.task_id, task.section_id]))
+    for (const task of revisionBatch.tasks) {
+      const existing = planSections.get(task.section_id)
+      const batchDeps = task.depends_on
+        .map(depTaskId => taskIdToSectionId.get(depTaskId))
+        .filter((id): id is string => id !== undefined)
+        .map(sectionId => ({ section_id: sectionId, reason: 'batch dependency' }))
+      planSections.set(task.section_id, {
+        ...(existing ?? { section_id: task.section_id, depends_on: [], related_sections: [], planning_notes: [] }),
+        depends_on: batchDeps,
+      })
+    }
+  }
   const executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
     schema_version: CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
     scope: 'technical_bid',
@@ -1837,7 +1903,7 @@ async function runChapterWriting(
   }
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
-    if (revision !== undefined) return Promise.resolve()
+    if (revision !== undefined || revisionBatch !== undefined) return Promise.resolve()
     // A failed final publication must not poison the recovery log queue:
     // persist the failed task state in a fresh commit lease.
     logWrites = logWrites.catch(() => undefined).then(() => {
@@ -1897,7 +1963,10 @@ async function runChapterWriting(
   const controller = new AbortController()
   const signal = AbortSignal.any([options.run.signal, controller.signal])
   const completed = checkpoint?.completed ?? new Map<string, CompletedChapter>()
-  const pending = new Set(worklist.filter(section => !completed.has(section.id)).map(section => section.id))
+  const pending = new Set(worklist
+    .filter(section => !completed.has(section.id))
+    .filter(section => revisionBatch === undefined || batchTaskBySection.has(section.id))
+    .map(section => section.id))
   type SectionSettlement =
     | { readonly sectionId: string; readonly chapter: CompletedChapter }
     | { readonly sectionId: string; readonly error: unknown }
@@ -2100,7 +2169,8 @@ async function runChapterWriting(
       const serial = context.contentPath.slice(-7, -3)
       const commandRevision = pendingRevisions.get(sectionId)
       const effectiveRevision = revision?.request ?? commandRevision
-      const revisionOriginal = revision?.original ?? (effectiveRevision === undefined
+      const batchTask = batchTaskBySection.get(sectionId)
+      const revisionOriginal = revision?.original ?? (effectiveRevision === undefined && batchTask === undefined
         ? undefined : await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
       const finishChapter = async (
         candidate: AcceptedChapterCandidate,
@@ -2117,8 +2187,19 @@ async function runChapterWriting(
           validateChapterRevisionReference(effectiveRevision, await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
           assertChapterRevisionScope(effectiveRevision, revisionOriginal, `${candidate.markdown.trim()}\n`)
         }
+        if (batchTask !== undefined && revisionOriginal !== undefined) {
+          const batchScopes: BatchRevisionScope[] = batchTask.issues.map(issue => ({
+            scope: issue.scope,
+            ...(issue.scope === 'paragraphs' && issue.start !== null && issue.end !== null
+              ? { start: issue.start, end: issue.end } : {}),
+          }))
+          assertChapterRevisionBatchScope(batchScopes, revisionOriginal, `${candidate.markdown.trim()}\n`)
+        }
         if (revision !== undefined) {
           revision.writing = true
+        }
+        if (batchWriting !== undefined && batchTask !== undefined) {
+          batchWriting.writing = true
         }
         logWrites = logWrites.then(async () => {
           assertCurrentInput()
@@ -2303,8 +2384,11 @@ async function runChapterWriting(
         const contextPrompt = renderChapterSubagentTask(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
         )
-        const basePrompt = effectiveRevision === undefined || revisionOriginal === undefined ? contextPrompt
-          : `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
+        const basePrompt = effectiveRevision === undefined && batchTask === undefined || revisionOriginal === undefined
+          ? contextPrompt
+          : batchTask !== undefined
+            ? `${contextPrompt}\n\n${renderRevisionBatchSectionPrompt(batchTask, revisionOriginal)}`
+            : `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision!, revisionOriginal)}`
         const prompt = attempt === 0 ? basePrompt : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues)
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
@@ -2328,6 +2412,18 @@ async function runChapterWriting(
           if (effectiveRevision !== undefined && revisionOriginal !== undefined) {
             assertChapterRevisionScope(
               effectiveRevision,
+              revisionOriginal,
+              `${normalizeChapterHeadings(parsed.markdown, context.section.title, sectionId, number).trim()}\n`,
+            )
+          }
+          if (batchTask !== undefined && revisionOriginal !== undefined) {
+            const batchScopes: BatchRevisionScope[] = batchTask.issues.map(issue => ({
+              scope: issue.scope,
+              ...(issue.scope === 'paragraphs' && issue.start !== null && issue.end !== null
+                ? { start: issue.start, end: issue.end } : {}),
+            }))
+            assertChapterRevisionBatchScope(
+              batchScopes,
               revisionOriginal,
               `${normalizeChapterHeadings(parsed.markdown, context.section.title, sectionId, number).trim()}\n`,
             )
@@ -2367,6 +2463,14 @@ async function runChapterWriting(
                 candidate.markdown = normalizeChapterHeadings(candidate.markdown, context.section.title, sectionId, number)
                 if (effectiveRevision !== undefined && revisionOriginal !== undefined) {
                   assertChapterRevisionScope(effectiveRevision, revisionOriginal, `${candidate.markdown.trim()}\n`)
+                }
+                if (batchTask !== undefined && revisionOriginal !== undefined) {
+                  const batchScopes: BatchRevisionScope[] = batchTask.issues.map(issue => ({
+                    scope: issue.scope,
+                    ...(issue.scope === 'paragraphs' && issue.start !== null && issue.end !== null
+                      ? { start: issue.start, end: issue.end } : {}),
+                  }))
+                  assertChapterRevisionBatchScope(batchScopes, revisionOriginal, `${candidate.markdown.trim()}\n`)
                 }
               }
             } catch (error: unknown) {
@@ -2474,12 +2578,14 @@ async function runChapterWriting(
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
       if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
-      log.status = 'failed'
-      log.failure_phase = log.phase
-      log.phase = null
-      await persistLog()
+      if (revisionBatch === undefined) {
+        log.status = 'failed'
+        log.failure_phase = log.phase
+        log.phase = null
+        await persistLog()
+      }
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
-      throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`)
+      throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`, { cause: error })
     } finally {
       if (writer !== undefined) {
         await writer.dispose()
@@ -2513,11 +2619,13 @@ async function runChapterWriting(
           const failedDependencies = dependencies.filter(dependency => failures.has(dependency))
           const error = new Error(`Bid chapter ${sectionId} cannot run because dependencies failed: ${failedDependencies.join(', ')}`)
           failures.set(sectionId, error)
-          const log = executionLog.sections.find(item => item.section_id === sectionId)
-          if (log !== undefined) {
-            log.status = 'failed'
-            log.phase = null
-            log.failure_phase = 'blocked'
+          if (revisionBatch === undefined) {
+            const log = executionLog.sections.find(item => item.section_id === sectionId)
+            if (log !== undefined) {
+              log.status = 'failed'
+              log.phase = null
+              log.failure_phase = 'blocked'
+            }
           }
         }
         pending.clear()
@@ -2560,7 +2668,7 @@ async function runChapterWriting(
     return chapter.entry
   })
   signal.throwIfAborted()
-  if (revision !== undefined) await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog, options.run.commits)
+  if (revision !== undefined || revisionBatch !== undefined) await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog, options.run.commits)
   await writeJson(join(workspace.projectRoot, MANIFEST_PATH), {
     schema_version: CHAPTER_WRITING_SCHEMA_VERSION,
     scope: 'technical_bid',
@@ -2589,7 +2697,7 @@ async function runChapterWriting(
     writingPlan,
   )
   if (options.control?.pending() === true) return runChapterWriting(agent, workspace, task, options)
-  if (revision === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
+  if (revision === undefined && revisionBatch === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
     schema_version: 1,
     plan_version: writingPlan.plan_version,
   }, options.run.commits)

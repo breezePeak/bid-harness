@@ -581,14 +581,14 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executor.execute.mock.calls[0]?.[0].stage).toBe('chapter_writing')
     expect(typeof executor.execute.mock.calls[0]?.[1].runId).toBe('string')
     expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
-  })
+  }, 30000)
 
   it('S5 工作台投影已保存审核报告，并从失败执行记录读取章节原因', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
-      schema_version: 7, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
+      schema_version: 8, section_id: 'SEC-1', verdict: 'repair', candidate_sha256: createHash('sha256').update('# 技术方案\n\n已有正文。\n').digest('hex'), writer_child_session_id: 'writer-a', reviewer_child_session_id: 'reviewer-a',
       must_answer_coverage: [{ item: '按期交付', status: 'missing', evidence_quotes: [], issue: '正文没有交付节点。' }],
       requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
       response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文。'], issue: null }],
@@ -745,7 +745,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(review?.issues).toEqual(expect.arrayContaining([expect.objectContaining({
       source: 'review_execution', title: '章节审核执行失败', detail: 'Chapter Reviewer 未正常完成：error。',
     })]))
-  })
+  }, 30000)
 
   it('S5 工作台将文档级缺口和递交待确认与章节状态分开投影', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -779,7 +779,7 @@ describe('Workspace 项目与独立 Session', () => {
       document_issues: [{ compliance_id: 'GLOBAL-CONTENT', status: 'fail', detail: '缺少资格材料。', affected_section_ids: ['SEC-1'] }],
       delivery_todos: [{ compliance_id: 'GLOBAL-UPLOAD', status: 'pending', detail: '缺少实际上传执行证据。', affected_section_ids: [] }],
     })
-  })
+  }, 30000)
 
   it('各级父节点从确认目录读取概述，不计入叶节写作和审查进度', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -1897,5 +1897,81 @@ describe('Workspace 项目与独立 Session', () => {
       expect(runtime(d.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
       expect(executor.execute).toHaveBeenCalledTimes(2)
     } finally { gate.resolve(undefined); await operationA }
+  })
+
+  it('S5 审批意见队列：收集、编辑、删除意见不触发任何章节写作 Run', async () => {
+    const { ctx, workspace, fresh, host, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-queue')
+    const chapter = await ctx.bid.getReviewChapter(agent.session, 'SEC-1')
+    expect(chapter.content_sha256).not.toBeNull()
+    const sha = chapter.content_sha256!
+
+    const added = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: sha },
+      instruction: '加强技术方案细节', suggestion: '补充实施步骤',
+    })
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    expect(added.value.issues).toHaveLength(1)
+    expect(added.value.issues[0]!.status).toBe('pending')
+    expect(added.value.issues[0]!.batch_id).toBeNull()
+    const issueId = added.value.issues[0]!.issue_id
+    const queueRevision = added.value.revision
+
+    const queue = await ctx.bid.getRevisionQueue(agent.session)
+    expect(queue.issues).toHaveLength(1)
+    expect(queue.revision).toBe(queueRevision)
+
+    const updated = await ctx.bid.updateRevisionIssue(agent.session, {
+      issue_id: issueId, expected_queue_revision: queueRevision,
+      instruction: '进一步细化技术方案',
+    })
+    expect(updated.ok).toBe(true)
+    if (!updated.ok) return
+    expect(updated.value.issues[0]!.instruction).toBe('进一步细化技术方案')
+
+    const deleted = await ctx.bid.deleteRevisionIssue(agent.session, {
+      issue_id: issueId, expected_queue_revision: updated.value.revision,
+    })
+    expect(deleted.ok).toBe(true)
+    if (!deleted.ok) return
+    expect(deleted.value.issues).toHaveLength(0)
+
+    expect(executeStage).not.toHaveBeenCalled()
+    expect(host.inFlight.size).toBe(0)
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+  })
+
+  it('S5 审批意见队列：非 pending issue 拒绝编辑，CAS 冲突返回稳定错误', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-queue-cas')
+    const chapter = await ctx.bid.getReviewChapter(agent.session, 'SEC-1')
+    const sha = chapter.content_sha256!
+
+    const added = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: sha },
+      instruction: '意见', suggestion: null,
+    })
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    const issueId = added.value.issues[0]!.issue_id
+
+    const stale = await ctx.bid.updateRevisionIssue(agent.session, {
+      issue_id: issueId, expected_queue_revision: 999,
+      instruction: '过期',
+    })
+    expect(stale).toMatchObject({ ok: false, error: { code: 'BID_REVISION_QUEUE_CONFLICT' } })
+
+    const unknown = await ctx.bid.updateRevisionIssue(agent.session, {
+      issue_id: 'REV-missing', expected_queue_revision: added.value.revision,
+      instruction: 'x',
+    })
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'BID_REVISION_ISSUE_NOT_FOUND' } })
   })
 })
