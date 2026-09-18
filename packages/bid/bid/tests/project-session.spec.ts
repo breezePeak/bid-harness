@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -1973,5 +1973,139 @@ describe('Workspace 项目与独立 Session', () => {
       instruction: 'x',
     })
     expect(unknown).toMatchObject({ ok: false, error: { code: 'BID_REVISION_ISSUE_NOT_FOUND' } })
+  })
+
+  it('S5 批量修订：inspect → plan → execute(全冲突) 同一回合真实工具调用', async () => {
+    const { ctx, workspace, fresh, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-batch-composition')
+    const chapter = await ctx.bid.getReviewChapter(agent.session, 'SEC-1')
+    expect(chapter.content_sha256).not.toBeNull()
+    const sha = chapter.content_sha256!
+
+    const added = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: sha },
+      instruction: '加强技术方案细节', suggestion: '补充实施步骤',
+    })
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    const issueId = added.value.issues[0]!.issue_id
+    const queueRevision = added.value.revision
+
+    const inspected = await ctx.tools.execute({
+      agent,
+      name: 'bid_stage_inspect',
+      arguments: { view: 'summary' },
+      callId: CallId('batch-inspect'),
+      signal: new AbortController().signal,
+    })
+    expect(inspected.isError, JSON.stringify(inspected)).toBe(false)
+    expect(inspected.value).toMatchObject({
+      runtime: { stage: 'chapter_writing', status: 'completed' },
+    })
+
+    const planned = await ctx.tools.execute({
+      agent,
+      name: 'bid_plan_revision_batch',
+      arguments: {
+        expected_queue_revision: queueRevision,
+        issue_ids: [issueId],
+        tasks: [{
+          task_id: 'TASK-1',
+          section_id: 'SEC-1',
+          issue_ids: [issueId],
+          depends_on: [],
+        }],
+      },
+      callId: CallId('batch-plan'),
+      signal: new AbortController().signal,
+    })
+    expect(planned.isError, JSON.stringify(planned)).toBe(false)
+    const planResult = planned.value as { batch_id: string; status: string; issue_ids: string[]; tasks: Array<{ task_id: string; status: string }>; queue_revision: number }
+    expect(planResult.batch_id).toMatch(/^BATCH-/u)
+    expect(planResult.status).toBe('planning')
+    expect(planResult.issue_ids).toEqual([issueId])
+    expect(planResult.tasks[0]?.task_id).toBe('TASK-1')
+    expect(planResult.tasks[0]?.status).toBe('queued')
+    const batchId = planResult.batch_id
+
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n修订后的正文。\n')
+
+    const executed = await ctx.tools.execute({
+      agent,
+      name: 'bid_execute_revision_batch',
+      arguments: { batch_id: batchId },
+      callId: CallId('batch-execute'),
+      signal: new AbortController().signal,
+    })
+    expect(executed.isError, JSON.stringify(executed)).toBe(false)
+    const execResult = executed.value as { batch_id: string; status: string; tasks: Array<{ task_id: string; status: string; failure: { code: string; message: string; phase: string | null } | null }> }
+    expect(execResult.batch_id).toBe(batchId)
+    expect(execResult.status).toBe('completed')
+    expect(execResult.tasks[0]?.status).toBe('conflict')
+    expect(execResult.tasks[0]?.failure?.code).toBe('STALE_BASE')
+
+    expect(executeStage).not.toHaveBeenCalled()
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+
+    const batchArtifact = JSON.parse(await readFile(join(workspace.projectRoot, `chapters/revisions/batches/${batchId}.json`), 'utf8')) as { status: string; tasks: Array<{ status: string }> }
+    expect(batchArtifact.status).toBe('completed')
+    expect(batchArtifact.tasks[0]?.status).toBe('conflict')
+
+    const finalQueue = await ctx.bid.getRevisionQueue(agent.session)
+    expect(finalQueue.issues[0]?.status).toBe('conflict')
+  })
+
+  it('S5 批量修订：inspect → plan 通过真实 AgentLoop 同一回合', async () => {
+    const { ctx, workspace, fresh, adapter, executeStage } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-batch-agent-loop')
+    const chapter = await ctx.bid.getReviewChapter(agent.session, 'SEC-1')
+    const sha = chapter.content_sha256!
+
+    const added = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: sha },
+      instruction: '加强技术方案细节', suggestion: '补充实施步骤',
+    })
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    const issueId = added.value.issues[0]!.issue_id
+    const queueRevision = added.value.revision
+
+    adapter.script.push(
+      toolCall('bid_stage_inspect', { view: 'summary' }),
+      toolCall('bid_plan_revision_batch', {
+        expected_queue_revision: queueRevision,
+        issue_ids: [issueId],
+        tasks: [{
+          task_id: 'TASK-1',
+          section_id: 'SEC-1',
+          issue_ids: [issueId],
+          depends_on: [],
+        }],
+      }),
+      answer('已规划批次，准备执行修订。'),
+    )
+    const before = agent.session.events.length
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '请规划并执行修订。' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    const toolCalls = agent.session.events.slice(before)
+      .filter(event => event.type === 'tool/call')
+      .map(event => event.data.name)
+    expect(toolCalls).toEqual(['bid_stage_inspect', 'bid_plan_revision_batch'])
+
+    const batchFiles = await readdir(join(workspace.projectRoot, 'chapters/revisions/batches'))
+    expect(batchFiles).toHaveLength(1)
+    const batchArtifact = JSON.parse(await readFile(join(workspace.projectRoot, `chapters/revisions/batches/${batchFiles[0]!}`), 'utf8')) as { status: string; tasks: Array<{ status: string }> }
+    expect(batchArtifact.status).toBe('planning')
+    expect(batchArtifact.tasks[0]?.status).toBe('queued')
+
+    expect(executeStage).not.toHaveBeenCalled()
+    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
   })
 })

@@ -107,6 +107,7 @@ export type RevisionBatchErrorCode =
   | 'BID_REVISION_BATCH_ISSUE_DUPLICATE'
   | 'BID_REVISION_BATCH_ISSUE_NOT_COVERED'
   | 'BID_REVISION_BATCH_TASK_DUPLICATE'
+  | 'BID_REVISION_BATCH_SECTION_DUPLICATE'
   | 'BID_REVISION_BATCH_SECTION_MISMATCH'
   | 'BID_REVISION_BATCH_DEPENDENCY_NOT_FOUND'
   | 'BID_REVISION_BATCH_SELF_DEPENDENCY'
@@ -242,6 +243,21 @@ async function commitRevisionBatchArtifacts(
  * @param batch 新创建的不可变批次快照。
  */
 export async function commitRevisionBatchPlan(
+  workspace: RevisionQueueWorkspace,
+  queue: RevisionQueueArtifact,
+  batch: RevisionBatchArtifact,
+): Promise<void> {
+  return commitRevisionBatchArtifacts(workspace, queue, batch)
+}
+
+/**
+ * 在单个 publication 内原子提交 queue 与 batch 的任意状态变更；
+ * preflight/start、plan、final settlement 共用此底层 helper，不复制 publication 逻辑。
+ * @param workspace 项目工作区。
+ * @param queue 当前审批意见队列。
+ * @param batch 当前批次 artifact。
+ */
+export async function commitRevisionBatchState(
   workspace: RevisionQueueWorkspace,
   queue: RevisionQueueArtifact,
   batch: RevisionBatchArtifact,
@@ -757,6 +773,48 @@ export async function persistRevisionBatchTaskStatus(
   const updated = updateRevisionBatchTaskStatus(batch, taskId, update, now)
   await writeRevisionBatch(workspace, updated)
   return updated
+}
+
+/**
+ * 串行化的批次任务状态写器；同一执行器内多个 section 并发调用时，
+ * 基于内存最新快照依次 read-modify-write，避免 lost update。
+ * 状态写失败向上抛，调用方须在 finally 中 await settle() 收敛写链。
+ */
+export interface RevisionBatchTaskStatusWriter {
+  /** 串行更新指定任务状态并持久化；返回的 Promise 在本次更新完成时 resolve，写链断裂时 reject。 */
+  updateTask(taskId: string, update: UpdateRevisionBatchTaskOptions): Promise<void>
+  /** 等待写链收敛；始终 resolve，用于 finally 清理。 */
+  settle(): Promise<void>
+}
+
+/**
+ * 创建绑定到指定批次的串行化状态写器；不串行 Writer/Reviewer，只串行 task 状态 artifact 写入。
+ * @param workspace 项目工作区。
+ * @param batchId 批次 ID。
+ */
+export function createRevisionBatchTaskStatusWriter(
+  workspace: RevisionQueueWorkspace,
+  batchId: string,
+): RevisionBatchTaskStatusWriter {
+  let writes = Promise.resolve()
+  let latest: RevisionBatchArtifact | null = null
+  return {
+    updateTask(taskId, update) {
+      writes = writes.then(async () => {
+        const base = latest ?? await readRevisionBatch(workspace, batchId)
+        if (base === null) {
+          throw new Error(`BID_REVISION_BATCH_NOT_FOUND: 未找到批次 ${batchId}`)
+        }
+        const updated = updateRevisionBatchTaskStatus(base, taskId, update, Date.now())
+        await writeRevisionBatch(workspace, updated)
+        latest = updated
+      })
+      return writes
+    },
+    settle() {
+      return writes.catch(() => undefined)
+    },
+  }
 }
 
 /** Reviewer 对单条审批意见的完成度判定。 */

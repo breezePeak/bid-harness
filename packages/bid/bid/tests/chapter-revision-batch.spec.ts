@@ -1,6 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
 import { renderChapterWritingInteractionPrompt } from '../src/stage-interaction.ts'
@@ -26,6 +28,7 @@ import {
   validateRevisionBatchPlan,
   writeRevisionBatch,
   commitRevisionBatchPlan,
+  commitRevisionBatchState,
   commitRevisionBatchExecutionSettlement,
   detectRevisionBatchIntegrity,
   recoverOrphanRevisionIssues,
@@ -37,6 +40,7 @@ import {
   failRevisionBatchExecution,
   updateRevisionBatchTaskStatus,
   persistRevisionBatchTaskStatus,
+  createRevisionBatchTaskStatusWriter,
   settleRevisionBatchIssues,
   detectStaleBaseVersions,
   type PlanRevisionBatchInput,
@@ -2547,5 +2551,431 @@ describe('任务 09: b54fe9a385 批量审批修订全链路端到端回归验收
     expect(prompt).toContain(
       '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
     )
+  })
+})
+describe('任务 A: 并发 RevisionTask 状态写器串行化', () => {
+  const disposals: Array<() => Promise<void>> = []
+
+  afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
+
+  async function makeWorkspace() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-revision-batch-concurrent-'))
+    disposals.push(() => rm(root, { recursive: true, force: true }))
+    return new BidWorkspace(root)
+  }
+
+  async function makeRunningBatch(
+    ws: BidWorkspace,
+    taskIds: readonly string[],
+  ): Promise<{ batchId: string; batch: RevisionBatchArtifact }> {
+    const sections = taskIds.map((_id, i) => ({ sectionId: `SEC-${i + 1}`, title: `章节${i + 1}` }))
+    let queue = emptyRevisionQueue()
+    let time = 1000
+    for (const sec of sections) {
+      queue = addRevisionIssue(queue, {
+        section_id: sec.sectionId, scope: 'chapter', reference: chapterRef(),
+        instruction: `针对 ${sec.title} 的意见`, suggestion: null,
+      }, sec.title, time)
+      time += 1000
+    }
+    const issueIds = queue.issues.map(issue => issue.issue_id)
+    const input = planInput(issueIds, taskIds.map((taskId, i) => ({
+      task_id: taskId, section_id: `SEC-${i + 1}`, issue_ids: [issueIds[i] ?? ''],
+    })))
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch: plannedBatch } = createRevisionBatch(queue, input, batchId, 5000, [])
+    await commitRevisionBatchPlan(ws, plannedQueue, plannedBatch)
+    const runningBatch = startRevisionBatchExecution(plannedBatch, 6000)
+    await writeRevisionBatch(ws, runningBatch)
+    return { batchId, batch: runningBatch }
+  }
+
+  it('1. persistRevisionBatchTaskStatus 并发调用产生 lost update（证明问题存在）', async () => {
+    const ws = await makeWorkspace()
+    const { batchId } = await makeRunningBatch(ws, ['T-A', 'T-B'])
+
+    await Promise.all([
+      persistRevisionBatchTaskStatus(ws, batchId, 'T-A', { status: 'running' }, 7000),
+      persistRevisionBatchTaskStatus(ws, batchId, 'T-B', { status: 'running' }, 7100),
+    ])
+
+    const reloaded = await readRevisionBatch(ws, batchId)
+    expect(reloaded).not.toBeNull()
+    const taskA = reloaded!.tasks.find(t => t.task_id === 'T-A')
+    const taskB = reloaded!.tasks.find(t => t.task_id === 'T-B')
+    const bothRunning = taskA?.status === 'running' && taskB?.status === 'running'
+    if (!bothRunning) {
+      const lostTask = taskA?.status !== 'running' ? 'T-A' : 'T-B'
+      expect(lostTask).toBeDefined()
+    }
+  })
+
+  it('2. 串行化写器: 2 task 并发更新后重读两者都保留', async () => {
+    const ws = await makeWorkspace()
+    const { batchId } = await makeRunningBatch(ws, ['T-A', 'T-B'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await Promise.all([
+      writer.updateTask('T-A', { status: 'running' }).then(() => writer.updateTask('T-A', { status: 'reviewing' })),
+      writer.updateTask('T-B', { status: 'running' }),
+    ])
+    await writer.settle()
+
+    const reloaded = await readRevisionBatch(ws, batchId)
+    expect(reloaded).not.toBeNull()
+    const taskA = reloaded!.tasks.find(t => t.task_id === 'T-A')
+    const taskB = reloaded!.tasks.find(t => t.task_id === 'T-B')
+    expect(taskA?.status).toBe('reviewing')
+    expect(taskB?.status).toBe('running')
+  })
+
+  it('3. 串行化写器: 3 task 并发更新后重读三者都保留', async () => {
+    const ws = await makeWorkspace()
+    const { batchId } = await makeRunningBatch(ws, ['T-A', 'T-B', 'T-C'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await Promise.all([
+      writer.updateTask('T-A', { status: 'running' }).then(() => writer.updateTask('T-A', { status: 'reviewing' })),
+      writer.updateTask('T-B', { status: 'running' }).then(() => writer.updateTask('T-B', { status: 'reviewing' })).then(() => writer.updateTask('T-B', { status: 'repairing' })),
+      writer.updateTask('T-C', { status: 'running' }),
+    ])
+    await writer.settle()
+
+    const reloaded = await readRevisionBatch(ws, batchId)
+    expect(reloaded).not.toBeNull()
+    const taskA = reloaded!.tasks.find(t => t.task_id === 'T-A')
+    const taskB = reloaded!.tasks.find(t => t.task_id === 'T-B')
+    const taskC = reloaded!.tasks.find(t => t.task_id === 'T-C')
+    expect(taskA?.status).toBe('reviewing')
+    expect(taskB?.status).toBe('repairing')
+    expect(taskC?.status).toBe('running')
+  })
+
+  it('4. 串行化写器: 使用 barrier 固定交错顺序后两者都保留', async () => {
+    const ws = await makeWorkspace()
+    const { batchId } = await makeRunningBatch(ws, ['T-A', 'T-B'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    let releaseA: () => void
+    const barrierA = new Promise<void>(resolve => { releaseA = resolve })
+    const taskAPromise = writer.updateTask('T-A', { status: 'running' }).then(async () => {
+      releaseA!()
+      await writer.updateTask('T-A', { status: 'reviewing' })
+    })
+    const taskBPromise = barrierA.then(() => writer.updateTask('T-B', { status: 'running' }))
+
+    await Promise.all([taskAPromise, taskBPromise])
+    await writer.settle()
+
+    const reloaded = await readRevisionBatch(ws, batchId)
+    expect(reloaded).not.toBeNull()
+    expect(reloaded!.tasks.find(t => t.task_id === 'T-A')?.status).toBe('reviewing')
+    expect(reloaded!.tasks.find(t => t.task_id === 'T-B')?.status).toBe('running')
+  })
+
+  it('5. 串行化写器: 持久化失败时 updateTask reject 且后续 updateTask 也 reject', async () => {
+    const ws = await makeWorkspace()
+    await makeRunningBatch(ws, ['T-A', 'T-B'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, 'BATCH-NONEXISTENT')
+
+    await expect(writer.updateTask('T-A', { status: 'running' }))
+      .rejects.toThrow(/BID_REVISION_BATCH_NOT_FOUND/)
+    await expect(writer.updateTask('T-B', { status: 'running' }))
+      .rejects.toThrow()
+    await writer.settle()
+  })
+
+  it('6. 串行化写器: settle 始终 resolve 即使写链断裂', async () => {
+    const ws = await makeWorkspace()
+    await makeRunningBatch(ws, ['T-A'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, 'BATCH-NONEXISTENT')
+
+    await expect(writer.updateTask('T-A', { status: 'running' }))
+      .rejects.toThrow(/BID_REVISION_BATCH_NOT_FOUND/)
+    await expect(writer.settle()).resolves.toBeUndefined()
+  })
+})
+describe('任务 B: settlement 是 Task 终态唯一权威决策点', () => {
+  const disposals: Array<() => Promise<void>> = []
+
+  afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
+
+  async function makeWorkspace() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-revision-settlement-'))
+    disposals.push(() => rm(root, { recursive: true, force: true }))
+    return new BidWorkspace(root)
+  }
+
+  async function makeRunningBatch(
+    ws: BidWorkspace,
+    taskIds: readonly string[],
+  ): Promise<{ batchId: string; batch: RevisionBatchArtifact; queue: RevisionQueueArtifact }> {
+    const sections = taskIds.map((_id, i) => ({ sectionId: `SEC-${i + 1}`, title: `章节${i + 1}` }))
+    let queue = emptyRevisionQueue()
+    let time = 1000
+    for (const sec of sections) {
+      queue = addRevisionIssue(queue, {
+        section_id: sec.sectionId, scope: 'chapter', reference: chapterRef(),
+        instruction: `针对 ${sec.title} 的意见`, suggestion: null,
+      }, sec.title, time)
+      time += 1000
+    }
+    const issueIds = queue.issues.map(issue => issue.issue_id)
+    const input = planInput(issueIds, taskIds.map((taskId, i) => ({
+      task_id: taskId, section_id: `SEC-${i + 1}`, issue_ids: [issueIds[i] ?? ''],
+    })))
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch: plannedBatch } = createRevisionBatch(queue, input, batchId, 5000, [])
+    await commitRevisionBatchPlan(ws, plannedQueue, plannedBatch)
+    const runningBatch = startRevisionBatchExecution(plannedBatch, 6000)
+    await writeRevisionBatch(ws, runningBatch)
+    return { batchId, batch: runningBatch, queue: plannedQueue }
+  }
+
+  it('Case 1: queued → running → reviewing, satisfied → settlement → completed', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, queue } = await makeRunningBatch(ws, ['T-1'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await writer.updateTask('T-1', { status: 'running' })
+    await writer.updateTask('T-1', { status: 'reviewing' })
+    await writer.settle()
+
+    const issueId = queue.issues[0]!.issue_id
+    const checks: RevisionIssueCheck[] = [
+      { issue_id: issueId, status: 'satisfied', reason: '已满足' },
+    ]
+    const batchBeforeSettle = await readRevisionBatch(ws, batchId)
+    expect(batchBeforeSettle!.tasks[0]?.status).toBe('reviewing')
+
+    const result = settleRevisionBatchIssues(queue, [issueId], checks, 8000)
+    expect(result.taskStatus).toBe('completed')
+
+    const settledBatch = updateRevisionBatchTaskStatus(batchBeforeSettle!, 'T-1', {
+      status: result.taskStatus,
+    }, 8000)
+    expect(settledBatch.tasks[0]?.status).toBe('completed')
+  })
+
+  it('Case 2: queued → running → reviewing, needs_input → settlement → needs_input, 无 completed → needs_input', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, queue } = await makeRunningBatch(ws, ['T-1'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await writer.updateTask('T-1', { status: 'running' })
+    await writer.updateTask('T-1', { status: 'reviewing' })
+    await writer.settle()
+
+    const issueId = queue.issues[0]!.issue_id
+    const checks: RevisionIssueCheck[] = [
+      { issue_id: issueId, status: 'needs_input', reason: '需要用户输入' },
+    ]
+    const batchBeforeSettle = await readRevisionBatch(ws, batchId)
+    expect(batchBeforeSettle!.tasks[0]?.status).toBe('reviewing')
+
+    const result = settleRevisionBatchIssues(queue, [issueId], checks, 8000)
+    expect(result.taskStatus).toBe('needs_input')
+
+    const settledBatch = updateRevisionBatchTaskStatus(batchBeforeSettle!, 'T-1', {
+      status: result.taskStatus,
+    }, 8000)
+    expect(settledBatch.tasks[0]?.status).toBe('needs_input')
+
+    expect(() => updateRevisionBatchTaskStatus(
+      updateRevisionBatchTaskStatus(batchBeforeSettle!, 'T-1', { status: 'completed' }, 7000),
+      'T-1', { status: 'needs_input' }, 8000,
+    )).toThrow('BID_REVISION_TASK_INVALID_TRANSITION')
+  })
+
+  it('Case 3: queued → running → reviewing → repairing → reviewing, unsatisfied → settlement → failed, 无 INVALID_TRANSITION', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, queue } = await makeRunningBatch(ws, ['T-1'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await writer.updateTask('T-1', { status: 'running' })
+    await writer.updateTask('T-1', { status: 'reviewing' })
+    await writer.updateTask('T-1', { status: 'repairing' })
+    await writer.updateTask('T-1', { status: 'reviewing' })
+    await writer.settle()
+
+    const issueId = queue.issues[0]!.issue_id
+    const checks: RevisionIssueCheck[] = [
+      { issue_id: issueId, status: 'unsatisfied', reason: '修复用尽仍未满足' },
+    ]
+    const batchBeforeSettle = await readRevisionBatch(ws, batchId)
+    expect(batchBeforeSettle!.tasks[0]?.status).toBe('reviewing')
+
+    const result = settleRevisionBatchIssues(queue, [issueId], checks, 9000)
+    expect(result.taskStatus).toBe('failed')
+
+    const settledBatch = updateRevisionBatchTaskStatus(batchBeforeSettle!, 'T-1', {
+      status: result.taskStatus,
+    }, 9000)
+    expect(settledBatch.tasks[0]?.status).toBe('failed')
+
+    expect(() => updateRevisionBatchTaskStatus(
+      updateRevisionBatchTaskStatus(batchBeforeSettle!, 'T-1', { status: 'completed' }, 8000),
+      'T-1', { status: 'failed' }, 9000,
+    )).toThrow('BID_REVISION_TASK_INVALID_TRANSITION')
+  })
+
+  it('Case 4: 执行阶段不写 completed, finishChapter 后 task 保持 reviewing', async () => {
+    const ws = await makeWorkspace()
+    const { batchId } = await makeRunningBatch(ws, ['T-1'])
+    const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
+
+    await writer.updateTask('T-1', { status: 'running' })
+    await writer.updateTask('T-1', { status: 'reviewing' })
+    await writer.settle()
+
+    const reloaded = await readRevisionBatch(ws, batchId)
+    expect(reloaded!.tasks[0]?.status).toBe('reviewing')
+    expect(reloaded!.tasks[0]?.status).not.toBe('completed')
+  })
+})
+describe('任务 C: preflight Queue + Batch 原子提交', () => {
+  const disposals: Array<() => Promise<void>> = []
+
+  afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
+
+  async function makeWorkspace() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-revision-preflight-'))
+    disposals.push(() => rm(root, { recursive: true, force: true }))
+    return new BidWorkspace(root)
+  }
+
+  async function setupBatch(
+    ws: BidWorkspace,
+  ): Promise<{ batchId: string; batch: RevisionBatchArtifact; queue: RevisionQueueArtifact }> {
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-1', scope: 'chapter', reference: chapterRef(),
+      instruction: '意见1', suggestion: null,
+    }, '章节1', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-2', scope: 'chapter', reference: chapterRef(),
+      instruction: '意见2', suggestion: null,
+    }, '章节2', 2000)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
+    const input = planInput([id1, id2], [
+      { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
+      { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2] },
+    ])
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch: plannedBatch } = createRevisionBatch(queue, input, batchId, 3000, [])
+    await commitRevisionBatchPlan(ws, plannedQueue, plannedBatch)
+    return { batchId, batch: plannedBatch, queue: plannedQueue }
+  }
+
+  async function simulatePublication(
+    ws: BidWorkspace,
+    queue: RevisionQueueArtifact,
+    batch: RevisionBatchArtifact,
+    writeCommitIntent: boolean,
+  ): Promise<void> {
+    const id = randomUUID()
+    const transactionRoot = join(ws.projectRoot, '.publications', id)
+    const stagedRoot = join(transactionRoot, 'staged')
+    await mkdir(stagedRoot, { recursive: true, mode: 0o700 })
+    const queueRel = 'chapters/revisions/queue.json'
+    const batchRel = `chapters/revisions/batches/${batch.batch_id}.json`
+    const queueContent = `${JSON.stringify(queue, null, 2)}\n`
+    const batchContent = `${JSON.stringify(batch, null, 2)}\n`
+    await writeFileAtomic(join(transactionRoot, 'staged', '000001'), queueContent, { mode: 0o600, dirMode: 0o700 })
+    await writeFileAtomic(join(transactionRoot, 'staged', '000002'), batchContent, { mode: 0o600, dirMode: 0o700 })
+    const manifest = {
+      schema_version: 1,
+      publication_id: id,
+      entries: [
+        { kind: 'write', path: queueRel, staged: 'staged/000001' },
+        { kind: 'write', path: batchRel, staged: 'staged/000002' },
+      ],
+    }
+    await writeFileAtomic(join(transactionRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
+    if (writeCommitIntent) {
+      await writeFileAtomic(join(transactionRoot, 'commit-intent'), 'commit\n', { mode: 0o600, dirMode: 0o700 })
+    }
+  }
+
+  it('1. commitRevisionBatchState 原子提交 Queue + Batch', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, batch, queue } = await setupBatch(ws)
+
+    const runningBatch = startRevisionBatchExecution(batch, 4000)
+    const staleQueue: RevisionQueueArtifact = {
+      ...queue,
+      issues: queue.issues.map((issue, i) =>
+        i === 0 ? { ...issue, status: 'conflict' as const, updated_at: 4000 } : issue,
+      ),
+    }
+    await commitRevisionBatchState(ws, staleQueue, runningBatch)
+
+    const diskQueue = await readRevisionQueue(ws)
+    const diskBatch = await readRevisionBatch(ws, batchId)
+    expect(diskQueue.issues[0]?.status).toBe('conflict')
+    expect(diskBatch?.status).toBe('running')
+  })
+
+  it('2. commit-intent 前崩溃: reconcile 后 Queue/Batch 都是旧状态', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, batch, queue } = await setupBatch(ws)
+
+    const runningBatch = startRevisionBatchExecution(batch, 4000)
+    const newQueue: RevisionQueueArtifact = {
+      ...queue,
+      issues: queue.issues.map((issue, i) =>
+        i === 0 ? { ...issue, status: 'conflict' as const, updated_at: 4000 } : issue,
+      ),
+    }
+    await simulatePublication(ws, newQueue, runningBatch, false)
+
+    await reconcileBidPublications(ws.root, ws.projectRoot)
+
+    const diskQueue = await readRevisionQueue(ws)
+    const diskBatch = await readRevisionBatch(ws, batchId)
+    expect(diskQueue.issues[0]?.status).toBe('scheduled')
+    expect(diskBatch?.status).toBe('planning')
+  })
+
+  it('3. commit-intent 后崩溃: reconcile 后 Queue/Batch 一起 roll forward', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, batch, queue } = await setupBatch(ws)
+
+    const runningBatch = startRevisionBatchExecution(batch, 4000)
+    const newQueue: RevisionQueueArtifact = {
+      ...queue,
+      issues: queue.issues.map((issue, i) =>
+        i === 0 ? { ...issue, status: 'conflict' as const, updated_at: 4000 } : issue,
+      ),
+    }
+    await simulatePublication(ws, newQueue, runningBatch, true)
+
+    await reconcileBidPublications(ws.root, ws.projectRoot)
+
+    const diskQueue = await readRevisionQueue(ws)
+    const diskBatch = await readRevisionBatch(ws, batchId)
+    expect(diskQueue.issues[0]?.status).toBe('conflict')
+    expect(diskQueue.issues[1]?.status).toBe('scheduled')
+    expect(diskBatch?.status).toBe('running')
+  })
+
+  it('4. 不出现 Queue 新 + Batch 旧: 原子提交后两者一致', async () => {
+    const ws = await makeWorkspace()
+    const { batchId, batch, queue } = await setupBatch(ws)
+
+    const runningBatch = startRevisionBatchExecution(batch, 4000)
+    const newQueue: RevisionQueueArtifact = {
+      ...queue,
+      revision: queue.revision + 1,
+      issues: queue.issues.map(issue => ({ ...issue, status: 'conflict' as const, updated_at: 4000 })),
+    }
+    await commitRevisionBatchState(ws, newQueue, runningBatch)
+
+    const diskQueue = await readRevisionQueue(ws)
+    const diskBatch = await readRevisionBatch(ws, batchId)
+    const queueAllConflict = diskQueue.issues.every(issue => issue.status === 'conflict')
+    const batchRunning = diskBatch?.status === 'running'
+    expect(queueAllConflict).toBe(true)
+    expect(batchRunning).toBe(true)
   })
 })
