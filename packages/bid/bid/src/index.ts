@@ -115,6 +115,8 @@ import {
   writeRevisionBatch,
   readRevisionBatch,
   startRevisionBatchExecution,
+  resumeRevisionBatchExecution,
+  suspendRevisionBatchExecution,
   completeRevisionBatchExecution,
   failRevisionBatchExecution,
   updateRevisionBatchTaskStatus,
@@ -3069,7 +3071,11 @@ export class BidHostRuntime extends TypertRemoteService {
         try {
           const batch = await readRevisionBatch(operation.workspace, request.batch_id)
           if (batch !== null) {
-            await writeRevisionBatch(operation.workspace, failRevisionBatchExecution(batch, Date.now()))
+            const isFatal = error instanceof Error && error.message.includes('FATAL_CORRUPTION')
+            const nextBatch = isFatal
+              ? failRevisionBatchExecution(batch, Date.now())
+              : suspendRevisionBatchExecution(batch, Date.now())
+            await writeRevisionBatch(operation.workspace, nextBatch)
           }
         } catch { /* batch 状态更新失败不掩盖原始错误 */ }
         throw error
@@ -4748,9 +4754,11 @@ export class BidHostRuntime extends TypertRemoteService {
             const parsed = zod.object({ batch_id: zod.string().min(1) }).strict().parse(payload)
             const batch = await readRevisionBatch(operation.workspace, parsed.batch_id)
             if (batch === null) throw new Error('BID_REVISION_BATCH_NOT_FOUND')
+            const runningBatch = resumeRevisionBatchExecution(batch, Date.now())
+            await writeRevisionBatch(operation.workspace, runningBatch)
             const queue = await readRevisionQueue(operation.workspace)
             const issueMap = new Map(queue.issues.map(issue => [issue.issue_id, issue]))
-            const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
+            const batchTasks: RevisionBatchTaskExecution[] = runningBatch.tasks.map((task) => {
               const issues = task.issue_ids.map((id) => {
                 const issue = issueMap.get(id)
                 if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
@@ -4773,13 +4781,16 @@ export class BidHostRuntime extends TypertRemoteService {
               }
             })
             const runnableTasks = batchTasks.filter((task) => {
-              const taskArtifact = batch.tasks.find(t => t.task_id === task.task_id)
-              return taskArtifact === undefined || (taskArtifact.status !== 'conflict' && taskArtifact.status !== 'blocked')
+              const taskArtifact = runningBatch.tasks.find(t => t.task_id === task.task_id)
+              return taskArtifact !== undefined
+                && taskArtifact.status !== 'completed'
+                && taskArtifact.status !== 'conflict'
+                && taskArtifact.status !== 'blocked'
             })
             if (runnableTasks.length > 0) {
               await this.executeChapterRevisionBatchCandidate(
                 operation.session, agent, operation.workspace,
-                { batchId: batch.batch_id, tasks: runnableTasks }, run,
+                { batchId: runningBatch.batch_id, tasks: runnableTasks }, run,
               )
             }
             const outlineForSettle = parseConfirmedOutlineArtifact(JSON.parse(await readFile(
@@ -4787,9 +4798,9 @@ export class BidHostRuntime extends TypertRemoteService {
             )))
             const worklistForSettle = buildChapterWorklist(outlineForSettle)
             const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
-            const settledQueue = await this.settleBatchRevisionIssues(operation.workspace, batch, queue, serialsForSettle)
+            const settledQueue = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
             await writeRevisionQueue(operation.workspace, settledQueue)
-            const latestBatch = await readRevisionBatch(operation.workspace, batch.batch_id) ?? batch
+            const latestBatch = await readRevisionBatch(operation.workspace, runningBatch.batch_id) ?? runningBatch
             const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
             await writeRevisionBatch(operation.workspace, completedBatch)
             return
@@ -4819,6 +4830,21 @@ export class BidHostRuntime extends TypertRemoteService {
             ? { code: 'BID_WORK_VALIDATION_FAILED', message: error.message, issues: error.issues }
             : { code: 'BID_WORK_RESUME_FAILED', message: error instanceof Error ? error.message : String(error) },
         )
+      }
+      if (run.work.kind === 'chapter_revision_batch') {
+        try {
+          const parsed = zod.object({ batch_id: zod.string().min(1) }).safeParse(payload)
+          if (parsed.success) {
+            const batch = await readRevisionBatch(operation.workspace, parsed.data.batch_id)
+            if (batch !== null) {
+              const isFatal = error instanceof Error && error.message.includes('FATAL_CORRUPTION')
+              const nextBatch = isFatal
+                ? failRevisionBatchExecution(batch, Date.now())
+                : suspendRevisionBatchExecution(batch, Date.now())
+              await writeRevisionBatch(operation.workspace, nextBatch)
+            }
+          }
+        } catch { /* 批次状态更新失败不掩盖原始错误 */ }
       }
       return bidSessionRuntime(operation.session)
     }

@@ -481,7 +481,22 @@ export function completeRevisionBatchExecution(
 }
 
 /**
- * 将批次状态标记为 suspended。
+ * 将批次状态从 suspended（或 crash 窗口下的 running）恢复为 running。
+ * @param batch 当前批次 artifact。
+ * @param now 当前时间戳。
+ * @returns 状态为 running 的新批次 artifact。
+ */
+export function resumeRevisionBatchExecution(
+  batch: RevisionBatchArtifact,
+  now: number,
+): RevisionBatchArtifact {
+  if (batch.status === 'running') return { ...batch, updated_at: now }
+  if (batch.status !== 'suspended') throw new Error('BID_REVISION_BATCH_NOT_SUSPENDED')
+  return { ...batch, status: 'running', updated_at: now }
+}
+
+/**
+ * 将批次状态标记为 suspended；已 suspended 时幂等返回。
  * @param batch 当前批次 artifact。
  * @param now 当前时间戳。
  * @returns 状态为 suspended 的新批次 artifact。
@@ -490,6 +505,7 @@ export function suspendRevisionBatchExecution(
   batch: RevisionBatchArtifact,
   now: number,
 ): RevisionBatchArtifact {
+  if (batch.status === 'suspended') return batch
   if (batch.status !== 'running') throw new Error('BID_REVISION_BATCH_NOT_RUNNING')
   return { ...batch, status: 'suspended', updated_at: now }
 }

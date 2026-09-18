@@ -24,6 +24,7 @@ import {
   writeRevisionBatch,
   renderRevisionBatchSectionPrompt,
   startRevisionBatchExecution,
+  resumeRevisionBatchExecution,
   completeRevisionBatchExecution,
   suspendRevisionBatchExecution,
   failRevisionBatchExecution,
@@ -1614,5 +1615,163 @@ describe('任务 04: stale/conflict 局部隔离与依赖传播', () => {
     expect(batch.tasks[0]?.status).toBe('conflict')
     expect(batchQueue.issues[0]?.status).toBe('conflict')
     expect(batchQueue.issues[1]?.status).toBe('conflict')
+  })
+})
+
+describe('任务 05: Batch 暂停恢复状态机 (suspend/resume/fail)', () => {
+  function makeRunningBatch(
+    tasks?: readonly { readonly taskId: string; readonly status: 'queued' | 'completed' | 'conflict' | 'blocked' }[],
+  ): RevisionBatchArtifact {
+    const taskList = tasks ?? [{ taskId: 'T-1', status: 'queued' }]
+    return {
+      schema_version: REVISION_BATCH_SCHEMA_VERSION,
+      batch_id: 'BATCH-005',
+      queue_revision: 1,
+      issue_ids: taskList.map(t => `ISSUE-${t.taskId}`),
+      status: 'running',
+      tasks: taskList.map(t => ({
+        task_id: t.taskId,
+        section_id: `SEC-${t.taskId}`,
+        issue_ids: [`ISSUE-${t.taskId}`],
+        depends_on: [],
+        status: t.status,
+        failure: null,
+        started_at: null,
+        completed_at: null,
+      })),
+      created_at: 1000,
+      updated_at: 2000,
+    }
+  }
+
+  it('1. stop → Run suspended + Batch suspended: 用户 stop 或中断时 batch 挂起为 suspended', () => {
+    const batch = makeRunningBatch()
+    const suspended = suspendRevisionBatchExecution(batch, 3000)
+    expect(suspended.status).toBe('suspended')
+    expect(suspended.updated_at).toBe(3000)
+
+    const idempotent = suspendRevisionBatchExecution(suspended, 4000)
+    expect(idempotent.status).toBe('suspended')
+  })
+
+  it('2. resume → running: 从 suspended 安全恢复为 running', () => {
+    const batch = makeRunningBatch()
+    const suspended = suspendRevisionBatchExecution(batch, 3000)
+    const resumed = resumeRevisionBatchExecution(suspended, 4000)
+    expect(resumed.status).toBe('running')
+    expect(resumed.updated_at).toBe(4000)
+
+    const crashRecovered = resumeRevisionBatchExecution(resumed, 5000)
+    expect(crashRecovered.status).toBe('running')
+    expect(crashRecovered.updated_at).toBe(5000)
+  })
+
+  it('3. 完成 → completed: 恢复执行完成后正常收敛', () => {
+    const batch = makeRunningBatch()
+    const suspended = suspendRevisionBatchExecution(batch, 3000)
+    const resumed = resumeRevisionBatchExecution(suspended, 4000)
+    const completed = completeRevisionBatchExecution(resumed, 5000)
+    expect(completed.status).toBe('completed')
+    expect(completed.updated_at).toBe(5000)
+  })
+
+  it('4. 可恢复 executor error → suspended: 遇到可恢复错误时分流到 suspended 而非 failed', () => {
+    const batch = makeRunningBatch()
+    const error = new Error('Executor network timeout or model rate limit')
+    const isFatal = error.message.includes('FATAL_CORRUPTION')
+    const nextBatch = isFatal
+      ? failRevisionBatchExecution(batch, 3000)
+      : suspendRevisionBatchExecution(batch, 3000)
+    expect(nextBatch.status).toBe('suspended')
+  })
+
+  it('5. resume 不重跑 completed: 恢复执行时已 completed 的 task 排除在 runnableTasks 外', () => {
+    const batch = makeRunningBatch([
+      { taskId: 'T-1', status: 'completed' },
+      { taskId: 'T-2', status: 'queued' },
+      { taskId: 'T-3', status: 'conflict' },
+      { taskId: 'T-4', status: 'blocked' },
+    ])
+    const suspended = suspendRevisionBatchExecution(batch, 3000)
+    const runningBatch = resumeRevisionBatchExecution(suspended, 4000)
+
+    const runnableTasks = runningBatch.tasks.filter((task) => {
+      return task.status !== 'completed' && task.status !== 'conflict' && task.status !== 'blocked'
+    })
+
+    expect(runnableTasks).toHaveLength(1)
+    expect(runnableTasks[0]?.task_id).toBe('T-2')
+  })
+
+  it('6. Host restart 后 resume: 落盘读取后仍能正常 resume 与 complete', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'dsh-task05-'))
+    try {
+      const workspace = new BidWorkspace(tmp)
+      const batch = makeRunningBatch([{ taskId: 'T-1', status: 'queued' }])
+      const suspended = suspendRevisionBatchExecution(batch, 3000)
+      await writeRevisionBatch(workspace, suspended)
+
+      const restored = await readRevisionBatch(workspace, 'BATCH-005')
+      expect(restored).not.toBeNull()
+      if (restored === null) throw new Error('BATCH-005 not found')
+      expect(restored.status).toBe('suspended')
+
+      const resumed = resumeRevisionBatchExecution(restored, 4000)
+      expect(resumed.status).toBe('running')
+      const completed = completeRevisionBatchExecution(resumed, 5000)
+      await writeRevisionBatch(workspace, completed)
+
+      const finalBatch = await readRevisionBatch(workspace, 'BATCH-005')
+      expect(finalBatch?.status).toBe('completed')
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('7. fatal corruption → failed: 致命损坏时明确标记 failed', () => {
+    const batch = makeRunningBatch()
+    const error = new Error('FATAL_CORRUPTION: disk data corrupted beyond recovery')
+    const isFatal = error.message.includes('FATAL_CORRUPTION')
+    const nextBatch = isFatal
+      ? failRevisionBatchExecution(batch, 3000)
+      : suspendRevisionBatchExecution(batch, 3000)
+    expect(nextBatch.status).toBe('failed')
+  })
+
+  it('8. 普通 task failed 不让 Batch failed: 章节级 failure 记录于 task，batch 最终可 completed', () => {
+    const batch = makeRunningBatch([
+      { taskId: 'T-1', status: 'queued' },
+      { taskId: 'T-2', status: 'queued' },
+    ])
+    const t1Running = updateRevisionBatchTaskStatus(batch, 'T-1', { status: 'running' }, 2100)
+    const t1Failed = updateRevisionBatchTaskStatus(t1Running, 'T-1', {
+      status: 'failed',
+      failure: { code: 'SECTION_FAILED', message: '章节写作失败', phase: 'review' },
+    }, 2200)
+
+    const t2Running = updateRevisionBatchTaskStatus(t1Failed, 'T-2', { status: 'running' }, 2300)
+    const t2Reviewing = updateRevisionBatchTaskStatus(t2Running, 'T-2', { status: 'reviewing' }, 2400)
+    const t2Completed = updateRevisionBatchTaskStatus(t2Reviewing, 'T-2', { status: 'completed' }, 2500)
+
+    const completedBatch = completeRevisionBatchExecution(t2Completed, 3000)
+    expect(completedBatch.status).toBe('completed')
+    expect(completedBatch.tasks[0]?.status).toBe('failed')
+    expect(completedBatch.tasks[0]?.failure?.code).toBe('SECTION_FAILED')
+    expect(completedBatch.tasks[1]?.status).toBe('completed')
+  })
+
+  it('9. complete 不再因状态错乱抛错: planning 拒绝 resume, suspended 必须 resume 才能 complete', () => {
+    const planningBatch: RevisionBatchArtifact = {
+      ...makeRunningBatch(),
+      status: 'planning',
+    }
+    expect(() => resumeRevisionBatchExecution(planningBatch, 3000)).toThrow('BID_REVISION_BATCH_NOT_SUSPENDED')
+
+    const suspended = suspendRevisionBatchExecution(makeRunningBatch(), 3000)
+    expect(() => completeRevisionBatchExecution(suspended, 4000)).toThrow('BID_REVISION_BATCH_NOT_RUNNING')
+
+    const resumed = resumeRevisionBatchExecution(suspended, 5000)
+    const completed = completeRevisionBatchExecution(resumed, 6000)
+    expect(completed.status).toBe('completed')
   })
 })
