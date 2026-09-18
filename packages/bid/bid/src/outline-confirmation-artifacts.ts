@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import { outlineArtifactSchema, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { TenderRequirementsArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
@@ -21,7 +22,7 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 
 /** Strict schema for the durable S5 decision record. */
 export const outlineConfirmationSchema = z.object({
-  schema_version: z.literal(OUTLINE_CONFIRMATION_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(OUTLINE_CONFIRMATION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   decision: z.literal('confirmed'),
   source_outline_sha256: sha256Schema,
@@ -32,7 +33,7 @@ export const outlineConfirmationSchema = z.object({
 
 /** Strict Host draft envelope used as the sole S5 business state. */
 export const outlineDraftSchema = z.object({
-  schema_version: z.literal(OUTLINE_DRAFT_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(OUTLINE_DRAFT_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   revision: z.number().int().positive(),
   source_outline_sha256: sha256Schema,

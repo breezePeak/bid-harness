@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidCommitLease } from './run-coordinator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 
@@ -9,7 +10,7 @@ const commandSchema = z.object({
   status: z.enum(['pending', 'applied']),
   command: z.unknown(),
 }).strict()
-const journalSchema = z.object({ schema_version: z.literal(1), commands: z.array(commandSchema) }).strict()
+const journalSchema = z.object({ schema_version: recordOnlySchemaVersion(1), commands: z.array(commandSchema) }).strict()
 /** One durable S5 command and whether its canonical publication completed. */
 export type BidChapterCommandRecord = z.infer<typeof commandSchema>
 

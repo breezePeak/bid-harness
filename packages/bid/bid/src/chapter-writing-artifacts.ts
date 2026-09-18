@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import {
   localEvidenceMaterialSchema,
   transientWebEvidenceMaterialSchema,
@@ -53,7 +54,7 @@ const flowchartDraftSchema = z.object({
   edges: z.array(flowchartDraftEdgeSchema).max(FLOWCHART_MAX_EDGES),
 }).strict()
 const flowchartSpecSchema = z.object({
-  type: z.literal('flowchart'), schema_version: z.literal(FLOWCHART_SCHEMA_VERSION),
+  type: z.literal('flowchart'), schema_version: recordOnlySchemaVersion(FLOWCHART_SCHEMA_VERSION),
   id: z.string().regex(/^FLOW-[A-Za-z0-9_-]+$/u),
   key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
   title: z.string().trim().min(1).max(200), purpose: z.string().trim().min(1).max(500).optional(), direction: z.enum(['TB', 'LR']),
@@ -132,7 +133,7 @@ export const chapterManifestEntrySchema = z.object({
 
 /** Strict durable index for all S6 chapter bodies. */
 export const chapterWritingManifestSchema = z.object({
-  schema_version: z.literal(CHAPTER_WRITING_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(CHAPTER_WRITING_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   chapters: z.array(chapterManifestEntrySchema),
@@ -158,7 +159,7 @@ export type BoundChapterCandidate = Omit<AcceptedChapterCandidate, 'metadata'> &
 /**
  * Parse a chapter sidecar file.
  * @param value - decoded JSON value.
- * @returns strict current-version chapter metadata.
+ * @returns Strict chapter metadata business structure.
  */
 export function parseChapterMetadata(value: unknown): ChapterMetadata {
   return chapterMetadataSchema.parse(value)
@@ -167,7 +168,7 @@ export function parseChapterMetadata(value: unknown): ChapterMetadata {
 /**
  * Parse the durable S6 manifest.
  * @param value - decoded JSON value.
- * @returns strict current-version chapter manifest.
+ * @returns Strict chapter manifest business structure.
  */
 export function parseChapterWritingManifest(value: unknown): ChapterWritingManifest {
   return chapterWritingManifestSchema.parse(value)

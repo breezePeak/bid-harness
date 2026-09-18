@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
@@ -1788,7 +1789,7 @@ async function runChapterWriting(
   })]))
   let appliedWritingPlanVersion: number | undefined
   try {
-    appliedWritingPlanVersion = z.object({ schema_version: z.literal(1), plan_version: z.number().int().positive() }).strict()
+    appliedWritingPlanVersion = z.object({ schema_version: recordOnlySchemaVersion(1), plan_version: z.number().int().positive() }).strict()
       .parse(await readJson(workspace, APPLIED_WRITING_PLAN_PATH)).plan_version
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

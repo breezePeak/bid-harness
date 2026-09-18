@@ -46,12 +46,12 @@ describe('chapter-writing schema v5', () => {
     expect(() => parseChapterMetadata(value())).toThrow()
   })
 
-  it('rejects a stale manifest schema version', () => {
-    expect(() => parseChapterWritingManifest({
-      schema_version: 1,
+  it('keeps a stale manifest schema version as a record', () => {
+    expect(parseChapterWritingManifest({
+      schema_version: 5,
       scope: 'technical_bid',
       confirmed_outline_sha256: '0'.repeat(64),
       chapters: [],
-    })).toThrow()
+    }).schema_version).toBe(5)
   })
 })

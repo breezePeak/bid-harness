@@ -132,20 +132,20 @@ describe('审批意见队列纯函数', () => {
 
 describe('审批意见引用校验', () => {
   it('接受精确连续段落', () => {
-    expect(() => validateRevisionIssueReference(paragraphReference(), markdown)).not.toThrow()
+    expect(() => { validateRevisionIssueReference(paragraphReference(), markdown) }).not.toThrow()
   })
 
   it('接受章节级引用', () => {
-    expect(() => validateRevisionIssueReference(chapterReference(), markdown)).not.toThrow()
+    expect(() => { validateRevisionIssueReference(chapterReference(), markdown) }).not.toThrow()
   })
 
   it('content sha 过期失败', () => {
     const ref = { ...chapterReference(), base_content_sha256: 'a'.repeat(64) }
-    expect(() => validateRevisionIssueReference(ref, markdown)).toThrow('BID_CHAPTER_REVISION_CONFLICT')
+    expect(() => { validateRevisionIssueReference(ref, markdown) }).toThrow('BID_CHAPTER_REVISION_CONFLICT')
   })
 
   it('半段选择失败', () => {
-    expect(() => validateRevisionIssueReference(paragraphReference('重复段'), markdown))
+    expect(() => { validateRevisionIssueReference(paragraphReference('重复段'), markdown) })
       .toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
   })
 
@@ -155,7 +155,7 @@ describe('审批意见引用校验', () => {
       scope: 'paragraphs', base_content_sha256: chapterContentSha256(markdown),
       start, end: start + '重复段落。'.length, text: '其他文字。',
     }
-    expect(() => validateRevisionIssueReference(ref, markdown)).toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
+    expect(() => { validateRevisionIssueReference(ref, markdown) }).toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
   })
 
   it('跨标题非法范围失败', () => {
@@ -165,7 +165,7 @@ describe('审批意见引用校验', () => {
       scope: 'paragraphs', base_content_sha256: chapterContentSha256(body),
       start: body.indexOf('首段。'), end: body.indexOf('尾段。') + 3, text,
     }
-    expect(() => validateRevisionIssueReference(ref, body)).toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
+    expect(() => { validateRevisionIssueReference(ref, body) }).toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
   })
 })
 
@@ -227,8 +227,10 @@ describe('审批意见队列持久化', () => {
     expect(reloaded).toEqual(second)
   })
 
-  it('解析拒绝旧 schema_version', async () => {
-    expect(() => parseRevisionQueueArtifact({ schema_version: 0, revision: 0, issues: [] })).toThrow()
+  it('解析保留合法版本并回退非法 schema_version', async () => {
+    expect(parseRevisionQueueArtifact({ schema_version: 0, revision: 0, issues: [] }).schema_version).toBe(1)
+    expect(parseRevisionQueueArtifact({ revision: 0, issues: [] }).schema_version).toBe(1)
+    expect(parseRevisionQueueArtifact({ schema_version: 'old', revision: 0, issues: [] }).schema_version).toBe(1)
   })
 })
 

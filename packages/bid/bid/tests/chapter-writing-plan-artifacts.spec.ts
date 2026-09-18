@@ -62,8 +62,8 @@ describe('chapter execution plan', () => {
       .toContain('CHAPTER_PLAN_WRITING_PLAN_INVALID')
   })
 
-  it('rejects schema versions and empty reasons at strict parsing', () => {
-    expect(() => parseChapterExecutionPlan({ ...validPlan(), schema_version: 1 })).toThrow()
+  it('ignores schema versions but keeps business fields strict', () => {
+    expect(parseChapterExecutionPlan({ ...validPlan(), schema_version: 999 }).schema_version).toBe(999)
     const plan = validPlan()
     plan.sections[1]!.depends_on[0]!.reason = ' '
     expect(() => parseChapterExecutionPlan(plan)).toThrow()
@@ -80,7 +80,7 @@ describe('chapter execution plan', () => {
       }],
     }
     expect(parseChapterExecutionLog(log).sections[0]?.phase).toBe('writing')
-    expect(() => parseChapterExecutionLog({ ...log, schema_version: 3 })).toThrow()
+    expect(parseChapterExecutionLog({ ...log, schema_version: 3 }).schema_version).toBe(3)
     expect(() => parseChapterExecutionLog({ ...log, sections: [{ ...log.sections[0]!, phase: undefined }] })).toThrow()
   })
 

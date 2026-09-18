@@ -83,7 +83,6 @@ describe('Bid 项目状态', () => {
 
   it.each([
     ['无法解析的 JSON', '{'],
-    ['未知版本', { schema_version: 4 }],
     ['未知阶段', { runtime: { stage: 'unknown', status: 'pending' } }],
     ['未知执行状态', { runtime: { stage: 'file_intake', status: 'unknown' } }],
     ['聊天记录', { messages: [{ role: 'user', content: '私有聊天内容' }] }],
@@ -99,6 +98,16 @@ describe('Bid 项目状态', () => {
 
     await expect(readBidProjectState(project)).rejects.toThrow('bid-invalid-project-state')
     await expect(checkpointBidProjectState(project, BID_INITIAL_RUNTIME_STATE)).rejects.toThrow('bid-invalid-project-state')
+    await expect(readFile(project.projectStatePath, 'utf8')).resolves.toBe(raw)
+  })
+
+  it('允许未知项目状态 schema_version 且不改写文件', async () => {
+    const project = await workspace()
+    const initial = await checkpointBidProjectState(project, BID_INITIAL_RUNTIME_STATE)
+    const raw = JSON.stringify({ ...initial, schema_version: 999 })
+    await writeFile(project.projectStatePath, raw)
+
+    await expect(readBidProjectState(project)).resolves.toMatchObject({ schema_version: 999 })
     await expect(readFile(project.projectStatePath, 'utf8')).resolves.toBe(raw)
   })
 

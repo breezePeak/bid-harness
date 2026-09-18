@@ -360,11 +360,11 @@ describe('批次持久化', () => {
     expect(reloaded).toEqual(batch)
   })
 
-  it('解析拒绝旧 schema_version', () => {
-    expect(() => parseRevisionBatchArtifact({
+  it('解析回退非法 schema_version', () => {
+    expect(parseRevisionBatchArtifact({
       schema_version: 0, batch_id: 'BATCH-1', queue_revision: 0,
-      issue_ids: ['REV-1'], status: 'planning', tasks: [], created_at: 0, updated_at: 0,
-    })).toThrow()
+      issue_ids: ['REV-1'], status: 'planning', tasks: [{ task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'], depends_on: [] }], created_at: 0, updated_at: 0,
+    }).schema_version).toBe(2)
   })
 
   it('解析拒绝非法 status', () => {
@@ -815,10 +815,10 @@ describe('BidReviewWorkbenchView revision overlay schema', () => {
     expect(parsed.outline[1]!.revision).toBeUndefined()
   })
 
-  it('schema_version=5 被拒绝', () => {
+  it('schema_version=5 仍可读取', () => {
     const view = makeWorkbenchBase() as unknown as { schema_version: number }
     view.schema_version = 5
-    expect(() => parseBidReviewWorkbenchView(view)).toThrow()
+    expect(parseBidReviewWorkbenchView(view).schema_version).toBe(5)
   })
 })
 describe('S5 批量修订全链路数据层集成', () => {

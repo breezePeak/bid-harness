@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import {
   parseTenderComplianceArtifact,
   parseTenderProjectArtifact,
@@ -44,7 +45,7 @@ const operationSchema = z.discriminatedUnion('type', [
 ])
 
 const selectionSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: recordOnlySchemaVersion(1),
   selected_scoring_ids: z.array(text).refine(ids => new Set(ids).size === ids.length, {
     message: 'selected_scoring_ids must be unique',
   }),

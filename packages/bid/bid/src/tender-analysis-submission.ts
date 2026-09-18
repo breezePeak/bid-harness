@@ -6,6 +6,7 @@ import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
@@ -120,7 +121,7 @@ const sourcedValueCheckpointSchema = z.object({
   value: z.string().nullable(), source_refs: z.array(sourceRefCheckpointSchema),
 }).strict()
 const tenderAnalysisCheckpointSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: recordOnlySchemaVersion(1),
   origin_run_id: z.string().min(1),
   origin_epoch: z.number().int().positive(),
   tender_file_ids: z.array(z.string().min(1)),

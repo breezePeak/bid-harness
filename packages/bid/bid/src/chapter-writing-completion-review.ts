@@ -2,6 +2,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { registerCompletedChapterReader } from './chapter-reading.ts'
 import type { WritingPlan } from './writing-requirements.ts'
@@ -75,7 +76,7 @@ export interface ChapterWritingCompletionRound {
 
 /** Restart-stable S5 completion ledger. */
 export interface ChapterWritingCompletionState {
-  readonly schema_version: 2
+  readonly schema_version: number
   readonly confirmed_outline_sha256: string
   readonly rounds: readonly ChapterWritingCompletionRound[]
   readonly completion?: {
@@ -109,7 +110,7 @@ const roundSchema = z.object({
 }).strict()
 
 const stateSchema = z.object({
-  schema_version: z.literal(2),
+  schema_version: recordOnlySchemaVersion(2),
   confirmed_outline_sha256: hash,
   rounds: z.array(roundSchema),
   completion: z.object({

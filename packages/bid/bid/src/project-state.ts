@@ -5,19 +5,13 @@ import { dirname } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import type { BidControlState, BidRuntimeState } from './control-plane-contract.ts'
-import { bidControlStateSchema, bidRuntimeSchema, bidRuntimeView, controlStateFromLegacyRuntime } from './runtime-state.ts'
+import { bidControlStateSchema, bidRuntimeView, controlStateFromLegacyRuntime } from './runtime-state.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
-
-const projectStateV1Schema = z.object({
-  schema_version: z.literal(1),
-  runtime: bidRuntimeSchema,
-  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  updated_at: z.number().int().nonnegative(),
-}).strict()
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const projectStateSchema = z.object({
-  schema_version: z.literal(3),
+  schema_version: recordOnlySchemaVersion(3),
   workflow: bidControlStateSchema.shape.workflow,
   run: bidControlStateSchema.shape.run,
   last_run: bidControlStateSchema.shape.lastRun,
@@ -38,7 +32,7 @@ function exposeRuntime(state: z.infer<typeof projectStateSchema>): BidProjectSta
 }
 
 /**
- * 读取项目状态；未创建时返回 undefined，格式无效或版本不符时拒绝读取。
+ * 读取项目状态；未创建时返回 undefined，格式无效时拒绝读取。
  * 不改写执行状态；Host 在项目锁内判断 running 是否因后端停止而中断。
  * @param workspace 项目所在的 Workspace 和状态文件路径。
  * @returns 文件中的项目状态和修订号。
@@ -57,8 +51,7 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
     const value: unknown = JSON.parse(raw)
     const current = projectStateSchema.safeParse(value)
     if (current.success) return exposeRuntime(current.data)
-    projectStateV1Schema.parse(value)
-    throw new Error('bid-project-state-version-unsupported')
+    projectStateSchema.parse(value)
   } catch (cause: unknown) {
     throw new Error(`bid-invalid-project-state: ${workspace.projectStatePath}`, { cause })
   }

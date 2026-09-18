@@ -48,7 +48,7 @@ import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSecti
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
-import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { OUTLINE_GENERATION_SCHEMA_VERSION, parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { assertBidMainSession, inspectBidStage, installStageInteractionTools, isBidHostSession, isBidMainSession, readStageJson, renderStageInteractionPrompt, stageInteractionSchema } from './stage-interaction.ts'
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
@@ -82,8 +82,8 @@ import {
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateId, DocxTemplateLibraryView, DocxTemplateUploadResult } from './docx-format-contract.ts'
 import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
 import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-estimate.ts'
-import { parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
-import { chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
@@ -147,6 +147,7 @@ import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
+import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
   applyWritingPlanInput,
@@ -170,6 +171,7 @@ import {
 } from './writing-entry-state.ts'
 import type { WritingEntryStop, WritingEntryIntent, WritingEntryView, WritingEntryExpected } from './writing-entry-contract.ts'
 import { writingEntryIntentSchema } from './writing-entry-contract.ts'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidBeforeStageStart } from './orchestrator.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
 import { readBidChapterCommandJournal, writeBidChapterCommandJournal, type BidChapterCommandRecord } from './chapter-command-journal.ts'
@@ -282,8 +284,8 @@ export type {
   BidRevisionIssueReference,
   BidRevisionQueueErrorCode,
 } from './control-plane-contract.ts'
-export { BID_SESSION_EVENT_TYPES } from './bid-events.ts'
-export type { BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
+export { BID_SESSION_EVENT_TYPES, appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
+export type { BidSchemaWarning, BidSchemaWarningReason, BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
 export {
   BID_INITIAL_CONTROL_STATE,
   BID_INITIAL_RUNTIME_STATE,
@@ -2801,7 +2803,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (previous !== undefined && input.update_kind === 'patch') {
       let appliedVersion = previous.plan_version
       try {
-        appliedVersion = zod.strictObject({ schema_version: zod.literal(1), plan_version: zod.number().int().positive() })
+        appliedVersion = zod.strictObject({ schema_version: recordOnlySchemaVersion(1), plan_version: zod.number().int().positive() })
           .parse(JSON.parse(await readFile(appliedPath, 'utf8'))).plan_version
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -5334,9 +5336,23 @@ export class BidHostRuntime extends TypertRemoteService {
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await Promise.all([assertNoLinkedPath(workspace.root, outlinePath), assertNoLinkedPath(workspace.root, logPath)])
     const outlineRaw = await readFile(outlinePath, 'utf8')
-    const outline = parseOutlineArtifact(JSON.parse(outlineRaw))
+    const outlineValue: unknown = JSON.parse(outlineRaw)
+    appendBidSchemaWarning(session, createBidSchemaWarning(
+      'outline/confirmed-outline.json', OUTLINE_GENERATION_SCHEMA_VERSION,
+      typeof outlineValue === 'object' && outlineValue !== null ? (outlineValue as { schema_version?: unknown }).schema_version : undefined,
+      runtime.stage,
+    ))
+    const outline = parseOutlineArtifact(outlineValue)
     let log: ReturnType<typeof parseOrMigrateChapterExecutionLog> | undefined
-    try { log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))) } catch { log = undefined }
+    try {
+      const logValue: unknown = JSON.parse(await readFile(logPath, 'utf8'))
+      appendBidSchemaWarning(session, createBidSchemaWarning(
+        'chapters/execution-log.json', CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
+        typeof logValue === 'object' && logValue !== null ? (logValue as { schema_version?: unknown }).schema_version : undefined,
+        runtime.stage,
+      ))
+      log = parseOrMigrateChapterExecutionLog(logValue)
+    } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
     const rowContents = await Promise.all(outline.sections.map(async (section) => {
       const index = worklist.findIndex(item => item.id === section.id)
@@ -5352,7 +5368,13 @@ export class BidHostRuntime extends TypertRemoteService {
         } catch { markdown = ''; contentAvailable = false }
         let artifact: ChapterReviewArtifact | undefined
         try {
-          artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+          const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8'))
+          appendBidSchemaWarning(session, createBidSchemaWarning(
+            `chapters/reviews/${serial}.json`, CHAPTER_REVIEW_SCHEMA_VERSION,
+            typeof reviewValue === 'object' && reviewValue !== null ? (reviewValue as { schema_version?: unknown }).schema_version : undefined,
+            runtime.stage,
+          ))
+          artifact = parseChapterReviewArtifact(reviewValue)
         } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
         if (artifact !== undefined && (!contentAvailable || !chapterReviewMatches(section.id, markdown, artifact))) {
           artifact = undefined

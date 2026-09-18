@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { publishBidBatch } from './publication-batch.ts'
 import {
@@ -58,7 +59,7 @@ export const revisionBatchStatusSchema = z.enum([
 
 /** 一个不可变的批次快照。 */
 export const revisionBatchArtifactSchema = z.object({
-  schema_version: z.literal(REVISION_BATCH_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(REVISION_BATCH_SCHEMA_VERSION),
   batch_id: z.string().min(1),
   queue_revision: z.number().int().nonnegative(),
   issue_ids: z.array(z.string().min(1)).min(1),
@@ -130,7 +131,7 @@ const legacyRevisionBatchTaskSchema = z.object({
 }).strict()
 
 const legacyRevisionBatchArtifactSchema = z.object({
-  schema_version: z.union([z.literal(1), z.literal(2)]),
+  schema_version: recordOnlySchemaVersion(REVISION_BATCH_SCHEMA_VERSION),
   batch_id: z.string().min(1),
   queue_revision: z.number().int().nonnegative(),
   issue_ids: z.array(z.string().min(1)).min(1),

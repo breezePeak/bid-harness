@@ -1,16 +1,21 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   BID_SESSION_EVENT_TYPES,
+  appendBidSchemaWarning,
+  BID_INITIAL_CONTROL_STATE,
+  createBidSchemaWarning,
   BID_STAGES,
   getBidStagePolicy,
   STAGE_RUN_STATUSES,
   parseBidReviewWorkbenchView,
+  reduceBidControlState,
   type BidSessionEventMap,
   type BidStagePolicy,
   type BidStageTask,
   type StageValidationResult,
 } from '@deepseek-ai/dsh-bid'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { BidEvidenceMappingProgress, BidRunNotice } from '@deepseek-ai/dsh-bid/control-plane'
 
@@ -67,7 +72,29 @@ describe('bid control-plane public contract', () => {
       'bid.user_confirmation.required',
       'bid.user_confirmation.received',
       'bid.writing_entry.changed',
+      'bid.schema.warning',
     ])
+  })
+
+  it('creates non-blocking schema warnings only for non-current values', () => {
+    expect(createBidSchemaWarning('outline/outline.json', 3, 3, 'outline_generation')).toBeUndefined()
+    expect(createBidSchemaWarning('outline/outline.json', 3, 5, 'outline_generation')).toMatchObject({ reason: 'mismatch', stage: 'outline_generation' })
+    expect(createBidSchemaWarning('outline/outline.json', 3, undefined, null)).toMatchObject({ reason: 'missing', stage: null })
+    expect(createBidSchemaWarning('outline/outline.json', 3, 'old', null)).toMatchObject({ reason: 'invalid' })
+  })
+
+  it('deduplicates the same schema warning within one session', () => {
+    const events: Array<{ type: string; data: unknown }> = []
+    const session = {
+      events,
+      append: (type: string, data: unknown) => events.push({ type, data }),
+    } as never
+    const warning = createBidSchemaWarning('outline/outline.json', 3, 999, 'outline_generation')
+    appendBidSchemaWarning(session, warning)
+    appendBidSchemaWarning(session, warning)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: 'bid.schema.warning', data: { reason: 'mismatch', stage: 'outline_generation' } })
+    expect(reduceBidControlState(BID_INITIAL_CONTROL_STATE, { type: 'bid.schema.warning', data: warning } as SessionEvent)).toEqual(BID_INITIAL_CONTROL_STATE)
   })
 
   it('keeps every Bid durable event readable by the persistence runtime', () => {

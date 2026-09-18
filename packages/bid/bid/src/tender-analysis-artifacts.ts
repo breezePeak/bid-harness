@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Version shared by every tender-analysis Artifact. */
 export const TENDER_ANALYSIS_SCHEMA_VERSION = 1 as const
@@ -24,7 +25,7 @@ const sourceRefsSchema = z.array(sourceRefSchema).min(1)
 const nullableFactSchema = z.string().min(1).nullable()
 
 const projectSchema = z.object({
-  schema_version: z.literal(TENDER_ANALYSIS_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(TENDER_ANALYSIS_SCHEMA_VERSION),
   project_name: nullableFactSchema,
   tender_name: nullableFactSchema,
   purchaser: nullableFactSchema,
@@ -50,7 +51,7 @@ const requirementSchema = z.object({
 }).strict()
 
 const requirementsSchema = z.object({
-  schema_version: z.literal(TENDER_ANALYSIS_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(TENDER_ANALYSIS_SCHEMA_VERSION),
   requirements: z.array(requirementSchema),
 }).strict()
 
@@ -75,7 +76,7 @@ const scoringItemSchema = z.object({
 }).strict()
 
 const scoringSchema = z.object({
-  schema_version: z.literal(TENDER_ANALYSIS_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(TENDER_ANALYSIS_SCHEMA_VERSION),
   scoring_items: z.array(scoringItemSchema),
 }).strict()
 
@@ -89,7 +90,7 @@ const complianceItemSchema = z.object({
 }).strict()
 
 const complianceSchema = z.object({
-  schema_version: z.literal(TENDER_ANALYSIS_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(TENDER_ANALYSIS_SCHEMA_VERSION),
   compliance_items: z.array(complianceItemSchema),
 }).strict()
 

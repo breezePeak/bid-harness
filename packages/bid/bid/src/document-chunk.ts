@@ -12,6 +12,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Character-based limits applied after structural Markdown boundaries. */
 export interface DocumentChunkConfig {
@@ -54,7 +55,7 @@ export interface DocumentChunkEntry {
 
 /** Stable manifest written beside the generated Markdown chunks. */
 export interface DocumentChunkIndex {
-  schema_version: 1
+  schema_version: number
   source_document: string
   chunk_count: number
   chunk_config: DocumentChunkConfig
@@ -92,7 +93,7 @@ const documentChunkEntrySchema = z.object({
 )
 
 const documentChunkIndexSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: recordOnlySchemaVersion(1),
   source_document: z.string().min(1),
   chunk_count: z.number().int().nonnegative(),
   chunk_config: documentChunkConfigSchema,

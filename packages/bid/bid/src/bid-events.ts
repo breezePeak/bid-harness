@@ -1,4 +1,5 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   BidControlState,
@@ -33,10 +34,61 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.user_confirmation.required',
   'bid.user_confirmation.received',
   'bid.writing_entry.changed',
+  'bid.schema.warning',
 ] as const
 
 /** One Bid Harness event type persisted in the shared DSH session log. */
 export type BidSessionEventType = typeof BID_SESSION_EVENT_TYPES[number]
+
+/** 非阻断的 schema_version 诊断原因。 */
+export type BidSchemaWarningReason = 'mismatch' | 'missing' | 'invalid'
+
+/** 只记录 schema_version 异常，不参与任何运行时决策。 */
+export interface BidSchemaWarning {
+  warningId: string
+  stage: BidStage | null
+  artifact: string
+  expected: number
+  observed: unknown
+  reason: BidSchemaWarningReason
+  message: string
+}
+
+/**
+ * Inspect a record-only schema version at a Host boundary.
+ * @param artifact Stable artifact label used for deduplication and display.
+ * @param expected Version written by the current implementation.
+ * @param observed Raw schema_version value from decoded JSON.
+ * @param stage Current Bid stage, when known.
+ * @returns A diagnostic payload, or undefined when the value is current.
+ */
+export function createBidSchemaWarning(
+  artifact: string,
+  expected: number,
+  observed: unknown,
+  stage: BidStage | null,
+): BidSchemaWarning | undefined {
+  const valid = typeof observed === 'number' && Number.isInteger(observed) && observed > 0
+  if (valid && observed === expected) return undefined
+  const reason: BidSchemaWarningReason = observed === undefined ? 'missing' : valid ? 'mismatch' : 'invalid'
+  return {
+    warningId: `schema:${artifact}:${String(expected)}:${JSON.stringify(observed)}`,
+    stage,
+    artifact,
+    expected,
+    observed,
+    reason,
+    message: reason === 'missing'
+      ? `${artifact} 缺少 schema_version，已按当前版本继续。`
+      : `${artifact} 的 schema_version=${JSON.stringify(observed)} 与当前版本 ${String(expected)} 不同或无效，已继续。`,
+  }
+}
+
+/** Append one schema warning per artifact/version/value tuple in a Session. */
+export function appendBidSchemaWarning(session: Session, warning: BidSchemaWarning | undefined): void {
+  if (warning === undefined || session.events.some(event => event.type === 'bid.schema.warning' && event.data.warningId === warning.warningId)) return
+  session.append('bid.schema.warning', warning)
+}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -115,6 +167,8 @@ declare module '@deepseek-ai/dsh-session/types' {
       | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
     /** S5 写作入口状态变更；广播安全摘要，不包含答案原文。 */
     'bid.writing_entry.changed': { view: WritingEntryView }
+    /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
+    'bid.schema.warning': BidSchemaWarning
   }
 }
 

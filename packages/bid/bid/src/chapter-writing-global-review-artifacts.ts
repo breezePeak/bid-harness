@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Version of the document-level S5 global-compliance review. */
 export const GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION = 1 as const
@@ -45,7 +46,7 @@ export const globalComplianceReviewItemSchema = z.object({
 
 /** Durable document-level S5 global-compliance record. */
 export const globalComplianceReviewArtifactSchema = z.object({
-  schema_version: z.literal(GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   confirmed_outline_sha256: sha256Schema,
   items: z.array(globalComplianceReviewItemSchema),
@@ -59,7 +60,7 @@ export type GlobalComplianceReviewArtifact = z.infer<typeof globalComplianceRevi
 /**
  * Parse a document-level global-compliance record.
  * @param value Untrusted JSON value.
- * @returns Strict current-version record.
+ * @returns Strict global-review business structure.
  */
 export function parseGlobalComplianceReviewArtifact(value: unknown): GlobalComplianceReviewArtifact {
   return globalComplianceReviewArtifactSchema.parse(value)

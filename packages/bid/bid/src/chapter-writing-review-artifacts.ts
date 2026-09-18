@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Version of an independent Chapter Reviewer report. */
 export const CHAPTER_REVIEW_SCHEMA_VERSION = 8 as const
@@ -69,7 +70,7 @@ const revisionIssueCheckSchema = z.object({
 
 /** Strict structured result returned by the isolated Chapter Reviewer Child. */
 export const chapterReviewSchema = z.object({
-  schema_version: z.literal(CHAPTER_REVIEW_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(CHAPTER_REVIEW_SCHEMA_VERSION),
   section_id: z.string().min(1),
   verdict: z.enum(['pass', 'repair', 'attention']),
   must_answer_coverage: z.array(coverageSchema),

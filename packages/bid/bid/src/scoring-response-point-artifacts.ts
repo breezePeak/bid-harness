@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { TenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { recordOnlySchemaVersion } from './schema-version.ts'
 
 /** Version of the Host-owned stable scoring response-point catalog. */
 export const SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION = 1 as const
@@ -13,7 +14,7 @@ const pointSchema = z.object({
 }).strict()
 
 const catalogSchema = z.object({
-  schema_version: z.literal(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
   scoring_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   next_sequence: z.number().int().positive(),
@@ -21,7 +22,7 @@ const catalogSchema = z.object({
 }).strict()
 
 const candidateSchema = z.object({
-  schema_version: z.literal(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
+  schema_version: recordOnlySchemaVersion(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
   points: z.array(z.object({
     scoring_id: z.string().min(1),
     order: z.number().int().positive(),
