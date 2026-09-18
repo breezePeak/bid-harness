@@ -46,10 +46,10 @@ export const revisionBatchTaskSchema = z.object({
   issue_ids: z.array(z.string().min(1)).min(1),
   depends_on: z.array(z.string().min(1)),
   dependency_reason: z.string().optional(),
-  status: revisionBatchTaskStatusSchema.default('queued'),
-  failure: revisionBatchTaskFailureSchema.nullable().default(null),
-  started_at: z.number().int().nonnegative().nullable().default(null),
-  completed_at: z.number().int().nonnegative().nullable().default(null),
+  status: revisionBatchTaskStatusSchema,
+  failure: revisionBatchTaskFailureSchema.nullable(),
+  started_at: z.number().int().nonnegative().nullable(),
+  completed_at: z.number().int().nonnegative().nullable(),
 }).strict()
 
 /** 批次状态。 */
@@ -142,43 +142,56 @@ const legacyRevisionBatchArtifactSchema = z.object({
   updated_at: z.number().int().nonnegative(),
 }).strict()
 
+function isLegacyRevisionBatchShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || !('tasks' in value)) return false
+  const tasks = (value as { tasks?: unknown }).tasks
+  if (!Array.isArray(tasks) || tasks.length === 0) return false
+  return tasks.some(task => (
+    typeof task === 'object' && task !== null
+    && (!('status' in task) || !('failure' in task) || !('started_at' in task) || !('completed_at' in task))
+  ))
+}
+
+function migrateLegacyRevisionBatch(legacy: z.infer<typeof legacyRevisionBatchArtifactSchema>): RevisionBatchArtifact {
+  return {
+    schema_version: legacy.schema_version,
+    batch_id: legacy.batch_id,
+    queue_revision: legacy.queue_revision,
+    issue_ids: [...legacy.issue_ids],
+    status: legacy.status,
+    tasks: legacy.tasks.map((task) => {
+      const fallbackStatus: RevisionBatchTaskStatus = legacy.status === 'completed'
+        ? 'completed'
+        : legacy.status === 'failed'
+          ? 'failed'
+          : 'queued'
+      return {
+        task_id: task.task_id,
+        section_id: task.section_id,
+        issue_ids: [...task.issue_ids],
+        depends_on: [...task.depends_on],
+        ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
+        status: task.status ?? fallbackStatus,
+        failure: task.failure ?? null,
+        started_at: task.started_at ?? null,
+        completed_at: task.completed_at ?? null,
+      }
+    }),
+    created_at: legacy.created_at,
+    updated_at: legacy.updated_at,
+  }
+}
+
 /**
- * 解析 batch artifact；自动将 v1 legacy 快照平滑迁移为 v2 格式。
+ * 解析 batch artifact；基于真实结构平滑迁移 legacy 快照。
  * @param value 已解码的 JSON 值。
  */
 export function parseRevisionBatchArtifact(value: unknown): RevisionBatchArtifact {
-  try {
-    return revisionBatchArtifactSchema.parse(value)
-  } catch {
+  if (isLegacyRevisionBatchShape(value)) {
     const legacy = legacyRevisionBatchArtifactSchema.parse(value)
-    return {
-      schema_version: REVISION_BATCH_SCHEMA_VERSION,
-      batch_id: legacy.batch_id,
-      queue_revision: legacy.queue_revision,
-      issue_ids: [...legacy.issue_ids],
-      status: legacy.status,
-      tasks: legacy.tasks.map((task) => {
-        const fallbackStatus: RevisionBatchTaskStatus = legacy.status === 'completed'
-          ? 'completed'
-          : legacy.status === 'failed'
-            ? 'failed'
-            : 'queued'
-        return {
-          task_id: task.task_id,
-          section_id: task.section_id,
-          issue_ids: [...task.issue_ids],
-          depends_on: [...task.depends_on],
-          ...(task.dependency_reason !== undefined ? { dependency_reason: task.dependency_reason } : {}),
-          status: task.status ?? fallbackStatus,
-          failure: task.failure ?? null,
-          started_at: task.started_at ?? null,
-          completed_at: task.completed_at ?? null,
-        }
-      }),
-      created_at: legacy.created_at,
-      updated_at: legacy.updated_at,
-    }
+    return migrateLegacyRevisionBatch(legacy)
   }
+  return revisionBatchArtifactSchema.parse(value)
 }
 
 /**

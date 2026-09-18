@@ -85,9 +85,18 @@ export function createBidSchemaWarning(
 }
 
 /** Append one schema warning per artifact/version/value tuple in a Session. */
-export function appendBidSchemaWarning(session: Session, warning: BidSchemaWarning | undefined): void {
-  if (warning === undefined || session.events.some(event => event.type === 'bid.schema.warning' && event.data.warningId === warning.warningId)) return
+export function appendBidSchemaWarning(
+  session: Session,
+  warning: BidSchemaWarning | undefined,
+): boolean {
+  if (warning === undefined) return false
+  if (session.events.some(event =>
+    event.type === 'bid.schema.warning'
+    && event.data.warningId === warning.warningId
+  )) return false
+
   session.append('bid.schema.warning', warning)
+  return true
 }
 
 declare module '@deepseek-ai/dsh-session/types' {

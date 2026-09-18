@@ -371,6 +371,72 @@ describe('批次持久化', () => {
     }).schema_version).toBe(2)
   })
 
+  it('旧 completed batch 平滑迁移后 task.status 推导为 completed 而非 queued', () => {
+    const parsed = parseRevisionBatchArtifact({
+      schema_version: 1,
+      batch_id: 'BATCH-OLD-COMPLETED',
+      queue_revision: 3,
+      issue_ids: ['REV-1'],
+      status: 'completed',
+      tasks: [{
+        task_id: 'T-1',
+        section_id: 'SEC-1',
+        issue_ids: ['REV-1'],
+        depends_on: [],
+      }],
+      created_at: 1000,
+      updated_at: 2000,
+    })
+    expect(parsed.tasks[0]?.status).toBe('completed')
+    expect(parsed.tasks[0]?.failure).toBeNull()
+    expect(parsed.tasks[0]?.started_at).toBeNull()
+    expect(parsed.tasks[0]?.completed_at).toBeNull()
+  })
+
+  it('旧 failed batch 平滑迁移后 task.status 推导为 failed', () => {
+    const parsed = parseRevisionBatchArtifact({
+      schema_version: 1,
+      batch_id: 'BATCH-OLD-FAILED',
+      queue_revision: 2,
+      issue_ids: ['REV-1'],
+      status: 'failed',
+      tasks: [{
+        task_id: 'T-1',
+        section_id: 'SEC-1',
+        issue_ids: ['REV-1'],
+        depends_on: [],
+      }],
+      created_at: 1000,
+      updated_at: 2000,
+    })
+    expect(parsed.tasks[0]?.status).toBe('failed')
+  })
+
+  it('未来版本 + current shape 时按 current 结构读取并保留 schema_version', () => {
+    const parsed = parseRevisionBatchArtifact({
+      schema_version: 999,
+      batch_id: 'BATCH-FUTURE',
+      queue_revision: 5,
+      issue_ids: ['REV-1'],
+      status: 'running',
+      tasks: [{
+        task_id: 'T-1',
+        section_id: 'SEC-1',
+        issue_ids: ['REV-1'],
+        depends_on: [],
+        status: 'repairing',
+        failure: null,
+        started_at: 1500,
+        completed_at: null,
+      }],
+      created_at: 1000,
+      updated_at: 2000,
+    })
+    expect(parsed.schema_version).toBe(999)
+    expect(parsed.tasks[0]?.status).toBe('repairing')
+    expect(parsed.tasks[0]?.started_at).toBe(1500)
+  })
+
   it('解析拒绝非法 status', () => {
     expect(() => parseRevisionBatchArtifact({
       schema_version: 1, batch_id: 'BATCH-1', queue_revision: 0,

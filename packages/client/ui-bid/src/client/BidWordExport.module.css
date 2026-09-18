@@ -90,6 +90,7 @@
 }
 .noConflictText {
   color: var(--dsw-alias-label-tertiary);
+}
 .actionGroup {
   display: flex;
   align-items: center;

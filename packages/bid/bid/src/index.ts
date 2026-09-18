@@ -5332,25 +5332,26 @@ export class BidHostRuntime extends TypertRemoteService {
   async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView> {
     const workspace = this.requireReviewWorkspace(session)
     const runtime = bidSessionRuntime(session)
+    let schemaWarningAppended = false
     const outlinePath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await Promise.all([assertNoLinkedPath(workspace.root, outlinePath), assertNoLinkedPath(workspace.root, logPath)])
     const outlineRaw = await readFile(outlinePath, 'utf8')
     const outlineValue: unknown = JSON.parse(outlineRaw)
-    appendBidSchemaWarning(session, createBidSchemaWarning(
+    schemaWarningAppended = appendBidSchemaWarning(session, createBidSchemaWarning(
       'outline/confirmed-outline.json', OUTLINE_GENERATION_SCHEMA_VERSION,
       typeof outlineValue === 'object' && outlineValue !== null ? (outlineValue as { schema_version?: unknown }).schema_version : undefined,
       runtime.stage,
-    ))
+    )) || schemaWarningAppended
     const outline = parseOutlineArtifact(outlineValue)
     let log: ReturnType<typeof parseOrMigrateChapterExecutionLog> | undefined
     try {
       const logValue: unknown = JSON.parse(await readFile(logPath, 'utf8'))
-      appendBidSchemaWarning(session, createBidSchemaWarning(
+      schemaWarningAppended = appendBidSchemaWarning(session, createBidSchemaWarning(
         'chapters/execution-log.json', CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
         typeof logValue === 'object' && logValue !== null ? (logValue as { schema_version?: unknown }).schema_version : undefined,
         runtime.stage,
-      ))
+      )) || schemaWarningAppended
       log = parseOrMigrateChapterExecutionLog(logValue)
     } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
@@ -5369,11 +5370,11 @@ export class BidHostRuntime extends TypertRemoteService {
         let artifact: ChapterReviewArtifact | undefined
         try {
           const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8'))
-          appendBidSchemaWarning(session, createBidSchemaWarning(
+          schemaWarningAppended = appendBidSchemaWarning(session, createBidSchemaWarning(
             `chapters/reviews/${serial}.json`, CHAPTER_REVIEW_SCHEMA_VERSION,
             typeof reviewValue === 'object' && reviewValue !== null ? (reviewValue as { schema_version?: unknown }).schema_version : undefined,
             runtime.stage,
-          ))
+          )) || schemaWarningAppended
           artifact = parseChapterReviewArtifact(reviewValue)
         } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
         if (artifact !== undefined && (!contentAvailable || !chapterReviewMatches(section.id, markdown, artifact))) {
@@ -5558,6 +5559,9 @@ export class BidHostRuntime extends TypertRemoteService {
           delivery_todos: findings.filter(item => item.delivery).map(({ delivery: _delivery, ...item }) => item),
         }
       } catch { /* S5 写作或文档级核验尚未形成当前版本结果。 */ }
+    }
+    if (schemaWarningAppended) {
+      await this.ctx.sessions.flush(session)
     }
     return {
       schema_version: 6,

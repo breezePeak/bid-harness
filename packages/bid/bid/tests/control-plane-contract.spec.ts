@@ -83,18 +83,22 @@ describe('bid control-plane public contract', () => {
     expect(createBidSchemaWarning('outline/outline.json', 3, 'old', null)).toMatchObject({ reason: 'invalid' })
   })
 
-  it('deduplicates the same schema warning within one session', () => {
+  it('deduplicates the same schema warning within one session and returns boolean', () => {
     const events: Array<{ type: string; data: unknown }> = []
     const session = {
       events,
       append: (type: string, data: unknown) => events.push({ type, data }),
     } as never
-    const warning = createBidSchemaWarning('outline/outline.json', 3, 999, 'outline_generation')
-    appendBidSchemaWarning(session, warning)
-    appendBidSchemaWarning(session, warning)
-    expect(events).toHaveLength(1)
+    const warning1 = createBidSchemaWarning('outline/outline.json', 3, 999, 'outline_generation')
+    const warning2 = createBidSchemaWarning('chapters/execution-log.json', 4, undefined, 'chapter_writing')
+    expect(appendBidSchemaWarning(session, undefined)).toBe(false)
+    expect(appendBidSchemaWarning(session, warning1)).toBe(true)
+    expect(appendBidSchemaWarning(session, warning1)).toBe(false)
+    expect(appendBidSchemaWarning(session, warning2)).toBe(true)
+    expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({ type: 'bid.schema.warning', data: { reason: 'mismatch', stage: 'outline_generation' } })
-    expect(reduceBidControlState(BID_INITIAL_CONTROL_STATE, { type: 'bid.schema.warning', data: warning } as SessionEvent)).toEqual(BID_INITIAL_CONTROL_STATE)
+    expect(events[1]).toMatchObject({ type: 'bid.schema.warning', data: { reason: 'missing', stage: 'chapter_writing' } })
+    expect(reduceBidControlState(BID_INITIAL_CONTROL_STATE, { type: 'bid.schema.warning', data: warning1 } as SessionEvent)).toEqual(BID_INITIAL_CONTROL_STATE)
   })
 
   it('keeps every Bid durable event readable by the persistence runtime', () => {

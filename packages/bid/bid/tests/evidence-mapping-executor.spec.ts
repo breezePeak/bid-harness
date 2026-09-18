@@ -639,7 +639,6 @@ function mappingFixture(
         response_points: Array<{ id: string }>
       }
       const serialized = serializeQuality(JSON.stringify({
-        schema_version: 4,
         scope: 'technical_bid',
         checked_requirement_ids: candidate.requirements.map(item => item.id),
         checked_scoring_ids: candidate.scoring.map(item => item.id),
@@ -3268,6 +3267,17 @@ describe('S4 Host 准入与最终确认', () => {
     expect([...fixture.taskAttempts.values()]).toEqual([1, 1, 1])
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
     expect(fixture.followup).not.toHaveBeenCalled()
+  })
+
+  it('模型 Structured Output 不含 schema_version 仍能完成质量报告提交且 Host 补齐当前版本', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-refinement-no-schema-version-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 0 })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+    const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as { schema_version: unknown }
+    expect(quality.schema_version).toBe(4)
   })
 
   it('全局目录复核 repair 耗尽保留质量报告错误及已完成 Mapping Task', async () => {
