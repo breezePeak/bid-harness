@@ -453,10 +453,15 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'atten
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
-    '当存在 pending revision issues 且用户明确表达"开始处理这些建议""把这些审批意见处理掉""执行上面的修改意见"时，调用 bid_plan_revision_batch 创建不可变批次快照；同章节 issue 强制聚合为一个 task，不同章节默认并行，只有真实语义依赖才设 depends_on。',
-    'bid_plan_revision_batch 只负责规划与持久化批次，不启动 Writer；选区中的"统一""全部"是 RevisionIssue 的局部要求，绝不能因为有这些词就调用 bid_confirm_writing_plan.patch 做全书修改。',
-    '批次规划成功后，当用户明确要求"执行修订""开始修改""按批次处理"时，调用 bid_execute_revision_batch 启动执行；Host 复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成章节，不删除已有正文。',
-    '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
+    '当存在 pending revision issues 且用户明确要求开始处理（如"开始处理这些建议""把这些都改掉""现在修""执行上面的意见"等）时：'
+      + '1. 调用 bid_stage_inspect 读取待处理审批意见；'
+      + '2. 规划 tasks（同一章节的本批意见强制聚合为一个 task，不同章节默认并行，真实语义依赖才设 depends_on）；'
+      + '3. 调用 bid_plan_revision_batch 创建并保存不可变批次快照；'
+      + '4. 规划成功且有可执行任务时，在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行，绝不向用户发起二次确认或询问是否执行；'
+      + '5. 部分 task 若出现 conflict 或 needs_input，直接执行其余独立任务，绝不因局部冲突阻断其他章节或询问用户。',
+    '用户若只是讨论、咨询或明确要求暂缓（如"这些意见你怎么看""先总结一下""还有哪些地方值得改""先别动"等），严禁调用批次规划或执行工具。',
+    '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；'
+      + '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
     status === 'running'
       ? '用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已经运行的 Writer/Reviewer 自然收敛。停止任务只使用聊天界面的原生停止。'
       : '当前阶段没有运行中的任务，不得调用 pause、resume 或 stop 阶段工具。',
@@ -661,8 +666,8 @@ export function installStageInteractionTools(
                       : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
                         : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
                           : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                          : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                            : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                            : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                              : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {

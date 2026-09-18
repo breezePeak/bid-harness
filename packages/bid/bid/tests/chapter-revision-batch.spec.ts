@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
+import { renderChapterWritingInteractionPrompt } from '../src/stage-interaction.ts'
 import { parseBidReviewWorkbenchView } from '../src/control-plane-contract.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import {
@@ -1888,5 +1889,155 @@ describe('任务 06: Host 强制同章节单 Task', () => {
     ])
     expect(() => validateRevisionBatchPlan(cycleInput, queue, new Map()))
       .toThrow('BID_REVISION_BATCH_CYCLE')
+  })
+})
+
+describe('任务 07: 用户一次开始自动规划并立即执行', () => {
+  const currentSha = 'a'.repeat(64)
+
+  function setupQueueForTurn7() {
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-203',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '意见 1',
+      suggestion: null,
+    }, '第二章第三节', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-204',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '意见 2',
+      suggestion: null,
+    }, '第二章第四节', 2000)
+    return queue
+  }
+
+  it('1. 一条"开始处理这些建议"同回合 plan + execute: 交互规则要求规划成功后同一回合内紧接着调用 execute', () => {
+    const runningPrompt = renderChapterWritingInteractionPrompt('running')
+    const completedPrompt = renderChapterWritingInteractionPrompt('completed')
+
+    for (const prompt of [runningPrompt, completedPrompt]) {
+      expect(prompt).toContain('当存在 pending revision issues 且用户明确要求开始处理')
+      expect(prompt).toContain('1. 调用 bid_stage_inspect 读取待处理审批意见；')
+      expect(prompt).toContain('3. 调用 bid_plan_revision_batch 创建并保存不可变批次快照；')
+      expect(prompt).toContain(
+        '4. 规划成功且有可执行任务时，在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行，'
+        + '绝不向用户发起二次确认或询问是否执行；',
+      )
+    }
+  })
+
+  it('2. 不要求第二条消息: 严禁向用户发起二次确认或询问是否执行', () => {
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    expect(prompt).toContain('绝不向用户发起二次确认或询问是否执行')
+    expect(prompt).not.toContain('当用户明确要求"执行修订""开始修改""按批次处理"时，调用 bid_execute_revision_batch')
+  })
+
+  it('3. 普通问答不启动: 讨论/咨询等普通意图严禁调用批次规划或执行工具', () => {
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    expect(prompt).toContain(
+      '用户若只是讨论、咨询或明确要求暂缓（如"这些意见你怎么看""先总结一下""还有哪些地方值得改""先别动"等），'
+      + '严禁调用批次规划或执行工具。',
+    )
+  })
+
+  it('4. "先别动/先别改"暂缓意图不启动: 明确要求暂缓时严禁调用批次工具', () => {
+    const prompt = renderChapterWritingInteractionPrompt('completed')
+    expect(prompt).toContain('先别动')
+    expect(prompt).toContain('严禁调用批次规划或执行工具')
+  })
+
+  it('5. 无 pending 不创建 batch: 规则限定仅在存在 pending revision issues 时调用', () => {
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    expect(prompt).toContain('当存在 pending revision issues 且用户明确要求开始处理')
+
+    const emptyQueue = emptyRevisionQueue()
+    const input = planInput(['REV-non-existent'], [
+      { task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: ['REV-non-existent'] },
+    ])
+    // 空队列中找不到 issue 抛出 NOT_FOUND，无法创建 batch
+    expect(() => validateRevisionBatchPlan(input, emptyQueue, new Map()))
+      .toThrow('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
+
+    // 已处理/非 pending 的 issue 也会抛出 NOT_PENDING
+    const queue = setupQueueForTurn7()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const appliedQueue: RevisionQueueArtifact = {
+      ...queue,
+      issues: queue.issues.map(issue => (issue.issue_id === id1 ? { ...issue, status: 'applied' } : issue)),
+    }
+    const pendingInput = planInput([id1], [
+      { task_id: 'TASK-1', section_id: 'SEC-203', issue_ids: [id1] },
+    ])
+    expect(() => validateRevisionBatchPlan(pendingInput, appliedQueue, new Map()))
+      .toThrow('BID_REVISION_BATCH_ISSUE_NOT_PENDING')
+  })
+
+  it('6. plan 失败不 execute: 规划校验失败阻断后续执行流程', () => {
+    const queue = setupQueueForTurn7()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const badInput = planInput([id1], [
+      { task_id: 'TASK-1', section_id: 'SEC-WRONG', issue_ids: [id1] },
+    ])
+    expect(() => validateRevisionBatchPlan(badInput, queue, new Map()))
+      .toThrow('BID_REVISION_BATCH_SECTION_MISMATCH')
+  })
+
+  it('7. plan 成功有可执行任务则立即 execute: 规划产物可直接被 execute 启动无需二次等待', () => {
+    const queue = setupQueueForTurn7()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const input = planInput([id1], [
+      { task_id: 'TASK-1', section_id: 'SEC-203', issue_ids: [id1] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-007-1', 1000, validated.staleIssues)
+    expect(batch.status).toBe('planning')
+    expect(batch.tasks[0]?.status).toBe('queued')
+
+    // 同一回合内紧接着调用 execute 启动执行
+    const executing = startRevisionBatchExecution(batch, 1100)
+    expect(executing.status).toBe('running')
+    expect(executing.tasks[0]?.status).toBe('queued')
+  })
+
+  it('8. 局部 conflict 不阻断独立任务且局部 revision 不走 writing plan patch', () => {
+    const prompt = renderChapterWritingInteractionPrompt('running')
+    expect(prompt).toContain(
+      '部分 task 若出现 conflict 或 needs_input，直接执行其余独立任务，绝不因局部冲突阻断其他章节或询问用户。',
+    )
+    expect(prompt).toContain(
+      '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；',
+    )
+
+    // 局部 conflict 不阻断其余独立 task
+    const queue = setupQueueForTurn7()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const id2 = queue.issues[1]?.issue_id ?? ''
+    const input = planInput([id1, id2], [
+      { task_id: 'TASK-1', section_id: 'SEC-203', issue_ids: [id1] },
+      { task_id: 'TASK-2', section_id: 'SEC-204', issue_ids: [id2] },
+    ])
+    // 模拟 SEC-203 发生过期冲突
+    const staleHashes = new Map([
+      ['SEC-203', 'b'.repeat(64)],
+      ['SEC-204', currentSha],
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, staleHashes)
+    expect(validated.staleIssues).toContain(id1)
+
+    const { batch } = createRevisionBatch(queue, input, 'BATCH-007-2', 1000, validated.staleIssues)
+    expect(batch.tasks.find(t => t.task_id === 'TASK-1')?.status).toBe('conflict')
+    expect(batch.tasks.find(t => t.task_id === 'TASK-2')?.status).toBe('queued')
+
+    // 启动执行：批次转为 running，TASK-2 保持 queued（等待 Writer 槽位），未被阻断
+    const executing = startRevisionBatchExecution(batch, 1100)
+    expect(executing.status).toBe('running')
+    expect(executing.tasks.find(t => t.task_id === 'TASK-1')?.status).toBe('conflict')
+    expect(executing.tasks.find(t => t.task_id === 'TASK-2')?.status).toBe('queued')
+    // 可由调度器将 TASK-2 顺利推进到 running
+    const scheduled = updateRevisionBatchTaskStatus(executing, 'TASK-2', { status: 'running' }, 1200)
+    expect(scheduled.tasks.find(t => t.task_id === 'TASK-2')?.status).toBe('running')
   })
 })
