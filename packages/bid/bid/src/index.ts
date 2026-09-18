@@ -5142,10 +5142,27 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<RevisionQueueArtifact> {
     let currentQueue = queue
     const now = Date.now()
+    let log: ChapterExecutionLog | undefined
+    try {
+      const logRaw = JSON.parse(await readFile(within(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))
+      log = parseOrMigrateChapterExecutionLog(logRaw)
+    } catch {}
     for (const task of batch.tasks) {
       const serial = sectionSerials.get(task.section_id)
       if (serial === undefined) {
         throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 缺少章节序号 ${task.section_id}`)
+      }
+      const sectionLog = log?.sections.find(s => s.section_id === task.section_id)
+      if (sectionLog !== undefined && sectionLog.status === 'failed') {
+        currentQueue = {
+          ...currentQueue,
+          issues: currentQueue.issues.map(issue =>
+            task.issue_ids.includes(issue.issue_id)
+              ? { ...issue, status: 'failed' as const, updated_at: now }
+              : issue,
+          ),
+        }
+        continue
       }
       let checks: RevisionIssueCheck[] = []
       try {

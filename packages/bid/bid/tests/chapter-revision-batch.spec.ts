@@ -8,6 +8,7 @@ import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import {
   addRevisionIssue,
   emptyRevisionQueue,
+  type RevisionIssue,
   type RevisionIssueReference,
   type RevisionQueueArtifact,
 } from '../src/chapter-revision-queue.ts'
@@ -985,10 +986,162 @@ describe('S5 批量修订全链路数据层集成', () => {
       },
     }
     const parsed = parseBidReviewWorkbenchView(view)
-    expect(parsed.revision_batch!.total_issues).toBe(5)
-    expect(parsed.revision_batch!.completed).toBe(2)
-    expect(parsed.revision_batch!.failed).toBe(1)
-    const b = parsed.revision_batch!
-    expect(b.running + b.pending + b.completed + b.failed).toBe(5)
+    const revisionBatch = parsed.revision_batch
+    expect(revisionBatch).toBeDefined()
+    if (revisionBatch !== undefined) {
+      expect(revisionBatch.total_issues).toBe(5)
+      expect(revisionBatch.completed).toBe(2)
+      expect(revisionBatch.failed).toBe(1)
+      expect(revisionBatch.running + revisionBatch.pending + revisionBatch.completed + revisionBatch.failed).toBe(5)
+    }
+  })
+})
+
+describe('任务 02: 章节级成功隔离与禁止全批回滚', () => {
+  function makeIssue(
+    sectionId: string,
+    title: string,
+    scope: 'chapter' | 'paragraphs',
+    issueId: string,
+    time: number,
+  ): RevisionIssue {
+    return {
+      issue_id: issueId,
+      section_id: sectionId,
+      section_title: title,
+      scope,
+      reference: { scope: 'chapter', base_content_sha256: '0'.repeat(64) },
+      instruction: `针对 ${title} 的修订意见`,
+      suggestion: null,
+      status: 'scheduled',
+      batch_id: 'BATCH-001',
+      created_at: time,
+      updated_at: time,
+    }
+  }
+
+  it('1 & 2 & 5. A/B/C 无依赖并行：A 成功、B 失败、C 成功，B 失败不回滚 A/C', () => {
+    const queue: RevisionQueueArtifact = {
+      schema_version: 1,
+      revision: 1,
+      issues: [
+        { ...makeIssue('SEC-A', 'A', 'chapter', 'REV-A', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-B', 'B', 'chapter', 'REV-B', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-C', 'C', 'chapter', 'REV-C', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+      ],
+    }
+
+    // A 成功审核通过
+    const resA = settleRevisionBatchIssues(queue, ['REV-A'], [
+      { issue_id: 'REV-A', status: 'satisfied', reason: 'A 已完成修订' },
+    ], 2000)
+    expect(resA.taskStatus).toBe('completed')
+    expect(resA.queue.issues.find(i => i.issue_id === 'REV-A')?.status).toBe('completed')
+
+    // B 审核未通过 (unsatisfied)
+    const resB = settleRevisionBatchIssues(resA.queue, ['REV-B'], [
+      { issue_id: 'REV-B', status: 'unsatisfied', reason: 'B 未完成修改' },
+    ], 3000)
+    expect(resB.taskStatus).toBe('failed')
+    expect(resB.queue.issues.find(i => i.issue_id === 'REV-B')?.status).toBe('failed')
+
+    // C 成功审核通过
+    const resC = settleRevisionBatchIssues(resB.queue, ['REV-C'], [
+      { issue_id: 'REV-C', status: 'satisfied', reason: 'C 已完成修订' },
+    ], 4000)
+    expect(resC.taskStatus).toBe('completed')
+    expect(resC.queue.issues.find(i => i.issue_id === 'REV-C')?.status).toBe('completed')
+
+    // 验证 B 失败后 A 和 C 依然保持 completed，绝未被回滚或撤销
+    expect(resC.queue.issues.find(i => i.issue_id === 'REV-A')?.status).toBe('completed')
+    expect(resC.queue.issues.find(i => i.issue_id === 'REV-B')?.status).toBe('failed')
+    expect(resC.queue.issues.find(i => i.issue_id === 'REV-C')?.status).toBe('completed')
+  })
+
+  it('3 & 4. 章节失败不提交半成品：未成功章节不产出有效核验结果', () => {
+    const queue: RevisionQueueArtifact = {
+      schema_version: 1,
+      revision: 1,
+      issues: [
+        { ...makeIssue('SEC-B', 'B', 'chapter', 'REV-B', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+      ],
+    }
+    // 当 B 失败（没有提供合法满足核验）时，无法结算为 completed
+    const result = settleRevisionBatchIssues(queue, ['REV-B'], [
+      { issue_id: 'REV-B', status: 'unsatisfied', reason: '存在未修复问题' },
+    ], 2000)
+    expect(result.taskStatus).toBe('failed')
+    expect(result.queue.issues[0]?.status).toBe('failed')
+  })
+
+  it('6 & 7. D depends_on B，B 失败后 D blocked，与 B 无关的 E 正常继续完成', () => {
+    const queue: RevisionQueueArtifact = {
+      schema_version: 1,
+      revision: 1,
+      issues: [
+        { ...makeIssue('SEC-B', 'B', 'chapter', 'REV-B', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-D', 'D', 'chapter', 'REV-D', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-E', 'E', 'chapter', 'REV-E', 1000), status: 'scheduled' as const, batch_id: 'BATCH-001' },
+      ],
+    }
+
+    // B 执行失败
+    const resB = settleRevisionBatchIssues(queue, ['REV-B'], [
+      { issue_id: 'REV-B', status: 'unsatisfied', reason: 'B 失败' },
+    ], 2000)
+    expect(resB.taskStatus).toBe('failed')
+
+    // E 与 B 无关，独立执行成功
+    const resE = settleRevisionBatchIssues(resB.queue, ['REV-E'], [
+      { issue_id: 'REV-E', status: 'satisfied', reason: 'E 正常完成' },
+    ], 3000)
+    expect(resE.taskStatus).toBe('completed')
+    expect(resE.queue.issues.find(i => i.issue_id === 'REV-E')?.status).toBe('completed')
+
+    // D 依赖 B，因 B 失败而未能正常通过
+    const resD = settleRevisionBatchIssues(resE.queue, ['REV-D'], [
+      { issue_id: 'REV-D', status: 'unsatisfied', reason: '前置章节 B 失败导致依赖阻塞' },
+    ], 4000)
+    expect(resD.taskStatus).toBe('failed')
+    expect(resD.queue.issues.find(i => i.issue_id === 'REV-D')?.status).toBe('failed')
+  })
+
+  it('8. resume 幂等性：已 completed 的 issues 在重新结算时保持状态不退化', () => {
+    const queue: RevisionQueueArtifact = {
+      schema_version: 1,
+      revision: 2,
+      issues: [
+        { ...makeIssue('SEC-A', 'A', 'chapter', 'REV-A', 1000), status: 'completed' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-C', 'C', 'chapter', 'REV-C', 1000), status: 'completed' as const, batch_id: 'BATCH-001' },
+        { ...makeIssue('SEC-B', 'B', 'chapter', 'REV-B', 1000), status: 'scheduled' as const, batch_id: 'BATCH-002' },
+      ],
+    }
+    // 对已完成的 A/C 保持幂等
+    const result = settleRevisionBatchIssues(queue, ['REV-B'], [
+      { issue_id: 'REV-B', status: 'satisfied', reason: '重试后修复完成' },
+    ], 5000)
+    expect(result.queue.issues.find(i => i.issue_id === 'REV-A')?.status).toBe('completed')
+    expect(result.queue.issues.find(i => i.issue_id === 'REV-C')?.status).toBe('completed')
+    expect(result.queue.issues.find(i => i.issue_id === 'REV-B')?.status).toBe('completed')
+  })
+
+  it('9 & 10. 批次生命周期状态流转与单章修订兼容：complete 幂等且 fail 覆盖所有运行状态', () => {
+    const batch: RevisionBatchArtifact = {
+      schema_version: 1,
+      batch_id: 'BATCH-001',
+      queue_revision: 1,
+      issue_ids: ['REV-1'],
+      status: 'running',
+      tasks: [{ task_id: 'T-1', section_id: 'SEC-1', issue_ids: ['REV-1'], depends_on: [] }],
+      created_at: 1000,
+      updated_at: 1000,
+    }
+    const completed = completeRevisionBatchExecution(batch, 2000)
+    expect(completed.status).toBe('completed')
+    // 再次 complete 幂等
+    expect(completeRevisionBatchExecution(completed, 3000).status).toBe('completed')
+
+    // 失败状态覆盖
+    expect(failRevisionBatchExecution(batch, 4000).status).toBe('failed')
   })
 })

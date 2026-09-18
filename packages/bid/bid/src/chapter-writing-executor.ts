@@ -1422,34 +1422,12 @@ export async function executeChapterWriting(
       for (const sectionId of batchSectionIds) {
         if (!worklist.some(section => section.id === sectionId)) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
       }
-      const paths = [
-        LOG_PATH,
-        MANIFEST_PATH,
-        GLOBAL_REVIEW_PATH,
-        COMPLETION_REVIEW_PATH,
-        ...worklist.flatMap((_section, workIndex) => {
-          const workSerial = String(workIndex + 1).padStart(4, '0')
-          return [
-            `chapters/sections/${workSerial}.md`,
-            `chapters/meta/${workSerial}.json`,
-            `chapters/reviews/${workSerial}.json`,
-          ]
-        }),
-      ]
-      const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
-        const absolute = join(workspace.projectRoot, path)
-        await assertNoLinkedPath(workspace.root, absolute)
-        return [absolute, await readFile(absolute, 'utf8')]
-      })))
-      const batchWriting = { writing: false }
+      const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch)
       try {
-        const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch, batchWriting)
         return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
-      } catch (error: unknown) {
-        if (batchWriting.writing) for (const [path, content] of backup) {
-          await options.run.commits.writeText(path, content)
-        }
-        throw error
+      } catch {
+        // Revision Batch 允许文档级 review 暂时 stale，不阻断成功章节
+        return artifacts
       }
     }
     const request = chapterRevisionRequestSchema.parse(options.revision)
@@ -1718,7 +1696,6 @@ async function runChapterWriting(
   agent: Agent, workspace: BidWorkspace, task: BidStageTask, options: ChapterWritingExecutionOptions,
   revision?: ChapterRevisionState,
   revisionBatch?: RevisionBatchExecutionInput,
-  batchWriting?: { writing: boolean },
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'chapter_writing') throw new Error('chapter-writing-executor-stage-invalid')
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
@@ -2224,9 +2201,6 @@ async function runChapterWriting(
         if (revision !== undefined) {
           revision.writing = true
         }
-        if (batchWriting !== undefined && batchTask !== undefined) {
-          batchWriting.writing = true
-        }
         logWrites = logWrites.then(async () => {
           assertCurrentInput()
           const committed = {
@@ -2615,12 +2589,10 @@ async function runChapterWriting(
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
       if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
-      if (revisionBatch === undefined) {
-        log.status = 'failed'
-        log.failure_phase = log.phase
-        log.phase = null
-        await persistLog()
-      }
+      log.status = 'failed'
+      log.failure_phase = log.phase
+      log.phase = null
+      await persistLog()
       if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
       throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`, { cause: error })
     } finally {
@@ -2656,13 +2628,11 @@ async function runChapterWriting(
           const failedDependencies = dependencies.filter(dependency => failures.has(dependency))
           const error = new Error(`Bid chapter ${sectionId} cannot run because dependencies failed: ${failedDependencies.join(', ')}`)
           failures.set(sectionId, error)
-          if (revisionBatch === undefined) {
-            const log = executionLog.sections.find(item => item.section_id === sectionId)
-            if (log !== undefined) {
-              log.status = 'failed'
-              log.phase = null
-              log.failure_phase = 'blocked'
-            }
+          const blockedLog = executionLog.sections.find(item => item.section_id === sectionId)
+          if (blockedLog !== undefined) {
+            blockedLog.status = 'failed'
+            blockedLog.phase = null
+            blockedLog.failure_phase = 'blocked'
           }
         }
         pending.clear()
@@ -2683,7 +2653,7 @@ async function runChapterWriting(
         pending.add(settled.sectionId)
       } else failures.set(settled.sectionId, settled.error)
     }
-    if (failures.size > 0) {
+    if (failures.size > 0 && revisionBatch === undefined) {
       throw new Error([...failures.entries()].map(([sectionId, error]) => `${sectionId}: ${String(error)}`).join('; '))
     }
   } catch (error: unknown) {
@@ -2699,10 +2669,22 @@ async function runChapterWriting(
     await Promise.all([logWrites, webWrites])
   }
 
+  let existingChapters: ChapterManifestEntry[] = []
+  if (revisionBatch !== undefined) {
+    try {
+      const existingManifest = JSON.parse(await readFile(join(workspace.projectRoot, MANIFEST_PATH), 'utf8')) as {
+        chapters?: ChapterManifestEntry[]
+      }
+      existingChapters = existingManifest.chapters ?? []
+    } catch {}
+  }
+  const existingChapterMap = new Map(existingChapters.map(c => [c.section_id, c]))
   const entries = worklist.map((section) => {
     const chapter = completed.get(section.id)
-    if (chapter === undefined) throw new Error(`Bid chapter manifest missing completed section ${section.id}`)
-    return chapter.entry
+    if (chapter !== undefined) return chapter.entry
+    const existing = existingChapterMap.get(section.id)
+    if (existing !== undefined) return existing
+    throw new Error(`Bid chapter manifest missing completed section ${section.id}`)
   })
   if (revision !== undefined || revisionBatch !== undefined) {
     await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog, options.run.commits)
@@ -2713,27 +2695,43 @@ async function runChapterWriting(
     confirmed_outline_sha256: outlineHash,
     chapters: entries,
   }, options.run.commits)
-  await writeGlobalComplianceReview(
-    agent,
-    workspace,
-    outline,
-    outlineHash,
-    compliance,
-    worklist.map((section): GlobalComplianceChapter => {
+  try {
+    const chaptersForGlobalReview: GlobalComplianceChapter[] = []
+    for (const [index, section] of worklist.entries()) {
       const chapter = completed.get(section.id)
-      if (chapter === undefined) throw new Error(`Bid global compliance review missing completed section ${section.id}`)
-      return {
-        section_id: section.id,
-        title: section.title,
-        markdown: chapter.candidate.markdown,
-        candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
+      if (chapter !== undefined) {
+        chaptersForGlobalReview.push({
+          section_id: section.id,
+          title: section.title,
+          markdown: chapter.candidate.markdown,
+          candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
+        })
+      } else {
+        const serial = String(index + 1).padStart(4, '0')
+        const md = await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+        chaptersForGlobalReview.push({
+          section_id: section.id,
+          title: section.title,
+          markdown: md,
+          candidate_sha256: chapterCandidateSha256(md),
+        })
       }
-    }),
-    manifest,
-    options.maxRepairAttempts,
-    options.run,
-    writingPlan,
-  )
+    }
+    await writeGlobalComplianceReview(
+      agent,
+      workspace,
+      outline,
+      outlineHash,
+      compliance,
+      chaptersForGlobalReview,
+      manifest,
+      options.maxRepairAttempts,
+      options.run,
+      writingPlan,
+    )
+  } catch (error) {
+    if (revisionBatch === undefined) throw error
+  }
   if (options.control?.pending() === true) return runChapterWriting(agent, workspace, task, options)
   if (revision === undefined && revisionBatch === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
     schema_version: 1,
