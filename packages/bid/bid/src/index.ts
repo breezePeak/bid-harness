@@ -113,6 +113,9 @@ import {
   createRevisionBatch as createRevisionBatchArtifact,
   validateRevisionBatchPlan,
   writeRevisionBatch,
+  commitRevisionBatchPlan,
+  commitRevisionBatchExecutionSettlement,
+  detectRevisionBatchIntegrity,
   readRevisionBatch,
   startRevisionBatchExecution,
   resumeRevisionBatchExecution,
@@ -2877,12 +2880,12 @@ export class BidHostRuntime extends TypertRemoteService {
         if (queue.revision !== batchInput.expected_queue_revision) {
           throw new Error('BID_REVISION_BATCH_QUEUE_CONFLICT')
         }
+        await detectRevisionBatchIntegrity(workspace, queue)
         const validated = validateRevisionBatchPlan(batchInput, queue, sectionHashes)
         const batchId = createRevisionBatchId()
         const now = Date.now()
         const { queue: updatedQueue, batch } = createRevisionBatchArtifact(queue, batchInput, batchId, now, validated.staleIssues)
-        await writeRevisionQueue(workspace, updatedQueue)
-        await writeRevisionBatch(workspace, batch)
+        await commitRevisionBatchPlan(workspace, updatedQueue, batch)
         return {
           batch_id: batch.batch_id,
           status: batch.status,
@@ -3045,21 +3048,24 @@ export class BidHostRuntime extends TypertRemoteService {
             await this.executeChapterRevisionBatchCandidate(
               operation.session, executionAgent, workspace, batchExecutionInput, admittedRun,
             )
-            const settledQueue = await this.settleBatchRevisionIssues(
+            const settled = await this.settleBatchRevisionIssues(
               workspace, runningBatch, currentQueue, sectionSerials,
             )
-            await writeRevisionQueue(workspace, settledQueue)
+            const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
+            await commitRevisionBatchExecutionSettlement(workspace, settled.queue, completedBatch)
           })
           await operation.runs.complete(admittedRun)
+        } else {
+          const latestBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
+          const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
+          await commitRevisionBatchExecutionSettlement(workspace, currentQueue, completedBatch)
         }
 
-        const latestBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
-        const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
-        await writeRevisionBatch(workspace, completedBatch)
+        const finalBatch = await readRevisionBatch(workspace, request.batch_id) ?? runningBatch
         return {
-          batch_id: completedBatch.batch_id,
-          status: completedBatch.status,
-          tasks: completedBatch.tasks,
+          batch_id: finalBatch.batch_id,
+          status: finalBatch.status,
+          tasks: finalBatch.tasks,
         }
       } catch (error: unknown) {
         if (run !== undefined && operation.runs.current === run) {
@@ -4761,7 +4767,9 @@ export class BidHostRuntime extends TypertRemoteService {
             const batchTasks: RevisionBatchTaskExecution[] = runningBatch.tasks.map((task) => {
               const issues = task.issue_ids.map((id) => {
                 const issue = issueMap.get(id)
-                if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
+                if (issue === undefined) {
+                  throw new Error(`FATAL_CORRUPTION: BID_REVISION_BATCH_CORRUPTED_MISSING_ISSUE: 队列缺失审批意见 ${id}`)
+                }
                 return {
                   issue_id: id,
                   instruction: issue.instruction,
@@ -4798,11 +4806,9 @@ export class BidHostRuntime extends TypertRemoteService {
             )))
             const worklistForSettle = buildChapterWorklist(outlineForSettle)
             const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
-            const settledQueue = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
-            await writeRevisionQueue(operation.workspace, settledQueue)
-            const latestBatch = await readRevisionBatch(operation.workspace, runningBatch.batch_id) ?? runningBatch
-            const completedBatch = completeRevisionBatchExecution(latestBatch, Date.now())
-            await writeRevisionBatch(operation.workspace, completedBatch)
+            const settled = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
+            const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
+            await commitRevisionBatchExecutionSettlement(operation.workspace, settled.queue, completedBatch)
             return
           }
           case 'stage_execution':
@@ -5256,7 +5262,7 @@ export class BidHostRuntime extends TypertRemoteService {
     batch: RevisionBatchArtifact,
     queue: RevisionQueueArtifact,
     sectionSerials: ReadonlyMap<string, string>,
-  ): Promise<RevisionQueueArtifact> {
+  ): Promise<{ readonly queue: RevisionQueueArtifact; readonly batch: RevisionBatchArtifact }> {
     let currentQueue = queue
     const now = Date.now()
     let log: ChapterExecutionLog | undefined
@@ -5310,8 +5316,7 @@ export class BidHostRuntime extends TypertRemoteService {
         status: result.taskStatus,
       }, now)
     }
-    await writeRevisionBatch(workspace, currentBatch)
-    return currentQueue
+    return { queue: currentQueue, batch: currentBatch }
   }
 
   /**

@@ -1,11 +1,16 @@
 /** S5 批量修订批次的持久化契约与确定性校验；不启动任何 Writer。 */
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { z } from 'zod'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { publishBidBatch } from './publication-batch.ts'
-import type { RevisionIssue, RevisionQueueArtifact, RevisionQueueWorkspace } from './chapter-revision-queue.ts'
+import {
+  REVISION_QUEUE_PATH,
+  revisionQueueArtifactSchema,
+  type RevisionIssue,
+  type RevisionQueueArtifact,
+  type RevisionQueueWorkspace,
+} from './chapter-revision-queue.ts'
 
 /** `batches/<batch_id>.json` 的 schema 版本。 */
 export const REVISION_BATCH_SCHEMA_VERSION = 2 as const
@@ -207,9 +212,120 @@ export async function writeRevisionBatch(
   const absolute = within(workspace.projectRoot, `${REVISION_BATCHES_PATH}/${batch.batch_id}.json`)
   await assertNoLinkedPath(workspace.root, absolute)
   const validated = revisionBatchArtifactSchema.parse(batch)
-  await publishBidBatch(workspace.root, dirname(absolute), async (lease) => {
+  await publishBidBatch(workspace.root, workspace.projectRoot, async (lease) => {
     await lease.writeJson(absolute, validated)
   })
+}
+
+async function commitRevisionBatchArtifacts(
+  workspace: RevisionQueueWorkspace,
+  queue: RevisionQueueArtifact,
+  batch: RevisionBatchArtifact,
+): Promise<void> {
+  const queuePath = within(workspace.projectRoot, REVISION_QUEUE_PATH)
+  const batchPath = within(workspace.projectRoot, `${REVISION_BATCHES_PATH}/${batch.batch_id}.json`)
+  await assertNoLinkedPath(workspace.root, queuePath)
+  await assertNoLinkedPath(workspace.root, batchPath)
+  const validatedQueue = revisionQueueArtifactSchema.parse(queue)
+  const validatedBatch = revisionBatchArtifactSchema.parse(batch)
+  await publishBidBatch(workspace.root, workspace.projectRoot, async (lease) => {
+    await lease.writeJson(queuePath, validatedQueue)
+    await lease.writeJson(batchPath, validatedBatch)
+  })
+}
+
+/**
+ * 在单个 publication 内原子提交 queue 与 batch，避免孤儿状态。
+ * @param workspace 项目工作区。
+ * @param queue 规划更新后的审批意见队列。
+ * @param batch 新创建的不可变批次快照。
+ */
+export async function commitRevisionBatchPlan(
+  workspace: RevisionQueueWorkspace,
+  queue: RevisionQueueArtifact,
+  batch: RevisionBatchArtifact,
+): Promise<void> {
+  return commitRevisionBatchArtifacts(workspace, queue, batch)
+}
+
+/**
+ * 在单个 publication 内原子提交结算后的 queue 与 batch，确保 task 与 issue 状态一致。
+ * @param workspace 项目工作区。
+ * @param queue 结算后的审批意见队列。
+ * @param batch 终态或更新后的批次 artifact。
+ */
+export async function commitRevisionBatchExecutionSettlement(
+  workspace: RevisionQueueWorkspace,
+  queue: RevisionQueueArtifact,
+  batch: RevisionBatchArtifact,
+): Promise<void> {
+  return commitRevisionBatchArtifacts(workspace, queue, batch)
+}
+
+/**
+ * 检验 queue 与 batch 的关键状态完整性。
+ * @param workspace 项目工作区。
+ * @param queue 审批意见队列。
+ * @param targetBatch 可选的待校验批次对象或 batch_id。
+ * @returns 检查结果；若存在孤儿 issue 抛出 BID_REVISION_BATCH_ORPHANED，若 batch 缺失 issue 抛出 FATAL_CORRUPTION。
+ */
+export async function detectRevisionBatchIntegrity(
+  workspace: RevisionQueueWorkspace,
+  queue: RevisionQueueArtifact,
+  targetBatch?: RevisionBatchArtifact | string,
+): Promise<{ readonly orphanedIssueIds: readonly string[] }> {
+  const orphanedIssueIds: string[] = []
+  for (const issue of queue.issues) {
+    if ((issue.status === 'scheduled' || issue.status === 'running') && issue.batch_id !== null) {
+      const batch = await readRevisionBatch(workspace, issue.batch_id)
+      if (batch === null) {
+        orphanedIssueIds.push(issue.issue_id)
+      }
+    }
+  }
+  if (orphanedIssueIds.length > 0) {
+    throw new Error(`BID_REVISION_BATCH_ORPHANED: 发现孤儿审批意见 ${orphanedIssueIds.join(', ')}，所属批次不存在`)
+  }
+
+  if (targetBatch !== undefined) {
+    const batch = typeof targetBatch === 'string'
+      ? await readRevisionBatch(workspace, targetBatch)
+      : targetBatch
+    if (batch !== null) {
+      const queueIssueIds = new Set(queue.issues.map(i => i.issue_id))
+      const missingIssueIds = batch.issue_ids.filter(id => !queueIssueIds.has(id))
+      if (missingIssueIds.length > 0) {
+        throw new Error(
+          `FATAL_CORRUPTION: BID_REVISION_BATCH_CORRUPTED_MISSING_ISSUE: 批次 ${batch.batch_id} 引用的审批意见不存在于队列: ${missingIssueIds.join(', ')}`,
+        )
+      }
+    }
+  }
+  return { orphanedIssueIds }
+}
+
+/**
+ * 将孤儿审批意见安全重置回 pending 状态，清空 batch_id 并自增 revision。
+ * @param queue 包含孤儿意见的队列。
+ * @param orphanedIssueIds 需恢复的孤儿 issue_id 列表。
+ * @param now 当前时间戳。
+ * @returns 恢复后的新队列。
+ */
+export function recoverOrphanRevisionIssues(
+  queue: RevisionQueueArtifact,
+  orphanedIssueIds: readonly string[],
+  now: number,
+): RevisionQueueArtifact {
+  const orphanSet = new Set(orphanedIssueIds)
+  return {
+    ...queue,
+    revision: queue.revision + 1,
+    issues: queue.issues.map(issue =>
+      orphanSet.has(issue.issue_id)
+        ? { ...issue, status: 'pending' as const, batch_id: null, updated_at: now }
+        : issue,
+    ),
+  }
 }
 
 /**

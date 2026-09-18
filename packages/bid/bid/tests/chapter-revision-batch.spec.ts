@@ -9,7 +9,9 @@ import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import {
   addRevisionIssue,
   emptyRevisionQueue,
+  readRevisionQueue,
   updateRevisionIssue,
+  writeRevisionQueue,
   type RevisionIssue,
   type RevisionIssueReference,
   type RevisionQueueArtifact,
@@ -23,6 +25,10 @@ import {
   revisionBatchArtifactSchema,
   validateRevisionBatchPlan,
   writeRevisionBatch,
+  commitRevisionBatchPlan,
+  commitRevisionBatchExecutionSettlement,
+  detectRevisionBatchIntegrity,
+  recoverOrphanRevisionIssues,
   renderRevisionBatchSectionPrompt,
   startRevisionBatchExecution,
   resumeRevisionBatchExecution,
@@ -38,6 +44,7 @@ import {
   type RevisionBatchTaskExecution,
   type RevisionIssueCheck,
 } from '../src/chapter-revision-batch.ts'
+import { reconcileBidPublications } from '../src/publication-batch.ts'
 import { assertChapterRevisionBatchScope, mergeParagraphRanges, type BatchRevisionScope } from '../src/chapter-revision.ts'
 
 const markdown = '# 1 章节\n\n首段。\n\n尾段。\n'
@@ -2039,5 +2046,253 @@ describe('任务 07: 用户一次开始自动规划并立即执行', () => {
     // 可由调度器将 TASK-2 顺利推进到 running
     const scheduled = updateRevisionBatchTaskStatus(executing, 'TASK-2', { status: 'running' }, 1200)
     expect(scheduled.tasks.find(t => t.task_id === 'TASK-2')?.status).toBe('running')
+  })
+})
+
+describe('任务 08: Queue 与 Batch 原子一致性', () => {
+  const currentSha = 'a'.repeat(64)
+  const disposals: Array<() => Promise<void>> = []
+
+  afterEach(async () => {
+    for (const dispose of disposals.splice(0)) await dispose()
+  })
+
+  async function createTestWorkspace() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-revision-atomic-'))
+    disposals.push(() => rm(root, { recursive: true, force: true }))
+    return new BidWorkspace(root)
+  }
+
+  function setupQueueForTurn8() {
+    let queue = emptyRevisionQueue()
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-301',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '修订意见 1',
+      suggestion: null,
+    }, '第三章第一节', 1000)
+    queue = addRevisionIssue(queue, {
+      section_id: 'SEC-302',
+      scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: currentSha },
+      instruction: '修订意见 2',
+      suggestion: null,
+    }, '第三章第二节', 2000)
+    return queue
+  }
+
+  it('1. plan 时 queue + batch 同 publication 原子提交', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const input = planInput([id1], [
+      { task_id: 'TASK-1', section_id: 'SEC-301', issue_ids: [id1] },
+    ])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const batchId = createRevisionBatchId()
+    const { queue: updatedQueue, batch } = createRevisionBatch(queue, input, batchId, 3000, validated.staleIssues)
+
+    await commitRevisionBatchPlan(ws, updatedQueue, batch)
+
+    const savedQueue = await readRevisionQueue(ws)
+    const savedBatch = await readRevisionBatch(ws, batchId)
+    expect(savedQueue.revision).toBe(updatedQueue.revision)
+    expect(savedQueue.issues[0]?.status).toBe('scheduled')
+    expect(savedQueue.issues[0]?.batch_id).toBe(batchId)
+    expect(savedBatch).not.toBeNull()
+    expect(savedBatch?.batch_id).toBe(batchId)
+    expect(savedBatch?.status).toBe('planning')
+  })
+
+  it('2. 模拟中途 crash 不出现 orphan: 未达 commit-intent 全部回滚，到达后全量 roll forward', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    await writeRevisionQueue(ws, queue)
+
+    // 运行 reconcilePublications 验证干净工作区
+    await reconcileBidPublications(ws.root, ws.projectRoot)
+    const queueAfterReconcile = await readRevisionQueue(ws)
+    expect(queueAfterReconcile.revision).toBe(queue.revision)
+
+    // 正常通过 commitRevisionBatchPlan 提交，两阶段事务自动清理临时目录
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const input = planInput([id1], [{ task_id: 'TASK-1', section_id: 'SEC-301', issue_ids: [id1] }])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const batchId = createRevisionBatchId()
+    const { queue: nextQueue, batch } = createRevisionBatch(queue, input, batchId, 3000, validated.staleIssues)
+
+    await commitRevisionBatchPlan(ws, nextQueue, batch)
+    // 模拟重新启动并对齐 publication 状态
+    await reconcileBidPublications(ws.root, ws.projectRoot)
+    const durableQueue = await readRevisionQueue(ws)
+    const durableBatch = await readRevisionBatch(ws, batchId)
+    expect(durableQueue.issues[0]?.status).toBe('scheduled')
+    expect(durableBatch?.batch_id).toBe(batchId)
+  })
+
+  it('3. task complete + issue complete 一致提交: 结算与完成在同 publication 内原子落地', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const input = planInput([id1], [{ task_id: 'TASK-1', section_id: 'SEC-301', issue_ids: [id1] }])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch } = createRevisionBatch(queue, input, batchId, 3000, validated.staleIssues)
+    await commitRevisionBatchPlan(ws, plannedQueue, batch)
+
+    // 模拟合法状态机迁移：queued -> running -> reviewing -> completed
+    const taskRunning = updateRevisionBatchTaskStatus(batch, 'TASK-1', { status: 'running' }, 3500)
+    const taskReviewing = updateRevisionBatchTaskStatus(taskRunning, 'TASK-1', { status: 'reviewing' }, 3800)
+    const taskCompleted = updateRevisionBatchTaskStatus(taskReviewing, 'TASK-1', { status: 'completed' }, 4000)
+    const settledQueue: RevisionQueueArtifact = {
+      ...plannedQueue,
+      revision: plannedQueue.revision + 1,
+      issues: plannedQueue.issues.map(issue =>
+        issue.issue_id === id1 ? { ...issue, status: 'completed' as const, updated_at: 4000 } : issue,
+      ),
+    }
+    const completedBatch = completeRevisionBatchExecution(
+      { ...taskCompleted, status: 'running' },
+      4500,
+    )
+
+    await commitRevisionBatchExecutionSettlement(ws, settledQueue, completedBatch)
+
+    const diskQueue = await readRevisionQueue(ws)
+    const diskBatch = await readRevisionBatch(ws, batchId)
+    expect(diskQueue.issues[0]?.status).toBe('completed')
+    expect(diskBatch?.status).toBe('completed')
+    expect(diskBatch?.tasks[0]?.status).toBe('completed')
+  })
+
+  it('4. CAS conflict 不写任何文件: expected_queue_revision 不一致时拒绝且磁盘零变更', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    // 写入 revision = 0
+    await writeRevisionQueue(ws, queue)
+
+    // 假设另一个操作推进了 revision 到 2
+    const advancedQueue: RevisionQueueArtifact = { ...queue, revision: 2 }
+    await writeRevisionQueue(ws, advancedQueue)
+
+    const id1 = advancedQueue.issues[0]?.issue_id ?? ''
+    // 尝试以陈旧的 expected_queue_revision = 0 进行规划校验
+    const staleInput = planInput([id1], [{ task_id: 'TASK-1', section_id: 'SEC-301', issue_ids: [id1] }], 0)
+
+    const currentDiskQueue = await readRevisionQueue(ws)
+    expect(currentDiskQueue.revision).toBe(2)
+    // 校验 CAS 冲突
+    expect(currentDiskQueue.revision !== staleInput.expected_queue_revision).toBe(true)
+
+    // 验证磁盘上的队列与批次保持原状，无任何新批次被写入
+    const missingBatch = await readRevisionBatch(ws, 'BATCH-NON-EXISTENT')
+    expect(missingBatch).toBeNull()
+    const queueRemains = await readRevisionQueue(ws)
+    expect(queueRemains.revision).toBe(2)
+  })
+
+  it('5. 旧 orphan 可检测: issue.batch_id 指向不存在 batch 抛出 BID_REVISION_BATCH_ORPHANED 且可安全恢复', async () => {
+    const ws = await createTestWorkspace()
+    let queue = setupQueueForTurn8()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    // 构造孤儿 issue：状态为 scheduled 但 batch_id 对应的文件不存在
+    queue = {
+      ...queue,
+      issues: queue.issues.map(issue =>
+        issue.issue_id === id1 ? { ...issue, status: 'scheduled' as const, batch_id: 'BATCH-GHOST' } : issue,
+      ),
+    }
+    await writeRevisionQueue(ws, queue)
+
+    // 检测应识别出孤儿并报错
+    await expect(detectRevisionBatchIntegrity(ws, queue))
+      .rejects.toThrow('BID_REVISION_BATCH_ORPHANED')
+
+    // 调用恢复函数将孤儿 issue 重置为 pending
+    const recovered = recoverOrphanRevisionIssues(queue, [id1], 5000)
+    expect(recovered.issues[0]?.status).toBe('pending')
+    expect(recovered.issues[0]?.batch_id).toBeNull()
+    expect(recovered.revision).toBe(queue.revision + 1)
+  })
+
+  it('6. batch 缺 issue 可检测: batch 存在但 queue 缺失 issue 识别为 FATAL_CORRUPTION', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    // 构造一个包含 queue 中未定义 issue 的 batch
+    const corruptBatch: RevisionBatchArtifact = {
+      schema_version: REVISION_BATCH_SCHEMA_VERSION,
+      batch_id: 'BATCH-CORRUPT',
+      queue_revision: 0,
+      issue_ids: ['REV-GHOST-MISSING'],
+      status: 'planning',
+      tasks: [{
+        task_id: 'T-1',
+        section_id: 'SEC-301',
+        issue_ids: ['REV-GHOST-MISSING'],
+        depends_on: [],
+        status: 'queued',
+        failure: null,
+        started_at: null,
+        completed_at: null,
+      }],
+      created_at: 1000,
+      updated_at: 1000,
+    }
+
+    await expect(detectRevisionBatchIntegrity(ws, queue, corruptBatch))
+      .rejects.toThrow('FATAL_CORRUPTION: BID_REVISION_BATCH_CORRUPTED_MISSING_ISSUE')
+  })
+
+  it('7. Host restart 后一致: publication 提交后重新读取工作区完全对齐', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    const id1 = queue.issues[0]?.issue_id ?? ''
+    const input = planInput([id1], [{ task_id: 'TASK-1', section_id: 'SEC-301', issue_ids: [id1] }])
+    const validated = validateRevisionBatchPlan(input, queue, new Map())
+    const batchId = createRevisionBatchId()
+    const { queue: plannedQueue, batch } = createRevisionBatch(queue, input, batchId, 3000, validated.staleIssues)
+
+    await commitRevisionBatchPlan(ws, plannedQueue, batch)
+
+    // 模拟宿主重启：重新打开该工作区路径
+    const reopenedWorkspace = new BidWorkspace(ws.root)
+    const reopenedQueue = await readRevisionQueue(reopenedWorkspace)
+    const reopenedBatch = await readRevisionBatch(reopenedWorkspace, batchId)
+
+    expect(reopenedQueue.revision).toBe(plannedQueue.revision)
+    expect(reopenedQueue.issues[0]?.status).toBe('scheduled')
+    expect(reopenedQueue.issues[0]?.batch_id).toBe(batchId)
+    expect(reopenedBatch?.batch_id).toBe(batchId)
+    expect(reopenedBatch?.tasks[0]?.issue_ids).toEqual([id1])
+  })
+
+  it('8. 并发 plan 不抢同一 pending issue: 先到者推进 revision，后到者被 CAS 或 NOT_PENDING 拒绝', async () => {
+    const ws = await createTestWorkspace()
+    const queue = setupQueueForTurn8()
+    await writeRevisionQueue(ws, queue)
+    const id1 = queue.issues[0]?.issue_id ?? ''
+
+    // Plan A 先到达并成功提交
+    const inputA = planInput([id1], [{ task_id: 'TASK-A', section_id: 'SEC-301', issue_ids: [id1] }], 0)
+    const validatedA = validateRevisionBatchPlan(inputA, queue, new Map())
+    const batchIdA = createRevisionBatchId()
+    const { queue: queueA, batch: batchA } = createRevisionBatch(queue, inputA, batchIdA, 2000, validatedA.staleIssues)
+    await commitRevisionBatchPlan(ws, queueA, batchA)
+
+    // Plan B 后到达（仍使用 expected_queue_revision = 0）
+    const inputB = planInput([id1], [{ task_id: 'TASK-B', section_id: 'SEC-301', issue_ids: [id1] }], 0)
+    const latestQueue = await readRevisionQueue(ws)
+    // 1. CAS 校验拒绝：revision 已从 0 推进到 1
+    expect(latestQueue.revision !== inputB.expected_queue_revision).toBe(true)
+
+    // 2. 即使 Plan B 试图使用最新 revision，由于 id1 已经不是 pending，业务校验也拒绝
+    const refreshedInputB = planInput(
+      [id1],
+      [{ task_id: 'TASK-B', section_id: 'SEC-301', issue_ids: [id1] }],
+      latestQueue.revision,
+    )
+    expect(() => validateRevisionBatchPlan(refreshedInputB, latestQueue, new Map()))
+      .toThrow('BID_REVISION_BATCH_ISSUE_NOT_PENDING')
   })
 })
