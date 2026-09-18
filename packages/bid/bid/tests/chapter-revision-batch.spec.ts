@@ -95,7 +95,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     const input = planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2] },
@@ -109,7 +109,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     const input = planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2], depends_on: ['T-1'], dependency_reason: '总体设计依赖技术方案结论' },
@@ -154,7 +154,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     expect(() => validateRevisionBatchPlan(planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
     ]), queue, new Map())).toThrow('BID_REVISION_BATCH_ISSUE_NOT_COVERED')
@@ -165,7 +165,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     expect(() => validateRevisionBatchPlan(planInput([id1], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2] },
@@ -177,7 +177,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-1', title: '技术方案' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     expect(() => validateRevisionBatchPlan(planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id2] },
@@ -213,7 +213,7 @@ describe('批次规划校验 validateRevisionBatchPlan', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     expect(() => validateRevisionBatchPlan(planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1], depends_on: ['T-2'] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2], depends_on: ['T-1'] },
@@ -256,7 +256,7 @@ describe('批次创建 createRevisionBatch', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     const input = planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2] },
@@ -309,7 +309,7 @@ describe('批次创建 createRevisionBatch', () => {
       { sectionId: 'SEC-1', title: '技术方案' },
       { sectionId: 'SEC-2', title: '总体设计' },
     )
-    const [id1, id2] = queue.issues.map(issue => issue.issue_id)
+    const [id1, id2] = queue.issues.map(issue => issue.issue_id) as [string, string]
     const input = planInput([id1, id2], [
       { task_id: 'T-1', section_id: 'SEC-1', issue_ids: [id1] },
       { task_id: 'T-2', section_id: 'SEC-2', issue_ids: [id2], depends_on: ['T-1'], dependency_reason: '依赖结论' },
@@ -363,14 +363,17 @@ describe('批次持久化', () => {
   })
 })
 describe('批次执行提示渲染 renderRevisionBatchSectionPrompt', () => {
-  function makeTask(issues: { instruction: string; suggestion: string | null; scope: 'chapter' | 'paragraphs'; reference_text: string | null }[]): RevisionBatchTaskExecution {
-    return { task_id: 'T-1', section_id: 'SEC-1', issue_ids: issues.map((_, i) => `REV-${i + 1}`), depends_on: [], issues }
+  function makeTask(issues: { instruction: string; suggestion: string | null; scope: 'chapter' | 'paragraphs'; reference_text: string | null; start: number | null; end: number | null }[]): RevisionBatchTaskExecution {
+    return {
+      task_id: 'T-1', section_id: 'SEC-1', issue_ids: issues.map((_, i) => `REV-${i + 1}`), depends_on: [],
+      issues: issues.map((issue, i) => ({ ...issue, issue_id: `REV-${i + 1}` })),
+    }
   }
 
   it('渲染多条审批意见', () => {
     const task = makeTask([
-      { instruction: '修改重复段落', suggestion: '合并为一段', scope: 'paragraphs', reference_text: '重复段落。' },
-      { instruction: '补充实施步骤', suggestion: null, scope: 'chapter', reference_text: null },
+      { instruction: '修改重复段落', suggestion: '合并为一段', scope: 'paragraphs', reference_text: '重复段落。', start: 0, end: 5 },
+      { instruction: '补充实施步骤', suggestion: null, scope: 'chapter', reference_text: null, start: null, end: null },
     ])
     const prompt = renderRevisionBatchSectionPrompt(task, '# 1 章节\n\n正文。\n')
     expect(prompt).toContain('共 2 条')
@@ -384,7 +387,7 @@ describe('批次执行提示渲染 renderRevisionBatchSectionPrompt', () => {
   })
 
   it('章节级意见不渲染选中段落', () => {
-    const task = makeTask([{ instruction: '全量重写', suggestion: null, scope: 'chapter', reference_text: null }])
+    const task = makeTask([{ instruction: '全量重写', suggestion: null, scope: 'chapter', reference_text: null, start: null, end: null }])
     const prompt = renderRevisionBatchSectionPrompt(task, '正文')
     expect(prompt).not.toContain('选中段落')
   })
@@ -613,21 +616,19 @@ describe('settleRevisionBatchIssues', () => {
     expect(result.queue.issues.find(issue => issue.issue_id === 'REV-002')?.status).toBe('failed')
   })
 
-  it('Reviewer 未返回某条 check → 该 issue 标记 failed', () => {
+  it('Reviewer 未返回某条 check → 抛出 BID_REVISION_REVIEW_INCOMPLETE', () => {
     const queue = makeQueueWithScheduledIssues(['REV-001', 'REV-002'])
     const checks: RevisionIssueCheck[] = [
       { issue_id: 'REV-001', status: 'satisfied', reason: '完成' },
     ]
-    const result = settleRevisionBatchIssues(queue, ['REV-001', 'REV-002'], checks, 2000)
-    expect(result.taskStatus).toBe('failed')
-    expect(result.queue.issues.find(issue => issue.issue_id === 'REV-002')?.status).toBe('failed')
+    expect(() => settleRevisionBatchIssues(queue, ['REV-001', 'REV-002'], checks, 2000))
+      .toThrow('BID_REVISION_REVIEW_INCOMPLETE')
   })
 
-  it('无 check → 全部 failed', () => {
+  it('无 check → 抛出 BID_REVISION_REVIEW_INCOMPLETE', () => {
     const queue = makeQueueWithScheduledIssues(['REV-001', 'REV-002'])
-    const result = settleRevisionBatchIssues(queue, ['REV-001', 'REV-002'], [], 2000)
-    expect(result.taskStatus).toBe('failed')
-    expect(result.queue.issues.every(issue => issue.status === 'failed')).toBe(true)
+    expect(() => settleRevisionBatchIssues(queue, ['REV-001', 'REV-002'], [], 2000))
+      .toThrow('BID_REVISION_REVIEW_INCOMPLETE')
   })
 
   it('只结算 task 内的 issue，不影响其他 issue', () => {
@@ -657,7 +658,48 @@ describe('settleRevisionBatchIssues', () => {
   })
 })
 describe('BidReviewWorkbenchView revision overlay schema', () => {
-  function makeWorkbenchBase() {
+  type WorkbenchBase = {
+    schema_version: number
+    outline: Array<{
+      section_id: string
+      parent_id: string | null
+      order: number
+      title: string
+      writable: boolean
+      writing_status: 'completed'
+      review_status: 'pass'
+      chapter_indicator: { status: 'passed'; tooltip: string }
+      content_available: boolean
+      revision?: { batch_id: string; task_id: string; status: string; issue_count: number }
+    }>
+    summary: {
+      chapter_count: number
+      content_count: number
+      reviewed_count: number
+      needs_attention_count: number
+      page_estimate: { status: 'unavailable' }
+      page_target: { status: 'not_set' }
+    }
+    global_compliance: {
+      status: 'not_required'
+      reviewed_count: number
+      total_count: number
+      document_issues: never[]
+      delivery_todos: never[]
+    }
+    revision_batch?: {
+      batch_id: string
+      status: string
+      total_issues: number
+      completed: number
+      running: number
+      pending: number
+      needs_input: number
+      failed: number
+    }
+  }
+
+  function makeWorkbenchBase(): WorkbenchBase {
     return {
       schema_version: 6,
       outline: [{
@@ -946,6 +988,7 @@ describe('S5 批量修订全链路数据层集成', () => {
     expect(parsed.revision_batch!.total_issues).toBe(5)
     expect(parsed.revision_batch!.completed).toBe(2)
     expect(parsed.revision_batch!.failed).toBe(1)
-    expect(parsed.revision_batch!.running + parsed.revision_batch!.pending + parsed.revision_batch!.completed + parsed.revision_batch!.failed).toBe(5)
+    const b = parsed.revision_batch!
+    expect(b.running + b.pending + b.completed + b.failed).toBe(5)
   })
 })

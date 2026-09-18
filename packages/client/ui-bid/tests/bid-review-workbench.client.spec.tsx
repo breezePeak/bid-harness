@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { DocxTemplateId } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidAddRevisionIssueRequest, DocxTemplateId } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
 import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 
@@ -12,7 +12,7 @@ const pageBasis = { source: 'template' as const, method: 'fast' as const,
   template: { id: 'a'.repeat(64) as DocxTemplateId, name: '项目技术标模板.docx', revision: 2 } }
 
 const workbench = {
-  schema_version: 5 as const,
+  schema_version: 6 as const,
   outline: [
     { section_id: 'ROOT', parent_id: null, order: 1, title: '技术方案', summary: '说明项目实施流程、人员分工与质量控制措施。', writable: false, writing_status: 'not_started' as const, review_status: 'not_started' as const, chapter_indicator: { status: 'not_started' as const, tooltip: '章节概述' }, content_available: true, page_estimate: { status: 'available' as const, pages: 2, incomplete: true, ...pageBasis } },
     { section_id: 'SEC-1', parent_id: 'ROOT', order: 1, title: '实施方案', writable: true, writing_status: 'content_ready' as const, review_status: 'reviewing' as const, chapter_indicator: { status: 'reviewing' as const, tooltip: '正在审核' }, content_available: true },
@@ -462,7 +462,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('单段右键打开审批意见弹框，填写后保存调用 addRevisionIssue 且不发聊天消息', async () => {
-    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
@@ -496,7 +496,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('连续三段右键生成连续段落引用，offset 跨段落准确', async () => {
-    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
@@ -528,7 +528,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('章节级审批意见：点击"对本章添加审批意见"按钮，scope 为 chapter', async () => {
-    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
@@ -617,7 +617,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('相同文字在章节出现两次时 offset 仍准确', async () => {
-    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     const markdown = '# 1.1 实施方案\n\n首段内容。\n\n重复段落。\n\n重复段落。\n\n尾段内容。\n'
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
@@ -647,7 +647,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('取消按钮关闭弹框且不保存', async () => {
-    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),

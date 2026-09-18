@@ -13,7 +13,7 @@ import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriter
 import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-headings.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
-import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence } from './chapter-writing-review.ts'
+import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence, type ChapterRevisionReviewIssue } from './chapter-writing-review.ts'
 import {
   attachGlobalComplianceReview,
   buildGlobalComplianceEvidence,
@@ -794,9 +794,30 @@ function renderChapterReviewerTask(
   quotes: ReadonlyMap<string, string>,
   evidence: readonly ChapterReviewEvidence[],
   hostAcceptanceResults: readonly HostAcceptanceResult[],
+  revisionIssues: readonly ChapterRevisionReviewIssue[] = [],
 ): string {
+  const revisionPromptLines = revisionIssues.length > 0 ? [
+    '本次是用户审批修订。',
+    '你必须逐条检查以下审批意见是否被当前候选正文满足。',
+    ...revisionIssues.flatMap(issue => [
+      `【审批意见 ${issue.issue_id}】`,
+      `范围：${issue.scope === 'chapter' ? '整章' : '段落'}`,
+      ...(issue.reference_text !== null ? [`原文：${issue.reference_text}`] : []),
+      `修改意见：${issue.instruction}`,
+      ...(issue.suggestion !== null ? [`修复建议：${issue.suggestion}`] : []),
+    ]),
+    '每一条必须调用 review_revision_issues 记录：',
+    '- satisfied：当前正文已完成；',
+    '- unsatisfied：Writer 可继续修复；',
+    '- needs_input：缺少用户必须提供的信息。',
+    '不能用章节总体 pass 代替逐条判断。',
+  ] : []
+  const opening = revisionIssues.length > 0
+    ? '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录固定覆盖项，用 review_revision_issues 逐条记录用户审批意见，用 review_acceptance_criteria 独立记录本章 semantic acceptance，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。'
+    : '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录固定覆盖项，用 review_acceptance_criteria 独立记录本章 semantic acceptance，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。'
   return [
-    '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录固定覆盖项，用 review_acceptance_criteria 独立记录本章 semantic acceptance，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。',
+    opening,
+    ...revisionPromptLines,
     '正文是直接交付采购方的技术标。bidder_response_voice 仅在正文以投标人的方案、措施、成果和承诺直接作答时为 true；若正文主要复述“采购文件提出”“甲方要求”、解释资格条件，或写成需求分析与审查报告，则设为 false 并指出需要改写的段落。必要的一句要求背景不影响通过。',
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
@@ -944,9 +965,10 @@ export function validateChapterReview(
       issues.push({ code: 'CHAPTER_REVIEW_ASSIGNMENT_CONFLICT_INVALID', message: `任务分配冲突引用未知章节 ${sectionId}。`, path: 'assignment_conflicts' })
     }
   }
+  const hasRevisionNeedsInput = review.revision_issue_checks?.some(item => item.status === 'needs_input') ?? false
   if ((review.verdict === 'attention') !== (review.blocking_issues.length === 0
-    && (review.assignment_conflicts.length > 0 || review.external_input_gaps.length > 0))) {
-    issues.push({ code: 'CHAPTER_REVIEW_ATTENTION_VERDICT_INVALID', message: 'attention 只用于无需 Writer 修改的任务冲突或外部资料缺口。', path: 'verdict' })
+    && (review.assignment_conflicts.length > 0 || review.external_input_gaps.length > 0 || hasRevisionNeedsInput))) {
+    issues.push({ code: 'CHAPTER_REVIEW_ATTENTION_VERDICT_INVALID', message: 'attention 只用于无需 Writer 修改的任务冲突、外部资料缺口或需要用户输入的审批意见。', path: 'verdict' })
   }
   if ((review.verdict === 'repair') !== (review.blocking_issues.length > 0)) {
     issues.push({ code: 'CHAPTER_REVIEW_REPAIR_VERDICT_INVALID', message: 'repair 必须对应至少一个 Writer 可修复问题。', path: 'verdict' })
@@ -964,7 +986,8 @@ export function validateChapterReview(
       || Object.values(review.quality_checks).some(value => !value)
       || review.claim_checks.some(item => item.status === 'unsupported')
       || review.global_compliance_checks.some(item => item.status === 'violates')
-      || review.assignment_conflicts.length > 0) {
+      || review.assignment_conflicts.length > 0
+      || (review.revision_issue_checks?.some(item => item.status !== 'satisfied') ?? false)) {
       const gaps = [
         ...covered.filter(item => item.status !== 'covered').map(item => `未覆盖：${item.item}`),
         ...review.blocking_issues,
@@ -972,6 +995,7 @@ export function validateChapterReview(
         ...review.claim_checks.filter(item => item.status === 'unsupported').map(item => `声明无依据：${item.claim_quote}；${item.issue}`),
         ...review.global_compliance_checks.filter(item => item.status === 'violates').map(item => `违反全局约束：${item.item}；${item.issue}`),
         ...review.assignment_conflicts.map(item => `任务分配冲突：${item.task}；${item.basis}`),
+        ...(review.revision_issue_checks?.filter(item => item.status !== 'satisfied').map(item => `审批意见未满足：${item.issue_id}（${item.status}）`) ?? []),
       ]
       issues.push({ code: 'CHAPTER_REVIEW_PASS_INVALID', message: `Reviewer pass 与内容问题矛盾：${gaps.join('；')}`, path: 'verdict' })
     }
@@ -1700,7 +1724,9 @@ async function runChapterWriting(
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
     throw new Error('chapter-writing-max-concurrency-invalid')
   }
-  if (revision === undefined && revisionBatch === undefined && options.control === undefined) await waitForModelStageIdle(agent, options.run.signal)
+  if (revision === undefined && revisionBatch === undefined && options.control === undefined) {
+    await waitForModelStageIdle(agent, options.run.signal)
+  }
   const inputs = await Promise.all([
     readJson(workspace, 'outline/confirmed-outline.json'), readJson(workspace, 'outline/confirmation.json'),
     readJson(workspace, 'analysis/project.json'), readJson(workspace, 'analysis/requirements.json'),
@@ -2268,6 +2294,13 @@ async function runChapterWriting(
           log.phase = 'reviewing'
           await persistLog()
           let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
+          const revisionReviewIssues: ChapterRevisionReviewIssue[] = batchTask?.issues.map(issue => ({
+            issue_id: issue.issue_id,
+            scope: issue.scope,
+            instruction: issue.instruction,
+            suggestion: issue.suggestion,
+            reference_text: issue.reference_text,
+          })) ?? []
           childSetups.set(reviewLabel, (child) => {
             const titles = agent.ctx.get('sessionTitle')
             if (titles !== undefined) {
@@ -2281,12 +2314,14 @@ async function runChapterWriting(
                 })
               } catch {}
             }
-            reviewRuntime = attachChapterReview(child, context, quotes, evidencePack, options.maxRepairAttempts, hostAcceptanceResults)
+            reviewRuntime = attachChapterReview(
+              child, context, quotes, evidencePack, options.maxRepairAttempts, hostAcceptanceResults, revisionReviewIssues,
+            )
           })
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
-            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults) }],
+            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues) }],
             signal,
             toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
             maxDepth: 1,
@@ -2351,7 +2386,7 @@ async function runChapterWriting(
           return { issues: reviewIssues }
         }
       }
-      const preserved = effectiveRevision === undefined ? checkpoint?.drafts.get(sectionId) : undefined
+      const preserved = effectiveRevision === undefined && batchTask === undefined ? checkpoint?.drafts.get(sectionId) : undefined
       let firstAttempt = 0
       if (preserved !== undefined) {
         const reviewed = await reviewCandidate(preserved.candidate)
@@ -2388,7 +2423,9 @@ async function runChapterWriting(
           ? contextPrompt
           : batchTask !== undefined
             ? `${contextPrompt}\n\n${renderRevisionBatchSectionPrompt(batchTask, revisionOriginal)}`
-            : `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision!, revisionOriginal)}`
+            : effectiveRevision !== undefined
+              ? `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
+              : contextPrompt
         const prompt = attempt === 0 ? basePrompt : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues)
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
@@ -2667,8 +2704,9 @@ async function runChapterWriting(
     if (chapter === undefined) throw new Error(`Bid chapter manifest missing completed section ${section.id}`)
     return chapter.entry
   })
-  signal.throwIfAborted()
-  if (revision !== undefined || revisionBatch !== undefined) await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog, options.run.commits)
+  if (revision !== undefined || revisionBatch !== undefined) {
+    await writeJson(join(workspace.projectRoot, LOG_PATH), executionLog, options.run.commits)
+  }
   await writeJson(join(workspace.projectRoot, MANIFEST_PATH), {
     schema_version: CHAPTER_WRITING_SCHEMA_VERSION,
     scope: 'technical_bid',

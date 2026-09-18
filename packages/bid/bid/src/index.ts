@@ -2852,8 +2852,7 @@ export class BidHostRuntime extends TypertRemoteService {
         const outline = (await confirmedOutline(workspace)).outline
         const worklist = buildWritableSectionWorklist(outline)
         const sectionHashes = new Map<string, string>()
-        for (let index = 0; index < worklist.length; index++) {
-          const section = worklist[index]!
+        for (const [index, section] of worklist.entries()) {
           try {
             const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`), 'utf8')
             sectionHashes.set(section.id, chapterContentSha256(markdown))
@@ -2912,11 +2911,12 @@ export class BidHostRuntime extends TypertRemoteService {
         )))
         const worklist = buildChapterWorklist(outline)
         const sectionSerials = new Map(worklist.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
-        const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map(task => {
-          const issues = task.issue_ids.map(id => {
+        const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
+          const issues = task.issue_ids.map((id) => {
             const issue = issueMap.get(id)
             if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
             return {
+              issue_id: id,
               instruction: issue.instruction,
               suggestion: issue.suggestion,
               scope: issue.scope,
@@ -2938,7 +2938,11 @@ export class BidHostRuntime extends TypertRemoteService {
           if (serial === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
           const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
           const currentSha = chapterContentSha256(markdown)
-          const taskIssues = task.issue_ids.map(id => issueMap.get(id)!)
+          const taskIssues = task.issue_ids.map((id) => {
+            const issue = issueMap.get(id)
+            if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
+            return issue
+          })
           const staleIssueIds = detectStaleBaseVersions(
             taskIssues.map(issue => ({ issue_id: issue.issue_id, reference: issue.reference })),
             currentSha,
@@ -4662,11 +4666,12 @@ export class BidHostRuntime extends TypertRemoteService {
             if (batch === null) throw new Error('BID_REVISION_BATCH_NOT_FOUND')
             const queue = await readRevisionQueue(operation.workspace)
             const issueMap = new Map(queue.issues.map(issue => [issue.issue_id, issue]))
-            const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map(task => {
-              const issues = task.issue_ids.map(id => {
+            const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
+              const issues = task.issue_ids.map((id) => {
                 const issue = issueMap.get(id)
                 if (issue === undefined) throw new Error('BID_REVISION_BATCH_ISSUE_NOT_FOUND')
                 return {
+                  issue_id: id,
                   instruction: issue.instruction,
                   suggestion: issue.suggestion,
                   scope: issue.scope,
@@ -5139,7 +5144,9 @@ export class BidHostRuntime extends TypertRemoteService {
     const now = Date.now()
     for (const task of batch.tasks) {
       const serial = sectionSerials.get(task.section_id)
-      if (serial === undefined) continue
+      if (serial === undefined) {
+        throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 缺少章节序号 ${task.section_id}`)
+      }
       let checks: RevisionIssueCheck[] = []
       try {
         const reviewRaw = JSON.parse(await readFile(
@@ -5147,7 +5154,9 @@ export class BidHostRuntime extends TypertRemoteService {
         ))
         const review = parseChapterReviewArtifact(reviewRaw)
         checks = review.revision_issue_checks ?? []
-      } catch { /* review 不可读时 issue 全部标记 failed */ }
+      } catch {
+        throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 无法读取审查报告 ${serial}`)
+      }
       const result = settleRevisionBatchIssues(currentQueue, task.issue_ids, checks, now)
       currentQueue = result.queue
     }
@@ -5219,12 +5228,15 @@ export class BidHostRuntime extends TypertRemoteService {
         content_available: contentAvailable,
       } }
     }))
-    let revisionOverlayBySection: Map<string, { batch_id: string; task_id: string; status: BidRevisionTaskStatus; issue_count: number }> = new Map()
+    type SectionOverlay = { batch_id: string; task_id: string; status: BidRevisionTaskStatus; issue_count: number }
+    const revisionOverlayBySection = new Map<string, SectionOverlay>()
     let revisionBatchSummary: BidReviewWorkbenchView['revision_batch'] | undefined
     try {
       const revisionQueue = await readRevisionQueue(workspace)
       const batchIssues = revisionQueue.issues.filter(issue => issue.batch_id !== null)
-      const batchIds = [...new Set(batchIssues.map(issue => issue.batch_id!))]
+      const batchIds = [...new Set(
+        revisionQueue.issues.map(issue => issue.batch_id).filter((id): id is string => id !== null),
+      )]
       for (const batchId of batchIds) {
         const batch = await readRevisionBatch(workspace, batchId)
         if (batch === null) continue
@@ -5235,10 +5247,9 @@ export class BidHostRuntime extends TypertRemoteService {
             const taskStatus: BidRevisionTaskStatus = batch.status === 'running'
               ? issueStatuses.every(s => s === 'completed') ? 'completed'
                 : issueStatuses.some(s => s === 'failed') ? 'failed'
-                : issueStatuses.some(s => s === 'needs_input') ? 'needs_input'
-                : issueStatuses.some(s => s === 'conflict') ? 'conflict'
-                : 'running'
-              : batch.status === 'suspended' ? 'queued'
+                  : issueStatuses.some(s => s === 'needs_input') ? 'needs_input'
+                    : issueStatuses.some(s => s === 'conflict') ? 'conflict'
+                      : 'running'
               : 'queued'
             revisionOverlayBySection.set(task.section_id, {
               batch_id: batch.batch_id,
@@ -5264,7 +5275,7 @@ export class BidHostRuntime extends TypertRemoteService {
         }
       }
     } catch { /* revision queue/batch 不可读时不阻塞 workbench。 */ }
-    let rows = rowContents.map(item => {
+    let rows = rowContents.map((item) => {
       const revision = revisionOverlayBySection.get(item.row.section_id)
       return revision === undefined ? item.row : { ...item.row, revision }
     })
@@ -5525,7 +5536,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
         return reject('BID_REVISION_QUEUE_NOT_ALLOWED', '正文编写完成后才能收集审批意见。')
       }
-      const queue = await commitRevisionQueueMutation(operation.workspace, expectedRevision, (current) =>
+      const queue = await commitRevisionQueueMutation(operation.workspace, expectedRevision, current =>
         mutate(current, operation.workspace))
       return { ok: true, value: this.projectRevisionQueueView(queue) }
     } catch (error: unknown) {
@@ -5602,9 +5613,8 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('updateRevisionIssue')
   async updateRevisionIssue(session: Session, request: BidUpdateRevisionIssueRequest): Promise<BidRevisionQueueResult> {
     return this.executeRevisionQueueMutation(session, request.expected_queue_revision, async (queue, workspace) => {
-      const index = queue.issues.findIndex(issue => issue.issue_id === request.issue_id)
-      if (index < 0) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
-      const current = queue.issues[index]!
+      const current = queue.issues.find(issue => issue.issue_id === request.issue_id)
+      if (current === undefined) throw new Error('BID_REVISION_ISSUE_NOT_FOUND')
       if (current.status !== 'pending') throw new Error('BID_REVISION_ISSUE_NOT_EDITABLE')
       const nextScope = request.scope ?? current.scope
       const nextReference = request.reference ?? current.reference
@@ -5627,7 +5637,7 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('deleteRevisionIssue')
   async deleteRevisionIssue(session: Session, request: BidDeleteRevisionIssueRequest): Promise<BidRevisionQueueResult> {
-    return this.executeRevisionQueueMutation(session, request.expected_queue_revision, (queue) =>
+    return this.executeRevisionQueueMutation(session, request.expected_queue_revision, queue =>
       deleteRevisionIssueFromQueue(queue, request))
   }
 

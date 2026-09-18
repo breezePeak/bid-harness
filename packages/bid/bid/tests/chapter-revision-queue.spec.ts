@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -204,7 +204,7 @@ describe('审批意见队列持久化', () => {
       instruction: '意见', suggestion: null,
     }, '技术方案', 1000)
     await writeRevisionQueue(ws, queue)
-    await expect(commitRevisionQueueMutation(ws, 999, (current) => current))
+    await expect(commitRevisionQueueMutation(ws, 999, current => current))
       .rejects.toThrow('BID_REVISION_QUEUE_CONFLICT')
   })
 
@@ -216,7 +216,7 @@ describe('审批意见队列持久化', () => {
       '技术方案', 1000,
     ))
     expect(first.revision).toBe(1)
-    const second = await commitRevisionQueueMutation(ws, 1, (current) => addRevisionIssue(
+    const second = await commitRevisionQueueMutation(ws, 1, current => addRevisionIssue(
       current,
       { section_id: 'SEC-1', scope: 'chapter', reference: chapterReference(), instruction: '二', suggestion: null },
       '技术方案', 2000,

@@ -196,7 +196,8 @@ export function validateRevisionBatchPlan(
   const staleIssues: string[] = []
   for (const task of tasks) {
     for (const issueId of task.issue_ids) {
-      const issue = pendingMap.get(issueId)!
+      const issue = pendingMap.get(issueId)
+      if (issue === undefined) continue
       const currentHash = sectionHashes.get(issue.section_id)
       if (currentHash !== undefined && issue.reference.base_content_sha256 !== currentHash) {
         staleIssues.push(issueId)
@@ -216,7 +217,7 @@ function detectCycle(tasks: readonly RevisionBatchTask[]): void {
     if (stack.has(taskId)) throw new Error('BID_REVISION_BATCH_CYCLE')
     if (visited.has(taskId)) return
     stack.add(taskId)
-    for (const dep of taskMap.get(taskId)!.depends_on) dfs(dep)
+    for (const dep of taskMap.get(taskId)?.depends_on ?? []) dfs(dep)
     stack.delete(taskId)
     visited.add(taskId)
   }
@@ -241,7 +242,7 @@ export function createRevisionBatch(
 ): { readonly queue: RevisionQueueArtifact; readonly batch: RevisionBatchArtifact } {
   const staleSet = new Set(staleIssues)
   const batchIssueIds = new Set(input.issue_ids)
-  const updatedIssues = queue.issues.map(issue => {
+  const updatedIssues = queue.issues.map((issue) => {
     if (!batchIssueIds.has(issue.issue_id)) return issue
     if (staleSet.has(issue.issue_id)) {
       return { ...issue, status: 'conflict' as const, batch_id: batchId, updated_at: now }
@@ -278,6 +279,7 @@ export interface RevisionBatchTaskExecution {
   readonly issue_ids: readonly string[]
   readonly depends_on: readonly string[]
   readonly issues: readonly {
+    readonly issue_id: string
     readonly instruction: string
     readonly suggestion: string | null
     readonly scope: 'chapter' | 'paragraphs'
@@ -403,17 +405,20 @@ export function settleRevisionBatchIssues(
   now: number,
 ): IssueSettlementResult {
   const checkMap = new Map(checks.map(check => [check.issue_id, check]))
-  const updatedIssues = queue.issues.map(issue => {
+  for (const id of taskIssueIds) {
+    if (!checkMap.has(id)) {
+      throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 缺少 issue ${id} 的审查结果`)
+    }
+  }
+  const updatedIssues = queue.issues.map((issue) => {
     if (!taskIssueIds.includes(issue.issue_id)) return issue
     const check = checkMap.get(issue.issue_id)
-    if (check === undefined) {
-      return { ...issue, status: 'failed' as const, updated_at: now }
-    }
+    if (check === undefined) return issue
     const nextStatus: RevisionIssue['status'] = check.status === 'satisfied' ? 'completed'
       : check.status === 'needs_input' ? 'needs_input' : 'failed'
     return { ...issue, status: nextStatus, updated_at: now }
   })
-  const settledStatuses = taskIssueIds.map(id => {
+  const settledStatuses = taskIssueIds.map((id) => {
     const issue = updatedIssues.find(item => item.issue_id === id)
     return issue?.status ?? 'failed'
   })

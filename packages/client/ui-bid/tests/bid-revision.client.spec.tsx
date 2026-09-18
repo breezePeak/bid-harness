@@ -2,7 +2,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { BidRevisionIssueView, BidRevisionQueueView, BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDeleteRevisionIssueRequest, BidRevisionIssueView, BidRevisionQueueView, BidReviewChapterView, BidUpdateRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { BidComposerContext, type BidComposerContextProps } from '../src/client/BidComposerContext.tsx'
@@ -131,15 +131,15 @@ function composerWithQueue(queue: BidRevisionQueueView) {
   const sendMessage = vi.fn(async () => {})
   const getChapter = vi.fn(async () => chapter)
   const getRevisionQueue = vi.fn(async () => queue)
-  const updateRevisionIssue = vi.fn(async () => queue)
-  const deleteRevisionIssue = vi.fn(async () => queue)
-  let submit: ComposerSubmitHandler | undefined
-  const registerSubmit = vi.fn((handler: ComposerSubmitHandler) => { submit = handler; return () => { submit = undefined } })
+  const updateRevisionIssue = vi.fn(async (_request: BidUpdateRevisionIssueRequest) => queue)
+  const deleteRevisionIssue = vi.fn(async (_request: BidDeleteRevisionIssueRequest) => queue)
+  const registerSubmit = vi.fn((_handler: ComposerSubmitHandler) => () => {})
   const props = {
     sessionId: 'bid', disabled: false,
     useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
-    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
+    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) =>
+      select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
     actions: store.actions, getChapter, sendMessage, registerSubmit,
     getRevisionQueue, updateRevisionIssue, deleteRevisionIssue,
   } as BidComposerContextProps
@@ -248,7 +248,8 @@ it('queue revision 冲突时重新拉取队列', async () => {
     sessionId: 'bid', disabled: false,
     useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
-    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
+    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) =>
+      select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
     actions: store.actions, getChapter: vi.fn(async () => chapter), sendMessage: vi.fn(async () => {}),
     registerSubmit: vi.fn(() => () => {}), getRevisionQueue, updateRevisionIssue, deleteRevisionIssue: vi.fn(async () => queue),
   } as BidComposerContextProps
@@ -270,7 +271,8 @@ it('getRevisionQueue 未注入时不显示队列区域', async () => {
     sessionId: 'bid', disabled: false,
     useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
     useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
-    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
+    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) =>
+      select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
     actions: store.actions, getChapter: vi.fn(async () => chapter), sendMessage: vi.fn(async () => {}),
     registerSubmit: vi.fn(() => () => {}),
   } as BidComposerContextProps
