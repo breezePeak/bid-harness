@@ -281,3 +281,32 @@ it('getRevisionQueue 未注入时不显示队列区域', async () => {
   expect(screen.queryByText(/待处理审批意见/)).toBeNull()
   view.unmount()
 })
+
+it('store 发送 notifyRevisionQueueChanged 信号后，ComposerContext 立即刷新并展示新 Issue 卡片', async () => {
+  let currentQueue = queueView([])
+  const store = createBidRevisionStore().create()
+  const getRevisionQueue = vi.fn(async () => currentQueue)
+  const props = {
+    sessionId: 'bid', disabled: false,
+    useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
+    useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) =>
+      select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot())),
+    actions: store.actions, getChapter: vi.fn(async () => chapter), sendMessage: vi.fn(async () => {}),
+    registerSubmit: vi.fn(() => () => {}), getRevisionQueue,
+  } as BidComposerContextProps
+  const view = render(<div data-composer-card=""><BidComposerContext {...props} /></div>)
+  await waitFor(() => { expect(getRevisionQueue).toHaveBeenCalledTimes(1) })
+  expect(screen.queryByText('REV-NEW')).toBeNull()
+
+  // 模拟 Host 产生了新 Issue，Workbench 保存成功后发出信号
+  currentQueue = queueView([makeIssue({ issue_id: 'REV-NEW', instruction: '新意见卡片' })])
+  await act(async () => {
+    store.actions.notifyRevisionQueueChanged()
+  })
+
+  await waitFor(() => { expect(getRevisionQueue).toHaveBeenCalledTimes(2) })
+  expect(await screen.findByText('REV-NEW')).toBeTruthy()
+  expect(screen.getByText('新意见卡片')).toBeTruthy()
+  view.unmount()
+})

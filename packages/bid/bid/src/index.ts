@@ -5430,11 +5430,12 @@ export class BidHostRuntime extends TypertRemoteService {
               issue_count: task.issue_ids.length,
             })
           }
-          const statusCounts = { completed: 0, running: 0, pending: 0, needs_input: 0, failed: 0 }
+          const statusCounts = { completed: 0, running: 0, pending: 0, needs_input: 0, failed: 0, conflict: 0 }
           for (const issue of batchIssues.filter(issue => issue.batch_id === batchId)) {
             if (issue.status === 'completed') statusCounts.completed += 1
             else if (issue.status === 'failed') statusCounts.failed += 1
             else if (issue.status === 'needs_input') statusCounts.needs_input += 1
+            else if (issue.status === 'conflict') statusCounts.conflict += 1
             else if (issue.status === 'scheduled' || issue.status === 'running') statusCounts.running += 1
             else statusCounts.pending += 1
           }

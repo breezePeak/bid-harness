@@ -12,7 +12,7 @@ export interface BidRevisionReference {
   readonly preview: string
 }
 
-type RevisionState = { reference: BidRevisionReference | null; revision: number }
+type RevisionState = { reference: BidRevisionReference | null; revision: number; queueRevisionSignal: number }
 
 /**
  * Share one unsent reference between the chapter reader and its session composer.
@@ -21,14 +21,18 @@ type RevisionState = { reference: BidRevisionReference | null; revision: number 
 export function createBidRevisionStore(): EngineStoreHandle<RevisionState, {
   setReference: (draft: RevisionState, reference: BidRevisionReference | null) => void
   clearReference: (draft: RevisionState, submitted: BidRevisionReference) => void
+  notifyRevisionQueueChanged: (draft: RevisionState) => void
 }> {
   return defineStore({
-    init: (): RevisionState => ({ reference: null, revision: 0 }),
+    init: (): RevisionState => ({ reference: null, revision: 0, queueRevisionSignal: 0 }),
     actions: {
       setReference: (draft, reference: BidRevisionReference | null) => { draft.reference = reference },
       clearReference: (draft, submitted: BidRevisionReference) => {
         if (JSON.stringify(draft.reference) === JSON.stringify(submitted)) draft.reference = null
         draft.revision++
+      },
+      notifyRevisionQueueChanged: (draft) => {
+        draft.queueRevisionSignal++
       },
     },
   })
@@ -39,12 +43,14 @@ export function createBidRevisionStore(): EngineStoreHandle<RevisionState, {
  * @param root - The current chapter's rendered body.
  * @param selection - Browser selection captured before opening the context menu.
  * @param chapter - Host chapter snapshot matching the rendered source.
+ * @param targetNode - Optional contextmenu event target to verify hit within selected paragraphs.
  * @returns The exact source reference, or null for an empty or unsupported selection.
  */
 export function selectedParagraphReference(
   root: HTMLElement,
   selection: Selection | null,
   chapter: BidReviewChapterView,
+  targetNode?: Node | null,
 ): BidRevisionReference | null {
   if (
     selection === null || selection.isCollapsed || selection.rangeCount !== 1
@@ -68,6 +74,7 @@ export function selectedParagraphReference(
   const first = paragraphs[0]
   const last = paragraphs.at(-1)
   if (first === undefined || last === undefined) return null
+  if (targetNode != null && !paragraphs.some(paragraph => paragraph.contains(targetNode))) return null
   for (let index = 1; index < paragraphs.length; index++) {
     if (paragraphs[index - 1]?.nextElementSibling !== paragraphs[index]) return null
   }

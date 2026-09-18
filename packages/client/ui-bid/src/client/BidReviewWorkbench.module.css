@@ -482,7 +482,11 @@
 
 .selectionMenu {
   position: fixed;
-  z-index: 100;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
   padding: 4px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
@@ -491,6 +495,10 @@
 }
 
 .selectionMenu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  white-space: nowrap;
   padding: 8px 12px;
   border: 0;
   border-radius: 4px;
@@ -498,6 +506,7 @@
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
   font: inherit;
+  text-align: left;
 }
 
 .selectionMenu button:hover, .selectionMenu button:focus-visible {

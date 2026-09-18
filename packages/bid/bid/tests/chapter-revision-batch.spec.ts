@@ -781,6 +781,7 @@ describe('BidReviewWorkbenchView revision overlay schema', () => {
       pending: number
       needs_input: number
       failed: number
+      conflict: number
     }
   }
 
@@ -848,6 +849,7 @@ describe('BidReviewWorkbenchView revision overlay schema', () => {
       pending: 1,
       needs_input: 0,
       failed: 0,
+      conflict: 0,
     }
     const parsed = parseBidReviewWorkbenchView(view)
     expect(parsed.revision_batch?.completed).toBe(1)
@@ -1067,6 +1069,7 @@ describe('S5 批量修订全链路数据层集成', () => {
         pending: 1,
         needs_input: 0,
         failed: 1,
+        conflict: 0,
       },
     }
     const parsed = parseBidReviewWorkbenchView(view)

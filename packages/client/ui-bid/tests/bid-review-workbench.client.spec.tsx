@@ -527,14 +527,15 @@ describe('BidReviewWorkbench', () => {
     }
   })
 
-  it('章节级审批意见：点击"对本章添加审批意见"按钮，scope 为 chapter', async () => {
+  it('章节级审批意见：右键当前章节标题区域打开审批弹框，scope 为 chapter', async () => {
     const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
-    const chapterBtn = await screen.findByRole('button', { name: '对本章添加审批意见' })
-    fireEvent.click(chapterBtn)
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     expect(screen.getByText(/整个章节/)).toBeTruthy()
     const textareas = screen.getAllByRole('textbox')
@@ -549,13 +550,49 @@ describe('BidReviewWorkbench', () => {
     }
   })
 
+  it('章节级审批意见：右键左侧章节目录中可写章节，读取最新章节后打开弹框', async () => {
+    const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const leafButton = await screen.findByRole('button', { name: '1.1 实施方案' })
+    const treeRow = leafButton.closest('div[class*="treeRow"]')!
+    fireEvent.contextMenu(treeRow, { clientX: 80, clientY: 80 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
+    await screen.findByRole('dialog', { name: '添加审批意见' })
+    expect(screen.getByText(/整个章节/)).toBeTruthy()
+    const textareas = screen.getAllByRole('textbox')
+    fireEvent.change(textareas[0]!, { target: { value: '目录右键意见。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
+    await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
+    const call = addRevisionIssue.mock.calls[0]![0]
+    expect(call.scope).toBe('chapter')
+    expect(call.section_id).toBe('SEC-1')
+  })
+
+  it('非可写父节点章节右键不拦截，保留浏览器默认右键', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const rootButton = await screen.findByRole('button', { name: /技术方案/ })
+    const rootRow = rootButton.closest('div[class*="treeRow"]')!
+    const event = fireEvent.contextMenu(rootRow, { clientX: 100, clientY: 100 })
+    expect(event).toBe(true)
+    expect(screen.queryByRole('menu', { name: '章节操作' })).toBeNull()
+  })
+
   it('空修改意见时显示验证错误，不调用 addRevisionIssue', async () => {
     const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
-    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
     expect((await screen.findByRole('alert')).textContent).toBe('请填写修改意见。')
@@ -571,7 +608,9 @@ describe('BidReviewWorkbench', () => {
     })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     const callsBefore = getChapter.mock.calls.length
-    fireEvent.click(screen.getByRole('button', { name: '对本章添加审批意见' }))
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     const textareas = screen.getAllByRole('textbox')
     fireEvent.change(textareas[0]!, { target: { value: '意见' } })
@@ -589,7 +628,9 @@ describe('BidReviewWorkbench', () => {
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
-    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     const textareas = screen.getAllByRole('textbox')
     fireEvent.change(textareas[0]!, { target: { value: '意见' } })
@@ -607,7 +648,9 @@ describe('BidReviewWorkbench', () => {
       addRevisionIssue, getRevisionQueue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
-    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     const textareas = screen.getAllByRole('textbox')
     fireEvent.change(textareas[0]!, { target: { value: '意见' } })
@@ -652,14 +695,16 @@ describe('BidReviewWorkbench', () => {
       addRevisionIssue,
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
-    fireEvent.click(await screen.findByRole('button', { name: '对本章添加审批意见' }))
+    const title = await screen.findByRole('heading', { name: '实施方案' })
+    fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
     expect(addRevisionIssue).not.toHaveBeenCalled()
   })
 
-  it('addRevisionIssue 未注入时不显示"添加审批意见"菜单项和章节按钮', async () => {
+  it('addRevisionIssue 未注入时不显示"添加审批意见"菜单项且无临时按钮', async () => {
     render(<BidReviewWorkbench {...props({
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
@@ -672,5 +717,217 @@ describe('BidReviewWorkbench', () => {
     window.getSelection()!.addRange(range)
     fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
     expect(screen.queryByRole('menuitem', { name: '添加审批意见' })).toBeNull()
+    const title = screen.getByRole('heading', { name: '实施方案' })
+    const event = fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
+    expect(event).toBe(true)
+    expect(screen.queryByRole('menu', { name: '章节操作' })).toBeNull()
+  })
+
+  it('右键点击点位于选区外部段落时，不拦截右键且不显示选区菜单', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n\n中段内容。\n\n末段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('首段内容。')
+    const last = screen.getByText('末段内容。')
+    const range = document.createRange()
+    range.selectNodeContents(first)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    const event = fireEvent.contextMenu(last, { clientX: 200, clientY: 200 })
+    expect(event).toBe(true)
+    expect(screen.queryByRole('menu', { name: '选中段落操作' })).toBeNull()
+  })
+
+  it('选区为空或折叠时右键不拦截，保留浏览器原生右键', async () => {
+    const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+    render(<BidReviewWorkbench {...props({
+      addRevisionIssue,
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const text = await screen.findByText('章节正文')
+    window.getSelection()!.removeAllRanges()
+    const event = fireEvent.contextMenu(text, { clientX: 100, clientY: 100 })
+    expect(event).toBe(true)
+    expect(screen.queryByRole('menu', { name: '选中段落操作' })).toBeNull()
+  })
+
+  it('右键菜单支持"添加到对话框"，设置 reference 并关闭菜单', async () => {
+    const setReference = vi.fn()
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      actions: { setReference, clearReference: vi.fn(), notifyRevisionQueueChanged: vi.fn() },
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('首段内容。')
+    const range = document.createRange()
+    range.selectNodeContents(first)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    fireEvent.contextMenu(first, { clientX: 100, clientY: 100 })
+    const addItem = await screen.findByRole('menuitem', { name: '添加到对话框' })
+    fireEvent.click(addItem)
+    expect(setReference).toHaveBeenCalledTimes(1)
+    const ref = setReference.mock.calls[0]![0]
+    expect(ref.reference.scope).toBe('paragraphs')
+    expect(ref.reference.text).toBe('首段内容。')
+    expect(screen.queryByRole('menu', { name: '选中段落操作' })).toBeNull()
+  })
+
+  it('右键菜单在视口边缘时自适应定位，不溢出视口', async () => {
+    const markdown = '# 1.1 实施方案\n\n首段内容。\n'
+    render(<BidReviewWorkbench {...props({
+      getChapter: async () => ({ ...chapter, markdown }),
+      addRevisionIssue: vi.fn(),
+      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    })} />)
+    const first = await screen.findByText('首段内容。')
+    const range = document.createRange()
+    range.selectNodeContents(first)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    // 模拟在右下角 (window.innerWidth = 1024, window.innerHeight = 768)
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true })
+    Object.defineProperty(window, 'innerHeight', { value: 768, configurable: true })
+    fireEvent.contextMenu(first, { clientX: 1020, clientY: 760 })
+    const menu = await screen.findByRole('menu', { name: '选中段落操作' })
+    expect(menu.style.left).toBe(`${1024 - 160 - 8}px`)
+    expect(menu.style.top).toBe(`${768 - 88 - 8}px`)
+  })
+
+  describe('批量修订复用原进度条与轮询', () => {
+    it('1. 原 S5 无 Batch UI 不变：不出现第二进度条，文案保持正文统计', async () => {
+      render(<BidReviewWorkbench {...props({
+        getWorkbench: async () => workbench,
+      })} />)
+      expect(await screen.findByText('正文 1/1')).toBeTruthy()
+      expect(screen.queryByText(/修订进度/)).toBeNull()
+      expect(screen.queryByText(/批量修订/)).toBeNull()
+      expect(document.querySelectorAll('[class*="revisionBatchPill"]')).toHaveLength(0)
+    })
+
+    it('2. RevisionBatch 按 Issue 数统计：3 个章节 8 个 Issue 显示 3/8', async () => {
+      const batchWorkbench = {
+        ...workbench,
+        outline: [
+          workbench.outline[0]!,
+          { ...workbench.outline[1]!, section_id: 'SEC-1', revision: { batch_id: 'B1', task_id: 'T1', status: 'completed' as const, issue_count: 4 } },
+          { ...workbench.outline[1]!, section_id: 'SEC-2', revision: { batch_id: 'B1', task_id: 'T2', status: 'running' as const, issue_count: 3 } },
+          { ...workbench.outline[1]!, section_id: 'SEC-3', revision: { batch_id: 'B1', task_id: 'T3', status: 'queued' as const, issue_count: 1 } },
+        ],
+        revision_batch: {
+          batch_id: 'B1', status: 'running' as const, total_issues: 8,
+          completed: 3, running: 2, pending: 3, needs_input: 0, failed: 0, conflict: 0,
+        },
+      }
+      render(<BidReviewWorkbench {...props({ getWorkbench: async () => batchWorkbench })} />)
+      expect(await screen.findByText('修订进度 3/8')).toBeTruthy()
+      expect(screen.queryByText('正文 1/1')).toBeNull()
+      expect(screen.queryByText('1/3')).toBeNull()
+    })
+
+    it('3. 一个章节多 Issue 场景：单章多个已完成 Issue 按 Issue 变化而非 task 数', async () => {
+      const batchWorkbench = {
+        ...workbench,
+        outline: [
+          workbench.outline[0]!,
+          { ...workbench.outline[1]!, section_id: 'SEC-A', revision: { batch_id: 'B1', task_id: 'T1', status: 'running' as const, issue_count: 6 } },
+          { ...workbench.outline[1]!, section_id: 'SEC-B', revision: { batch_id: 'B1', task_id: 'T2', status: 'queued' as const, issue_count: 1 } },
+        ],
+        revision_batch: {
+          batch_id: 'B1', status: 'running' as const, total_issues: 7,
+          completed: 4, running: 2, pending: 1, needs_input: 0, failed: 0, conflict: 0,
+        },
+      }
+      render(<BidReviewWorkbench {...props({ getWorkbench: async () => batchWorkbench })} />)
+      expect(await screen.findByText('修订进度 4/7')).toBeTruthy()
+      expect(screen.queryByText('0/2')).toBeNull()
+      expect(screen.queryByText('1/2')).toBeNull()
+    })
+
+    it('4. terminal 异常状态计入已处理并达到 100%，异常统计仍单独显示', async () => {
+      const batchWorkbench = {
+        ...workbench,
+        revision_batch: {
+          batch_id: 'B1', status: 'completed' as const, total_issues: 8,
+          completed: 5, needs_input: 1, failed: 1, conflict: 1, running: 0, pending: 0,
+        },
+      }
+      render(<BidReviewWorkbench {...props({ getWorkbench: async () => batchWorkbench })} />)
+      expect(await screen.findByText('修订进度 8/8')).toBeTruthy()
+      const batchPill = document.querySelector('[class*="revisionBatchPill"]')
+      expect(batchPill).toBeTruthy()
+      expect(batchPill?.textContent).toContain('待补资料 1')
+      expect(batchPill?.textContent).toContain('正文冲突 1')
+      expect(batchPill?.textContent).toContain('失败 1')
+    })
+
+    it('5. pending Issue 但 Batch 尚未创建：不切换到修订进度', async () => {
+      render(<BidReviewWorkbench {...props({
+        getWorkbench: async () => workbench,
+      })} />)
+      expect(await screen.findByText('正文 1/1')).toBeTruthy()
+      expect(screen.queryByText(/修订进度/)).toBeNull()
+    })
+
+    it('6. 实时轮询：projection 处于 completed 但 revision_batch 为 running 时持续轮询并实时刷新', async () => {
+      vi.useFakeTimers()
+      try {
+        let count = 0
+        const getWorkbench = vi.fn(async () => {
+          count++
+          const completed = count === 1 ? 1 : count === 2 ? 3 : count === 3 ? 6 : 8
+          return {
+            ...workbench,
+            revision_batch: {
+              batch_id: 'B1', status: 'running' as const, total_issues: 8,
+              completed, running: 8 - completed, pending: 0, needs_input: 0, failed: 0, conflict: 0,
+            },
+          }
+        })
+        render(<BidReviewWorkbench {...props({
+          getWorkbench,
+          useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+        })} />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+        expect(screen.getByText('修订进度 1/8')).toBeTruthy()
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+        expect(screen.getByText('修订进度 3/8')).toBeTruthy()
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+        expect(screen.getByText('修订进度 6/8')).toBeTruthy()
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+        expect(screen.getByText('修订进度 8/8')).toBeTruthy()
+        expect(getWorkbench.mock.calls.length).toBeGreaterThanOrEqual(4)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('7. 完成后停止轮询：revision_batch 处于 completed 且普通 S5 不在 running 时停止轮询', async () => {
+      vi.useFakeTimers()
+      try {
+        const getWorkbench = vi.fn(async () => ({
+          ...workbench,
+          revision_batch: {
+            batch_id: 'B1', status: 'completed' as const, total_issues: 8,
+            completed: 8, running: 0, pending: 0, needs_input: 0, failed: 0, conflict: 0,
+          },
+        }))
+        render(<BidReviewWorkbench {...props({
+          getWorkbench,
+          useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+        })} />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+        const initialCalls = getWorkbench.mock.calls.length
+        await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+        expect(getWorkbench.mock.calls.length).toBe(initialCalls)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 })

@@ -52,6 +52,15 @@ export const revisionBatchTaskSchema = z.object({
   completed_at: z.number().int().nonnegative().nullable(),
 }).strict()
 
+/** 模型与浏览器提交的批次任务规划字段；status 等运行时状态由 Host 在创建 artifact 时填充。 */
+export const revisionBatchTaskInputSchema = revisionBatchTaskSchema.pick({
+  task_id: true,
+  section_id: true,
+  issue_ids: true,
+  depends_on: true,
+  dependency_reason: true,
+})
+
 /** 批次状态。 */
 export const revisionBatchStatusSchema = z.enum([
   'planning', 'running', 'suspended', 'completed', 'failed',

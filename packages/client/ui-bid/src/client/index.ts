@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { BidAddRevisionIssueRequest, BidRevisionQueueResult, BidRevisionQueueView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidAddRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
 import { BidConfirmationModeControl, BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
@@ -163,10 +163,7 @@ export function apply(ctx: ClientContext): void {
       registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
         ctx.conversation.submitHandlers.register(sessionId, handler),
       getRevisionQueue: async () => {
-        const remote = ctx.remote.bid as unknown as {
-          getRevisionQueue(id: SessionId): Promise<BidRevisionQueueResult>
-        }
-        const result = await remote.getRevisionQueue(sessionId)
+        const result = await ctx.remote.bid.getRevisionQueue(sessionId)
         if (!result.ok) throw actionFailure(result.error)
         return result.value
       },
@@ -176,25 +173,19 @@ export function apply(ctx: ClientContext): void {
         instruction?: string
         suggestion?: string | null
       }) => {
-        type UpdateRequest = { issue_id: string; expected_queue_revision: number; instruction?: string; suggestion?: string | null }
-        const remote = ctx.remote.bid as unknown as {
-          updateRevisionIssue(id: SessionId, req: UpdateRequest): Promise<BidRevisionQueueResult>
-        }
-        const result = await remote.updateRevisionIssue(sessionId, request)
+        const result = await ctx.remote.bid.updateRevisionIssue(sessionId, request)
         if (!result.ok) throw actionFailure(result.error)
-        return result.value
+        if (!result.value.ok) throw actionFailure(result.value.error)
+        return result.value.value
       },
       deleteRevisionIssue: async (request: {
         issue_id: string
         expected_queue_revision: number
       }) => {
-        type DeleteRequest = { issue_id: string; expected_queue_revision: number }
-        const remote = ctx.remote.bid as unknown as {
-          deleteRevisionIssue(id: SessionId, req: DeleteRequest): Promise<BidRevisionQueueResult>
-        }
-        const result = await remote.deleteRevisionIssue(sessionId, request)
+        const result = await ctx.remote.bid.deleteRevisionIssue(sessionId, request)
         if (!result.ok) throw actionFailure(result.error)
-        return result.value
+        if (!result.value.ok) throw actionFailure(result.value.error)
+        return result.value.value
       },
     }),
   }, BidComposerContext))
@@ -388,8 +379,6 @@ export function apply(ctx: ClientContext): void {
           value: unknown
           error: Parameters<typeof actionFailure>[0]
         }>
-        getRevisionQueue(id: SessionId): Promise<BidRevisionQueueView>
-        addRevisionIssue(id: SessionId, request: BidAddRevisionIssueRequest): Promise<BidRevisionQueueResult>
       }
       return {
         getWorkbench: async () => {
@@ -402,11 +391,16 @@ export function apply(ctx: ClientContext): void {
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
         },
-        getRevisionQueue: () => remote.getRevisionQueue(sessionId),
-        addRevisionIssue: async (request: BidAddRevisionIssueRequest) => {
-          const result = await remote.addRevisionIssue(sessionId, request)
+        getRevisionQueue: async () => {
+          const result = await ctx.remote.bid.getRevisionQueue(sessionId)
           if (!result.ok) throw actionFailure(result.error)
           return result.value
+        },
+        addRevisionIssue: async (request: BidAddRevisionIssueRequest) => {
+          const result = await ctx.remote.bid.addRevisionIssue(sessionId, request)
+          if (!result.ok) throw actionFailure(result.error)
+          if (!result.value.ok) throw actionFailure(result.value.error)
+          return result.value.value
         },
         openWordExport: () => {
           const conversation = ctx.sessions.scope(sessionId)?.get('conversation')

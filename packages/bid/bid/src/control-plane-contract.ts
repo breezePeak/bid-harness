@@ -549,7 +549,8 @@ export interface BidReviewWorkbenchView {
     readonly pending: number
     readonly needs_input: number
     readonly failed: number
-  }
+    readonly conflict: number
+  } | undefined
 }
 
 /** 批量修订中单个 task 的浏览器安全状态。 */
@@ -651,6 +652,7 @@ const reviewWorkbenchSchema = z.strictObject({
     pending: z.number().int().nonnegative(),
     needs_input: z.number().int().nonnegative(),
     failed: z.number().int().nonnegative(),
+    conflict: z.number().int().nonnegative(),
   }).optional(),
 })
 

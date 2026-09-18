@@ -56,7 +56,7 @@ it('章节引用提交原样透传 steer 和 signal，发送成功后才清除�
   await act(async () => {
     await expect(view.submit('请继续这一节', [], signal, 'steer')).resolves.toEqual({ kind: 'success' })
   })
-  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'), 'steer', signal)
+  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'), 'steer', signal, undefined)
   expect(view.store.getSnapshot().reference).toBeNull()
 })
 
@@ -68,7 +68,7 @@ it('章节引用默认保留 queue，未带引用交还普通发送', async () =
   await act(async () => {
     await expect(view.submit('排队修改', [], undefined, 'queue')).resolves.toEqual({ kind: 'success' })
   })
-  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('排队修改'), 'queue', undefined)
+  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('排队修改'), 'queue', undefined, undefined)
 })
 
 it('章节引用发送失败不清除引用且不重复发送', async () => {

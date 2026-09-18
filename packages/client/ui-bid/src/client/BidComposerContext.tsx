@@ -44,6 +44,7 @@ export function BidComposerContext({
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const reference = useStore(state => state.reference)
+  const queueRevisionSignal = useStore(state => state.queueRevisionSignal)
   const enabled = isBid && (projection?.runtime.stage === 'docx_export'
     || projection?.runtime.stage === 'chapter_writing'
       && ['running', 'attention_required', 'completed'].includes(projection.runtime.status))
@@ -75,7 +76,7 @@ export function BidComposerContext({
   useEffect(() => {
     if (!enabled) return
     void refreshQueue()
-  }, [enabled, refreshQueue])
+  }, [enabled, refreshQueue, queueRevisionSignal])
 
   const startEdit = (issue: BidRevisionIssueView): void => {
     setEditingIssue(issue)
@@ -214,9 +215,9 @@ export function BidComposerContext({
   useEffect(() => () => { requestVersion.current++ }, [sessionId])
 
   if (!enabled) return null
-  const visibleIssues = queue?.issues.filter(issue =>
+  const visibleIssues = queue?.issues?.filter(issue =>
     issue.status === 'pending' || issue.status === 'scheduled' || issue.status === 'running') ?? []
-  const pendingCount = queue?.issues.filter(issue => issue.status === 'pending').length ?? 0
+  const pendingCount = queue?.issues?.filter(issue => issue.status === 'pending').length ?? 0
   return <div ref={rootRef} className={css.root} data-bid-composer-context="">
     {visibleIssues.length > 0 && (
       <div className={css.queue}>
