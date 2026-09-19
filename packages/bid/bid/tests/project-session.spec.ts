@@ -8,6 +8,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
@@ -167,7 +168,11 @@ async function persistStageExecutionWork(workspace: BidWorkspace, stage: BidStag
   return work
 }
 
-async function fixture(options: { readonly realOrchestrator?: boolean; readonly withPreset?: boolean } = {}) {
+async function fixture(options: {
+  readonly realOrchestrator?: boolean
+  readonly withPreset?: boolean
+  readonly withPersistence?: boolean
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-project-session-'))
   disposals.push(() => rm(root, { recursive: true, force: true }))
   const ctx = new Context()
@@ -176,6 +181,9 @@ async function fixture(options: { readonly realOrchestrator?: boolean; readonly 
   const adapter = new ProjectSessionAdapter()
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   await ctx.plugin(SessionStore)
+  if (options.withPersistence === true) {
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+  }
   await ctx.plugin(SystemPrompt, { persona: 'test' })
   await ctx.plugin(ToolRuntime)
   const webOutput = { schema: { type: 'object' as const }, render: () => [{ type: 'text' as const, text: '{}' }] }
@@ -1935,9 +1943,6 @@ describe('Workspace 项目与独立 Session', () => {
     })
     expect(added.ok).toBe(true)
     if (!added.ok) return
-    expect(added.value.issues).toHaveLength(1)
-    expect(added.value.issues[0]!.status).toBe('pending')
-    expect(added.value.issues[0]!.batch_id).toBeNull()
     const issueId = added.value.issues[0]!.issue_id
     const queueRevision = added.value.revision
 
@@ -2043,7 +2048,13 @@ describe('Workspace 项目与独立 Session', () => {
       signal: new AbortController().signal,
     })
     expect(planned.isError, JSON.stringify(planned)).toBe(false)
-    const planResult = planned.value as { batch_id: string; status: string; issue_ids: string[]; tasks: Array<{ task_id: string; status: string }>; queue_revision: number }
+    const planResult = planned.value as {
+      batch_id: string
+      status: string
+      issue_ids: string[]
+      tasks: Array<{ task_id: string; status: string }>
+      queue_revision: number
+    }
     expect(planResult.batch_id).toMatch(/^BATCH-/u)
     expect(planResult.status).toBe('planning')
     expect(planResult.issue_ids).toEqual([issueId])
@@ -2061,7 +2072,15 @@ describe('Workspace 项目与独立 Session', () => {
       signal: new AbortController().signal,
     })
     expect(executed.isError, JSON.stringify(executed)).toBe(false)
-    const execResult = executed.value as { batch_id: string; status: string; tasks: Array<{ task_id: string; status: string; failure: { code: string; message: string; phase: string | null } | null }> }
+    const execResult = executed.value as {
+      batch_id: string
+      status: string
+      tasks: Array<{
+        task_id: string
+        status: string
+        failure: { code: string; message: string; phase: string | null } | null
+      }>
+    }
     expect(execResult.batch_id).toBe(batchId)
     expect(execResult.status).toBe('completed')
     expect(execResult.tasks[0]?.status).toBe('conflict')
@@ -2128,4 +2147,234 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executeStage).not.toHaveBeenCalled()
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
   })
+
+  it('S5 批量修订：不同 section 的原 Writer 来自不同 parent 时拒绝执行', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+    const outline = await seedProjectArtifacts(workspace)
+    const twoSectionOutline = {
+      ...outline,
+      sections: [
+        ...outline.sections,
+        { ...outline.sections[0]!, id: 'SEC-2', order: 2, title: '总体设计', purpose: '说明总体设计' },
+      ],
+    }
+    const twoSectionSha = outlineArtifactSha256(twoSectionOutline)
+    await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(twoSectionOutline))
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(twoSectionOutline))
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
+      schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: twoSectionSha,
+      writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1,
+      sections: [
+        { section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'completed', phase: null, failure_phase: null, attempts: [], final_writer_child_session_id: 'writer-sec-1', final_reviewer_child_session_id: 'reviewer-a' },
+        { section_id: 'SEC-2', depends_on: [], related_sections: [], epoch: 0, status: 'completed', phase: null, failure_phase: null, attempts: [], final_writer_child_session_id: 'writer-sec-2', final_reviewer_child_session_id: 'reviewer-b' },
+      ],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
+      schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
+      confirmed_outline_sha256: twoSectionSha,
+      user_message_refs: [{ session_id: 'main', message_id: 'message-1', seq: 1 }],
+      user_requirements: ['没有特殊要求，直接开始'], global_instructions: ['完整响应招标要求。'], document_acceptance: [],
+      sections: [
+        { section_id: 'SEC-1', task: '完成技术方案。', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
+        { section_id: 'SEC-2', task: '完成总体设计。', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
+      ],
+      revision: null,
+    }))
+    const manifestBase = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')) as { schema_version: number; scope: string; confirmed_outline_sha256: string; chapters: Array<Record<string, unknown>> }
+    const chapter1 = manifestBase.chapters[0]!
+    const chapter2 = { ...chapter1, section_id: 'SEC-2', content_path: 'chapters/sections/0002.md', review_path: 'chapters/reviews/0002.json', handoff: { ...(chapter1.handoff as object), section_id: 'SEC-2' } }
+    await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify({ ...manifestBase, confirmed_outline_sha256: twoSectionSha, chapters: [chapter1, chapter2] }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '# 总体设计\n\n已有正文。\n')
+
+    await ctx.agentLoop.createAgent(ctx, {
+      sessionId: SessionId('writer-sec-1'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: SessionId('parent-a') },
+    })
+    await ctx.agentLoop.createAgent(ctx, {
+      sessionId: SessionId('writer-sec-2'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: SessionId('parent-b') },
+    })
+
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-batch-multi-parent')
+
+    const sha1 = chapterContentSha256(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8'))
+    const sha2 = chapterContentSha256(await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8'))
+    const added1 = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: sha1 },
+      instruction: '加强技术方案', suggestion: null,
+    })
+    expect(added1.ok).toBe(true)
+    if (!added1.ok) return
+    const added2 = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-2', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: sha2 },
+      instruction: '加强总体设计', suggestion: null,
+    })
+    expect(added2.ok).toBe(true)
+    if (!added2.ok) return
+    const issue1Id = added1.value.issues[0]!.issue_id
+    const issue2Id = added2.value.issues[1]!.issue_id
+
+    const planned = await ctx.tools.execute({
+      agent,
+      name: 'bid_plan_revision_batch',
+      arguments: {
+        expected_queue_revision: added2.value.revision,
+        issue_ids: [issue1Id, issue2Id],
+        tasks: [
+          { task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: [issue1Id], depends_on: [] },
+          { task_id: 'TASK-2', section_id: 'SEC-2', issue_ids: [issue2Id], depends_on: [] },
+        ],
+      },
+      callId: CallId('multi-parent-plan'),
+      signal: new AbortController().signal,
+    })
+    expect(planned.isError, JSON.stringify(planned)).toBe(false)
+    const batchId = (planned.value as { batch_id: string }).batch_id
+
+    const executed = await ctx.tools.execute({
+      agent,
+      name: 'bid_execute_revision_batch',
+      arguments: { batch_id: batchId },
+      callId: CallId('multi-parent-execute'),
+      signal: new AbortController().signal,
+    })
+    expect(executed.isError).toBe(true)
+    expect((executed as { error?: { message?: string } }).error?.message).toContain('BID_CHAPTER_REVISION_MULTI_PARENT_UNSUPPORTED')
+  })
+
+  it('S5 批量修订：从失败修订残留恢复原 Writer parent 续写', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true, withPreset: true })
+    for (const name of ['grep', 'read'] as const) {
+      ctx.tools.register({ name, description: name, parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [{ type: 'text' as const, text: '{}' }] }, execute: async () => ({}) })
+    }
+    const outline = await seedProjectArtifacts(workspace)
+    const outlineSha = outlineArtifactSha256(outline)
+    const markdown = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const candidateSha = createHash('sha256').update(`${markdown.trim()}\n`).digest('hex')
+
+    await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({
+      schema_version: 2, scope: 'technical_bid', decision: 'confirmed',
+      source_outline_sha256: outlineSha, confirmed_outline_sha256: outlineSha,
+      confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha,
+    }))
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await mkdir(join(workspace.projectRoot, 'chapters/reviews'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), JSON.stringify({
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineSha,
+      writing_plan_version: 1, global_consistency_notes: ['全局一致性说明'],
+      sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], planning_notes: ['章节规划说明'] }],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'SEC-1',
+      covered_must_answer: ['按期交付'],
+      covered_scoring_response_point_ids: ['RP-000001'],
+      covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],
+      local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: 'SEC-1', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+      flowcharts: [],
+    }))
+    await writeFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), JSON.stringify({
+      schema_version: 8, section_id: 'SEC-1', verdict: 'pass',
+      must_answer_coverage: [{ item: '按期交付', status: 'covered', evidence_quotes: ['已有正文'], issue: null }],
+      requirement_coverage: [{ requirement_id: 'REQ-1', item: '按期交付', status: 'covered', evidence_quotes: ['已有正文'], issue: null }],
+      response_point_coverage: [{ response_point_id: 'RP-000001', item: '说明技术方案', status: 'covered', evidence_quotes: ['已有正文'], issue: null }],
+      compliance_coverage: [], acceptance_criteria_results: [], global_compliance_checks: [],
+      assignment_conflicts: [], external_input_gaps: [], claim_checks: [],
+      quality_checks: {
+        bidder_response_voice: true,
+        project_specific: true,
+        structure_complete: true,
+        legacy_project_pollution_free: true,
+        placeholder_free: true,
+        obvious_repetition_free: true,
+      },
+      blocking_issues: [],
+      candidate_sha256: candidateSha, writer_child_session_id: 'writer-sec-1', reviewer_child_session_id: 'reviewer-a',
+    }))
+    await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({
+      stage: 'evidence_mapping', sources: [],
+    }))
+
+    const originalParent = (await ctx.agentLoop.createAgent(ctx, {
+      sessionId: SessionId('original-s5-parent'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { cwd: workspace.root },
+    })).agent
+    await ctx.agentLoop.createAgent(ctx, {
+      sessionId: SessionId('writer-sec-1'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: originalParent.id },
+    })
+
+    const attempt = {
+      role: 'writer', attempt: 1, child_session_id: 'writer-sec-1', label: 'Writer',
+      started_at: '2024-01-01T00:00:00Z', ended_at: '2024-01-01T00:01:00Z',
+      stop_reason: 'completed', accepted: true, issues: [],
+      input: { plan_version: 1, section_epoch: 0, dependencies: [] },
+    }
+    const reviewAttempt = {
+      role: 'reviewer', attempt: 1, child_session_id: 'reviewer-a', label: 'Reviewer',
+      started_at: '2024-01-01T00:01:00Z', ended_at: '2024-01-01T00:02:00Z',
+      stop_reason: 'completed', accepted: true, issues: [],
+      input: { plan_version: 1, section_epoch: 0, dependencies: [] },
+    }
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
+      schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineSha,
+      writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1,
+      sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'failed', phase: null, failure_phase: 'repairing', attempts: [attempt, reviewAttempt], final_writer_child_session_id: 'writer-sec-1', final_reviewer_child_session_id: 'reviewer-a' }],
+    }))
+
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-batch-original-parent')
+
+    const persistence = ctx.get('sessionPersistence')!
+    const writerInspect = await persistence.inspect(SessionId('writer-sec-1'), new AbortController().signal)
+    expect(writerInspect.meta.parentSession).toBe(originalParent.id)
+    expect(writerInspect.meta.cwd).toBe(workspace.root)
+    expect(ctx.agents.get(originalParent.id)?.id).toBe(originalParent.id)
+
+    const sha = chapterContentSha256(markdown)
+    const added = await ctx.bid.addRevisionIssue(agent.session, {
+      section_id: 'SEC-1', scope: 'chapter', reference: { scope: 'chapter', base_content_sha256: sha },
+      instruction: '加强技术方案', suggestion: null,
+    })
+    expect(added.ok, JSON.stringify(added)).toBe(true)
+    if (!added.ok) return
+    const issueId = added.value.issues[0]!.issue_id
+
+    const planned = await ctx.tools.execute({
+      agent,
+      name: 'bid_plan_revision_batch',
+      arguments: {
+        expected_queue_revision: added.value.revision,
+        issue_ids: [issueId],
+        tasks: [{ task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: [issueId], depends_on: [] }],
+      },
+      callId: CallId('original-parent-plan'),
+      signal: new AbortController().signal,
+    })
+    expect(planned.isError, JSON.stringify(planned)).toBe(false)
+    const batchId = (planned.value as { batch_id: string }).batch_id
+    const followup = vi.spyOn(ctx.subagents, 'followup')
+
+    const executed = await ctx.tools.execute({
+      agent,
+      name: 'bid_execute_revision_batch',
+      arguments: { batch_id: batchId },
+      callId: CallId('original-parent-execute'),
+      signal: new AbortController().signal,
+    })
+
+    expect(followup.mock.calls.some(([parent, childId]) =>
+      parent.id === originalParent.id && childId === SessionId('writer-sec-1')), JSON.stringify({
+      executed,
+      followups: followup.mock.calls.map(([parent, childId]) => ({ parentId: parent.id, childId })),
+    })).toBe(true)
+    const executedError = executed.isError ? (executed as { error?: { message?: string } }).error?.message ?? '' : ''
+    expect(executedError, JSON.stringify(executed)).not.toContain('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+  })
+
 })

@@ -5182,8 +5182,10 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * 恢复批次中各 section 原 Writer 的 parent agent，执行批量修订后发布结果。
    * 原 Writer 不可恢复时抛出 BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE。
+   * 批次内 section 的原 Writer 来自不同 parent 时抛出 BID_CHAPTER_REVISION_MULTI_PARENT_UNSUPPORTED，
+   * 本次仅支持单一原 parent；执行时复用该原 parent 而非本次执行 agent，避免原 Writer parentSession 校验失败。
    * @param session Bid Main Session。
-   * @param executionAgent 当前执行 agent。
+   * @param executionAgent 当前执行 agent，仅当其本身即原 parent 时直接复用。
    * @param canonical 规范工作区。
    * @param batchExecutionInput 批次执行输入。
    * @param run 当前 Run 上下文。
@@ -5219,14 +5221,21 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       parentIds.add(parentId)
     }
-    const resumedParents: AgentHandle[] = []
+    if (parentIds.size !== 1) {
+      throw new Error('BID_CHAPTER_REVISION_MULTI_PARENT_UNSUPPORTED')
+    }
+    const parentId = [...parentIds][0]
+    if (parentId === undefined) {
+      throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+    }
+    let resumedParent: AgentHandle | undefined
     try {
-      const presets = this.ctx.get('agentPresets')
-      for (const parentId of parentIds) {
-        if (parentId === executionAgent.id) continue
-        if (this.ctx.agents.get(parentId) !== undefined) continue
+      let revisionParent =
+        parentId === executionAgent.id ? executionAgent : this.ctx.agents.get(parentId)
+      if (revisionParent === undefined) {
         const parentSession = await persistence.inspect(parentId, run.signal)
-        const resumedParent = await this.ctx.agents.resume({
+        const presets = this.ctx.get('agentPresets')
+        resumedParent = await this.ctx.agents.resume({
           resumeSessionId: parentId,
           signal: run.signal,
           async setup(parentContext) {
@@ -5237,9 +5246,13 @@ export class BidHostRuntime extends TypertRemoteService {
             }))
           },
         })
-        resumedParents.push(resumedParent)
+        revisionParent = resumedParent.agent
       }
-      await executeChapterWriting(executionAgent, candidate.workspace, buildBidStageTask('chapter_writing'), {
+      if (revisionParent.session.header.cwd === undefined
+        || projectKey(revisionParent.session) !== projectKey(session)) {
+        throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      }
+      await executeChapterWriting(revisionParent, candidate.workspace, buildBidStageTask('chapter_writing'), {
         maxRepairAttempts: this.config.modelStageRepairAttempts,
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
         maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
@@ -5249,7 +5262,7 @@ export class BidHostRuntime extends TypertRemoteService {
       })
       await publishBidWorkingPaths(run, canonical, candidate.workspace, ['chapters'])
     } finally {
-      for (const parent of resumedParents) await parent.dispose()
+      await resumedParent?.dispose()
     }
   }
 
@@ -5296,7 +5309,9 @@ export class BidHostRuntime extends TypertRemoteService {
         }
         currentBatch = updateRevisionBatchTaskStatus(currentBatch, task.task_id, {
           status: sectionLog.failure_phase === 'blocked' ? 'blocked' : 'failed',
-          failure: {
+          // Writer 已经把可诊断的失败写入 task artifact；只在旧 artifact
+          // 没有失败详情时回退到章节日志，避免结算阶段覆盖根因。
+          failure: currentTask?.failure ?? {
             code: 'SECTION_FAILED',
             message: '章节执行失败',
             phase: sectionLog.failure_phase,

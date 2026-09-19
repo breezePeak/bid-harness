@@ -1061,6 +1061,7 @@ async function loadChapterCheckpoint(
   maxConcurrency: number,
   writingPlanInvalidations: ReadonlySet<string>,
   writingPlanVersion: number,
+  recoverCompletedRevisionArtifacts: boolean,
 ): Promise<ChapterCheckpoint | undefined> {
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
@@ -1086,7 +1087,8 @@ async function loadChapterCheckpoint(
         || JSON.stringify(log.related_sections) !== JSON.stringify(planned.related_sections.map(item => item.section_id))) {
         return undefined
       }
-      if (log.status !== 'completed') {
+      // 修订失败不撤销此前已提交的章节；只有修订恢复路径可通过下方完整产物校验恢复完成状态。
+      if (log.status !== 'completed' && !recoverCompletedRevisionArtifacts) {
         log.status = 'pending'
         log.phase = 'queued'
         log.failure_phase = null
@@ -1134,6 +1136,9 @@ async function loadChapterCheckpoint(
           || validateChapterReview(context, candidate, review).length > 0) throw new Error('checkpoint-review-invalid')
           completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
           drafts.delete(section.id)
+          log.status = 'completed'
+          log.phase = null
+          log.failure_phase = null
         } catch {
           if (candidateBytesChanged) throw new Error('checkpoint-candidate-changed')
           log.status = 'pending'
@@ -1806,10 +1811,12 @@ async function runChapterWriting(
     : writingPlan.plan_version
   let checkpoint = await loadChapterCheckpoint(
     workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations, checkpointVersion,
+    revision !== undefined || revisionBatch !== undefined,
   )
   if (checkpoint === undefined && checkpointVersion !== writingPlan.plan_version) {
     checkpoint = await loadChapterCheckpoint(
       workspace, outline, outlineHash, contexts, options.maxConcurrency, new Set(), writingPlan.plan_version,
+      revision !== undefined || revisionBatch !== undefined,
     )
   }
   const originalWriterId = revision === undefined ? undefined

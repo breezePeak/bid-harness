@@ -13,6 +13,7 @@ import type {
 import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BidReviewWorkbench } from '../src/client/BidReviewWorkbench.tsx'
 import { BidComposerContext } from '../src/client/BidComposerContext.tsx'
+import { BidStagePanel } from '../src/client/BidStagePanel.tsx'
 import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 
 afterEach(() => {
@@ -93,6 +94,10 @@ const mockChapter: BidReviewChapterView = {
   review: { status: 'reviewing', issues: [] },
 }
 
+async function openRevisionPanel(): Promise<void> {
+  fireEvent.click(await screen.findByRole('button', { name: '展开批量审核修改' }))
+}
+
 describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
   function setupCompositionEnvironment() {
     const store = createBidRevisionStore().create()
@@ -105,6 +110,12 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         revision: currentRevision,
         issues: [...issues],
       }
+    })
+
+    let revisionQueueListener: (() => void) | null = null
+    const subscribeRevisionQueueChanged = vi.fn((listener: () => void) => {
+      revisionQueueListener = listener
+      return () => { revisionQueueListener = null }
     })
 
     const remoteAddIssue = vi.fn(async (request: BidAddRevisionIssueRequest): Promise<BidRevisionQueueView> => {
@@ -123,6 +134,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         updated_at: Date.now(),
       }
       issues.push(newIssue)
+      revisionQueueListener?.()
       return {
         schema_version: 1,
         revision: currentRevision,
@@ -149,8 +161,36 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         renderSlot: (name: string) => <div data-slot={name} />,
         getWorkbench: remoteGetWorkbench,
         getChapter: remoteGetChapter,
-        getRevisionQueue: remoteQueue,
         addRevisionIssue: remoteAddIssue,
+      }
+
+      const stagePanelProps = {
+        sessionId: 'bid' as SessionId,
+        disabled: false,
+        useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
+        useProjection: () => ({
+          allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing'],
+          runtime: { stage: 'chapter_writing', status: 'running' },
+          composer: { enabled: true },
+        }),
+        useStore: (select: (state: { mode: string }) => unknown) => select({ mode: 'manual' }),
+        actions: { setMode: vi.fn(), markAttempted: vi.fn(), clearAttempted: vi.fn() },
+        t: ((key: string) => key) as unknown as (_key: string) => string,
+        getDetails: vi.fn(async () => ({})),
+        setDetailsAvailable: vi.fn(),
+        setComposerBlock: vi.fn(),
+        selectReviewView: vi.fn(),
+        setReviewViewAvailable: vi.fn(),
+        reviewSurface: { host: () => null, subscribe: () => () => {} },
+        uploadFiles: vi.fn(async () => []),
+        getDocxLibrary: vi.fn(async () => ({ templates: [], templateMaxBytes: 1024, revision: 1 })),
+        uploadDocxTemplate: vi.fn(),
+        getRevisionQueue: remoteQueue,
+        updateRevisionIssue: vi.fn(),
+        deleteRevisionIssue: vi.fn(),
+        startRevisionBatch: vi.fn(async () => {}),
+        locateChapter: vi.fn(),
+        subscribeRevisionQueueChanged,
       }
 
       const composerProps = {
@@ -165,16 +205,16 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         getChapter: remoteGetChapter,
         sendMessage: vi.fn(async () => {}),
         registerSubmit: (_handler: ComposerSubmitHandler) => () => {},
-        getRevisionQueue: remoteQueue,
       }
 
       return (
         <div data-testid="composition-root">
           <div data-testid="review-panel">
-            <BidReviewWorkbench {...(workbenchProps as any)} />
+            <BidReviewWorkbench {...(workbenchProps as unknown as Parameters<typeof BidReviewWorkbench>[0])} />
           </div>
           <div data-testid="composer-dock">
-            <BidComposerContext {...(composerProps as any)} />
+            <BidStagePanel {...(stagePanelProps as unknown as Parameters<typeof BidStagePanel>[0])} />
+            <BidComposerContext {...(composerProps as unknown as Parameters<typeof BidComposerContext>[0])} />
             <textarea aria-label="编写意见" />
           </div>
         </div>
@@ -225,12 +265,9 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
     expect(await screen.findByRole('heading', { name: '添加审批意见' })).toBeTruthy()
     expect(screen.getByText(/实施方案详解 · 1 段/)).toBeTruthy()
 
-    // 6. 填写修改意见、修改建议
+    // 6. 填写修改意见
     const instructionInput = screen.getByLabelText(/修改意见/)
     fireEvent.change(instructionInput, { target: { value: '必须补充项目经理高级工程师证书扫描件' } })
-
-    const suggestionInput = screen.getByLabelText(/修复建议/)
-    fireEvent.change(suggestionInput, { target: { value: '建议附在资质证明附录中' } })
 
     // 7. 点击保存（添加到待处理意见）
     const saveBtn = screen.getByRole('button', { name: '添加到待处理意见' })
@@ -249,15 +286,16 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
           text: expect.any(String),
         }),
         instruction: '必须补充项目经理高级工程师证书扫描件',
-        suggestion: '建议附在资质证明附录中',
+        suggestion: null,
       })
     })
 
-    // 9. 验证：ComposerContext 内部在没有任何整页刷新、没有点击任何外部按钮的情况下，立即展示出新增的 Issue 卡片！
-    expect(await screen.findByText(/待处理审批意见 1/)).toBeTruthy()
+    // 9. 底部入口打开批量审核修改浮层并展示新增意见，Composer 上方不显示队列
+    await openRevisionPanel()
+    expect(await screen.findByRole('list', { name: '待修复与修复中，共 1 条' })).toBeTruthy()
     expect(screen.getByText('ISSUE-1')).toBeTruthy()
     expect(screen.getByText('必须补充项目经理高级工程师证书扫描件')).toBeTruthy()
-    expect(screen.getByText('建议附在资质证明附录中')).toBeTruthy()
+    expect(screen.queryByText(/待处理审批意见/)).toBeNull()
   })
 
   it('Case 2: 左侧章节目录右键添加审批意见完整链路 -> scope: chapter 且 Composer 立即展示', async () => {
@@ -300,8 +338,9 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
       })
     })
 
-    // 7. 验证 Composer 立即出现该卡片
-    expect(await screen.findByText(/待处理审批意见 1/)).toBeTruthy()
+    // 7. 验证浮层立即出现该卡片
+    await openRevisionPanel()
+    expect(await screen.findByRole('list', { name: '待修复与修复中，共 1 条' })).toBeTruthy()
     expect(screen.getByText('ISSUE-1')).toBeTruthy()
     expect(screen.getByText('整个章节字数偏少，需要扩充工期保障措施')).toBeTruthy()
   })
@@ -327,7 +366,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
     fireEvent.change(screen.getByLabelText(/修改意见/), { target: { value: '方案标题需要遵循招标要求统一规范' } })
     fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' }))
 
-    // 5. 验证 remote 调用及 Composer 即时刷新
+    // 5. 验证 remote 调用及浮层即时刷新
     await waitFor(() => {
       expect(harness.remoteAddIssue).toHaveBeenCalledWith({
         scope: 'chapter',
@@ -341,7 +380,8 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
       })
     })
 
-    expect(await screen.findByText(/待处理审批意见 1/)).toBeTruthy()
+    await openRevisionPanel()
+    expect(await screen.findByRole('list', { name: '待修复与修复中，共 1 条' })).toBeTruthy()
     expect(screen.getByText('ISSUE-1')).toBeTruthy()
     expect(screen.getByText('方案标题需要遵循招标要求统一规范')).toBeTruthy()
   })

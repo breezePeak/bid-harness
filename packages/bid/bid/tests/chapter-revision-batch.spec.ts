@@ -1841,7 +1841,19 @@ describe('任务 05: Batch 暂停恢复状态机 (suspend/resume/fail)', () => {
     expect(completedBatch.tasks[1]?.status).toBe('completed')
   })
 
-  it('9. complete 不再因状态错乱抛错: planning 拒绝 resume, suspended 必须 resume 才能 complete', () => {
+  it('9. task 已有底层失败详情时，重复结算保留根因', () => {
+    const batch = makeRunningBatch()
+    const failure = { code: 'CHAPTER_WRITING_FAILED', message: 'Writer 会话恢复失败', phase: 'repairing' as const }
+    const failed = updateRevisionBatchTaskStatus(batch, 'T-1', {
+      status: 'failed',
+      failure,
+    }, 2100)
+    const settled = updateRevisionBatchTaskStatus(failed, 'T-1', { status: 'failed' }, 2200)
+
+    expect(settled.tasks[0]?.failure).toEqual(failure)
+  })
+
+  it('10. complete 不再因状态错乱抛错: planning 拒绝 resume, suspended 必须 resume 才能 complete', () => {
     const planningBatch: RevisionBatchArtifact = {
       ...makeRunningBatch(),
       status: 'planning',
@@ -2726,7 +2738,7 @@ describe('任务 A: 并发 RevisionTask 状态写器串行化', () => {
     const writer = createRevisionBatchTaskStatusWriter(ws, batchId)
 
     let releaseA: () => void
-    const barrierA = new Promise<void>(resolve => { releaseA = resolve })
+    const barrierA = new Promise<void>((resolve) => { releaseA = resolve })
     const taskAPromise = writer.updateTask('T-A', { status: 'running' }).then(async () => {
       releaseA!()
       await writer.updateTask('T-A', { status: 'reviewing' })

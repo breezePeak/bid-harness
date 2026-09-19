@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { BidAddRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidAddRevisionIssueRequest, BidDeleteRevisionIssueRequest, BidRevisionQueueView, BidUpdateRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
 import { BidConfirmationModeControl, BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
@@ -85,6 +85,14 @@ export interface BidStagePanelInjected {
   /** Persist one S2 scoring item inclusion decision. */
   setTenderScoringSelection?: (scoringId: string, selected: boolean) => Promise<TenderAnalysisConfirmationView>
   confirmTenderAnalysis?: (operations: readonly TenderAnalysisEditOperation[]) => Promise<void>
+  /** S5 批量审核修改支持 */
+  getRevisionQueue?: () => Promise<BidRevisionQueueView>
+  updateRevisionIssue?: (request: BidUpdateRevisionIssueRequest) => Promise<BidRevisionQueueView>
+  deleteRevisionIssue?: (request: BidDeleteRevisionIssueRequest) => Promise<BidRevisionQueueView>
+  startRevisionBatch?: () => Promise<void>
+  locateChapter?: (sectionId: string) => void
+  subscribeReviewWorkbenchActive?: (listener: (active: boolean) => void) => () => void
+  subscribeRevisionQueueChanged?: (listener: () => void) => () => void
 }
 
 /** Structured Bid Host rejection retained for actionable panel feedback. */
@@ -125,6 +133,87 @@ export function apply(ctx: ClientContext): void {
   ctx.conversationEvents.register(bidRunNoticeDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
+  const pendingSectionLocate = new Map<string, string>()
+  const sectionLocateListeners = new Map<string, Set<(sectionId: string) => void>>()
+
+  function registerSectionLocateListener(sessionId: string, listener: (sectionId: string) => void): () => void {
+    let listeners = sectionLocateListeners.get(sessionId)
+    if (!listeners) {
+      listeners = new Set()
+      sectionLocateListeners.set(sessionId, listeners)
+    }
+    listeners.add(listener)
+    const pending = pendingSectionLocate.get(sessionId)
+    if (pending !== undefined) {
+      pendingSectionLocate.delete(sessionId)
+      listener(pending)
+    }
+    return () => {
+      listeners?.delete(listener)
+      if (listeners?.size === 0) sectionLocateListeners.delete(sessionId)
+    }
+  }
+
+  function triggerSectionLocate(sessionId: string, sectionId: string): void {
+    const listeners = sectionLocateListeners.get(sessionId)
+    if (listeners && listeners.size > 0) {
+      for (const listener of listeners) listener(sectionId)
+    } else {
+      pendingSectionLocate.set(sessionId, sectionId)
+    }
+  }
+
+  const workbenchActiveSessions = new Set<string>()
+  const workbenchActiveListeners = new Map<string, Set<(active: boolean) => void>>()
+
+  function setWorkbenchActive(sessionId: string, active: boolean): void {
+    if (active) {
+      workbenchActiveSessions.add(sessionId)
+    } else {
+      workbenchActiveSessions.delete(sessionId)
+    }
+    const listeners = workbenchActiveListeners.get(sessionId)
+    if (listeners) {
+      for (const listener of listeners) listener(active)
+    }
+  }
+
+  function subscribeWorkbenchActive(sessionId: string, listener: (active: boolean) => void): () => void {
+    let listeners = workbenchActiveListeners.get(sessionId)
+    if (!listeners) {
+      listeners = new Set()
+      workbenchActiveListeners.set(sessionId, listeners)
+    }
+    listeners.add(listener)
+    listener(workbenchActiveSessions.has(sessionId))
+    return () => {
+      listeners?.delete(listener)
+      if (listeners?.size === 0) workbenchActiveListeners.delete(sessionId)
+    }
+  }
+
+  const revisionQueueListeners = new Map<string, Set<() => void>>()
+
+  function triggerRevisionQueueChanged(sessionId: string): void {
+    const listeners = revisionQueueListeners.get(sessionId)
+    if (listeners) {
+      for (const listener of listeners) listener()
+    }
+  }
+
+  function subscribeRevisionQueueChanged(sessionId: string, listener: () => void): () => void {
+    let listeners = revisionQueueListeners.get(sessionId)
+    if (!listeners) {
+      listeners = new Set()
+      revisionQueueListeners.set(sessionId, listeners)
+    }
+    listeners.add(listener)
+    return () => {
+      listeners?.delete(listener)
+      if (listeners?.size === 0) revisionQueueListeners.delete(sessionId)
+    }
+  }
+
   const getChapter = async (sessionId: SessionId, sectionId: string): Promise<BidReviewChapterView> => {
     const result = await ctx.remote.bid.getReviewChapter(sessionId, sectionId)
     if (!result.ok) throw actionFailure(result.error)
@@ -162,31 +251,6 @@ export function apply(ctx: ClientContext): void {
       },
       registerSubmit: (handler: import('@deepseek-ai/dsh-client-ui-conversation/client').ComposerSubmitHandler) =>
         ctx.conversation.submitHandlers.register(sessionId, handler),
-      getRevisionQueue: async () => {
-        const result = await ctx.remote.bid.getRevisionQueue(sessionId)
-        if (!result.ok) throw actionFailure(result.error)
-        return result.value
-      },
-      updateRevisionIssue: async (request: {
-        issue_id: string
-        expected_queue_revision: number
-        instruction?: string
-        suggestion?: string | null
-      }) => {
-        const result = await ctx.remote.bid.updateRevisionIssue(sessionId, request)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error)
-        return result.value.value
-      },
-      deleteRevisionIssue: async (request: {
-        issue_id: string
-        expected_queue_revision: number
-      }) => {
-        const result = await ctx.remote.bid.deleteRevisionIssue(sessionId, request)
-        if (!result.ok) throw actionFailure(result.error)
-        if (!result.value.ok) throw actionFailure(result.value.error)
-        return result.value.value
-      },
     }),
   }, BidComposerContext))
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
@@ -231,7 +295,9 @@ export function apply(ctx: ClientContext): void {
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
       requestWritingRequirements: async (intent) => {
-        const result = await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
+        const result = intent === undefined
+          ? await ctx.remote.bid.requestWritingRequirements(sessionId)
+          : await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
@@ -322,6 +388,38 @@ export function apply(ctx: ClientContext): void {
       },
       getDocxLibrary: () => wordRemote(sessionId).getLibrary(),
       uploadDocxTemplate: (file, revision) => wordRemote(sessionId).uploadTemplate(file, revision),
+      getRevisionQueue: async () => {
+        const result = await ctx.remote.bid.getRevisionQueue(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
+      updateRevisionIssue: async (request: BidUpdateRevisionIssueRequest) => {
+        const result = await ctx.remote.bid.updateRevisionIssue(sessionId, request)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+        triggerRevisionQueueChanged(String(sessionId))
+        return result.value.value
+      },
+      deleteRevisionIssue: async (request: BidDeleteRevisionIssueRequest) => {
+        const result = await ctx.remote.bid.deleteRevisionIssue(sessionId, request)
+        if (!result.ok) throw actionFailure(result.error)
+        if (!result.value.ok) throw actionFailure(result.value.error)
+        triggerRevisionQueueChanged(String(sessionId))
+        return result.value.value
+      },
+      startRevisionBatch: () => {
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
+        return conversation.send('开始处理当前全部待处理审批意见。', 'queue')
+      },
+      locateChapter: (sectionId: string) => {
+        triggerSectionLocate(String(sessionId), sectionId)
+        const scoped = (ctx.sessions as { scope?: (id: SessionId) => { get(name: string): unknown } | undefined }).scope?.(sessionId)
+        const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
+        conversation?.selectView?.('bid-review')
+      },
+      subscribeReviewWorkbenchActive: listener => subscribeWorkbenchActive(String(sessionId), listener),
+      subscribeRevisionQueueChanged: listener => subscribeRevisionQueueChanged(String(sessionId), listener),
     }),
   }, BidStagePanel))
   const wordRemote = (sessionId: SessionId): BidWordExportInjected => {
@@ -400,7 +498,27 @@ export function apply(ctx: ClientContext): void {
           const result = await ctx.remote.bid.addRevisionIssue(sessionId, request)
           if (!result.ok) throw actionFailure(result.error)
           if (!result.value.ok) throw actionFailure(result.value.error)
+          triggerRevisionQueueChanged(String(sessionId))
           return result.value.value
+        },
+        updateRevisionIssue: async (request: BidUpdateRevisionIssueRequest) => {
+          const result = await ctx.remote.bid.updateRevisionIssue(sessionId, request)
+          if (!result.ok) throw actionFailure(result.error)
+          if (!result.value.ok) throw actionFailure(result.value.error)
+          triggerRevisionQueueChanged(String(sessionId))
+          return result.value.value
+        },
+        deleteRevisionIssue: async (request: BidDeleteRevisionIssueRequest) => {
+          const result = await ctx.remote.bid.deleteRevisionIssue(sessionId, request)
+          if (!result.ok) throw actionFailure(result.error)
+          if (!result.value.ok) throw actionFailure(result.value.error)
+          triggerRevisionQueueChanged(String(sessionId))
+          return result.value.value
+        },
+        startRevisionBatch: () => {
+          const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+          if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
+          return conversation.send('开始处理当前全部待处理审批意见。', 'queue')
         },
         openWordExport: () => {
           const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
@@ -408,6 +526,8 @@ export function apply(ctx: ClientContext): void {
           conversation?.selectView('bid-word-export')
           return Promise.resolve()
         },
+        onLocateChapter: (listener: (sectionId: string) => void) => registerSectionLocateListener(String(sessionId), listener),
+        notifyWorkbenchMount: (active: boolean) => { setWorkbenchActive(String(sessionId), active) },
       }
     },
   }, BidReviewWorkbench)

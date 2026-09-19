@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyOutlineEdits, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -55,10 +55,27 @@ function projection(patch: Partial<BidClientProjection> = {}): BidClientProjecti
 
 function props(
   value: BidClientProjection | undefined,
-  patch: Partial<BidStagePanelProps> = {},
+  patch: Partial<BidStagePanelProps> & { writingEntry?: unknown } = {},
 ): BidStagePanelProps {
-  const useProjection = (_key: string, selector?: (item: BidClientProjection | undefined) => unknown) =>
-    selector === undefined ? value : selector(value)
+  const useProjection = (key: string, selector?: (item: unknown) => unknown) => {
+    if (key === BID_WRITING_ENTRY_PROJECTION_KEY) {
+      const entry = patch.writingEntry ?? {
+        expected: { project_revision: 0, request_id: null, attempt_id: null, stop_id: null, plan_version: null },
+        phase: 'empty',
+        owner_session_id: null,
+        request_state: null,
+        continuation: null,
+        processing_state: null,
+        has_answer: false,
+        has_plan: false,
+        answer_save_status: 'none',
+        can_retry_answer: false,
+        error: null,
+      }
+      return selector === undefined ? entry : selector(entry)
+    }
+    return selector === undefined ? value : selector(value)
+  }
   const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
     selector({ byId: { session_bid: { agentPreset: 'bid', running: false } } })
   return {
@@ -1282,5 +1299,87 @@ describe('ui-bid browser plugin', () => {
 
     expect(screen.queryByText('招标文件-2026年项目.docx')).toBeNull()
     expect(screen.getByText('人工框架-CW.docx')).toBeTruthy()
+  })
+
+  it('S5 对话页面渲染独立悬浮的批量审核修改图标，展开显示问题并支持查看位置，审核工作台激活时隐藏', async () => {
+    const mockRevisionQueue = {
+      schema_version: 1 as const,
+      revision: 1,
+      issues: [
+        {
+          issue_id: 'issue-1',
+          session_id: 'session_bid',
+          section_id: 'sec-1',
+          section_title: '1.1 总体技术方案',
+          title: '方案缺少应急预案',
+          instruction: '补充应急预案和灾备方案',
+          suggestion: '建议补充应急预案',
+          category: 'format' as const,
+          severity: 'medium' as const,
+          status: 'pending' as const,
+          created_at: 1726700000000,
+          updated_at: 1726700000000,
+          batch_id: null,
+          error: null,
+          scope: 'chapter' as const,
+          reference: { scope: 'chapter' as const, base_content_sha256: '0'.repeat(64) },
+        },
+      ],
+    }
+
+    let workbenchListener: ((active: boolean) => void) | null = null
+    const subscribeReviewWorkbenchActive = vi.fn((listener: (active: boolean) => void) => {
+      workbenchListener = listener
+      return () => { workbenchListener = null }
+    })
+    const getRevisionQueue = vi.fn(async () => mockRevisionQueue)
+    const locateChapter = vi.fn()
+
+    const s5Projection = projection({
+      runtime: { stage: 'chapter_writing', status: 'waiting_user' },
+      allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
+      composer: { enabled: true },
+    })
+
+    render(
+      <BidStagePanel
+        {...props(s5Projection, {
+          getRevisionQueue,
+          locateChapter,
+          subscribeReviewWorkbenchActive,
+        })}
+      />,
+    )
+
+    // 1. 在 S5 对话页面下，应存在独立悬浮展开按钮，并显示待处理数量 Badge
+    const toggleButton = await screen.findByLabelText('展开批量审核修改')
+    expect(toggleButton).toBeTruthy()
+    expect(within(toggleButton).getByText('1')).toBeTruthy()
+
+    // 2. 点击展开悬浮卡片
+    fireEvent.click(toggleButton)
+    expect(screen.getByLabelText('折叠批量审核修改')).toBeTruthy()
+    expect(await screen.findByRole('region', { name: '批量审核修改' })).toBeTruthy()
+
+    // 3. 问题列表展示
+    expect(await screen.findByText('补充应急预案和灾备方案')).toBeTruthy()
+    expect(screen.getByText('1.1 总体技术方案')).toBeTruthy()
+
+    // 4. 点击查看位置
+    const locateBtn = screen.getByRole('button', { name: '查看位置' })
+    fireEvent.click(locateBtn)
+    expect(locateChapter).toHaveBeenCalledWith('sec-1')
+
+    // 5. 审核工作台激活或退出时，全局唯一的悬浮面板均保持常驻，展开状态不重置
+    act(() => {
+      workbenchListener?.(true)
+    })
+    expect(screen.getByLabelText('折叠批量审核修改')).toBeTruthy()
+    expect(screen.getByRole('region', { name: '批量审核修改' })).toBeTruthy()
+
+    act(() => {
+      workbenchListener?.(false)
+    })
+    expect(screen.getByLabelText('折叠批量审核修改')).toBeTruthy()
   })
 })

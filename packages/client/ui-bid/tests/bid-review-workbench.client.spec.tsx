@@ -2,7 +2,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { BidAddRevisionIssueRequest, DocxTemplateId } from '@deepseek-ai/dsh-bid/control-plane'
+import type {
+  BidAddRevisionIssueRequest,
+  DocxTemplateId,
+} from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
 import { createBidRevisionStore } from '../src/client/revision-reference.ts'
 
@@ -27,6 +30,7 @@ const chapter = {
   materials: [{ source_kind: 'reference_bid' as const, source_label: '参考旧标', file_id: 'ref-01.docx', usage: 'adapt', summary: '历史同类实施方案' }],
   review: { status: 'reviewing' as const, issues: [] },
 }
+
 
 function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbenchProps {
   const store = createBidRevisionStore().create()
@@ -237,18 +241,27 @@ describe('BidReviewWorkbench', () => {
     expect(screen.queryByRole('heading', { name: '文档级合规核验' })).toBeNull()
   })
 
-  it('选择需修复章节时默认展示已保存审核问题的详情、严重程度和建议', async () => {
+  it('审核问题限制在独立滚动区域，并可逐条展开或折叠为一行', async () => {
     const issue = {
       issue_id: 'SEC-1-review-1', section_id: 'SEC-1', source: 'review' as const, category: 'blocking_issues', severity: 'high' as const,
       status: 'open' as const, title: '审核结论', detail: '缺少与交付节点对应的实施措施。', suggestion: '补充交付节点和责任分工。',
     }
-    render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'needs_attention', issues: [issue] } }) })} />)
+    const secondIssue = { ...issue, issue_id: 'SEC-1-review-2', title: '格式问题', detail: '表格标题不完整。' }
+    render(<BidReviewWorkbench {...props({ getChapter: async () => ({ ...chapter, review: { status: 'needs_attention', issues: [issue, secondIssue] } }) })} />)
     expect(await screen.findByText('章节审核')).toBeTruthy()
     expect(screen.getAllByText('正文需要修复')).toHaveLength(2)
     expect(screen.getByText('问题数量')).toBeTruthy()
+    const issueList = screen.getByRole('list', { name: '审核问题列表，共 2 个问题' })
+    expect(issueList.querySelectorAll('details')).toHaveLength(2)
+    const firstIssue = screen.getByText('审核结论').closest('details')
+    expect(firstIssue?.open).toBe(false)
+    fireEvent.click(screen.getByText('审核结论'))
+    expect(firstIssue?.open).toBe(true)
     expect(screen.getByText('问题详情：缺少与交付节点对应的实施措施。')).toBeTruthy()
-    expect(screen.getByText('严重程度：高风险')).toBeTruthy()
-    expect(screen.getByText('修改建议：补充交付节点和责任分工。')).toBeTruthy()
+    expect(firstIssue?.textContent).toContain('严重程度：高风险')
+    expect(firstIssue?.textContent).toContain('修改建议：补充交付节点和责任分工。')
+    fireEvent.click(screen.getByText('审核结论'))
+    expect(firstIssue?.open).toBe(false)
     expect(screen.getByText('参考资料')).toBeTruthy()
   })
 
@@ -479,15 +492,15 @@ describe('BidReviewWorkbench', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: '添加审批意见' }))
     await screen.findByRole('dialog', { name: '添加审批意见' })
     const textareas = screen.getAllByRole('textbox')
+    expect(textareas).toHaveLength(1)
     fireEvent.change(textareas[0]!, { target: { value: '这里结构太散，改成分步骤描述。' } })
-    fireEvent.change(textareas[1]!, { target: { value: '建议按四步组织。' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
     await waitFor(() => { expect(addRevisionIssue).toHaveBeenCalledTimes(1) })
     const call = addRevisionIssue.mock.calls[0]![0]
     expect(call.scope).toBe('paragraphs')
     expect(call.section_id).toBe('SEC-1')
     expect(call.instruction).toBe('这里结构太散，改成分步骤描述。')
-    expect(call.suggestion).toBe('建议按四步组织。')
+    expect(call.suggestion).toBeNull()
     if (call.reference.scope === 'paragraphs') {
       expect(call.reference.base_content_sha256).toBe(chapter.content_sha256)
       expect(call.reference.text).toBe('首段内容。')
@@ -639,13 +652,14 @@ describe('BidReviewWorkbench', () => {
     expect(screen.getByRole('dialog', { name: '添加审批意见' })).toBeTruthy()
   })
 
-  it('queue revision 冲突时重新拉取队列并提示重试', async () => {
-    const getRevisionQueue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
+  it('queue revision 冲突时通知队列变更并提示重试', async () => {
+    const notifyRevisionQueueChanged = vi.fn()
     const addRevisionIssue = vi.fn(async () => {
       throw Object.assign(new Error('conflict'), { code: 'BID_REVISION_QUEUE_CONFLICT' })
     })
     render(<BidReviewWorkbench {...props({
-      addRevisionIssue, getRevisionQueue,
+      addRevisionIssue,
+      actions: { setReference: vi.fn(), clearReference: vi.fn(), notifyRevisionQueueChanged, setSelectedSectionId: vi.fn() },
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
@@ -656,7 +670,7 @@ describe('BidReviewWorkbench', () => {
     fireEvent.change(textareas[0]!, { target: { value: '意见' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加到待处理意见' })) })
     expect((await screen.findByRole('alert')).textContent).toBe('队列已更新，请重试。')
-    await waitFor(() => { expect(getRevisionQueue).toHaveBeenCalled() })
+    expect(notifyRevisionQueueChanged).toHaveBeenCalled()
   })
 
   it('相同文字在章节出现两次时 offset 仍准确', async () => {
@@ -760,7 +774,7 @@ describe('BidReviewWorkbench', () => {
     const markdown = '# 1.1 实施方案\n\n首段内容。\n'
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
-      actions: { setReference, clearReference: vi.fn(), notifyRevisionQueueChanged: vi.fn() },
+      actions: { setReference, clearReference: vi.fn(), notifyRevisionQueueChanged: vi.fn(), setSelectedSectionId: vi.fn() },
       useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
@@ -799,12 +813,28 @@ describe('BidReviewWorkbench', () => {
     expect(menu.style.top).toBe(`${768 - 88 - 8}px`)
   })
 
+  describe('批量审核修改全局唯一性保证', () => {
+    it('正文详情工作台内部不挂载私有悬浮面板，由会话全局唯一渲染', async () => {
+      render(<BidReviewWorkbench {...props({
+        useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      })} />)
+
+      expect(await screen.findByText('实施方案')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '展开批量审核修改' })).toBeNull()
+      expect(screen.queryByRole('heading', { name: '批量审核修改' })).toBeNull()
+    })
+  })
+
   describe('批量修订复用原进度条与轮询', () => {
-    it('1. 原 S5 无 Batch UI 不变：不出现第二进度条，文案保持正文统计', async () => {
+    it('1. 普通 S5 使用唯一进度条显示正文统计', async () => {
       render(<BidReviewWorkbench {...props({
         getWorkbench: async () => workbench,
       })} />)
       expect(await screen.findByText('正文 1/1')).toBeTruthy()
+      const progress = screen.getByRole('progressbar', { name: 'S5 正文进度：1/1 章已生成' })
+      expect(progress.getAttribute('value')).toBe('1')
+      expect(progress.getAttribute('max')).toBe('1')
+      expect(screen.getAllByRole('progressbar')).toHaveLength(1)
       expect(screen.queryByText(/修订进度/)).toBeNull()
       expect(screen.queryByText(/批量修订/)).toBeNull()
       expect(document.querySelectorAll('[class*="revisionBatchPill"]')).toHaveLength(0)
@@ -826,6 +856,10 @@ describe('BidReviewWorkbench', () => {
       }
       render(<BidReviewWorkbench {...props({ getWorkbench: async () => batchWorkbench })} />)
       expect(await screen.findByText('修订进度 3/8')).toBeTruthy()
+      const progress = screen.getByRole('progressbar', { name: '批量修订进度：3/8 条审批意见已处理' })
+      expect(progress.getAttribute('value')).toBe('3')
+      expect(progress.getAttribute('max')).toBe('8')
+      expect(screen.getAllByRole('progressbar')).toHaveLength(1)
       expect(screen.queryByText('正文 1/1')).toBeNull()
       expect(screen.queryByText('1/3')).toBeNull()
     })

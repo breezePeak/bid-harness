@@ -16,7 +16,7 @@ Host 每章持有一个 continuable Writer，首轮请求前安装私有 `submit
 
 Host 在审查前按确认目录生成唯一根标题，落盘、引句和哈希共同绑定规范化候选。叶节的下级目录由 S4 确认，S5 不生成节内编号；标题接受规则见[目录结构与叶节写作](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)。Word 使用同一根标题编号并调整标题层级；页面通过独立页眉显示根标题，正文不重复显示。
 
-用户在章节完成后提交修订时，Host 从执行日志恢复原 Writer 及其父会话；恢复失败拒绝修订，不能创建替代 Writer。独立引用标签携带原文哈希，段落标签另带连续顶层段落的位置与原文。提交工具和落盘检查精确前缀、后缀，避免重复段落或模型扩大修改范围。操作期间父 Agent 不进入模型步骤；失败恢复已写章节产物，成功发布执行记录并刷新正文。引用和意见通过专用 Remote 提交，不进入普通主 Agent 发送路径。
+用户在章节完成后提交修订时，Host 从执行日志恢复原 Writer 及其父会话；恢复失败拒绝修订，不能创建替代 Writer。批量修订只接受属于同一原 parent 的目标 Writer，由该 parent 调度全部续写；混合 parent 的批次在模型运行前拒绝。独立引用标签携带原文哈希，段落标签另带连续顶层段落的位置与原文。提交工具和落盘检查精确前缀、后缀，避免重复段落或模型扩大修改范围。操作期间父 Agent 不进入模型步骤；失败恢复已写章节产物，成功发布执行记录并刷新正文。引用和意见通过专用 Remote 提交，不进入普通主 Agent 发送路径。
 
 ## Alternatives considered
 
@@ -26,8 +26,10 @@ Host 在审查前按确认目录生成唯一根标题，落盘、引句和哈希
 
 **只在页面修正编号。** 保存正文、Reviewer 引句与 Word 会出现不同内容。审查前规范化能使三者引用同一候选。
 
+**按章节恢复多个原 parent 后分别执行批次。** 批次依赖、失败传播和发布由一次章节执行统一结算；拆成多个父会话会产生多个部分执行边界。当前 S5 同次执行的 Writer 共用 parent，Host 对不一致检查点拒绝整批执行。
+
 ## Consequences
 
-Writer 历史随修复增长，但每章保持稳定身份。现有执行日志和磁盘格式继续表达轮次、故障和最终候选；用户修订使用 `reviseChapter` Remote。独立 Reviewer、fallback 与检查点恢复仍遵循[私有提交协议](2026-09-07-s5-private-submission-protocols.md)及[故障隔离](../bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)，这两份记录保留各自的证据校验与持久化理由。
+Writer 历史随修复增长，但每章保持稳定身份。现有执行日志和磁盘格式继续表达轮次、故障和最终候选；用户修订使用 `reviseChapter` Remote，批量修订要求目标 Writer 共用原 parent。独立 Reviewer、fallback 与检查点恢复仍遵循[私有提交协议](2026-09-07-s5-private-submission-protocols.md)及[故障隔离](../bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)，这两份记录保留各自的证据校验与持久化理由。
 
 定向协议、AgentLoop 和真实 Loader 的无密钥回放覆盖三章并发、同一 Writer 两次修复后通过、预算、取消及过期提交。确定性测试验证调度和协议，不证明真实模型对依赖或事实适用性的判断质量；真实模型验收另行检查计划中的依赖原因、实际重叠区间和各轮 Writer 身份；单个项目全部通过审查不证明任意项目的事实判断均正确。

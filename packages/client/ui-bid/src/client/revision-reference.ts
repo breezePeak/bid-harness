@@ -12,7 +12,12 @@ export interface BidRevisionReference {
   readonly preview: string
 }
 
-type RevisionState = { reference: BidRevisionReference | null; revision: number; queueRevisionSignal: number }
+type RevisionState = {
+  reference: BidRevisionReference | null
+  revision: number
+  queueRevisionSignal: number
+  selectedSectionId: string | null
+}
 
 /**
  * Share one unsent reference between the chapter reader and its session composer.
@@ -22,9 +27,10 @@ export function createBidRevisionStore(): EngineStoreHandle<RevisionState, {
   setReference: (draft: RevisionState, reference: BidRevisionReference | null) => void
   clearReference: (draft: RevisionState, submitted: BidRevisionReference) => void
   notifyRevisionQueueChanged: (draft: RevisionState) => void
+  setSelectedSectionId: (draft: RevisionState, sectionId: string | null) => void
 }> {
   return defineStore({
-    init: (): RevisionState => ({ reference: null, revision: 0, queueRevisionSignal: 0 }),
+    init: (): RevisionState => ({ reference: null, revision: 0, queueRevisionSignal: 0, selectedSectionId: null }),
     actions: {
       setReference: (draft, reference: BidRevisionReference | null) => { draft.reference = reference },
       clearReference: (draft, submitted: BidRevisionReference) => {
@@ -33,6 +39,9 @@ export function createBidRevisionStore(): EngineStoreHandle<RevisionState, {
       },
       notifyRevisionQueueChanged: (draft) => {
         draft.queueRevisionSignal++
+      },
+      setSelectedSectionId: (draft, sectionId: string | null) => {
+        draft.selectedSectionId = sectionId
       },
     },
   })
