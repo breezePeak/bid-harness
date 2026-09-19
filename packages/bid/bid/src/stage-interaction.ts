@@ -33,7 +33,7 @@ import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifa
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
 import { readRevisionQueue } from './chapter-revision-queue.ts'
-import { revisionBatchTaskSchema } from './chapter-revision-batch.ts'
+import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -59,7 +59,7 @@ export const stageInteractionSchema = z.union([
     action: z.literal('bid_plan_revision_batch'),
     expected_queue_revision: z.number().int().nonnegative(),
     issue_ids: z.array(z.string().min(1)).min(1),
-    tasks: z.array(revisionBatchTaskSchema).min(1),
+    tasks: z.array(revisionBatchTaskInputSchema).min(1),
   }).strict(),
   z.object({
     action: z.literal('bid_execute_revision_batch'),

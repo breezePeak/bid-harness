@@ -21,6 +21,7 @@ import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from
 import type { BidKey } from './locales.ts'
 import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
+import { BidRevisionFloatingPanel } from './BidRevisionFloatingPanel.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import { isBidMainSessionSummary } from './session-authority.ts'
 import css from './BidStagePanel.module.css'
@@ -151,8 +152,8 @@ function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
 }
 
 function composerReason(projection: BidClientProjection, t: TranslateBid): string | undefined {
-  if (projection.composer.enabled) return undefined
-  switch (projection.composer.reason) {
+  if (projection.composer?.enabled) return undefined
+  switch (projection.composer?.reason) {
     case 'bid.upload_required': return t('reason.bid.upload_required')
     case 'bid.stage_running': return t('reason.bid.stage_running')
     case 'bid.stage_pending': return t('reason.bid.stage_pending')
@@ -203,6 +204,13 @@ export function BidStagePanel({
   getTenderAnalysisForConfirmation,
   setTenderScoringSelection,
   getEvidenceMappingProgress,
+  getRevisionQueue,
+  updateRevisionIssue,
+  deleteRevisionIssue,
+  startRevisionBatch,
+  locateChapter,
+  subscribeReviewWorkbenchActive,
+  subscribeRevisionQueueChanged,
   useStore,
   actions,
   t,
@@ -387,6 +395,25 @@ export function BidStagePanel({
     : canConfirm ? outlineReviewReady ? 'bid-outline' : 'bid-confirmation' : 'bid-review'
   const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
+  const [, setReviewWorkbenchActive] = useState(false)
+  useEffect(() => {
+    if (!subscribeReviewWorkbenchActive) return
+    return subscribeReviewWorkbenchActive(setReviewWorkbenchActive)
+  }, [subscribeReviewWorkbenchActive])
+
+  const [revisionSignal, setRevisionSignal] = useState(0)
+  useEffect(() => {
+    if (!subscribeRevisionQueueChanged) return
+    return subscribeRevisionQueueChanged(() => {
+      setRevisionSignal(s => s + 1)
+    })
+  }, [subscribeRevisionQueueChanged])
+
+  const showFloatingRevision = hasProjection
+    && isBidSession
+    && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
+    && getRevisionQueue !== undefined
+
   useEffect(() => {
     if (!hasProjection) return
     setComposerBlock(blockedReason, embedConversation)
@@ -514,11 +541,11 @@ export function BidStagePanel({
   const chapterAutomaticKey = `${sessionId}:chapter_writing:automatic`
   useEffect(() => {
     if (projection?.runtime.stage !== 'tender_analysis' || projection.runtime.status !== 'waiting_user') {
-      actions.clearAttempted(tenderAutomaticKey)
+      actions.clearAttempted?.(tenderAutomaticKey)
     }
     if (projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user') {
-      actions.clearAttempted(chapterManualKey)
-      actions.clearAttempted(chapterAutomaticKey)
+      actions.clearAttempted?.(chapterManualKey)
+      actions.clearAttempted?.(chapterAutomaticKey)
     }
   }, [actions, chapterAutomaticKey, chapterManualKey, projection?.runtime.stage, projection?.runtime.status, tenderAutomaticKey])
 
@@ -527,7 +554,7 @@ export function BidStagePanel({
       || draftSaveState !== 'saved' || requestPending !== null) return
     const key = `${sessionId}:${projection?.runtime.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
     if (automaticAttempts.includes(key)) return
-    actions.markAttempted(key)
+    actions.markAttempted?.(key)
     invoke('confirm', async () => {
       await draftQueue.current
       const current = draftRef.current
@@ -1382,7 +1409,7 @@ export function BidStagePanel({
               {writingEntry.answer_save_status === 'unconfirmed' && (
                 <span className={css.error}>{t('error.answer_save_failed')}</span>
               )}
-              {writingEntry.error !== null && (
+              {writingEntry.error != null && Boolean(writingEntry.error.message) && (
                 <span className={css.error}>{writingEntry.error.message}</span>
               )}
             </>
@@ -1391,6 +1418,25 @@ export function BidStagePanel({
 
         {!canConfirm && !canConfirmAnalysis && errorNotice}
       </div>
+      {showFloatingRevision && (
+        <BidRevisionFloatingPanel
+          sessionId={String(sessionId)}
+          getRevisionQueue={getRevisionQueue}
+          updateRevisionIssue={updateRevisionIssue}
+          deleteRevisionIssue={deleteRevisionIssue}
+          startRevisionBatch={startRevisionBatch}
+          onLocate={(sectionId) => {
+            if (locateChapter) {
+              locateChapter(sectionId)
+            } else {
+              selectReviewView('bid-review')
+            }
+          }}
+          isRunning={projection?.runtime.status === 'running'}
+          floatingMode="fixed"
+          refreshSignal={revisionSignal}
+        />
+      )}
     </section>
   )
 }

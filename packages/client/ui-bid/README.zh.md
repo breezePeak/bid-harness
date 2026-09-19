@@ -12,6 +12,8 @@ S3 确认前使用临时“审核项”入口，确认后由“目录详情”�
 
 面板把 `projection.composer.enabled` 及其稳定 reason code 映射到同一 Session 的 `ctx.conversation.blocks`。S5 审核项使用三栏工作台展示目录、正文、资料和 Reviewer 状态，通过专用 Remote 读取审核报告与章节；完成后的 Word 导出通过 `bid/exportDocx` 生成独立文件，不改变 S5 Projection。非 Bid Preset 或 Projection 不可用时会清除 block 并隐藏面板，从而让非 Bid Session 保持原有 composer 与附件路径。发布的 `bid` Agent Preset 经 Host roster 发现并显示为“标书模式”；Preset seat 不包含 Bid 专用分支或 toggle。
 
+正文详情右栏底部的折叠按钮打开独立悬浮面板，批量审核修改不占用章节审核与参考资料的文档流。面板上栏列出待修复、已排队和修复中的意见，下栏保留已修复及未修复的历史结果；意见可切换到所属章节，待修复项可编辑或删除。“一键修复”把处理全部待修复意见的明确请求交给当前 Bid Main Agent，继续使用现有批次规划和执行工具；批次活动期间显示意见级进度并每秒刷新。Composer 上方只保留正文引用，不显示审核意见队列。
+
 Word 格式页从 Host 读取模板字节上限，默认显示 300 MiB。选择模板后，浏览器把 `File` 直接作为独立同源二进制请求体发送；Session、文件名、长度和配置 revision 位于小型请求头，模板字节不进入配置 Remote 的 JSON。Host 在同一上传操作中完成 OOXML 提取、模板正文格式说明解释、证据合并和冲突检测；页面只显示主要格式表与固定效果预览，冲突单元格只接受证据值确认，底部“导出 Word”同时生成并下载文件。
 
 S2–S5 重置完成后，面板显示 `waiting_start` 并保持 Composer 可用。Host 在同一 Session 的 DSH 原生用户提问空间中提供当前阶段重跑或停止选项；回答重跑后才调用 `bid/startStage`，避免重置操作在用户确认前自动消耗模型调用。普通聊天消息不会被当作该问题的答案。

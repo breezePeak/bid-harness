@@ -154,7 +154,7 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### What the model sees
 
-章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer；用户意见、当前正文和限定引用进入原 Writer 的会话日志。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
+章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer；用户意见、当前正文和限定引用进入原 Writer 的会话日志。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
 
 #### Token effect
 
