@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type {
   BidDeleteRevisionIssueRequest,
@@ -384,10 +384,10 @@ function FloatingRevisionIssueTable({
       <table className={css.table} role="list" aria-label={ariaLabel}>
         <thead>
           <tr>
-            <th style={{ width: '22%' }}>所属章节</th>
-            <th style={{ width: '48%' }}>修改意见与详情</th>
-            <th style={{ width: '14%' }}>状态</th>
-            <th style={{ width: '16%' }}>操作</th>
+            <th style={{ width: '25%' }}>所属章节</th>
+            <th style={{ width: '45%' }}>修改意见</th>
+            <th style={{ width: '15%' }}>状态</th>
+            <th style={{ width: '15%' }}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -402,74 +402,84 @@ function FloatingRevisionIssueTable({
                 : ''
 
             return (
-              <tr key={issue.issue_id} role="listitem" data-status={issue.status}>
-                <td>
-                  <div className={css.locationCell}>
-                    <button
-                      type="button"
-                      className={css.issueLocation}
-                      onClick={() => { onLocate?.(issue.section_id) }}
-                      title={`点击查看章节：${sectionTitle}`}
-                    >
-                      {sectionTitle}
-                    </button>
-                    <span className={css.issueIdHidden} aria-hidden="true" title={issue.issue_id}>
-                      {issue.issue_id}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <div className={css.instructionCell}>
-                    <div className={css.instructionText}>{issue.instruction}</div>
-                    {quoteText !== '' && (
-                      <div className={css.detailBlock} title={quoteText}>
-                        <span className={css.detailLabel}>详情：</span>
-                        <span className={css.detailContent}>{quoteText}</span>
-                      </div>
-                    )}
-                    {issue.suggestion !== null && issue.suggestion.trim() !== '' && (
-                      <div className={css.suggestionText}>说明：{issue.suggestion}</div>
-                    )}
-                  </div>
-                </td>
-                <td>
-                  <div className={css.statusCell}>
-                    <span className={css.issueStatus} data-status={issue.status}>
-                      <span className={css.statusDot} />
-                      {getFloatingRevisionIssueStatusLabel(issue.status)}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <div className={css.actionsCell}>
-                    <button
-                      type="button"
-                      className={css.btnAction}
-                      onClick={() => { onLocate?.(issue.section_id) }}
-                    >
-                      查看位置
-                    </button>
-                    {canEdit && (
+              <Fragment key={issue.issue_id}>
+                <tr
+                  role="listitem"
+                  data-status={issue.status}
+                  className={quoteText !== '' ? css.rowWithDetail : undefined}
+                >
+                  <td>
+                    <div className={css.locationCell}>
+                      <button
+                        type="button"
+                        className={css.issueLocation}
+                        onClick={() => { onLocate?.(issue.section_id) }}
+                        title={`点击查看章节：${sectionTitle}`}
+                      >
+                        {sectionTitle}
+                      </button>
+                      <span className={css.issueIdHidden} aria-hidden="true" title={issue.issue_id}>
+                        {issue.issue_id}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className={css.instructionCell}>
+                      <div className={css.instructionText}>{issue.instruction}</div>
+                      {issue.suggestion !== null && issue.suggestion.trim() !== '' && (
+                        <div className={css.suggestionText}>说明：{issue.suggestion}</div>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    <div className={css.statusCell}>
+                      <span className={css.issueStatus} data-status={issue.status}>
+                        <span className={css.statusDot} />
+                        {getFloatingRevisionIssueStatusLabel(issue.status)}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className={css.actionsCell}>
                       <button
                         type="button"
                         className={css.btnAction}
-                        onClick={() => { startEdit(issue) }}
+                        onClick={() => { onLocate?.(issue.section_id) }}
                       >
-                        编辑
+                        查看位置
                       </button>
-                    )}
-                    {canDelete && (
-                      <button
-                        type="button"
-                        className={classes(css.btnAction, css.btnActionDanger)}
-                        onClick={() => { setDeletingIssue(issue) }}
-                      >
-                        删除
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          className={css.btnAction}
+                          onClick={() => { startEdit(issue) }}
+                        >
+                          编辑
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          type="button"
+                          className={classes(css.btnAction, css.btnActionDanger)}
+                          onClick={() => { setDeletingIssue(issue) }}
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+                {quoteText !== '' && (
+                  <tr className={css.detailRow} data-status={issue.status}>
+                    <td colSpan={4} className={css.detailCell}>
+                      <div className={css.detailBar} title={quoteText}>
+                        <span className={css.detailLabel}>详情：</span>
+                        <span className={css.detailContent}>{quoteText}</span>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             )
           })}
         </tbody>
