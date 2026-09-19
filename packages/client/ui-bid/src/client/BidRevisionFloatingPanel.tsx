@@ -384,10 +384,10 @@ function FloatingRevisionIssueTable({
       <table className={css.table} role="list" aria-label={ariaLabel}>
         <thead>
           <tr>
-            <th style={{ width: '28%' }}>章节与位置</th>
-            <th style={{ width: '42%' }}>修改意见</th>
-            <th style={{ width: '15%' }}>状态</th>
-            <th style={{ width: '15%' }}>操作</th>
+            <th style={{ width: '22%' }}>所属章节</th>
+            <th style={{ width: '48%' }}>修改意见与详情</th>
+            <th style={{ width: '14%' }}>状态</th>
+            <th style={{ width: '16%' }}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -413,12 +413,7 @@ function FloatingRevisionIssueTable({
                     >
                       {sectionTitle}
                     </button>
-                    {quoteText !== '' && (
-                      <span className={css.referenceText} title={quoteText}>
-                        位置：{quoteText}
-                      </span>
-                    )}
-                    <span className={css.issueId} title={issue.issue_id}>
+                    <span className={css.issueIdHidden} aria-hidden="true" title={issue.issue_id}>
                       {issue.issue_id}
                     </span>
                   </div>
@@ -426,6 +421,12 @@ function FloatingRevisionIssueTable({
                 <td>
                   <div className={css.instructionCell}>
                     <div className={css.instructionText}>{issue.instruction}</div>
+                    {quoteText !== '' && (
+                      <div className={css.detailBlock} title={quoteText}>
+                        <span className={css.detailLabel}>详情：</span>
+                        <span className={css.detailContent}>{quoteText}</span>
+                      </div>
+                    )}
                     {issue.suggestion !== null && issue.suggestion.trim() !== '' && (
                       <div className={css.suggestionText}>说明：{issue.suggestion}</div>
                     )}
