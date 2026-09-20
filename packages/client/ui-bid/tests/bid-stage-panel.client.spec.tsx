@@ -562,9 +562,11 @@ describe('BidStagePanel', () => {
     })} />)
 
     expect(screen.getByText('已挂起')).toBeTruthy()
-    expect(screen.getByText('阶段执行已挂起')).toBeTruthy()
+    expect(screen.getByText('SEC-401 映射失败')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '失败原因：SEC-401 映射失败' })).toBeTruthy()
     expect(screen.getByText('主 Agent 正在检查恢复方案……')).toBeTruthy()
-    expect(screen.getByText('挂起原因：retry_exhausted')).toBeTruthy()
+    expect(screen.queryByText('挂起原因：retry_exhausted')).toBeNull()
+    expect(screen.queryByText('阶段执行已挂起')).toBeNull()
     expect(screen.queryByText('正在处理…')).toBeNull()
     expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
     expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
@@ -870,7 +872,8 @@ describe('BidStagePanel', () => {
       composer: { enabled: false, reason: 'bid.stage_failed' },
     }), { uploadFiles: vi.fn(async () => []) })} />)
 
-    expect(screen.getByText('文件接入失败，请重新选择或再次上传文件')).toBeTruthy()
+    expect(screen.getByText('文档无法解析')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '失败原因：文档无法解析' })).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('文档无法解析')
     expect(screen.getByRole('button', { name: '招标文件' })).toBeTruthy()
   })
@@ -901,11 +904,15 @@ describe('BidStagePanel', () => {
       composer: { enabled: true },
     }))} />)
 
-    expect(screen.getByText('校验发现 2 个问题')).toBeTruthy()
-    expect(screen.getByText('文件：analysis/scoring.json')).toBeTruthy()
-    expect(screen.getByText('字段：scoring_items[2].response_points')).toBeTruthy()
-    expect(screen.getByText('原因：至少需要一项技术响应重点。')).toBeTruthy()
-    expect(screen.getByText('文件：analysis/compliance.json')).toBeTruthy()
+    expect(screen.getByText('招标分析结果未通过校验')).toBeTruthy()
+    const infoButton = screen.getByRole('button', { name: /失败原因：/ })
+    expect(infoButton).toBeTruthy()
+    const detailLabel = infoButton.getAttribute('aria-label') ?? ''
+    expect(detailLabel).toContain('analysis/scoring.json')
+    expect(detailLabel).toContain('scoring_items[2].response_points')
+    expect(detailLabel).toContain('至少需要一项技术响应重点。')
+    expect(detailLabel).toContain('analysis/compliance.json')
+    expect(detailLabel).toContain('只能使用 fatal、mandatory 或 warning。')
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
     expect(screen.queryByRole('button', { name: '确认技术标分析' })).toBeNull()
   })
@@ -1422,5 +1429,33 @@ describe('ui-bid browser plugin', () => {
       workbenchListener?.(false)
     })
     expect(screen.getByLabelText('折叠批量审核修改')).toBeTruthy()
+  })
+
+  it('挂起或失败时将失败原因摘要与信息图标渲染在状态行，且不再渲染底部挂起与错误框', () => {
+    const fullError = 'S3 模型任务未正常完成，保留当前候选；本轮不能标记为已复核。原因：stream error: stream disconnected before completion: stream closed before response.completed'
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'outline_generation', status: 'suspended', failureReason: fullError },
+      run: {
+        runId: 'run-interrupted', stage: 'outline_generation', epoch: 1, baseProjectRevision: 1,
+        work: {
+          kind: 'stage_execution',
+          workId: 's3-work',
+          stage: 'outline_generation',
+          requestRef: 'requests/s3-work.json',
+          requestSha256: '0'.repeat(64),
+          inputFingerprint: '0'.repeat(64),
+        },
+        status: 'suspended', cause: 'executor_error', startedAt: 10, updatedAt: 20,
+      },
+    }))} />)
+
+    expect(screen.getByText('S3 模型任务未正常完成')).toBeTruthy()
+    const infoButton = screen.getByRole('button', { name: /失败原因：/ })
+    expect(infoButton).toBeTruthy()
+    const label = infoButton.getAttribute('aria-label') ?? ''
+    expect(label).toContain('保留当前候选')
+    expect(label).toContain('stream disconnected before completion')
+    expect(screen.queryByText('挂起原因：executor_error')).toBeNull()
+    expect(screen.queryByText('阶段执行已挂起')).toBeNull()
   })
 })

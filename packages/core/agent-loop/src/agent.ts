@@ -47,6 +47,15 @@ type Phase =
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
+const MAX_CONSECUTIVE_IDENTICAL_TOOL_ARG_FRAGMENTS = 128
+const MAX_STREAMED_TOOL_ARGUMENT_CHARS = 512 * 1024
+
+interface ToolArgumentStreamState {
+  totalArgumentChars: number
+  lastNonEmptyFragment: string | null
+  consecutiveSameFragmentCount: number
+}
+
 type PreparedStep =
   | { kind: 'reject' }
   | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly }
@@ -343,11 +352,36 @@ export class ReactLoopAgent implements Agent {
       )
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
+      const toolArgumentStates = new Map<string, ToolArgumentStreamState>()
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
         for await (const chunk of stream) {
           signal.throwIfAborted()
+          if (chunk.type === 'tool-call-delta') {
+            const state = toolArgumentStates.get(chunk.id) ?? {
+              totalArgumentChars: 0,
+              lastNonEmptyFragment: null,
+              consecutiveSameFragmentCount: 0,
+            }
+            state.totalArgumentChars += chunk.argumentsDelta.length
+            if (state.totalArgumentChars > MAX_STREAMED_TOOL_ARGUMENT_CHARS) {
+              throw new LlmError('Streamed tool-call arguments exceeded 512 KiB before completion.', 'MODEL_TOOL_ARGUMENT_TOO_LARGE')
+            }
+            if (chunk.argumentsDelta !== '') {
+              if (state.lastNonEmptyFragment === chunk.argumentsDelta) state.consecutiveSameFragmentCount += 1
+              else {
+                state.lastNonEmptyFragment = chunk.argumentsDelta
+                state.consecutiveSameFragmentCount = 1
+              }
+              if (state.consecutiveSameFragmentCount >= MAX_CONSECUTIVE_IDENTICAL_TOOL_ARG_FRAGMENTS) {
+                throw new LlmError('Streamed tool-call arguments repeated one fragment 128 consecutive times.', 'MODEL_TOOL_ARGUMENT_DEGENERATED')
+              }
+            }
+            toolArgumentStates.set(chunk.id, state)
+          } else if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+            toolArgumentStates.delete(chunk.block.id)
+          }
           chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
           assembler.push(chunk)
         }

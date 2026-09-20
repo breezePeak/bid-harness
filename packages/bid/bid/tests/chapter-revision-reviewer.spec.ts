@@ -134,7 +134,7 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_revision_issues', { items: issues.map(issue => ({ issue_id: issue.issue_id, status: 'satisfied', reason: '选区内意见已完成' })) })
     await call('set_review_summary', {
       quality_checks: { ...quality, obvious_repetition_free: false },
-      blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false,
+      blocking_issues: ['选区外正文整体风格仍需调整'], assignment_conflicts: [], external_input_gaps: [], external_input_only: false,
     })
     await call('finish_chapter_review', {})
 

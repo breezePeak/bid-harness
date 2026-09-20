@@ -75,6 +75,7 @@ import {
   createRevisionComparisonArtifact,
   readRevisionComparison,
 } from './chapter-revision-comparison.ts'
+import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import {
@@ -1151,12 +1152,18 @@ async function loadChapterCheckpoint(
           if (log.final_reviewer_child_session_id === null) throw new Error('checkpoint-reviewer-missing')
           const review = parseChapterReviewArtifact(await readJson(workspace, reviewPath))
           candidateBytesChanged = review.candidate_sha256 !== candidateSha256
-          if (review.section_id !== section.id || candidateBytesChanged
+          const semanticPath = candidateBytesChanged
+            ? await resolveSemanticRevisionPath(workspace, serial, section.id, review.candidate_sha256, candidateSha256)
+            : undefined
+          const reviewCandidate = semanticPath?.valid === true && semanticPath.from_markdown !== undefined
+            ? { ...candidate, markdown: semanticPath.from_markdown }
+            : candidate
+          if (review.section_id !== section.id || (candidateBytesChanged && semanticPath?.valid !== true)
           || review.writer_child_session_id !== log.final_writer_child_session_id
           || review.reviewer_child_session_id !== log.final_reviewer_child_session_id
           || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
             && attempt.child_session_id === log.final_reviewer_child_session_id)
-          || validateChapterReview(context, candidate, review).length > 0) throw new Error('checkpoint-review-invalid')
+          || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
           completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
           drafts.delete(section.id)
           log.status = 'completed'
@@ -2267,14 +2274,14 @@ async function runChapterWriting(
         let comparison = revisionBatch !== undefined && batchTask !== undefined
           && revisionOriginal !== undefined && persistCandidate
           ? createRevisionComparisonArtifact({
-              batchId: revisionBatch.batchId,
-              taskId: batchTask.task_id,
-              sectionId: batchTask.section_id,
-              issueIds: batchTask.issue_ids,
-              beforeMarkdown: revisionOriginal,
-              afterMarkdown,
-              createdAt: Date.now(),
-            })
+            batchId: revisionBatch.batchId,
+            taskId: batchTask.task_id,
+            sectionId: batchTask.section_id,
+            issueIds: batchTask.issue_ids,
+            beforeMarkdown: revisionOriginal,
+            afterMarkdown,
+            createdAt: Date.now(),
+          })
           : undefined
         if (comparison !== undefined) {
           const existing = await readRevisionComparison(workspace, comparison.batch_id, comparison.task_id)

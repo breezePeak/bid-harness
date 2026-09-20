@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createUserMessage, CallId, LlmError, StreamChunk  } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, CallId, LlmError, StreamChunk, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -8,6 +8,19 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from './mock-adapter.ts'
+
+class CleanupMockAdapter extends MockAdapter {
+  cleaned = false
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    try {
+      yield* super.stream(options)
+    } finally {
+      await Promise.resolve()
+      this.cleaned = true
+    }
+  }
+}
 
 function driverDone(agent: Agent): Promise<void> {
   return (agent as Agent & { done: Promise<void> }).done
@@ -41,6 +54,17 @@ function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
 
+function streamedToolArguments(id: string, fragments: readonly string[], index = 0): StreamChunk[] {
+  return [
+    { type: 'block-start', index, blockType: 'tool-call' },
+    ...fragments.map((argumentsDelta, fragmentIndex): StreamChunk => ({
+      type: 'tool-call-delta', index, id: CallId(id),
+      ...fragmentIndex === 0 ? { name: 'write' } : {},
+      argumentsDelta,
+    })),
+  ]
+}
+
 /** All user-message texts recorded in the log (to assert what actually ran). */
 function userTexts(agent: Agent): string[] {
   return agent.session.events
@@ -50,6 +74,89 @@ function userTexts(agent: Agent): string[] {
 }
 
 describe('agent loop', () => {
+  it.each(['     \n', ']}'])('在同一 tool call 第 128 个相同 arguments fragment 时终止 stream：%j', async (fragment) => {
+    const chunks = [
+      ...streamedToolArguments('degenerate', Array.from({ length: 129 }, () => fragment)),
+      { type: 'text-delta' as const, index: 1, text: 'MUST NOT STREAM' },
+    ]
+    const adapter = new CleanupMockAdapter([chunks])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('degenerate-tool-arguments'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    const turnEnd = agent.session.events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason).toMatchObject({
+      kind: 'error', error: { code: 'MODEL_TOOL_ARGUMENT_DEGENERATED' },
+    })
+    const deltas = agent.session.events.filter(event => event.type === 'assistant/chunk'
+      && event.data.chunk.type === 'tool-call-delta')
+    expect(deltas).toHaveLength(127)
+    expect(agent.session.events.some(event => event.type === 'assistant/chunk'
+      && event.data.chunk.type === 'text-delta' && event.data.chunk.text === 'MUST NOT STREAM')).toBe(false)
+    expect(adapter.cleaned).toBe(true)
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('限制每个未闭合 tool call 的 streamed arguments 总字符数', async () => {
+    const adapter = new MockAdapter([streamedToolArguments('large', ['x'.repeat(512 * 1024 + 1)])])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('large-tool-arguments'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    const turnEnd = agent.session.events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason).toMatchObject({
+      kind: 'error', error: { code: 'MODEL_TOOL_ARGUMENT_TOO_LARGE' },
+    })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('不同 tool-call id 的重复计数相互隔离', async () => {
+    const chunks = [
+      ...streamedToolArguments('a', Array.from({ length: 100 }, () => 'x'), 0),
+      ...streamedToolArguments('b', ['normal'], 1).slice(1),
+      ...Array.from({ length: 28 }, (): StreamChunk => ({ type: 'tool-call-delta', index: 0, id: CallId('a'), argumentsDelta: 'x' })),
+    ]
+    const adapter = new MockAdapter([chunks])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('isolated-tool-arguments'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    const turnEnd = agent.session.events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason).toMatchObject({
+      kind: 'error', error: { code: 'MODEL_TOOL_ARGUMENT_DEGENERATED' },
+    })
+  })
+
+  it('正常变化 fragment 不触发重复熔断，tool call 闭合后清理计数', async () => {
+    const first = streamedToolArguments('same-id', ['x', 'x'], 0)
+    const second = streamedToolArguments('same-id', Array.from({ length: 127 }, () => 'x'), 1)
+    const varying = streamedToolArguments('varying', Array.from({ length: 300 }, (_, index) => String(index)), 2)
+    const chunks: StreamChunk[] = [
+      ...first,
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId('same-id'), name: 'write', arguments: '{}' } },
+      ...second,
+      { type: 'block-end', index: 1, block: { type: 'tool-call', id: CallId('same-id'), name: 'write', arguments: '{}' } },
+      ...varying,
+      { type: 'block-end', index: 2, block: { type: 'tool-call', id: CallId('varying'), name: 'write', arguments: '{}' } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    const adapter = new MockAdapter([chunks])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('bounded-normal-tool-arguments'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    const turnEnd = agent.session.events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason).toEqual({ kind: 'max-tokens' })
+  })
+
   it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid AgentOptions.maxTokens %s before publication',
     async (maxTokens) => {

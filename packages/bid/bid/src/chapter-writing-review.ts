@@ -411,11 +411,14 @@ export function attachChapterReview(
             && context.sectionWritingPlan.acceptance_criteria.find(item => item.id === result.criterion_id)?.priority === 'required')
             .map(item => `动态验收未通过：${context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)?.description}；${item.message}`),
         ]
-        const blocking = completedSummary.external_input_only ? [] : [...new Set([
-          ...completedSummary.blocking_issues,
-          ...(paragraphRevision ? [] : wholeChapterBlocking),
-          ...unsatisfiedRevisionIssues.map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`),
-        ])]
+        const blocking = completedSummary.external_input_only ? [] : paragraphRevision
+          ? [...new Set(unsatisfiedRevisionIssues
+            .map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`))]
+          : [...new Set([
+            ...completedSummary.blocking_issues,
+            ...wholeChapterBlocking,
+            ...unsatisfiedRevisionIssues.map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`),
+          ])]
         const globalComplianceChecks = context.globalCompliance.map((item) => {
           const result = globalChecks.get(item.id)
           if (result === undefined) throw new Error(`S5 review lost global compliance ${item.id}`)

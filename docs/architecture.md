@@ -83,6 +83,8 @@ turn/end
 
 `turn/*`, `step/*`, `user/message`, `assistant/*`, and `tool/*` are durable session events; the rest are live extension points across three domains. `agent/pre-step`, `agent/request`, `llm/stream`, and the three `tools/*` events are waterfalls, whose listeners must call `next()` to delegate; `agent/turn-stopping` is serial and has no `next()`.
 
+Agent Loop 按 tool-call id 限制未闭合的流式 arguments：连续 128 个完全相同的非空片段以 `MODEL_TOOL_ARGUMENT_DEGENERATED` 终止当前请求，累计超过 512 KiB 以 `MODEL_TOOL_ARGUMENT_TOO_LARGE` 终止；两者都通过流迭代器关闭路径等待提供方收口，不执行未闭合的工具调用。
+
 Input reaches the driver through one inbox. Some messages wake it immediately; injected context waits in the inbox until another message does.
 
 `agent/pre-step` decides what the model sees. Listeners may rewrite the claimed messages or reject them outright; a rejected or empty first claim still closes a durable turn that spent no step, so the log records the attempt. Each step reads the prompt sections and tool schemas that plugins registered.

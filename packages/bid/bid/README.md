@@ -45,7 +45,7 @@ Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带
 
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
-S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；引用只提交 `T1` 等短文件引用、`chunk_*` 和语义位置线索，Host 从真实 chunk 正文直接截取 `raw_text`，计算真实文件 ID、路径与行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 独立复核语义拆分的响应点，由 Host 分配稳定 `RP-*` 身份，适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
+S2 的 Main Agent 只用 `grep`、`read` 和五个阶段私有提交工具提取 Project、Requirements、Scoring 与 Compliance 语义；引用只提交 `T1` 等短文件引用、`chunk_*` 和语义位置线索，Host 从真实 chunk 正文直接截取 `raw_text`，计算真实文件 ID、路径与行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分原文保持完整且不包含响应点字段。S3 把 Host 读取的 Scoring 直接注入两个无文件工具的 Child，通过结构化输出生成并独立复核响应点；Host 校验 Schema、评分归属、非空性和连续顺序后写入 Candidate，再分配稳定 `RP-*` 身份。S3 适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
 S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。Writer 能修复的 `required` 失败进入有界定向修订，`preferred` 失败和外部资料缺口只保留在报告中。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
@@ -154,13 +154,24 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### What the model sees
 
-章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer；用户意见、当前正文和限定引用进入原 Writer 的会话日志。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
+章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
+
+##### Paragraph-only revision task
+
+```markdown
+paragraph-only task 只把合并后的授权段落、前后各一个只读顶层块和对应意见交给原 Writer，Writer 只返回 `SEG-*` replacement，不获得 metadata、完整章节或资料工具。Host 精确替换原文并执行章节硬校验，Delta Reviewer 只接收选区 before/after；技术语义改变时转入完整章节 Writer 与 Reviewer，普通表达修订不会启动完整 Chapter、Global 或 Completion Reviewer。Fast Path 最多执行一次局部 repair，选区外正文与 meta 文件不由模型提交。
+```
+
+##### Batch revision history
+
+```markdown
 
 批量修订 task 成功提交时，Host 在正文 publication 内同时保存任务级 before/after Markdown 及摘要；同一 task 的全部 issue 共享该快照。浏览器按 `issue_id → batch_id → task_id` 读取历史版本并重新校验身份、issue 顺序与摘要；旧记录没有快照时返回不可用，不用当前正文推算历史。
+```
 
 #### Token effect
 
-修订请求随当前章节正文、用户意见和引用数量增长，不重复注入其他章节正文。失败恢复章节正文、metadata、审查与执行记录，其他章节不重写。
+整章修订输入随当前章节正文、用户意见和引用数量增长。paragraph-only 输入只随授权选区、相邻只读块和意见数量增长；Delta Reviewer 只读取同一范围的 before/after，不读取整章 Evidence Pack。失败恢复章节正文、metadata、审查与执行记录，其他章节不重写。
 
 #### KV Cache effect
 

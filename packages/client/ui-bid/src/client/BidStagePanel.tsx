@@ -15,6 +15,7 @@ import {
   Menu,
   Portal,
   StateDot,
+  Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: pulls the input-dock SlotMap merge.
 import { BidActionError, type BidSelectedFile, type BidStagePanelInjected } from './index.ts'
@@ -173,6 +174,156 @@ function fileRules(projection: BidClientProjection, t: TranslateBid): string | u
     maxFiles: projection.maxFiles ?? '—',
   })
 }
+
+const KNOWN_ERROR_LABELS: Readonly<Record<string, string>> = {
+  OUTLINE_CANDIDATE_JSON_INVALID: '大纲候选格式校验未通过',
+  OUTLINE_CANDIDATE_MISSING: '大纲候选内容缺失',
+  TENDER_ANALYSIS_SCHEMA_INVALID: '招标分析结果校验未通过',
+  TENDER_ANALYSIS_FAILED: '招标文件分析失败',
+  EVIDENCE_MAPPING_FAILED: '响应条款匹配失败',
+  CHAPTER_WRITING_FAILED: '章节内容编写失败',
+  DOCX_EXPORT_FAILED: 'Word 导出生成失败',
+  STREAM_ERROR: '模型生成连接中断',
+  RETRY_EXHAUSTED: '重试次数已耗尽',
+  EXECUTOR_ERROR: '执行服务异常',
+  USER_STOP: '用户已终止执行',
+}
+
+function cleanSummaryText(text: string): string {
+  return text.replace(/[。；;：:\s]+$/, '').trim()
+}
+
+function extractErrorSummary(raw: string): { summary: string; detailRemaining?: string | undefined } {
+  const trimmed = raw.trim()
+  if (!trimmed) return { summary: '阶段执行失败' }
+
+  for (const [code, label] of Object.entries(KNOWN_ERROR_LABELS)) {
+    if (trimmed.startsWith(code) || trimmed.includes(code)) {
+      const remaining = trimmed.replace(new RegExp(`^${code}\\s*[:：$]*\\s*`), '').trim()
+      return {
+        summary: label,
+        detailRemaining: remaining !== '' && remaining !== code ? remaining : undefined,
+      }
+    }
+  }
+
+  let mainHead = trimmed
+  let mainTail: string | undefined
+
+  const matchReason = /^(.*?)(?:[。；;]?\s*(?:原因|Reason|Details|details)[:：]\s*(.+))$/s.exec(trimmed)
+  if (matchReason && matchReason[1]?.trim()) {
+    mainHead = matchReason[1].trim()
+    mainTail = matchReason[2]?.trim()
+  }
+
+  if (/unexpected.*json|json.*parse|syntaxerror/i.test(mainHead)) {
+    return { summary: 'JSON 数据解析异常', detailRemaining: trimmed }
+  }
+  if (/network|econnrefused|timeout|timed out/i.test(mainHead)) {
+    return { summary: '网络请求异常', detailRemaining: trimmed }
+  }
+
+  const clauseMatch = /^([^。；;\n,，]+)/.exec(mainHead)
+  if (clauseMatch && clauseMatch[1]?.trim()) {
+    const clause = clauseMatch[1].trim()
+    if (clause.length >= 4 && clause.length <= 18 && clause.length < mainHead.length) {
+      const restOfHead = mainHead.slice(clause.length).replace(/^[。；;,，\s]+/, '').trim()
+      const detailParts = [restOfHead, mainTail].filter(Boolean) as string[]
+      return {
+        summary: cleanSummaryText(clause),
+        detailRemaining: detailParts.join('\n') || undefined,
+      }
+    }
+  }
+
+  if (mainHead.length <= 18) {
+    return {
+      summary: cleanSummaryText(mainHead),
+      detailRemaining: mainTail,
+    }
+  }
+
+  return {
+    summary: `${mainHead.slice(0, 16)}…`,
+    detailRemaining: trimmed,
+  }
+}
+
+function formatFailureDisplay(
+  rawReason: string | undefined,
+  issues: readonly StageValidationIssue[] = [],
+  t?: TranslateBid,
+): { summary: string; detail: string } {
+  const hasIssues = issues.length > 0
+  let summary = ''
+  let detailRemaining: string | undefined
+
+  if (rawReason && rawReason.trim()) {
+    const extracted = extractErrorSummary(rawReason)
+    summary = extracted.summary
+    detailRemaining = extracted.detailRemaining
+  } else if (hasIssues) {
+    summary = t ? t('validation.count', { count: issues.length }) : `校验发现 ${String(issues.length)} 个问题`
+  } else {
+    summary = '阶段执行失败'
+  }
+
+  const sections: string[] = []
+
+  if (hasIssues || detailRemaining || (rawReason && rawReason.trim() !== summary)) {
+    sections.push(`【失败原因】\n${summary}`)
+  } else if (rawReason && rawReason.trim()) {
+    sections.push(rawReason.trim())
+  } else {
+    sections.push(summary)
+  }
+
+  if (detailRemaining) {
+    sections.push(`【详细报错】\n${detailRemaining}`)
+  } else if (rawReason && rawReason.trim() !== summary && !hasIssues) {
+    sections.push(`【详细报错】\n${rawReason.trim()}`)
+  }
+
+  if (hasIssues) {
+    const issueLines: string[] = [`【校验问题】(共 ${String(issues.length)} 项)`]
+    issues.forEach((issue, index) => {
+      const parts: string[] = []
+      if (issue.artifact) {
+        parts.push(`文件：${issue.artifact}`)
+      }
+      if (issue.path) {
+        parts.push(`字段：${issue.path}`)
+      }
+      const msg = issue.message || issue.code
+      parts.push(`原因：${msg}`)
+      const recovery = (issue as { recovery?: string }).recovery
+      if (recovery) {
+        parts.push(`建议：${recovery}`)
+      }
+      const itemText = parts.map((p, i) => (i === 0 ? `${String(index + 1)}. ${p}` : `   ${p}`)).join('\n')
+      issueLines.push(itemText)
+    })
+    sections.push(issueLines.join('\n\n'))
+  }
+
+  const detail = sections.join('\n\n')
+  return { summary, detail }
+}
+
+function IconInfoOutline14({ className }: { className?: string }) {
+  return (
+    <svg width={14} height={14} className={className} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M7 0.8C3.57584 0.8 0.8 3.57584 0.8 7C0.8 10.4242 3.57584 13.2 7 13.2C10.4242 13.2 13.2 10.4242 13.2 7C13.2 3.57584 10.4242 0.8 7 0.8ZM2.05 7C2.05 4.26619 4.26619 2.05 7 2.05C9.73381 2.05 11.95 4.26619 11.95 7C11.95 9.73381 9.73381 11.95 7 11.95C4.26619 11.95 2.05 9.73381 2.05 7ZM6.2 3.85C6.2 3.40817 6.55817 3.05 7 3.05C7.44183 3.05 7.8 3.40817 7.8 3.85C7.8 4.29183 7.44183 4.65 7 4.65C6.55817 4.65 6.2 4.29183 6.2 3.85ZM6.35 5.75C6.35 5.39101 6.64101 5.1 7 5.1C7.35899 5.1 7.65 5.39101 7.65 5.75V9.75C7.65 10.109 7.35899 10.4 7 10.4C6.64101 10.4 6.35 10.109 6.35 9.75V5.75Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
+
 
 /**
  * Render a Bid Session from the current Host projection. Local state is
@@ -723,12 +874,14 @@ export function BidStagePanel({
     setRequestError(null)
   }
 
-  const hostFailureReason = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
+  const isFailedOrSuspended = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
+  const hostFailureReason = isFailedOrSuspended
     ? projection.runtime.failureReason
     : undefined
-  const hostFailureIssues = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
+  const hostFailureIssues = isFailedOrSuspended
     ? projection.runtime.failureIssues ?? []
     : []
+  const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
   const runCancelling = projection.run?.status === 'cancelling'
   const progressSyncFailed = projection.runtime.stage === 'evidence_mapping'
     && mappingReadState === 'stale'
@@ -913,10 +1066,33 @@ export function BidStagePanel({
             ? <IconChecklistOutline14 className={css.lead} />
             : <StateDot state={dotState} />}
           <span className={css.stage}>{t(stageKey(displayStage))}</span>
-          <span className={css.message} role="status">
-            {runCancelling
-              ? t('prompt.stage_cancelling')
-              : t(promptKey(displayStage, projection.runtime.status))}
+          <span className={css.message} role={hasFailureInfo ? 'alert' : 'status'}>
+            {runCancelling ? (
+              t('prompt.stage_cancelling')
+            ) : hasFailureInfo ? (
+              (() => {
+                const { summary, detail } = formatFailureDisplay(hostFailureReason, hostFailureIssues, t)
+                return (
+                  <span className={css.messageContent}>
+                    <span className={css.messageFailureText} title={summary}>
+                      {summary}
+                    </span>
+                    <Tooltip label={detail} side="bottom" maxWidth={440}>
+                      <span
+                        className={css.failureInfoIcon}
+                        tabIndex={0}
+                        role="button"
+                        aria-label={t('error.stage', { message: detail })}
+                      >
+                        <IconInfoOutline14 />
+                      </span>
+                    </Tooltip>
+                  </span>
+                )
+              })()
+            ) : (
+              t(promptKey(displayStage, projection.runtime.status))
+            )}
           </span>
           <span className={css.runtimeStatus}>
             {runCancelling
@@ -940,11 +1116,6 @@ export function BidStagePanel({
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
         )}
 
-        {projection.run?.status === 'suspended' && (
-          <div className={css.decisionRow}>
-            <p className={css.suspensionReason}>{t('suspension.reason', { reason: projection.run.cause ?? 'host_restart' })}</p>
-          </div>
-        )}
 
         {showMappingProgress && (
           <div
@@ -1011,25 +1182,6 @@ export function BidStagePanel({
                 {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
               </p>
             )}
-          </div>
-        )}
-
-        {hostFailureReason !== undefined && (
-          <p className={css.error} role="alert">{t('error.stage', { message: hostFailureReason })}</p>
-        )}
-
-        {hostFailureIssues.length > 0 && (
-          <div className={css.validationIssues} role="alert">
-            <p>{t('validation.count', { count: hostFailureIssues.length })}</p>
-            <ol>
-              {hostFailureIssues.map((issue, index) => (
-                <li key={`${String(index)}:${issue.code}:${issue.artifact ?? ''}:${issue.path ?? ''}`}>
-                  {issue.artifact !== undefined && <span>{t('validation.artifact', { artifact: issue.artifact })}</span>}
-                  {issue.path !== undefined && <span>{t('validation.path', { path: issue.path })}</span>}
-                  <span>{t('validation.message', { message: issue.message })}</span>
-                </li>
-              ))}
-            </ol>
           </div>
         )}
 

@@ -138,6 +138,15 @@ import {
   type RevisionIssueCheck,
 } from './chapter-revision-batch.ts'
 import { readRevisionComparison } from './chapter-revision-comparison.ts'
+import { readParagraphRevisionReview } from './chapter-paragraph-revision-artifacts.ts'
+import {
+  executeParagraphRevisionTask,
+  isParagraphOnlyRevisionTask,
+  runParagraphRevisionScheduler,
+  type ParagraphRevisionTaskResult,
+} from './chapter-paragraph-revision-executor.ts'
+import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
+import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type StageSchedulerControl } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
@@ -5282,14 +5291,96 @@ export class BidHostRuntime extends TypertRemoteService {
         || projectKey(revisionParent.session) !== projectKey(session)) {
         throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
       }
-      await executeChapterWriting(revisionParent, candidate.workspace, buildBidStageTask('chapter_writing'), {
-        maxRepairAttempts: this.config.modelStageRepairAttempts,
-        maxConcurrency: this.config.chapterWritingMaxConcurrency,
-        maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
-        webSearchEnabled: this.config.webSearchEnabled,
-        run: candidate.run,
-        revisionBatch: batchExecutionInput,
+      const [outline, requirements, scoring, compliance, responsePoints, writingPlan] = await Promise.all([
+        readFile(within(candidate.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
+          .then(value => parseConfirmedOutlineArtifact(JSON.parse(value))),
+        readFile(within(candidate.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')
+          .then(value => parseTenderRequirementsArtifact(JSON.parse(value))),
+        readFile(within(candidate.workspace.projectRoot, 'analysis/scoring.json'), 'utf8')
+          .then(value => parseTenderScoringArtifact(JSON.parse(value))),
+        readFile(within(candidate.workspace.projectRoot, 'analysis/compliance.json'), 'utf8')
+          .then(value => parseTenderComplianceArtifact(JSON.parse(value))),
+        readFile(within(candidate.workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
+          .then(value => parseScoringResponsePointCatalog(JSON.parse(value))),
+        readFile(within(candidate.workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')
+          .then(value => parseWritingPlan(JSON.parse(value))),
+      ])
+      const worklist = buildChapterWorklist(outline)
+      const scheduled = batchExecutionInput.tasks.map((task) => {
+        const index = worklist.findIndex(section => section.id === task.section_id)
+        const section = worklist[index]
+        const writerId = writerIds.get(task.section_id)
+        if (section === undefined || writerId === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+        return { task, value: { serial: String(index + 1).padStart(4, '0'), title: section.title, writerId } }
       })
+      const customerTextContext = {
+        outline,
+        requirements,
+        scoring,
+        compliance,
+        responsePoints,
+        acceptanceCriterionIds: [
+          ...writingPlan.document_acceptance.map(item => item.id),
+          ...writingPlan.sections.flatMap(section => section.acceptance_criteria.map(item => item.id)),
+        ],
+      }
+      const fallback = async (item: typeof scheduled[number]): Promise<ParagraphRevisionTaskResult> => {
+        await executeChapterWriting(revisionParent, candidate.workspace, buildBidStageTask('chapter_writing'), {
+          maxRepairAttempts: this.config.modelStageRepairAttempts,
+          maxConcurrency: 1,
+          maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+          webSearchEnabled: this.config.webSearchEnabled,
+          run: candidate.run,
+          revisionBatch: {
+            batchId: batchExecutionInput.batchId,
+            tasks: [{ ...item.task, depends_on: [] }],
+          },
+        })
+        return { status: 'completed' }
+      }
+      const results = await runParagraphRevisionScheduler({
+        tasks: scheduled,
+        maxConcurrency: this.config.chapterWritingMaxConcurrency,
+        run: item => isParagraphOnlyRevisionTask(item.task)
+          ? executeParagraphRevisionTask({
+            parent: revisionParent,
+            workspace: candidate.workspace,
+            batchId: batchExecutionInput.batchId,
+            task: item.task,
+            serial: item.value.serial,
+            title: item.value.title,
+            writerId: item.value.writerId,
+            signal: candidate.run.signal,
+            customerTextContext,
+          })
+          : Promise.resolve({ status: 'full_review' as const }),
+        fallback,
+      })
+      let updatedBatch = await readRevisionBatch(candidate.workspace, batchExecutionInput.batchId)
+      if (updatedBatch !== null) {
+        const now = Date.now()
+        updatedBatch = {
+          ...updatedBatch,
+          tasks: updatedBatch.tasks.map((task) => {
+            const result = results.get(task.task_id)
+            if (result === undefined) return task
+            return result.status === 'completed'
+              ? { ...task, status: 'completed' as const, failure: null, started_at: task.started_at ?? now, completed_at: task.completed_at ?? now }
+              : result.status === 'needs_input'
+                ? { ...task, status: 'needs_input' as const, failure: null, started_at: task.started_at ?? now, completed_at: null }
+                : result.status === 'blocked'
+                  ? { ...task, status: 'blocked' as const, started_at: task.started_at, completed_at: null, failure: {
+                    code: result.code, message: result.message, phase: null,
+                  } }
+                  : { ...task, status: 'failed' as const, started_at: task.started_at ?? now, completed_at: null, failure: {
+                    code: result.status === 'failed' ? result.code : 'PARAGRAPH_REVISION_FAILED',
+                    message: result.status === 'failed' ? result.message : '局部修订失败。', phase: null,
+                  } }
+          }),
+          updated_at: now,
+        }
+        await writeRevisionBatch(candidate.workspace, updatedBatch)
+      }
       await publishBidWorkingPaths(run, canonical, candidate.workspace, ['chapters'])
     } finally {
       await resumedParent?.dispose()
@@ -5314,13 +5405,23 @@ export class BidHostRuntime extends TypertRemoteService {
     const now = Date.now()
     let log: ChapterExecutionLog | undefined
     try {
-      const logRaw = JSON.parse(await readFile(within(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))
+      const logRaw: unknown = JSON.parse(await readFile(within(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))
       log = parseOrMigrateChapterExecutionLog(logRaw)
     } catch {}
     let currentBatch = await readRevisionBatch(workspace, batch.batch_id) ?? batch
     for (const task of batch.tasks) {
       const currentTask = currentBatch.tasks.find(t => t.task_id === task.task_id)
       if (currentTask?.status === 'conflict' || currentTask?.status === 'blocked') {
+        continue
+      }
+      if (currentTask?.status === 'needs_input' || currentTask?.status === 'failed') {
+        const status = currentTask.status === 'needs_input' ? 'needs_input' as const : 'failed' as const
+        currentQueue = {
+          ...currentQueue,
+          issues: currentQueue.issues.map(issue => task.issue_ids.includes(issue.issue_id)
+            ? { ...issue, status, updated_at: now }
+            : issue),
+        }
         continue
       }
       const serial = sectionSerials.get(task.section_id)
@@ -5351,11 +5452,19 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       let checks: RevisionIssueCheck[] = []
       try {
-        const reviewRaw = JSON.parse(await readFile(
-          within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8',
-        ))
-        const review = parseChapterReviewArtifact(reviewRaw)
-        checks = review.revision_issue_checks ?? []
+        const paragraphOnly = task.issue_ids.map(id => currentQueue.issues.find(issue => issue.issue_id === id))
+          .every(issue => issue?.scope === 'paragraphs')
+        const fastReview = paragraphOnly
+          ? await readParagraphRevisionReview(workspace, batch.batch_id, task.task_id)
+          : null
+        if (fastReview !== null) checks = fastReview.issue_checks
+        else {
+          const reviewRaw: unknown = JSON.parse(await readFile(
+            within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8',
+          ))
+          const review = parseChapterReviewArtifact(reviewRaw)
+          checks = review.revision_issue_checks ?? []
+        }
       } catch {
         throw new Error(`BID_REVISION_REVIEW_INCOMPLETE: 无法读取审查报告 ${serial}`)
       }
@@ -5422,7 +5531,8 @@ export class BidHostRuntime extends TypertRemoteService {
           )) || schemaWarningAppended
           artifact = parseChapterReviewArtifact(reviewValue)
         } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-        if (artifact !== undefined && (!contentAvailable || !chapterReviewMatches(section.id, markdown, artifact))) {
+        if (artifact !== undefined && (!contentAvailable
+          || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
           artifact = undefined
         }
         review = projectChapterReview(section.id, artifact, execution)
@@ -5586,8 +5696,27 @@ export class BidHostRuntime extends TypertRemoteService {
             ? [{ section_id: row.section_id, title: row.title, markdown, candidate_sha256: chapterCandidateSha256(markdown) }]
             : []
         ))
+        const globalReviewChapters: GlobalComplianceChapter[] = []
+        for (const chapter of globalChapters) {
+          const expectedHashes = [...new Set(report.items.flatMap(item => item.checked_chapters
+            .filter(checked => checked.section_id === chapter.section_id).map(checked => checked.candidate_sha256)))]
+          if (expectedHashes.length > 1) throw new Error('stale-global-compliance-review')
+          const expected = expectedHashes[0] ?? chapter.candidate_sha256
+          if (expected === chapter.candidate_sha256) {
+            globalReviewChapters.push(chapter)
+            continue
+          }
+          const index = worklist.findIndex(section => section.id === chapter.section_id)
+          if (index < 0) throw new Error('stale-global-compliance-review')
+          const serial = String(index + 1).padStart(4, '0')
+          const semantic = await resolveSemanticRevisionPath(
+            workspace, serial, chapter.section_id, expected, chapter.candidate_sha256,
+          )
+          if (!semantic.valid || semantic.from_markdown === undefined) throw new Error('stale-global-compliance-review')
+          globalReviewChapters.push({ ...chapter, markdown: semantic.from_markdown, candidate_sha256: expected })
+        }
         if (report.confirmed_outline_sha256 !== outlineArtifactSha256(outline)
-          || validateGlobalComplianceReview(report, outline, compliance, globalChapters, bidManifest).length > 0) {
+          || validateGlobalComplianceReview(report, outline, compliance, globalReviewChapters, bidManifest).length > 0) {
           throw new Error('stale-global-compliance-review')
         }
         const findings = report.items.flatMap(item => item.status === 'fail' || item.status === 'pending' ? [{
@@ -5664,7 +5793,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
     } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-    if (artifact !== undefined && (markdown === null || !chapterReviewMatches(section.id, markdown, artifact))) {
+    if (artifact !== undefined && (markdown === null || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
       artifact = undefined
     }
     const review = projectChapterReview(section.id, artifact, execution)
@@ -6423,8 +6552,17 @@ function reviewIssuesFromArtifact(sectionId: string, artifact: ChapterReviewArti
   return issues
 }
 
-function chapterReviewMatches(sectionId: string, markdown: string, artifact: ChapterReviewArtifact): boolean {
-  return artifact.section_id === sectionId && artifact.candidate_sha256 === chapterCandidateSha256(markdown)
+async function chapterReviewMatches(
+  workspace: BidWorkspace,
+  serial: string,
+  sectionId: string,
+  markdown: string,
+  artifact: ChapterReviewArtifact,
+): Promise<boolean> {
+  if (artifact.section_id !== sectionId) return false
+  const current = chapterCandidateSha256(markdown)
+  return artifact.candidate_sha256 === current
+    || (await resolveSemanticRevisionPath(workspace, serial, sectionId, artifact.candidate_sha256, current)).valid
 }
 
 function reviewIssuesFromExecution(sectionId: string, execution: ChapterExecutionLog['sections'][number]): BidReviewIssueView[] {

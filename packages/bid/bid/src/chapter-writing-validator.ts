@@ -28,6 +28,7 @@ import {
 import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { validateFlowchartAnchors } from './flowchart.ts'
 import { missingTableCaptionLines } from './docx-numbering.ts'
+import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -226,6 +227,7 @@ export async function validateChapterWriting(
   }))
   const actual = new Set<string>()
   const globalChapters: GlobalComplianceChapter[] = []
+  const semanticBaselines = new Map<string, { markdown: string; sha256: string; currentSha256: string }>()
   const chapterReviews = new Map<string, ReturnType<typeof parseChapterReviewArtifact>>()
   for (const chapter of chapters.chapters) {
     if (actual.has(chapter.section_id)) reject(issues, 'CHAPTER_WRITING_SECTION_DUPLICATE', 'Each writable section may have one chapter only.', MANIFEST)
@@ -292,8 +294,17 @@ export async function validateChapterWriting(
       if (reviewRaw === undefined) throw new Error('review-missing')
       const review = parseChapterReviewArtifact(reviewRaw)
       chapterReviews.set(chapter.section_id, review)
-      if (review.section_id !== chapter.section_id || review.candidate_sha256 !== chapter.review_sha256
-        || review.candidate_sha256 !== chapterCandidateSha256(markdown)) throw new Error('review-invalid')
+      const currentSha256 = chapterCandidateSha256(markdown)
+      const serial = chapter.content_path.slice(-7, -3)
+      const semanticPath = review.candidate_sha256 === currentSha256
+        ? undefined
+        : await resolveSemanticRevisionPath(workspace, serial, chapter.section_id, review.candidate_sha256, currentSha256)
+      if (review.section_id !== chapter.section_id || chapter.review_sha256 !== currentSha256
+        || (review.candidate_sha256 !== currentSha256 && semanticPath?.valid !== true)) throw new Error('review-invalid')
+      const reviewMarkdown = semanticPath?.from_markdown ?? markdown
+      semanticBaselines.set(chapter.section_id, {
+        markdown: reviewMarkdown, sha256: review.candidate_sha256, currentSha256,
+      })
       const sectionLog = executionLog.sections.find(section => section.section_id === chapter.section_id)
       if (sectionLog === undefined || review.writer_child_session_id !== sectionLog.final_writer_child_session_id
         || review.reviewer_child_session_id !== sectionLog.final_reviewer_child_session_id) throw new Error('review-child-invalid')
@@ -309,7 +320,7 @@ export async function validateChapterWriting(
           { id, parent_id, title, purpose, must_answer }
         )),
         sectionWritingPlan,
-      }, { section_id: section.id, markdown, metadata: chapter }, review))
+      }, { section_id: section.id, markdown: reviewMarkdown, metadata: chapter }, review))
     } catch { reject(issues, 'CHAPTER_WRITING_CONTENT_INVALID', 'A chapter body is missing, linked, outside the project, or empty.', chapter.content_path) }
   }
   for (const id of writable.keys()) if (!actual.has(id)) reject(issues, 'CHAPTER_WRITING_SECTION_MISSING', 'The manifest omits a writable confirmed section.', MANIFEST)
@@ -322,14 +333,45 @@ export async function validateChapterWriting(
   if (globalReview.confirmed_outline_sha256 !== outlineHash) {
     reject(issues, 'GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID', 'The document-level compliance review does not match the confirmed outline.', GLOBAL_REVIEW)
   }
-  issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalChapters, bidManifest))
+  const globalReviewValidationChapters: GlobalComplianceChapter[] = []
+  for (const chapter of globalChapters) {
+    const expectedHashes = [...new Set(globalReview.items.flatMap(item => item.checked_chapters
+      .filter(checked => checked.section_id === chapter.section_id).map(checked => checked.candidate_sha256)))]
+    if (expectedHashes.length > 1) {
+      reject(issues, 'GLOBAL_COMPLIANCE_CHAPTER_STALE', '文档级核验对同一章节引用了不一致的正文版本。', GLOBAL_REVIEW)
+      continue
+    }
+    const expected = expectedHashes[0] ?? chapter.candidate_sha256
+    if (expected === chapter.candidate_sha256) {
+      globalReviewValidationChapters.push(chapter)
+      continue
+    }
+    const serial = expectedPaths.get(chapter.section_id)?.content.slice(-7, -3)
+    const path = serial === undefined ? undefined
+      : await resolveSemanticRevisionPath(workspace, serial, chapter.section_id, expected, chapter.candidate_sha256)
+    if (path?.valid !== true || path.from_markdown === undefined) {
+      reject(issues, 'GLOBAL_COMPLIANCE_CHAPTER_STALE', '文档级核验引用的章节正文版本没有有效语义修订链。', GLOBAL_REVIEW)
+      continue
+    }
+    globalReviewValidationChapters.push({ ...chapter, markdown: path.from_markdown, candidate_sha256: expected })
+  }
+  issues.push(...validateGlobalComplianceReview(globalReview, outline, compliance, globalReviewValidationChapters, bidManifest))
   const completion = completionReview.completion
   const documentSha256 = chapterContentSha256(JSON.stringify(buildChapterWorklist(outline).map((section) => {
     const chapter = globalChapters.find(item => item.section_id === section.id)
     return [section.id, chapter?.candidate_sha256 ?? null]
   })))
+  const baselineDocumentSha256 = chapterContentSha256(JSON.stringify(buildChapterWorklist(outline).map(section => [
+    section.id, semanticBaselines.get(section.id)?.sha256 ?? null,
+  ])))
+  const completionIdentityValid = completion !== undefined && (completion.document_sha256 === documentSha256
+    || (completion.document_sha256 === baselineDocumentSha256
+      && buildChapterWorklist(outline).every((section) => {
+        const baseline = semanticBaselines.get(section.id)
+        return baseline !== undefined && (baseline.sha256 === baseline.currentSha256 || baseline.markdown.length > 0)
+      })))
   if (completionReview.confirmed_outline_sha256 !== outlineHash || completion === undefined
-    || completion.plan_version !== writingPlan.plan_version || completion.document_sha256 !== documentSha256
+    || completion.plan_version !== writingPlan.plan_version || !completionIdentityValid
     || completion.document_acceptance_results.length !== writingPlan.document_acceptance.length
     || completion.document_acceptance_results.some((item, index) => item.criterion_id !== writingPlan.document_acceptance[index]?.id)) {
     reject(issues, 'CHAPTER_WRITING_COMPLETION_REVIEW_INVALID', 'The current plan and chapter identities require a complete Main-Agent document review.', COMPLETION_REVIEW)
@@ -387,7 +429,9 @@ export async function validateChapterWriting(
     }
     for (const evidence of result.evidence_quotes) {
       const chapter = globalChapters.find(item => item.section_id === evidence.section_id)
-      if (chapter === undefined || !chapter.markdown.includes(evidence.quote)) {
+      const baseline = semanticBaselines.get(evidence.section_id)
+      if (chapter === undefined || (!chapter.markdown.includes(evidence.quote)
+        && (baseline === undefined || !baseline.markdown.includes(evidence.quote)))) {
         reject(issues, 'CHAPTER_WRITING_DOCUMENT_ACCEPTANCE_QUOTE_INVALID', `${criterion.id} 引用了非当前正文。`, COMPLETION_REVIEW)
       }
     }

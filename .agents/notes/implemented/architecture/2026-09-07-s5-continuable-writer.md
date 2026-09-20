@@ -16,7 +16,11 @@ Host 每章持有一个 continuable Writer，首轮请求前安装私有 `submit
 
 Host 在审查前按确认目录生成唯一根标题，落盘、引句和哈希共同绑定规范化候选。叶节的下级目录由 S4 确认，S5 不生成节内编号；标题接受规则见[目录结构与叶节写作](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)。Word 使用同一根标题编号并调整标题层级；页面通过独立页眉显示根标题，正文不重复显示。
 
-用户在章节完成后提交修订时，Host 从执行日志恢复原 Writer 及其父会话；恢复失败拒绝修订，不能创建替代 Writer。批量修订只接受属于同一原 parent 的目标 Writer，由该 parent 调度全部续写；混合 parent 的批次在模型运行前拒绝。独立引用标签携带原文哈希，段落标签另带连续顶层段落的位置与原文。单选区提交工具和落盘检查精确前缀、后缀；多选区检查首尾固定片段及全部中间固定片段，用户意见中的整章措辞不能扩大 Host 记录的授权范围。仅有段落选区时，Host 忽略 Writer 重新提交的 metadata 并沿用修订前记录，Reviewer 不把选区外既存问题转成修复阻塞；包含整章意见时正文和 metadata 仍可共同更新。每轮 Writer 修复和最终发布重复执行相同范围检查。操作期间父 Agent 不进入模型步骤；失败恢复已写章节产物，成功发布执行记录并刷新正文。引用和意见通过专用 Remote 提交，不进入普通主 Agent 发送路径。
+用户在章节完成后提交修订时，Host 从执行日志恢复原 Writer 及其父会话；恢复失败拒绝修订，不能创建替代 Writer。批量修订只接受属于同一原 parent 的目标 Writer，由该 parent 调度全部续写；混合 parent 的批次在模型运行前拒绝。独立引用标签携带原文哈希，段落标签另带连续顶层段落的位置与原文，用户意见中的整章措辞不能扩大 Host 记录的授权范围。
+
+paragraph-only task 进入独立 Fast Path：Host 合并重叠或相邻选区，只向原 Writer 提供授权段落和前后各一个只读顶层块，Writer 通过 `submit_paragraph_revision` 返回一一对应的 replacement。Host 按偏移倒序替换并重复执行范围、标题、流程图 anchor、表题、内部编号和非空检查；该协议不接受 metadata，也不开放资料读取或联网工具。轻量 Delta Reviewer 只判断审批意见满足度与技术语义是否保持，最多驱动一次局部 repair；改变技术事实、参数、承诺、评分响应、证据或 handoff 时不发布局部候选，改由完整章节路径处理。paragraph 模式的完整 Reviewer fallback 只有未满足的当前审批意见能形成本轮 blocking repair。
+
+Fast Path accept 将正文、任务级 comparison、Delta Review、章节 semantic lineage 和 manifest 当前正文摘要放在同一 publication 中，meta 文件与原完整 Chapter Review 保持不变。lineage 逐项绑定 comparison 与 Delta Review 的身份和 before/after 摘要；Workbench、检查点和最终 Validator 只有在整条链连续、全部意见 satisfied 且 `semantic_preserved=true` 时，才把原完整章节审核、全局审核和整书语义证据视为当前正文的有效历史基线。当前标题、流程图、表题、内部编号、格式、页数和其他 Host 确定性事实始终按现正文重新校验。
 
 ## Alternatives considered
 
@@ -28,8 +32,10 @@ Host 在审查前按确认目录生成唯一根标题，落盘、引句和哈希
 
 **按章节恢复多个原 parent 后分别执行批次。** 批次依赖、失败传播和发布由一次章节执行统一结算；拆成多个父会话会产生多个部分执行边界。当前 S5 同次执行的 Writer 共用 parent，Host 对不一致检查点拒绝整批执行。
 
+**段落选区继续复用完整 Writer 与完整 Reviewer。** 该路径要求模型重新提交整章并重复全章证据审查，既扩大输入输出，也让选区外问题进入 repair；replacement 协议从数据结构上限制写权限，Delta Reviewer 只在技术语义改变时升级为完整审核。
+
 ## Consequences
 
-Writer 历史随修复增长，但每章保持稳定身份。现有执行日志和磁盘格式继续表达轮次、故障和最终候选；用户修订使用 `reviseChapter` Remote，批量修订要求目标 Writer 共用原 parent。独立 Reviewer、fallback 与检查点恢复仍遵循[私有提交协议](2026-09-07-s5-private-submission-protocols.md)及[故障隔离](../bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)，这两份记录保留各自的证据校验与持久化理由。
+Writer 历史随修复增长，但每章保持稳定身份。整章修订继续使用原完整 Writer、独立 Chapter Reviewer、Global Reviewer 和 Completion Reviewer；普通 paragraph-only 修订只增加一次 Writer followup 和一次 Delta Reviewer，修复时各再增加一次。语义 lineage 保留旧审核证据的真实历史正文，不改写旧审核摘要冒充新审核。用户修订使用 `reviseChapter` Remote，批量修订要求目标 Writer 共用原 parent。完整 Reviewer、fallback 与检查点恢复仍遵循[私有提交协议](2026-09-07-s5-private-submission-protocols.md)及[故障隔离](../bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)，这两份记录保留各自的证据校验与持久化理由。
 
 定向协议、AgentLoop 和真实 Loader 的无密钥回放覆盖三章并发、同一 Writer 两次修复后通过、预算、取消及过期提交。确定性测试验证调度和协议，不证明真实模型对依赖或事实适用性的判断质量；真实模型验收另行检查计划中的依赖原因、实际重叠区间和各轮 Writer 身份；单个项目全部通过审查不证明任意项目的事实判断均正确。

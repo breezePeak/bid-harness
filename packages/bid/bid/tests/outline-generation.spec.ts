@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -179,6 +179,7 @@ function modelAgent(
     inheritToolsFromParent?: boolean
     write?: (args: Record<string, unknown>) => Promise<unknown>
     read?: (args: Record<string, unknown>) => Promise<unknown>
+    structuredOutputs?: unknown[]
   } = {},
 ) {
   const events: SessionEvent[] = options.sandboxMode === undefined ? [] : [{
@@ -226,12 +227,29 @@ function modelAgent(
       return visible ? definitions.get(name) ?? (name === 'write' ? writeTool : name === 'read' ? readTool : undefined) : undefined
     }) }
   Object.assign(parent, { ctx: { get: () => tools } })
-  const services = { tools, agents: { get: vi.fn((id: string) => id === 'parent' ? parent : undefined) } }
+  const structuredOutputs = [...(options.structuredOutputs ?? [{
+    schema_version: 1,
+    points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }],
+  }, {
+    schema_version: 1,
+    points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }],
+  }])]
+  const subagentStart = vi.fn(async (_provider: string, request: Record<string, unknown>) => ({
+    id: `child-${String(subagentStart.mock.calls.length)}`,
+    result: Promise.resolve({ stopReason: 'completed', structured: structuredOutputs.shift() }),
+    dispose: vi.fn(async () => {}),
+    request,
+  }))
+  const services = {
+    tools,
+    agents: { get: vi.fn((id: string) => id === 'parent' ? parent : undefined) },
+    subagents: { getProvider: vi.fn(() => ({ inheritsParentContext: false })), start: subagentStart },
+  }
   const agent = { id: 'session', session: { events, header: { cwd: workspace.root,
     ...(options.inheritToolsFromParent === true ? { origin: 'subagent' as const, parentSession: 'parent' } : {}) } },
   ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
   inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] }, followup, whenIdle } as unknown as Agent
-  return { agent, followup, whenIdle, guard, register }
+  return { agent, followup, whenIdle, guard, register, subagentStart }
 }
 
 function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneration>>): string[] {
@@ -447,35 +465,84 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
 })
 
 describe('outline-generation Blueprint Quality Review', () => {
-  it('S3 执行通道复用父会话的文件工具', async () => {
+  it('S3 响应点 Child 只返回结构化候选，由 Host 写入 Candidate', async () => {
     const workspace = await fixture()
     await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
-    const responseCandidate = JSON.stringify({
+    const responseCandidate = {
       schema_version: 1,
       points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }],
-    })
+    }
     const read = vi.fn(async () => ({}))
-    const { agent } = modelAgent(workspace, async (prompt, submitReview, write, readTool) => {
-      if (prompt.includes('评分响应点分析')) {
-        await readTool({ file_path: 'analysis/scoring.json' })
-        const output = prompt.match(/唯一输出：([^。]+scoring-response-points\.candidate\.json)/)?.[1]
-        if (output === undefined) throw new Error('响应点候选路径缺失')
-        await write({ file_path: output, content: responseCandidate })
-      } else if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
-      else if (!prompt.includes('Response Point Semantic Review')) await publishOutline(workspace, researchDrivenOutline)
+    const write = vi.fn(async () => ({}))
+    const run = createTestBidRunContext()
+    const { agent, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+      else await publishOutline(workspace, researchDrivenOutline)
     }, {
-      inheritToolsFromParent: true,
       read,
-      write: async (args) => {
-        const output = resolve(workspace.root, String(args.file_path))
-        await mkdir(dirname(output), { recursive: true })
-        await writeFile(output, String(args.content))
-        return {}
-      },
+      write,
+      structuredOutputs: [responseCandidate, responseCandidate],
     })
 
-    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
-    expect(read).toHaveBeenCalledWith({ file_path: 'analysis/scoring.json' })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run })).resolves.toEqual(artifacts)
+    expect(read).not.toHaveBeenCalled()
+    expect(write).not.toHaveBeenCalled()
+    expect(subagentStart).toHaveBeenCalledTimes(2)
+    for (const [, request] of subagentStart.mock.calls) expect(request).toMatchObject({ toolFilter: { allow: [] } })
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'runs', run.runId, 'scratch', 'outline-generation', 'analysis/scoring-response-points.candidate.json'), 'utf8'))).toEqual(responseCandidate)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toMatchObject({
+      points: [{ id: 'RP-000001', ...responseCandidate.points[0] }],
+    })
+  })
+
+  it.each([
+    ['非法 scoring_id', { schema_version: 1, points: [{ scoring_id: '001', order: 1, text: '实施进度' }] }],
+    ['order 不连续', { schema_version: 1, points: [
+      { scoring_id: 'SCORE-SCHEDULE', order: 1, text: '实施进度' },
+      { scoring_id: 'SCORE-SCHEDULE', order: 3, text: '进度保障' },
+    ] }],
+    ['text 为空', { schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '   ' }] }],
+  ])('%s 时 Host 拒绝且不写 Candidate', async (_name, structured) => {
+    const workspace = await fixture()
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    const run = createTestBidRunContext()
+    const { agent } = modelAgent(workspace, async () => {}, { structuredOutputs: [structured] })
+
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run }))
+      .rejects.toThrow('OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID')
+    await expect(readFile(join(workspace.projectRoot, 'runs', run.runId, 'scratch', 'outline-generation', 'analysis/scoring-response-points.candidate.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('遗漏评分项时 Host 拒绝 Candidate', async () => {
+    const workspace = await fixture()
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify({
+      ...scoring,
+      scoring_items: [
+        ...scoring.scoring_items,
+        { ...scoring.scoring_items[0]!, id: 'SCORE-SECOND', title: '第二项评分' },
+      ],
+    }))
+    const candidate = { schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '实施进度' }] }
+    const { agent } = modelAgent(workspace, async () => {}, { structuredOutputs: [candidate] })
+
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('scoring-response-point-candidate-order-invalid')
+  })
+
+  it('语义复核返回非法结构时不覆盖已有合法 Candidate', async () => {
+    const workspace = await fixture()
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    const candidatePath = join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json')
+    const existing = { schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '已有合法响应点' }] }
+    await writeFile(candidatePath, JSON.stringify(existing))
+    const invalid = { schema_version: 1, points: [{ scoring_id: '001', order: 1, text: '错误响应点' }] }
+    const { agent } = modelAgent(workspace, async () => {}, { structuredOutputs: [invalid] })
+
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID')
+    expect(JSON.parse(await readFile(candidatePath, 'utf8'))).toEqual(existing)
   })
 
   it('accepts structured advisory issues and lets the Host author the formal v4 report', async () => {
@@ -600,48 +667,26 @@ describe('outline-generation Blueprint Quality Review', () => {
     await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
     const task = buildBidStageTask('outline_generation')
     expect(task.inputs).not.toContain('analysis/scoring-response-points.json')
-    const responseCandidate = JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })
-    const oversizedRead = vi.fn(async (args: Record<string, unknown>) => {
-      if (args.limit !== undefined) throw new Error('limit must be less than or equal to 2000')
-      return {}
-    })
-    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview, write, read) => {
-      if (prompt.includes('评分响应点分析')) {
-        await read({ file_path: 'analysis/scoring.json', limit: 10_000 })
-        const output = prompt.match(/唯一输出：([^。]+scoring-response-points\.candidate\.json)/)?.[1]
-        if (output === undefined) throw new Error('响应点候选路径缺失')
-        await write({ file_path: output, content: responseCandidate, sandbox_permissions: 'workspace-write', justification: '写入工作区候选文件' })
-      }
-      else if (prompt.includes('Response Point Semantic Review')) return
-      else if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+    const responseCandidate = { schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }
+    const { agent, followup, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
       else await publishOutline(workspace, researchDrivenOutline)
     }, {
-      sandboxMode: 'workspace-write',
-      write: async (args) => {
-        expect(args).not.toHaveProperty('sandbox_permissions')
-        expect(args).not.toHaveProperty('justification')
-        expect(typeof args.file_path).toBe('string')
-        expect(args.content).toBe(responseCandidate)
-        const output = resolve(workspace.root, String(args.file_path))
-        await mkdir(dirname(output), { recursive: true })
-        await writeFile(output, String(args.content))
-        return {}
-      },
-      read: oversizedRead,
+      structuredOutputs: [responseCandidate, responseCandidate],
     })
     await expect(executeOutlineGeneration(agent, workspace, task)).resolves.toEqual(artifacts)
-    expect(followup).toHaveBeenCalledTimes(4)
-    expect(oversizedRead).toHaveBeenNthCalledWith(1, { file_path: 'analysis/scoring.json', limit: 10_000 })
-    expect(oversizedRead).toHaveBeenNthCalledWith(2, { file_path: 'analysis/scoring.json' })
-    for (const [message] of followup.mock.calls) {
-      expect(message.content[0]!.text).toContain('当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification')
-    }
-    const analysisPrompt = followup.mock.calls[0]![0].content[0]!.text
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(subagentStart).toHaveBeenCalledTimes(2)
+    const analysisPrompt = (subagentStart.mock.calls[0]![1] as { prompt: Array<{ text: string }> }).prompt[0]!.text
     expect(analysisPrompt).toContain('本次合法 ID：["SCORE-SCHEDULE"]')
+    expect(analysisPrompt).toContain('<scoring-json>')
     expect(analysisPrompt).not.toContain('"scoring_id":"SCORE-..."')
-    const semanticPrompt = followup.mock.calls[1]![0].content[0]!.text
+    for (const forbidden of ['scoring-response-points.candidate.json', '调用 write', 'sandbox_permissions', 'justification']) {
+      expect(analysisPrompt).not.toContain(forbidden)
+    }
+    const semanticPrompt = (subagentStart.mock.calls[1]![1] as { prompt: Array<{ text: string }> }).prompt[0]!.text
     expect(semanticPrompt).toContain('本次合法 scoring_id：["SCORE-SCHEDULE"]')
-    for (const index of [2, 3]) {
+    for (const index of [0, 1]) {
       const prompt = followup.mock.calls[index]![0].content[0]!.text
       expect(prompt).toContain('analysis/scoring-response-points.json')
       expect(prompt).toContain('"id":"RP-000001"')
@@ -779,13 +824,13 @@ describe('outline-generation Blueprint Quality Review', () => {
   })
 
   it('reviews real itemized scoring semantics without splitting quality words or score counts', async () => {
-    const workspace = await fixture()
-    const prompt = renderResponsePointSemanticReviewTask({ id: 'session' } as Agent, workspace)
+    const candidate = { schema_version: 1 as const, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '实施进度' }] }
+    const prompt = renderResponsePointSemanticReviewTask({ id: 'session' } as Agent, scoringArtifact, candidate)
     expect(prompt).toContain('项目目标、预期成果')
     expect(prompt).toContain('软件技术路线、总体设计应分别保留')
     expect(prompt).toContain('完整、合理可行、现状分析准确清晰')
     expect(prompt).toContain('总体方案完整、合理、可行，得5分')
-    expect(prompt).toContain('不得另写 review report')
+    expect(prompt).toContain('通过结构化输出返回复核后的完整候选')
   })
 
   it('allows one response point to be covered by multiple writable sections', () => {

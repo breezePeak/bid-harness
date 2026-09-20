@@ -97,6 +97,37 @@
   white-space: nowrap;
 }
 
+.messageContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.messageFailureText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failureInfoIcon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.failureInfoIcon:hover,
+.failureInfoIcon:focus-visible {
+  color: var(--dsw-alias-label-primary);
+}
+
 .runtimeStatus {
   flex: none;
   white-space: nowrap;

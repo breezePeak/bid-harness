@@ -651,15 +651,24 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     scoring_response_point_ids: [...pointIds.slice(0, 10), 'RP-999999'], scoring_ids: ['SCORE-UNKNOWN'], requirement_ids: [],
   }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
+  const writePromptArtifact = (callId: string, suffix: string, content: unknown): ScriptStep => (options) => {
+    const prompt = options.messages.flatMap(message => message.content)
+      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    const paths = [...prompt.matchAll(new RegExp(`[^\\s：]+${suffix.replaceAll('.', '\\.').replaceAll('/', '\\/')}`, 'gu'))]
+    const path = paths.at(-1)?.[0]
+    if (path === undefined) throw new Error(`S3 回放 Prompt 缺少 ${suffix}`)
+    return toolCall(callId, 'write', { file_path: path, content: JSON.stringify(content) })
+  }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript = [
-    toolCall('response-points', 'write', { file_path: prefix + '/analysis/scoring-response-points.candidate.json', content: JSON.stringify(responseCandidate) }),
-    finalText('评分响应点候选已完成。'),
-    finalText('评分原文逐项复核完成。'),
-    toolCall('draft', 'write', { file_path: prefix + '/outline/outline.json', content: JSON.stringify(candidate) }),
+    writePromptArtifact('draft', '/outline/outline.json', candidate),
     finalText('初步目录候选已完成。'),
   ]
-  const adapter = new ScriptedAdapter(sessionId, parentScript, [])
+  const childScript = [
+    toolCall('response-points', 'structured_output', responseCandidate),
+    toolCall('response-points-review', 'structured_output', responseCandidate),
+  ]
+  const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
@@ -672,28 +681,28 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts, run }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
   const failed = await orchestrator.runCurrentAutomaticStage()
-  if (failed.status !== 'failed' || !failed.failureReason?.includes('RP-999999')) throw new Error('未知 RP 未进入可续修的失败状态')
+  if (failed.status !== 'suspended' || !failed.failureReason?.includes('RP-999999')) throw new Error('未知 RP 未进入可续修的挂起状态：' + JSON.stringify(failed))
   const catalogBefore = await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
   const baseline = outline
   parentScript.push(
     toolCall('forbidden-catalog-write', 'write', { file_path: prefix + '/analysis/scoring-response-points.json', content: '{}' }),
-    toolCall('candidate-repair', 'write', { file_path: prefix + '/outline/candidate-repair.json', content: JSON.stringify([
+    writePromptArtifact('candidate-repair', '/outline/candidate-repair.json', [
       { section_index: 0, field: 'scoring_response_point_ids', value: pointIds.slice(0, 10) },
       { section_index: 0, field: 'scoring_ids', value: ['SCORE-1'] },
-    ]) }),
+    ]),
     finalText('根据正式评分原文重新明确选择合法 RP 与评分关联。'),
-    toolCall('requirement-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([
+    writePromptArtifact('requirement-repair', '/outline/repair-operations.json', [
       { type: 'update_section', section_id: section.id, requirement_ids: section.requirement_ids },
-    ]) }),
+    ]),
     finalText('将招标要求关联至现有安全方案章节。'),
-    toolCall('customer-text-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
+    writePromptArtifact('customer-text-repair', '/outline/repair-operations.json', [{
       type: 'update_section', section_id: section.id, title: section.title,
-    }]) }),
+    }]),
     finalText('已用客户可理解的自然语言替换内部编号标题。'),
-    toolCall('local-repair', 'write', { file_path: prefix + '/outline/repair-operations.json', content: JSON.stringify([{
+    writePromptArtifact('local-repair', '/outline/repair-operations.json', [{
       type: 'update_section', section_id: section.id, scoring_response_point_ids: pointIds,
       must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
-    }]) }),
+    }]),
     finalText('已提交审计留存与追溯的局部修复。'),
     toolCall('quality-review', 'submit_outline_quality_review', { issues: [] }),
     finalText('逐项复核章节归属和写作指导已完成。'),
@@ -701,12 +710,17 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   maxRepairAttempts = 4
   const suspended = orchestrator.controlState.run
   if (suspended?.status !== 'suspended') throw new Error('S3 失败没有保留可恢复 Run')
+  parentScript.unshift(
+    writePromptArtifact('resumed-draft', '/outline/outline.json', candidate),
+    finalText('恢复目录候选。'),
+  )
   const outcome = await orchestrator.resume(suspended.runId)
+  if (outcome.status !== 'waiting_user') throw new Error('S3 续修没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
   const catalogUnchanged = catalogBefore === await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
   const untouchedUnchanged = JSON.stringify(baseline.sections[1]) === JSON.stringify(result.sections[1])
-  if (!catalogUnchanged || !untouchedUnchanged || outcome.status !== 'waiting_user') throw new Error('S3 续修改变了无关内容或跳过用户确认')
+  if (!catalogUnchanged || !untouchedUnchanged) throw new Error('S3 续修改变了无关内容')
   return { failed, outcome, catalogUnchanged, untouchedUnchanged, outline: result, report,
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }
 }

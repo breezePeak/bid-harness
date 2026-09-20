@@ -5,7 +5,7 @@ import { join, relative, resolve } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
-import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { ToolArgsError, type ObjectJsonSchema, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
@@ -33,6 +33,8 @@ import {
   type ScoringResponsePointCatalog,
   createScoringResponsePointCatalog,
   parseScoringResponsePointCandidate,
+  scoringResponsePointCandidateSchema,
+  type ScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
 import { parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderScoringArtifact, type TenderRequirementsArtifact, type TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
@@ -50,6 +52,28 @@ const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.jso
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
 const qualityReportSubmissionSchema = z.object({ issues: z.array(outlineQualityIssueSchema) }).strict()
+
+// 子代理结构化输出仅接受结构约束；Host 的 Zod 解析保留全部标量约束。
+function removeUnsupportedSubagentSchemaConstraints(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) removeUnsupportedSubagentSchemaConstraints(item)
+    return
+  }
+  if (value === null || typeof value !== 'object') return
+  const schema = value as Record<string, unknown>
+  delete schema.$schema
+  delete schema.minLength
+  delete schema.exclusiveMinimum
+  delete schema.maximum
+  for (const child of Object.values(schema)) removeUnsupportedSubagentSchemaConstraints(child)
+}
+
+const rawScoringResponsePointCandidateOutputSchema = zodJsonSchema(scoringResponsePointCandidateSchema)
+removeUnsupportedSubagentSchemaConstraints(rawScoringResponsePointCandidateOutputSchema)
+const scoringResponsePointCandidateOutputSchema: ObjectJsonSchema = {
+  ...rawScoringResponsePointCandidateOutputSchema,
+  type: 'object',
+}
 
 /** Drop a no-op same-mode escalation while preserving every genuinely wider request. */
 function withoutRedundantSandboxEscalation(agent: Agent, args: unknown): unknown {
@@ -158,43 +182,44 @@ function latestOutlineFeedback(agent: Agent): string | undefined {
 /** Render the S3 semantic scoring analysis assignment. */
 function renderResponsePointAnalysisTask(
   agent: Agent,
-  workspace: BidWorkspace,
   task: BidStageTask,
-  scoringIds: readonly string[],
+  scoring: TenderScoringArtifact,
 ): string {
-  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
+  const scoringIds = scoring.scoring_items.map(item => item.id)
   return [
     `当前阶段：${task.stage} / 评分响应点分析`,
     `Bid Session：${agent.id}`,
-    `读取 ${root}/analysis/scoring.json。`,
+    '以下是本次需要分析的评分项 JSON，由 Host 提供：',
+    `<scoring-json>\n${JSON.stringify(scoring)}\n</scoring-json>`,
     '逐项理解评分语义，将每个评分项拆成一个或多个可独立回答、可独立审查，或在实际评分逻辑中明显独立评价的最小合理业务单元。重点识别原文明列事项、包括或包括但不限于的独立内容、编号或分号列项、逐项得分或扣分，以及虽在同一句但可独立编写审查的技术内容。',
     '不要按顿号、逗号、和、及或分值数量机械切分。完整、合理、可行、准确、符合要求等质量判断词不是独立写作主题，除非原文明确定义为分别响应的评价维度；不得凭常识新增原文没有依据的评分内容。',
-    `唯一输出：${root}/${RESPONSE_POINT_CANDIDATE}。严格写入 {"schema_version":1,"points":[{"scoring_id":"从合法 ID 中选择","order":1,"text":"具体响应点"}]}。scoring_id 必须逐字复制 scoring.json 中的 id；本次合法 ID：${JSON.stringify(scoringIds)}。`,
-    '每个 scoring_id 至少一个响应点，同一评分项的 order 从 1 连续递增。写完停止，稳定 RP ID 由 Host 分配。',
+    `scoring_id 必须逐字复制 Host 提供的 id；本次合法 ID：${JSON.stringify(scoringIds)}。`,
+    '每个 scoring_id 至少一个响应点，同一评分项的 order 从 1 连续递增。稳定 RP ID 由 Host 分配。',
   ].join('\n')
 }
 
 /**
- * Render the independent S3 semantic review that repairs the candidate in place.
+ * Render the independent S3 semantic review that returns a full candidate.
  * @param agent - live Bid Agent receiving the review assignment.
- * @param workspace - Workspace 级 Bid 项目.
- * @param scoringIds - 当前评分 Artifact 中允许使用的评分 ID；省略时不注入项目清单。
+ * @param scoring - 当前评分 Artifact，作为响应点复核的语义来源。
+ * @param candidate - 待复核的响应点候选。
  * @returns model-visible semantic review instructions.
  */
 export function renderResponsePointSemanticReviewTask(
   agent: Agent,
-  workspace: BidWorkspace,
-  scoringIds?: readonly string[],
+  scoring: TenderScoringArtifact,
+  candidate: ScoringResponsePointCandidate,
 ): string {
-  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
+  const scoringIds = scoring.scoring_items.map(item => item.id)
   return [
     '当前阶段：outline_generation / Response Point Semantic Review',
     `Bid Session：${agent.id}`,
-    `重新读取 ${root}/analysis/scoring.json 和 ${root}/${RESPONSE_POINT_CANDIDATE}。`,
+    `Host 提供的评分项：${JSON.stringify(scoring)}`,
+    `待复核响应点：${JSON.stringify(candidate)}`,
     '逐个评分项复核：原文明列事项是否遗漏，多个独立内容是否错误合并，完整单义要求是否过度拆碎，质量评价词是否误作写作主题，是否新增无原文依据的内容，scoring_id 与顺序是否正确，每个响应点是否具体到可直接用于目录设计。',
-    ...(scoringIds === undefined ? [] : [`本次合法 scoring_id：${JSON.stringify(scoringIds)}；候选中的 scoring_id 必须逐字复制这些值。`]),
+    `本次合法 scoring_id：${JSON.stringify(scoringIds)}；候选中的 scoring_id 必须逐字复制这些值。`,
     '典型逐项计分原文中的项目目标、预期成果、总体设计对相关政策与现有条件的符合性、软件技术路线、总体设计应分别保留；完整、合理可行、现状分析准确清晰、符合项目要求、满足采购需求仍是质量标准。整体表述“总体方案完整、合理、可行，得5分”应保留为一个合理响应点，不得按分值拆成五项。',
-    `发现过粗、遗漏或误拆时直接重写 ${root}/${RESPONSE_POINT_CANDIDATE}；没有问题则保持文件内容。不得另写 review report。完成后停止，Host 只校验 JSON、scoring_id、每项至少一点、连续 order 和非空文本。`,
+    '通过结构化输出返回复核后的完整候选；没有问题则原样返回。Host 校验 scoring_id、每项至少一点、连续 order 和非空文本。',
   ].join('\n')
 }
 
@@ -386,6 +411,57 @@ export async function executeOutlineGeneration(
   const scoring = await readInput('analysis/scoring.json', parseTenderScoringArtifact)
   const requirements = await readInput('analysis/requirements.json', parseTenderRequirementsArtifact)
   const compliance = await readInput('analysis/compliance.json', parseTenderComplianceArtifact)
+  const validateResponsePointCandidate = (value: unknown): ScoringResponsePointCandidate => {
+    try {
+      const candidate = parseScoringResponsePointCandidate(typeof value === 'string' ? JSON.parse(value) : value)
+      createScoringResponsePointCatalog(scoring, candidate)
+      return candidate
+    } catch (error) {
+      throw new BidStageExecutionError([{
+        code: 'OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID',
+        artifact: RESPONSE_POINT_CANDIDATE,
+        message: error instanceof Error ? error.message : String(error),
+      }])
+    }
+  }
+  const generateResponsePointCandidate = async (
+    label: string,
+    prompt: string,
+  ): Promise<ScoringResponsePointCandidate> => {
+    const subagents = agent.ctx.get('subagents')
+    if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
+      throw new Error('S3 评分响应点分析需要独立上下文的 spawn provider。')
+    }
+    await options.run.scheduler.waitUntilRunnable(options.run.signal)
+    const child = await subagents.start('spawn', {
+      parent: agent,
+      signal: options.run.signal,
+      label,
+      prompt: [{ type: 'text', text: prompt }],
+      outputSchema: scoringResponsePointCandidateOutputSchema,
+      toolFilter: { allow: [] },
+      maxDepth: 1,
+      persona: '你是评分响应点分析 Subagent。只分析 Host 注入的评分内容，不调用工具、不派生其他 Agent，并通过结构化输出返回完整候选。',
+    })
+    try {
+      const result = await child.result
+      if (result.stopReason !== 'completed') {
+        throw new Error(`评分响应点 Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`)
+      }
+      if (result.structured === undefined) throw new Error('评分响应点 Subagent 未返回结构化候选。')
+      return validateResponsePointCandidate(result.structured)
+    } catch (error) {
+      if (options.run.signal.aborted) throw error
+      if (error instanceof BidStageExecutionError) throw error
+      throw new BidStageExecutionError([{
+        code: 'OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID',
+        artifact: RESPONSE_POINT_CANDIDATE,
+        message: error instanceof Error ? error.message : String(error),
+      }])
+    } finally {
+      await child.dispose()
+    }
+  }
   const inputVersion = createHash('sha256').update(JSON.stringify(await Promise.all(task.inputs.map(async input => [input, await read(input)])))).digest('hex')
   const previousVersion = await read('outline/generation-inputs.json')
   if (previousVersion !== undefined && await readInput('outline/generation-inputs.json', value => z.string().parse(value)) !== inputVersion) {
@@ -533,20 +609,19 @@ export async function executeOutlineGeneration(
   try {
     if (catalog === undefined) {
       if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
-      if (await read(RESPONSE_POINT_CANDIDATE) === undefined) {
-        await run(
-          renderResponsePointAnalysisTask(agent, workspace, task, scoring.scoring_items.map(item => item.id)),
-          [RESPONSE_POINT_CANDIDATE],
-        )
-      }
-      await run(
-        renderResponsePointSemanticReviewTask(agent, workspace, scoring.scoring_items.map(item => item.id)),
-        [RESPONSE_POINT_CANDIDATE],
-        undefined,
-        true,
+      const rawCandidate = await read(RESPONSE_POINT_CANDIDATE)
+      const candidate = rawCandidate === undefined
+        ? await generateResponsePointCandidate('评分响应点分析', renderResponsePointAnalysisTask(agent, task, scoring))
+        : validateResponsePointCandidate(rawCandidate)
+      const reviewedCandidate = await generateResponsePointCandidate(
+        '评分响应点语义复核',
+        renderResponsePointSemanticReviewTask(agent, scoring, candidate),
       )
-      const candidate = parseScoringResponsePointCandidate(JSON.parse((await read(RESPONSE_POINT_CANDIDATE)) ?? 'null'))
-      catalog = createScoringResponsePointCatalog(scoring, candidate)
+      const candidatePath = scratchPath(RESPONSE_POINT_CANDIDATE)
+      await assertNoLinkedPath(workspace.root, candidatePath)
+      await options.run.commits.writeJson(candidatePath, reviewedCandidate)
+      scratchArtifacts.add(RESPONSE_POINT_CANDIDATE)
+      catalog = createScoringResponsePointCatalog(scoring, reviewedCandidate)
       await write(RESPONSE_POINT_CATALOG, catalog)
     }
     const handoff = '\n正式响应点清单（只读，不得修改、删除或重新分配编号）：' + relative(workspace.root, path(RESPONSE_POINT_CATALOG)).replaceAll('\\', '/')

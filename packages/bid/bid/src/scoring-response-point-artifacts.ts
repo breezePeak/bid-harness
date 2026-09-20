@@ -21,8 +21,9 @@ const catalogSchema = z.object({
   points: z.array(pointSchema),
 }).strict()
 
-const candidateSchema = z.object({
-  schema_version: recordOnlySchemaVersion(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
+/** Structured S3 response-point output validated before the Host writes any candidate Artifact. */
+export const scoringResponsePointCandidateSchema = z.object({
+  schema_version: z.literal(SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION),
   points: z.array(z.object({
     scoring_id: z.string().min(1),
     order: z.number().int().positive(),
@@ -35,7 +36,7 @@ export type ScoringResponsePoint = z.infer<typeof pointSchema>
 /** Stable response-point identity projected beside the S2 scoring Artifact. */
 export type ScoringResponsePointCatalog = z.infer<typeof catalogSchema>
 /** S3 Agent analysis before the Host assigns stable response-point ids. */
-export type ScoringResponsePointCandidate = z.infer<typeof candidateSchema>
+export type ScoringResponsePointCandidate = z.infer<typeof scoringResponsePointCandidateSchema>
 
 /**
  * Parse the Host-owned stable scoring response-point catalog.
@@ -52,7 +53,7 @@ export function parseScoringResponsePointCatalog(value: unknown): ScoringRespons
  * @returns Strict response-point candidates.
  */
 export function parseScoringResponsePointCandidate(value: unknown): ScoringResponsePointCandidate {
-  return candidateSchema.parse(value)
+  return scoringResponsePointCandidateSchema.parse(value)
 }
 
 /**
