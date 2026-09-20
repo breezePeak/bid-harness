@@ -24,6 +24,7 @@ interface TestOperation {
   readonly done: Promise<void>
   readonly settle: () => void
   reservedForReset: boolean
+  executionHandle?: { agent: Agent }
 }
 
 interface TestHost {
@@ -60,7 +61,12 @@ describe('Bid Host stage reset', () => {
     await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
     const key = process.platform === 'win32' ? realpathSync(cwd).toLowerCase() : realpathSync(cwd)
     const prior = Promise.withResolvers<undefined>()
-    const idle = Promise.withResolvers<undefined>()
+    const executionIdle = Promise.withResolvers<undefined>()
+    const executionCancel = vi.fn()
+    const executionAgent = {
+      cancel: executionCancel,
+      whenIdle: vi.fn(() => executionIdle.promise),
+    } as unknown as Agent
     const operation: TestOperation = {
       session, workspace, key, ready: true,
       controller: new AbortController(),
@@ -68,6 +74,7 @@ describe('Bid Host stage reset', () => {
       done: prior.promise,
       settle: () => { prior.resolve(undefined) },
       reservedForReset: false,
+      executionHandle: { agent: executionAgent },
     }
     const cancel = vi.fn()
     const agent = {
@@ -79,11 +86,18 @@ describe('Bid Host stage reset', () => {
     } as unknown as Agent
     const flush = vi.fn(async () => {})
     const drive = vi.fn()
+    const startStage = vi.fn(async () => ({ ok: true, value: { stage: 'evidence_mapping', status: 'running' } }))
+    const ask = vi.fn(async ({ questions }: { questions: Array<{ id: string }> }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
+    }))
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
         on: vi.fn(() => () => {}),
+        fiber: ctx.fiber,
+        get: vi.fn(() => undefined),
+        agents: { get: () => agent },
         sessions: { flush, list: () => [session] },
-        userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+        userQuestions: { ask },
         logger: { warn: vi.fn() },
       },
       config: {
@@ -96,7 +110,12 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map([[key, operation]]),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingWritingQuestions: new Map(),
+      processingWritingPlans: new Map(),
+      writingEntryStops: new Map(),
+      unsavedWritingAnswers: new Map(),
       automaticOrchestrator: () => ({ drive }),
+      startStage,
     }) as TestHost
 
     await expect(BidHostRuntime.prototype.resetStage.call(
@@ -106,8 +125,10 @@ describe('Bid Host stage reset', () => {
     )).rejects.toMatchObject({ code: 'BID_STAGE_RESET_NOT_ALLOWED' })
 
     const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, 'evidence_mapping')
-    await vi.waitFor(() => { expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
+    await vi.waitFor(() => { expect(executionCancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
     expect(operation.controller.signal.aborted).toBe(true)
+    expect(cancel).not.toHaveBeenCalled()
+    expect(agent.whenIdle).not.toHaveBeenCalled()
     expect(drive).not.toHaveBeenCalled()
     await expect(BidHostRuntime.prototype.resetStage.call(
       host as unknown as BidHostRuntime,
@@ -116,7 +137,7 @@ describe('Bid Host stage reset', () => {
     )).rejects.toMatchObject({ code: 'BID_OPERATION_IN_PROGRESS' })
 
     prior.resolve(undefined)
-    idle.resolve(undefined)
+    executionIdle.resolve(undefined)
     await expect(reset).resolves.toEqual({ stage: 'evidence_mapping', status: 'waiting_start' })
     await expect(access(evidencePath)).rejects.toThrow()
     await expect(access(mappingCheckpointPath)).rejects.toThrow()
@@ -126,6 +147,10 @@ describe('Bid Host stage reset', () => {
     expect(drive).not.toHaveBeenCalled()
     expect(flush).toHaveBeenCalledWith(session)
     expect(host.inFlight.has(key)).toBe(false)
+    await vi.waitFor(() => { expect(ask).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(startStage).toHaveBeenCalledWith(session) })
+    expect(session.events.some(event => event.type === 'bid.run.decision.required')).toBe(true)
+    expect(session.events.some(event => event.type === 'bid.run.decision.received')).toBe(true)
   })
 
   it.each(BID_STAGES.filter(stage => stage !== 'docx_export'))('clears %s and later-stage model context before waiting for start', async (stage) => {
@@ -157,6 +182,9 @@ describe('Bid Host stage reset', () => {
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
         on: vi.fn(() => () => {}),
+        fiber: ctx.fiber,
+        get: vi.fn(() => undefined),
+        agents: { get: () => agent },
         sessions: { flush: vi.fn(async () => {}), list: () => [session] },
         userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
         logger: { warn: vi.fn() },
@@ -171,6 +199,10 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map(),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingWritingQuestions: new Map(),
+      processingWritingPlans: new Map(),
+      writingEntryStops: new Map(),
+      unsavedWritingAnswers: new Map(),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 

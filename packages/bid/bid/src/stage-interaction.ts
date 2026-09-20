@@ -344,8 +344,11 @@ async function inspectBidStageValue(
       ...(taskContext === undefined ? {} : { task_contract_context: taskContext }),
     }
   }
-  const draft = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
-    .then(async outline => outline === null ? null : getOrCreateOutlineDraft(workspace))
+  const workingOutline = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
+  const initialConfirmedOutline = runtime.stage === 'evidence_mapping' && workingOutline === null
+    ? await readOptionalStageJson(workspace, 'outline/initial-confirmed-outline.json', parseOutlineArtifact)
+    : null
+  const draft = workingOutline === null ? null : await getOrCreateOutlineDraft(workspace)
   const response_points = await readOptionalStageJson(workspace, 'analysis/scoring-response-points.json', parseScoringResponsePointCatalog)
   const evidence = runtime.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) : null
@@ -354,7 +357,7 @@ async function inspectBidStageValue(
     ? await readOptionalStageJson(workspace, 'analysis/evidence-mapping-plan.json', parseEvidenceMappingPlan) : null
   const mappingProgress = runtime.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
   const mappingTasks = runtime.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
-  const sections = draft?.outline.sections ?? []
+  const sections = draft?.outline.sections ?? initialConfirmedOutline?.sections ?? []
   const includeMappingDetails = view === 'task_contract_context' || runtime.status === 'waiting_user'
   const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
     ...(includeMappingDetails ? { evidence: mappings.get(item.section.id) ?? null } : {}),

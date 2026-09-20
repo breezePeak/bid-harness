@@ -396,6 +396,10 @@ export function BidStagePanel({
   const progressRunId = projection?.run?.runId ?? null
   const progressWorkId = projection?.run?.work.workId ?? null
   const progressReaderAvailable = getEvidenceMappingProgress !== undefined
+  const mappingProgressObservable = isBidSession
+    && progressStage === 'evidence_mapping'
+    && progressStatus !== 'pending'
+    && progressStatus !== 'waiting_start'
   const progressInput = useRef({ projection, getEvidenceMappingProgress })
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
@@ -451,14 +455,13 @@ export function BidStagePanel({
   }, [projection, getEvidenceMappingProgress])
 
   const mappingProgress = mappingSnapshot?.sessionId === sessionId
-    && progressStage === 'evidence_mapping'
+    && mappingProgressObservable
     && (progressWorkId === null || mappingSnapshot.workId === progressWorkId)
     ? mappingSnapshot.progress
     : null
 
   useEffect(() => {
-    if (isSubagent || !isBidSession
-      || progressStage !== 'evidence_mapping'
+    if (isSubagent || !mappingProgressObservable
       || !progressReaderAvailable) {
       setMappingSnapshot(null)
       setMappingReadState('loading')
@@ -531,7 +534,7 @@ export function BidStagePanel({
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [
-    sessionId, isSubagent, isBidSession, progressStage, progressStatus,
+    sessionId, isSubagent, mappingProgressObservable,
     progressRunId, progressWorkId, progressReaderAvailable,
   ])
 
@@ -1038,12 +1041,23 @@ export function BidStagePanel({
     not_started: 0,
     failed: 0,
     failed_section_ids: [],
+    tasks: [],
   }
-  const showMappingProgress = isBidSession && projection.runtime.stage === 'evidence_mapping'
+  const showMappingProgress = mappingProgressObservable
   const mappingPercent = visibleMappingProgress.total > 0
     ? Math.min(100, Math.round((visibleMappingProgress.completed / visibleMappingProgress.total) * 100))
     : 0
   const mappingProgressPending = mappingProgress === null
+  const mappingTaskGroups = [
+    ['running', 'mapping.tasks.running'] as const,
+    ['failed', 'mapping.tasks.failed'] as const,
+    ['pending', 'mapping.tasks.not_started'] as const,
+    ['completed', 'mapping.tasks.completed'] as const,
+  ].map(([status, label]) => ({
+    status,
+    label,
+    tasks: visibleMappingProgress.tasks.filter(task => task.status === status),
+  })).filter(group => group.tasks.length > 0)
   const mappingAccessibilityLabel = mappingProgressPending
     ? t('mapping.progress_pending')
     : t(mappingActivelyRunning ? 'mapping.progress' : 'mapping.progress_inactive', {
@@ -1103,7 +1117,7 @@ export function BidStagePanel({
           </span>
         </div>
 
-        {projection.runtime.stage === 'evidence_mapping'
+        {mappingProgressObservable
           && mappingReadState !== 'ready' && (
           <p className={css.agentStatus} role="status">
             {mappingReadState === 'stale'
@@ -1177,10 +1191,29 @@ export function BidStagePanel({
             <div className={css.mappingProgressTrack}>
               <BidProgressBar value={mappingPercent} max={100} />
             </div>
-            {visibleMappingProgress.failed_section_ids.length > 0 && (
-              <p className={css.mappingFailureSections}>
-                {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
-              </p>
+            {mappingTaskGroups.length > 0 && (
+              <div className={css.mappingTaskList}>
+                {mappingTaskGroups.map(group => (
+                  <div className={css.mappingTaskGroup} key={group.status}>
+                    <div className={css.mappingTaskGroupTitle}>
+                      {t(group.label, { count: group.tasks.length })}
+                    </div>
+                    {group.tasks.map(task => (
+                      <div className={css.mappingTask} key={task.task_id}>
+                        <span className={css.mappingTaskMarker} aria-hidden="true">
+                          {task.status === 'completed' ? '✓' : task.status === 'failed' ? '!' : '●'}
+                        </span>
+                        <span>
+                          <span className={css.mappingTaskTitle}>{task.title}</span>
+                          {task.status === 'failed' && task.latest_issue !== null && (
+                            <span className={css.mappingTaskIssue}>{task.latest_issue}</span>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}

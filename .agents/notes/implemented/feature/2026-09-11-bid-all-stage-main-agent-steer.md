@@ -12,7 +12,9 @@ S1–S5 和 `docx_export` 的运行态、全部完成态都允许 `send_message`
 
 `main-agent-protocol.ts` 限制 Execution Session 只调用当前阶段的私有工具，并登记当前协议消息供 Run 取消时清理。私有请求产生 `agent/error` 时协议保留原始错误，idle 仅用于没有更具体失败的兜底。S2、S3 与 S5 共用该机制；模块不再监听公开用户消息，也不在一个 Session 中切换公开与私有工具。
 
-运行态公开回合只看到阶段 scoped 工具。`bid_stage_inspect` 从项目文件与 Session Log 生成有界只读快照，不取得 mutation lock：S1 返回导入计数，S2 返回分析产物摘要，S3/S4 返回目录和 Mapping 进度，S5/S6 返回最多一百个章节的写作状态、最近问题及页数估算；最近公开事件最多六条且逐条截断。详细任务契约只在显式 `task_contract_context` 请求中返回，正文只按结构化引用读取。
+运行态公开回合只看到阶段 scoped 工具。`bid_stage_inspect` 从项目文件与 Session Log 生成有界只读快照，不取得 mutation lock：S1 返回导入计数，S2 返回分析产物摘要，S3/S4 返回目录和 Mapping 进度，S5/S6 返回最多一百个章节的写作状态、最近问题及页数估算；S4 working outline 缺失时只用 `initial-confirmed-outline.json` 恢复章节摘要和可写 ID，不伪造 Draft。最近公开事件最多六条且逐条截断。详细任务契约只在显式 `task_contract_context` 请求中返回，正文只按结构化引用读取。
+
+S4 浏览器进度直接投影执行日志的稳定任务顺序、标题、阶段、状态、章节范围、最近 Child 身份和最近错误摘要；checkpoint 的完成事实覆盖日志瞬时状态。页面按运行中、失败、未开始、已完成分组显示任务标题，失败项只显示最近错误摘要，不读取 Child transcript。`pending` 和 `waiting_start` 没有 Mapping Progress，客户端清空旧快照且不轮询，避免把重置后的等待开始显示成同步中。
 
 Child、Writer 和 Reviewer Promise 属于 Execution Session，独立于公开回合。活跃项目的 `subagent-report` 与 `subagent-settled` 通知不进入 Interaction Session，后台任务的结构化结果仍由原调度器消费。普通消息只能由模型根据语义选择 inspect 或既有受控 mutation；发送方式、引用和关键词均不产生业务分支。
 

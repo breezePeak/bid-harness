@@ -40,6 +40,7 @@ const savedProgress = {
   not_started: 4,
   failed: 2,
   failed_section_ids: ['SEC-1', 'SEC-2'],
+  tasks: [],
 }
 
 function projection(patch: Partial<BidClientProjection> = {}): BidClientProjection {
@@ -367,6 +368,7 @@ describe('BidStagePanel', () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 1, initial: 1, supplemental: 0, completed: 1, running: 0, not_started: 0, failed: 0,
       failed_section_ids: [],
+      tasks: [],
     }))
     const confirmOutline = vi.fn(async () => {})
     const shared = {
@@ -385,7 +387,7 @@ describe('BidStagePanel', () => {
     expect(setComposerBlock).toHaveBeenLastCalledWith(undefined, false)
     fireEvent.click(screen.getByRole('button', { name: '使用该目录' }))
     await waitFor(() => { expect(confirmOutline).toHaveBeenCalledWith({ expected_revision: 2, expected_draft_sha256: 'c'.repeat(64) }) })
-    expect(getEvidenceMappingProgress.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(getEvidenceMappingProgress).toHaveBeenCalled()
   })
   it('stays absent without the Host projection and follows runtime updates', () => {
     const setComposerBlock = vi.fn()
@@ -419,6 +421,12 @@ describe('BidStagePanel', () => {
       not_started: 5,
       failed: 0,
       failed_section_ids: [],
+      tasks: [
+        { task_id: 'MAP-1', title: '技术范围与交付要求理解', phase: 'initial' as const, status: 'running' as const,
+          section_ids: ['SEC-1'], child_session_id: 'child-1', latest_issue: null },
+        { task_id: 'MAP-2', title: '技术偏离表', phase: 'initial' as const, status: 'completed' as const,
+          section_ids: ['SEC-2'], child_session_id: 'child-2', latest_issue: null },
+      ],
     }))
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'running' },
@@ -433,6 +441,8 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('进行中 2')).toBeTruthy()
     expect(screen.getByText('已完成 3')).toBeTruthy()
     expect(screen.getByText('未开始 5')).toBeTruthy()
+    expect(screen.getByText('技术范围与交付要求理解')).toBeTruthy()
+    expect(screen.getByText('技术偏离表')).toBeTruthy()
     const progress = document.querySelector<HTMLProgressElement>('[data-bid-progress]')
     expect(progress?.value).toBe(30)
     expect(progress?.max).toBe(100)
@@ -449,6 +459,7 @@ describe('BidStagePanel', () => {
       not_started: 5,
       failed: 0,
       failed_section_ids: [],
+      tasks: [],
     } as const
     let resolveProgress: ((value: typeof progress) => void) | undefined
     const getEvidenceMappingProgress = vi.fn(() => new Promise<typeof progress>((resolve) => {
@@ -470,25 +481,28 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('2 / 10 (20%)')).toBeTruthy()
   })
 
-  it('S4 等待启动且尚无日志时仍显示占位进度条', () => {
+  it('S4 等待启动时不读取或显示 Mapping 进度', () => {
+    const getEvidenceMappingProgress = vi.fn()
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
       allowedActions: ['send_message'],
       composer: { enabled: true },
-    }))} />)
+    }), { getEvidenceMappingProgress })} />)
 
-    expect(screen.getByText('研究任务')).toBeTruthy()
-    expect(screen.queryByText('0 / 0 (0%)')).toBeNull()
-    expect(screen.getByRole('status', { name: '研究任务：进度同步中…' })).toBeTruthy()
-    expect(screen.getByText('同步中')).toBeTruthy()
-    expect(document.querySelector('[data-bid-progress]')).toBeTruthy()
-    expect(screen.getByText('正在同步映射进度…')).toBeTruthy()
+    expect(screen.getByText('阶段已重置完毕，请确认后开始执行')).toBeTruthy()
+    expect(screen.getByText('等待开始')).toBeTruthy()
+    expect(screen.queryByText('研究任务')).toBeNull()
+    expect(screen.queryByText('同步中')).toBeNull()
+    expect(screen.queryByText('正在同步映射进度…')).toBeNull()
+    expect(getEvidenceMappingProgress).not.toHaveBeenCalled()
   })
 
   it('S4 复核失败时仍显示已读取的完成与失败进度', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
+      tasks: [{ task_id: 'MAP-401', title: '系统测试方案', phase: 'initial' as const, status: 'failed' as const,
+        section_ids: ['SEC-401'], child_session_id: 'child-401', latest_issue: 'rpm exhausted' }],
     }))
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'failed', failureReason: '复核未通过' },
@@ -497,7 +511,9 @@ describe('BidStagePanel', () => {
 
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
     expect(screen.getByText('失败 18')).toBeTruthy()
-    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+    expect(screen.queryByText('失败 Section：SEC-401')).toBeNull()
+    expect(screen.getByText('系统测试方案')).toBeTruthy()
+    expect(screen.getByText('rpm exhausted')).toBeTruthy()
   })
 
   it('shows reset completion without a stage action button', () => {
@@ -544,6 +560,7 @@ describe('BidStagePanel', () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
+      tasks: [],
     }))
     render(<BidStagePanel {...props(projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
@@ -571,7 +588,7 @@ describe('BidStagePanel', () => {
     expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
     expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
-    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+    expect(screen.queryByText('失败 Section：SEC-401')).toBeNull()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
     expect(screen.queryByRole('button', { name: '继续未完成任务' })).toBeNull()
   })

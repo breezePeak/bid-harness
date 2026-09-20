@@ -3610,6 +3610,7 @@ export class BidHostRuntime extends TypertRemoteService {
       throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Word 操作正在执行，请完成后重置阶段。')
     }
     const prior = this.inFlight.get(key)
+    const priorExecutionAgent = prior?.executionHandle?.agent
     if (prior !== undefined) {
       if (prior.reservedForReset || prior.session !== session) {
         throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Bid 操作正在执行。')
@@ -3625,8 +3626,8 @@ export class BidHostRuntime extends TypertRemoteService {
       if (prior !== undefined) {
         await prior.runs.retire()
         prior.controller.abort()
-        agent.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
-        await Promise.all([prior.done, agent.whenIdle()])
+        priorExecutionAgent?.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+        await Promise.all([prior.done, priorExecutionAgent?.whenIdle()])
       }
       const runtime = await this.prepareOperation(operation)
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
@@ -3702,7 +3703,8 @@ export class BidHostRuntime extends TypertRemoteService {
       try {
         await this.finishOperation(session, operation)
       } finally {
-        if (resetCompleted) this.ensureRunDecision(agent)
+        const liveInteractionAgent = this.ctx.agents.get(session.id)
+        if (resetCompleted && liveInteractionAgent !== undefined) this.ensureRunDecision(liveInteractionAgent)
       }
     }
   }

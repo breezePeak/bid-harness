@@ -1714,8 +1714,19 @@ describe('evidence-mapping Agent executor', () => {
     const research = await invoke('submit_section_research_assessment', branchResearchAssessment())
     expect(research).toMatchObject({ isError: false, value: { research_ready: true, key_findings: [{ finding_index: 1, nature: 'professional_design' }] } })
     const findingRef = submittedFindingRef(research)
+    for (const placement of ['within_section', 'excluded', 'separate_section'] as const) {
+      expect((await invoke('submit_section_structure_assessment', { ...structureAssessment(), topic_dispositions: [{
+        finding_index: 1, placement, target_section_id: 'SEC-2', reason: '非法多余目标。',
+      }] })).isError).toBe(true)
+    }
+    expect((await invoke('submit_section_structure_assessment', { ...structureAssessment(), topic_dispositions: [{
+      finding_index: 1, placement: 'covered_elsewhere', reason: '缺少目标。',
+    }] })).isError).toBe(true)
     expect((await invoke('submit_section_structure_assessment', structureAssessment())).isError).toBe(true)
     expect((await invoke('update_section_task', blueprint)).isError).toBe(false)
+    expect((await invoke('submit_section_structure_assessment', { ...structureAssessment(), topic_dispositions: [{
+      finding_index: 1, placement: 'covered_elsewhere', target_section_id: 'SEC-2', reason: '由其他章节承接。',
+    }] })).isError).toBe(false)
     expect((await invoke('submit_section_structure_assessment', { ...structureAssessment(), hidden_heading_pressure: true })).isError).toBe(true)
     expect((await invoke('submit_section_structure_assessment', { ...structureAssessment(), topic_dispositions: [] })).isError).toBe(true)
     for (const target_section_id of ['SEC-1', 'UNKNOWN']) {
@@ -2469,7 +2480,7 @@ describe('evidence-mapping Agent executor', () => {
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
-    await expect(readEvidenceMappingProgress(workspace)).resolves.toEqual({
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
       total: 2,
       initial: 2,
       supplemental: 0,
@@ -2479,6 +2490,10 @@ describe('evidence-mapping Agent executor', () => {
       failed: 0,
       failed_section_ids: [],
     })
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({ tasks: [
+      { task_id: 'MAP-INIT-SEC-1', title: '章节1', status: 'running', section_ids: ['SEC-1'], latest_issue: null },
+      { task_id: 'MAP-INIT-SEC-2', title: '章节2', status: 'running', section_ids: ['SEC-2'], latest_issue: null },
+    ] })
     const initialPrompt = promptText(fixture.starts[0]!.request.request)
     expect(initialPrompt).toContain('current_section_scope：[{"id":"SEC-1"')
     expect(initialPrompt).toContain('current_section_baseline：[{"id":"SEC-1"')
@@ -2549,7 +2564,7 @@ describe('evidence-mapping Agent executor', () => {
     } as unknown as ToolExecution)).toContain('read_source')
     fixture.starts.forEach((start) => { start.resolve() })
     await expect(execution).resolves.toHaveLength(4)
-    await expect(readEvidenceMappingProgress(workspace)).resolves.toEqual({
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
       total: 3,
       initial: 2,
       supplemental: 1,
@@ -3449,29 +3464,64 @@ describe('S4 Host 准入与最终确认', () => {
     expect(log.tasks.some(task => task.status === 'failed')).toBe(true)
   })
 
-  it('Provider 限流不在 S4 子任务层重试，由 Run 恢复边界统一处理', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-retry-')))
-    const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    fixture.subagents.startContinuable.mockRejectedValueOnce(new Error('429: rpm exhausted'))
-    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxRepairAttempts: 0, maxConcurrency: 1, maxInfrastructureRetryAttempts: 1,
-    })
-    const rejection = expect(execution).rejects.toMatchObject({
-      issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: '429: rpm exhausted' }],
-    })
-
-    await rejection
-
-    const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
-      tasks: Array<{ status: string; attempts: Array<{ accepted: boolean; issues: Array<{ code: string }> }> }>
+  it('Child RATE_LIMIT 共享冷却后重试当前任务，已完成 sibling 不重跑', async () => {
+    vi.useFakeTimers()
+    try {
+      const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-retry-')))
+      const fixture = mappingFixture(workspace, await writeInputs(workspace))
+      const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+        maxRepairAttempts: 0, maxConcurrency: 1, maxInfrastructureRetryAttempts: 1,
+      })
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+      const failed = fixture.starts[0]!
+      const child = fixture.children.get(String(failed.request.childId))!
+      ;(child.session.events as unknown[]).push({
+        type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 rpm exhausted' } } },
+      })
+      failed.complete()
+      await vi.waitFor(async () => {
+        expect((await readEvidenceMappingProgress(workspace))?.tasks[0]?.latest_issue).toContain('rpm exhausted')
+      })
+      expect(fixture.starts).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+      fixture.starts[1]!.resolve()
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+      fixture.starts[2]!.resolve()
+      await execution
+      expect(fixture.taskAttempts.get('MAP-INIT-SEC-1')).toBe(1)
+      expect(fixture.taskAttempts.get('MAP-INIT-SEC-2')).toBe(1)
+      const log = parseEvidenceMappingExecutionLog(JSON.parse(
+        await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+      ))
+      expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'RATE_LIMIT' })] }),
+        expect.objectContaining({ accepted: true }),
+      ]))
+    } finally {
+      vi.useRealTimers()
     }
-    expect(fixture.subagents.startContinuable).toHaveBeenCalledOnce()
-    expect(log.tasks.some(task => task.status === 'failed')).toBe(true)
-    expect(log.tasks[0]!.attempts).toHaveLength(1)
-    expect(log.tasks[0]!.attempts[0]).toMatchObject({ accepted: false, issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR' }] })
+  })
+
+  it('Child RATE_LIMIT 耗尽共享预算时保留限流根因', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-exhausted-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, maxInfrastructureRetryAttempts: 0,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const failed = fixture.starts[0]!
+    const child = fixture.children.get(String(failed.request.childId))!
+    ;(child.session.events as unknown[]).push({
+      type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 rpm exhausted' } } },
+    })
+    failed.complete()
+    await expect(execution).rejects.toMatchObject({
+      issues: [{ code: 'RATE_LIMIT', message: expect.stringContaining('rpm exhausted') }],
+    })
+    expect(fixture.starts).toHaveLength(1)
     const progress = await readEvidenceMappingProgress(workspace)
-    expect(progress?.failed).toBeGreaterThan(0)
-    expect(progress?.failed_section_ids).toEqual(['SEC-1'])
+    expect(progress?.tasks[0]).toMatchObject({ status: 'failed', latest_issue: expect.stringContaining('rpm exhausted') })
   })
 
   it('空 Evidence 合法，本地 chunk 不需要 Child read 日志证明', async () => {

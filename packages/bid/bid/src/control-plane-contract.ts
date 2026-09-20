@@ -166,6 +166,16 @@ export interface BidEvidenceMappingProgress {
   readonly failed: number
   /** 失败 Mapping Tasks 直接负责的 Section，按执行计划顺序去重。 */
   readonly failed_section_ids: readonly string[]
+  /** 按执行日志稳定顺序排列的 Mapping Task 可见状态。 */
+  readonly tasks: readonly {
+    readonly task_id: string
+    readonly title: string
+    readonly phase: 'initial' | 'final_check'
+    readonly status: 'pending' | 'running' | 'completed' | 'failed'
+    readonly section_ids: readonly string[]
+    readonly child_session_id: string | null
+    readonly latest_issue: string | null
+  }[]
 }
 
 /** Flattened compatibility view derived from Workflow and Run state. */

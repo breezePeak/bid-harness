@@ -8,9 +8,9 @@ S4 Mapping Child 遇到请求限流时，执行器把一次可恢复的 Provider
 
 ## Decision
 
-S4 Host 对 Mapping Child 的基础设施错误区分可恢复限流与不可重试错误。具有 `RATE_LIMIT`、非账户额度耗尽的 HTTP 429，或明确表示 RPM 限流的失败，在单个 Mapping Task 范围内按有限指数退避自动重新创建 Child；Provider 提供的 `Retry-After` 延迟优先，默认延迟从 500 毫秒开始并限制在 60 秒内。默认最多自动重试两次。
+S4 Host 对 Mapping Child 的基础设施错误区分可恢复限流与不可重试错误。Child 最终 `turn/end` 的结构化 `RATE_LIMIT` 优先进入可恢复路径；没有结构化 code 时，只把 HTTP 429、`rpm exhausted`、TPM/RPM 上限或 `rate_limit_error` 识别为限流，不把认证、余额或永久额度错误归入重试。模型限流在共享 `subagent` Provider 冷却表中等待 30 秒，再在单个 Mapping Task 范围内重新创建 Child；Web Provider 的 `Retry-After` 仍优先于从 500 毫秒开始、上限 60 秒的有限退避。两类 Provider 共用默认最多两次的基础设施重试预算。
 
-自动恢复期间任务日志保持 `running`，其他章节继续使用已有并发槽位；重试成功后继续原批次，任务不显示为失败。自动预算耗尽、账户额度耗尽、模型输出无效或 Host 持久化异常仍按原规则终止批次并进入阶段失败，用户重试入口只处理这些最终失败。
+自动恢复期间任务日志保留失败 attempt 并把任务恢复为 `running`；共享冷却阻止排队任务立即创建新的 Child，已完成章节不重跑。重试成功后继续原批次，任务不显示为最终失败。自动预算耗尽、账户额度耗尽、模型输出无效或 Host 持久化异常仍按原规则终止批次并进入阶段失败，用户重试入口只处理这些最终失败。
 
 Mapping Child 的 `turn/end` 错误保留稳定 code、status 和 Provider 重试延迟，Host 据此分类，不从普通用户可见文本推测账户额度。未接受结果不能再通过空映射结果伪装成已完成任务。
 

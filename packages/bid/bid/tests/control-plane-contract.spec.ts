@@ -140,6 +140,15 @@ describe('bid control-plane public contract', () => {
       readonly not_started: number
       readonly failed: number
       readonly failed_section_ids: readonly string[]
+      readonly tasks: readonly {
+        readonly task_id: string
+        readonly title: string
+        readonly phase: 'initial' | 'final_check'
+        readonly status: 'pending' | 'running' | 'completed' | 'failed'
+        readonly section_ids: readonly string[]
+        readonly child_session_id: string | null
+        readonly latest_issue: string | null
+      }[]
     }>()
   })
 

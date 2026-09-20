@@ -18,6 +18,8 @@ S5 的明确修改继续通过现有 Writing Plan 与 durable command journal �
 
 任一同项目 Interaction Session 的原生 Stop 表示取消整个 Run。Host 先撤销提交权限，再中止 Execution Session 的 Run、关闭调度入口、等待 Child 与 Activity 收敛，最后持久化 `user_stop` 挂起状态；普通聊天失败不触发该路径。
 
+阶段重置同样只取消并等待旧 operation 保存的 Execution Agent，不取消发出命令的 Interaction Agent。清理和项目锁释放后，Host 按主 Session ID 从 live Agent registry 重新取得 Interaction Agent，再发出持久化 `bid.run.decision.required` 对应的原生开始问题；只有用户答案写入 `bid.run.decision.received` 后才启动新 Run。
+
 ## Alternatives considered
 
 **继续在同一 Session 交错公开回合和私有协议。** Agent Loop 同一时刻只能运行一个轮次，工具卸载与 continuation 排队仍无法让公开回复和长执行真正并行，也让两类日志及取消原因共享所有权。

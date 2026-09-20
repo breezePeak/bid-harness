@@ -401,6 +401,34 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
+  it('S4 reset 后 inspect 从 S3 已确认目录恢复章节摘要但不伪造 Draft', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline))
+    await Promise.all([
+      rm(join(workspace.projectRoot, 'outline/outline.json'), { force: true }),
+      rm(join(workspace.projectRoot, 'outline/draft.json'), { force: true }),
+    ])
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_start' })
+    const agent = await fresh('reset-s4-inspect')
+
+    const inspected = await ctx.tools.execute({
+      agent, name: 'bid_stage_inspect', arguments: { view: 'task_contract_context' },
+      callId: CallId('reset-s4-inspect'), signal: new AbortController().signal,
+    })
+
+    expect(inspected).toMatchObject({ isError: false, value: {
+      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      current_artifacts_summary: { outline_sections: outline.sections.length },
+      sections: expect.arrayContaining([expect.objectContaining({
+        section: expect.objectContaining({ id: outline.sections[0]!.id }),
+      })]),
+      draft: null,
+      mapping_progress: null,
+      mapping_tasks: [],
+    } })
+  })
+
   it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)

@@ -147,6 +147,8 @@ export const DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS = 2
 
 const MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS = 500
 const MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS = 60_000
+const MAPPING_SUBAGENT_RATE_LIMIT_COOLDOWN_MS = 30_000
+type MappingInfrastructureProvider = typeof MAPPING_AGENT_TOOLS[number] | 'subagent'
 
 /** Host-owned S4 planning, Mapping Task retry, and concurrency limits. */
 export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOptions {
@@ -169,7 +171,7 @@ class MappingSubagentInfrastructureError extends BidStageExecutionError {
     readonly contextOverflow = false,
     readonly taskId?: string,
     readonly retryAfterMs = 0,
-    readonly provider?: typeof MAPPING_AGENT_TOOLS[number],
+    readonly provider?: MappingInfrastructureProvider,
   ) {
     super(issues)
     this.name = 'MappingSubagentInfrastructureError'
@@ -239,6 +241,22 @@ function isRebuildableMappingTaskRuntimeError(error: unknown): boolean {
   const code = record(error)?.code
   return ['SUBAGENT_MATERIALIZATION_FAILED', 'SUBAGENT_RESUME_FAILED', 'SUBAGENT_RESULT_CHANNEL_FAILED']
     .includes(typeof code === 'string' ? code : '')
+}
+
+function mappingSubagentTurnInfrastructureFailure(
+  error: unknown,
+  taskId: string,
+): MappingSubagentInfrastructureError | undefined {
+  const code = record(error)?.code
+  const detail = error instanceof Error ? error.message : String(error)
+  const permanent = /authentication|invalid api key|insufficient (?:balance|credit)|billing|permanent quota/iu.test(detail)
+  const rateLimited = code === 'RATE_LIMIT'
+    || !permanent && /(?:HTTP\s*)?429|rpm exhausted|inference exceeds (?:tpm|rpm) limit|rate_limit_error/iu.test(detail)
+  if (!rateLimited) return undefined
+  return new MappingSubagentInfrastructureError([{
+    code: 'RATE_LIMIT',
+    message: `Mapping Subagent 模型限流：${detail}`,
+  }], true, false, taskId, MAPPING_SUBAGENT_RATE_LIMIT_COOLDOWN_MS, 'subagent')
 }
 
 async function waitForMappingInfrastructureRetry(
@@ -513,20 +531,20 @@ const topicDispositionBasisSchema = z.object({
   ]),
   ref: z.string().trim().min(1),
 }).strict()
-const topicDispositionSchema = z.object({
+const topicDispositionFields = {
   finding_index: z.number().int().positive(),
-  placement: z.enum(['separate_section', 'within_section', 'covered_elsewhere', 'excluded']),
-  target_section_id: z.string().trim().min(1).optional(),
   reason: z.string().trim().min(1),
-}).strict().superRefine((disposition, context) => {
-  if (disposition.placement === 'covered_elsewhere' && disposition.target_section_id === undefined) {
-    context.addIssue({ code: 'custom', path: ['target_section_id'], message: 'covered_elsewhere 必须指定目标章节' })
-  }
-  if ((disposition.placement === 'within_section' || disposition.placement === 'excluded')
-    && disposition.target_section_id !== undefined) {
-    context.addIssue({ code: 'custom', path: ['target_section_id'], message: `${disposition.placement} 不接受目标章节` })
-  }
-})
+} as const
+const topicDispositionSchema = z.discriminatedUnion('placement', [
+  z.object({ ...topicDispositionFields, placement: z.literal('within_section') }).strict(),
+  z.object({ ...topicDispositionFields, placement: z.literal('excluded') }).strict(),
+  z.object({ ...topicDispositionFields, placement: z.literal('separate_section') }).strict(),
+  z.object({
+    ...topicDispositionFields,
+    placement: z.literal('covered_elsewhere'),
+    target_section_id: z.string().trim().min(1),
+  }).strict(),
+])
 const sectionResearchAssessmentFields = {
   sufficient_for_blueprint: z.boolean(),
   diagnostics: z.object({
@@ -1064,10 +1082,8 @@ function assertTopicDispositionsLockable(
     const path = `topic_dispositions.${index}.target_section_id`
     if (disposition.placement === 'separate_section') {
       const findingRef = state.researchAssessment?.key_findings[disposition.finding_index - 1]?.finding_ref
-      const targetIds = disposition.target_section_id === undefined
-        ? state.outlineOperationBases.filter(basis => findingRef !== undefined && basis.finding_refs.includes(findingRef))
-          .flatMap(basis => basis.target_section_ids.flatMap(id => [...sectionSubtreeIds(state.stagedOutline, id)]))
-        : [disposition.target_section_id]
+      const targetIds = state.outlineOperationBases.filter(basis => findingRef !== undefined && basis.finding_refs.includes(findingRef))
+        .flatMap(basis => basis.target_section_ids.flatMap(id => [...sectionSubtreeIds(state.stagedOutline, id)]))
       if (!targetIds.some(targetId => targetId !== rootId && currentById.get(targetId)?.writable === true
         && editableIds.has(targetId) && changedIds.has(targetId))) {
         violations.push(`${path}: separate_section 尚未落实；请执行对应研究发现的结构操作，Host 会绑定新 Section。`)
@@ -1075,7 +1091,7 @@ function assertTopicDispositionsLockable(
     } else if (disposition.placement === 'covered_elsewhere') {
       const targetId = disposition.target_section_id
       if (targetId === rootId) violations.push(`${path}: covered_elsewhere 不能指向当前 Section。`)
-      else if (targetId === undefined || !currentById.has(targetId)) violations.push(`${path}: 未知目标 Section ${targetId ?? ''}。`)
+      else if (!currentById.has(targetId)) violations.push(`${path}: 未知目标 Section ${targetId}。`)
     }
   }
   if (violations.length > 0) throw new ToolArgsError(violations)
@@ -2171,9 +2187,21 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
   const failedSectionIds = [...new Set(log.tasks.flatMap(task => task.status !== 'failed' || checkpointCompleted.has(task.task_id)
     ? []
     : planByTask.get(task.task_id)?.section_ids ?? []))]
+  const tasks = log.tasks.map((task) => {
+    const latestAttempt = task.attempts.at(-1)
+    return {
+      task_id: task.task_id,
+      title: task.title,
+      phase: task.phase,
+      status: checkpointCompleted.has(task.task_id) ? 'completed' as const : task.status,
+      section_ids: planByTask.get(task.task_id)?.section_ids ?? [],
+      child_session_id: task.final_child_session_id ?? latestAttempt?.child_session_id ?? null,
+      latest_issue: latestAttempt?.issues[0]?.message ?? null,
+    }
+  })
   return { total: log.tasks.length, initial: log.tasks.filter(task => task.phase === 'initial').length,
     supplemental: log.tasks.filter(task => task.phase === 'final_check').length, completed, running, not_started: notStarted,
-    failed, failed_section_ids: failedSectionIds }
+    failed, failed_section_ids: failedSectionIds, tasks }
 }
 
 /**
@@ -4268,6 +4296,15 @@ async function executeEvidenceMappingRun(
             } catch (error: unknown) {
               if (signal.aborted) throw fatalWebFailure ?? error
               if (error instanceof BidStageExecutionError) throw error
+              const turnFailure = mappingSubagentTurnInfrastructureFailure(error, mappingTask.task_id)
+              if (turnFailure !== undefined) {
+                log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1,
+                  stop_reason: 'infrastructure-error', accepted: false,
+                  issues: turnFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [] })
+                log.status = 'failed'
+                await persistLog()
+                throw turnFailure
+              }
               const detail = error instanceof Error ? error.message : String(error)
               latestIssues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: `Mapping Subagent 结果通道发生基础设施错误：${detail}` }]
               log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
@@ -4316,6 +4353,8 @@ async function executeEvidenceMappingRun(
         if (signal.aborted) throw fatalWebFailure ?? error
         if (error instanceof BidStageExecutionError) throw error
         if (error instanceof FinalReviewTaskTooLargeError) throw error
+        const turnFailure = mappingSubagentTurnInfrastructureFailure(error, mappingTask.task_id)
+        if (turnFailure !== undefined) throw turnFailure
         const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }]
         throw new MappingSubagentInfrastructureError(
           issues,
@@ -4340,7 +4379,9 @@ async function executeEvidenceMappingRun(
       } catch (error) {
         if (error instanceof MappingSubagentInfrastructureError && error.contextOverflow) throw error
         if (!(error instanceof MappingSubagentInfrastructureError) || !error.retryable || signal.aborted) throw error
-        const provider = error.provider === undefined ? 'subagent' : providerFor(error.provider)
+        const provider = error.provider === undefined || error.provider === 'subagent'
+          ? 'subagent'
+          : providerFor(error.provider)
         const retries = infrastructureRetries.get(provider) ?? 0
         if (retries >= maxInfrastructureRetryAttempts) {
           fatalWebFailure ??= error
@@ -4348,6 +4389,10 @@ async function executeEvidenceMappingRun(
           throw error
         }
         infrastructureRetries.set(provider, retries + 1)
+        providerCooldownUntil.set(provider, Math.max(
+          providerCooldownUntil.get(provider) ?? 0,
+          Date.now() + error.retryAfterMs,
+        ))
         const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'

@@ -12,6 +12,8 @@ S4 Mapping Child 通过一个工具同时提交 Task 身份、全量章节数组
 
 Initial Mapping Child 按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过 Research Ready 后，在自己的 Section 子树内逐次调用 `update_section_task` 或 `apply_section_outline_edit`；Host 对现有 `OutlineEditOperation` 形成的候选执行共享结构校验，成功后才发布任务状态、返回实际生成的临时 Section ID 并失效结构或职责受影响的草稿，失败操作不污染后续目录。`lock_section_outline` 再次检查共享结构，保存[目录粒度结论](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，只在目录有效时固定当前子树并分别返回当前 Mapping 与待入队新叶。Child 通过 `submit_section_mapping` upsert 自己的正式材料，通过 `add_mapping_suggestion` 去重保存全局建议，并用 `finish_mapping_task` 请求 Host 按真实提交状态检查缺失章节和可修正问题。Remap 使用已锁定范围内的 `submit_section_mapping` 与 `finish_mapping_task`，不获得目录工具。
 
+Structure Assessment 的 `topic_dispositions` 使用 `placement` 判别联合。`within_section`、`excluded` 和 `separate_section` 的工具参数不存在 `target_section_id`；`covered_elsewhere` 是唯一携带真实目标 Section ID 的分支。`separate_section` 的目标只来自 `apply_section_outline_edit` 保存的 finding binding，模型不能填写 `self`、当前章节或预估的新章 ID。
+
 Section 工具只要求模型提供章节 ID、Writing Brief 和资料语义。省略的材料、缺口、展开维度和写作数组由 Host 补为空数组；既有 Section 省略 coverage 时继承锁定目录，S4 新建 Section 必须一次提交当前 Task 范围内的 Requirement、Scoring 和 Response Point override。Host 在单次调用内解析短文件引用、绑定真实文件身份、校验分块存在及 usage，并只接受当前 Child 已成功抓取或 Host 已登记正文的 Web URL。每个 Section 使用 Map 保存当前内容，另由 Host Set 记录成功的材料工具结果；再次提交覆盖材料且不能形成重复项，只更新任务不会冒充材料已提交。显式空材料提交仍会记录成功，已有有效 baseline 在局部重映射和 Final Check 中继续复用。
 
 Final Check 只注册 `replace_section_mapping`、`submit_branch_summary` 和 `finish_final_check`。未替换章节自动保留 Host baseline；缺少 baseline 的最终章节和缺少摘要的结构节点由 finish 返回明确列表。Final Child 没有目录编辑或建议工具，也不提交未变更 ID、全量 Mapping 数组或空建议数组。
