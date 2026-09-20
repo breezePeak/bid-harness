@@ -17,6 +17,7 @@ const resolved: FormatValues = Object.fromEntries<FormatValue>(['heading1', 'hea
   [`${role}.alignment`, role.endsWith('Caption') ? 'center' : role === 'body' ? 'both' : 'left'],
   [`${role}.line`, 1.5], [`${role}.lineRule`, 'auto'], [`${role}.firstLine`, role === 'body' ? 2 : 0],
   [`${role}.firstLineUnit`, role === 'body' ? 'chars' : 'mm'],
+  [`${role}.bold`, role.startsWith('heading')],
 ]))
 
 function fixture(conflicts: FormatConflict[] = []) {
@@ -42,7 +43,11 @@ function fixture(conflicts: FormatConflict[] = []) {
     templateId,
     library,
     templateMaxBytes: library.templateMaxBytes,
-    fields: [{ key: 'tableCaption.size', group: '表格与图表说明', label: '表题字号（磅）', value: 12 }],
+    fields: [
+      { key: 'body.font', group: '正文', label: '正文中文字体', value: '宋体' },
+      { key: 'body.bold', group: '正文', label: '正文加粗', value: false },
+      { key: 'tableCaption.size', group: '表格与图表说明', label: '表题字号（磅）', value: 12 },
+    ],
     values: { ...resolved }, warnings: [], fingerprint: 'current',
   }
   const actions: BidWordExportInjected = {
@@ -106,10 +111,34 @@ describe('Word 导出页面', () => {
     expect(screen.getAllByText('小四（12pt）')).toHaveLength(3)
     const exportButton = screen.getByRole('button', { name: '导出 Word' })
     expect(exportButton.closest('header')).not.toBeNull()
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['导出 Word'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['导出 Word', '修改', '修改', '修改', '修改', '修改'])
     expect(screen.queryByText('格式描述')).toBeNull()
     expect(screen.queryByText('页面设置')).toBeNull()
     expect(actions.preview).toHaveBeenCalledOnce()
+  })
+
+  it('格式确认后仍可修改正文格式并刷新预览', async () => {
+    const { props, actions } = fixture()
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+    const bodyRow = screen.getByRole('row', { name: /正文/u })
+    fireEvent.click(within(bodyRow).getByRole('button', { name: '修改' }))
+    let dialog = screen.getByRole('dialog', { name: '修改正文格式' })
+    fireEvent.change(within(dialog).getByLabelText('正文中文字体'), { target: { value: '仿宋' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存' }))
+    await screen.findByText('格式已保存')
+    expect(actions.saveFormat).toHaveBeenLastCalledWith('a'.repeat(64), {
+      revision: 0, userConfirmed: { 'body.font': '仿宋', 'body.bold': false },
+    })
+    expect(actions.preview).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(within(bodyRow).getByRole('button', { name: '修改' }))
+    dialog = screen.getByRole('dialog', { name: '修改正文格式' })
+    fireEvent.change(within(dialog).getByLabelText('正文中文字体'), { target: { value: '楷体' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => { expect(actions.saveFormat).toHaveBeenLastCalledWith('a'.repeat(64), {
+      revision: 1, userConfirmed: { 'body.font': '楷体', 'body.bold': false },
+    }) })
   })
 
   it('选择模板后自动解析并立即刷新 resolved 预览', async () => {
@@ -140,7 +169,7 @@ describe('Word 导出页面', () => {
     expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
   })
 
-  it('冲突单元格标红并只允许选择证据中的值', async () => {
+  it('格式差异单元格标红并提供模板候选值', async () => {
     const conflict: FormatConflict = { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
       { key: 'tableCaption.size', value: 12, source: 'template_instruction', text: '表题 12 磅' },
       { key: 'tableCaption.size', value: 16, source: 'named_style', text: 'Caption' },
@@ -148,20 +177,20 @@ describe('Word 导出页面', () => {
     const { props, actions } = fixture([conflict])
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
-    expect(screen.getByText('待确认')).toBeDefined()
+    expect(screen.getByText('待确认 · 修改')).toBeDefined()
     fireEvent.click(screen.getByRole('button', { name: '小四（12pt）' }))
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByText('表题字号（磅）存在冲突')).toBeDefined()
+    expect(within(dialog).getByText('表题字号（磅）存在多个候选')).toBeDefined()
     expect(within(dialog).getByText('来源：模板格式说明')).toBeDefined()
     fireEvent.click(within(dialog).getByRole('radio', { name: /16/u }))
     fireEvent.click(within(dialog).getByRole('button', { name: '确认' }))
-    await screen.findByText('格式已确认')
+    await screen.findByText('格式已保存')
     expect(actions.saveFormat).toHaveBeenCalledWith('a'.repeat(64), { revision: 0, userConfirmed: { 'tableCaption.size': 16 } })
     expect(screen.queryByText('待确认')).toBeNull()
     expect(actions.preview).toHaveBeenCalledTimes(2)
   })
 
-  it('存在未确认冲突时导出按钮提示数量并定位首项', async () => {
+  it('存在未确认格式差异时导出按钮提示数量并定位首项', async () => {
     const conflicts: FormatConflict[] = ['tableCaption.size', 'body.font'].map((key, index) => ({
       key, resolvedValue: index ? '宋体' : 12, status: 'conflict', evidence: [
         { key, value: index ? '宋体' : 12, source: 'direct_format' },
@@ -172,11 +201,11 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '当前仍有 2 项格式冲突，请先确认。')
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '当前模板内仍有 2 项格式差异待确认。')
     expect(actions.generate).not.toHaveBeenCalled()
   })
 
-  it('主要表格之外的冲突仍提供简短确认入口', async () => {
+  it('主要表格之外的格式差异仍提供简短确认入口', async () => {
     const conflict: FormatConflict = { key: 'heading3.bold', resolvedValue: true, status: 'conflict', evidence: [
       { key: 'heading3.bold', value: true, source: 'direct_format' },
       { key: 'heading3.bold', value: false, source: 'named_style' },
@@ -188,7 +217,7 @@ describe('Word 导出页面', () => {
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
     expect(document.activeElement).toBe(entry)
     fireEvent.click(entry)
-    expect(screen.getByRole('dialog', { name: 'heading3.bold存在冲突' })).toBeDefined()
+    expect(screen.getByRole('dialog', { name: 'heading3.bold存在多个候选' })).toBeDefined()
   })
 
   it('无冲突时一个按钮完成生成和下载', async () => {
@@ -300,12 +329,12 @@ describe('Word 导出页面', () => {
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '格式配置无效：body.size')
     expect(screen.getByText('模板.docx')).toBeDefined()
     expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
-    expect(screen.getByLabelText('其他格式冲突')).toBeDefined()
+    expect(screen.getByLabelText('其他待确认的格式差异')).toBeDefined()
     expect(screen.getByTitle('Word 效果预览')).toBeDefined()
     expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', false)
   })
 
-  it('确认格式冲突时不重新触发页数测算且不阻塞连续确认', async () => {
+  it('确认格式差异时不重新触发页数测算且不阻塞连续确认', async () => {
     const conflicts: FormatConflict[] = [
       { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
         { key: 'tableCaption.size', value: 12, source: 'template_instruction' },
@@ -325,7 +354,7 @@ describe('Word 导出页面', () => {
     const firstDialog = screen.getByRole('dialog')
     fireEvent.click(within(firstDialog).getByRole('radio', { name: /16/u }))
     fireEvent.click(within(firstDialog).getByRole('button', { name: '确认' }))
-    await screen.findByText('格式已确认')
+    await screen.findByText('格式已保存')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(vi.mocked(actions.estimatePages).mock.calls.length).toBe(initialEstimateCalls)
 
@@ -335,7 +364,7 @@ describe('Word 导出页面', () => {
     const confirmButton = within(secondDialog).getByRole('button', { name: '确认' })
     expect(confirmButton).toHaveProperty('disabled', false)
     fireEvent.click(confirmButton)
-    await screen.findByText('格式已确认')
+    await screen.findByText('格式已保存')
   })
 
   it('页数测算未完成时不阻碍直接导出 Word', async () => {

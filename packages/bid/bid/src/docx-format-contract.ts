@@ -159,7 +159,7 @@ export interface DocxFormatView extends DocxFormatCoreView {
   templateId: DocxTemplateId | null
   library: DocxTemplateLibraryView
 }
-/** 用户确认冲突必须携带读取时的版本及完整确认集合。 */
+/** 用户格式覆盖必须携带读取时的版本及完整覆盖集合。 */
 export interface DocxFormatRequest {
   revision: number
   userConfirmed: FormatValues

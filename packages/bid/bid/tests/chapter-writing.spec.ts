@@ -15,6 +15,7 @@ import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai
 import {
   pickChapterContext,
   renderChapterExecutionPlanTask,
+  renderChapterSubagentTask,
   validateChapterCandidate,
   type ChapterWritingCommand,
   type ChapterWritingControl,
@@ -1093,6 +1094,14 @@ describe('chapter-writing executor', () => {
     )
     expect(prompt).toContain('finish_chapter_plan')
     expect(prompt).toContain('无需逐章提交空数组')
+  })
+
+  it('Writer 只加粗段首总结句，不把规则扩大到整段或全文', () => {
+    const prompt = renderChapterSubagentTask(emptyChapterContext(outlineFixture().sections[1]!), [], [], [])
+    expect(prompt).toContain('只有在概括本段结论、总体措施或核心安排时才使用')
+    expect(prompt).toContain('只加粗这句，后续展开句保持普通正文')
+    expect(prompt).toContain('不得把整段、多句、列表、表格或全文统一加粗')
+    expect(prompt).not.toContain('正文不得使用 **文字**')
   })
 
   it('allows the S6 capability union while keeping bash forbidden', () => {

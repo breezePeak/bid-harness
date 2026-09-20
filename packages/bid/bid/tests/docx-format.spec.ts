@@ -134,6 +134,18 @@ describe('项目 Word 格式链路', () => {
     ]))
   })
 
+  it('模板格式与系统默认值不同不形成格式差异', () => {
+    const fields = formatFields(defaults)
+    const state = defaultDocxFormatState(fields)
+    state.extracted.candidates = [{
+      id: 'Normal', name: 'Normal', roles: ['body'], samples: ['正文'],
+      values: { font: '仿宋' }, evidence: [{ key: 'font', value: '仿宋', source: 'named_style', text: 'Normal' }],
+    }]
+    const view = resolveFormat(state, fields)
+    expect(view.state.resolved['body.font']).toBe('仿宋')
+    expect(view.state.conflicts.find(conflict => conflict.key === 'body.font')).toBeUndefined()
+  })
+
   it('在严格字段校验前统一转换模板说明中的字号、行距和缩进', () => {
     const fields = formatFields(defaults)
     const source = '各级标题均为三号宋体，正文（包括图表标题）小四宋体，首行缩进2字符，段前段后0行，行距1.5倍。'
@@ -209,17 +221,19 @@ describe('项目 Word 格式链路', () => {
     expect(confirmed.state.userConfirmed).toEqual({ 'heading1.size': 20 })
     expect(confirmed.state.resolved['heading1.size']).toBe(20)
     expect(confirmed.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('confirmed')
-    await expect(saveDocxFormat(project, extracted.templateId, { revision: confirmed.state.revision,
-      userConfirmed: { 'heading1.size': 21 } })).rejects.toThrow('候选')
+    const edited = await saveDocxFormat(project, extracted.templateId, { revision: confirmed.state.revision,
+      userConfirmed: { 'heading1.size': 21, 'body.font': '楷体' } })
+    expect(edited.state.userConfirmed).toEqual({ 'heading1.size': 21, 'body.font': '楷体' })
+    expect(edited.state.resolved).toMatchObject({ 'heading1.size': 21, 'body.font': '楷体' })
     const zip = await JSZip.loadAsync(await template())
     const document = await zip.file('word/document.xml')!.async('string')
     zip.file('word/document.xml', document.replace('第一章 标题', '第二章 标题'))
-    const added = await saveDocxTemplate(project, { revision: confirmed.library.revision,
+    const added = await saveDocxTemplate(project, { revision: edited.library.revision,
       name: '新模板.docx', bytes: await zip.generateAsync({ type: 'nodebuffer' }) })
     expect(added.templateId).not.toBe(extracted.templateId)
     expect(added.state.userConfirmed).toEqual({})
     expect(added.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
-    expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 20 })
+    expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 21, 'body.font': '楷体' })
     expect((await readDocxTemplateLibrary(project)).estimateTemplateId).toBe(extracted.templateId)
   })
 
