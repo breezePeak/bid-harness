@@ -73,6 +73,13 @@ describe('S5 Writer 短引用与语义输入', () => {
     }, [])).resolves.toMatchObject({ section_id: context.section.id })
   })
 
+  it('共同提交路径保留段首总结句的 Markdown 加粗', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n**本方案建立全过程质量保障机制。** 后续从责任、检查和整改三个方面展开。`, metadata: {},
+    }, [])).resolves.toMatchObject({ section_id: context.section.id })
+  })
+
   it('候选池隔离缺失、Hash 和不安全路径，不给坏来源新 W，并显示中文原因', async () => {
     const { workspace, refs, context, web } = await fixture()
     const missing = snapshot('缺失正文')

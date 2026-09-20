@@ -14,7 +14,6 @@ import type {
   DocxTemplateId,
   DocxTemplateLibraryView,
   DocxTemplateRegistry,
-  FormatValue,
 } from './docx-format-contract.ts'
 import { DOCX_TEMPLATE_PARSER_VERSION, DOCX_TEMPLATE_REGISTRY_VERSION } from './docx-format-contract.ts'
 import { defaultDocxFormatState, formatFields, FORMAT_ROLES, resolveFormat, validateFormatValues, viewResolvedFormat } from './docx-format.ts'
@@ -372,7 +371,7 @@ async function resolveAndWrite(
   return decorateView(workspace, templateId, view)
 }
 
-/** 保存一份模板自己的完整冲突确认集合。 */
+/** 保存一份模板自己的完整用户格式覆盖；覆盖值可在确认后继续修改。 */
 export async function saveDocxFormat(
   workspace: BidWorkspace,
   templateId: DocxTemplateId | null,
@@ -383,16 +382,9 @@ export async function saveDocxFormat(
   const current = await readDocxFormat(workspace, templateId)
   if (parsed.data.revision !== current.state.revision) throw new Error('配置已在其他页面修改，请重新加载后再确认。')
   const confirmed = validateFormatValues(parsed.data.userConfirmed, current.fields)
-  for (const [key, value] of Object.entries(confirmed)) {
-    const conflict = current.state.conflicts.find(item => item.key === key)
-    if (!conflict || !conflict.evidence.some(item => sameValue(item.value, value)))
-      throw new Error('冲突确认值不属于模板提供的候选。')
-  }
   return resolveAndWrite(workspace, templateId, { ...current.state,
     revision: current.state.revision + 1, opened: true, userConfirmed: confirmed })
 }
-
-const sameValue = (left: FormatValue, right: FormatValue): boolean => typeof left === typeof right && left === right
 
 /** 保存 DOCX 原文件并为新模板创建独立格式状态；相同摘要复用已有模板。 */
 export async function saveDocxTemplate(

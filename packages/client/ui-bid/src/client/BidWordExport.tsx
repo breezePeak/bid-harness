@@ -12,6 +12,7 @@ import type {
   FormatEvidenceSource,
   FormatRole,
   FormatValue,
+  FormatValues,
 } from '@deepseek-ai/dsh-bid/control-plane'
 import { Button, IconPlusOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
@@ -78,6 +79,8 @@ export function BidWordExport({
   const [formatVisible, setFormatVisible] = useState(false)
   const [activeConflict, setActiveConflict] = useState<FormatConflict | null>(null)
   const [selected, setSelected] = useState<FormatValue | undefined>()
+  const [editingRole, setEditingRole] = useState<{ role: FormatRole; label: string } | null>(null)
+  const [roleDraft, setRoleDraft] = useState<FormatValues>({})
   const [savingConflict, setSavingConflict] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [exportFeedback, setExportFeedback] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
@@ -108,17 +111,18 @@ export function BidWordExport({
   useEffect(() => {
     if (!isBid) return
     let disposed = false
+    const active = (): boolean => !disposed
     void getLibrary().then(async (next) => {
-      if (disposed) return
+      if (!active()) return
       setLibrary(next)
       const initial = next.estimateTemplateId ?? next.templates[0]?.id ?? null
-      await loadTemplate(initial, () => !disposed)
+      await loadTemplate(initial, active)
       for (const template of next.templates) {
         if (template.id === initial) continue
-        if (!disposed) triggerEstimate(template.id)
+        if (active()) triggerEstimate(template.id)
       }
-      if (initial !== null && !disposed) triggerEstimate(null)
-    }).catch((reason: unknown) => { if (!disposed) setError(reason instanceof Error ? reason.message : 'Word 模板库读取失败。') })
+      if (initial !== null && active()) triggerEstimate(null)
+    }).catch((reason: unknown) => { if (active()) setError(reason instanceof Error ? reason.message : 'Word 模板库读取失败。') })
     return () => { disposed = true }
   }, [getLibrary, isBid, loadTemplate, sessionId, triggerEstimate])
   if (!isBid) return null
@@ -146,6 +150,15 @@ export function BidWordExport({
     ? '按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。'
     : ''
   const value = (key: string): FormatValue => view?.state.resolved[key] ?? ''
+  const editRole = (role: FormatRole, label: string): void => {
+    if (!view) return
+    setRoleDraft(Object.fromEntries(view.fields.filter(field => field.key.startsWith(`${role}.`))
+      .map(field => [field.key, view.state.resolved[field.key] ?? field.value])))
+    setEditingRole({ role, label })
+  }
+  const updateRoleDraft = (key: string, next: FormatValue): void => {
+    setRoleDraft(current => ({ ...current, [key]: next }))
+  }
   const cell = (keys: string[], text: string) => {
     const conflict = conflictFor(keys)
     return <td className={conflict ? css.conflict : undefined}>{conflict
@@ -168,7 +181,7 @@ export function BidWordExport({
       </div>
       <Button variant="primary" size="sm" disabled={!ready || !view || !formatVisible || Boolean(busy) || uploading} onClick={() => {
         if (unresolved.length) {
-          const message = `当前仍有 ${String(unresolved.length)} 项格式冲突，请先确认。`
+          const message = `当前模板内仍有 ${String(unresolved.length)} 项格式差异待确认。`
           setError(message)
           setExportFeedback({ status: 'error', text: message })
           firstConflict.current?.focus()
@@ -272,9 +285,9 @@ export function BidWordExport({
                 <span className={css.templateMeta}>
                   <span>{estimateLabel(estimates.get(template.id))}</span>
                   {template.conflictCount > 0 ? (
-                    <span className={css.conflictText}> · {String(template.conflictCount)} 项格式冲突</span>
+                    <span className={css.conflictText}> · {String(template.conflictCount)} 项格式差异待确认</span>
                   ) : (
-                    <span className={css.noConflictText}> · 无格式冲突</span>
+                    <span className={css.noConflictText}> · 格式已确定</span>
                   )}
                 </span>
               </label>
@@ -285,6 +298,7 @@ export function BidWordExport({
           <p role="status" className={css.status}>{busy || status || partialExportMessage}</p>
         )}
         {error && <p role="alert" className={css.error}>{error}</p>}
+        {formatVisible && view && <p className={css.formatHint}>格式差异只来自当前模板内识别到的多个样式或格式说明，不与系统默认格式比较；系统默认值仅补充模板未定义的字段。所有格式确认后仍可修改。</p>}
         {formatVisible && view && <table className={css.summary}>
           <caption>当前模板主要格式</caption>
           <thead><tr><th>类型</th><th>字体</th><th>字号</th><th>对齐</th><th>行距</th><th>缩进</th><th>状态</th></tr></thead>
@@ -297,11 +311,13 @@ export function BidWordExport({
               {cell([`${role}.alignment`], ALIGNMENT_LABELS[String(value(`${role}.alignment`))] ?? displayValue(value(`${role}.alignment`)))}
               {cell([`${role}.line`, `${role}.lineRule`], displayValue(value(`${role}.line`)))}
               {cell([`${role}.firstLine`, `${role}.firstLineUnit`], Number(value(`${role}.firstLine`)) === 0 ? '0' : `${displayValue(value(`${role}.firstLine`))}${value(`${role}.firstLineUnit`) === 'chars' ? '字符' : 'mm'}`)}
-              <td className={roleConflicts.length ? css.pending : undefined}>{roleConflicts.length ? '待确认' : '正常'}</td>
+              <td className={roleConflicts.length ? css.pending : undefined}><button type="button" onClick={() => { editRole(role, label) }}>
+                {roleConflicts.length ? '待确认 · 修改' : '修改'}
+              </button></td>
             </tr>
           })}</tbody>
         </table>}
-        {formatVisible && otherConflicts.length > 0 && <div className={css.otherConflicts} aria-label="其他格式冲突"><strong>其他待确认</strong>
+        {formatVisible && otherConflicts.length > 0 && <div className={css.otherConflicts} aria-label="其他待确认的格式差异"><strong>其他格式差异待确认</strong>
           {otherConflicts.map(conflict => <button key={conflict.key} ref={conflict.key === firstUnresolvedKey ? firstConflict : undefined}
             type="button" onClick={() => { setActiveConflict(conflict); setSelected(conflict.resolvedValue) }}>
             {view?.fields.find(field => field.key === conflict.key)?.label ?? conflict.key}：{displayValue(conflict.resolvedValue)}
@@ -312,7 +328,7 @@ export function BidWordExport({
         : <p>正在生成 Word 效果预览…</p> : <p>正在读取所选模板。</p>}</div>
     </div>
     {activeConflict && <div className={css.backdrop}><div role="dialog" aria-modal="true" aria-labelledby="word-conflict-title" className={css.dialog}>
-      <h2 id="word-conflict-title">{view?.fields.find(field => field.key === activeConflict.key)?.label ?? activeConflict.key}存在冲突</h2>
+      <h2 id="word-conflict-title">{view?.fields.find(field => field.key === activeConflict.key)?.label ?? activeConflict.key}存在多个候选</h2>
       {[...new Map(activeConflict.evidence.map(item => [displayValue(item.value), item.value])).values()].map((option) => {
         const sources = [...new Set(activeConflict.evidence
           .filter(item => sameValue(item.value, option))
@@ -327,11 +343,11 @@ export function BidWordExport({
         void saveFormat(selectedId, {
           revision: view.state.revision,
           userConfirmed: { ...view.state.userConfirmed, [activeConflict.key]: selected },
-        }).then(async (next) => {
+        }).then((next) => {
           setView(next)
           setLibrary(next.library)
           setActiveConflict(null)
-          setStatus('格式已确认')
+          setStatus('格式已保存')
           void preview(selectedId).then((rendered) => {
             setPreviewHtml(rendered.previewHtml ?? '')
           }).catch(() => {})
@@ -341,6 +357,37 @@ export function BidWordExport({
           setSavingConflict(false)
         })
       }}>确认</Button></div>
+    </div></div>}
+    {editingRole && view && <div className={css.backdrop}><div role="dialog" aria-modal="true" aria-labelledby="word-role-title" className={css.dialog}>
+      <h2 id="word-role-title">修改{editingRole.label}格式</h2>
+      <div className={css.editFields}>{view.fields.filter(field => field.key.startsWith(`${editingRole.role}.`)).map((field) => {
+        const draft = roleDraft[field.key] ?? field.value
+        return <label key={field.key}><span>{field.label}</span>{typeof field.value === 'boolean'
+          ? <input type="checkbox" checked={Boolean(draft)} onChange={(event) => { updateRoleDraft(field.key, event.target.checked) }}/>
+          : field.options
+            ? <select value={String(draft)} onChange={(event) => { updateRoleDraft(field.key, event.target.value) }}>
+              {field.options.map(option => <option key={option} value={option}>{ALIGNMENT_LABELS[option] ?? option}</option>)}
+            </select>
+            : <input type={typeof field.value === 'number' ? 'number' : 'text'} value={String(draft)} min={field.min} max={field.max} step="any"
+              onChange={(event) => { updateRoleDraft(field.key, typeof field.value === 'number' ? Number(event.target.value) : event.target.value) }}/>
+        }</label>
+      })}</div>
+      <div className={css.dialogActions}><Button onClick={() => { setEditingRole(null) }}>取消</Button><Button variant="primary" disabled={savingConflict} onClick={() => {
+        if (savingConflict) return
+        setSavingConflict(true)
+        setError('')
+        void saveFormat(selectedId, { revision: view.state.revision,
+          userConfirmed: { ...view.state.userConfirmed, ...roleDraft } }).then(async (next) => {
+          setView(next)
+          setLibrary(next.library)
+          setEditingRole(null)
+          setStatus('格式已保存')
+          const rendered = await preview(selectedId)
+          setPreviewHtml(rendered.previewHtml ?? '')
+        }).catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : '操作失败，请重试。')
+        }).finally(() => { setSavingConflict(false) })
+      }}>保存</Button></div>
     </div></div>}
   </section>
 }
