@@ -5,6 +5,7 @@ import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-wri
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseOrMigrateChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
+import { sectionVisibleRequirements } from './section-evidence-context.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
@@ -312,7 +313,7 @@ export async function validateChapterWriting(
       if (sectionWritingPlan === undefined) throw new Error('writing-plan-section-missing')
       issues.push(...validateChapterReview({
         section,
-        requirements: requirements.requirements.filter(item => section.requirement_ids.includes(item.id)),
+        requirements: sectionVisibleRequirements(section, requirements),
         responsePoints: catalog.points.filter(item => (section.scoring_response_point_ids ?? []).includes(item.id)),
         compliance: compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
         globalCompliance: compliance.compliance_items.filter(item => outline.global_compliance_ids.includes(item.id)),

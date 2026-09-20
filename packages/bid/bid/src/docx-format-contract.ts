@@ -156,7 +156,7 @@ export interface DocxFormatCoreView {
   fingerprint?: string
   previewHtml?: string
 }
-/** 一份明确模板或系统默认格式的浏览器视图。 */
+/** 一份上传模板或系统默认模板的浏览器视图。 */
 export interface DocxFormatView extends DocxFormatCoreView {
   templateId: DocxTemplateId | null
   library: DocxTemplateLibraryView

@@ -1,0 +1,45 @@
+.root {
+  min-width: 0;
+}
+
+.row,
+.leading,
+.chevron,
+.title,
+.summary {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.separator {
+  flex: none;
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
+  background: currentcolor;
+  opacity: 0.55;
+}
+
+.summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.body {
+  padding: 4px 0 4px 22px;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+}

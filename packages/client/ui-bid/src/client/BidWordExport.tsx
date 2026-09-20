@@ -272,7 +272,7 @@ export function BidWordExport({
             <input type="radio" name="word-template" checked={selectedId === null} onChange={() => { choose(null) }}/>
             <div className={css.templateInfo}>
               <div className={css.templateTitleRow}>
-                <strong className={css.templateName}>系统默认格式</strong>
+                <strong className={css.templateName}>系统默认模板</strong>
                 {library?.estimateTemplateId === null && <span className={css.benchmarkBadge}>页数基准</span>}
               </div>
             </div>

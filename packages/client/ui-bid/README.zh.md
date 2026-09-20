@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只读取当前 `projection.runtime` 的阶段与状态，不使用聊天流、Main Agent、Subagent 或工具的运行状态推导阶段是否执行；Main Agent 运行状态只在阶段已挂起时显示独立的恢复检查提示。客户端只将 durable `bid.run.notice` 折叠为聊天时间线中的终端 Run 提示；它不推进阶段、不推导权限，也不保存本地阶段或状态。
+标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只读取当前 `projection.runtime` 的阶段与状态，不使用聊天流、Main Agent、Subagent 或工具的运行状态推导阶段是否执行；Main Agent 运行状态只在阶段已挂起时显示独立的恢复检查提示。客户端把 durable `bid.run.notice` 投影为聊天时间线中的终端 Run 提示：错误默认显示一行红色小字号概述，悬停时显示展开箭头，展开后保留完整诊断；它不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 `projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，状态行固定显示“已挂起”并停止阶段动画，同时显示挂起原因和安全错误；恢复、重跑和停止由 Host 通过 DSH 原生用户提问呈现，面板不提供阶段操作按钮。时间线以持久化通知显示停止或中断，不把通知送入模型上下文。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
 

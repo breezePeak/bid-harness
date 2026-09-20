@@ -69,10 +69,10 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
-import { composeDocxFromTemplate } from './docx-compose.ts'
-import { fillBidCover, type BidCoverData } from './docx-cover.ts'
+import type { BidCoverData } from './docx-cover.ts'
+import { buildDocxFromResolvedTemplate } from './docx-build.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
-  clearDocxExportArtifacts, invalidateDocxLastExports, readBuiltInDocxTemplateBytes, readDocxTemplateBytes, registerDocxExportArtifacts,
+  clearDocxExportArtifacts, invalidateDocxLastExports, registerDocxExportArtifacts,
   saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
@@ -7075,21 +7075,13 @@ export class BidWorkspace {
     const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
-    const originalTemplate = view.templateId === null
-      ? await readBuiltInDocxTemplateBytes()
-      : await readDocxTemplateBytes(this, view.templateId)
     const builtInTemplate = view.templateId === null
-    const templateBytes = builtInTemplate
-      ? await fillBidCover(originalTemplate, await readBidCoverData(this))
-      : originalTemplate
-    const compose = (flowchartMode: 'svg' | 'visio-placeholder' = 'svg') => composeDocxFromTemplate(
+    const coverData = builtInTemplate ? await readBidCoverData(this) : undefined
+    const compose = (flowchartMode: 'svg' | 'visio-placeholder' = 'svg') => buildDocxFromResolvedTemplate(
       this,
-      templateBytes,
       markdown,
-      view.state.resolved,
-      view.state.modelInterpreted.mapping,
-      flowchartMode,
-      builtInTemplate ? { omitSourceTitle: true, fixedSectionTitle: '技术偏离表' } : {},
+      view,
+      { flowchartMode, ...(coverData === undefined ? {} : { coverData }) },
     )
     const office = nativeExport ?? createNativeVisioExport()
     const flowcharts = extractFlowchartSpecs(markdown)

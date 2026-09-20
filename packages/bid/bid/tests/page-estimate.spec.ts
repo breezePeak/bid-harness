@@ -158,7 +158,7 @@ describe('Word page estimate', () => {
 
     const current = await readDocxFormat(project, null)
     await writeDocxFormat(project, null, { ...current.state, revision: current.state.revision + 1,
-      resolved: { ...current.state.resolved, 'body.size': 18 } })
+      userConfirmed: { ...current.state.userConfirmed, 'body.size': 18 } })
     const formatChanged = await estimateDocxMarkdownPages(project, markdown, null, { renderPdf })
     expect(formatChanged.fingerprint).not.toBe(first.fingerprint)
     expect(renderPdf).toHaveBeenCalledTimes(3)
@@ -186,21 +186,16 @@ describe('Word page estimate', () => {
     expect(available).toHaveBeenCalledOnce()
   })
 
-  it('S5 真实分页固定使用纵向 A4，同时保留模板排版参数', async () => {
+  it('系统默认真实分页使用内置模板的封面、目录和技术偏离表骨架', async () => {
     clearPageEstimateCache()
     const project = await workspace()
-    const current = await readDocxFormat(project, null)
-    await writeDocxFormat(project, null, { ...current.state, revision: current.state.revision + 1,
-      resolved: { ...current.state.resolved, 'page.paper': 'A3', 'page.orientation': 'landscape',
-        'page.left': 31, 'body.size': 18 } })
     const renderPdf = vi.fn(async (docx: Buffer) => {
       const zip = await import('jszip').then(module => module.default.loadAsync(docx))
-      const [document, styles] = await Promise.all([
-        zip.file('word/document.xml')!.async('string'), zip.file('word/styles.xml')!.async('string'),
-      ])
-      expect(document).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>')
-      expect(document).toContain('<w:pgMar w:top="1417" w:right="1417" w:bottom="1417" w:left="1757"')
-      expect(styles).toContain('<w:sz w:val="36"/>')
+      const document = await zip.file('word/document.xml')!.async('string')
+      expect(document).toContain('w:val="dsh-cover-project-name"')
+      expect(document).toContain('TOC \\o "1-6" \\h \\z \\u')
+      expect(document).toContain('w:val="dsh-technical-deviation-table"')
+      expect(document).toContain('正文。')
       return pdf(1)
     })
 

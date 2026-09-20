@@ -127,9 +127,48 @@ export async function readDocxTemplateBytes(workspace: BidWorkspace, templateId:
   return readFile(path)
 }
 
-/** @returns 随包发布、包含封面、TOC、技术偏离表和正文锚点的默认模板。 */
+/**
+ * 读取随包发布的系统默认 Word 模板。
+ * @returns 包含封面、TOC、技术偏离表和正文锚点的原始字节。
+ */
 export async function readBuiltInDocxTemplateBytes(): Promise<Buffer> {
   return readFile(new URL('../assets/templates/default-technical-bid.docx', import.meta.url))
+}
+
+async function createBuiltInDocxFormatState(
+  workspace: BidWorkspace,
+  persisted?: DocxFormatState,
+): Promise<DocxFormatState> {
+  const fields = formatFields(workspace.config)
+  const parsed = await parseDocxTemplate(
+    await readBuiltInDocxTemplateBytes(),
+    'default-technical-bid.docx',
+    workspace.config.docxTemplateMaxBytes,
+    { includeUnusedRoleStyles: true },
+  )
+  const base = defaultDocxFormatState(fields)
+  const selectedCandidates: DocxFormatState['extracted']['candidates'] = []
+  const selectedIds = new Set<string>()
+  // 封面、目录等固定内容的直接格式不定义可插入正文；每个角色采用模板的首个语义候选。
+  for (const role of FORMAT_ROLES) {
+    const candidate = parsed.extracted.candidates.find(item =>
+      item.roles.includes(role) && !item.id.startsWith('direct-'))
+    if (candidate !== undefined && !selectedIds.has(candidate.id)) {
+      selectedCandidates.push(candidate)
+      selectedIds.add(candidate.id)
+    }
+  }
+  const resolved = resolveFormat({
+    ...base,
+    revision: persisted?.revision ?? 0,
+    opened: persisted?.opened ?? false,
+    extracted: { ...parsed.extracted, candidates: selectedCandidates },
+    modelInterpreted: { values: {}, mapping: {}, evidence: [] },
+    userConfirmed: persisted?.userConfirmed ?? {},
+    ...(persisted?.lastExport === undefined ? {} : { lastExport: persisted.lastExport }),
+  }, fields, workspace.config.docxTemplateMaxBytes).state
+  // 审计视图保留完整提取证据，但固定内容的直接格式不参与系统 baseline。
+  return { ...resolved, extracted: parsed.extracted }
 }
 
 async function parseStateFile(path: string): Promise<DocxFormatState | undefined> {
@@ -260,7 +299,12 @@ async function decorateView(workspace: BidWorkspace, templateId: DocxTemplateId 
   return { ...await withTenderWarnings(workspace, view), templateId, library: await readDocxTemplateLibrary(workspace) }
 }
 
-/** 读取明确模板；省略模板 ID 时读取 S5 页数基准，null 明确读取系统默认格式。 */
+/**
+ * 读取上传模板或从内置 DOCX 重建系统默认模板格式。
+ * @param workspace 格式状态所属项目。
+ * @param templateId 上传模板 ID；省略时读取 S5 页数基准，null 读取系统默认模板。
+ * @returns 模板身份、完整格式状态、字段定义和模板库。
+ */
 export async function readDocxFormat(workspace: BidWorkspace, templateId?: DocxTemplateId | null): Promise<DocxFormatView> {
   const registry = await readDocxTemplateRegistry(workspace)
   const selected = templateId === undefined ? registry.estimateTemplateId : templateId
@@ -269,7 +313,10 @@ export async function readDocxFormat(workspace: BidWorkspace, templateId?: DocxT
   const path = formatPath(workspace, selected)
   await assertNoLinkedPath(workspace.root, path)
   const fields = formatFields(workspace.config)
-  const state = await parseStateFile(path) ?? defaultDocxFormatState(fields)
+  const persisted = await parseStateFile(path)
+  const state = selected === null
+    ? await createBuiltInDocxFormatState(workspace, persisted)
+    : persisted ?? defaultDocxFormatState(fields)
   if (template !== undefined && (state.template?.hash !== template.hash
     || state.template.name !== template.name || state.template.parserVersion !== template.parserVersion)) {
     throw new Error('模板格式配置与模板身份不一致。')
@@ -277,7 +324,13 @@ export async function readDocxFormat(workspace: BidWorkspace, templateId?: DocxT
   return decorateView(workspace, selected, viewResolvedFormat(state, fields, workspace.config.docxTemplateMaxBytes))
 }
 
-/** 在调用方 Word 操作锁内原子保存一份模板或系统默认格式配置。 */
+/**
+ * 在调用方 Word 操作锁内原子保存格式状态。
+ * @param workspace 格式状态所属项目。
+ * @param templateId 上传模板 ID；null 保存系统默认模板的用户状态。
+ * @param state 已完成校验和解析的完整状态。
+ * @param commits 可选的外层发布事务。
+ */
 export async function writeDocxFormat(
   workspace: BidWorkspace,
   templateId: DocxTemplateId | null,

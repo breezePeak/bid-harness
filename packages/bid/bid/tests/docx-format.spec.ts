@@ -10,7 +10,7 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { BidWorkspace } from '../src/index.ts'
 import { defaultDocxFormatState, formatFields, resolveFormat, validateFormatValues } from '../src/docx-format.ts'
 import { readDocxFormat, readDocxTemplateLibrary, readDocxTemplateRegistry, saveDocxFormat, saveDocxFormatInterpretation, saveDocxTemplate,
-  setEstimateDocxTemplate } from '../src/docx-format-store.ts'
+  setEstimateDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
 import { DOCX_TEMPLATE_MAX_BYTES, DOCX_TEMPLATE_PARSER_VERSION } from '../src/docx-format-contract.ts'
 import { parseDocxTemplate, readDocxXml } from '../src/docx-template.ts'
 import { renderDocx } from '../src/docx-render.ts'
@@ -223,6 +223,57 @@ describe('项目 Word 格式链路', () => {
     expect(added.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
     expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 21, 'body.font': '仿宋' })
     expect((await readDocxTemplateLibrary(project)).estimateTemplateId).toBe(extracted.templateId)
+  })
+
+  it('系统默认格式始终从内置 DOCX 重建并保留用户覆盖与运行状态', async () => {
+    const project = await workspace()
+    const fields = formatFields(defaults)
+    const parsed = await parseDocxTemplate(
+      await readFile(new URL('../assets/templates/default-technical-bid.docx', import.meta.url)),
+      'default-technical-bid.docx',
+      DOCX_TEMPLATE_MAX_BYTES,
+      { includeUnusedRoleStyles: true },
+    )
+    const initial = await readDocxFormat(project, null)
+    expect(initial.state.extracted).toEqual(parsed.extracted)
+    expect(initial.state.conflicts.filter(conflict => conflict.status === 'conflict')).toEqual([])
+    for (const [role, keys] of Object.entries({
+      heading1: ['font', 'size'], heading2: ['font', 'size'],
+      body: ['font', 'latinFont', 'size', 'firstLine', 'firstLineUnit', 'line', 'before', 'after'],
+      tableCaption: ['font', 'size'], figureCaption: ['font', 'size'],
+    })) {
+      const candidate = parsed.extracted.candidates.find(item =>
+        item.roles.some(candidateRole => candidateRole === role) && !item.id.startsWith('direct-'))
+      expect(candidate, `${role} 应由内置 DOCX 命名样式提供`).toBeDefined()
+      expect(initial.state.resolved).toMatchObject(Object.fromEntries(
+        keys.map(key => [`${role}.${key}`, candidate!.values[key]!])))
+    }
+
+    const polluted = resolveFormat({
+      ...defaultDocxFormatState(formatFields({ font: 'Microsoft YaHei', bodySize: 22, headingSize: 32 })),
+      revision: 7,
+      opened: true,
+      modelInterpreted: { values: { 'body.font': 'Microsoft YaHei' }, mapping: {}, evidence: [
+        { key: 'body.font', value: 'Microsoft YaHei', source: 'template_instruction', text: '旧默认正文' },
+      ] },
+      userConfirmed: { 'body.size': 14 },
+      lastExport: { path: 'output/old.docx', fingerprint: 'a'.repeat(64) },
+    }, fields).state
+    await writeDocxFormat(project, null, polluted)
+    const migrated = await readDocxFormat(project, null)
+    expect(migrated.state).toMatchObject({ revision: 7, opened: true,
+      userConfirmed: { 'body.size': 14 }, lastExport: polluted.lastExport })
+    expect(migrated.state.extracted).toEqual(parsed.extracted)
+    expect(migrated.state.modelInterpreted).toEqual({ values: {}, mapping: {}, evidence: [] })
+    expect(migrated.state.resolved).toMatchObject({ ...initial.state.resolved, 'body.size': 14 })
+
+    const saved = await saveDocxFormat(project, null, {
+      revision: migrated.state.revision,
+      userConfirmed: { ...migrated.state.userConfirmed, 'heading1.size': 21 },
+    })
+    const reopened = await readDocxFormat(project, null)
+    expect(reopened.state.revision).toBe(saved.state.revision)
+    expect(reopened.state.resolved).toMatchObject({ ...initial.state.resolved, 'body.size': 14, 'heading1.size': 21 })
   })
 
   it('模板 Registry 追加模板并只在首次上传时自动选择页数基准', async () => {

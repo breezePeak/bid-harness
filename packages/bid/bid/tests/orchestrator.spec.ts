@@ -54,6 +54,24 @@ describe('BidOrchestrator', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
+  it('keeps non-S2 validation issues out of the run error summary', async () => {
+    const current = await session()
+    const issue = { code: 'CHAPTER_REVIEW_TEXT_INVALID', message: '覆盖记录文本必须匹配当前章节 canonical 条目。' }
+    const orchestrator = new BidOrchestrator(
+      current,
+      { canExecute: () => true, execute: async task => artifacts(task.stage) },
+      { validate: async () => ({ ok: false, issues: [issue] }) },
+    )
+    current.append('bid.project.resumed', { runtime: { stage: 'chapter_writing', status: 'waiting_start' }, revision: 1 })
+
+    await orchestrator.startResetStage()
+    current.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
+    await expect(orchestrator.runConfirmedStage()).resolves.toMatchObject({ stage: 'chapter_writing', status: 'suspended' })
+    expect(orchestrator.controlState.run).toMatchObject({
+      error: { code: 'BID_STAGE_VALIDATION_FAILED', message: '当前阶段结果未通过校验。', issues: [issue] },
+    })
+  })
+
   it('records executor validation issues on the current stage', async () => {
     const current = await session()
     const orchestrator = new BidOrchestrator(

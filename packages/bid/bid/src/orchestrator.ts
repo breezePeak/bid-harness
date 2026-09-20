@@ -477,7 +477,7 @@ export class BidOrchestrator {
     if (!validation.ok) {
       await this.runs.suspend('retry_exhausted', {
         code: 'BID_STAGE_VALIDATION_FAILED',
-        message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : validation.issues.map(formatStageValidationIssue).join('; '),
+        message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : '当前阶段结果未通过校验。',
         issues: validation.issues,
       })
       return 'failed'
@@ -530,13 +530,4 @@ export class BidOrchestrator {
   private attentionRequired(stage: BidStage, reason: string, issues: StageValidationIssue[]): void {
     this.session.append('bid.stage.attention_required', { stage, status: 'attention_required', reason, issues })
   }
-}
-
-/**
- * Format one browser-safe issue for compact logs and non-S2 summaries.
- * @param issue Validation issue with optional Artifact and field paths.
- * @returns Stable colon-delimited summary without raw values.
- */
-export function formatStageValidationIssue(issue: StageValidationIssue): string {
-  return [issue.code, issue.artifact, issue.path, issue.message].filter(value => value !== undefined).join(': ')
 }

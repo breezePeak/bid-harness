@@ -116,7 +116,28 @@ describe('Word 导出页面', () => {
     expect(screen.getAllByRole('button', { name: '修改' })).toHaveLength(5)
     expect(screen.queryByText('格式描述')).toBeNull()
     expect(screen.queryByText('页面设置')).toBeNull()
+    expect(screen.getByText('系统默认模板')).toBeDefined()
+    expect(screen.queryByText('系统默认格式')).toBeNull()
     expect(actions.preview).toHaveBeenCalledOnce()
+  })
+
+  it('系统默认模板展示 Host 返回的 resolved 并使用 null 读取预览', async () => {
+    const { props, actions, getView } = fixture()
+    vi.mocked(actions.getFormat).mockImplementation(async selectedId => selectedId === null
+      ? { ...getView(), templateId: null, state: { ...getView().state, template: undefined,
+        resolved: { ...getView().state.resolved, 'body.size': 13 } },
+      values: { ...getView().values, 'body.size': 13 } }
+      : { ...getView(), templateId: selectedId })
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    fireEvent.click(screen.getByRole('radio', { name: /系统默认模板/u }))
+    await screen.findByText('13pt')
+    expect(actions.getFormat).toHaveBeenLastCalledWith(null)
+    expect(actions.preview).toHaveBeenLastCalledWith(null)
+
+    fireEvent.click(screen.getByRole('radio', { name: /模板\.docx/u }))
+    await waitFor(() => { expect(screen.queryByText('13pt')).toBeNull() })
   })
 
   it('选择模板后自动解析并立即刷新 resolved 预览', async () => {

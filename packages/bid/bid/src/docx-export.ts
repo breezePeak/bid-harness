@@ -54,7 +54,7 @@ export { collectDocxChapterBody } from './docx-content.ts'
  * @param workspace 已由 Host 锁定的项目。
  * @param run 本次阶段的唯一执行与正式提交权限。
  * @param destination 项目内输出路径；省略时写入固定交付文件。
- * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认格式。
+ * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认模板。
  * @param nativeExport 可选的 Visio/Word 能力注入；省略时使用当前 Windows COM 实现。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */

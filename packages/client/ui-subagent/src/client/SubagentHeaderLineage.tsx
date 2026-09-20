@@ -768,7 +768,12 @@ function CatalogDropdown({
     ? undefined
     : catalog?.entries.find(entry => entry.kind === 'child' && entry.id === currentSessionId)
   const switcherDisplayTitle = currentEntry?.kind === 'child'
-    ? currentEntry.label ?? currentEntry.id
+    ? resolveRowPresentation(
+      currentEntry.label ?? currentEntry.id,
+      summaries[currentEntry.id]?.title,
+      [],
+      currentEntry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable'),
+    ).displayLabel
     : displayTitle
   const healthy = catalog?.entries.filter(entry => entry.kind === 'child') ?? []
   const descendants = useMemo(

@@ -8,9 +8,9 @@ Word 导出只把模板解析成格式值，再由 Renderer 新建文档。生�
 
 ## Decision
 
-S5 继续从页数基准模板读取页边距、字体、字号、行距、段距、缩进、标题及表格文字格式，但快速估算与 LibreOffice 真实分页都固定使用纵向 A4。模板纸型、方向、特殊分节和固定内容不进入 S5 页数基准。
+S5 继续从页数基准模板读取页边距、字体、字号、行距、段距、缩进、标题及表格文字格式。快速估算固定使用纵向 A4；LibreOffice 真实分页按[系统默认 Word 模板唯一真源](../bug-fix/2026-09-20-system-default-docx-single-source.md)与正式导出共用所选模板的原位合成结果。
 
-S6 显式模板以 `word-export/templates/{hash}.docx` 的原始字节为最终包骨架，系统默认格式以随包发布的 `assets/templates/default-technical-bid.docx` 为骨架。`composeDocxFromTemplate()` 把 S5 Markdown 渲染成单节 OOXML 内容，复制正文引用的样式、编号、关系和图片，再由 `applyTemplateContent()` 插入正文内容控件、书签、占位段落或末节属性之前。模板原有 ZIP 部件、正文固定块和节属性不重建；默认格式不再从零新建文档。
+S6 显式模板以 `word-export/templates/{hash}.docx` 的原始字节为最终包骨架，系统默认模板以随包发布的 `assets/templates/default-technical-bid.docx` 为骨架。`buildDocxFromResolvedTemplate()` 为真实分页和正式导出选择同一原始文件，再由 `composeDocxFromTemplate()` 把 S5 Markdown 渲染成单节 OOXML 内容，复制正文引用的样式、编号、关系和图片，并通过 `applyTemplateContent()` 插入正文内容控件、书签、占位段落或末节属性之前。模板原有 ZIP 部件、正文固定块和节属性不重建；系统默认模板不从零新建文档。
 
 `inspectDocxTemplateStructure()` 用内容控件标签、书签和占位文字识别正文锚点。默认模板用稳定 tag 标出封面字段、真实 TOC 字段、技术偏离表及正文位置；封面由程序读取项目事实和 `bidderName` 配置填充，不进入 Writer。S3 确认边界把技术偏离表规范为固定第一章并拒绝“目录”节点，第二章以后保留确认目录。表格使用表头语义与 `tblGrid`、`gridSpan`、`vMerge` 形成逻辑列；默认技术偏离表按源数据调整行数并填充，固定第一章不再插入正文锚点。其他模板的内容控件标记列及响应语义列仍是可编辑区域，未完全容纳的普通源表随正文保留。模型只提供正文及既有样式角色解释，不接收封面、目录、XML、关系或单元格位置。
 

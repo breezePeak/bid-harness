@@ -159,9 +159,15 @@ function paragraphFormat(node: XmlNode, theme: ThemeFonts): FormatValues {
  * @param bytes 原始 DOCX。
  * @param name 浏览器显示名称，不参与路径选择。
  * @param maxBytes 当前部署允许的原始字节数。
+ * @param options 是否保留内置模板未在固定内容中使用的语义样式。
  * @returns 可保存的完整格式候选；输入受文件与格式 XML 字节上限约束，不按候选数量截断。
  */
-export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxBytes = DOCX_TEMPLATE_MAX_BYTES): Promise<ParsedDocxTemplate> {
+export async function parseDocxTemplate(
+  bytes: Uint8Array,
+  name: string,
+  maxBytes = DOCX_TEMPLATE_MAX_BYTES,
+  options: { readonly includeUnusedRoleStyles?: boolean } = {},
+): Promise<ParsedDocxTemplate> {
   const files = await readDocxXml(bytes, maxBytes)
   const styles = files['word/styles.xml'] ?? {}
   const doc = files['word/document.xml'] as XmlNode
@@ -272,7 +278,8 @@ export async function parseDocxTemplate(bytes: Uint8Array, name: string, maxByte
   const defaultStyle = [...styleNodes].find(([, node]) => attr(node, 'type') === 'paragraph' && attr(node, 'default') === '1')?.[0]
   const usedStyles = new Set(bodyParagraphs.map(p => val(child(p, 'pPr'), 'pStyle') ?? defaultStyle))
   for (const [id, node] of styleNodes) {
-    if (attr(node, 'type') !== 'paragraph' || !usedStyles.has(id))
+    if (attr(node, 'type') !== 'paragraph'
+      || !usedStyles.has(id) && !(options.includeUnusedRoleStyles === true && rolesOf(id).length > 0))
       continue
     addCandidate({ id,
       name: val(node,

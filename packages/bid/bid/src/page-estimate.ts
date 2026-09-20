@@ -1,4 +1,4 @@
-/** 固定 A4 的快速排版近似与可选 LibreOffice 真实分页；两者均使用模板 resolved 排版格式。 */
+/** 固定 A4 的快速近似与基于所选原始模板的 LibreOffice 真实分页。 */
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -13,9 +13,10 @@ import { z } from 'zod'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { DocxFormatView, DocxTemplateId, FormatValues } from './docx-format-contract.ts'
 import { readDocxFormat } from './docx-format-store.ts'
+import { buildDocxFromResolvedTemplate, docxTemplateHash } from './docx-build.ts'
 import { collectDocxChapterBody } from './docx-content.ts'
 import { captionRole } from './docx-numbering.ts'
-import { docxAssetHash, docxImageDimensions, renderDocx } from './docx-render.ts'
+import { docxAssetHash, docxImageDimensions } from './docx-render.ts'
 import type { BidWorkspace } from './index.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
@@ -247,11 +248,12 @@ async function fastMarkdownPages(workspace: BidWorkspace, markdown: string, valu
   return pagesFromHeight(await markdownHeight(workspace, markdown, values, width, [], true), values)
 }
 
-function renderedFingerprint(markdown: string, view: DocxFormatView, assetHash: string): string {
+function renderedFingerprint(markdown: string, view: DocxFormatView, assetHash: string, templateHash: string): string {
   return createHash('sha256').update(JSON.stringify({
     rendererVersion: DOCX_PAGE_RENDERER_VERSION,
     markdown,
     assetHash,
+    templateHash,
     templateId: view.templateId,
     templateRevision: view.state.revision,
     values: Object.entries(view.values).sort(([left], [right]) => left.localeCompare(right)),
@@ -265,7 +267,8 @@ async function renderedPages(
   options: RenderedPageEstimateOptions = {},
 ): Promise<{ pages: number; method: 'fast' | 'rendered'; fingerprint: string }> {
   const assetHash = await docxAssetHash(workspace, markdown)
-  const fingerprint = renderedFingerprint(markdown, view, assetHash)
+  const templateHash = await docxTemplateHash(workspace, view)
+  const fingerprint = renderedFingerprint(markdown, view, assetHash, templateHash)
   const operationKey = `${workspace.projectRoot}\0${fingerprint}`
   const path = within(workspace.projectRoot, `word-export/page-estimates/${fingerprint}.json`)
   await assertNoLinkedPath(workspace.root, path)
@@ -277,7 +280,7 @@ async function renderedPages(
     let pending = renderedInFlight.get(operationKey)
     if (pending === undefined) {
       pending = (async () => {
-        const docx = await renderDocx(workspace, markdown, view.values, false, 'a4')
+        const docx = await buildDocxFromResolvedTemplate(workspace, markdown, view)
         const pages = await pdfPageCount(await (options.renderPdf ?? libreOfficePdf)(docx.bytes))
         const record = renderedCacheSchema.parse({ version: 1, fingerprint, pages })
         await writeFileAtomic(path, `${JSON.stringify(record)}\n`, { mode: 0o600, dirMode: 0o700 })
@@ -293,7 +296,14 @@ async function renderedPages(
   return { pages: await fastMarkdownPages(workspace, markdown, view.values), method: 'fast', fingerprint }
 }
 
-/** 按指定模板排版参数在 A4 上渲染完整 Markdown；LibreOffice 不可用时返回明确的 fast 方法。 */
+/**
+ * 按所选原始模板合成完整 Markdown；LibreOffice 不可用时返回明确的 fast 方法。
+ * @param workspace 正文、图片和模板所属项目。
+ * @param markdown 待测算的完整正文快照。
+ * @param templateId 明确的上传模板 ID；null 使用系统默认模板。
+ * @param options 可注入的 DOCX 转 PDF 实现。
+ * @returns 页数、测算方法、缓存指纹和格式身份。
+ */
 export async function estimateDocxMarkdownPages(
   workspace: BidWorkspace,
   markdown: string,

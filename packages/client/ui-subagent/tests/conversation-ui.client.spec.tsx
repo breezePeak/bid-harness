@@ -918,6 +918,28 @@ describe('SubagentHeaderLineage', () => {
     })
   })
 
+  it('uses the stage and task id in the current subagent switcher title', () => {
+    const input = {
+      ...props(catalog({ entries: [{
+        kind: 'child', id: CHILD, mode: 'continuable',
+        label: 'S5 · 0001 · 1 - 编写 · 访问控制与安全审计',
+        activity: 'running', hasChildren: false,
+      }] }), {}, {
+        [CHILD]: {
+          ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+          title: '访问控制与安全审计', displayTitle: '访问控制与安全审计',
+        },
+      }),
+      sessionId: CHILD,
+      lineageSessionId: CHILD,
+      displayTitle: '访问控制与安全审计',
+    }
+    render(<SubagentHeaderLineage {...input} />)
+
+    expect(screen.getByRole('button', { name: '切换子代理：S5 · 0001' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '切换子代理：访问控制与安全审计' })).toBeNull()
+  })
+
   it('falls back to the catalog session id when the selected row has no label', () => {
     const input = {
       ...props(catalog({ entries: [{
