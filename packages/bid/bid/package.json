@@ -54,7 +54,8 @@
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",
-    "lib/typert.remote-client.d.ts"
+    "lib/typert.remote-client.d.ts",
+    "assets/templates/default-technical-bid.docx"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "workspace:^",

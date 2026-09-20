@@ -239,6 +239,7 @@ export function renderOutlineGenerationTask(
     'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
     '模型只选择 scoring_response_point_ids，不必抄写 scoring_response_points；Host 从正式清单按选择顺序重建快照并合并所属 scoring_ids。每个 RP 至少由一个合适的可写叶子覆盖，也可由多个章节共同响应。不得修改正式清单或猜测 RP 编号。',
     'writable 节点必须有至少一个具体 must_answer。父评分、子评分和通用质量评分可以同时关联。结构节点 writable=false、must_answer=[] 且必须有子节点。章节标题应按技术语义表达组织、阶段、质量、风险、安全、验收等内容，但不要套固定模板。',
+    '不要创建“目录”章节。Host 固定保留 id=dsh-technical-deviation-table、title=技术偏离表的可写第一章；封面和目录由导出程序生成，第二章以后才组织本项目的动态技术正文。',
     '技术响应索引、偏离表或合规清单只能作为索引或附录，不能集中承担正文覆盖。mandatory Requirement 和重点 Scoring 必须在对应的实质性可写叶子中映射；索引重复引用不能替代正文拆分。',
     '每个 Requirement、Scoring 和 Compliance ID 都必须至少覆盖一次；mandatory Requirement，以及 must_answer=true、带 score 或 score_range 的 Scoring，必须关联至少一个 writable 节点。一个 ID 可出现在多个章节，但同一数组不得重复。Compliance 可以放在 global_compliance_ids 或具体章节。',
     ...(feedback === undefined ? [] : [

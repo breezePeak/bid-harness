@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
-import { assertChapterRevisionScope, chapterContentSha256, chapterRevisionRequestSchema, validateChapterRevisionReference } from '../src/chapter-revision.ts'
+import { assertChapterRevisionScope, chapterContentSha256, chapterRevisionRequestSchema, renderChapterRevisionTask, validateChapterRevisionReference } from '../src/chapter-revision.ts'
 import type { BidChapterRevisionRequest } from '../src/control-plane-contract.ts'
 
 const markdown = '# 1 章节\n\n保留首段。\n\n重复段落。\n\n重复段落。\n\n保留末段。\n'
@@ -51,5 +51,15 @@ describe('章节修订引用', () => {
     expect(chapterRevisionRequestSchema.safeParse(selection()).success).toBe(true)
     expect(chapterRevisionRequestSchema.safeParse({ ...selection(), instruction: ' ' }).success).toBe(false)
     expect(chapterRevisionRequestSchema.safeParse({ ...selection(), reference: { section_id: 'SEC-1' } }).success).toBe(false)
+  })
+
+  it('意见中的整章措辞不能扩大 Host 选区', () => {
+    const request = { ...selection(), instruction: '每一段都太像 AI 写的，全文整体重写。' }
+    const prompt = renderChapterRevisionTask(request, markdown)
+    expect(prompt).toContain('本次修改权限只由 Host 给出的选区决定')
+    expect(prompt).toContain('也只能修改下面引用的完整段落')
+    expect(() => {
+      assertChapterRevisionScope(request, markdown, markdown.replace('保留首段。', '越权修改。'))
+    }).toThrow(ToolArgsError)
   })
 })

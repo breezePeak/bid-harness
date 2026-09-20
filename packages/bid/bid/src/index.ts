@@ -49,6 +49,7 @@ import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations } from './outline-generation-executor.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { OUTLINE_GENERATION_SCHEMA_VERSION, parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { ensureTechnicalDeviationSection } from './outline-generation-normalization.ts'
 import { assertBidMainSession, inspectBidStage, installStageInteractionTools, isBidHostSession, isBidMainSession, readStageJson, renderStageInteractionPrompt, stageInteractionSchema } from './stage-interaction.ts'
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
@@ -69,8 +70,9 @@ import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
 import { composeDocxFromTemplate } from './docx-compose.ts'
+import { fillBidCover, type BidCoverData } from './docx-cover.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
-  clearDocxExportArtifacts, invalidateDocxLastExports, readDocxTemplateBytes, registerDocxExportArtifacts,
+  clearDocxExportArtifacts, invalidateDocxLastExports, readBuiltInDocxTemplateBytes, readDocxTemplateBytes, registerDocxExportArtifacts,
   saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
 import {
   DOCX_TEMPLATE_MAX_BYTES,
@@ -94,6 +96,7 @@ import {
   type FlowchartExportMode,
   type NativeVisioExport,
 } from './native-visio.ts'
+import { createNativeWordFinalizer, DOCX_TOC_UPDATE_DEFERRED } from './native-word.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -134,6 +137,7 @@ import {
   type RevisionBatchTaskFailure,
   type RevisionIssueCheck,
 } from './chapter-revision-batch.ts'
+import { readRevisionComparison } from './chapter-revision-comparison.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type StageSchedulerControl } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
@@ -213,6 +217,7 @@ import type {
   BidRevisionQueueResult,
   BidRevisionQueueView,
   BidRevisionQueueErrorCode,
+  BidRevisionComparisonResult,
   StageArtifact,
   StageValidationIssue,
 } from './control-plane-contract.ts'
@@ -284,6 +289,7 @@ export type {
   BidRevisionIssueStatus,
   BidRevisionIssueReference,
   BidRevisionQueueErrorCode,
+  BidRevisionComparisonResult,
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES, appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 export type { BidSchemaWarning, BidSchemaWarningReason, BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
@@ -420,6 +426,13 @@ export {
   type VisioDiagramResult,
   type WordVisioEmbedder,
 } from './native-visio.ts'
+export { fillBidCover, type BidCoverData } from './docx-cover.ts'
+export {
+  createNativeWordFinalizer,
+  DOCX_TOC_UPDATE_DEFERRED,
+  WORD_FINALIZER_UNAVAILABLE,
+  type WordDocumentFinalizer,
+} from './native-word.ts'
 export { registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
 export * from './writing-entry-contract.ts'
 export * from './writing-entry-state.ts'
@@ -448,6 +461,8 @@ export interface BidConfig {
   font: string
   bodySize: number
   headingSize: number
+  /** 默认技术标封面的投标人名称；为空时不猜测。 */
+  bidderName?: string
   documentChunk: DocumentChunkConfig
 }
 
@@ -464,6 +479,7 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
   font: 'Microsoft YaHei',
   bodySize: 22,
   headingSize: 32,
+  bidderName: '',
   documentChunk: DEFAULT_DOCUMENT_CHUNK_CONFIG,
 }
 
@@ -495,6 +511,8 @@ export interface Config {
   wordFormatMaxTokens: number
   /** Word 格式建议超时毫秒数。 */
   wordFormatTimeoutMs: number
+  /** 默认技术标封面的投标人名称。 */
+  bidderName: string
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
@@ -511,6 +529,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
   webSearchEnabled: true,
   wordFormatMaxTokens: 8192,
   wordFormatTimeoutMs: 120000,
+  bidderName: '',
 }
 
 /** Validated Bid Host runtime configuration. */
@@ -529,6 +548,7 @@ export const Config: z<Config> = z.object({
   webSearchEnabled: z.boolean().default(DEFAULT_HOST_RUNTIME_CONFIG.webSearchEnabled),
   wordFormatMaxTokens: z.natural().min(256).max(32768).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatMaxTokens),
   wordFormatTimeoutMs: z.natural().min(1000).max(600000).default(DEFAULT_HOST_RUNTIME_CONFIG.wordFormatTimeoutMs),
+  bidderName: z.string().max(200).default(DEFAULT_HOST_RUNTIME_CONFIG.bidderName),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -547,6 +567,7 @@ function workspaceConfig(config: Config): BidConfig {
     maxFileBytes: config.maxFileBytes,
     maxTotalBytes: config.maxTotalBytes,
     docxTemplateMaxBytes: config.docxTemplateMaxBytes,
+    bidderName: config.bidderName,
   }
 }
 
@@ -1396,7 +1417,7 @@ async function executeOutlineConfirmationCandidate(
       artifact: 'outline/draft.json',
     }] }
   }
-  let outline = draft.outline
+  let outline = parseOutlineArtifact({ ...draft.outline, sections: ensureTechnicalDeviationSection(draft.outline.sections) })
   const sharedInputs = await Promise.all([
     'analysis/requirements.json',
     'analysis/scoring.json',
@@ -4991,7 +5012,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const markdown = await collectDocxMarkdown(workspace)
+      const markdown = await collectDocxMarkdown(workspace, undefined, templateId)
       const source = destination.slice(0, -'.docx'.length) + '.md'
       await workspace.exportDocxMarkdown(markdown, destination, templateId, undefined, source)
       const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
@@ -5002,10 +5023,14 @@ export class BidHostRuntime extends TypertRemoteService {
         code: formatView.state.lastExport.mode === 'editable' ? 'DOCX_EXPORT_MODE_EDITABLE' : 'DOCX_EXPORT_MODE_FALLBACK',
         message: formatView.state.lastExport.summary,
       }] : []
+      const tocWarnings = formatView.state.lastExport?.tocUpdateDeferred ? [{
+        code: DOCX_TOC_UPDATE_DEFERRED,
+        message: '当前环境未检测到 Microsoft Word，已保留真实目录字段；在 Word 中打开文档时将自动请求刷新目录和页码。',
+      }] : []
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
         message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
-      }, ...exportReportWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
+      }, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
     try {
@@ -5763,6 +5788,69 @@ export class BidHostRuntime extends TypertRemoteService {
     const workspace = this.requireReviewWorkspace(session)
     const queue = await readRevisionQueue(workspace)
     return this.projectRevisionQueueView(queue)
+  }
+
+  /**
+   * 读取一条已完成审批意见所属 batch task 的完整前后正文。
+   * @param session Bid 会话。
+   * @param issueId 审批意见身份。
+   * @returns 精确历史 comparison；旧记录不伪造缺失快照。
+   */
+  @Remote('getRevisionComparison')
+  async getRevisionComparison(session: Session, issueId: string): Promise<BidRevisionComparisonResult> {
+    const workspace = this.requireReviewWorkspace(session)
+    try {
+      const queue = await readRevisionQueue(workspace)
+      const issue = queue.issues.find(candidate => candidate.issue_id === issueId)
+      if (issue === undefined) {
+        return { ok: false, error: { code: 'BID_REVISION_COMPARISON_NOT_FOUND', message: '未找到该审批意见。' } }
+      }
+      if (issue.status !== 'completed' || issue.batch_id === null) {
+        return { ok: false, error: { code: 'BID_REVISION_COMPARISON_NOT_AVAILABLE', message: '该审批意见没有可用的成功修订快照。' } }
+      }
+      const batch = await readRevisionBatch(workspace, issue.batch_id)
+      if (batch === null) {
+        return { ok: false, error: { code: 'BID_REVISION_COMPARISON_NOT_FOUND', message: '未找到该审批意见所属批次。' } }
+      }
+      const tasks = batch.tasks.filter(task => task.issue_ids.includes(issue.issue_id))
+      if (tasks.length !== 1) throw new Error('BID_REVISION_COMPARISON_CORRUPT')
+      const task = tasks[0]
+      if (task === undefined || task.section_id !== issue.section_id || task.status !== 'completed') {
+        throw new Error('BID_REVISION_COMPARISON_CORRUPT')
+      }
+      const comparison = await readRevisionComparison(workspace, batch.batch_id, task.task_id)
+      if (comparison === null) {
+        return {
+          ok: false,
+          error: {
+            code: 'BID_REVISION_COMPARISON_NOT_AVAILABLE',
+            message: '该修复记录创建于历史对比快照功能启用前，无法还原完整修改前版本。',
+          },
+        }
+      }
+      if (comparison.batch_id !== batch.batch_id
+        || comparison.task_id !== task.task_id
+        || comparison.section_id !== task.section_id
+        || JSON.stringify(comparison.issue_ids) !== JSON.stringify(task.issue_ids)) {
+        throw new Error('BID_REVISION_COMPARISON_CORRUPT')
+      }
+      return {
+        ok: true,
+        value: {
+          issue_id: issue.issue_id,
+          batch_id: comparison.batch_id,
+          task_id: comparison.task_id,
+          section_id: comparison.section_id,
+          section_title: issue.section_title,
+          before_markdown: comparison.before_markdown,
+          after_markdown: comparison.after_markdown,
+          before_sha256: comparison.before_sha256,
+          after_sha256: comparison.after_sha256,
+        },
+      }
+    } catch {
+      return { ok: false, error: { code: 'BID_REVISION_COMPARISON_CORRUPT', message: '该修复记录的历史对比快照已损坏。' } }
+    }
   }
 
   /**
@@ -6555,6 +6643,30 @@ function validateConfig(config: BidConfig): void {
   }
 }
 
+function bidExportDate(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date)
+  const value = (type: Intl.DateTimeFormatPartTypes): string => parts.find(part => part.type === type)?.value ?? ''
+  return `${value('year')}年${value('month')}月${value('day')}日`
+}
+
+async function readBidCoverData(workspace: BidWorkspace): Promise<BidCoverData> {
+  const path = within(workspace.projectRoot, 'analysis/project.json')
+  await assertNoLinkedPath(workspace.root, path)
+  let project: ReturnType<typeof parseTenderProjectArtifact> | undefined
+  try { project = parseTenderProjectArtifact(JSON.parse(await readFile(path, 'utf8'))) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const projectName = project?.project_name ?? project?.tender_name
+  const bidderName = workspace.config.bidderName?.trim()
+  return {
+    ...(typeof projectName === 'string' ? { projectName } : {}),
+    ...(bidderName ? { bidderName } : {}),
+    date: bidExportDate(),
+  }
+}
+
 
 function uniqueName(name: string, used: Set<string>): string {
   const extension = extname(name)
@@ -6823,6 +6935,23 @@ export class BidWorkspace {
     const view = await readDocxFormat(this, templateId)
     const pending = view.state.conflicts.filter(conflict => conflict.status === 'conflict')
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
+    const originalTemplate = view.templateId === null
+      ? await readBuiltInDocxTemplateBytes()
+      : await readDocxTemplateBytes(this, view.templateId)
+    const builtInTemplate = view.templateId === null
+    const templateBytes = builtInTemplate
+      ? await fillBidCover(originalTemplate, await readBidCoverData(this))
+      : originalTemplate
+    const compose = (flowchartMode: 'svg' | 'visio-placeholder' = 'svg') => composeDocxFromTemplate(
+      this,
+      templateBytes,
+      markdown,
+      view.state.resolved,
+      view.state.modelInterpreted.mapping,
+      flowchartMode,
+      builtInTemplate ? { omitSourceTitle: true, fixedSectionTitle: '技术偏离表' } : {},
+    )
+    const office = nativeExport ?? createNativeVisioExport()
     const flowcharts = extractFlowchartSpecs(markdown)
     if (/\{\{(?:flowchart|flow_ref):/u.test(markdown)) throw new Error('FLOWCHART_MARKER_UNRESOLVED: 正文仍包含未解析的流程图 marker。')
     let finalBytes: Buffer
@@ -6832,15 +6961,11 @@ export class BidWorkspace {
     let exportReasons: readonly string[] | undefined
     let exportSummary: string | undefined
     if (flowcharts.length === 0) {
-      const rendered = view.templateId === null
-        ? await renderDocx(this, markdown, view.state.resolved)
-        : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
-          view.state.resolved, view.state.modelInterpreted.mapping)
+      const rendered = await compose()
       finalBytes = rendered.bytes
       await readDocxXml(finalBytes)
       assetHash = rendered.assetHash
     } else {
-      const office = nativeExport ?? createNativeVisioExport()
       const env = await detectFlowchartExportEnvironment(office)
       exportMode = env.mode
       exportReasons = env.reasons
@@ -6855,10 +6980,7 @@ export class BidWorkspace {
             nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
             replacements.push({ placeholder: flowchartPlaceholder(flowchart), visioPath })
           }
-          const rendered = view.templateId === null
-            ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'visio-placeholder')
-            : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
-              view.state.resolved, view.state.modelInterpreted.mapping, 'visio-placeholder')
+          const rendered = await compose('visio-placeholder')
           const temporaryDocx = resolve(temporaryRoot, 'rendered.docx')
           await writeFile(temporaryDocx, rendered.bytes, { flag: 'wx' })
           await office.word.embed(temporaryDocx, replacements)
@@ -6876,19 +6998,31 @@ export class BidWorkspace {
           nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.svg`, bytes: Buffer.from(renderedSvg.svg, 'utf8') })
           nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.json`, bytes: Buffer.from(JSON.stringify(flowchart, null, 2), 'utf8') })
         }
-        const rendered = view.templateId === null
-          ? await renderDocx(this, markdown, view.state.resolved, false, 'configured', 'svg')
-          : await composeDocxFromTemplate(this, await readDocxTemplateBytes(this, view.templateId), markdown,
-            view.state.resolved, view.state.modelInterpreted.mapping, 'svg')
+        const rendered = await compose('svg')
         finalBytes = rendered.bytes
         await readDocxXml(finalBytes)
         assetHash = rendered.assetHash
       }
     }
+    let tocUpdateDeferred = false
+    const finalizer = office.finalizer ?? (nativeExport === undefined ? createNativeWordFinalizer() : undefined)
+    if (finalizer !== undefined && await finalizer.isAvailable()) {
+      const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-word-finalize-'))
+      try {
+        const temporaryDocx = resolve(temporaryRoot, 'final.docx')
+        await writeFile(temporaryDocx, finalBytes, { flag: 'wx' })
+        await finalizer.updateFields(temporaryDocx)
+        finalBytes = await readFile(temporaryDocx)
+        await readDocxXml(finalBytes)
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true })
+      }
+    } else tocUpdateDeferred = true
     const nextFormat = { ...view.state,
       lastExport: {
         path: destination,
         fingerprint: docxFingerprint(markdown, view, assetHash),
+        ...(tocUpdateDeferred ? { tocUpdateDeferred: true } : {}),
         ...(exportMode !== undefined ? { mode: exportMode, reasons: exportReasons, summary: exportSummary } : {}),
       },
     }

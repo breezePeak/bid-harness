@@ -122,6 +122,26 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     expect(review?.blocking_issues).toContain('审批意见未满足：REV-002 unsatisfied: 正文仍然残留 v1.0 描述')
   })
 
+  it('段落修订不把选区外既存缺陷自动升级为 blocking issue', async () => {
+    const { agent, call } = await harness()
+    const context = makeContext()
+    const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文内容']]), evidence, 0, [], issues, true)
+    const checklist = buildChapterReviewChecklist(context)
+
+    await call('review_coverage_items', { items: checklist.map((item, index) => index === 0
+      ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '选区外原文已有缺失' }
+      : covered(item.item_ref)) })
+    await call('review_revision_issues', { items: issues.map(issue => ({ issue_id: issue.issue_id, status: 'satisfied', reason: '选区内意见已完成' })) })
+    await call('set_review_summary', {
+      quality_checks: { ...quality, obvious_repetition_free: false },
+      blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false,
+    })
+    await call('finish_chapter_review', {})
+
+    expect(runtime.captured()?.verdict).toBe('pass')
+    expect(runtime.captured()?.blocking_issues).toEqual([])
+  })
+
   it('3. unsatisfied 会被纳入 blocking_issues 并可被 validateChapterReview 正确接受', async () => {
     const { agent, call } = await harness()
     const context = makeContext()

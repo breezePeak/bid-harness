@@ -116,7 +116,7 @@ export function mergeParagraphRanges(ranges: readonly { readonly start: number; 
 /**
  * 拒绝修改多条意见授权范围以外的正文；同一章节多 issue 批量修订使用。
  * 存在 chapter-scope issue 时整章正文可修改；paragraph-only 时严格限制在合并后的授权段落。
- * 通过检查非授权片段在候选中按顺序出现来容忍授权范围内长度变化。
+ * 通过首尾锚定并检查中间非授权片段按顺序出现，容忍授权范围内长度变化。
  * @param scopes 同一 task 中所有 issue 的授权范围。
  * @param original 用户引用的精确原文。
  * @param candidate 完整候选的实际落盘文本。
@@ -139,10 +139,16 @@ export function assertChapterRevisionBatchScope(scopes: readonly BatchRevisionSc
     cursor = range.end
   }
   fixedSegments.push(original.slice(cursor))
-  let searchFrom = 0
-  for (const segment of fixedSegments) {
+  const first = fixedSegments.at(0) ?? ''
+  const last = fixedSegments.at(-1) ?? ''
+  if (!candidate.startsWith(first) || !candidate.endsWith(last)) {
+    throw new ToolArgsError(['只能修改授权段落内的正文，未授权的标题、空白和其他段落必须保持原样。'])
+  }
+  let searchFrom = first.length
+  const searchEnd = candidate.length - last.length
+  for (const segment of fixedSegments.slice(1, -1)) {
     const found = candidate.indexOf(segment, searchFrom)
-    if (found < 0) {
+    if (found < 0 || found + segment.length > searchEnd) {
       throw new ToolArgsError(['只能修改授权段落内的正文，未授权的标题、空白和其他段落必须保持原样。'])
     }
     searchFrom = found + segment.length
@@ -160,7 +166,7 @@ export function renderChapterRevisionTask(request: BidChapterRevisionRequest, ma
     '继续修改你在本会话编写的章节。以下用户编写意见决定修改幅度。',
     request.reference.scope === 'chapter'
       ? '只修改指定章节；用户要求全量重写时全量重写，要求最小修改时保留其他原文。'
-      : '只允许修改下面引用的完整段落。即使用户要求全量重写，也只能重写选中段落。选区外正文、标题和空白必须保持原样。',
+      : '本次修改权限只由 Host 给出的选区决定，不由用户意见中的自然语言决定。即使意见出现“整章”“所有段落”“每一段”“全文”或“整体重写”，也只能修改下面引用的完整段落。选区外正文、标题、空白、换行和流程图 anchor 必须保持原样。',
     `章节：${request.reference.section_id}`,
     `用户编写意见：\n${request.instruction}`,
     ...(request.reference.scope === 'paragraphs' ? [`选中段落：\n${request.reference.text}`] : []),

@@ -27,6 +27,7 @@ export interface BidRevisionFloatingPanelProps {
   readonly deleteRevisionIssue?: ((request: BidDeleteRevisionIssueRequest) => Promise<BidRevisionQueueView>) | undefined
   readonly startRevisionBatch?: (() => Promise<void>) | undefined
   readonly onLocate?: ((sectionId: string) => void) | undefined
+  readonly onCompare?: ((issueId: string, sectionId: string) => void) | undefined
   readonly isRunning?: boolean | undefined
   readonly refreshSignal?: number | undefined
   readonly onQueueChanged?: ((queue?: BidRevisionQueueView) => void) | undefined
@@ -41,6 +42,7 @@ export function BidRevisionFloatingPanel({
   deleteRevisionIssue,
   startRevisionBatch,
   onLocate,
+  onCompare,
   isRunning = false,
   refreshSignal = 0,
   onQueueChanged,
@@ -269,6 +271,7 @@ export function BidRevisionFloatingPanel({
                 <FloatingRevisionIssueTable
                   issues={revisionHistory}
                   onLocate={onLocate}
+                  onCompare={onCompare}
                   ariaLabel={`历史记录，共 ${String(revisionHistory.length)} 条`}
                 />
               )}
@@ -365,6 +368,7 @@ function resolveSectionTitle(issue: BidRevisionIssueView): string {
 function FloatingRevisionIssueTable({
   issues,
   onLocate,
+  onCompare,
   updateRevisionIssue,
   deleteRevisionIssue,
   startEdit,
@@ -373,6 +377,7 @@ function FloatingRevisionIssueTable({
 }: {
   readonly issues: readonly BidRevisionIssueView[]
   readonly onLocate?: ((sectionId: string) => void) | undefined
+  readonly onCompare?: ((issueId: string, sectionId: string) => void) | undefined
   readonly updateRevisionIssue?: ((request: BidUpdateRevisionIssueRequest) => Promise<BidRevisionQueueView>) | undefined
   readonly deleteRevisionIssue?: ((request: BidDeleteRevisionIssueRequest) => Promise<BidRevisionQueueView>) | undefined
   readonly startEdit?: ((issue: BidRevisionIssueView) => void) | undefined
@@ -444,9 +449,12 @@ function FloatingRevisionIssueTable({
                       <button
                         type="button"
                         className={css.btnAction}
-                        onClick={() => { onLocate?.(issue.section_id) }}
+                        onClick={() => {
+                          if (issue.status === 'completed') onCompare?.(issue.issue_id, issue.section_id)
+                          else onLocate?.(issue.section_id)
+                        }}
                       >
-                        查看位置
+                        {issue.status === 'completed' ? '对比查看' : '查看位置'}
                       </button>
                       {canEdit && (
                         <button

@@ -2,7 +2,60 @@
 import { z } from 'zod'
 import { catalogMatchesScoring, type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import type { TenderScoringArtifact } from './tender-analysis-artifacts.ts'
-import { outlineCandidateSchema, parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
+import { outlineCandidateSchema, parseOutlineArtifact, TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
+
+const deviationTitle = (value: string): boolean => value.normalize('NFKC').replace(/\s+/gu, '') === '技术偏离表'
+
+/** @returns 保留原章节身份并把技术偏离表规范为固定第一章的目录。 */
+export function ensureTechnicalDeviationSection(sections: OutlineSection[]): OutlineSection[] {
+  if (sections.some(section => section.title.normalize('NFKC').replace(/\s+/gu, '') === '目录')) {
+    throw new Error('S3 不得创建目录章节；目录由 Word 导出程序生成。')
+  }
+  const matches = sections.filter(section => section.id === TECHNICAL_DEVIATION_SECTION_ID || deviationTitle(section.title))
+  if (matches.length > 1) throw new Error('目录只能包含一个技术偏离表章节。')
+  const existing = matches[0]
+  const fixed: OutlineSection = existing === undefined ? {
+    id: TECHNICAL_DEVIATION_SECTION_ID,
+    parent_id: null,
+    order: 1,
+    level: 1,
+    title: '技术偏离表',
+    purpose: '逐项汇总招标技术要求、投标响应内容及偏离情况。',
+    writable: true,
+    must_answer: ['逐项填写招标技术要求、投标响应内容、偏离程度和备注。'],
+    requirement_ids: [],
+    scoring_ids: [],
+    compliance_ids: [],
+    origin: 'generated',
+    framework_refs: [],
+    scoring_response_point_ids: [],
+    scoring_response_points: [],
+    suggested_tables: ['技术偏离表'],
+    suggested_figures: [],
+    writing_notes: ['只生成用于填充默认模板技术偏离表的数据，不编写封面或目录。'],
+  } : {
+    ...existing,
+    id: TECHNICAL_DEVIATION_SECTION_ID,
+    parent_id: null,
+    order: 1,
+    level: 1,
+    title: '技术偏离表',
+    writable: true,
+    must_answer: existing.must_answer.length > 0 ? existing.must_answer : ['逐项填写招标技术要求、投标响应内容、偏离程度和备注。'],
+  }
+  const previousId = existing?.id
+  const remaining = sections
+    .filter(section => section !== existing)
+    .map(section => previousId === undefined || section.parent_id !== previousId
+      ? section
+      : { ...section, parent_id: TECHNICAL_DEVIATION_SECTION_ID })
+  const roots = remaining.filter(section => section.parent_id === null)
+    .sort((left, right) => left.order - right.order)
+  const rootOrder = new Map(roots.map((section, index) => [section.id, index + 2]))
+  return [...remaining.map(section => section.parent_id === null
+    ? { ...section, order: rootOrder.get(section.id) ?? section.order }
+    : section), fixed]
+}
 
 /**
  * 仅从正式清单派生响应点快照及评分关联，保留模型选择与其他章节内容。

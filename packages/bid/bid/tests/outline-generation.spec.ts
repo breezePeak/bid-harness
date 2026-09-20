@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
+import { ensureTechnicalDeviationSection, normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
 import { applyOutlineRepair } from '../src/outline-generation-repair.ts'
 import { missingOutlineResponsePoints } from '../src/outline-shared-validator.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -820,6 +820,19 @@ const repairSchedule = [{ type: 'update_section', section_id: 'SEC-SCHEDULE',
 }]
 
 describe('S3 确定性规范化与局部续修', () => {
+  it('确认边界固定技术偏离表为第一章并拒绝模型目录章节', () => {
+    const sections = ensureTechnicalDeviationSection(reviewedOutline.sections)
+    const roots = sections.filter(section => section.parent_id === null).sort((left, right) => left.order - right.order)
+    expect(roots.map(section => [section.id, section.title])).toEqual([
+      ['dsh-technical-deviation-table', '技术偏离表'],
+      ['SEC-IMPLEMENTATION', '项目实施方案'],
+    ])
+    expect(() => ensureTechnicalDeviationSection([
+      ...reviewedOutline.sections,
+      { ...reviewedOutline.sections[2]!, id: 'toc', parent_id: null, order: 2, level: 1, title: '目录' },
+    ])).toThrow('不得创建目录章节')
+  })
+
   it('重建缺失、错误文字和错误顺序的快照，去重且幂等，不补入未选择的 RP', async () => {
     const workspace = await fixture()
     const catalog = await catalogWithMissing(workspace)

@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { promisify } from 'node:util'
 import { layoutFlowchart, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
+import { createNativeWordFinalizer, type WordDocumentFinalizer } from './native-word.ts'
 
 const execFileAsync = promisify(execFile)
 /** Stable error code returned when Visio COM cannot be activated. */
@@ -35,6 +36,7 @@ export interface WordVisioEmbedder {
 export interface NativeVisioExport {
   readonly visio: VisioBackend
   readonly word: WordVisioEmbedder
+  readonly finalizer?: WordDocumentFinalizer
 }
 
 export { flowchartPlaceholder } from './flowchart.ts'
@@ -259,7 +261,7 @@ try {
  * @returns Paired Windows Visio and Word COM capabilities.
  */
 export function createNativeVisioExport(): NativeVisioExport {
-  return { visio: new NativeVisioBackend(), word: new NativeWordVisioEmbedder() }
+  return { visio: new NativeVisioBackend(), word: new NativeWordVisioEmbedder(), finalizer: createNativeWordFinalizer() }
 }
 
 /** 流程图导出支持的运行模式。 */

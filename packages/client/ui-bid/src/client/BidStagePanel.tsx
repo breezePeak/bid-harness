@@ -211,6 +211,7 @@ export function BidStagePanel({
   deleteRevisionIssue,
   startRevisionBatch,
   locateChapter,
+  compareRevision,
   subscribeReviewWorkbenchActive,
   subscribeRevisionQueueChanged,
   useStore,
@@ -1437,6 +1438,7 @@ export function BidStagePanel({
               selectReviewView('bid-review')
             }
           }}
+          onCompare={compareRevision}
           isRunning={projection.runtime.status === 'running'}
           floatingMode="fixed"
           refreshSignal={revisionSignal}

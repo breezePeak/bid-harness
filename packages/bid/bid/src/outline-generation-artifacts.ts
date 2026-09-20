@@ -6,6 +6,8 @@ export const OUTLINE_GENERATION_SCHEMA_VERSION = 3 as const
 
 /** Version of the internal Blueprint Quality Review record. */
 export const OUTLINE_QUALITY_REPORT_SCHEMA_VERSION = 4 as const
+/** S3 中由程序保留、供默认 Word 模板填表的固定第一章身份。 */
+export const TECHNICAL_DEVIATION_SECTION_ID = 'dsh-technical-deviation-table' as const
 
 /** Stable reference from one generated Section to an imported framework heading. */
 export const outlineFrameworkRefSchema = z.object({

@@ -34,7 +34,7 @@ const descendants = (node: XmlNode, name: string): XmlNode[] => (node.elements ?
 const attr = (node: XmlNode, name: string): string | undefined => Object.entries(node.attributes ?? {})
   .find(([key]) => local(key) === name)?.[1]
 const text = (node: XmlNode): string => node.type === 'text' ? node.text ?? '' : (node.elements ?? []).map(text).join('')
-const normalized = (value: string): string => value.normalize('NFKC').replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase()
+const normalized = (value: string): string => value.normalize('NFKC').replace(/[\s\p{P}\p{S}\p{Cf}]+/gu, '').toLowerCase()
 const clone = <T>(value: T): T => structuredClone(value)
 
 function parseXml(source: string, path: string): XmlNode {
@@ -114,6 +114,12 @@ interface FilledTemplateTables {
   movedCaptions: XmlNode[]
 }
 
+/** 模板固定章节在合成时拥有的确定性处理。 */
+export interface DocxTemplateCompositionOptions {
+  omitSourceTitle?: boolean
+  fixedSectionTitle?: string
+}
+
 function tableInfo(node: XmlNode): TableInfo | undefined {
   const rows = children(node, 'tr')
   if (rows.length === 0) return undefined
@@ -125,6 +131,38 @@ function tableInfo(node: XmlNode): TableInfo | undefined {
     || rows.slice(1).some(row => logicalCells(row, gridColumns)
       .some(candidate => candidate.start === cell.start && isEditable(candidate.node))))
   return { node, gridColumns, header, rows: rows.slice(1), editable }
+}
+
+function isTechnicalDeviationTable(info: TableInfo): boolean {
+  return descendants(info.node, 'tblCaption').some(node => normalized(attr(node, 'val') ?? '') === 'dshtechnicaldeviationtable')
+}
+
+function removeVerticalMerges(row: XmlNode): void {
+  for (const properties of descendants(row, 'tcPr')) {
+    properties.elements = (properties.elements ?? []).filter(node => local(node.name) !== 'vMerge')
+  }
+}
+
+function resizeTechnicalDeviationTable(target: TableInfo, rowCount: number): TableInfo {
+  const prototype = target.rows[0]
+  if (prototype === undefined || rowCount === target.rows.length) return target
+  const rows = children(target.node, 'tr')
+  const header = rows[0]
+  if (header === undefined) return target
+  const replacements = Array.from({ length: rowCount }, () => {
+    const row = clone(prototype)
+    removeVerticalMerges(row)
+    return row
+  })
+  let inserted = false
+  target.node.elements = (target.node.elements ?? []).flatMap((node): XmlNode[] => {
+    if (local(node.name) !== 'tr') return [node]
+    if (node === header) return [node]
+    if (inserted) return []
+    inserted = true
+    return replacements
+  })
+  return tableInfo(target.node) ?? target
 }
 
 function bodyAnchor(body: XmlNode): DocxTemplateStructure['bodyAnchor'] {
@@ -299,10 +337,14 @@ function fillTemplateTables(
   const unusedSources = new Set(sources)
   const consumed = new Map<XmlNode, XmlNode>()
   const movedCaptions: XmlNode[] = []
-  for (const target of targets) {
-    const source = [...unusedSources].map(candidate => ({ candidate, score: tableScore(target, candidate) }))
+  for (const originalTarget of targets) {
+    const source = [...unusedSources].map(candidate => ({ candidate, score: tableScore(originalTarget, candidate) }))
       .sort((left, right) => right.score - left.score)[0]
     if (source === undefined || source.score < 0) continue
+    const technicalDeviation = isTechnicalDeviationTable(originalTarget)
+    const target = technicalDeviation
+      ? resizeTechnicalDeviationTable(originalTarget, source.candidate.rows.length)
+      : originalTarget
     const sourceRows = new Set(source.candidate.rows)
     for (const [index, targetRow] of target.rows.entries()) {
       const sourceRow = matchingSourceRow(target, targetRow, source.candidate, sourceRows)
@@ -317,6 +359,11 @@ function fillTemplateTables(
         if (targetCell !== undefined && sourceCell !== undefined && !verticalMergeContinues(targetCell.node)) {
           setCellText(targetCell.node, sourceCell.value)
         }
+      }
+      if (technicalDeviation) {
+        const indexHeader = target.header.find(header => header.semantic === 'index')
+        const indexCell = indexHeader === undefined ? undefined : cellAt(targetRow, target.gridColumns, indexHeader.start)
+        if (indexCell !== undefined) setCellText(indexCell.node, String(index + 1))
       }
     }
     unusedSources.delete(source.candidate)
@@ -344,6 +391,34 @@ function removeConsumedBlocks(elements: XmlNode[], consumed: Map<XmlNode, XmlNod
     const caption = elements[index - 1]
     if (caption !== undefined && local(caption.name) === 'p' && children(child(caption, 'pPr') ?? {}, 'pStyle')
       .some(style => attr(style, 'val') === 'DshTableCaption')) omitted.add(index - 1)
+  }
+  return elements.filter((_, index) => !omitted.has(index))
+}
+
+function withoutTemplateOwnedBlocks(
+  elements: XmlNode[],
+  options: DocxTemplateCompositionOptions,
+): XmlNode[] {
+  const omitted = new Set<number>()
+  if (options.omitSourceTitle) {
+    const title = elements.findIndex(node => local(node.name) === 'p' && paragraphStyleIds(node).includes('Title'))
+    if (title >= 0) omitted.add(title)
+  }
+  if (options.fixedSectionTitle !== undefined) {
+    const start = elements.findIndex(node => local(node.name) === 'p'
+      && paragraphStyleIds(node).includes('Heading1')
+      && normalized(text(node)) === normalized(options.fixedSectionTitle ?? ''))
+    if (start >= 0) {
+      let end = elements.length
+      for (let index = start + 1; index < elements.length; index++) {
+        const node = elements[index]
+        if (node !== undefined && local(node.name) === 'p' && paragraphStyleIds(node).includes('Heading1')) {
+          end = index
+          break
+        }
+      }
+      for (let index = start; index < end; index++) omitted.add(index)
+    }
   }
   return elements.filter((_, index) => !omitted.has(index))
 }
@@ -583,12 +658,14 @@ function insertBody(body: XmlNode, elements: XmlNode[]): void {
  * @param templateBytes 用户上传的原始 DOCX。
  * @param contentBytes 单节 DOCX 正文，最终节属性不会进入模板。
  * @param mapping 模板样式角色映射。
+ * @param options 模板拥有的标题和固定章节。
  * @returns 以原模板为包骨架的 DOCX。
  */
 export async function applyTemplateContent(
   templateBytes: Uint8Array,
   contentBytes: Uint8Array,
   mapping: DocxFormatInterpretation['mapping'] = {},
+  options: DocxTemplateCompositionOptions = {},
 ): Promise<Buffer> {
   await Promise.all([readDocxXml(templateBytes), readDocxXml(contentBytes)])
   const [targetZip, sourceZip] = await Promise.all([JSZip.loadAsync(templateBytes), JSZip.loadAsync(contentBytes)])
@@ -606,7 +683,7 @@ export async function applyTemplateContent(
   const sourceBody = documentBody(sourceDocument)
   const sourceElements = (sourceBody.elements ?? []).filter(node => local(node.name) !== 'sectPr')
   const filled = fillTemplateTables(targetBody, sourceElements, mapping)
-  const inserted = removeConsumedBlocks(sourceElements, filled.consumed)
+  const inserted = withoutTemplateOwnedBlocks(removeConsumedBlocks(sourceElements, filled.consumed), options)
   const merged = [...inserted, ...filled.movedCaptions]
   await mergeStyles(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
     targetRelationships, sourceRelationships, merged, mapping)
@@ -632,6 +709,7 @@ export async function applyTemplateContent(
  * @param values 模板提取并确认的正文排版值。
  * @param mapping 模板样式角色映射。
  * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
+ * @param options 模板拥有的标题和固定章节。
  * @returns 合成 DOCX 与正文图片摘要。
  */
 export async function composeDocxFromTemplate(
@@ -641,7 +719,8 @@ export async function composeDocxFromTemplate(
   values: FormatValues,
   mapping: DocxFormatInterpretation['mapping'] = {},
   flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
+  options: DocxTemplateCompositionOptions = {},
 ): Promise<{ bytes: Buffer; assetHash: string }> {
   const rendered = await renderDocx(workspace, markdown, values, false, 'a4', flowchartMode)
-  return { bytes: await applyTemplateContent(templateBytes, rendered.bytes, mapping), assetHash: rendered.assetHash }
+  return { bytes: await applyTemplateContent(templateBytes, rendered.bytes, mapping, options), assetHash: rendered.assetHash }
 }

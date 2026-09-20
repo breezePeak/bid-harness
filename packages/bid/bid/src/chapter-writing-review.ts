@@ -160,6 +160,7 @@ const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.sha
  * @param maxContinuations 未 finish 时同一 Child 的有限续行次数。
  * @param hostAcceptanceResults 当前章节确定性条件的 Host 测量。
  * @param revisionIssues 当前任务的用户审批意见清单（如为批量修订）。
+ * @param paragraphRevision 当前任务是否仅授权段落选区。
  * @returns 仅在权威 finish 结果成功后可读的报告。
  */
 export function attachChapterReview(
@@ -167,6 +168,7 @@ export function attachChapterReview(
   evidence: readonly ChapterReviewEvidence[], maxContinuations: number,
   hostAcceptanceResults: readonly HostAcceptanceResult[] = [],
   revisionIssues: readonly ChapterRevisionReviewIssue[] = [],
+  paragraphRevision = false,
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
@@ -394,8 +396,7 @@ export function attachChapterReview(
           : undefined
         const unsatisfiedRevisionIssues = revisionIssueChecksList?.filter(item => item.status === 'unsatisfied') ?? []
         const hasRevisionNeedsInput = revisionIssueChecksList?.some(item => item.status === 'needs_input') ?? false
-        const blocking = completedSummary.external_input_only ? [] : [...new Set([
-          ...completedSummary.blocking_issues,
+        const wholeChapterBlocking = [
           ...entries.filter(entry => entry.result.status === 'missing')
             .filter(entry => !completedSummary.external_input_gaps.some(gap => gap.item_ref === entry.item.item_ref))
             .map(entry => `未覆盖：${entry.item.text}；${entry.result.issue}`),
@@ -409,6 +410,10 @@ export function attachChapterReview(
           ...hostAcceptanceResults.filter(result => result.status !== 'met'
             && context.sectionWritingPlan.acceptance_criteria.find(item => item.id === result.criterion_id)?.priority === 'required')
             .map(item => `动态验收未通过：${context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)?.description}；${item.message}`),
+        ]
+        const blocking = completedSummary.external_input_only ? [] : [...new Set([
+          ...completedSummary.blocking_issues,
+          ...(paragraphRevision ? [] : wholeChapterBlocking),
           ...unsatisfiedRevisionIssues.map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`),
         ])]
         const globalComplianceChecks = context.globalCompliance.map((item) => {

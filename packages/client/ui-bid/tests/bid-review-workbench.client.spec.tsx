@@ -4,6 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   BidAddRevisionIssueRequest,
+  BidRevisionComparisonView,
   DocxTemplateId,
 } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
@@ -48,6 +49,61 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('renders historical comparison as shared rows with after on the left', async () => {
+    let compare: ((target: { issueId: string; sectionId: string }) => void) | undefined
+    render(<BidReviewWorkbench {...props({
+      getRevisionComparison: async () => ({
+        issue_id: 'ISSUE-1', batch_id: 'BATCH-1', task_id: 'TASK-1', section_id: 'SEC-1', section_title: '实施方案',
+        before_markdown: '# 实施方案\n\nAAA\n\nCCC\n', after_markdown: '# 实施方案\n\nAAA\n\nBBB\n\nCCC\n',
+        before_sha256: 'a'.repeat(64), after_sha256: 'b'.repeat(64),
+      }),
+      onCompareRevision: listener => { compare = listener; return () => {} },
+    })} />)
+    await screen.findByText('章节正文')
+    act(() => { compare?.({ issueId: 'ISSUE-1', sectionId: 'SEC-1' }) })
+    await screen.findByRole('heading', { name: '本次修改对比' })
+    const headers = screen.getAllByText(/修改[前后]/u).map(element => element.textContent)
+    expect(headers).toEqual(['修改后', '修改前'])
+    const inserted = screen.getByText('BBB').closest('[data-kind="insert"]')
+    expect(inserted?.children[0]?.textContent).toContain('BBB')
+    expect(inserted?.children[1]?.textContent).toBe('')
+  })
+
+  it('keeps the latest comparison when an earlier request resolves last', async () => {
+    let compare: ((target: { issueId: string; sectionId: string }) => void) | undefined
+    const first = Promise.withResolvers<BidRevisionComparisonView>()
+    const second = Promise.withResolvers<BidRevisionComparisonView>()
+    const comparison = (issueId: string, text: string) => ({
+      issue_id: issueId, batch_id: `BATCH-${issueId}`, task_id: `TASK-${issueId}`, section_id: 'SEC-1', section_title: '实施方案',
+      before_markdown: '# 实施方案\n\n旧正文\n', after_markdown: `# 实施方案\n\n${text}\n`,
+      before_sha256: 'a'.repeat(64), after_sha256: 'b'.repeat(64),
+    })
+    render(<BidReviewWorkbench {...props({
+      getRevisionComparison: issueId => issueId === 'A' ? first.promise : second.promise,
+      onCompareRevision: listener => { compare = listener; return () => {} },
+    })} />)
+    await screen.findByText('章节正文')
+    act(() => {
+      compare?.({ issueId: 'A', sectionId: 'SEC-1' })
+      compare?.({ issueId: 'B', sectionId: 'SEC-1' })
+    })
+    await act(async () => { second.resolve(comparison('B', 'B 修改后')); await second.promise })
+    expect(await screen.findByText('B 修改后')).toBeTruthy()
+    await act(async () => { first.resolve(comparison('A', 'A 修改后')); await first.promise })
+    expect(screen.queryByText('A 修改后')).toBeNull()
+    expect(screen.getByText('B 修改后')).toBeTruthy()
+  })
+
+  it('shows the legacy snapshot message without replacing history with current content', async () => {
+    let compare: ((target: { issueId: string; sectionId: string }) => void) | undefined
+    render(<BidReviewWorkbench {...props({
+      getRevisionComparison: async () => { throw Object.assign(new Error('not available'), { code: 'BID_REVISION_COMPARISON_NOT_AVAILABLE' }) },
+      onCompareRevision: listener => { compare = listener; return () => {} },
+    })} />)
+    await screen.findByText('章节正文')
+    act(() => { compare?.({ issueId: 'OLD', sectionId: 'SEC-1' }) })
+    expect((await screen.findByRole('alert')).textContent).toContain('该修复记录创建于历史对比快照功能启用前，无法还原完整修改前版本。')
+  })
   it('仅为完整目录中的非叶节显示页数，折叠不改变叶节状态点', async () => {
     const branch = { ...workbench.outline[0]!, section_id: 'BRANCH', parent_id: 'ROOT', order: 1, title: '实施安排', page_estimate: { status: 'empty' as const, ...pageBasis } }
     const leaf = { ...workbench.outline[1]!, parent_id: 'BRANCH', order: 1 }

@@ -33,7 +33,9 @@ import {
   CHAPTER_WRITING_SCHEMA_VERSION,
   parseChapterMetadata,
   type AcceptedChapterCandidate,
+  type BoundChapterCandidate,
   type ChapterCandidate,
+  type ChapterMetadata,
   type ChapterManifestEntry,
 } from './chapter-writing-artifacts.ts'
 import {
@@ -67,6 +69,12 @@ import {
   type RevisionBatchTaskExecution,
   type UpdateRevisionBatchTaskOptions,
 } from './chapter-revision-batch.ts'
+import {
+  assertRevisionComparisonEquivalent,
+  buildRevisionComparisonPath,
+  createRevisionComparisonArtifact,
+  readRevisionComparison,
+} from './chapter-revision-comparison.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import {
@@ -804,12 +812,26 @@ export async function validateChapterCandidate(
   return (await validateAndBindChapterCandidate(workspace, manifest, context, candidate, webSources, webSnapshots)).issues
 }
 
+/**
+ * 段落修订忽略 Writer 重新提交的 metadata，并保留原章节的完整持久化记录。
+ * @param candidate 已绑定的 Writer 候选。
+ * @param metadata 修订前 metadata；非段落修订不提供。
+ * @returns 使用原 metadata 的段落修订候选，或未改变的其他候选。
+ */
+export function preserveParagraphRevisionMetadata(
+  candidate: BoundChapterCandidate,
+  metadata: ChapterMetadata | undefined,
+): BoundChapterCandidate {
+  return metadata === undefined ? candidate : { ...candidate, metadata: { ...metadata, additional_web_materials: [] } }
+}
+
 function renderChapterReviewerTask(
   context: ChapterContext, candidate: AcceptedChapterCandidate, dependencies: readonly DependencyChapterContext[],
   quotes: ReadonlyMap<string, string>,
   evidence: readonly ChapterReviewEvidence[],
   hostAcceptanceResults: readonly HostAcceptanceResult[],
   revisionIssues: readonly ChapterRevisionReviewIssue[] = [],
+  paragraphRevision = false,
 ): string {
   const revisionPromptLines = revisionIssues.length > 0 ? [
     '本次是用户审批修订。',
@@ -833,6 +855,7 @@ function renderChapterReviewerTask(
   return [
     opening,
     ...revisionPromptLines,
+    ...(paragraphRevision ? ['本次只授权段落选区。只判断用户意见是否在授权段落内完成以及本次修改是否破坏章节合法性；选区外原本存在的问题不得成为 blocking issue，也不得要求 Writer 修改选区外正文。'] : []),
     '正文是直接交付采购方的技术标。bidder_response_voice 仅在正文以投标人的方案、措施、成果和承诺直接作答时为 true；若正文主要复述“采购文件提出”“甲方要求”、解释资格条件，或写成需求分析与审查报告，则设为 false 并指出需要改写的段落。必要的一句要求背景不影响通过。',
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
@@ -2209,6 +2232,11 @@ async function runChapterWriting(
       const effectiveRevision = revision?.request ?? commandRevision
       const revisionOriginal = revision?.original ?? (effectiveRevision === undefined && batchTask === undefined
         ? undefined : await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
+      const paragraphRevision = effectiveRevision?.reference.scope === 'paragraphs'
+        || (batchTask !== undefined && batchTask.issues.every(issue => issue.scope === 'paragraphs'))
+      const revisionMetadata = paragraphRevision
+        ? parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot, context.metadataPath), 'utf8')))
+        : undefined
       const finishChapter = async (
         candidate: AcceptedChapterCandidate,
         review: ChapterReview,
@@ -2235,6 +2263,26 @@ async function runChapterWriting(
         if (revision !== undefined) {
           revision.writing = true
         }
+        const afterMarkdown = `${candidate.markdown.trim()}\n`
+        let comparison = revisionBatch !== undefined && batchTask !== undefined
+          && revisionOriginal !== undefined && persistCandidate
+          ? createRevisionComparisonArtifact({
+              batchId: revisionBatch.batchId,
+              taskId: batchTask.task_id,
+              sectionId: batchTask.section_id,
+              issueIds: batchTask.issue_ids,
+              beforeMarkdown: revisionOriginal,
+              afterMarkdown,
+              createdAt: Date.now(),
+            })
+          : undefined
+        if (comparison !== undefined) {
+          const existing = await readRevisionComparison(workspace, comparison.batch_id, comparison.task_id)
+          if (existing !== null) {
+            assertRevisionComparisonEquivalent(existing, comparison)
+            comparison = undefined
+          }
+        }
         logWrites = logWrites.then(async () => {
           assertCurrentInput()
           const committed = {
@@ -2244,8 +2292,14 @@ async function runChapterWriting(
           }
           await options.run.commits.publish(async (lease) => {
             if (persistCandidate) {
-              await lease.writeText(join(workspace.projectRoot, context.contentPath), `${candidate.markdown.trim()}\n`)
+              await lease.writeText(join(workspace.projectRoot, context.contentPath), afterMarkdown)
               await lease.writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
+            }
+            if (comparison !== undefined) {
+              await lease.writeJson(
+                join(workspace.projectRoot, buildRevisionComparisonPath(comparison.batch_id, comparison.task_id)),
+                comparison,
+              )
             }
             await lease.writeJson(join(workspace.projectRoot, reviewPath), {
               ...review,
@@ -2324,12 +2378,13 @@ async function runChapterWriting(
             }
             reviewRuntime = attachChapterReview(
               child, context, quotes, evidencePack, options.maxRepairAttempts, hostAcceptanceResults, revisionReviewIssues,
+              paragraphRevision,
             )
           })
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
-            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues) }],
+            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision) }],
             signal,
             toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
             maxDepth: 1,
@@ -2451,9 +2506,9 @@ async function runChapterWriting(
         })
         writer ??= createChapterWriterChild(agent, label, options.maxRepairAttempts, async (child, value) => {
           const snapshots = buildWebEvidenceSnapshots(capturedByChild.get(String(child.id))?.values() ?? [])
-          const parsed = await bindChapterWriterInput(
+          const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
             workspace, manifest, context, references, value, snapshots,
-          )
+          ), revisionMetadata)
           const customerFacingIssues = chapterInternalIdentifierIssues(context, parsed.markdown)
           const tableCaptionIssues = missingTableCaptionLines(parsed.markdown)
             .map(line => `markdown: 正文第 ${line || '?'} 行的表格缺少紧邻上方的表题。`)
@@ -2503,7 +2558,9 @@ async function runChapterWriting(
           } else {
             rejectedCandidate = result.structured
             try {
-              const parsed = await bindChapterWriterInput(workspace, manifest, context, references, result.structured, attemptSnapshots)
+              const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
+                workspace, manifest, context, references, result.structured, attemptSnapshots,
+              ), revisionMetadata)
               const validated = await validateAndBindChapterCandidate(
                 workspace, manifest, context, parsed, [...durableWebSources.values()], attemptSnapshots,
               )

@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale registry merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { BidAddRevisionIssueRequest, BidDeleteRevisionIssueRequest, BidRevisionQueueView, BidUpdateRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidAddRevisionIssueRequest, BidDeleteRevisionIssueRequest, BidRevisionComparisonResult, BidRevisionComparisonView, BidRevisionQueueView, BidUpdateRevisionIssueRequest } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidWordExport, type BidWordExportInjected } from './BidWordExport.tsx'
 import { BidConfirmationModeControl, BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
@@ -93,6 +93,7 @@ export interface BidStagePanelInjected {
   deleteRevisionIssue?: (request: BidDeleteRevisionIssueRequest) => Promise<BidRevisionQueueView>
   startRevisionBatch?: () => Promise<void>
   locateChapter?: (sectionId: string) => void
+  compareRevision?: (issueId: string, sectionId: string) => void
   subscribeReviewWorkbenchActive?: (listener: (active: boolean) => void) => () => void
   subscribeRevisionQueueChanged?: (listener: () => void) => () => void
 }
@@ -137,6 +138,9 @@ export function apply(ctx: ClientContext): void {
   const confirmationModeStore = createBidConfirmationModeStore()
   const pendingSectionLocate = new Map<string, string>()
   const sectionLocateListeners = new Map<string, Set<(sectionId: string) => void>>()
+  type RevisionCompareTarget = { readonly issueId: string; readonly sectionId: string }
+  const pendingRevisionCompare = new Map<string, RevisionCompareTarget>()
+  const revisionCompareListeners = new Map<string, Set<(target: RevisionCompareTarget) => void>>()
 
   function registerSectionLocateListener(sessionId: string, listener: (sectionId: string) => void): () => void {
     let listeners = sectionLocateListeners.get(sessionId)
@@ -163,6 +167,30 @@ export function apply(ctx: ClientContext): void {
     } else {
       pendingSectionLocate.set(sessionId, sectionId)
     }
+  }
+
+  function registerRevisionCompareListener(sessionId: string, listener: (target: RevisionCompareTarget) => void): () => void {
+    let listeners = revisionCompareListeners.get(sessionId)
+    if (listeners === undefined) {
+      listeners = new Set()
+      revisionCompareListeners.set(sessionId, listeners)
+    }
+    listeners.add(listener)
+    const pending = pendingRevisionCompare.get(sessionId)
+    if (pending !== undefined) {
+      pendingRevisionCompare.delete(sessionId)
+      listener(pending)
+    }
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0) revisionCompareListeners.delete(sessionId)
+    }
+  }
+
+  function triggerRevisionCompare(sessionId: string, target: RevisionCompareTarget): void {
+    const listeners = revisionCompareListeners.get(sessionId)
+    if (listeners === undefined || listeners.size === 0) pendingRevisionCompare.set(sessionId, target)
+    else for (const listener of listeners) listener(target)
   }
 
   const workbenchActiveSessions = new Set<string>()
@@ -423,6 +451,11 @@ export function apply(ctx: ClientContext): void {
         const conversation = scoped?.get('conversation') as { selectView?: (viewId: string) => void } | undefined
         conversation?.selectView?.('bid-review')
       },
+      compareRevision: (issueId: string, sectionId: string) => {
+        triggerRevisionCompare(String(sessionId), { issueId, sectionId })
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        conversation?.selectView('bid-review')
+      },
       subscribeReviewWorkbenchActive: listener => subscribeWorkbenchActive(String(sessionId), listener),
       subscribeRevisionQueueChanged: listener => subscribeRevisionQueueChanged(String(sessionId), listener),
     }),
@@ -482,6 +515,10 @@ export function apply(ctx: ClientContext): void {
           value: unknown
           error: Parameters<typeof actionFailure>[0]
         }>
+        getRevisionComparison(id: SessionId, issueId: string): Promise<
+          | { ok: true; value: BidRevisionComparisonResult }
+          | { ok: false; error: Parameters<typeof actionFailure>[0] }
+        >
       }
       return {
         getWorkbench: async () => {
@@ -493,6 +530,12 @@ export function apply(ctx: ClientContext): void {
           const result = await remote.getReviewChapter(sessionId, sectionId)
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
+        },
+        getRevisionComparison: async (issueId: string): Promise<BidRevisionComparisonView> => {
+          const result = await remote.getRevisionComparison(sessionId, issueId)
+          if (!result.ok) throw actionFailure(result.error)
+          if (!result.value.ok) throw actionFailure(result.value.error)
+          return result.value.value
         },
         getRevisionQueue: async () => {
           const result = await ctx.remote.bid.getRevisionQueue(sessionId)
@@ -532,6 +575,7 @@ export function apply(ctx: ClientContext): void {
           return Promise.resolve()
         },
         onLocateChapter: (listener: (sectionId: string) => void) => registerSectionLocateListener(String(sessionId), listener),
+        onCompareRevision: (listener: (target: RevisionCompareTarget) => void) => registerRevisionCompareListener(String(sessionId), listener),
         notifyWorkbenchMount: (active: boolean) => { setWorkbenchActive(String(sessionId), active) },
       }
     },

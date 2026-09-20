@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BidAddRevisionIssueRequest,
   BidDeleteRevisionIssueRequest,
+  BidRevisionComparisonView,
   BidRevisionQueueView,
   BidRevisionTaskStatus,
   BidReviewChapterView,
@@ -26,6 +27,7 @@ import {
 import css from './BidReviewWorkbench.module.css'
 import { BidProgressBar } from './BidProgressBar.tsx'
 import { isBidMainSessionSummary } from './session-authority.ts'
+import { buildRevisionDiffRows } from './revision-diff.ts'
 
 export type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
 
@@ -67,6 +69,7 @@ function pageTargetInfo(
 export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
+  getRevisionComparison?: (issueId: string) => Promise<BidRevisionComparisonView>
   openWordExport?: () => Promise<void>
   /** Read the current revision issue queue from the Host. */
   getRevisionQueue?: () => Promise<BidRevisionQueueView>
@@ -80,6 +83,8 @@ export interface BidReviewWorkbenchInjected {
   startRevisionBatch?: () => Promise<void>
   /** Register external chapter locate requests triggered from chat or floating panel. */
   onLocateChapter?: (listener: (sectionId: string) => void) => () => void
+  /** Register historical revision comparison requests from the floating panel. */
+  onCompareRevision?: (listener: (target: { readonly issueId: string; readonly sectionId: string }) => void) => () => void
   /** Notify parent dock/panel when review workbench mounts or unmounts. */
   notifyWorkbenchMount?: (active: boolean) => void
 }
@@ -96,6 +101,12 @@ type ContextMenuState = {
   readonly y: number
   readonly target: ApprovalTarget
 }
+
+type ReaderMode =
+  | { readonly kind: 'normal' }
+  | { readonly kind: 'compare-loading'; readonly issueId: string; readonly sectionId: string }
+  | { readonly kind: 'compare'; readonly comparison: BidRevisionComparisonView }
+  | { readonly kind: 'compare-error'; readonly issueId: string; readonly sectionId: string; readonly message: string }
 
 
 const MATERIAL_USAGE_LABEL: Record<string, string> = {
@@ -115,7 +126,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
   sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport,
-  addRevisionIssue, onLocateChapter, notifyWorkbenchMount, actions, useStore,
+  getRevisionComparison, addRevisionIssue, onLocateChapter, onCompareRevision, notifyWorkbenchMount, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
@@ -123,6 +134,8 @@ export function BidReviewWorkbench({
   const [workbench, setWorkbench] = useState<BidReviewWorkbenchView | null>(null)
   const [chapter, setChapter] = useState<BidReviewChapterView | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [readerMode, setReaderMode] = useState<ReaderMode>({ kind: 'normal' })
+  const compareRequestVersion = useRef(0)
   const [exporting, setExporting] = useState(false)
   const [complianceModalOpen, setComplianceModalOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
@@ -160,8 +173,12 @@ export function BidReviewWorkbench({
   const latestWorkbenchRef = useRef<BidReviewWorkbenchView | null>(workbench)
   latestWorkbenchRef.current = workbench
 
-  const refresh = useCallback((): Promise<void> => {
+  const refresh = useCallback((exitCompare = true): Promise<void> => {
     if (!ready) return Promise.resolve()
+    if (exitCompare) {
+      compareRequestVersion.current++
+      setReaderMode({ kind: 'normal' })
+    }
     const version = ++requestVersion.current
     return getWorkbench().then(async (value) => {
       if (version !== requestVersion.current) return
@@ -190,7 +207,7 @@ export function BidReviewWorkbench({
     let disposed = false
     let timer: number | undefined
     const poll = (): void => {
-      void refresh().then(() => {
+      void refresh(false).then(() => {
         const currentWorkbench = latestWorkbenchRef.current
         const revisionBatchActive = currentWorkbench?.revision_batch?.status === 'planning'
           || currentWorkbench?.revision_batch?.status === 'running'
@@ -228,6 +245,8 @@ export function BidReviewWorkbench({
   if (!ready) return null
 
   const select = (sectionId: string): void => {
+    compareRequestVersion.current++
+    setReaderMode({ kind: 'normal' })
     const version = ++requestVersion.current
     selectedSectionId.current = sectionId
     setError(null)
@@ -243,6 +262,36 @@ export function BidReviewWorkbench({
     )
   }
 
+  const openRevisionCompare = (issueId: string, sectionId: string): void => {
+    const version = ++compareRequestVersion.current
+    selectedSectionId.current = sectionId
+    setError(null)
+    setReaderMode({ kind: 'compare-loading', issueId, sectionId })
+    if (getRevisionComparison === undefined) {
+      setReaderMode({ kind: 'compare-error', issueId, sectionId, message: '历史对比接口不可用。' })
+      return
+    }
+    void Promise.all([getChapter(sectionId), getRevisionComparison(issueId)]).then(
+      ([nextChapter, comparison]) => {
+        if (version !== compareRequestVersion.current) return
+        if (comparison.section_id !== sectionId) {
+          setReaderMode({ kind: 'compare-error', issueId, sectionId, message: '历史对比记录与章节不一致。' })
+          return
+        }
+        setChapter(nextChapter)
+        setReaderMode({ kind: 'compare', comparison })
+      },
+      (reason: unknown) => {
+        if (version !== compareRequestVersion.current) return
+        const code = typeof reason === 'object' && reason !== null && 'code' in reason ? String(reason.code) : ''
+        const message = code === 'BID_REVISION_COMPARISON_NOT_AVAILABLE'
+          ? '该修复记录创建于历史对比快照功能启用前，无法还原完整修改前版本。'
+          : reason instanceof Error ? reason.message : String(reason)
+        setReaderMode({ kind: 'compare-error', issueId, sectionId, message })
+      },
+    )
+  }
+
   useEffect(() => {
     notifyWorkbenchMount?.(true)
     return () => { notifyWorkbenchMount?.(false) }
@@ -254,6 +303,15 @@ export function BidReviewWorkbench({
       select(sectionId)
     })
   }, [onLocateChapter])
+
+  useEffect(() => {
+    if (!onCompareRevision) return
+    return onCompareRevision(({ issueId, sectionId }) => { openRevisionCompare(issueId, sectionId) })
+  }, [onCompareRevision])
+
+  const comparisonRows = useMemo(() => readerMode.kind === 'compare'
+    ? buildRevisionDiffRows(readerMode.comparison.before_markdown, readerMode.comparison.after_markdown)
+    : [], [readerMode])
 
   const targetSectionId = useStore(state => state.selectedSectionId)
   useEffect(() => {
@@ -588,7 +646,60 @@ export function BidReviewWorkbench({
         </div>
 
         <div className={css.reader} role="main" aria-label="正文阅读">
-          {chapter?.markdown == null ? (
+          {readerMode.kind !== 'normal' ? (
+            <section className={css.compareSurface} aria-label="本次修改对比">
+              <header className={css.compareToolbar}>
+                <div>
+                  <h1 className={css.compareTitle}>本次修改对比</h1>
+                  <p className={css.breadcrumbs}>章节：{readerMode.kind === 'compare' ? readerMode.comparison.section_title : chapter?.title ?? readerMode.sectionId}</p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    const sectionId = readerMode.kind === 'compare' ? readerMode.comparison.section_id : readerMode.sectionId
+                    select(sectionId)
+                  }}
+                >
+                  返回正文
+                </Button>
+              </header>
+              {readerMode.kind === 'compare-loading' ? (
+                <p className={css.compareNotice} role="status">正在读取历史对比…</p>
+              ) : readerMode.kind === 'compare-error' ? (
+                <p className={css.compareNotice} role="alert">{readerMode.message}</p>
+              ) : (
+                <>
+                  <div className={css.compareColumnHeaders} aria-hidden="true">
+                    <strong>修改后</strong>
+                    <strong>修改前</strong>
+                  </div>
+                  <div className={css.diffRows}>
+                    {comparisonRows.map(row => (
+                      <div className={css.diffRow} data-kind={row.kind} key={row.id}>
+                        <div className={classes(
+                          css.diffCell,
+                          row.after === null ? css.diffCellPlaceholder
+                            : row.kind === 'insert' ? css.diffCellInsert
+                              : row.kind === 'modify' ? css.diffCellModify : css.diffCellEqual,
+                        )}>
+                          {row.after !== null && <MarkdownText text={row.after} />}
+                        </div>
+                        <div className={classes(
+                          css.diffCell,
+                          row.before === null ? css.diffCellPlaceholder
+                            : row.kind === 'delete' ? css.diffCellDelete
+                              : row.kind === 'modify' ? css.diffCellModify : css.diffCellEqual,
+                        )}>
+                          {row.before !== null && <MarkdownText text={row.before} />}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
+          ) : chapter?.markdown == null ? (
             <div className={css.emptyState}>
               <div className={css.emptyStateIcon}>
                 <IconThinkOutline14 size={24} />

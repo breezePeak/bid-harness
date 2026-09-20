@@ -762,6 +762,30 @@ export interface BidRevisionQueueView {
   readonly issues: readonly BidRevisionIssueView[]
 }
 
+/** 浏览器安全的一次成功批量修订前后正文。 */
+export interface BidRevisionComparisonView {
+  readonly issue_id: string
+  readonly batch_id: string
+  readonly task_id: string
+  readonly section_id: string
+  readonly section_title: string
+  readonly before_markdown: string
+  readonly after_markdown: string
+  readonly before_sha256: string
+  readonly after_sha256: string
+}
+
+/** 历史 comparison 读取的稳定错误码。 */
+export type BidRevisionComparisonErrorCode =
+  | 'BID_REVISION_COMPARISON_NOT_AVAILABLE'
+  | 'BID_REVISION_COMPARISON_NOT_FOUND'
+  | 'BID_REVISION_COMPARISON_CORRUPT'
+
+/** 读取一条审批意见所对应历史 comparison 的结果。 */
+export type BidRevisionComparisonResult =
+  | { readonly ok: true; readonly value: BidRevisionComparisonView }
+  | { readonly ok: false; readonly error: { readonly code: BidRevisionComparisonErrorCode; readonly message: string } }
+
 /** 浏览器提交的新建审批意见输入。 */
 export interface BidAddRevisionIssueRequest {
   readonly section_id: string

@@ -591,6 +591,7 @@ export interface RevisionBatchExecutionInput {
  * @returns 原 Writer 的批量修订提示。
  */
 export function renderRevisionBatchSectionPrompt(task: RevisionBatchTaskExecution, markdown: string): string {
+  const chapterScope = task.issues.some(issue => issue.scope === 'chapter')
   const issueLines = task.issues.map((issue, index) => {
     const suggestion = issue.suggestion !== null ? `\n  建议修改：${issue.suggestion}` : ''
     const reference = issue.scope === 'paragraphs' && issue.reference_text !== null
@@ -601,7 +602,9 @@ export function renderRevisionBatchSectionPrompt(task: RevisionBatchTaskExecutio
   return [
     '继续修改你在本会话编写的章节。以下多条用户审批意见决定修改幅度。',
     '综合所有意见一次性修改；不要逐条处理或只处理部分意见。',
-    '用户要求全量重写时全量重写，要求最小修改时保留其他原文。段落级意见只允许修改引用的完整段落，选区外正文保持原样。',
+    chapterScope
+      ? '当前任务包含整章授权，可按审批意见修改整章正文和 metadata。'
+      : '本次修改权限只由 Host 给出的选区决定，不由审批意见中的自然语言决定。即使意见出现“整章”“所有段落”“每一段”“全文”或“整体重写”，也只能修改各条意见授权段落的并集；相邻未选段落以及选区外标题、空白、换行和流程图 anchor 均禁止修改。',
     `章节：${task.section_id}`,
     `审批意见（共 ${task.issues.length} 条）：\n${issueLines.join('\n\n')}`,
     `当前完整正文：\n${markdown}`,

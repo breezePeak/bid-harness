@@ -199,7 +199,7 @@ describe('项目 Word 格式链路', () => {
     expect(conflict).toMatchObject({ resolvedValue: 14, status: 'conflict' })
   })
 
-  it('用户确认只更新所属模板，新模板保留旧模板及其确认', async () => {
+  it('用户可把任意合法字段改为候选之外的值并反复修改', async () => {
     const project = await workspace()
     const extracted = await saveDocxTemplate(project, { revision: 0, name: '冲突模板.docx', bytes: await template() })
     const confirmed = await saveDocxFormat(project, extracted.templateId, { revision: extracted.state.revision,
@@ -209,17 +209,19 @@ describe('项目 Word 格式链路', () => {
     expect(confirmed.state.userConfirmed).toEqual({ 'heading1.size': 20 })
     expect(confirmed.state.resolved['heading1.size']).toBe(20)
     expect(confirmed.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('confirmed')
-    await expect(saveDocxFormat(project, extracted.templateId, { revision: confirmed.state.revision,
-      userConfirmed: { 'heading1.size': 21 } })).rejects.toThrow('候选')
+    const modified = await saveDocxFormat(project, extracted.templateId, { revision: confirmed.state.revision,
+      userConfirmed: { 'heading1.size': 21, 'body.font': '仿宋' } })
+    expect(modified.state.userConfirmed).toEqual({ 'heading1.size': 21, 'body.font': '仿宋' })
+    expect(modified.state.resolved).toMatchObject({ 'heading1.size': 21, 'body.font': '仿宋' })
     const zip = await JSZip.loadAsync(await template())
     const document = await zip.file('word/document.xml')!.async('string')
     zip.file('word/document.xml', document.replace('第一章 标题', '第二章 标题'))
-    const added = await saveDocxTemplate(project, { revision: confirmed.library.revision,
+    const added = await saveDocxTemplate(project, { revision: modified.library.revision,
       name: '新模板.docx', bytes: await zip.generateAsync({ type: 'nodebuffer' }) })
     expect(added.templateId).not.toBe(extracted.templateId)
     expect(added.state.userConfirmed).toEqual({})
     expect(added.state.conflicts.find(conflict => conflict.key === 'heading1.size')?.status).toBe('conflict')
-    expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 20 })
+    expect((await readDocxFormat(project, extracted.templateId)).state.userConfirmed).toEqual({ 'heading1.size': 21, 'body.font': '仿宋' })
     expect((await readDocxTemplateLibrary(project)).estimateTemplateId).toBe(extracted.templateId)
   })
 

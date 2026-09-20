@@ -106,4 +106,7 @@ export type {
   BidDeleteRevisionIssueRequest,
   BidRevisionQueueErrorCode,
   BidRevisionQueueResult,
+  BidRevisionComparisonView,
+  BidRevisionComparisonErrorCode,
+  BidRevisionComparisonResult,
 } from './control-plane-contract.ts'

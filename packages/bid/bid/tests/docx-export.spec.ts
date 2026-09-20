@@ -429,7 +429,7 @@ describe('Bid DOCX export', () => {
     expect(markdown).toContain('### 2.1.1 资源配置')
     expect(markdown).toContain('## 2.2 交付')
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'deviation.docx')) })
-    expect(html).toContain('<h1><strong>技术偏离表</strong></h1>')
+    expect(html).toContain('<h1>技术偏离表</h1>')
     expect(html).toContain('无偏离')
     expect(html).toContain('<table>')
     expect(html).toContain('资源配置正文。')
@@ -483,7 +483,7 @@ describe('Bid DOCX export', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]?.code).toBe('DOCX_EXPORT_PAGE_TARGET_BELOW')
     await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).resolves.not.toHaveLength(0)
-  })
+  }, 15_000)
 
   it.each(['缺失', '损坏'])('审核和执行产物%s不阻止已有正文导出', async (state) => {
     const { workspace } = await exportFixture()

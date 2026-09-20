@@ -14,7 +14,6 @@ import type {
   DocxTemplateId,
   DocxTemplateLibraryView,
   DocxTemplateRegistry,
-  FormatValue,
 } from './docx-format-contract.ts'
 import { DOCX_TEMPLATE_PARSER_VERSION, DOCX_TEMPLATE_REGISTRY_VERSION } from './docx-format-contract.ts'
 import { defaultDocxFormatState, formatFields, FORMAT_ROLES, resolveFormat, validateFormatValues, viewResolvedFormat } from './docx-format.ts'
@@ -73,6 +72,7 @@ const stateSchema = z.strictObject({ version: z.literal(2),
     mode: z.enum(['editable', 'image_fallback']).optional(),
     reasons: z.array(z.string().max(500)).max(20).optional(),
     summary: z.string().max(1000).optional(),
+    tocUpdateDeferred: z.boolean().optional(),
   }).optional() })
 const exportArtifactsSchema = z.strictObject({ paths: z.array(z.string().min(1).max(500)).max(10_000) })
 const templateRecordSchema = z.strictObject({
@@ -125,6 +125,11 @@ export async function readDocxTemplateBytes(workspace: BidWorkspace, templateId:
   const path = within(workspace.projectRoot, `word-export/templates/${templateIdSchema.parse(templateId)}.docx`)
   await assertNoLinkedPath(workspace.root, path)
   return readFile(path)
+}
+
+/** @returns 随包发布、包含封面、TOC、技术偏离表和正文锚点的默认模板。 */
+export async function readBuiltInDocxTemplateBytes(): Promise<Buffer> {
+  return readFile(new URL('../assets/templates/default-technical-bid.docx', import.meta.url))
 }
 
 async function parseStateFile(path: string): Promise<DocxFormatState | undefined> {
@@ -372,7 +377,7 @@ async function resolveAndWrite(
   return decorateView(workspace, templateId, view)
 }
 
-/** 保存一份模板自己的完整冲突确认集合。 */
+/** 保存一份模板自己的完整用户格式覆盖；任意已定义字段均可反复修改。 */
 export async function saveDocxFormat(
   workspace: BidWorkspace,
   templateId: DocxTemplateId | null,
@@ -383,16 +388,9 @@ export async function saveDocxFormat(
   const current = await readDocxFormat(workspace, templateId)
   if (parsed.data.revision !== current.state.revision) throw new Error('配置已在其他页面修改，请重新加载后再确认。')
   const confirmed = validateFormatValues(parsed.data.userConfirmed, current.fields)
-  for (const [key, value] of Object.entries(confirmed)) {
-    const conflict = current.state.conflicts.find(item => item.key === key)
-    if (!conflict || !conflict.evidence.some(item => sameValue(item.value, value)))
-      throw new Error('冲突确认值不属于模板提供的候选。')
-  }
   return resolveAndWrite(workspace, templateId, { ...current.state,
     revision: current.state.revision + 1, opened: true, userConfirmed: confirmed })
 }
-
-const sameValue = (left: FormatValue, right: FormatValue): boolean => typeof left === typeof right && left === right
 
 /** 保存 DOCX 原文件并为新模板创建独立格式状态；相同摘要复用已有模板。 */
 export async function saveDocxTemplate(

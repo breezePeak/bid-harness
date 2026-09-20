@@ -142,6 +142,8 @@ export interface DocxLastExport {
   mode?: 'editable' | 'image_fallback' | undefined
   reasons?: readonly string[] | undefined
   summary?: string | undefined
+  /** 当前宿主没有 Word COM，真实 TOC 字段留待打开文档时刷新。 */
+  tocUpdateDeferred?: boolean | undefined
 }
 /** 解析及确认结果；浏览器和 DOCX 生成器只读取 values 指向的 resolved。 */
 export interface DocxFormatCoreView {

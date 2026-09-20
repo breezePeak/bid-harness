@@ -12,12 +12,12 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const resolved: FormatValues = Object.fromEntries<FormatValue>(['heading1', 'heading2', 'body', 'figureCaption', 'tableCaption'].flatMap((role): Array<[string, FormatValue]> => [
+const resolved: FormatValues = { ...Object.fromEntries<FormatValue>(['heading1', 'heading2', 'body', 'figureCaption', 'tableCaption'].flatMap((role): Array<[string, FormatValue]> => [
   [`${role}.font`, '宋体'], [`${role}.latinFont`, 'Times New Roman'], [`${role}.size`, role.startsWith('heading') ? 16 : 12],
   [`${role}.alignment`, role.endsWith('Caption') ? 'center' : role === 'body' ? 'both' : 'left'],
   [`${role}.line`, 1.5], [`${role}.lineRule`, 'auto'], [`${role}.firstLine`, role === 'body' ? 2 : 0],
   [`${role}.firstLineUnit`, role === 'body' ? 'chars' : 'mm'],
-]))
+])), 'body.bold': false, 'heading3.bold': true, 'page.orientation': 'portrait' }
 
 function fixture(conflicts: FormatConflict[] = []) {
   const templateId = 'a'.repeat(64) as DocxTemplateId
@@ -42,7 +42,13 @@ function fixture(conflicts: FormatConflict[] = []) {
     templateId,
     library,
     templateMaxBytes: library.templateMaxBytes,
-    fields: [{ key: 'tableCaption.size', group: '表格与图表说明', label: '表题字号（磅）', value: 12 }],
+    fields: [
+      { key: 'page.orientation', group: '页面设置', label: '方向', value: 'portrait', options: ['portrait', 'landscape'] },
+      { key: 'body.font', group: '正文', label: '正文中文字体', value: '宋体' },
+      { key: 'body.bold', group: '正文', label: '正文加粗', value: false },
+      { key: 'heading3.bold', group: '标题', label: '三级标题加粗', value: true },
+      { key: 'tableCaption.size', group: '表格与图表说明', label: '表题字号（磅）', value: 12, min: 5, max: 96 },
+    ],
     values: { ...resolved }, warnings: [], fingerprint: 'current',
   }
   const actions: BidWordExportInjected = {
@@ -106,7 +112,8 @@ describe('Word 导出页面', () => {
     expect(screen.getAllByText('小四（12pt）')).toHaveLength(3)
     const exportButton = screen.getByRole('button', { name: '导出 Word' })
     expect(exportButton.closest('header')).not.toBeNull()
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['导出 Word'])
+    expect(screen.getByRole('button', { name: '修改全部参数' })).toBeDefined()
+    expect(screen.getAllByRole('button', { name: '修改' })).toHaveLength(5)
     expect(screen.queryByText('格式描述')).toBeNull()
     expect(screen.queryByText('页面设置')).toBeNull()
     expect(actions.preview).toHaveBeenCalledOnce()
@@ -140,7 +147,7 @@ describe('Word 导出页面', () => {
     expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
   })
 
-  it('冲突单元格标红并只允许选择证据中的值', async () => {
+  it('冲突参数也允许输入模板候选之外的合法值', async () => {
     const conflict: FormatConflict = { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
       { key: 'tableCaption.size', value: 12, source: 'template_instruction', text: '表题 12 磅' },
       { key: 'tableCaption.size', value: 16, source: 'named_style', text: 'Caption' },
@@ -149,16 +156,52 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByText('待确认')).toBeDefined()
-    fireEvent.click(screen.getByRole('button', { name: '小四（12pt）' }))
+    const tableCaptionRow = screen.getByRole('row', { name: /表题/u })
+    fireEvent.click(within(tableCaptionRow).getByRole('button', { name: '修改小四（12pt）' }))
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByText('表题字号（磅）存在冲突')).toBeDefined()
-    expect(within(dialog).getByText('来源：模板格式说明')).toBeDefined()
-    fireEvent.click(within(dialog).getByRole('radio', { name: /16/u }))
-    fireEvent.click(within(dialog).getByRole('button', { name: '确认' }))
-    await screen.findByText('格式已确认')
-    expect(actions.saveFormat).toHaveBeenCalledWith('a'.repeat(64), { revision: 0, userConfirmed: { 'tableCaption.size': 16 } })
+    expect(within(dialog).getByText('修改表题字号（磅）')).toBeDefined()
+    expect(within(dialog).queryByLabelText('正文中文字体')).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('表题字号（磅）'), { target: { value: '18' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存修改' }))
+    await screen.findByText('Word 参数已保存，仍可继续修改')
+    expect(actions.saveFormat).toHaveBeenCalledWith('a'.repeat(64), { revision: 0,
+      userConfirmed: { 'tableCaption.size': 18 } })
     expect(screen.queryByText('待确认')).toBeNull()
     expect(actions.preview).toHaveBeenCalledTimes(2)
+  })
+
+  it('全部参数在保存后仍可再次修改', async () => {
+    const { props, actions } = fixture()
+    render(<BidWordExport {...props}/> )
+    await screen.findByTitle('Word 效果预览')
+    fireEvent.click(screen.getByRole('button', { name: '修改全部参数' }))
+    const first = screen.getByRole('dialog')
+    expect(within(first).getByLabelText('方向')).toBeDefined()
+    expect(within(first).getByLabelText('正文中文字体')).toBeDefined()
+    expect(within(first).getByLabelText('正文加粗')).toBeDefined()
+    fireEvent.change(within(first).getByLabelText('正文中文字体'), { target: { value: '仿宋' } })
+    fireEvent.click(within(first).getByRole('checkbox', { name: '正文加粗' }))
+    fireEvent.click(within(first).getByRole('button', { name: '保存全部参数' }))
+    await screen.findByText('Word 参数已保存，仍可继续修改')
+
+    fireEvent.click(screen.getByRole('button', { name: '修改全部参数' }))
+    const second = screen.getByRole('dialog')
+    expect(within(second).getByLabelText('正文中文字体')).toHaveProperty('value', '仿宋')
+    expect(within(second).getByRole('checkbox', { name: '正文加粗' })).toHaveProperty('checked', true)
+    expect(actions.saveFormat).toHaveBeenCalledOnce()
+  })
+
+  it('点击某一行只编辑该类型参数', async () => {
+    const { props } = fixture()
+    render(<BidWordExport {...props}/> )
+    await screen.findByTitle('Word 效果预览')
+    const bodyRow = screen.getByRole('row', { name: /^正文/u })
+    fireEvent.click(within(bodyRow).getByRole('button', { name: '修改' }))
+    const dialog = screen.getByRole('dialog', { name: '修改所选 Word 参数' })
+    expect(within(dialog).getByLabelText('正文中文字体')).toBeDefined()
+    expect(within(dialog).getByLabelText('正文加粗')).toBeDefined()
+    expect(within(dialog).queryByLabelText('方向')).toBeNull()
+    expect(within(dialog).queryByLabelText('表题字号（磅）')).toBeNull()
   })
 
   it('存在未确认冲突时导出按钮提示数量并定位首项', async () => {
@@ -172,11 +215,11 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '当前仍有 2 项格式冲突，请先确认。')
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '当前模板仍有 2 项格式差异，请先确认或修改。')
     expect(actions.generate).not.toHaveBeenCalled()
   })
 
-  it('主要表格之外的冲突仍提供简短确认入口', async () => {
+  it('主要表格之外的模板内差异也打开全部参数编辑器', async () => {
     const conflict: FormatConflict = { key: 'heading3.bold', resolvedValue: true, status: 'conflict', evidence: [
       { key: 'heading3.bold', value: true, source: 'direct_format' },
       { key: 'heading3.bold', value: false, source: 'named_style' },
@@ -184,11 +227,11 @@ describe('Word 导出页面', () => {
     const { props } = fixture([conflict])
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
-    const entry = screen.getByRole('button', { name: 'heading3.bold：是' })
+    const entry = screen.getByRole('button', { name: '三级标题加粗：是' })
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
-    expect(document.activeElement).toBe(entry)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '修改全部参数' }))
     fireEvent.click(entry)
-    expect(screen.getByRole('dialog', { name: 'heading3.bold存在冲突' })).toBeDefined()
+    expect(screen.getByRole('dialog', { name: '修改三级标题加粗' })).toBeDefined()
   })
 
   it('无冲突时一个按钮完成生成和下载', async () => {
@@ -300,12 +343,12 @@ describe('Word 导出页面', () => {
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '格式配置无效：body.size')
     expect(screen.getByText('模板.docx')).toBeDefined()
     expect(screen.getByRole('table', { name: '当前模板主要格式' })).toBeDefined()
-    expect(screen.getByLabelText('其他格式冲突')).toBeDefined()
+    expect(screen.getByLabelText('其他模板内格式差异')).toBeDefined()
     expect(screen.getByTitle('Word 效果预览')).toBeDefined()
     expect(screen.getByRole('button', { name: '导出 Word' })).toHaveProperty('disabled', false)
   })
 
-  it('确认格式冲突时不重新触发页数测算且不阻塞连续确认', async () => {
+  it('保存全部参数一次确认全部模板内差异且不重新触发页数测算', async () => {
     const conflicts: FormatConflict[] = [
       { key: 'tableCaption.size', resolvedValue: 12, status: 'conflict', evidence: [
         { key: 'tableCaption.size', value: 12, source: 'template_instruction' },
@@ -321,21 +364,14 @@ describe('Word 导出页面', () => {
     await screen.findByTitle('Word 效果预览')
     const initialEstimateCalls = vi.mocked(actions.estimatePages).mock.calls.length
 
-    fireEvent.click(screen.getByRole('button', { name: '小四（12pt）' }))
-    const firstDialog = screen.getByRole('dialog')
-    fireEvent.click(within(firstDialog).getByRole('radio', { name: /16/u }))
-    fireEvent.click(within(firstDialog).getByRole('button', { name: '确认' }))
-    await screen.findByText('格式已确认')
+    fireEvent.click(screen.getByRole('button', { name: '修改全部参数' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存全部参数' }))
+    await screen.findByText('Word 参数已保存，仍可继续修改')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(vi.mocked(actions.estimatePages).mock.calls.length).toBe(initialEstimateCalls)
-
-    const secondConflictButton = screen.getByRole('button', { name: 'heading3.bold：是' })
-    fireEvent.click(secondConflictButton)
-    const secondDialog = screen.getByRole('dialog')
-    const confirmButton = within(secondDialog).getByRole('button', { name: '确认' })
-    expect(confirmButton).toHaveProperty('disabled', false)
-    fireEvent.click(confirmButton)
-    await screen.findByText('格式已确认')
+    expect(screen.queryByText('待确认')).toBeNull()
+    expect(screen.queryByLabelText('其他模板内格式差异')).toBeNull()
   })
 
   it('页数测算未完成时不阻碍直接导出 Word', async () => {

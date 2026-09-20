@@ -14,12 +14,14 @@ import type { ToolDefinition, ToolExecution, ToolRunContext } from '@deepseek-ai
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import {
   pickChapterContext,
+  preserveParagraphRevisionMetadata,
   renderChapterExecutionPlanTask,
   validateChapterCandidate,
   type ChapterWritingCommand,
   type ChapterWritingControl,
 } from '../src/chapter-writing-executor.ts'
 import type { ChapterCandidate } from '../src/chapter-writing-artifacts.ts'
+import type { BoundChapterCandidate, ChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import type { ChapterReview } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterCandidateSha256 } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
@@ -71,6 +73,26 @@ const executeChapterWriting = (
 }
 
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
+
+it('段落修订保留原 metadata 和流程图定义', () => {
+  const flowchart = {
+    type: 'flowchart' as const, schema_version: 1, id: 'FLOW-SEC-1-integration-test-route', key: 'integration-test-route',
+    title: '集成测试路径', direction: 'TB' as const,
+    nodes: [{ id: 'N1', type: 'start' as const, text: '开始' }], edges: [],
+  }
+  const original: ChapterMetadata = {
+    section_id: 'SEC-1', covered_must_answer: ['要求'], covered_scoring_response_point_ids: [],
+    covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: ['待确认'],
+    handoff: { ...emptyHandoff('SEC-1'), decisions: ['保留决策'] }, flowcharts: [flowchart],
+  }
+  const submitted: BoundChapterCandidate = {
+    section_id: 'SEC-1', markdown: '# 章节\n\n第二段改成更自然的表达。\n\n{{flowchart:integration-test-route}}',
+    metadata: { ...original, unresolved_topics: [], handoff: emptyHandoff('SEC-1'), flowcharts: [], additional_web_materials: [] },
+  }
+  const result = preserveParagraphRevisionMetadata(submitted, original)
+  expect(result.metadata).toEqual({ ...original, additional_web_materials: [] })
+  expect(result.markdown).toBe(submitted.markdown)
+})
 
 function promptText(request: SubagentStartRequest): string {
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')

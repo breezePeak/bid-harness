@@ -175,7 +175,12 @@
 }
 .error, .pending { color: var(--dsw-alias-state-error-primary); }
 .summary { width: 100%; border-collapse: collapse; font-size: 12px; }
-.summary caption { padding: 12px 0; text-align: left; font-weight: 600; font-size: 14px; }
+.summaryHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.summaryHeader strong { font-size: 14px; }
+.editAllButton { padding: 5px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); cursor: pointer; }
+.editAllButton:hover, .editAllButton:focus-visible { border-color: var(--dsw-alias-state-business-primary, #185abd); color: var(--dsw-alias-state-business-primary, #185abd); }
+.formatHint { margin: 6px 0 10px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.visuallyHidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .summary th, .summary td { padding: 9px 8px; border: 1px solid var(--dsw-alias-border-l1); text-align: left; vertical-align: middle; }
 .summary thead th { background: var(--dsw-alias-bg-layer-1); white-space: nowrap; }
 .summary button { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
@@ -190,5 +195,15 @@
 .dialog h2 { margin: 0 0 16px; font-size: 16px; }
 .dialog label { display: flex; gap: 10px; padding: 10px 0; }
 .dialog small { display: block; margin-top: 4px; color: var(--dsw-alias-label-secondary); }
+.formatDialog { width: min(960px, 100%); max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.formatDialog h2 { margin-bottom: 4px; }
+.dialogHint { margin: 0 0 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.formatFields { overflow: auto; padding-right: 6px; }
+.formatFields fieldset { margin: 0 0 14px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; }
+.formatFields legend { padding: 0 6px; font-weight: 600; }
+.fieldGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; }
+.formatDialog .fieldGrid label { display: grid; grid-template-columns: 1fr; align-content: start; gap: 5px; padding: 0; font-size: 12px; }
+.formatDialog input:not([type="checkbox"]), .formatDialog select { width: 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 4px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+.formatDialog input[type="checkbox"] { justify-self: start; }
 .dialogActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-@media (max-width: 900px) { .root { overflow: auto; } .columns { display: block; } .left { border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); } .preview { min-height: 600px; } }
+@media (max-width: 900px) { .root { overflow: auto; } .columns { display: block; } .left { border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); } .preview { min-height: 600px; } .fieldGrid { grid-template-columns: 1fr; } }

@@ -475,6 +475,16 @@ describe('批次执行提示渲染 renderRevisionBatchSectionPrompt', () => {
     const prompt = renderRevisionBatchSectionPrompt(task, '正文')
     expect(prompt).not.toContain('选中段落')
   })
+
+  it('paragraph-only 提示不允许审批意见扩大 Host 选区', () => {
+    const task = makeTask([{
+      instruction: '每一段都改自然一点，全文整体重写', suggestion: null,
+      scope: 'paragraphs', reference_text: '正文。', start: 8, end: 11,
+    }])
+    const prompt = renderRevisionBatchSectionPrompt(task, '# 1 章节\n\n正文。\n')
+    expect(prompt).toContain('本次修改权限只由 Host 给出的选区决定')
+    expect(prompt).toContain('只能修改各条意见授权段落的并集')
+  })
 })
 
 describe('批次状态流转', () => {
@@ -554,6 +564,24 @@ describe('assertChapterRevisionBatchScope', () => {
     const candidate = '# 标题\n\n段落一。\n\n段落二改。\n\n段落三。\n'
     const scopes: BatchRevisionScope[] = [{ scope: 'paragraphs', start: 7, end: 14 }]
     expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).toThrow()
+  })
+
+  it('拒绝在首个未授权片段前新增内容', () => {
+    const start = original.indexOf('段落二')
+    const end = start + '段落二。'.length
+    const candidate = `新增内容\n${original.slice(0, start)}段落二改。${original.slice(end)}`
+    expect(() => {
+      assertChapterRevisionBatchScope([{ scope: 'paragraphs', start, end }], original, candidate)
+    }).toThrow()
+  })
+
+  it('拒绝在最后一个未授权片段后新增内容', () => {
+    const start = original.indexOf('段落二')
+    const end = start + '段落二。'.length
+    const candidate = `${original.slice(0, start)}段落二改。${original.slice(end)}新增内容\n`
+    expect(() => {
+      assertChapterRevisionBatchScope([{ scope: 'paragraphs', start, end }], original, candidate)
+    }).toThrow()
   })
 
   it('多个不连续授权范围合并校验', () => {

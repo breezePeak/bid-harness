@@ -32,6 +32,9 @@ import { isBidMainSession } from '../src/stage-interaction.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
+import { writeRevisionQueue, type RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
+import { writeRevisionBatch, type RevisionBatchArtifact } from '../src/chapter-revision-batch.ts'
+import { buildRevisionComparisonPath, createRevisionComparisonArtifact } from '../src/chapter-revision-comparison.ts'
 import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from '../src/control-plane-contract.ts'
 import {
   DOCX_TEMPLATE_NAME_HEADER,
@@ -2037,6 +2040,75 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executeStage).not.toHaveBeenCalled()
     expect(host.inFlight.size).toBe(0)
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+  })
+
+  it('S5 历史对比按 issue 定位 task 快照，旧记录明确不可用', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-comparison')
+    const queue: RevisionQueueArtifact = {
+      schema_version: 1,
+      revision: 1,
+      issues: [
+        {
+          issue_id: 'ISSUE-1', section_id: 'SEC-1', section_title: '技术方案', scope: 'chapter',
+          reference: { scope: 'chapter', base_content_sha256: 'a'.repeat(64) }, instruction: '补充步骤',
+          suggestion: null, status: 'completed', batch_id: 'BATCH-1', created_at: 1, updated_at: 2,
+        },
+        {
+          issue_id: 'ISSUE-2', section_id: 'SEC-1', section_title: '技术方案', scope: 'chapter',
+          reference: { scope: 'chapter', base_content_sha256: 'b'.repeat(64) }, instruction: '补充验收',
+          suggestion: null, status: 'completed', batch_id: 'BATCH-2', created_at: 3, updated_at: 4,
+        },
+      ],
+    }
+    const batch: RevisionBatchArtifact = {
+      schema_version: 2,
+      batch_id: 'BATCH-1', queue_revision: 1, issue_ids: ['ISSUE-1'], status: 'completed',
+      tasks: [{ task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: ['ISSUE-1'], depends_on: [], status: 'completed', failure: null, started_at: 1, completed_at: 2 }],
+      created_at: 1, updated_at: 2,
+    }
+    await writeRevisionQueue(workspace, queue)
+    await writeRevisionBatch(workspace, batch)
+    await writeRevisionBatch(workspace, {
+      ...batch,
+      batch_id: 'BATCH-2', issue_ids: ['ISSUE-2'],
+      tasks: [{ ...batch.tasks[0]!, task_id: 'TASK-2', issue_ids: ['ISSUE-2'], started_at: 3, completed_at: 4 }],
+      created_at: 3, updated_at: 4,
+    })
+    await expect(ctx.bid.getRevisionComparison(agent.session, 'ISSUE-1')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BID_REVISION_COMPARISON_NOT_AVAILABLE' },
+    })
+
+    const comparison = createRevisionComparisonArtifact({
+      batchId: 'BATCH-1', taskId: 'TASK-1', sectionId: 'SEC-1', issueIds: ['ISSUE-1'],
+      beforeMarkdown: '# 技术方案\n\nV1\n', afterMarkdown: '# 技术方案\n\nV2\n', createdAt: 2,
+    })
+    const path = join(workspace.projectRoot, buildRevisionComparisonPath('BATCH-1', 'TASK-1'))
+    await mkdir(join(workspace.projectRoot, 'chapters/revisions/comparisons/BATCH-1'), { recursive: true })
+    await writeFile(path, `${JSON.stringify(comparison)}\n`)
+    const comparison2 = createRevisionComparisonArtifact({
+      batchId: 'BATCH-2', taskId: 'TASK-2', sectionId: 'SEC-1', issueIds: ['ISSUE-2'],
+      beforeMarkdown: '# 技术方案\n\nV2\n', afterMarkdown: '# 技术方案\n\nV3\n', createdAt: 4,
+    })
+    const path2 = join(workspace.projectRoot, buildRevisionComparisonPath('BATCH-2', 'TASK-2'))
+    await mkdir(join(workspace.projectRoot, 'chapters/revisions/comparisons/BATCH-2'), { recursive: true })
+    await writeFile(path2, `${JSON.stringify(comparison2)}\n`)
+    await expect(ctx.bid.getRevisionComparison(agent.session, 'ISSUE-1')).resolves.toMatchObject({
+      ok: true,
+      value: { issue_id: 'ISSUE-1', task_id: 'TASK-1', before_markdown: '# 技术方案\n\nV1\n', after_markdown: '# 技术方案\n\nV2\n' },
+    })
+    await expect(ctx.bid.getRevisionComparison(agent.session, 'ISSUE-2')).resolves.toMatchObject({
+      ok: true,
+      value: { issue_id: 'ISSUE-2', task_id: 'TASK-2', before_markdown: '# 技术方案\n\nV2\n', after_markdown: '# 技术方案\n\nV3\n' },
+    })
+    await writeFile(path, `${JSON.stringify({ ...comparison, after_markdown: 'tampered' })}\n`)
+    await expect(ctx.bid.getRevisionComparison(agent.session, 'ISSUE-1')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BID_REVISION_COMPARISON_CORRUPT' },
+    })
   })
 
   it('S5 审批意见队列：非 pending issue 拒绝编辑，CAS 冲突返回稳定错误', async () => {

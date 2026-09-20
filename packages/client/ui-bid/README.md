@@ -8,6 +8,8 @@ Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversati
 
 面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
+批量审核历史中的已完成意见可打开对应 task 的 Markdown 前后快照，固定左侧显示修改后、右侧显示修改前。顶层 Markdown block 组成共享双列行，新增或删除的缺失侧保留自然等高空单元格；两列共用正文阅读区的单一垂直滚动位置。旧记录缺少快照时只提示无法还原，章节标题仍提供普通正文定位。
+
 After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, keeps the composer disabled, and exposes one “Start this stage” action backed by `bid/startStage`. Reset itself never starts model execution.
 
 输入框左侧工具栏为每个 Bid Session 提供“手动确认 / 自动确认”选择，默认手动且不写入项目状态。自动确认模式在 S2 使用审核页当前编辑结果确认；S3/S4 等待 Draft 保存后，按阶段、revision 和 SHA-256 最多提交一次确认；S5 调用正式 Host Action 生成无用户原话的默认 Writing Plan 并启动正文。自动操作失败不循环重试，`failed` 与 `waiting_start` 始终保留人工处理。
