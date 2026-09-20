@@ -61,6 +61,8 @@ describe('Bid Host stage reset', () => {
     await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
     const key = process.platform === 'win32' ? realpathSync(cwd).toLowerCase() : realpathSync(cwd)
     const prior = Promise.withResolvers<undefined>()
+    const idle = Promise.withResolvers<undefined>()
+    idle.resolve(undefined)
     const executionIdle = Promise.withResolvers<undefined>()
     const executionCancel = vi.fn()
     const executionAgent = {

@@ -179,15 +179,20 @@ function summaryRunningShortcuts(
       || !reachesSubagentRoot(summary, rootSessionId, summaries)
     ) return
     const node = catalogNodes.get(id)
-    shortcuts.push(node === undefined
-      ? {
+    if (node !== undefined) {
+      shortcuts.push(shortcutFromCatalogNode(node, summaries))
+    } else {
+      const subagentProjection = summary.projectionValues?.subagent as { label?: string } | undefined
+      const subagentLabel = typeof subagentProjection?.label === 'string' ? subagentProjection.label : undefined
+      const label = subagentLabel ?? (summary.displayTitle !== '' ? summary.displayTitle : id.slice(-6))
+      shortcuts.push({
         id,
-        label: summary.displayTitle,
+        label,
         title: summary.title,
         path: [],
         address: undefined,
-      }
-      : shortcutFromCatalogNode(node, summaries))
+      })
+    }
   }
   for (const id of orderedIds) add(id)
   return shortcuts
@@ -362,6 +367,23 @@ function SubagentSwitcherIcon() {
   )
 }
 
+function RunningSubagentGlyph() {
+  return (
+    <span className={css.runningGlyph} aria-hidden="true">
+      <span className={css.pulseGlow} />
+      <svg
+        width="11"
+        height="11"
+        viewBox="0 0 16 16"
+        fill="currentColor"
+        className={css.agentSparkle}
+      >
+        <path d="M8 0.5C8 4.64 4.64 8 0.5 8C4.64 8 8 11.36 8 15.5C8 11.36 11.36 8 15.5 8C11.36 8 8 4.64 8 0.5Z" />
+      </svg>
+    </span>
+  )
+}
+
 /** Render the known direct-child shape while its authoritative catalog hydrates. */
 function CatalogLoadingRows({
   parentSessionId, catalog, summaries, level, activity, showEmptyNotice = false, t,
@@ -471,21 +493,27 @@ function resolveRowPresentation(
   path: readonly string[],
   mode: string,
 ): { displayLabel: string; secondary: string } {
-  const fullMatch = rawLabel.match(/^S5\s*·\s*\d+\s*·\s*([\d.]+\s*-\s*编写(?: · 修复 \d+| · 运行重试 \d+)*)\s*·\s*(.+)$/)
-  if (fullMatch && fullMatch[1] !== undefined && fullMatch[2] !== undefined) {
+  const fullMatch = rawLabel.match(/^(S\d+)\s*·\s*(\d+)\s*·\s*([\d.]+\s*-\s*编写)((?: · 修复 \d+| · 运行重试 \d+)*)\s*·\s*(.+)$/)
+  if (fullMatch && fullMatch[1] !== undefined && fullMatch[2] !== undefined && fullMatch[5] !== undefined) {
+    const stageName = fullMatch[1]
+    const taskId = fullMatch[2]
+    const retries = fullMatch[4] ?? ''
+    const actionDesc = fullMatch[3]
+    const chapterTitle = fullMatch[5].trim()
     return {
-      displayLabel: fullMatch[1],
-      secondary: fullMatch[2].trim(),
+      displayLabel: `${stageName} · ${taskId}${retries}`,
+      secondary: `${actionDesc} · ${chapterTitle}`,
     }
   }
 
-  const oldMatch = rawLabel.match(/^S5\s*·\s*(\d+(?:\.\d+)*)\s*(?:·\s*(修复\s*\d+|运行重试\s*\d+))*\s*·\s*(.+)$/)
-  if (oldMatch && oldMatch[1] !== undefined && oldMatch[3] !== undefined) {
-    const chapterNo = oldMatch[1].includes('.') ? oldMatch[1] : (oldMatch[1].replace(/^0+/, '') || '0')
-    const retryOrRepair = oldMatch[2] ? ` · ${oldMatch[2]}` : ''
-    const chapterTitle = oldMatch[3].trim()
+  const oldMatch = rawLabel.match(/^(S\d+)\s*·\s*(\d+(?:\.\d+)*)\s*(?:·\s*(修复\s*\d+|运行重试\s*\d+))*\s*·\s*(.+)$/)
+  if (oldMatch && oldMatch[1] !== undefined && oldMatch[2] !== undefined && oldMatch[4] !== undefined) {
+    const stageName = oldMatch[1]
+    const taskId = oldMatch[2]
+    const retryOrRepair = oldMatch[3] ? ` · ${oldMatch[3]}` : ''
+    const chapterTitle = oldMatch[4].trim()
     return {
-      displayLabel: `${chapterNo} - 编写${retryOrRepair}`,
+      displayLabel: `${stageName} · ${taskId}${retryOrRepair}`,
       secondary: chapterTitle,
     }
   }
@@ -794,13 +822,13 @@ function CatalogDropdown({
 
   useEffect(() => {
     if (
-      variant !== 'switcher'
-      || catalog !== undefined
+      catalog !== undefined
       || requestedInitialCatalog.current === rootSessionId
     ) return
+    if (variant !== 'switcher' && descendants.runningCount === 0) return
     requestedInitialCatalog.current = rootSessionId
     refresh(rootSessionId)
-  }, [catalog, refresh, rootSessionId, variant])
+  }, [catalog, descendants.runningCount, refresh, rootSessionId, variant])
 
   const observeCatalog = (parentSessionId: SessionId, next: boolean): void => {
     if (next) observedCatalogs.current.add(parentSessionId)
@@ -1018,7 +1046,7 @@ function CatalogDropdown({
                   changeOpen(false)
                 }}
               >
-                <span className={css.shortcutGlyph} />
+                <RunningSubagentGlyph />
               </button>
             )
           })}
@@ -1054,16 +1082,7 @@ function CatalogDropdown({
       >
         {variant === 'switcher'
           ? <span className={css.switcherTitle}>{switcherDisplayTitle}</span>
-          : (
-            <>
-              {descendants.runningCount > 0 && (
-                <span className={css.activitySlot}>
-                  <StateDot state="ongoing" />
-                </span>
-              )}
-              <span className={css.count}>{t(totalCountKey, { count: descendantCount })}</span>
-            </>
-          )}
+          : <span className={css.count}>{t(totalCountKey, { count: descendantCount })}</span>}
         {variant === 'switcher'
           ? <SubagentSwitcherIcon />
           : <IconChevronDownOutline14 className={open ? css.triggerOpen : undefined} />}
@@ -1168,7 +1187,7 @@ export function SubagentHeaderLineage({
   return (
     <>
       <CatalogDropdown
-        key={lineageSessionId}
+        key={`${lineageSessionId}:switcher`}
         rootSessionId={parentId}
         currentSessionId={lineageSessionId}
         variant="switcher"
@@ -1178,7 +1197,7 @@ export function SubagentHeaderLineage({
       />
       {openTitle === undefined && (
         <CatalogDropdown
-          key={lineageSessionId}
+          key={`${lineageSessionId}:count`}
           rootSessionId={lineageSessionId}
           variant="count"
           {...shared}

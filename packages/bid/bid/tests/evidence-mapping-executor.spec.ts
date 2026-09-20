@@ -390,8 +390,45 @@ function mappingFixture(
       }, operations, () => `NEW-${task.task_id.replaceAll(/[^A-Za-z0-9]+/gu, '-')}-${String(++allocated).padStart(3, '0')}`)
       mappingSections = projected.sections.filter(section => section.writable && task.section_ids.includes(section.id))
     }
+    const technicalDeviationMapping = (section?: OutlineSection): EvidenceMappingPartialResult['section_mappings'][number] => ({
+      section_id: TECHNICAL_DEVIATION_SECTION_ID,
+      local_materials: [local],
+      web_materials: [],
+      missing_topics: [],
+      writing_dimensions: ['技术响应'],
+      writing_brief: {
+        purpose: section?.purpose ?? '逐项形成技术响应索引。',
+        must_answer: section?.must_answer ?? [],
+        writing_notes: section?.writing_notes ?? [],
+        suggested_tables: section?.suggested_tables ?? [],
+        suggested_figures: section?.suggested_figures ?? [],
+        requirement_ids: section?.requirement_ids ?? [],
+        scoring_ids: section?.scoring_ids ?? [],
+        scoring_response_point_ids: section?.scoring_response_point_ids ?? [],
+      },
+    })
+    const sectionMapping = (section: OutlineSection): EvidenceMappingPartialResult['section_mappings'][number] => {
+      const section_id = section.id
+      const previous = current?.find(item => item.section_id === section_id)
+      return {
+        section_id,
+        local_materials: [local],
+        web_materials: [],
+        missing_topics: previous?.missing_topics ?? [],
+        writing_dimensions: previous?.writing_dimensions.length ? previous.writing_dimensions : ['技术响应'],
+        writing_brief: {
+          purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
+          suggested_tables: section.suggested_tables, suggested_figures: section.suggested_figures,
+          requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
+          scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+        },
+      }
+    }
     const pendingMapping = (section: OutlineSection): EvidenceMappingPartialResult['section_mappings'][number] | undefined => {
       const taskReview = pendingReviews?.find(item => item.kind === 'task' && item.section_id === section.id)
+      if (taskReview === undefined && section.id === TECHNICAL_DEVIATION_SECTION_ID) {
+        return technicalDeviationMapping(section)
+      }
       if (taskReview === undefined) return undefined
       const { mapping_present: _mappingPresent, ...taskValue } = taskReview.value as
         Pick<EvidenceMappingPartialResult['section_mappings'][number], 'writing_brief' | 'writing_dimensions' | 'missing_topics'> & { mapping_present: boolean }
@@ -414,26 +451,13 @@ function mappingFixture(
       section_mappings: repairFirst && task.task_id === 'MAP-INIT-SEC-1' && attempt === 1
         ? []
         : task.phase === 'final_check'
-          ? mappingSections.flatMap((section) => {
+          ? task.section_ids.flatMap((sectionId) => {
+            const section = mappingSections.find(item => item.id === sectionId) ?? sections.find(item => item.id === sectionId)
+            if (section === undefined) return sectionId === TECHNICAL_DEVIATION_SECTION_ID ? [technicalDeviationMapping()] : []
             const mapping = pendingMapping(section)
-            return mapping === undefined ? [] : [mapping]
+            return [mapping ?? sectionMapping(section)]
           })
-          : mappingSections.map((section) => {
-            const section_id = section.id
-            const previous = current?.find(item => item.section_id === section_id)
-            return {
-              section_id,
-              local_materials: [local],
-              web_materials: [],
-              missing_topics: previous?.missing_topics ?? [], writing_dimensions: previous?.writing_dimensions.length ? previous.writing_dimensions : ['技术响应'],
-              writing_brief: {
-                purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
-                suggested_tables: section.suggested_tables, suggested_figures: section.suggested_figures,
-                requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
-                scoring_response_point_ids: section.scoring_response_point_ids ?? [],
-              },
-            }
-          }),
+          : mappingSections.map(sectionMapping),
       refinement_suggestions: [],
     }
     if (task.phase === 'final_check') {
@@ -614,6 +638,14 @@ function mappingFixture(
             rejected = true
             break
           }
+          if (finalReview) {
+            const webMaterials = Array.isArray((mapping as Record<string, unknown>).web_materials)
+              ? (mapping as { web_materials: Array<{ chunk_refs?: string[] }> }).web_materials
+              : []
+            for (const ref of webMaterials.flatMap(material => material.chunk_refs ?? [])) {
+              await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: ref })
+            }
+          }
           const taskTool = tools.get('update_section_task')
           if (taskTool !== undefined) {
             const result = await invokeSubmissionTool(child, taskTool, taskToolArgs(mapping as Record<string, unknown>))
@@ -654,8 +686,13 @@ function mappingFixture(
           const pending = await invokeSubmissionTool(child, tools.get('list_review_items')!, {})
           if (pending.isError) continue
           const items = (pending.value as {
-            pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }>
+            pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[]; material_ref?: string } }>
           }).pending_items
+          for (const item of items.filter(item => item.kind === 'local_material')) {
+            if (item.value.material_ref !== undefined) {
+              await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: item.value.material_ref })
+            }
+          }
           for (const item of items.filter(item => item.kind === 'web_material')) {
             for (const ref of item.value.chunk_refs ?? []) {
               await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: ref })
@@ -900,8 +937,13 @@ function mappingFixture(
       const response = await invokeSubmissionTool(child, tools.get('list_review_items')!, {})
       if (response.isError) throw new Error(response.error.message)
       const items = (response.value as {
-        pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[] } }>
+        pending_items: Array<{ review_ref: string; kind: string; value: { chunk_refs?: string[]; material_ref?: string } }>
       }).pending_items
+      for (const item of items.filter(item => item.kind === 'local_material')) {
+        if (item.value.material_ref !== undefined) {
+          await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: item.value.material_ref })
+        }
+      }
       for (const item of items.filter(item => item.kind === 'web_material')) {
         for (const ref of item.value.chunk_refs ?? []) {
           await invokeSubmissionTool(child, tools.get('read_source')!, { source_ref: ref })
@@ -3162,13 +3204,13 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
-  it('保留当前工具统计格式', () => {
+  it('保留当前执行日志格式和工具统计', () => {
     const current = { calls: 2, succeeded: 1, failed: 1, hits: 4, failure_reasons: ['current', 'shared'] }
     const currentLog = executionLogFixture(executionLogTools({ web_fetch: current }))
-    expect(parseEvidenceMappingExecutionLog(currentLog)).toEqual(currentLog)
+    expect(parseEvidenceMappingExecutionLog(currentLog)).toEqual({ schema_version: 5, ...currentLog })
   })
 
-  it('拒绝带有旧版本字段的 S4 私有执行日志', async () => {
+  it('读取带有旧版本字段的 S4 私有执行日志进度', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-log-v2-')))
     await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
@@ -3177,7 +3219,7 @@ describe('evidence-mapping Agent executor', () => {
       observed_max_concurrency: 0,
       tasks: [],
     }))
-    await expect(readEvidenceMappingProgress(workspace)).rejects.toThrow()
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({ total: 0, tasks: [] })
   })
 })
 
@@ -3623,6 +3665,8 @@ describe('S4 Host 准入与最终确认', () => {
     const host = Object.create(BidHostRuntime.prototype) as BidHostRuntime
     Object.assign(host, {
       ctx: {
+        fiber: ctx.fiber,
+        get: (name: string) => name === 'sessions' ? { list: () => [session], flush: async () => {} } : undefined,
         on: () => () => {},
         logger: fixture.logger,
         agents: {
@@ -3651,20 +3695,23 @@ describe('S4 Host 准入与最终确认', () => {
       expected_revision: current.revision, expected_draft_sha256: current.draft_outline_sha256,
     })
     const result = await confirming
-    expect(result, JSON.stringify(result)).toMatchObject({ ok: true })
+    expect(result, JSON.stringify({
+      result,
+      toolErrors: fixture.submissionResults.filter(item => item.isError).map(item => item.error.message),
+    })).toMatchObject({ ok: true })
     expect(fixture.starts).toHaveLength(2)
-    expect(fixture.finalStarts).toHaveLength(edit === 'order' || edit === 'delete-unused' ? 1 : 2)
+    expect(fixture.finalStarts).toHaveLength(edit === 'split' ? 3 : 2)
     expect(session.events.filter(event => event.type === 'bid.stage.started' && event.data.stage === 'evidence_mapping')).toHaveLength(1)
     {
       const confirmed = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
       const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       expect(validateSectionEvidenceCoverage(confirmed, evidence)).toEqual([])
       expect(parseOutlineConfirmationArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmation.json'), 'utf8'))).decision).toBe('confirmed')
-      if (edit === 'delete') expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1'])
+      if (edit === 'delete') expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual([TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1'])
       if (edit === 'order') expect(fixture.starts).toHaveLength(2)
       if (edit === 'delete-unused') {
         expect(fixture.starts).toHaveLength(2)
-        expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual(['SEC-1'])
+        expect(evidence.section_mappings.map(mapping => mapping.section_id)).toEqual([TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1'])
         const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
         const retained = initialSourceContents.find(item => item.content.includes('MAP-INIT-SEC-1 正文'))!
         expect(ledger.sources).toEqual([retained.source])

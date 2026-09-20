@@ -123,7 +123,8 @@ describe('SubagentHeaderLineage', () => {
     const view = render(<SubagentHeaderLineage {...props(catalog(), {}, summaries)} />)
 
     const trigger = screen.getByRole('button', { name: '1 个子代理，正在运行' })
-    expect(trigger.querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(trigger.querySelector('[data-state="ongoing"]')).toBeNull()
+    expect(screen.getAllByRole('button', { name: /进入正在运行的子代理/ })).toHaveLength(2)
 
     view.rerender(<SubagentHeaderLineage {...props(catalog(), {}, {
       ...summaries,
@@ -131,6 +132,22 @@ describe('SubagentHeaderLineage', () => {
     })} />)
     const inactiveTrigger = screen.getByRole('button', { name: '3 个子代理' })
     expect(inactiveTrigger.querySelector('[data-state="ongoing"]')).toBeNull()
+  })
+
+  it('formats running subagent shortcuts as stage name + task id and renders running animation glyph', () => {
+    const entries: ChildEntry[] = [{
+      kind: 'child',
+      id: CHILD,
+      mode: 'continuable',
+      label: 'S5 · 0001 · 1 - 编写 · 访问控制与安全审计',
+      activity: 'running',
+      hasChildren: false,
+    }]
+    render(<SubagentHeaderLineage {...props(catalog({ entries }))} />)
+    const shortcut = screen.getByRole('button', { name: '进入正在运行的子代理：S5 · 0001' })
+    expect(shortcut).toBeTruthy()
+    expect(shortcut.title).toBe('S5 · 0001')
+    expect(shortcut.querySelector('svg')).not.toBeNull()
   })
 
   it('shows up to three running subagent shortcuts before the history trigger', () => {
@@ -368,7 +385,7 @@ describe('SubagentHeaderLineage', () => {
 
     expect(screen.getByText('3.1 - 编写')).toBeTruthy()
     expect(screen.getByText('项目目标')).toBeTruthy()
-    expect(screen.getByText('3 - 编写')).toBeTruthy()
+    expect(screen.getByText('S5 · 0003')).toBeTruthy()
     expect(screen.getByText('历年卫片执法违...')).toBeTruthy()
     expect(screen.queryByText(/你是 S5 Chapter Subagent/)).toBeNull()
   })

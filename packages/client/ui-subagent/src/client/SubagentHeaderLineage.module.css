@@ -61,18 +61,11 @@
   line-height: 20px;
 }
 
-.activitySlot {
-  display: inline-flex;
-  flex: none;
-  width: 10px;
-  height: 10px;
-}
-
 .shortcutRail {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 3px;
+  gap: 5px;
 }
 
 .shortcut {
@@ -80,27 +73,26 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
-  border: 1px solid var(--dsw-alias-border-l2);
+  border: 1px solid rgba(16, 185, 129, 0.35);
   border-radius: 50%;
-  background: var(--dsw-alias-bg-l1);
-  color: var(--dsw-alias-label-secondary);
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--dsw-alias-state-success-primary);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+  box-shadow: 0 1px 3px rgba(16, 185, 129, 0.16);
+  transition: transform 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
 
 .shortcut:hover,
 .shortcut:focus-visible {
-  z-index: 1;
-  border-color: currentColor;
+  z-index: 2;
+  border-color: var(--dsw-alias-state-success-primary);
   outline: none;
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.shortcut + .shortcut {
-  margin-left: -6px;
+  background: rgba(16, 185, 129, 0.2);
+  box-shadow: 0 2px 6px rgba(16, 185, 129, 0.28);
+  transform: translateY(-1px) scale(1.1);
 }
 
 .shortcut1 {
@@ -108,28 +100,71 @@
 }
 
 .shortcut2 {
-  color: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-state-success-primary);
 }
 
 .shortcut3 {
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-state-success-primary);
 }
 
-.shortcutGlyph {
+.runningGlyph {
   position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.pulseGlow {
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.25;
+  animation: liveGlow 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.agentSparkle {
+  display: block;
   width: 10px;
   height: 10px;
+  overflow: visible;
+  filter: drop-shadow(0 0 2px rgba(16, 185, 129, 0.4));
+  animation: sparklePulse 2.4s ease-in-out infinite;
 }
 
-.shortcutGlyph::before {
-  content: '';
-  position: absolute;
-  inset: 1px;
-  background:
-    radial-gradient(circle at 1px 1px, currentColor 1.5px, transparent 1.6px),
-    radial-gradient(circle at 7px 1px, currentColor 1.5px, transparent 1.6px),
-    radial-gradient(circle at 1px 7px, currentColor 1.5px, transparent 1.6px),
-    radial-gradient(circle at 7px 7px, currentColor 1.5px, transparent 1.6px);
+.shortcut2 .pulseGlow,
+.shortcut2 .agentSparkle {
+  animation-delay: 0.6s;
+}
+
+.shortcut3 .pulseGlow,
+.shortcut3 .agentSparkle {
+  animation-delay: 1.2s;
+}
+
+@keyframes liveGlow {
+  0%, 100% {
+    transform: scale(0.85);
+    opacity: 0.2;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.45;
+  }
+}
+
+@keyframes sparklePulse {
+  0%, 100% {
+    transform: scale(0.9) rotate(0deg);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.12) rotate(12deg);
+    opacity: 1;
+  }
 }
 
 .trigger:hover,

@@ -1101,8 +1101,9 @@ describe('Workspace 项目与独立 Session', () => {
 
     const exported = await ctx.bid.exportDocx(agent.session, null)
 
-    expect(exported).toMatchObject({ ok: true, value: { warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT' }] } })
+    expect(exported).toMatchObject({ ok: true })
     if (!exported.ok) throw new Error('已有正文应可导出')
+    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_CONTENT_SNAPSHOT')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文。')
     expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'suspended', failureReason: '部分章节失败' })
     expect(await readBidProjectState(workspace)).toMatchObject({
