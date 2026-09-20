@@ -72,14 +72,14 @@ describe('view-ring runtime dual (real ledger)', () => {
     const offLate = slots.register(
       { name: 'conversation.view', id: 'z-late', order: 20, label: '晚' }, () => null)
     const offEarly = slots.register(
-      { name: 'conversation.view', id: 'early', order: 0, label: '早' }, () => null)
+      { name: 'conversation.view', id: 'early', order: 0, label: '早', embeddedChat: true }, () => null)
     // Order-sorted ledger, label fallback for a labelless rider.
     const offBare = slots.register(
       { name: 'conversation.view', id: 'bare', order: 10 }, () => null)
     const tabs = slots.entries('conversation.view')
       .map(e => ({ id: e.options.id, label: e.options.label ?? e.options.id, embeddedChat: e.options.embeddedChat === true }))
     expect(tabs).toEqual([
-      { id: 'early', label: '早', embeddedChat: false },
+      { id: 'early', label: '早', embeddedChat: true },
       { id: 'bare', label: 'bare', embeddedChat: false },
       { id: 'z-late', label: '晚', embeddedChat: false },
     ])

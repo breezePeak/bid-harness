@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -49,6 +50,47 @@ const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.jso
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
 const qualityReportSubmissionSchema = z.object({ issues: z.array(outlineQualityIssueSchema) }).strict()
+
+/** Drop a no-op same-mode escalation while preserving every genuinely wider request. */
+function withoutRedundantSandboxEscalation(agent: Agent, args: unknown): unknown {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return args
+  let mode: string | undefined
+  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+    const event = agent.session.events[index] as { type?: string; data?: { mode?: unknown } } | undefined
+    if (event?.type === 'sandbox/mode' && typeof event.data?.mode === 'string') {
+      mode = event.data.mode
+      break
+    }
+  }
+  const input = args as Record<string, unknown>
+  if (mode === undefined || input.sandbox_permissions !== mode) return args
+  const standingArgs = { ...input }
+  delete standingArgs.sandbox_permissions
+  delete standingArgs.justification
+  return standingArgs
+}
+
+async function readWithConfiguredLimit(tool: ToolDefinition, args: unknown, exec: ToolRunContext): Promise<unknown> {
+  try {
+    return await tool.execute(args, exec)
+  } catch (error) {
+    const input = args !== null && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : undefined
+    if (input?.limit === undefined || !(error instanceof Error) || !error.message.startsWith('limit must be ')) throw error
+    const defaultLimitArgs = { ...input }
+    delete defaultLimitArgs.limit
+    return tool.execute(defaultLimitArgs, exec)
+  }
+}
+
+function resolveStageTool(agent: Agent, name: string): ToolDefinition | undefined {
+  const tools = agent.ctx.get('tools')
+  const direct = tools?.get(name, agent)
+  if (direct !== undefined || agent.session.header.origin !== 'subagent') return direct
+  const parentId = agent.session.header.parentSession
+  if (parentId === undefined) return undefined
+  const parent = agent.ctx.get('agents')?.get(parentId)
+  return parent?.ctx.get('tools')?.get(name, parent)
+}
 
 function renderOutlineRevisionFeedback(feedback: string): string {
   return `以当前持久化 Draft 为基线，保留未涉及章节、全部招标要求和评分覆盖。按以下用户反馈重构目录，不得只在 writing_notes 中转述：\n<outline-revision-feedback>\n${feedback}\n</outline-revision-feedback>`
@@ -359,6 +401,18 @@ export async function executeOutlineGeneration(
   }
   let writablePaths: string[] = []
   const allowed = new Set([...task.allowedTools, QUALITY_REPORT_TOOL])
+  const writeTool = resolveStageTool(agent, 'write')
+  if (writeTool === undefined) throw new Error('S3 需要 write 工具。')
+  const liftWriteShadow = tools.register({
+    ...writeTool,
+    execute: (args, exec) => writeTool.execute(withoutRedundantSandboxEscalation(agent, args), exec),
+  })
+  const readTool = resolveStageTool(agent, 'read')
+  if (readTool === undefined) throw new Error('S3 需要 read 工具。')
+  const liftReadShadow = tools.register({
+    ...readTool,
+    execute: (args, exec) => readWithConfiguredLimit(readTool, args, exec),
+  })
   const liftRestriction = tools.restrict({ allow: task.allowedTools })
   const liftGuard = tools.guard((exec) => {
     if (!allowed.has(exec.name)) return 'S3 仅允许读取输入及写入当前任务指定的候选文件。'
@@ -376,6 +430,7 @@ export async function executeOutlineGeneration(
       readonly names: readonly string[]
       readonly setEnabled: (enabled: boolean) => void
     },
+    preserveOutputs = false,
   ): Promise<void> => {
     options.run.signal.throwIfAborted()
     await options.run.scheduler.waitUntilRunnable(options.run.signal)
@@ -383,7 +438,18 @@ export async function executeOutlineGeneration(
       const candidate = scratchPath(output)
       await assertNoLinkedPath(workspace.root, candidate)
       await mkdir(join(candidate, '..'), { recursive: true, mode: 0o700 })
-      await rm(candidate, { force: true })
+      if (preserveOutputs) {
+        const formal = path(output)
+        await assertNoLinkedPath(workspace.root, formal)
+        try {
+          await copyFile(formal, candidate, constants.COPYFILE_EXCL)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code !== 'EEXIST' && code !== 'ENOENT') throw error
+        }
+      } else {
+        await rm(candidate, { force: true })
+      }
       scratchArtifacts.add(output)
     }))
     writablePaths = outputs.map(scratchPath)
@@ -391,7 +457,7 @@ export async function executeOutlineGeneration(
     const modelPrompt = outputs.reduce((text, output) => text.replaceAll(
       relative(workspace.root, path(output)).replaceAll('\\', '/'),
       relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
-    ), prompt)
+    ), prompt) + '\n当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification；只有 read-only 下首次写入被沙箱拒绝后，才按错误提示做一次严格升级重试。'
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const protocol = installMainAgentProtocol(agent, {
       privateTools: privateTask?.names ?? [],
@@ -452,7 +518,7 @@ export async function executeOutlineGeneration(
       await run(prompt, [OUTLINE_ARTIFACT], {
         names: [QUALITY_REPORT_TOOL],
         setEnabled,
-      })
+      }, true)
     } finally {
       setEnabled(false)
     }
@@ -475,6 +541,8 @@ export async function executeOutlineGeneration(
       await run(
         renderResponsePointSemanticReviewTask(agent, workspace, scoring.scoring_items.map(item => item.id)),
         [RESPONSE_POINT_CANDIDATE],
+        undefined,
+        true,
       )
       const candidate = parseScoringResponsePointCandidate(JSON.parse((await read(RESPONSE_POINT_CANDIDATE)) ?? 'null'))
       catalog = createScoringResponsePointCatalog(scoring, candidate)
@@ -664,6 +732,8 @@ export async function executeOutlineGeneration(
   } finally {
     liftGuard()
     liftRestriction()
+    liftReadShadow()
+    liftWriteShadow()
     if (!completed) await remove(QUALITY_REPORT_ARTIFACT)
   }
 }

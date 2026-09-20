@@ -11,6 +11,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { ApprovalPanel } from '../src/client/skeleton/ApprovalPanel.tsx'
 
 // The service reads its initial locale from the browser; these specs assert
 // the shipped Chinese copy, so they state the browser they assume.
@@ -96,6 +97,10 @@ describe('apply wiring', () => {
     expect(b.slots.spec('conversation.hero.agentPreset')).toEqual({ kind: 'single', scope: 'root' })
     expect(b.slots.spec('conversation.session.header.lineage'))
       .toEqual({ kind: 'single', scope: 'session' })
+    expect(b.slots.spec('conversation.composer')).toEqual({ kind: 'chain', scope: 'session' })
+    expect(b.slots.spec('conversation.composer.interaction')).toEqual({ kind: 'chain', scope: 'session' })
+    expect(b.slots.entries('conversation.composer.interaction').some(entry => entry.component === ApprovalPanel)).toBe(true)
+    expect(b.slots.entries('conversation.composer').some(entry => entry.component === ApprovalPanel)).toBe(false)
     expect(b.slots.entries('settings.general.item').map(entry => entry.options.id)).toEqual(['composer-enter'])
     await b.runtime.dispose()
   })

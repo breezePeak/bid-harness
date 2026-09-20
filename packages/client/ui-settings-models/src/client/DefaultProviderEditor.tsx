@@ -53,7 +53,7 @@ export function DefaultProviderEditor({ namespace, api, writable, onSaved }: Def
   return <div className={styles['editor']}>
     <label className={styles['field']}>
       <span className={styles['fieldLabel']}>默认 Provider</span>
-      <select aria-label="默认 Provider" className={styles['input']} value={provider} disabled={!writable || busy}
+      <select aria-label="默认 Provider" className={`${styles['input']} ${styles['selectInput']}`} value={provider} disabled={!writable || busy}
         onChange={(event) => { setProvider(event.target.value); setModel(groups.find(group => group.id === event.target.value)?.models[0]?.id ?? '') }}>
         {!groups.some(group => group.id === provider) && <option value={provider}>{provider}</option>}
         {groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
@@ -61,7 +61,7 @@ export function DefaultProviderEditor({ namespace, api, writable, onSaved }: Def
     </label>
     <label className={styles['field']}>
       <span className={styles['fieldLabel']}>默认模型</span>
-      <select aria-label="默认模型" className={styles['input']} value={model} disabled={!writable || busy}
+      <select aria-label="默认模型" className={`${styles['input']} ${styles['selectInput']}`} value={model} disabled={!writable || busy}
         onChange={(event) => { setModel(event.target.value) }}>
         {!models.some(item => item.id === model) && <option value={model}>{model}</option>}
         {models.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}

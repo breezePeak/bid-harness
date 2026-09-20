@@ -485,6 +485,23 @@ export function renderLiveStageInteractionPrompt(stage: string, status: 'running
   ].join('\n')
 }
 
+function renderIdleStageInteractionPrompt(
+  stage: string,
+  status: 'pending' | 'waiting_start' | 'failed',
+): string {
+  return [
+    `当前 Bid 阶段：${stage}；当前状态：${status}。`,
+    '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
+    '不得自行开始、重启、重置或推进阶段，也不得把普通聊天当成 Host 原生阶段决策。',
+    '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
+    status === 'pending'
+      ? '阶段尚未开始。普通消息不会启动阶段；阶段启动继续由现有 Host action 或原生阶段决策负责。'
+      : status === 'waiting_start'
+        ? 'Host 正等待正式启动或恢复决定。普通聊天不等于该决定，不得偷偷启动阶段。'
+        : '当前阶段失败且没有可运行任务。先解释失败原因；恢复、重跑或停止继续走已有 Host 恢复协议。',
+  ].join('\n')
+}
+
 function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, reason?: string): string {
   return [
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
@@ -512,8 +529,9 @@ export function installStageInteractionTools(
       const runtime = bidRuntimeView(control)
       const suspended = control.run?.status === 'suspended' ? control.run : undefined
       const stage = isBidMainSession(agent.session)
-        && (runtime.status === 'waiting_user' || runtime.status === 'running'
-          || runtime.status === 'completed' || runtime.status === 'attention_required' || suspended !== undefined)
+        && (runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
+          || runtime.status === 'waiting_user' || runtime.status === 'running' || runtime.status === 'completed'
+          || runtime.status === 'attention_required' || suspended !== undefined)
         ? runtime.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? runtime.status : `suspended:${suspended.runId}`}`
       const existing = mounted.get(agent)
@@ -523,17 +541,19 @@ export function installStageInteractionTools(
       if (stage === undefined) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-      const available = suspended !== undefined
-        ? suspended.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
-          ? [names[0], names[4], names[5]]
-          : [names[0]]
-        : runtime.status !== 'waiting_user'
-          ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(runtime.status === 'running' ? names.slice(8, 10) : [])]
-            : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5], names[6], names[7]]
-              : runtime.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
-          : stage === 'tender_analysis' ? names.slice(0, 1)
-            : stage === 'outline_generation' ? names.slice(0, 3)
-              : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
+      const available = runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
+        ? [names[0]]
+        : suspended !== undefined
+          ? suspended.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
+            ? [names[0], names[4], names[5]]
+            : [names[0]]
+          : runtime.status !== 'waiting_user'
+            ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(runtime.status === 'running' ? names.slice(8, 10) : [])]
+              : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5], names[6], names[7]]
+                : runtime.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
+            : stage === 'tender_analysis' ? names.slice(0, 1)
+              : stage === 'outline_generation' ? names.slice(0, 3)
+                : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
@@ -703,7 +723,8 @@ export function installStageInteractionTools(
       if (!isBidMainSession(agent.session)) return
       const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
       const runtime = bidRuntimeView(control)
-      if (runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required'
+      if (runtime.status !== 'pending' && runtime.status !== 'waiting_start' && runtime.status !== 'failed'
+        && runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required'
         && control.run?.status !== 'suspended') return
       const previous = claimState.get(agent)
       const prior = agent.session.events.findLast(event => event.type === 'step/end' && event.data.turn === turn)
@@ -748,7 +769,9 @@ export function installStageInteractionTools(
           || runtime.stage === 'docx_export' && runtime.status === 'completed')
           ? renderChapterWritingInteractionPrompt(runtime.status, runtime.stage)
           : runtime.status === 'running' || runtime.status === 'completed'
-            ? renderLiveStageInteractionPrompt(runtime.stage, runtime.status) : undefined
+            ? renderLiveStageInteractionPrompt(runtime.stage, runtime.status)
+            : runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
+              ? renderIdleStageInteractionPrompt(runtime.stage, runtime.status) : undefined
       if (prompt === undefined) return decision
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })

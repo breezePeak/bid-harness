@@ -42,7 +42,11 @@ export interface SessionInputDeps {
   /** Register the immutable message handoff before reference or attachment work awaits. */
   localHandoff?: (attempt: SubmitAttempt) => void
   /** Register an image-only handoff, whose empty text cannot enter InputMachine. */
-  localImageHandoff?: (imageIds: readonly DraftAttachmentId[]) => void
+  localImageHandoff?: (
+    imageIds: readonly DraftAttachmentId[],
+    submissionId: string,
+    mode: InputSubmitMode,
+  ) => void
   /** Mark a handoff failed before the default sink reaches Session.prompt. */
   localHandoffFailed?: (attempt: SubmitAttempt, error: string) => void
   /**
@@ -56,6 +60,7 @@ export interface SessionInputDeps {
     imageIds: readonly DraftAttachmentId[],
     mode: InputSubmitMode,
     signal: AbortSignal,
+    submissionId: string,
   ): Promise<SubmitOutcome>
   /** Command-plane image plumbing (the hub owns the conversation face and the copy). */
   commandImages: {
@@ -102,7 +107,10 @@ export class SessionInputShell implements SessionInput {
 
   // Real wall clock: the typing-run merge window must actually expire in
   // production (the machine's no-clock default is a constant for pure tests).
-  private readonly core = new InputMachine({ now: () => Date.now() })
+  private readonly core = new InputMachine({
+    now: () => Date.now(),
+    makeSubmissionId: () => `client-${globalThis.crypto.randomUUID()}`,
+  })
   private noticeSeq = 0
   private lastMirroredDraft = ''
   private imageIds: readonly DraftAttachmentId[] = []
@@ -218,9 +226,10 @@ export class SessionInputShell implements SessionInput {
     if (this.snapshot.draft.trim() === '' && this.imageIds.length > 0) {
       if (this.snapshot.phase === 'plain' && !this.imageSendInFlight) {
         const imageIds = [...this.imageIds]
+        const submissionId = `client-${globalThis.crypto.randomUUID()}`
         this.imageSendInFlight = true
-        this.deps.localImageHandoff?.(imageIds)
-        void this.deps.defaultSink('', imageIds, mode, new AbortController().signal).then((outcome) => {
+        this.deps.localImageHandoff?.(imageIds, submissionId, mode)
+        void this.deps.defaultSink('', imageIds, mode, new AbortController().signal, submissionId).then((outcome) => {
           this.imageSendInFlight = false
           if (this.disposed) return
           if (outcome.kind === 'success') this.commitSend(imageIds)
@@ -472,7 +481,9 @@ export class SessionInputShell implements SessionInput {
     const imageIds = [...attempt.imageIds ?? []]
     const occurrences = attempt.references ?? []
     if (occurrences.length === 0) {
-      this.settleSubmit(attempt, this.deps.defaultSink(draft.trim(), imageIds, mode, attempt.signal), imageIds)
+      this.settleSubmit(attempt, this.deps.defaultSink(
+        draft.trim(), imageIds, mode, attempt.signal, attempt.submissionId,
+      ), imageIds)
       return
     }
     const inputTriggers = this.deps.inputTriggers?.()
@@ -496,7 +507,9 @@ export class SessionInputShell implements SessionInput {
           cursor = part.offset + part.length
         }
         out += draft.slice(cursor)
-        this.settleSubmit(attempt, this.deps.defaultSink(out.trim(), imageIds, mode, attempt.signal), imageIds)
+        this.settleSubmit(attempt, this.deps.defaultSink(
+          out.trim(), imageIds, mode, attempt.signal, attempt.submissionId,
+        ), imageIds)
       },
       (error: unknown) => {
         controller.abort()
@@ -541,6 +554,7 @@ export class SessionInputShell implements SessionInput {
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         }))
+        if (this.snapshot.draft === '') this.setDraft(attempt.draftSnapshot)
         this.handedOff.delete(attempt.seq)
       },
     )

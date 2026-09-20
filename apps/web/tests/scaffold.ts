@@ -308,8 +308,9 @@ export interface LaunchOptions {
 async function cleanupScaffoldWorld(ctx: Context, workspaceCwd: string, persistenceRoot: string): Promise<unknown[]> {
   const failures: unknown[] = []
   await Promise.resolve(ctx.fiber.dispose()).catch((error: unknown) => failures.push(error))
-  await rm(workspaceCwd, { recursive: true, force: true }).catch((error: unknown) => failures.push(error))
-  await rm(persistenceRoot, { recursive: true, force: true }).catch((error: unknown) => failures.push(error))
+  const removeOptions = { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as const
+  await rm(workspaceCwd, removeOptions).catch((error: unknown) => failures.push(error))
+  await rm(persistenceRoot, removeOptions).catch((error: unknown) => failures.push(error))
   return failures
 }
 
@@ -817,6 +818,7 @@ export async function seedSession(
   fixtureText: string,
   id: string,
   agentPreset?: string,
+  cwd = scaffold.workspaceCwd,
 ): Promise<SessionId> {
   const decoded = parseSeedFixture(realizeSeedFixture(scaffold, fixtureText, id))
   const events = decoded.events
@@ -829,7 +831,7 @@ export async function seedSession(
     version: SESSION_FORMAT_VERSION,
     id: SessionId(id),
     createdAt: Date.now() - 60_000,
-    cwd: scaffold.workspaceCwd,
+    cwd,
     delegationDepth: 0,
     ...agentPreset === undefined ? {} : { agentPreset },
   }

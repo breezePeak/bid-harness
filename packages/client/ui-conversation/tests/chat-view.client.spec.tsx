@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { useEffect } from 'react'
 import type {
   AssistantMessageNode, CommandNode, CompactionSummaryNode, ConversationNode, ConversationSnapshot,
-  ModelRetryNode, RunningToolCall, SessionId, SessionListState, ToolCallBlock, ToolResultNode, TurnErrorNode,
+  ModelRetryNode, OutgoingMessage, RunningToolCall, SessionId, SessionListState, ToolCallBlock, ToolResultNode, TurnErrorNode,
   TurnMaxTokensNode, UserMessageNode, WorkspaceListState,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
@@ -92,6 +92,21 @@ const user = (seq: number, text: string): UserMessageNode => ({
   content: [{ type: 'text', text }] as never,
   source: null,
 })
+function outgoingMessage(
+  id: string,
+  text: string,
+  status: OutgoingMessage['status'] = 'preparing',
+): OutgoingMessage {
+  return {
+    localId: `local-${id}`,
+    clientSubmissionId: `client-${id}`,
+    mode: 'queue',
+    content: [{ type: 'text', text }],
+    preview: text,
+    text,
+    status,
+  }
+}
 const assistant = (seq: number, text: string, turn = 1): AssistantMessageNode => ({
   kind: 'assistant', seq, time: seq * 1_000, turn, step: 1, blocks: [{ kind: 'text', text }],
 })
@@ -443,6 +458,68 @@ describe('ChatView', () => {
         'fixture:user:1', 'fixture:assistant:2',
         'fixture:tool:a', 'call:a', 'fixture:tool:b', 'call:b',
       ])
+  })
+
+  it('shows local outgoing text immediately in the chat flow', () => {
+    const h = makeHarness({ outgoing: [outgoingMessage('1', '还有几个任务')] })
+    const view = render(<h.ChatView {...h.props} />)
+
+    expect(view.getByText('还有几个任务').closest('[data-pending-outgoing]')).not.toBeNull()
+    expect(view.queryByText('准备中')).toBeNull()
+  })
+
+  it('hands optimistic outgoing to the Host steering row by submission id', () => {
+    const message = outgoingMessage('1', '立即补充')
+    const h = makeHarness({ outgoing: [message] })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.container.querySelector('[data-pending-outgoing]')).not.toBeNull()
+
+    act(() => {
+      h.set({ queue: [{
+        id: 'steer-occurrence' as never,
+        messageId: 'steer-message' as never,
+        placement: 'steering',
+        clientSubmissionId: message.clientSubmissionId,
+        content: [{ type: 'text', text: '立即补充' }],
+        preview: '立即补充',
+        text: '立即补充',
+      }] })
+    })
+
+    expect(view.container.querySelector('[data-pending-outgoing]')).toBeNull()
+    expect(view.container.querySelector('[data-pending-steering]')).not.toBeNull()
+    expect(view.getAllByText('立即补充')).toHaveLength(1)
+  })
+
+  it('removes optimistic chat ownership when the Host queue owns the same submission id', () => {
+    const message = outgoingMessage('1', '稍后处理')
+    const h = makeHarness({ outgoing: [message] })
+    const view = render(<h.ChatView {...h.props} />)
+
+    act(() => {
+      h.set({ queue: [{
+        id: 'queued-occurrence' as never,
+        messageId: 'queued-message' as never,
+        placement: 'queued',
+        clientSubmissionId: message.clientSubmissionId,
+        content: [{ type: 'text', text: '稍后处理' }],
+        preview: '稍后处理',
+        text: '稍后处理',
+      }] })
+    })
+
+    expect(view.container.querySelector('[data-pending-outgoing]')).toBeNull()
+    expect(view.queryByText('稍后处理')).toBeNull()
+  })
+
+  it('keeps failed outgoing visible with its real error', () => {
+    const h = makeHarness({
+      outgoing: [{ ...outgoingMessage('1', '仍然保留'), status: 'failed', error: '网络断开' }],
+    })
+    const view = render(<h.ChatView {...h.props} />)
+
+    expect(view.getByText('仍然保留').closest('[data-pending-outgoing]')).not.toBeNull()
+    expect(view.getByRole('alert').textContent).toBe('网络断开')
   })
 
   it('renders Host-pending steering at the flow tail and hands off to the durable node', () => {

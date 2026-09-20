@@ -97,11 +97,13 @@ describe('web e2e: resident question composer round trip', () => {
     await input.fill(PROMPT)
     await input.press('Enter')
 
-    // The composer takes over the input area while the tool blocks. Its
-    // presence is a STABLE waiting state (not a transient): it stays until
-    // answered, so a plain waitFor is race-free.
+    // The question panel is a stable structured interaction above the
+    // still-mounted ordinary composer until it is answered.
     const composer = page.locator('[data-question-key]')
     await composer.waitFor({ timeout: MODE === 'record' ? 120_000 : 30_000 })
+    const ordinaryInput = page.locator('[data-composer-card] textarea')
+    await expect.poll(async () => ordinaryInput.isVisible(), { timeout: 10_000 }).toBe(true)
+    await expect.poll(async () => ordinaryInput.isEnabled(), { timeout: 10_000 }).toBe(true)
     await expect.poll(() => composer.getByText('Which color do you prefer?').count(), { timeout: 10_000 }).toBeGreaterThan(0)
 
     const selectedRow = page.locator('[role="treeitem"][aria-selected="true"]')
@@ -217,12 +219,12 @@ describe('web e2e: resident question composer round trip', () => {
       answers: [{ id: 'color', selected: ['Blue'], custom: 'Include accessibility notes' }],
     })
     await expect.poll(() => page.getByText('DONE', { exact: true }).count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
-    // Composer gone; regular input restored.
+    // The structured interaction leaves; the resident ordinary input remains.
     expect(await page.locator('[data-question-key]').count()).toBe(0)
     expect(await selectedRow.locator('[data-state="warning"]').count()).toBe(0)
     await expect.poll(() => page.locator('textarea').first().isEnabled(), { timeout: 10_000 }).toBe(true)
     // Golden of the answered transcript: the ask_user_question round trip
-    // rendered as history (question tool row + DONE), composer takeover gone.
+    // rendered as history (question tool row + DONE), structured interaction gone.
     const snapshot = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(ANSWERED_EXPECTED, snapshot, MODE)
     expect(tripwire.pageErrors).toEqual([])

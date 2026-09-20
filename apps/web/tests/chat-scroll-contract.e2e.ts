@@ -3,7 +3,7 @@
 // bottom ownership, interaction state, and the real outer scroll host rather
 // than DOM cardinality or implementation-specific spacer markup.
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
@@ -45,6 +45,7 @@ const FLING_SESSION_ID = 'chat-scroll-fling-e2e'
 const LIVE_FLING_PROMPT = 'CHAT_SCROLL_FLING_USER Keep streaming while I fling back through older output.'
 const LIVE_FLING_FIRST = 'CHAT_SCROLL_FLING_STREAM_FIRST'
 const LIVE_FLING_DONE = 'CHAT_SCROLL_FLING_STREAM_DONE'
+const SHELL_TOOL = platform() === 'win32' ? 'pwsh' : 'bash'
 
 const HISTORY_FIXTURE = createChatScrollFixture({
   markerPrefix: 'HISTORY',
@@ -112,12 +113,18 @@ function textStream(first: string, done: string, deltaCount: number): StreamChun
 }
 
 function toolStream(): StreamChunk[] {
-  const command = [
-    `: > ${TOOL_READY_FILE}`,
-    `while [ ! -f ${TOOL_RELEASE_FILE} ]; do sleep 0.02; done`,
-    'line=1',
-    `while [ "$line" -le 64 ]; do printf '${LIVE_TOOL_RESULT} line %02d\\n' "$line"; line=$((line + 1)); done`,
-  ].join('; ')
+  const command = platform() === 'win32'
+    ? [
+      `Set-Content -LiteralPath '${TOOL_READY_FILE}' -Value '' -NoNewline`,
+      `while (-not (Test-Path -LiteralPath '${TOOL_RELEASE_FILE}')) { Start-Sleep -Milliseconds 20 }`,
+      `1..64 | ForEach-Object { '${LIVE_TOOL_RESULT} line {0:D2}' -f $_ }`,
+    ].join('; ')
+    : [
+      `: > ${TOOL_READY_FILE}`,
+      `while [ ! -f ${TOOL_RELEASE_FILE} ]; do sleep 0.02; done`,
+      'line=1',
+      `while [ "$line" -le 64 ]; do printf '${LIVE_TOOL_RESULT} line %02d\\n' "$line"; line=$((line + 1)); done`,
+    ].join('; ')
   const args = JSON.stringify({ command, description: LIVE_TOOL_RESULT })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -125,13 +132,13 @@ function toolStream(): StreamChunk[] {
       type: 'tool-call-delta',
       index: 0,
       id: LIVE_TOOL_CALL_ID,
-      name: 'bash',
+      name: SHELL_TOOL,
       argumentsDelta: args,
     },
     {
       type: 'block-end',
       index: 0,
-      block: { type: 'tool-call', id: LIVE_TOOL_CALL_ID, name: 'bash', arguments: args },
+      block: { type: 'tool-call', id: LIVE_TOOL_CALL_ID, name: SHELL_TOOL, arguments: args },
     },
     { type: 'usage', usage: { inputTokens: 256, outputTokens: 48 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
@@ -563,7 +570,7 @@ describe('web e2e: long Chat scroll contract', () => {
         await composer.fill(LIVE_TOOL_PROMPT)
         await world.page.getByRole('button', { name: 'Send message', exact: true }).click()
         await expect.poll(() => fileExists(readyPath), { timeout: 15_000 }).toBe(true)
-        const liveRow = world.page.locator(`[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-sample="bash"]`)
+        const liveRow = world.page.locator(`[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-tool="${SHELL_TOOL}"]`)
         await liveRow.waitFor({ timeout: 15_000 })
         expect(await liveRow.getAttribute('data-state')).toBe('running')
         await expectBottom(world.page)
@@ -606,7 +613,7 @@ describe('web e2e: long Chat scroll contract', () => {
       await expectBottom(world.page)
       await expectMarkerAboveComposer(world.page, LIVE_TOOL_DONE)
 
-      const liveRowSelector = `[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-sample="bash"]`
+      const liveRowSelector = `[data-chat-call-id="${LIVE_TOOL_CALL_ID}"] [data-tool="${SHELL_TOOL}"]`
       const liveRow = world.page.locator(liveRowSelector)
       await wheelUntilVisible(world.page, liveRowSelector, -300)
       const toolAnchor = await liveRow.evaluate((row) => {
@@ -620,8 +627,9 @@ describe('web e2e: long Chat scroll contract', () => {
           top: flow.getBoundingClientRect().top - host.getBoundingClientRect().top,
         }
       })
-      await liveRow.click()
-      await expect.poll(() => liveRow.getAttribute('aria-expanded'), { timeout: 10_000 }).toBe('true')
+      const liveDisclosure = liveRow.getByRole('button').first()
+      await liveDisclosure.click()
+      await expect.poll(() => liveDisclosure.getAttribute('aria-expanded'), { timeout: 10_000 }).toBe('true')
       await expectSameFlowTop(world.page, toolAnchor)
       await wheelToHistoryStart(world.page)
       await world.page.getByRole('button', { name: 'Back to bottom', exact: true }).click()
@@ -629,7 +637,7 @@ describe('web e2e: long Chat scroll contract', () => {
       await wheelUntilMounted(world.page, liveRowSelector, -1_100)
       const restoredRow = world.page.locator(liveRowSelector)
       await restoredRow.waitFor({ timeout: 10_000 })
-      expect(await restoredRow.getAttribute('aria-expanded')).toBe('true')
+      expect(await restoredRow.getByRole('button').first().getAttribute('aria-expanded')).toBe('true')
       expect(await world.page.getByText(LIVE_TOOL_RESULT, { exact: false }).count()).toBeGreaterThan(0)
       assertClean(world)
     })
@@ -750,13 +758,16 @@ describe('web e2e: long Chat scroll contract', () => {
       const backToBottom = world.page.getByRole('button', { name: 'Back to bottom', exact: true })
 
       // Focus rides the last seeded tool row (a tabbable button whose keydown
-      // handler passes scrolling keys through). End first normalizes the
+      // handler passes scrolling keys through). PageDown first normalizes the
       // focus-driven scrollIntoView back to the floor.
       const lastToolRow = world.page.locator(
         `[data-chat-call-id="chat-scroll-${String(INPUTS_FIXTURE.turns).padStart(3, '0')}-1"] [data-sample="bash"]`,
       )
       await lastToolRow.focus()
-      await world.page.keyboard.press('End')
+      for (let press = 0; press < 8 && (await scrollGeometry(world.page)).distanceFromBottom > 1; press += 1) {
+        await world.page.keyboard.press('PageDown')
+        await nextPaint(world.page)
+      }
       await expectBottom(world.page)
       await expect.poll(() => backToBottom.count(), { timeout: 10_000 }).toBe(0)
       for (let press = 0; press < 3; press += 1) {
@@ -766,7 +777,10 @@ describe('web e2e: long Chat scroll contract', () => {
       await backToBottom.waitFor({ timeout: 10_000 })
       await expect.poll(async () => (await scrollGeometry(world.page)).distanceFromBottom, { timeout: 10_000 })
         .toBeGreaterThan(100)
-      await world.page.keyboard.press('End')
+      for (let press = 0; press < 8 && (await scrollGeometry(world.page)).distanceFromBottom > 1; press += 1) {
+        await world.page.keyboard.press('PageDown')
+        await nextPaint(world.page)
+      }
       await expectBottom(world.page)
       await expect.poll(() => backToBottom.count(), { timeout: 10_000 }).toBe(0)
       assertClean(world)

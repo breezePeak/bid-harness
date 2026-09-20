@@ -16,12 +16,22 @@ import { zh } from '../src/client/locales.ts'
 async function bench(readAttachment?: SessionFace['readAttachment']) {
   const runtime = await SlotTestRuntime.create()
   const prompt = vi.fn(() => Promise.resolve({ ok: true as const, value: { accepted: true as const } }))
+  const beginOutgoing = vi.fn()
+  const updateOutgoing = vi.fn()
   const updateQueue = vi.fn(() => Promise.resolve({ ok: true as const, value: { accepted: true as const } }))
   const cancel = vi.fn(() => Promise.resolve({ ok: true as const, value: { accepted: true as const } }))
   const loadOlder = vi.fn(() => Promise.resolve())
   await runtime.sessions.add({
     id: 's1',
-    session: { prompt, updateQueue, cancel, loadOlder, ...(readAttachment === undefined ? {} : { readAttachment }) },
+    session: {
+      prompt,
+      beginOutgoing,
+      updateOutgoing,
+      updateQueue,
+      cancel,
+      loadOlder,
+      ...(readAttachment === undefined ? {} : { readAttachment }),
+    },
   })
   // config.input is required (the apply shares its hub with the inject
   // factories); the bench passes its own instance explicitly.
@@ -34,10 +44,30 @@ async function bench(readAttachment?: SessionFace['readAttachment']) {
   const root = runtime.ctx.get('conversation') as ConversationController
   const scoped = runtime.sessions.scope('s1')!.get('conversation') as ConversationController
   const shell = hub.shellFor(runtime.sessions.binding('s1')!)
-  return { runtime, fiber, root, scoped, hub, shell, prompt, updateQueue, cancel, loadOlder }
+  return {
+    runtime, fiber, root, scoped, hub, shell, prompt, beginOutgoing, updateOutgoing, updateQueue, cancel, loadOlder,
+  }
 }
 
 describe('ConversationController', () => {
+  it('keeps immediate submit policy scoped to the addressed session', async () => {
+    const b = await bench()
+    expect(b.scoped.resolveSubmitModeOverride(true, true)).toBeUndefined()
+
+    b.scoped.setSubmitModePolicy('immediate')
+    expect(b.scoped.resolveSubmitModeOverride(false, true)).toBe('queue')
+    expect(b.scoped.resolveSubmitModeOverride(true, true)).toBe('steer')
+    expect(b.scoped.resolveSubmitModeOverride(true, false)).toBe('queue')
+
+    await b.runtime.sessions.add({ id: 's2', session: { prompt: vi.fn() } })
+    const other = b.runtime.sessions.scope('s2')!.get('conversation') as ConversationController
+    expect(other.resolveSubmitModeOverride(true, true)).toBeUndefined()
+
+    b.scoped.setSubmitModePolicy('default')
+    expect(b.scoped.resolveSubmitModeOverride(true, true)).toBeUndefined()
+    await b.runtime.dispose()
+  })
+
   it('业务引用提交失败保留草稿且不转发普通消息，释放后恢复普通发送', async () => {
     const b = await bench()
     const sessionId = b.runtime.sessions.behavior('s1').sessionId
@@ -124,6 +154,90 @@ describe('ConversationController', () => {
     b.shell.setDraft('业务插话')
     b.shell.submit('steer')
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
+    expect(b.prompt).not.toHaveBeenCalled()
+    dispose()
+    await b.runtime.dispose()
+  })
+
+  it('matches a prepared outgoing row only by submission identity when serialized text changes', async () => {
+    const b = await bench()
+    const session = b.runtime.sessions.behavior('s1')
+    b.root.beginOutgoing(session, '界面可见文本', [], 'submission-visible')
+
+    await expect(b.root.sendSession(
+      session,
+      '带业务引用的序列化文本',
+      [],
+      'queue',
+      undefined,
+      'submission-visible',
+    )).resolves.toEqual({ kind: 'success' })
+
+    expect(b.beginOutgoing).toHaveBeenCalledOnce()
+    expect(b.beginOutgoing).toHaveBeenCalledWith(
+      'submission-visible',
+      [{ type: 'text', text: '界面可见文本' }],
+      'queue',
+    )
+    expect(b.prompt).toHaveBeenCalledWith(
+      [{ type: 'text', text: '带业务引用的序列化文本' }],
+      'queue',
+      undefined,
+      'submission-visible',
+    )
+    await b.runtime.dispose()
+  })
+
+  it('keeps identical outgoing text independent by submission identity', async () => {
+    const b = await bench()
+    const session = b.runtime.sessions.behavior('s1')
+    b.root.beginOutgoing(session, '相同内容', [], 'submission-first')
+    b.root.beginOutgoing(session, '相同内容', [], 'submission-second')
+
+    await b.root.sendSession(session, '相同内容', [], 'queue', undefined, 'submission-second')
+    await b.root.sendSession(session, '相同内容', [], 'queue', undefined, 'submission-first')
+
+    expect(b.beginOutgoing).toHaveBeenCalledTimes(2)
+    expect(b.prompt).toHaveBeenNthCalledWith(
+      1,
+      [{ type: 'text', text: '相同内容' }],
+      'queue',
+      undefined,
+      'submission-second',
+    )
+    expect(b.prompt).toHaveBeenNthCalledWith(
+      2,
+      [{ type: 'text', text: '相同内容' }],
+      'queue',
+      undefined,
+      'submission-first',
+    )
+    await b.runtime.dispose()
+  })
+
+  it('marks a business-resolved error on the outgoing row without calling the Host prompt', async () => {
+    const b = await bench()
+    const session = b.runtime.sessions.behavior('s1')
+    const dispose = b.root.submitHandlers.register(session.sessionId, () => Promise.resolve({
+      kind: 'error',
+      text: '引用已经失效',
+    }))
+    b.root.beginOutgoing(session, '更新引用', [], 'submission-business-error')
+
+    await expect(b.root.sendSession(
+      session,
+      '更新引用',
+      [],
+      'steer',
+      undefined,
+      'submission-business-error',
+    )).resolves.toEqual({ kind: 'error', text: '引用已经失效' })
+
+    expect(b.updateOutgoing).toHaveBeenCalledWith(
+      'submission-business-error',
+      'failed',
+      '引用已经失效',
+    )
     expect(b.prompt).not.toHaveBeenCalled()
     dispose()
     await b.runtime.dispose()

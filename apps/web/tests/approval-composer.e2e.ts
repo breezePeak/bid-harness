@@ -1,4 +1,4 @@
-// Web e2e scenario: the composer-takeover approval panel under a long
+// Web e2e scenario: the structured approval panel under a long
 // command. The shipped composition confines bash through the sandbox policy
 // and routes its escalation through the approval seam, so a read-only session
 // asked to write a file produces a REAL pending approval — the panel renders
@@ -11,12 +11,15 @@
 // Geometry is the point of the scenario. The command is unbounded model text,
 // and an uncapped card grows with it until the refuse/allow buttons leave the
 // viewport — an approval the user could see and not answer.
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { deriveReplayScript, parseSessionLog, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Empty type import: carries the approval package's session-event merge, so
 // the decided-outcome assertion below type-checks against the real union.
@@ -46,15 +49,61 @@ const PROMPT = `Write a file named notes.txt in the workspace containing exactly
 /** Draft used to measure the composer's own text cap: enough lines to pass it. */
 const CAP_PROBE = Array.from({ length: 40 }, (_, index) => `line ${index}`).join('\n')
 
-describe('web e2e: approval takeover keeps its actions reachable', () => {
+function replaceToolCall(entry: ReplayEntry, name: string, argumentsJson: string): ReplayEntry {
+  if (entry.kind !== 'chunks') throw new Error('approval replay tool call must be a completed chunk entry')
+  let wroteArguments = false
+  const chunks = entry.chunks.flatMap((chunk): StreamChunk[] => {
+    if (chunk.type === 'tool-call-delta') {
+      if (wroteArguments) return []
+      wroteArguments = true
+      return [{ ...chunk, name, argumentsDelta: argumentsJson }]
+    }
+    if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+      return [{ ...chunk, block: { ...chunk.block, name, arguments: argumentsJson } }]
+    }
+    return [chunk]
+  })
+  return { kind: 'chunks', chunks }
+}
+
+async function windowsReplayOverride(): Promise<{ directory: string; path: string }> {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-web-approval-'))
+  const path = join(directory, 'replay.override.json')
+  const replay = deriveReplayScript(parseSessionLog(await readFile(FIXTURE, 'utf8')))
+  if (replay.length < 2) throw new Error('approval replay must contain the initial and escalated shell calls')
+  const command = `Set-Content -LiteralPath notes.txt -Value '${TOKENS}' -NoNewline`
+  replay[0] = replaceToolCall(replay[0]!, 'pwsh', JSON.stringify({
+    command,
+    description: 'Write notes.txt with the specified text',
+  }))
+  replay[1] = replaceToolCall(replay[1]!, 'pwsh', JSON.stringify({
+    description: 'Write notes.txt with the specified text',
+    command,
+    sandbox_permissions: 'workspace-write',
+    justification: 'Need to write the notes.txt file as requested by the user.',
+  }))
+  await writeFile(path, JSON.stringify(replay))
+  return { directory, path }
+}
+
+describe('web e2e: approval interaction keeps its actions reachable', () => {
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
+  let overrideDirectory: string | undefined
   const sessionEvents: SessionEvent[] = []
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15 })
+    const override = MODE !== 'record' && process.platform === 'win32'
+      ? await windowsReplayOverride()
+      : undefined
+    overrideDirectory = override?.directory
+    scaffold = await launchWebScaffold(MODE === 'record' ? {} : {
+      replayFixture: FIXTURE,
+      paceMs: 15,
+      ...(override === undefined ? {} : { replayOverride: override.path }),
+    })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
@@ -67,6 +116,7 @@ describe('web e2e: approval takeover keeps its actions reachable', () => {
   afterAll(async () => {
     await browser?.close()
     await scaffold?.close()
+    if (overrideDirectory !== undefined) await rm(overrideDirectory, { recursive: true, force: true })
   })
 
   it('caps the long command, answers through the panel, and runs the escalated command', async () => {
@@ -78,7 +128,7 @@ describe('web e2e: approval takeover keeps its actions reachable', () => {
     await input.waitFor({ timeout: 10_000 })
 
     // The composer's own text cap, measured on the live draft scrollport before
-    // the takeover replaces it — the box that carries the cap, while the
+    // the approval appears — the box that carries the cap, while the
     // textarea inside it is as tall as the whole draft. The panel's scroll
     // region must stop at the same height (the designer's requirement: one cap
     // for the composer seat), and measuring it here keeps the assertion free of
@@ -101,19 +151,22 @@ describe('web e2e: approval takeover keeps its actions reachable', () => {
     await input.fill(PROMPT)
     await input.press('Enter')
 
-    // The panel takes over the input area while the tool blocks. Its presence
-    // is a STABLE waiting state (it stays until answered), so waitFor is
-    // race-free.
+    // The approval panel stays above the ordinary composer while the tool waits.
     const panel = page.locator('[data-approval-key]')
     await panel.waitFor({ timeout: MODE === 'record' ? 180_000 : 60_000 })
+    const ordinaryInput = page.locator('[data-composer-card] textarea')
+    await expect.poll(async () => ordinaryInput.isVisible(), { timeout: 10_000 }).toBe(true)
+    await expect.poll(async () => ordinaryInput.isEnabled(), { timeout: 10_000 }).toBe(true)
     const scroll = panel.locator('[data-approval-scroll]')
     await expect.poll(() => scroll.getByText(/tok/).count(), { timeout: 15_000 }).toBeGreaterThan(0)
 
     if (MODE !== 'record') {
       // This golden owns the stable waiting surface; the answered golden below
       // owns the resulting transcript.
-      const snapshot = await captureStableAria(page, '[data-approval-key]', scaffold.workspaceCwd)
-      await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
+      if (process.platform !== 'win32') {
+        const snapshot = await captureStableAria(page, '[data-approval-key]', scaffold.workspaceCwd)
+        await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
+      }
 
       // The uncapped-card hazard the header names, measured at the lane
       // baseline and at a short viewport, on the live panel.

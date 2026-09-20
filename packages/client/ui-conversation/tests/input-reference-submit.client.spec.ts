@@ -55,7 +55,13 @@ describe('reference submission', () => {
     expect(first.snapshot.draft).toBe('@Research notes ')
     expect(mirror).toHaveBeenLastCalledWith(`${spacedMention} `)
 
-    const sink = vi.fn(() => Promise.resolve<SubmitOutcome>({ kind: 'success' }))
+    const sink = vi.fn<(
+      _text: string,
+      _imageIds: readonly DraftAttachmentId[],
+      _mode: 'queue' | 'steer',
+      _signal: AbortSignal,
+      _submissionId: string,
+    ) => Promise<SubmitOutcome>>(() => Promise.resolve({ kind: 'success' }))
     const restored = new SessionInputShell({
       actx: {} as ClientContext,
       defaultSink: sink,
@@ -64,8 +70,37 @@ describe('reference submission', () => {
     restored.setDraft(mirror.mock.calls.at(-1)?.[0] as string)
     restored.submit()
     await vi.waitFor(() => {
-      expect(sink).toHaveBeenCalledWith(spacedMention, [], 'queue', expect.any(AbortSignal))
+      expect(sink).toHaveBeenCalledWith(spacedMention, [], 'queue', expect.any(AbortSignal), expect.any(String))
     })
+  })
+
+  it('keeps one submission id from optimistic handoff through reference serialization', async () => {
+    const localHandoff = vi.fn()
+    const sink = vi.fn<(
+      _text: string,
+      _imageIds: readonly DraftAttachmentId[],
+      _mode: 'queue' | 'steer',
+      _signal: AbortSignal,
+      _submissionId: string,
+    ) => Promise<SubmitOutcome>>(() => Promise.resolve({ kind: 'success' }))
+    const shell = new SessionInputShell({
+      actx: {} as ClientContext,
+      inputTriggers: () => ({
+        serializeReference: () => Promise.resolve(mention),
+        track: vi.fn(),
+      } as unknown as InputTriggerController),
+      localHandoff,
+      defaultSink: sink,
+      commandImages,
+    })
+    chip(shell)
+    const visible = shell.snapshot.draft.trim()
+    shell.submit('steer')
+
+    await vi.waitFor(() => { expect(sink).toHaveBeenCalledOnce() })
+    const attempt = localHandoff.mock.calls[0]?.[0] as { submissionId: string }
+    expect(sink.mock.calls[0]?.[0]).not.toBe(visible)
+    expect(sink.mock.calls[0]?.[4]).toBe(attempt.submissionId)
   })
 
   it('keeps a failed outgoing handoff out of the editable draft', async () => {
@@ -99,7 +134,7 @@ describe('reference submission', () => {
     await vi.waitFor(() => {
       expect(sink).toHaveBeenCalledTimes(1)
     })
-    expect(sink).toHaveBeenNthCalledWith(1, mention, [], 'queue', expect.any(AbortSignal))
+    expect(sink).toHaveBeenNthCalledWith(1, mention, [], 'queue', expect.any(AbortSignal), expect.any(String))
     expect(shell.snapshot.draft).toBe('')
     expect(shell.snapshot.occurrences).toEqual([])
     expect(shell.notices.getSnapshot()).toMatchObject({
@@ -113,7 +148,7 @@ describe('reference submission', () => {
     await vi.waitFor(() => {
       expect(sink).toHaveBeenCalledTimes(2)
     })
-    expect(sink).toHaveBeenNthCalledWith(2, mention, [], 'queue', expect.any(AbortSignal))
+    expect(sink).toHaveBeenNthCalledWith(2, mention, [], 'queue', expect.any(AbortSignal), expect.any(String))
     expect(shell.snapshot.occurrences).toEqual([])
     expect(serializeReference).toHaveBeenCalledTimes(2)
   })
@@ -184,7 +219,7 @@ describe('reference submission', () => {
     shell.dispose()
     resolveReference(mention)
     await vi.waitFor(() => {
-      expect(sink).toHaveBeenCalledWith(mention, [], 'queue', expect.any(AbortSignal))
+      expect(sink).toHaveBeenCalledWith(mention, [], 'queue', expect.any(AbortSignal), expect.any(String))
     })
   })
 
@@ -205,6 +240,29 @@ describe('reference submission', () => {
 })
 
 describe('submit transaction hardening', () => {
+  it('uses one submission id and preserves steer mode for an image-only send', async () => {
+    const localImageHandoff = vi.fn<(
+      _imageIds: readonly DraftAttachmentId[],
+      _submissionId: string,
+      _mode: 'queue' | 'steer',
+    ) => void>()
+    const sink = vi.fn(() => Promise.resolve<SubmitOutcome>({ kind: 'success' }))
+    const shell = new SessionInputShell({
+      actx: {} as ClientContext,
+      localImageHandoff,
+      defaultSink: sink,
+      commandImages,
+    })
+    const imageIds = ['img-1' as DraftAttachmentId]
+    shell.addImages(imageIds)
+    shell.submit('steer')
+    await vi.waitFor(() => { expect(sink).toHaveBeenCalledOnce() })
+
+    const submissionId = localImageHandoff.mock.calls[0]?.[1]
+    expect(localImageHandoff).toHaveBeenCalledWith(imageIds, submissionId, 'steer')
+    expect(sink).toHaveBeenCalledWith('', imageIds, 'steer', expect.any(AbortSignal), submissionId)
+  })
+
   it('sends one image-only prompt per settlement, ignoring Enter during the round-trip', async () => {
     let settle!: (outcome: SubmitOutcome) => void
     const sink = vi.fn(() => new Promise<SubmitOutcome>((resolve) => { settle = resolve }))

@@ -1,7 +1,5 @@
-// ApprovalPanel: the composer-takeover approval prompt (designer draft
-// approval.png), registered as a selector-routed entry of the
-// conversation-declared composer chain. While an approval question is
-// pending, this panel occupies the composer slot in place of the InputBar:
+// ApprovalPanel: a structured interaction registered above the resident
+// InputBar. While an approval question is pending, this panel shows
 // an amber "Waiting for approval" strip on the card top, the model's
 // justification as the headline, the paired command in muted code text, and
 // a right-aligned refuse/allow action row. Justification and command are
@@ -9,8 +7,7 @@
 // cap (`data-approval-scroll`) and the action row stays outside it — the
 // buttons must be reachable no matter how long the command is.
 // One-shot: the buttons disable
-// after a click and the panel leaves (the InputBar returns) on the broadcast
-// resolved frame.
+// after a click and the panel leaves on the broadcast resolved frame.
 
 import { useMemo, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -32,7 +29,7 @@ export function commandOf(call: RunningToolCall | undefined): string | undefined
 }
 
 /**
- * Composer takeover boundary: mints the domain face on the carrier's stable
+ * Structured interaction boundary: mints the domain face on the carrier's stable
  * identity and remounts the flow per request key, so the one-shot answered
  * latch never leaks to the next pending approval.
  * @param props - the selector-matched pending approval carrier plus the framework standard kit.

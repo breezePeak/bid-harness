@@ -161,6 +161,11 @@ export function ConversationRoot({
     // share one constraint (composer.dock = stats-line family).
     footer: !hero && zone !== undefined ? renderSlot('conversation.composer.dock', zone) : null,
   })
+  const interactionPanel = renderSlotChain(
+    'conversation.composer.interaction',
+    { interactions: pending, session },
+    { fallback: null },
+  )
 
   const composerBar = (
     <div className={clsx(css.composerStack, hero && css.composerHero)}>
@@ -168,6 +173,7 @@ export function ConversationRoot({
       {hero && <HeroShell t={t} renderSlot={renderSlot} />}
       {hero && heroWorkspaceRow}
       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
+      {interactionPanel}
       {inputBar}
     </div>
   )
@@ -179,10 +185,8 @@ export function ConversationRoot({
     { fallback: composerBar, overlay: true },
   )
 
-  // Sticky wraps the whole chain output (fallback + elected overlay), not
-  // only `.composerStack`: overlay:true renders those as siblings, and sticky
-  // on the fallback alone would leave Question/Approval panels at the content
-  // end off-screen when the user is not pinned to the floor.
+  // Sticky wraps the whole hard-takeover chain output. The fallback already
+  // contains the structured interaction panel and resident InputBar.
   const composerSeat = composerBlock?.embedded === true && embeddedComposerHost !== null
     ? (
       <Portal container={embeddedComposerHost}>

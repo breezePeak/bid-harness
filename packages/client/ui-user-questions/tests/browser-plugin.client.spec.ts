@@ -1,6 +1,6 @@
 /**
  * apply wiring on a real cordis Context + SlotRegistry: QuestionComposer
- * registered as the `question` entry of the conversation-declared composer
+ * registered as the `question` entry of the structured interaction
  * slot with ZERO business face (data and verbs ride the dispatched carrier),
  * declaration-aware activation, and fiber-teardown unregistration. Component and
  * domain-face behavior is covered props-direct in question-composer.spec.tsx;
@@ -17,9 +17,9 @@ async function bench() {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const slots = ctx.get('slots') as SlotRegistry
-  // The composer slot exists only while its declaring entry is live.
+  // The structured interaction slot exists only while its declaring entry is live.
   slots.register(
-    { name: 'root', children: { 'conversation.composer': { kind: 'chain', scope: 'session' } } } as never,
+    { name: 'root', children: { 'conversation.composer.interaction': { kind: 'chain', scope: 'session' } } } as never,
     () => null,
   )
   ctx.provide('locale', new LocaleRuntime(ctx))
@@ -31,25 +31,25 @@ describe('apply', () => {
     expect(inject).toEqual(['slots', 'locale'])
   })
 
-  it('waits until a live entry declares the composer slot', async () => {
+  it('waits until a live entry declares the structured interaction slot', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()
     ctx.provide('locale', new LocaleRuntime(ctx))
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
-    expect(ctx.slots.entries('conversation.composer')).toHaveLength(0)
+    expect(ctx.slots.entries('conversation.composer.interaction')).toHaveLength(0)
     ctx.slots.register(
-      { name: 'root', children: { 'conversation.composer': { kind: 'chain', scope: 'session' } } } as never,
+      { name: 'root', children: { 'conversation.composer.interaction': { kind: 'chain', scope: 'session' } } } as never,
       () => null,
     )
     await Promise.resolve()
-    expect(ctx.slots.entries('conversation.composer')).toHaveLength(1)
+    expect(ctx.slots.entries('conversation.composer.interaction')).toHaveLength(1)
   })
 
   it('registers the question entry: routing selector, no inject face', async () => {
     const { ctx, slots } = await bench()
     await ctx.plugin({ inject: [...inject], apply }).await()
-    const entry = slots.entries('conversation.composer')[0]!
+    const entry = slots.entries('conversation.composer.interaction')[0]!
     expect(entry.component).toBe(QuestionComposer)
     // The whole behavior surface rides the matched carrier: no business face;
     // copy rides the standard locale seat.
@@ -67,8 +67,8 @@ describe('apply', () => {
     const { ctx, slots } = await bench()
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
-    expect(slots.entries('conversation.composer')).toHaveLength(1)
+    expect(slots.entries('conversation.composer.interaction')).toHaveLength(1)
     await fiber.dispose()
-    expect(slots.entries('conversation.composer')).toHaveLength(0)
+    expect(slots.entries('conversation.composer.interaction')).toHaveLength(0)
   })
 })

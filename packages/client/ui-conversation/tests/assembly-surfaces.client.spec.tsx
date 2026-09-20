@@ -7,7 +7,7 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import type { ISession, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotTestRuntime, usePinnedBrowserLanguages, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
-import { apply, inject, type ConvViewProps, type EmptyWorkspaceOwnerProps, type IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { apply, inject, type ConvViewProps, type EmptyWorkspaceOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 
 usePinnedBrowserLanguages('zh-CN')
 
@@ -186,11 +186,12 @@ describe('embedded conversation surface', () => {
   it('ports the one ChatView and Composer into a feature-owned S7 layout', async () => {
     const runtime = await bench()
     const scoped = runtime.sessions.scope(SID)
-    const conversation = scoped?.get('conversation') as IConversation | undefined
+    const conversation = scoped?.get('conversation')
     if (conversation === undefined) throw new Error('conversation service is unavailable')
     runtime.slots.register({
       name: 'conversation.view',
       id: 'embedded',
+      embeddedChat: true,
       inject: () => ({
         setEmbeddedSurface: (kind: 'chat' | 'composer', element: HTMLElement | null) => {
           conversation.setEmbeddedSurface(kind, element)
@@ -213,7 +214,7 @@ describe('embedded conversation surface', () => {
 })
 
 describe('prompt rejection through the assembled composer', () => {
-  it('renders the promptError alert strip and keeps the draft in the machine', async () => {
+  it('renders the promptError alert strip after the submitted draft leaves the machine', async () => {
     const runtime = await SlotTestRuntime.create()
     runtime.provide('connection', { api: { settings: {} }, isLoopback: false })
     // The plugin injects both; these specs exercise no settings path.
@@ -248,9 +249,7 @@ describe('prompt rejection through the assembled composer', () => {
     })
     const alert = await view.findByRole('alert')
     expect(alert.textContent).toContain('prompt rejected before acceptance (agent-busy)')
-    await waitFor(() => {
-      expect((view.container.querySelector('textarea'))!.value).toBe('do not lose this')
-    })
+    expect((view.container.querySelector('textarea'))!.value).toBe('')
     await runtime.dispose()
   })
 })

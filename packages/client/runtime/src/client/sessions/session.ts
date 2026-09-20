@@ -206,7 +206,7 @@ export class Session implements SessionFace {
     if (this.blankBit) this.firstPromptPendingTurn = true
     this.notifier.markDirty()
     const submissionId = clientSubmissionId ?? `client-${this.sessionId}-${++this.promptSequence}`
-    this.beginOutgoing(submissionId, content)
+    this.beginOutgoing(submissionId, content, mode)
     this.outgoing.update(submissionId, 'submitting')
     let result: RpcResult<{ accepted: true }>
     let transportFailed = false

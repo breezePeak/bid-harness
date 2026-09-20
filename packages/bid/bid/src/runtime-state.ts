@@ -480,7 +480,7 @@ export function getBidClientProjection(
     composer: { enabled: true },
     ...fileView,
   }
-  if (state.workflow.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { ...base, allowedActions: ['export_docx'], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
+  if (state.workflow.stage === 'docx_export' && runtime.status !== 'running' && runtime.status !== 'completed') return { ...base, allowedActions: ['send_message', 'export_docx'], composer: { enabled: true }, ...fileView }
   if (state.workflow.gate === 'failed') return {
     ...base,
     allowedActions: ['send_message'],
@@ -506,7 +506,7 @@ export function getBidClientProjection(
     composer: { enabled: true },
     ...fileView,
   }
-  if (runtime.stage === 'file_intake') return { ...base, allowedActions: ['upload_files'], composer: { enabled: false, reason: 'bid.upload_required' }, ...fileView }
+  if (runtime.stage === 'file_intake') return { ...base, allowedActions: ['upload_files', 'send_message'], composer: { enabled: true }, ...fileView }
   if (runtime.stage === 'tender_analysis' && runtime.status === 'waiting_user') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
   if ((runtime.stage === 'outline_generation' || runtime.stage === 'evidence_mapping') && runtime.status === 'waiting_user') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
   if (runtime.stage === 'chapter_writing' && runtime.status === 'waiting_user') return {
@@ -515,5 +515,5 @@ export function getBidClientProjection(
     composer: { enabled: true },
     ...fileView,
   }
-  return { ...base, allowedActions: [], composer: { enabled: false, reason: 'bid.stage_pending' }, ...fileView }
+  return { ...base, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
 }

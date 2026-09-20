@@ -106,7 +106,7 @@ function concreteConversation(ctx: Context): ConversationController {
   return conversation
 }
 
-/** Chain routing: claim the composer while an approval wait is pending (pure — owner props only). */
+/** Select the pending Approval for the structured interaction panel. */
 function selectApproval({ interactions }: ComposerChainProps): ApprovalWait | null {
   return interactions.find((i): i is ApprovalWait => i.kind === 'approval') ?? null
 }
@@ -214,6 +214,7 @@ export function apply(ctx: Context): void {
       'conversation.session': { kind: 'single', scope: 'session' },
       'conversation.session.header': { kind: 'single', scope: 'session' },
       'conversation.composer': { kind: 'chain', scope: 'session' },
+      'conversation.composer.interaction': { kind: 'chain', scope: 'session' },
       'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
       'conversation.input.overlay': { kind: 'list', scope: 'session' },
       'conversation.input.dock': { kind: 'list', scope: 'session' },
@@ -357,7 +358,8 @@ export function apply(ctx: Context): void {
         },
         draftImages: ids => conversation.draftImages(ids),
         resolveSubmitMode: (running, gesture, steeringAvailable) =>
-          submissionPolicy.resolve(running, gesture, steeringAvailable),
+          scopedConversation(sessions, sessionId).resolveSubmitModeOverride(running, steeringAvailable)
+          ?? submissionPolicy.resolve(running, gesture, steeringAvailable),
         toggleCommandMenu: inputTriggers === undefined
           ? undefined
           : (selection) => {
@@ -391,15 +393,13 @@ export function apply(ctx: Context): void {
     },
   }, InputBar)
 
-  // The approval takeover: a selector-routed entry of the chain this package
-  // just declared (the ui-user-questions registration pattern; the entry lives here
-  // because approval answering is core conversation UX, not an optional tool).
-  // Zero business face — data and verbs both ride the matched carrier.
-  // priority 1: question takeovers (default 0) win when both kinds are
+  // Approval is a structured interaction above the resident InputBar. The
+  // matched carrier supplies both data and response verbs.
+  // priority 1: questions (default 0) win when both kinds are
   // pending — a question is a conversation the model is waiting on, while an
   // approval only blocks one tool call; answering the question first cannot
   // strand the approval (it re-elects the moment the question resolves).
-  slots.register({ name: 'conversation.composer', select: selectApproval, priority: 1, locale: NS }, ApprovalPanel)
+  slots.register({ name: 'conversation.composer.interaction', select: selectApproval, priority: 1, locale: NS }, ApprovalPanel)
 
   // The chat view: first entry of the ring this package just declared.
   // ChatView owns only the stable ordered Node list. Business renderers are
