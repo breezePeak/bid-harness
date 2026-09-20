@@ -17,8 +17,11 @@
 - group:
   - status: Retried model request (2/2) · {{duration}}
 - status:
-  - text: This turn failedupstream 503
-  - code: SERVER
+  - button "This turn failed SERVERupstream 503":
+    - img
+    - text: This turn failed
+    - code: SERVER
+    - text: upstream 503
 - textbox "Message the agent"
 - button "Commands":
   - img

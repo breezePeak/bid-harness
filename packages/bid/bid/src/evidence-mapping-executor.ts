@@ -16,7 +16,7 @@ import { buildWebEvidenceSnapshots, type CapturedWebResult, type WebEvidenceSnap
 import { evidenceChunkId } from './document-chunk.ts'
 import { mappingCorpusToolGuard, resolveMappingCorpusLocations, type MappingCorpusLocation } from './evidence-mapping-corpus.ts'
 import { createMappingSourceTools, mappingMaterialRef, mappingSourceCatalog } from './evidence-mapping-source-tools.ts'
-import { buildWritableSectionWorklist, sectionEvidenceContext, outlineSectionScope } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, sectionEvidenceContext, sectionVisibleRequirements, outlineSectionScope } from './section-evidence-context.ts'
 import {
   canonicalWebChunkRefs,
   evidenceMappingPartialResultSchema,
@@ -743,6 +743,22 @@ function mappingTaskWritingSections(outline: OutlineArtifact, task: EvidenceMapp
   return buildWritableSectionWorklist(outline).filter(section => editable.has(section.id))
 }
 
+function mappingTaskAssignedCoverage(outline: OutlineArtifact, task: EvidenceMappingTask): {
+  requirement_ids: string[]
+  scoring_ids: string[]
+  scoring_response_point_ids: string[]
+} {
+  const assignedIds = taskOwnsOutlineRefinement(task)
+    ? taskEditableSectionIds(outline, task)
+    : new Set(task.section_ids)
+  const assignedSections = outline.sections.filter(section => assignedIds.has(section.id))
+  return {
+    requirement_ids: uniqueStrings(assignedSections.flatMap(section => section.requirement_ids)),
+    scoring_ids: uniqueStrings(assignedSections.flatMap(section => section.scoring_ids)),
+    scoring_response_point_ids: uniqueStrings(assignedSections.flatMap(section => section.scoring_response_point_ids ?? [])),
+  }
+}
+
 function mappingTaskOutlineSections(outline: OutlineArtifact, task: EvidenceMappingTask): Array<{
   section_id: string
   parent_id: string | null
@@ -777,16 +793,27 @@ function applySectionTaskOperation(state: MappingSubmissionState, task: Evidence
   if (!mappingTaskWritingSections(state.stagedOutline, task).some(section => section.id === operation.section_id)) {
     throw new ToolArgsError([`section_id: ${operation.section_id} 不属于当前任务。`])
   }
+  const allowedRequirementIds = [...state.assignedCoverage.requirement_ids]
+  if (operation.basis.kind === 'tender_requirement' && allowedRequirementIds.length === 0) {
+    throw new ToolArgsError([
+      'basis.kind: 当前任务没有可写 Requirement Coverage；相关 Requirements 仅为只读研究上下文。若依据章节职责完善 Blueprint，请使用 kind=section_responsibility、requirement_ids=[]；禁止猜测 Requirement ID。',
+    ])
+  }
   if (operation.basis.kind === 'tender_requirement' && operation.basis.requirement_ids.length === 0) {
     throw new ToolArgsError(['basis.requirement_ids: 招标要求依据必须指明相关要求。'])
   }
   for (const id of operation.basis.requirement_ids) if (!state.assignedCoverage.requirement_ids.has(id)) {
-    throw new ToolArgsError([`basis.requirement_ids: ${id} 不属于本任务的招标要求。`])
+    throw new ToolArgsError([
+      `basis.requirement_ids: ${id} 不属于本任务 Coverage Ownership。当前允许值：${JSON.stringify(allowedRequirementIds)}。`
+      + (allowedRequirementIds.length === 0 ? ' 当前必须传 requirement_ids=[]；若依据章节职责修改 Blueprint，使用 kind=section_responsibility。' : ''),
+    ])
   }
   if (operation.coverage_override !== undefined) {
     for (const key of Object.keys(state.assignedCoverage) as Array<keyof typeof state.assignedCoverage>) {
       const unknown = operation.coverage_override[key].find(id => !state.assignedCoverage[key].has(id))
-      if (unknown !== undefined) throw new ToolArgsError([`coverage_override.${key}: ${unknown} 不属于当前任务。`])
+      if (unknown !== undefined) throw new ToolArgsError([
+        `coverage_override.${key}: ${unknown} 不属于当前任务 Coverage Ownership。当前允许值：${JSON.stringify([...state.assignedCoverage[key]])}。`,
+      ])
     }
   }
   const before = currentSectionMapping(state, task, operation.section_id)
@@ -973,6 +1000,7 @@ function successfulLocalResearchRefs(
 
 function assertResearchFindingReferences(
   assessment: SectionResearchAssessment,
+  visibleTenderContext: ReturnType<typeof mappingTaskVisibleTenderContext>,
   inputs: EvidenceMappingInputs,
   locations: readonly MappingCorpusLocation[],
   captured: Iterable<CapturedWebResult>,
@@ -980,9 +1008,9 @@ function assertResearchFindingReferences(
 ): void {
   const capturedResults = [...captured]
   const validRefs = {
-    requirement: new Set(inputs.requirements.requirements.map(item => item.id)),
-    scoring: new Set(inputs.scoring.scoring_items.map(item => item.id)),
-    response_point: new Set(inputs.responsePoints.points.map(item => item.id)),
+    requirement: new Set(visibleTenderContext.requirements.map(item => item.id)),
+    scoring: new Set(visibleTenderContext.scoring.map(item => item.id)),
+    response_point: new Set(visibleTenderContext.responsePoints.map(item => item.id)),
     user_framework: new Set(inputs.frameworks.flatMap((framework, frameworkIndex) => framework.headings
       .map((_heading, headingIndex) => userFrameworkHeadingRef(frameworkIndex, headingIndex)))),
     reference_outline: new Set(locations.flatMap((location, locationIndex) => (location.outline ?? [])
@@ -1632,7 +1660,14 @@ function attachMappingSubmissionRuntime(
         ...submitted,
         key_findings: submitted.key_findings.map(finding => ({ ...finding, finding_ref: researchFindingRef(finding.finding) })),
       })
-      assertResearchFindingReferences(assessment, inputs, locations, captured(), readWebChunkRefs())
+      assertResearchFindingReferences(
+        assessment,
+        mappingTaskVisibleTenderContext(task, inputs),
+        inputs,
+        locations,
+        captured(),
+        readWebChunkRefs(),
+      )
       const retainedFindingRefs = new Set(assessment.key_findings.map(finding => finding.finding_ref))
       const used = new Set(state.outlineOperationBases.flatMap(basis => basis.finding_refs))
       assessment.key_findings.push(...state.researchAssessment?.key_findings
@@ -1655,7 +1690,12 @@ function attachMappingSubmissionRuntime(
   })
   if (task.task_kind !== 'branch_summary') register({
     name: 'update_section_task',
-    description: '研究充分性判断通过后，独立记录或修改章节 Writing Brief、展开维度、职责内缺口或覆盖关联；材料仍须锁定后另行提交。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
+    description: [
+      '研究充分性判断通过后，独立记录或修改章节 Writing Brief、展开维度、职责内缺口或覆盖关联；材料仍须锁定后另行提交。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
+      state.assignedCoverage.requirement_ids.size === 0
+        ? '当前任务 requirement_ids 可写集合为空；基于章节职责更新时使用 section_responsibility + requirement_ids=[]；Related Requirements 仅为只读上下文。'
+        : `basis.requirement_ids / coverage_override.requirement_ids 只能使用：${[...state.assignedCoverage.requirement_ids].join(', ')}。`,
+    ].join(' '),
     parameters: zodJsonSchema(sectionTaskOperationSchema), output,
     async execute(args: unknown): Promise<unknown> {
       const change = applySectionTaskOperation(state, task, args)
@@ -2290,6 +2330,34 @@ function subagentTaskContext(value: unknown): unknown {
     .map(([key, field]) => [key, subagentTaskContext(field)]))
 }
 
+function mappingTaskVisibleTenderContext(task: EvidenceMappingTask, inputs: EvidenceMappingInputs): {
+  currentScope: Set<string>
+  contextSections: OutlineArtifact['sections']
+  requirements: EvidenceMappingInputs['requirements']['requirements']
+  scoring: EvidenceMappingInputs['scoring']['scoring_items']
+  responsePoints: EvidenceMappingInputs['responsePoints']['points']
+  compliance: EvidenceMappingInputs['compliance']['compliance_items']
+} {
+  const summaryContext = new Set((task.summary_section_ids ?? []).flatMap(id => [
+    id, ...directChildSections(inputs.outline, id).map(section => section.id),
+  ]))
+  const currentScope = scopedSectionIds(inputs.outline, task)
+  const contextSections = inputs.outline.sections.filter(section => currentScope.has(section.id) || summaryContext.has(section.id))
+  const requirementIds = new Set(contextSections.flatMap(section =>
+    sectionVisibleRequirements(section, inputs.requirements).map(item => item.id)))
+  const scoringIds = new Set(contextSections.flatMap(section => section.scoring_ids))
+  const responsePointIds = new Set(contextSections.flatMap(section => section.scoring_response_point_ids ?? []))
+  const complianceIds = new Set(contextSections.flatMap(section => sectionEvidenceContext(inputs.outline, section).compliance_ids))
+  return {
+    currentScope,
+    contextSections,
+    requirements: inputs.requirements.requirements.filter(item => requirementIds.has(item.id)),
+    scoring: inputs.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
+    responsePoints: inputs.responsePoints.points.filter(item => responsePointIds.has(item.id)),
+    compliance: inputs.compliance.compliance_items.filter(item => complianceIds.has(item.id)),
+  }
+}
+
 /**
  * Render one bounded independent Mapping Subagent assignment.
  * @param task - Section-based task assigned to this Child.
@@ -2306,19 +2374,9 @@ export function renderEvidenceMappingSubagentTask(
   promptTask: EvidenceMappingTask = task,
   webSearchEnabled = true,
 ): string {
-  const summaryContext = new Set((promptTask.summary_section_ids ?? []).flatMap(id => [
-    id, ...directChildSections(inputs.outline, id).map(section => section.id),
-  ]))
-  const currentScope = scopedSectionIds(inputs.outline, promptTask)
-  const contextSections = inputs.outline.sections.filter(section => currentScope.has(section.id) || summaryContext.has(section.id))
-  const requirementIds = new Set(contextSections.flatMap(section => section.requirement_ids))
-  const scoringIds = new Set(contextSections.flatMap(section => section.scoring_ids))
-  const responsePointIds = new Set(contextSections.flatMap(section => section.scoring_response_point_ids ?? []))
-  const complianceIds = new Set(contextSections.flatMap(section => sectionEvidenceContext(inputs.outline, section).compliance_ids))
-  const requirements = inputs.requirements.requirements.filter(item => requirementIds.has(item.id))
-  const scoring = inputs.scoring.scoring_items.filter(item => scoringIds.has(item.id))
-  const responsePoints = inputs.responsePoints.points.filter(item => responsePointIds.has(item.id))
-  const compliance = inputs.compliance.compliance_items.filter(item => complianceIds.has(item.id))
+  const { currentScope, contextSections, requirements, scoring, responsePoints, compliance } =
+    mappingTaskVisibleTenderContext(promptTask, inputs)
+  const coverageOwnership = mappingTaskAssignedCoverage(inputs.outline, task)
   const currentSectionScope = inputs.outline.sections.filter(section => currentScope.has(section.id))
     .map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }))
   const phaseTools = task.task_kind === 'branch_summary'
@@ -2362,6 +2420,12 @@ export function renderEvidenceMappingSubagentTask(
     `相关 Scoring：${JSON.stringify(subagentTaskContext(scoring))}`,
     `相关 Response Points：${JSON.stringify(subagentTaskContext(responsePoints))}`,
     `相关 Compliance：${JSON.stringify(subagentTaskContext(compliance))}`,
+    `current_coverage_ownership：${JSON.stringify(coverageOwnership)}`,
+    '相关 Requirements / Scoring / Response Points 是当前 Child 可读取、研究和引用的业务上下文；current_coverage_ownership 才是 update_section_task 可以写入的 coverage 范围，两者不是同一概念。',
+    'update_section_task.basis.requirement_ids 和 coverage_override.requirement_ids 只能使用 current_coverage_ownership.requirement_ids 中的 ID。',
+    ...(coverageOwnership.requirement_ids.length === 0 ? [
+      'current_coverage_ownership.requirement_ids=[] 时，不得猜测 Requirement ID，不得使用 kind=tender_requirement；依据当前章节职责完善 Blueprint 时使用 kind=section_responsibility，并传 requirement_ids=[]。',
+    ] : []),
     ...(task.phase === 'final_check' ? [] : [`可用资料目录与正文定位：${JSON.stringify(mappingSourceCatalog(locations))}`]),
     `只允许调用：${allowedTools.join(', ')}。资料只能通过授权引用读取。`,
     ...(task.task_kind === 'branch_summary' ? [] : [
@@ -2411,7 +2475,16 @@ function renderEvidenceMappingRepairChecklist(
     if (!state.researchReady) steps.push('先完成当前 Section 的资料研究，再调用 submit_section_research_assessment 提交 sufficient_for_blueprint=true 的结论。')
     const missingBlueprints = mappingTaskWritingSections(state.stagedOutline, task)
       .filter(section => !state.blueprintSections.has(section.id)).map(section => section.id)
-    if (missingBlueprints.length > 0) steps.push(`随后为 ${missingBlueprints.join('、')} 调用 update_section_task，提交完整 Blueprint。`)
+    if (missingBlueprints.length > 0) {
+      const allowedRequirementIds = [...state.assignedCoverage.requirement_ids]
+      steps.push([
+        `随后为 ${missingBlueprints.join('、')} 调用 update_section_task，提交完整 Blueprint。`,
+        `当前可写 requirement_ids=${JSON.stringify(allowedRequirementIds)}。`,
+        ...(allowedRequirementIds.length === 0 ? [
+          '本任务没有 Requirement Coverage；不要猜 Requirement ID。依据章节职责更新时使用 basis.kind=section_responsibility、basis.requirement_ids=[]。',
+        ] : ['只能从该集合选择 Requirement ID。']),
+      ].join(''))
+    }
     if (state.structureAssessment === undefined || state.structureAssessment.stale) steps.push('再调用 submit_section_structure_assessment，针对当前 Blueprint 提交有效的目录判断。')
     if (!state.locked) steps.push('完成有效目录判断后调用 lock_section_outline；锁定成功前不得提交 Mapping。')
   } else if (!state.locked) {
@@ -3836,10 +3909,7 @@ async function executeEvidenceMappingRun(
         const mapping = acceptedMappings.get(sectionId)
         if (mapping !== undefined) baselineMappings.set(sectionId, mapping)
       }
-      const assignedIds = taskOwnsOutlineRefinement(mappingTask)
-        ? taskEditableSectionIds(runInputs.outline, mappingTask)
-        : new Set(mappingTask.section_ids)
-      const assignedSections = runInputs.outline.sections.filter(section => assignedIds.has(section.id))
+      const assignedCoverage = mappingTaskAssignedCoverage(runInputs.outline, mappingTask)
       const savedProgress = mappingTask.phase === 'final_check' ? checkpointTasks.get(mappingTask.task_id) : undefined
       const restoredResult = savedProgress?.result
       const restoredReviews = new Map((savedProgress?.review_records ?? []).map((item, index) => {
@@ -3893,9 +3963,9 @@ async function executeEvidenceMappingRun(
           reviewSequence: restoredReviews.size,
           reviewInvalidated: savedProgress?.review_invalidated ?? 0,
           assignedCoverage: {
-            requirement_ids: new Set(assignedSections.flatMap(section => section.requirement_ids)),
-            scoring_ids: new Set(assignedSections.flatMap(section => section.scoring_ids)),
-            scoring_response_point_ids: new Set(assignedSections.flatMap(section => section.scoring_response_point_ids ?? [])),
+            requirement_ids: new Set(assignedCoverage.requirement_ids),
+            scoring_ids: new Set(assignedCoverage.scoring_ids),
+            scoring_response_point_ids: new Set(assignedCoverage.scoring_response_point_ids),
           },
           reviewInputs: runInputs,
           responsePoints: runInputs.responsePoints,

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { buildEvidenceMappingPlan, buildChapterWorklist, buildWritableSectionWorklist, changedWritableSectionIds, validateSectionEvidenceCoverage, reconcileSectionEvidence, type EvidenceMapArtifact, type OutlineArtifact, type OutlineSection } from '@deepseek-ai/dsh-bid'
+import { buildEvidenceMappingPlan, buildChapterWorklist, buildWritableSectionWorklist, changedWritableSectionIds, validateSectionEvidenceCoverage, reconcileSectionEvidence, sectionVisibleRequirements, TECHNICAL_DEVIATION_SECTION_ID, type EvidenceMapArtifact, type OutlineArtifact, type OutlineSection, type TenderRequirementsArtifact } from '@deepseek-ai/dsh-bid'
 
 function section(id: string, parent_id: string | null, order: number): OutlineSection {
   return { id, parent_id, order, level: parent_id === null ? 1 : 2, title: id, purpose: '说明方案', writable: true, must_answer: ['回答要求'], requirement_ids: [], scoring_ids: [], compliance_ids: [], scoring_response_point_ids: [], origin: 'generated', scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] }
@@ -15,6 +15,22 @@ function outline(): OutlineArtifact {
 function evidence(value: OutlineArtifact): EvidenceMapArtifact {
   return { section_mappings: buildWritableSectionWorklist(value).map(section => ({ section_id: section.id, local_materials: [], web_materials: [], missing_topics: ['没有可靠资料'], writing_dimensions: [] })) }
 }
+
+const requirements: TenderRequirementsArtifact = {
+  schema_version: 1,
+  requirements: ['R-1', 'R-2'].map(id => ({
+    id, category: '技术', raw_text: id, normalized_requirement: id, mandatory: true, source_refs: [],
+  })),
+}
+
+it('普通章节只读取归属 Requirement，技术偏离表只读全部 Requirement 且不改变归属', () => {
+  const ordinary = { ...section('SEC-1', null, 1), requirement_ids: ['R-1'] }
+  const deviation = { ...section(TECHNICAL_DEVIATION_SECTION_ID, null, 1), requirement_ids: [] }
+
+  expect(sectionVisibleRequirements(ordinary, requirements).map(item => item.id)).toEqual(['R-1'])
+  expect(sectionVisibleRequirements(deviation, requirements).map(item => item.id)).toEqual(['R-1', 'R-2'])
+  expect(deviation.requirement_ids).toEqual([])
+})
 
 it('14 个可写叶子生成 14 个独立 Mapping Task，S5 仍逐章节写作', () => {
   const value: OutlineArtifact = { ...outline(), sections: [

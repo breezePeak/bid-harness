@@ -15,6 +15,7 @@ import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai
 import {
   pickChapterContext,
   preserveParagraphRevisionMetadata,
+  renderChapterSubagentTask,
   renderChapterExecutionPlanTask,
   validateChapterCandidate,
   type ChapterWritingCommand,
@@ -30,6 +31,7 @@ import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
 import {
   BidWorkspace,
+  TECHNICAL_DEVIATION_SECTION_ID,
   type OutlineArtifact,
   CHAPTER_EXECUTION_SCHEMA_VERSION,
   buildBidStageTask,
@@ -73,6 +75,49 @@ const executeChapterWriting = (
 }
 
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
+
+it('技术偏离表读取全部 Requirement 但保持空 coverage ownership', () => {
+  const base = outlineFixture()
+  const section = {
+    ...base.sections[1]!,
+    id: TECHNICAL_DEVIATION_SECTION_ID,
+    parent_id: null,
+    requirement_ids: [],
+  }
+  const outline = { ...base, sections: [section] }
+  const requirements = parseTenderRequirementsArtifact({
+    schema_version: 1,
+    requirements: ['R-1', 'R-2'].map(id => ({
+      id, category: '技术', raw_text: `${id} 原文`, normalized_requirement: `${id} 要求`, mandatory: true, source_refs: source,
+    })),
+  })
+  const context = pickChapterContext({
+    section,
+    sequence: 1,
+    project: parseTenderProjectArtifact({
+      schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+      project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
+      implementation_constraints: [], key_technical_points: [], source_refs: source, analyzed_tender_files: ['tender'],
+    }),
+    requirements,
+    scoring: parseTenderScoringArtifact({ schema_version: 1, scoring_items: [] }),
+    compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
+    evidence: parseEvidenceMapArtifact({ section_mappings: [{
+      section_id: section.id, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: [],
+    }] }),
+    responsePointCatalog: [],
+    outline,
+    writingPlan: writingPlanFixture(outline),
+  })
+
+  expect(context.requirements.map(item => item.id)).toEqual(['R-1', 'R-2'])
+  expect(context.section.requirement_ids).toEqual([])
+  const prompt = renderChapterSubagentTask(context, [], [], [])
+  expect(prompt).toContain('Relevant Requirements')
+  expect(prompt).toContain('R-1')
+  expect(prompt).toContain('R-2')
+  expect(prompt).toContain('只读 Requirement 上下文，不代表本章拥有正文 coverage')
+})
 
 it('段落修订保留原 metadata 和流程图定义', () => {
   const flowchart = {

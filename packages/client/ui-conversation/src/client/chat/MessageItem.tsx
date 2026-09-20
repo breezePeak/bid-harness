@@ -8,7 +8,7 @@ import type { ReactNode } from 'react'
 import type {
   ModelRetryNode, TurnErrorNode, UserMessageNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
-import { JsonBlock, MessageText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DisclosureRow, JsonBlock, MessageText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { OutgoingMessage } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeOwnerProps, ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
 import { ReferenceIcon } from '../reference/ReferenceIcon.tsx'
@@ -113,19 +113,41 @@ function ModelRetryItem({ node, active, t }: {
   )
 }
 
-/** Persistent, turn-positioned feedback for a terminal failure. */
 function TurnErrorItem({ node, t }: {
   node: TurnErrorNode
   t: ChatViewSlotProps['t']
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const firstLine = node.message.trim().split(/\r?\n/u, 1)[0] ?? node.message
   return (
-    <div className={css.turnErrorRow} role="status">
-      <StateDot state="error" className={css.turnErrorDot} />
-      <div className={css.turnErrorCopy}>
-        <span className={css.turnErrorTitle}>{t('message.turnError')}</span>
-        <span className={css.turnErrorMessage}>{node.message}</span>
-      </div>
-      {node.code !== undefined && <code className={css.turnErrorCode}>{node.code}</code>}
+    <div className={css.turnError} role="status">
+      <DisclosureRow
+        rowClassName={css.turnErrorRow}
+        leadingClassName={css.turnErrorLeading}
+        titleClassName={css.turnErrorTitle}
+        chevronClassName={css.turnErrorChevron}
+        icon={<StateDot state="error" />}
+        title={t('message.turnError')}
+        open={expanded}
+        expandable
+        expandOnRowClick
+        onToggle={() => { setExpanded(value => !value) }}
+        collapsedContent={(
+          <>
+            <span className={css.turnErrorSeparator} aria-hidden />
+            <span className={css.turnErrorSummary}>
+              {node.code !== undefined && <code className={css.turnErrorCode}>{node.code}</code>}
+              {node.code !== undefined && firstLine !== '' && <span aria-hidden> · </span>}
+              {firstLine}
+            </span>
+          </>
+        )}
+      >
+        <div className={css.turnErrorBody}>
+          {node.code !== undefined && <code className={css.turnErrorCode}>{node.code}</code>}
+          <div>{node.message}</div>
+        </div>
+      </DisclosureRow>
     </div>
   )
 }
@@ -135,7 +157,7 @@ function TurnMaxTokensItem({ t }: {
   t: ChatViewSlotProps['t']
 }) {
   return (
-    <div className={css.turnErrorRow} role="status">
+    <div className={css.maxTokensRow} role="status">
       <StateDot state="warning" className={css.turnErrorDot} />
       <div className={css.turnErrorCopy}>
         <span className={css.maxTokensTitle}>{t('message.maxTokens')}</span>

@@ -1,8 +1,9 @@
 /** S4 与 S5 共用的章节遍历、检索上下文及证据集合校验。 */
 import { BidStageExecutionError, type StageValidationIssue } from './control-plane-contract.ts'
 import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
-import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
+import type { TenderRequirementsArtifact } from './tender-analysis-artifacts.ts'
 
 interface SectionEvidenceContext {
   readonly heading_path: string[]
@@ -75,6 +76,22 @@ export function sectionEvidenceContext(outline: OutlineArtifact, section: Outlin
     suggested_tables: section.suggested_tables,
     suggested_figures: section.suggested_figures,
   }
+}
+
+/**
+ * 返回模型可见的只读 Requirement 上下文，不决定 Outline coverage ownership。
+ * `section.requirement_ids` 仍是正式 coverage 的唯一来源。
+ * @param section 当前目录章节。
+ * @param requirements S2 Requirement 清单。
+ * @returns 保持 S2 原顺序的当前章节可见 Requirement。
+ */
+export function sectionVisibleRequirements(
+  section: OutlineSection,
+  requirements: TenderRequirementsArtifact,
+): TenderRequirementsArtifact['requirements'] {
+  if (section.id === TECHNICAL_DEVIATION_SECTION_ID) return requirements.requirements
+  const ids = new Set(section.requirement_ids)
+  return requirements.requirements.filter(item => ids.has(item.id))
 }
 
 /**

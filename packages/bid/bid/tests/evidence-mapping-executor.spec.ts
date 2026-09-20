@@ -43,6 +43,7 @@ import {
   parseTenderScoringArtifact,
   pickChapterContext,
   readEvidenceMappingProgress,
+  renderEvidenceMappingSubagentTask,
   resolveMappingCorpusLocations,
   mappingCorpusToolGuard,
   webEvidenceContentSha256,
@@ -52,6 +53,7 @@ import {
   type OutlineSection,
   type LocalEvidenceMaterial,
   type SectionEvidenceMapping,
+  TECHNICAL_DEVIATION_SECTION_ID,
 } from '@deepseek-ai/dsh-bid'
 import { writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
 
@@ -146,6 +148,53 @@ function promptText(request: { prompt: readonly { type: string; text?: string }[
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
+it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 coverage ownership', () => {
+  const source = [{ file_id: 'tender', chunk: 'chunk', line_start: 1, line_end: 1 }]
+  const requirements = parseTenderRequirementsArtifact({
+    schema_version: 1,
+    requirements: ['R-1', 'R-2'].map(id => ({
+      id, category: '技术', raw_text: `${id} 原文`, normalized_requirement: `${id} 要求`, mandatory: true, source_refs: source,
+    })),
+  })
+  const section = (id: string, requirement_ids: string[], order: number): OutlineSection => ({
+    id, parent_id: null, order, level: 1, title: id, purpose: '形成技术响应', writable: true,
+    must_answer: ['逐项响应'], requirement_ids, scoring_ids: [], compliance_ids: [], origin: 'generated',
+    scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
+  })
+  const outline = parseOutlineArtifact({
+    schema_version: 3, scope: 'technical_bid', document_title: '技术标', global_compliance_ids: [],
+    sections: [section(TECHNICAL_DEVIATION_SECTION_ID, [], 1), section('SEC-1', ['R-1'], 2)],
+  })
+  const scoring = parseTenderScoringArtifact({ schema_version: 1, scoring_items: [] })
+  const inputs = {
+    project: parseTenderProjectArtifact({
+      schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+      project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
+      implementation_constraints: [], key_technical_points: [], source_refs: source, analyzed_tender_files: ['tender'],
+    }),
+    requirements,
+    scoring,
+    responsePoints: createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [] }),
+    compliance: parseTenderComplianceArtifact({ schema_version: 1, compliance_items: [] }),
+    outline,
+    frameworks: [],
+  }
+  const task = (sectionId: string): EvidenceMappingTask => ({
+    task_id: `MAP-INIT-${sectionId}`, task_kind: 'section_mapping', generation: 0, phase: 'initial',
+    section_ids: [sectionId], outline_edit_scope_id: sectionId, title: sectionId, heading_path: [sectionId],
+  })
+  const deviationPrompt = renderEvidenceMappingSubagentTask(task(TECHNICAL_DEVIATION_SECTION_ID), inputs, [])
+  const ordinaryPrompt = renderEvidenceMappingSubagentTask(task('SEC-1'), inputs, [])
+  const field = (prompt: string, prefix: string): unknown => {
+    const line = prompt.split('\n').find(value => value.startsWith(prefix))
+    return line === undefined ? undefined : JSON.parse(line.slice(prefix.length))
+  }
+
+  expect((field(deviationPrompt, '相关 Requirements：') as Array<{ id: string }>).map(item => item.id)).toEqual(['R-1', 'R-2'])
+  expect(field(deviationPrompt, 'current_coverage_ownership：')).toMatchObject({ requirement_ids: [] })
+  expect((field(ordinaryPrompt, '相关 Requirements：') as Array<{ id: string }>).map(item => item.id)).toEqual(['R-1'])
+})
+
 async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2']) {
   const [tender, reference, framework, referenceBid] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
@@ -204,6 +253,7 @@ async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[
 function branchResearchAssessment(
   sufficient = true,
   unresolvedGaps: Array<{ topic: string; affects_blueprint: boolean; writing_impact: string }> = [],
+  requirementRef = 'R-1',
 ) {
   return {
     sufficient_for_blueprint: sufficient,
@@ -214,7 +264,7 @@ function branchResearchAssessment(
       project_specific_quality_risks: '已检查项目特有信息、质量验证、风险与约束。',
     },
     key_findings: [{ finding: '研究识别出技术响应任务的方法与验证责任。', explanation: '根据任务定义方法、输入输出与验证责任。',
-      nature: 'professional_design', basis: [{ kind: 'requirement', ref: 'R-1' }], evidence_boundary: '方法属于方案设计，不冒充采购人指定步骤。' }],
+      nature: 'professional_design', basis: [{ kind: 'requirement', ref: requirementRef }], evidence_boundary: '方法属于方案设计，不冒充采购人指定步骤。' }],
     unresolved_gaps: unresolvedGaps,
   }
 }
@@ -495,6 +545,14 @@ function mappingFixture(
     } catch {
       parsed = undefined
     }
+    const requirementsLine = promptText(request.request).split('\n').find(line => line.startsWith('相关 Requirements：'))
+    const visibleRequirements = requirementsLine === undefined
+      ? []
+      : JSON.parse(requirementsLine.slice('相关 Requirements：'.length)) as Array<{ id: string }>
+    const frameworksLine = promptText(request.request).split('\n').find(line => line.startsWith('用户原始目录框架：'))
+    const visibleFrameworks = frameworksLine === undefined
+      ? []
+      : JSON.parse(frameworksLine.slice('用户原始目录框架：'.length)) as Array<{ headings: Array<{ ref: string }> }>
     const tools = submissionTools.get(String(child.id))
     if (parsed !== undefined && tools !== undefined) {
       const candidates = submissionCandidates(submissionArgs(parsed, String(child.id)))
@@ -504,7 +562,11 @@ function mappingFixture(
         let scopedSections: OutlineSection[] = []
         const assessment = tools.get('submit_section_research_assessment')
         if (assessment !== undefined) {
-          await invokeSubmissionTool(child, assessment, branchResearchAssessment())
+          const research = branchResearchAssessment(true, [], visibleRequirements[0]?.id)
+          if (visibleRequirements.length === 0) {
+            research.key_findings[0]!.basis = [{ kind: 'user_framework', ref: visibleFrameworks[0]!.headings[0]!.ref }]
+          }
+          await invokeSubmissionTool(child, assessment, research)
           scopedSections = JSON.parse(promptText(request.request).split('\n')
             .find(line => line.startsWith('current_section_scope：'))!.slice('current_section_scope：'.length)) as OutlineSection[]
           for (const section of scopedSections.filter(item => item.writable)) {
@@ -917,6 +979,69 @@ function executionLogFixture(
 }
 
 describe('evidence-mapping Agent executor', () => {
+  it('技术偏离表以全量 Requirement 研究并以空 ownership 完成 S4 Task', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-technical-deviation-mapping-')))
+    const material = await writeInputs(workspace, [TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1', 'SEC-2'])
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const deviation = outline.sections[0]!
+    Object.assign(deviation, {
+      title: '技术偏离表', purpose: '逐项形成技术响应索引。', must_answer: ['逐项响应全部技术要求。'],
+      requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
+    })
+    Object.assign(outline.sections[1]!, {
+      requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'],
+      scoring_response_points: [{ scoring_id: 'S-1', response_point: '响应点1' }],
+    })
+    Object.assign(outline.sections[2]!, {
+      requirement_ids: ['R-2'], scoring_ids: ['S-2'], scoring_response_point_ids: ['RP-000002'],
+      scoring_response_points: [{ scoring_id: 'S-2', response_point: '响应点2' }],
+    })
+    await writeFile(outlinePath, JSON.stringify(outline))
+    await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
+      schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['R-1', 'R-2'],
+      checked_scoring_ids: ['S-1', 'S-2'], checked_scoring_response_point_ids: ['RP-000001', 'RP-000002'],
+      reviewed_section_ids: outline.sections.map(section => section.id), issues: [],
+    }))
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 3, maxRepairAttempts: 0,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    const start = fixture.starts.find(item => promptText(item.request.request).includes(`"task_id":"MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}"`))
+    if (start === undefined) throw new Error('missing technical deviation Mapping Child')
+    const childId = start.request.childId!
+    const invoke = (name: string, args: unknown) => fixture.invokeSubmissionTool(childId, name, args)
+
+    for (const requirementId of ['R-1', 'R-2']) {
+      expect((await invoke('submit_section_research_assessment', branchResearchAssessment(true, [], requirementId))).isError).toBe(false)
+    }
+    const invalid = await invoke('update_section_task', {
+      section_id: TECHNICAL_DEVIATION_SECTION_ID,
+      basis: { kind: 'section_responsibility', explanation: '按固定章节职责形成索引。', requirement_ids: ['R-1'] },
+      writing_dimensions: ['逐项技术响应'],
+    })
+    expect(invalid.isError && invalid.error.message).toContain('当前允许值：[]')
+    expect(invalid.isError && invalid.error.message).toContain('section_responsibility')
+    const blueprint = {
+      section_id: TECHNICAL_DEVIATION_SECTION_ID,
+      basis: { kind: 'section_responsibility', explanation: '按固定章节职责形成逐条响应索引。', requirement_ids: [] },
+      writing_brief: { purpose: deviation.purpose, must_answer: deviation.must_answer, writing_notes: [], suggested_tables: ['技术偏离表'], suggested_figures: [] },
+      writing_dimensions: ['逐项技术响应'], missing_topics: [],
+    }
+    expect((await invoke('update_section_task', blueprint)).isError).toBe(false)
+    expect((await invoke('submit_section_structure_assessment', structureAssessment())).isError).toBe(false)
+    expect((await invoke('lock_section_outline', { comparison: '固定技术偏离表职责完整，无需调整目录。' })).isError).toBe(false)
+    expect((await invoke('submit_section_mapping', { section_id: TECHNICAL_DEVIATION_SECTION_ID, local_materials: [], web_materials: [] })).isError).toBe(false)
+    expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
+    expect(fixture.submissionTool(childId, 'update_section_task').description).toContain('requirement_ids 可写集合为空')
+
+    start.complete()
+    fixture.starts.filter(item => item !== start).forEach((item) => { item.resolve() })
+    await execution
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
   it('真实接受入口隔离材料与任务，并按当前版本复核任务、每条用途及受影响祖先总述', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-review-versions-')))
     const material = await writeInputs(workspace)
@@ -1583,6 +1708,9 @@ describe('evidence-mapping Agent executor', () => {
     const unknownLocal = branchResearchAssessment()
     unknownLocal.key_findings[0]!.basis = [{ kind: 'local_material', ref: 'M1:chunk_9999' }]
     expect((await invoke('submit_section_research_assessment', unknownLocal)).isError).toBe(true)
+    const invisibleRequirement = await invoke('submit_section_research_assessment', branchResearchAssessment(true, [], 'R-2'))
+    expect(invisibleRequirement).toMatchObject({ isError: true })
+    expect(invisibleRequirement.isError && invisibleRequirement.error.message).toContain('R-2 不是当前运行中已验证的 requirement 引用')
     const research = await invoke('submit_section_research_assessment', branchResearchAssessment())
     expect(research).toMatchObject({ isError: false, value: { research_ready: true, key_findings: [{ finding_index: 1, nature: 'professional_design' }] } })
     const findingRef = submittedFindingRef(research)

@@ -215,7 +215,7 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-.turnErrorRow {
+.maxTokensRow {
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr) auto;
   gap: 8px;
@@ -229,24 +229,64 @@
   margin-top: 5px;
 }
 
-.turnErrorCopy {
+.turnErrorCopy,
+.turnError {
   min-width: 0;
-  overflow-wrap: anywhere;
+}
+
+.turnErrorRow {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.turnErrorLeading,
+.turnErrorChevron,
+.turnErrorTitle {
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .turnErrorTitle {
-  margin-right: 6px;
-  color: var(--dsw-alias-state-error-primary);
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 400;
 }
 
-.turnErrorMessage {
-  color: var(--dsw-alias-label-secondary);
+.turnErrorSeparator {
+  flex: none;
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
+  background: currentcolor;
+  opacity: 0.55;
+}
+
+.turnErrorSummary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turnErrorBody {
+  padding: 4px 0 4px 22px;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
 }
 
 .turnErrorCode {
-  color: var(--dsw-alias-label-tertiary);
+  color: inherit;
   font: var(--dsw-font-markdown-code-block-small);
+}
+
+.turnErrorBody .turnErrorCode {
+  display: block;
+  margin-bottom: 2px;
 }
 
 .maxTokensTitle {

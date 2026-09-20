@@ -657,14 +657,20 @@ describe('ChatView', () => {
     expect(within(cancelledDisclosure).getByRole('status').textContent).toContain('重试已取消')
   })
 
-  it('renders terminal turn failures inline with their durable message and optional code', () => {
+  it('collapses terminal turn failures to one red summary row and expands the full diagnostic', () => {
     const h = makeHarness({ nodes: [user(1, 'try'), turnError(2, 'AUTH'), turnError(3)] })
     const view = render(<h.ChatView {...h.props} />)
     const statuses = view.getAllByRole('status')
     expect(statuses.map(status => status.textContent)).toEqual([
-      '本轮运行失败API key is invalidAUTH',
+      '本轮运行失败AUTH · API key is invalid',
       '本轮运行失败plugin exploded',
     ])
+    const rows = statuses.map(status => within(status).getByRole('button'))
+    expect(rows.map(row => row.getAttribute('aria-expanded'))).toEqual(['false', 'false'])
+
+    fireEvent.click(rows[0]!)
+    expect(rows[0]?.getAttribute('aria-expanded')).toBe('true')
+    expect(statuses[0]?.textContent).toBe('本轮运行失败AUTHAPI key is invalid')
   })
 
   it('renders the max-tokens notice with localized guidance, distinct from turn errors', () => {

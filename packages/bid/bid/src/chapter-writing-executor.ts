@@ -77,7 +77,7 @@ import {
 } from './chapter-revision-comparison.ts'
 import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
-import { buildWritableSectionWorklist, sectionEvidenceContext, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, sectionEvidenceContext, sectionVisibleRequirements, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import {
   buildWebEvidenceSnapshots,
   type CapturedWebResult,
@@ -98,7 +98,7 @@ import {
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
-import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
 import { resolveFrameworkDraftMaterials, type FrameworkDraftMaterial } from './outline-framework.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog, type ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -280,7 +280,6 @@ export function pickChapterContext(raw: {
   outline: OutlineArtifact
   writingPlan: WritingPlan
 }): ChapterContext {
-  const requirementIds = new Set(raw.section.requirement_ids)
   const scoringIds = new Set(raw.section.scoring_ids)
   const responsePointIds = new Set(raw.section.scoring_response_point_ids ?? [])
   const complianceIds = new Set(raw.section.compliance_ids)
@@ -299,7 +298,7 @@ export function pickChapterContext(raw: {
     contentPath: `chapters/sections/${String(raw.sequence).padStart(4, '0')}.md`,
     metadataPath: `chapters/meta/${String(raw.sequence).padStart(4, '0')}.json`,
     project: raw.project,
-    requirements: raw.requirements.requirements.filter(item => requirementIds.has(item.id)),
+    requirements: sectionVisibleRequirements(raw.section, raw.requirements),
     scoring: raw.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
     responsePoints: raw.responsePointCatalog.filter(point => responsePointIds.has(point.id)),
     compliance: raw.compliance.compliance_items.filter(item => complianceIds.has(item.id)),
@@ -486,6 +485,9 @@ export function renderChapterSubagentTask(
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
     `Chapter Planning Notes：${JSON.stringify(planningNotes)}`,
     `Relevant Requirements：${JSON.stringify(modelContext(context.requirements))}`,
+    ...(context.section.id === TECHNICAL_DEVIATION_SECTION_ID ? [
+      '当前章节是系统固定的技术偏离表。Relevant Requirements 是用于逐条生成响应索引的只读 Requirement 上下文，不代表本章拥有正文 coverage。必须按 Relevant Requirements 的原顺序逐条形成技术偏离表数据，不得漏项。表格中不得输出 REQ-* 系统内部编号，应使用招标原文、原有条款编号、需求名称或 normalized/raw_text 的自然语言。本章只形成响应索引与偏离声明，不展开后续技术正文；实质性方案仍由后续确认章节承担。',
+    ] : []),
     `Relevant Scoring：${JSON.stringify(modelContext(context.scoring))}`,
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
     `Chapter Required Compliance（本章必须正文响应）：${JSON.stringify(modelContext(context.compliance))}`,
