@@ -9,6 +9,7 @@ import type {
   ModelRetryNode, TurnErrorNode, UserMessageNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { JsonBlock, MessageText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { OutgoingMessage } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeOwnerProps, ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
 import { ReferenceIcon } from '../reference/ReferenceIcon.tsx'
 import { CompactionItem } from './CompactionItem.tsx'
@@ -214,7 +215,7 @@ function projectUserText(text: string, sessionLabels: readonly string[]): ReactN
 
 /** Right-aligned bubble shared by user and steering rows. */
 function UserStyleBubble({
-  content, renderMessageImages, actions, pending = false, referenceLabels = [], t,
+  content, renderMessageImages, actions, pending = false, pendingOutgoing = false, error, referenceLabels = [], t,
 }: {
   content: readonly unknown[]
   renderMessageImages: ChatNodeOwnerProps['renderMessageImages']
@@ -222,6 +223,10 @@ function UserStyleBubble({
   actions?: (text: string) => ReactNode
   /** Whether this is the Host-authoritative pre-admission steering projection. */
   pending?: boolean
+  /** Whether this is the client-owned optimistic admission row. */
+  pendingOutgoing?: boolean
+  /** Admission failure attached to the optimistic row. */
+  error?: string
   /** Exact session mention labels associated by the adjacent recall node. */
   referenceLabels?: readonly string[]
   t: ChatViewSlotProps['t']
@@ -230,13 +235,19 @@ function UserStyleBubble({
   const truncated = (total: number): string => t('json.truncated', { total })
   const showBubble = text !== '' || rest.length > 0
   return (
-    <div className={css.userRow} data-pending-steering={pending || undefined} data-time-hover-root>
+    <div
+      className={css.userRow}
+      data-pending-steering={pending || undefined}
+      data-pending-outgoing={pendingOutgoing || undefined}
+      data-time-hover-root
+    >
       <div className={css.userStack}>
         {renderMessageImages({ images, align: 'end' })}
         {showBubble && <div className={css.bubble}>
           {projectUserText(text, referenceLabels)}
           {rest.map((block, i) => <JsonBlock key={i} label={t('message.extraBlock')} payload={block} truncatedLabel={truncated} />)}
         </div>}
+        {error !== undefined && <div className={css.referenceSummary} role="alert">{error}</div>}
         {referenceLabels.length > 0 && (
           <div className={css.referenceSummary}>
             {t('message.referenceSummary', { labels: referenceLabels.join(t('message.referenceSeparator')) })}
@@ -245,6 +256,28 @@ function UserStyleBubble({
       </div>
       {actions?.(text)}
     </div>
+  )
+}
+
+/**
+ * Render one client-owned outgoing message at the chat flow tail.
+ *
+ * @param props - Local outgoing message and chat rendering dependencies.
+ * @returns The pending or failed user-style chat bubble.
+ */
+export function PendingOutgoingBubble({ message, renderMessageImages, t }: {
+  message: OutgoingMessage
+  renderMessageImages: ChatNodeOwnerProps['renderMessageImages']
+  t: ChatViewSlotProps['t']
+}): ReactNode {
+  return (
+    <UserStyleBubble
+      content={message.content}
+      renderMessageImages={renderMessageImages}
+      pendingOutgoing
+      {...(message.error === undefined ? {} : { error: message.error })}
+      t={t}
+    />
   )
 }
 

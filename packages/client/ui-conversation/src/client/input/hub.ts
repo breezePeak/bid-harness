@@ -86,26 +86,24 @@ export class InputHub implements SessionInputResolver {
       inputTriggers: () => this.controller(actx),
       popup: () => this.popup(actx),
       queue: queueReadFaceOf(session),
-      localHandoff: attempt => this.conversation().beginOutgoing(
-        session,
-        attempt.draftSnapshot,
-        attempt.imageIds ?? [],
-        attempt.submissionId ?? `client-${attempt.seq}`,
-        attempt.mode,
+      localHandoff: (attempt) => {
+        this.conversation().beginOutgoing(
+          session,
+          attempt.draftSnapshot,
+          attempt.imageIds ?? [],
+          attempt.submissionId,
+          attempt.mode,
+        )
+      },
+      localImageHandoff: (imageIds, submissionId, mode) => {
+        this.conversation().beginOutgoing(session, '', imageIds, submissionId, mode)
+      },
+      localHandoffFailed: (attempt, error) => {
+        this.conversation().updateOutgoing(session, attempt.submissionId, error)
+      },
+      defaultSink: (text, imageIds, mode, signal, submissionId) => this.sink(
+        session, text, imageIds, mode, signal, submissionId,
       ),
-      localImageHandoff: imageIds => this.conversation().beginOutgoing(
-        session,
-        '',
-        imageIds,
-        `client-${id}-${Date.now()}`,
-        'queue',
-      ),
-      localHandoffFailed: (attempt, error) => this.conversation().updateOutgoing(
-        session,
-        attempt.submissionId ?? `client-${id}-${attempt.seq}`,
-        error,
-      ),
-      defaultSink: (text, imageIds, mode, signal) => this.sink(session, text, imageIds, mode, signal),
       steerQueue: () => { void this.steerQueue(session, shell) },
       commandImages: {
         serialize: ids => this.conversation().serializeDraftImages(ids),
@@ -196,9 +194,10 @@ export class InputHub implements SessionInputResolver {
     imageIds: readonly DraftAttachmentId[],
     mode: InputSubmitMode,
     signal: AbortSignal,
+    submissionId: string,
   ): Promise<SubmitOutcome> {
     if (text === '' && imageIds.length === 0) return Promise.resolve({ kind: 'success' })
-    return this.conversation().sendSession(session, text, imageIds, mode, signal)
+    return this.conversation().sendSession(session, text, imageIds, mode, signal, submissionId)
   }
 
   /**

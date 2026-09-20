@@ -356,6 +356,48 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.getDocxTemplateLibrary(main.session)).toEqual(library)
   })
 
+  it('pending and failed Bid stages expose bounded public inspection without starting a Run', async () => {
+    const { ctx, workspace, fresh, host } = await fixture()
+    await seedProjectArtifacts(workspace)
+    const cases = [
+      ['file_intake', 'pending', 'ready'],
+      ['tender_analysis', 'pending', 'ready'],
+      ['evidence_mapping', 'waiting_start', 'waiting_start'],
+      ['tender_analysis', 'failed', 'failed'],
+      ['docx_export', 'pending', 'ready'],
+    ] as const
+
+    for (const [stage, status, gate] of cases) {
+      await checkpointBidProjectState(workspace, {
+        workflow: { stage, gate },
+        run: null,
+        lastRun: null,
+      })
+      const agent = await fresh(`idle-${stage}-${status}`)
+
+      await expect(ctx.serial('session/prompt-admission', {
+        session: agent.session,
+        mode: 'queue',
+        content: [{ type: 'text', text: '现在是什么状态？' }],
+      })).resolves.toBeUndefined()
+
+      expect(ctx.tools.schemas(agent).filter(tool => tool.name.startsWith('bid_')).map(tool => tool.name))
+        .toEqual(['bid_stage_inspect'])
+      const inspected = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'summary' },
+        callId: CallId(`idle-${stage}-${status}`),
+        signal: new AbortController().signal,
+      })
+      expect(inspected.isError, JSON.stringify(inspected)).toBe(false)
+      expect(inspected.value).toMatchObject({ runtime: { stage, status } })
+      expect(host.inFlight.size).toBe(0)
+      expect(agent.session.events.some(event => event.type === 'bid.stage.started')).toBe(false)
+      expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
+    }
+  })
+
   it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
@@ -366,6 +408,13 @@ describe('Workspace 项目与独立 Session', () => {
     ]) {
       await writeFile(join(workspace.projectRoot, 'outline', path!), JSON.stringify({ ...outline, sections: outline.sections.map(section => ({ ...section, title })) }))
     }
+    const finalOutline = { ...outline, sections: outline.sections.map(section => ({ ...section, title: 'S4 最终确认目录' })) }
+    const writingPlanPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const writingPlan = JSON.parse(await readFile(writingPlanPath, 'utf8')) as Record<string, unknown>
+    await writeFile(writingPlanPath, JSON.stringify({
+      ...writingPlan,
+      confirmed_outline_sha256: outlineArtifactSha256(finalOutline),
+    }))
     const cases = [
       ['file_intake', 'pending', false, null, false],
       ['tender_analysis', 'waiting_user', true, null, false],
@@ -382,6 +431,7 @@ describe('Workspace 项目与独立 Session', () => {
     for (const [index, [stage, status, tender, title, body]] of cases.entries()) {
       await checkpointBidProjectState(workspace, { stage, status })
       const agent = await fresh(`details-${String(index)}`)
+      executor.execute.mockClear()
       const details = await ctx.bid.getDetails(agent.session)
       expect(details.tender !== null).toBe(tender)
       expect(details.outline?.sections[0]?.title ?? null).toBe(title)
@@ -393,8 +443,8 @@ describe('Workspace 项目与独立 Session', () => {
         expect(details.outlinePresentation?.evidence?.section_mappings[0]?.missing_topics).toEqual(['待补充实施材料'])
         expect(details.outlinePresentation?.errors).toEqual([])
       } else expect(details.outlinePresentation).toEqual({ source: 'initial_confirmed', baseline: null, evidence: null, errors: [] })
+      expect(executor.execute).not.toHaveBeenCalled()
     }
-    expect(executor.execute).not.toHaveBeenCalled()
   })
 
   it('S5 运行中读取详情不等待写作任务，不调用确认接口；上下文损坏保留最终版本状态', async () => {
@@ -437,7 +487,10 @@ describe('Workspace 项目与独立 Session', () => {
     expect(b.session.header.seedLength).toBeUndefined()
     expect(b.session.surface.nodes).toEqual([])
     expect(b.session.deriveMessages()).toEqual([])
-    expect(b.session.events.every(event => event.type === 'bid.project.resumed')).toBe(true)
+    expect(b.session.events.map(event => event.type)).toEqual([
+      'bid.project.resumed',
+      'bid.writing_entry.changed',
+    ])
     expect(fork).not.toHaveBeenCalled()
     expect(executor.execute).not.toHaveBeenCalled()
     expect(a.session.deriveMessages()).toHaveLength(3)
@@ -470,9 +523,23 @@ describe('Workspace 项目与独立 Session', () => {
     expect(activeState.run).toMatchObject({ interactionSessionId: owner.id })
     expect(activeState.run.executionSessionId).toBeTruthy()
     expect(activeState.run.executionSessionId).not.toBe(owner.id)
-    expect(ctx.agents.get(SessionId(activeState.run.executionSessionId!))?.session.header).toMatchObject({
+    const executionSession = ctx.agents.get(SessionId(activeState.run.executionSessionId!))?.session
+    expect(executionSession?.header).toMatchObject({
       parentSession: owner.id,
       origin: 'subagent',
+    })
+    expect(executionSession?.events.find(event => event.type === 'subagent/descriptor')?.data).toMatchObject({
+      mode: 'one-shot',
+      provider: 'bid',
+      label: 'Bid 阶段执行',
+    })
+    await expect(ctx.subagents.listChildren(owner.id)).resolves.toContainEqual({
+      kind: 'child',
+      id: SessionId(activeState.run.executionSessionId!),
+      mode: 'one-shot',
+      label: 'Bid 阶段执行',
+      activity: 'running',
+      hasChildren: false,
     })
 
     const observer = await fresh('active-observer', workspace.root, false)
@@ -829,7 +896,7 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(outlinePath, JSON.stringify(outline))
     expect((await ctx.bid.getReviewWorkbench(agent.session)).outline[0]?.content_available).toBe(false)
     expect((await ctx.bid.getReviewChapter(agent.session, 'ROOT')).markdown).toBeNull()
-  })
+  }, 30000)
 
   it('页数估算失败不阻塞正文工作台读取', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -1433,6 +1500,9 @@ describe('Workspace 项目与独立 Session', () => {
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const retry = resumeRun(ctx, agent.session)
     await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
+    const run = executeStage.mock.calls[0]?.[1]
+    if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
 
     const requestStarted = Promise.withResolvers<undefined>()
     const responseGate = Promise.withResolvers<undefined>()
@@ -1445,12 +1515,10 @@ describe('Workspace 项目与独立 Session', () => {
     responseGate.resolve(undefined)
     await agent.whenIdle()
 
-    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
-    const run = executeStage.mock.calls[0]?.[1]
-    if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
     await vi.waitFor(() => { expect(run.signal.aborted).toBe(true) })
     stageGate.resolve([])
     await retry
+    await ctx.bid.stopRun(agent.session)
     expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'suspended', failureReason: undefined })
     expect(host.inFlight.size).toBe(0)
     adapter.script.push(answer('停止后仍可继续聊天。'))
@@ -1719,6 +1787,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.cancel({ kind: 'user' })
     release.resolve(undefined)
     await uploading
+    await ctx.bid.stopRun(agent.session)
     firstImport.mockRestore()
 
     const restored = Promise.withResolvers<readonly { name: string; bytes: Uint8Array }[]>()

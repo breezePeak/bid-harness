@@ -127,13 +127,18 @@ describe('Bid client projection', () => {
   it('derives allowed actions and composer capability from host runtime state', () => {
     expect(getBidClientProjection({ stage: 'file_intake', status: 'pending' })).toMatchObject({
       runtime: { stage: 'file_intake', status: 'pending' },
-      allowedActions: ['upload_files'],
-      composer: { enabled: false, reason: 'bid.upload_required' },
+      allowedActions: ['upload_files', 'send_message'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({ stage: 'tender_analysis', status: 'pending' })).toMatchObject({
       runtime: { stage: 'tender_analysis', status: 'pending' },
-      allowedActions: [],
-      composer: { enabled: false, reason: 'bid.stage_pending' },
+      allowedActions: ['send_message'],
+      composer: { enabled: true },
+    })
+    expect(getBidClientProjection({ stage: 'docx_export', status: 'pending' })).toMatchObject({
+      runtime: { stage: 'docx_export', status: 'pending' },
+      allowedActions: ['send_message', 'export_docx'],
+      composer: { enabled: true },
     })
     expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toMatchObject({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
@@ -197,6 +202,34 @@ describe('Bid client projection', () => {
     }
   })
 
+  it('keeps public chat admitted across the complete Bid stage lifecycle', () => {
+    const cases = [
+      ['file_intake', 'pending'],
+      ['file_intake', 'running'],
+      ['tender_analysis', 'pending'],
+      ['tender_analysis', 'waiting_user'],
+      ['outline_generation', 'pending'],
+      ['outline_generation', 'waiting_user'],
+      ['evidence_mapping', 'waiting_start'],
+      ['evidence_mapping', 'running'],
+      ['evidence_mapping', 'waiting_user'],
+      ['chapter_writing', 'pending'],
+      ['chapter_writing', 'running'],
+      ['chapter_writing', 'waiting_user'],
+      ['chapter_writing', 'attention_required'],
+      ['chapter_writing', 'completed'],
+      ['docx_export', 'pending'],
+      ['docx_export', 'running'],
+      ['docx_export', 'completed'],
+    ] as const
+
+    for (const [stage, status] of cases) {
+      const projection = getBidClientProjection({ stage, status })
+      expect(projection.composer, `${stage}/${status}`).toEqual({ enabled: true })
+      expect(projection.allowedActions, `${stage}/${status}`).toContain('send_message')
+    }
+  })
+
   it('registers bid.runtime as a whole-value DSH session projection', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -206,8 +239,8 @@ describe('Bid client projection', () => {
 
     expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
       runtime: { stage: 'file_intake', status: 'pending' },
-      allowedActions: ['upload_files'],
-      composer: { enabled: false, reason: 'bid.upload_required' },
+      allowedActions: ['upload_files', 'send_message'],
+      composer: { enabled: true },
     })
 
     const resetSession = ctx.sessions.create()

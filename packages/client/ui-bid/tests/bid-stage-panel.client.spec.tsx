@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -82,6 +82,7 @@ function props(
     sessionId: 'session_bid',
     useProjection,
     useSessions,
+    setRealtimeChatMode: vi.fn(),
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
     getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null })),
@@ -142,6 +143,7 @@ describe('BidStagePanel', () => {
     const getEvidenceMappingProgress = vi.fn()
     const getDocxLibrary = vi.fn()
     const setComposerBlock = vi.fn()
+    const setRealtimeChatMode = vi.fn()
     const selectReviewView = vi.fn()
     const setReviewViewAvailable = vi.fn()
     const childSessions: BidStagePanelProps['useSessions'] = <S,>(selector: (state: SessionListState) => S): S => selector({
@@ -157,6 +159,7 @@ describe('BidStagePanel', () => {
       getOutlineReviewContext,
       getEvidenceMappingProgress,
       getDocxLibrary,
+      setRealtimeChatMode,
       setComposerBlock,
       selectReviewView,
       setReviewViewAvailable,
@@ -178,9 +181,44 @@ describe('BidStagePanel', () => {
     expect(getOutlineReviewContext).not.toHaveBeenCalled()
     expect(getEvidenceMappingProgress).not.toHaveBeenCalled()
     expect(getDocxLibrary).not.toHaveBeenCalled()
+    expect(setRealtimeChatMode).not.toHaveBeenCalledWith(true)
     expect(setComposerBlock).not.toHaveBeenCalled()
     expect(selectReviewView).not.toHaveBeenCalled()
     expect(setReviewViewAvailable).toHaveBeenCalledWith(false)
+  })
+
+  it('keeps realtime delivery enabled across S1-S6 without following runtime status', () => {
+    const setRealtimeChatMode = vi.fn()
+    const cases = [
+      ['file_intake', 'pending'],
+      ['file_intake', 'running'],
+      ['tender_analysis', 'pending'],
+      ['tender_analysis', 'waiting_user'],
+      ['outline_generation', 'pending'],
+      ['outline_generation', 'waiting_user'],
+      ['evidence_mapping', 'running'],
+      ['evidence_mapping', 'waiting_user'],
+      ['chapter_writing', 'running'],
+      ['chapter_writing', 'waiting_user'],
+      ['chapter_writing', 'attention_required'],
+      ['docx_export', 'pending'],
+      ['docx_export', 'running'],
+      ['docx_export', 'completed'],
+    ] as const
+    const view = render(<BidStagePanel {...props(projection({
+      runtime: { stage: cases[0][0], status: cases[0][1] },
+    }), { setRealtimeChatMode })} />)
+
+    for (const [stage, status] of cases.slice(1)) {
+      view.rerender(<BidStagePanel {...props(projection({ runtime: { stage, status } }), {
+        setRealtimeChatMode,
+      })} />)
+    }
+
+    expect(setRealtimeChatMode).toHaveBeenCalledWith(true)
+    expect(setRealtimeChatMode.mock.calls.some(([enabled]) => enabled === false)).toBe(false)
+    view.unmount()
+    expect(setRealtimeChatMode).toHaveBeenCalledWith(false)
   })
 
   it('确认模式默认手动并可从输入工具栏切换为自动确认', () => {
@@ -395,6 +433,9 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('进行中 2')).toBeTruthy()
     expect(screen.getByText('已完成 3')).toBeTruthy()
     expect(screen.getByText('未开始 5')).toBeTruthy()
+    const progress = document.querySelector<HTMLProgressElement>('[data-bid-progress]')
+    expect(progress?.value).toBe(30)
+    expect(progress?.max).toBe(100)
     expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
   })
 
@@ -440,7 +481,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByText('0 / 0 (0%)')).toBeNull()
     expect(screen.getByRole('status', { name: '研究任务：进度同步中…' })).toBeTruthy()
     expect(screen.getByText('同步中')).toBeTruthy()
-    expect(document.querySelector('[class*="mappingProgressTrack"]')).toBeTruthy()
+    expect(document.querySelector('[data-bid-progress]')).toBeTruthy()
     expect(screen.getByText('正在同步映射进度…')).toBeTruthy()
   })
 
@@ -1088,7 +1129,7 @@ describe('ui-bid browser plugin', () => {
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
-    const remoteRequestWritingRequirements = vi.fn<(_sessionId: string) => Promise<unknown>>()
+    const remoteRequestWritingRequirements = vi.fn<(_sessionId: string, _intent: WritingEntryIntent) => Promise<unknown>>()
       .mockResolvedValue({
         ok: true as const,
         value: { ok: true as const, value: { stage: 'chapter_writing' as const, status: 'waiting_user' as const } },
@@ -1144,7 +1185,7 @@ describe('ui-bid browser plugin', () => {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
-        requestWritingRequirements: () => Promise<void>
+        requestWritingRequirements: (intent: WritingEntryIntent) => Promise<void>
         autoStartChapterWriting: () => Promise<void>
         getEvidenceMappingProgress: (observed?: BidClientProjection) => Promise<unknown>
       }
@@ -1204,8 +1245,8 @@ describe('ui-bid browser plugin', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     await expect(injected.uploadFiles([{ file: tender, role: 'tender' }])).rejects.toThrow('不支持该文件类型 (BID_FILE_TYPE_UNSUPPORTED)')
 
-    await injected.requestWritingRequirements()
-    expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid')
+    await injected.requestWritingRequirements({ mode: 'ensure' })
+    expect(remoteRequestWritingRequirements).toHaveBeenCalledWith('session_bid', { mode: 'ensure' })
     await injected.autoStartChapterWriting()
     expect(remoteAutoStartChapterWriting).toHaveBeenCalledWith('session_bid')
     const observed = projection({ runtime: { stage: 'evidence_mapping', status: 'suspended' } })

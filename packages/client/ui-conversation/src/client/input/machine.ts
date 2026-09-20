@@ -135,10 +135,12 @@ export class InputMachine {
   private pasteSeq = 0
   private readonly mergeWindowMs: number
   private readonly now: () => number
+  private readonly makeSubmissionId: (seq: number) => string
 
   constructor(options: InputMachineOptions = {}) {
     this.mergeWindowMs = options.mergeWindowMs ?? 1000
     this.now = options.now ?? (() => 0)
+    this.makeSubmissionId = options.makeSubmissionId ?? (seq => `client-${seq}`)
   }
 
   /** Read-only snapshot of the machine state (queue always empty at this tier). */
@@ -480,7 +482,7 @@ export class InputMachine {
     const attempt: SubmitAttempt = {
       seq: this.seq,
       signal: controller.signal,
-      submissionId: `client-${this.seq}`,
+      submissionId: this.makeSubmissionId(this.seq),
       draftSnapshot: this.draft,
       references: this.occurrences.map(({ offset, length, source, ref }) => ({ offset, length, source, ref })),
       imageIds: [...imageIds],
@@ -574,9 +576,6 @@ export class InputMachine {
     if (!detached && (this.phase !== 'submitting' || this.inflight?.attempt.seq !== ev.attempt.seq)) return []
     if (!detached) this.inflight = undefined
     if (detached) {
-      if (!ev.ok && this.draft === '') {
-        this.adopt(flight.attempt.draftSnapshot)
-      }
       return ev.ok && ev.outcome?.text === undefined
         ? []
         : ev.outcome?.text !== undefined || ev.message !== undefined

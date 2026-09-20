@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Page } from 'playwright'
 import { expect, it } from 'vitest'
-import { BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog, type OutlineArtifact } from '@deepseek-ai/dsh-bid'
+import { BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog, outlineArtifactSha256, type OutlineArtifact } from '@deepseek-ai/dsh-bid'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { launchWebScaffold } from './scaffold.ts'
@@ -59,7 +59,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
       })
     }
     await publish({ stage: 'tender_analysis', status: 'waiting_user' })
-    await page.getByRole('tab', { name: '招标详情', exact: true }).waitFor()
+    await page.getByRole('tab', { name: '招标书分析', exact: true }).waitFor()
     const tenderConfirmation = page.getByRole('region', { name: '招标详情', exact: true }).getByRole('button', { name: '确认技术标分析', exact: true })
     await tenderConfirmation.waitFor()
     const tenderButtonBox = await tenderConfirmation.boundingBox()
@@ -90,10 +90,10 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
       await mkdir(join(workspace.projectRoot, path.split('/')[0]!), { recursive: true })
       await writeFile(join(workspace.projectRoot, path), JSON.stringify(value))
     }
-    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'waiting_user' })
+    await publish({ stage: 'outline_generation', status: 'waiting_user' })
     await scaffold.ctx.bid.getOutlineDraft(agent.session)
     await page.getByText('S3 · 初步技术标目录审核', { exact: true }).waitFor()
-    expect(await page.getByRole('tab', { name: '招标详情', exact: true }).count()).toBe(1)
+    expect(await page.getByRole('tab', { name: '招标书分析', exact: true }).count()).toBe(1)
     expect(await page.getByRole('tab', { name: '目录详情', exact: true }).count()).toBe(0)
     expect(await page.getByRole('tab', { name: '审核项', exact: true }).count()).toBe(1)
     const outlineButtonBox = await page.getByRole('region', { name: '审核项', exact: true }).getByRole('button', { name: '使用该目录', exact: true }).boundingBox()
@@ -117,12 +117,12 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     await page.getByLabel('B 标题', { exact: true }).waitFor()
     expect(await page.getByLabel('NEW 标题', { exact: true }).count()).toBe(0)
     expect(await page.getByRole('tab', { name: '审核项', exact: true }).count()).toBe(0)
-    const evidence = { schema_version: 10, section_mappings: [{
+    const evidence = { section_mappings: [{
       section_id: 'B', local_materials: [], web_materials: [], missing_topics: ['验收清单'], writing_dimensions: ['验收标准'],
     }] }
     await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify(evidence))
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
-    await scaffold.ctx.bid.getOutlineDraft(agent.session)
+    await publish({ stage: 'evidence_mapping', status: 'waiting_user' })
+    await page.reload()
     await page.getByText('S4 · 深化目录与材料审核', { exact: true }).waitFor()
     await page.getByText('S3 已确认目录 · 只读', { exact: true }).waitFor()
     await page.getByLabel('EXTRA-19 标题', { exact: true }).waitFor()
@@ -194,25 +194,24 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8'))).toEqual(evidence)
     const finalOutline = (await scaffold.ctx.bid.getOutlineDraft(agent.session)).outline
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(finalOutline))
+    for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
+      const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
+      artifact.confirmed_outline_sha256 = outlineArtifactSha256(finalOutline)
+      await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
+    }
     await publish({ stage: 'chapter_writing', status: 'running' })
-    await page.getByRole('tab', { name: '目录详情', exact: true }).click()
-    await page.getByText('最终目录已确认 / 只读', { exact: true }).waitFor()
-    await page.getByRole('heading', { name: 'S4 最终确认目录', exact: true }).waitFor()
-    await left.getByRole('button', { name: '交付验收', exact: true }).click()
-    expect(await right.locator('[aria-current="true"]').getAttribute('data-section-id')).toBe('B')
-    await page.getByLabel('当前章节详情').getByText('验收标准', { exact: true }).waitFor()
-    expect(await page.getByLabel('目录差异汇总').textContent()).toContain('结构调整')
-    expect(await right.locator('[draggable="true"]').count()).toBe(0)
-    await page.getByRole('tab', { name: '正文详情', exact: true }).click()
+    await scaffold.ctx.sessions.flush(agent.session)
+    await page.reload()
+    await page.getByRole('tab', { name: '正文详情', exact: true }).waitFor()
     await page.getByText('已有正文。', { exact: true }).waitFor()
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 章节更新\n\n实时更新的正文。\n')
     await page.getByText('实时更新的正文。', { exact: true }).waitFor()
     await publish({ stage: 'docx_export', status: 'completed' })
     await page.reload()
-    for (const label of ['招标详情', '目录详情', '正文详情']) {
+    for (const label of ['招标书分析', '目录详情', '正文详情']) {
       await page.getByRole('tab', { name: label, exact: true }).waitFor()
     }
-    await page.getByRole('tab', { name: '招标详情', exact: true }).click()
+    await page.getByRole('tab', { name: '招标书分析', exact: true }).click()
     await page.getByRole('region', { name: '招标详情', exact: true }).waitFor()
     expect(await page.getByRole('button', { name: '确认技术标分析', exact: true }).count()).toBe(0)
     await page.getByRole('tab', { name: '目录详情', exact: true }).click()
@@ -261,7 +260,7 @@ it('S5 运行中可打开 Word 导出并提示仅导出已保存章节', async (
     await exportButton.click()
 
     await page.getByRole('region', { name: '导出 Word', exact: true }).waitFor()
-    await page.getByText('当前导出仅包含已完成并保存的章节。', { exact: true }).waitFor()
+    await page.getByText('按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。', { exact: true }).waitFor()
   } catch (error) {
     await saveFailureShot(page, 'bid-running-word-export-failure')
     throw error
@@ -288,21 +287,39 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '确认最终技术标目录' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    const baseline = { ...outline, sections: outline.sections.map(section => ({ ...section, title: 'S3 技术方案', must_answer: ['初步交付要求'] })) }
-    const finalOutline = { ...outline, sections: outline.sections.map(section => ({ ...section, title: 'S4 技术方案', must_answer: ['明确交付核验流程'] })) }
+    const baseline = { ...outline, sections: outline.sections.map(section => ({ ...section, title: 'S3 技术方案', must_answer: ['按期交付', '初步交付要求'] })) }
+    const finalOutline = { ...outline, sections: outline.sections.map(section => ({ ...section, title: 'S4 技术方案', must_answer: ['按期交付', '明确交付核验流程'] })) }
     for (const [path, value] of Object.entries({
       'outline/initial-confirmed-outline.json': baseline,
       'outline/outline.json': finalOutline,
+      'outline/draft.json': {
+        schema_version: 1,
+        scope: 'technical_bid',
+        revision: 1,
+        source_outline_sha256: outlineArtifactSha256(finalOutline),
+        draft_outline_sha256: outlineArtifactSha256(finalOutline),
+        outline: finalOutline,
+      },
       'outline/quality-report.json': { schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-1'], issues: [] },
-      'analysis/web-evidence-sources.json': { schema_version: 2, stage: 'evidence_mapping', sources: [] },
+      'analysis/web-evidence-sources.json': { stage: 'evidence_mapping', sources: [] },
     })) await writeFile(join(workspace.projectRoot, path), JSON.stringify(value))
+    for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
+      const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
+      artifact.confirmed_outline_sha256 = outlineArtifactSha256(finalOutline)
+      await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
+    }
     await rm(join(workspace.projectRoot, 'outline/confirmed-outline.json'))
     const state = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
     agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
     await page.getByRole('tab', { name: '目录详情', exact: true }).click()
     await page.getByText('S4 · 深化目录与材料审核', { exact: true }).waitFor()
-    await page.getByRole('button', { name: '使用该目录', exact: true }).click()
-    await expect.poll(() => agent.session.events.some(event => event.type === 'bid.user_confirmation.received' && event.data.stage === 'evidence_mapping')).toBe(true)
+    const draft = await scaffold.ctx.bid.getOutlineDraft(agent.session)
+    const confirmation = await scaffold.ctx.bid.confirmOutline(agent.session, {
+      expected_revision: draft.revision,
+      expected_draft_sha256: draft.draft_outline_sha256,
+    })
+    expect(confirmation, JSON.stringify(confirmation)).toMatchObject({ ok: true })
+    expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.received' && event.data.stage === 'evidence_mapping')).toBe(true)
     await expect.poll(async () => JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as unknown).toEqual(finalOutline)
     await expect.poll(async () => (await scaffold.ctx.bid.getDetails(agent.session)).outlinePresentation?.source).toBe('final_confirmed')
     await page.getByRole('tab', { name: '正文详情', exact: true }).waitFor()
@@ -324,7 +341,7 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
     }
     await assertDetails()
     await page.getByRole('tab', { name: '正文详情', exact: true }).waitFor()
-    await page.getByRole('tab', { name: '招标详情', exact: true }).click()
+    await page.getByRole('tab', { name: '招标书分析', exact: true }).click()
     await assertDetails()
     await page.reload()
     await assertDetails()

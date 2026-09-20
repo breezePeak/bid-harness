@@ -18,7 +18,7 @@ import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { createChatStore } from '../src/client/stores.ts'
-import { SessionInputShell } from '../src/client/input/facade.ts'
+import { SessionInputShell, type SessionInputDeps } from '../src/client/input/facade.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { ConversationRoot } from '../src/client/skeleton/ConversationRoot.tsx'
 import { ConversationSession, ConversationSessionHeader } from '../src/client/skeleton/ConversationSession.tsx'
@@ -33,7 +33,7 @@ import type { ViewTab } from '../src/client/contract/views.ts'
 
 /** Machine-backed wiring over a sink spy. */
 function fakeWiring() {
-  const sink = vi.fn(() => Promise.resolve({ kind: 'success' as const }))
+  const sink = vi.fn<SessionInputDeps['defaultSink']>(() => Promise.resolve({ kind: 'success' as const }))
   const shell = new SessionInputShell({ actx: {} as ClientContext, defaultSink: sink, commandImages: { serialize: () => Promise.resolve([]), release: () => {}, unsupportedNotice: (token: string) => `${token.trim()} images-unsupported` } })
   return { wiring: shell, sink, shell }
 }
@@ -89,8 +89,10 @@ function mount(
   workspaceRows: WorkspaceView[] = [{ ...workspace('one'), sessionIds: [SID] }],
   retargetWorkspace = vi.fn(async (_workspaceId: WorkspaceId) => {}),
   options: {
-    /** When true, mimic overlay:true chain siblings (hidden fallback + takeover). */
-    overlayTakeover?: boolean
+    /** Render a structured Question/Approval panel above the ordinary InputBar. */
+    interactionPanel?: boolean
+    /** Mimic the overlay hard takeover used by a read-only subagent. */
+    hardTakeover?: boolean
     /** The session list summary's `blank` flag — independent of the snapshot's. */
     summaryBlank?: boolean
     /** Drop the session's summary row entirely (a session the list has not caught up with). */
@@ -247,18 +249,26 @@ function mount(
     }
     return <div data-testid={`view-${opts?.only ?? key}`} />
   }) as ConversationRootProps['renderSlot']
-  const renderSlotChain = ((_key, _owner, opts) => (
-    options.overlayTakeover === true
-      ? (
-        <>
-          <div data-chain-overlay-fallback="conversation.composer" style={{ display: 'none' }}>
-            {opts?.fallback ?? null}
-          </div>
-          <div data-testid="composer-takeover">TAKEOVER</div>
-        </>
-      )
-      : (opts?.fallback ?? null)
-  )) as ConversationRootProps['renderSlotChain']
+  const renderSlotChain = ((key, _owner, opts) => {
+    if (key === 'conversation.composer.interaction') {
+      return options.interactionPanel === true
+        ? <div data-testid="structured-interaction">INTERACTION</div>
+        : (opts?.fallback ?? null)
+    }
+    if (key === 'conversation.composer') {
+      return options.hardTakeover === true
+        ? (
+          <>
+            <div data-hard-takeover-fallback="" style={{ display: 'none' }}>
+              {opts?.fallback ?? null}
+            </div>
+            <div data-testid="composer-hard-takeover">READ ONLY</div>
+          </>
+        )
+        : (opts?.fallback ?? null)
+    }
+    return opts?.fallback ?? null
+  }) as ConversationRootProps['renderSlotChain']
   const props: ConversationRootProps = {
     sessionId: SID,
     SessionProvider: ({ children }) => children(SID),
@@ -345,7 +355,7 @@ describe('ConversationRoot resident composer', () => {
     fireEvent.change(box, { target: { value: 'ordinary revised' } })
     expect(b.chat.store.getSnapshot().draft).toBe('ordinary revised')
     fireEvent.keyDown(box, { key: 'Enter' })
-    expect(b.sink).toHaveBeenCalledWith('ordinary revised', [], 'queue', expect.any(AbortSignal))
+    expect(b.sink).toHaveBeenCalledWith('ordinary revised', [], 'queue', expect.any(AbortSignal), expect.any(String))
     expect((b.view.getByRole('button', { name: 'Child' }) as HTMLButtonElement).disabled).toBe(true)
     expect(b.view.queryByText('Root')).toBeNull()
   })
@@ -392,13 +402,29 @@ describe('ConversationRoot resident composer', () => {
     expect(b.slotCalls).toContain('conversation.session.header.utilities')
   })
 
-  it('sticky composer seat wraps the whole overlay chain, not only the fallback stack', () => {
-    const b = mount(conversationSnapshot(), undefined, undefined, { overlayTakeover: true })
+  it('keeps a structured interaction and the ordinary InputBar visible in the same sticky composer seat', () => {
+    const b = mount(conversationSnapshot({ pending: [{} as never] }), undefined, undefined, {
+      interactionPanel: true,
+    })
     const seat = b.view.container.querySelector('[data-composer-seat]')
-    const takeover = b.view.getByTestId('composer-takeover')
-    const fallback = b.view.container.querySelector('[data-chain-overlay-fallback="conversation.composer"]')
-    expect(seat?.contains(takeover)).toBe(true)
-    expect(seat?.contains(fallback)).toBe(true)
+    const interaction = b.view.getByTestId('structured-interaction')
+    const textarea = b.view.getByRole('textbox') as HTMLTextAreaElement
+    expect(seat?.contains(interaction)).toBe(true)
+    expect(seat?.contains(textarea)).toBe(true)
+    expect(textarea.disabled).toBe(false)
+    fireEvent.change(textarea, { target: { value: '问题还没回答，我先发一条聊天' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(b.sink).toHaveBeenCalledOnce()
+    expect(b.sink.mock.calls[0]?.[0]).toBe('问题还没回答，我先发一条聊天')
+  })
+
+  it('keeps hard subagent takeover above both structured interactions and the InputBar', () => {
+    const b = mount(conversationSnapshot({ pending: [{} as never] }), undefined, undefined, {
+      interactionPanel: true,
+      hardTakeover: true,
+    })
+    expect(b.view.getByTestId('composer-hard-takeover')).toBeTruthy()
+    expect(b.view.queryByRole('textbox')).toBeNull()
   })
 
   it('hero phase: same textarea, hero chrome, no header, picker switches the workspace', () => {
@@ -486,11 +512,14 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
   })
 
-  it('keeps pending takeover interaction accessible outside the Chat view', () => {
-    const b = mount(conversationSnapshot({ pending: [{} as never] }))
+  it('keeps pending structured interaction and ordinary chat input accessible outside the Chat view', () => {
+    const b = mount(conversationSnapshot({ pending: [{} as never] }), undefined, undefined, {
+      interactionPanel: true,
+    })
     act(() => { b.chat.actions.setView('trajectory') })
     expect(b.view.getByTestId('view-trajectory')).toBeTruthy()
     expect(b.view.queryByTestId('view-chat')).toBeNull()
+    expect(b.view.getByTestId('structured-interaction')).toBeTruthy()
     expect(b.view.getByRole('textbox')).toBeTruthy()
   })
 

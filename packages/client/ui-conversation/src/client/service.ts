@@ -20,7 +20,7 @@ import type { ComposerAttachment } from './contract/slots.ts'
 import type { QueueAction, QueueItemId } from './contract/queue.ts'
 import type { ComposerBlocks } from './input/blocks.ts'
 import type { ComposerSubmitHandler, ComposerSubmitHandlers, DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
-import type { InputSubmitMode } from './contract/composer-submission.ts'
+import type { ComposerSubmitModePolicy, InputSubmitMode } from './contract/composer-submission.ts'
 import type { EmbeddedSurface, EmbeddedSurfaceKind } from './embedded-surface.ts'
 
 /**
@@ -38,6 +38,10 @@ export interface IConversation {
   readonly blocks: ComposerBlocks
   /** 为有业务引用的输入注册专用提交动作。 */
   readonly submitHandlers: ComposerSubmitHandlers
+  /** Set the ordinary composer delivery policy for the caller's Session. */
+  setSubmitModePolicy(policy: ComposerSubmitModePolicy): void
+  /** Resolve a caller-scoped delivery override, or defer to the generic policy. */
+  resolveSubmitModeOverride(running: boolean, steeringAvailable: boolean): InputSubmitMode | undefined
   /** Register a local outgoing row before asynchronous message preparation. */
   beginOutgoing(
     session: SessionFace,
@@ -121,7 +125,8 @@ export class ConversationController extends Service implements IConversation {
   /** The per-session composer-block registry. */
   readonly blocks: ComposerBlocks
   private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
-  private readonly pendingOutgoing = new Map<SessionId, { text: string; imageCount: number; submissionId: string }[]>()
+  private readonly submitModePolicies = new Map<SessionId, ComposerSubmitModePolicy>()
+  private readonly pendingOutgoing = new Map<SessionId, Set<string>>()
   /** @inheritdoc */
   readonly submitHandlers: ComposerSubmitHandlers = {
     register: (sessionId, handler) => {
@@ -137,12 +142,12 @@ export class ConversationController extends Service implements IConversation {
   beginOutgoing(
     session: SessionFace,
     text: string,
-    imageIds: readonly DraftAttachmentId[],
+    _imageIds: readonly DraftAttachmentId[],
     submissionId: string,
     mode: InputSubmitMode = 'queue',
   ): void {
-    const pending = this.pendingOutgoing.get(session.sessionId) ?? []
-    pending.push({ text, imageCount: imageIds.length, submissionId })
+    const pending = this.pendingOutgoing.get(session.sessionId) ?? new Set<string>()
+    pending.add(submissionId)
     this.pendingOutgoing.set(session.sessionId, pending)
     const owner = session as SessionFace & {
       beginOutgoing?: (id: string, content: readonly PromptContentPart[], mode?: InputSubmitMode) => void
@@ -152,9 +157,8 @@ export class ConversationController extends Service implements IConversation {
   /** Update a local row when preparation failed before Session.prompt ran. */
   updateOutgoing(session: SessionFace, submissionId: string, error: string): void {
     const pending = this.pendingOutgoing.get(session.sessionId)
-    const index = pending?.findIndex(item => item.submissionId === submissionId) ?? -1
-    if (index >= 0) pending?.splice(index, 1)
-    if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
+    pending?.delete(submissionId)
+    if (pending?.size === 0) this.pendingOutgoing.delete(session.sessionId)
     const owner = session as SessionFace & {
       updateOutgoing?: (id: string, status: 'failed', error: string) => void
     }
@@ -197,7 +201,25 @@ export class ConversationController extends Service implements IConversation {
       this.imageUrls.clear()
       this.imageGenerations.clear()
       this.submissions.clear()
+      this.submitModePolicies.clear()
     }, 'conversation attachment URL cache')
+  }
+
+  /** @inheritdoc */
+  setSubmitModePolicy(policy: ComposerSubmitModePolicy): void {
+    const session = this.scopedSession('setSubmitModePolicy')
+    if (policy === 'default') {
+      this.submitModePolicies.delete(session.sessionId)
+      return
+    }
+    this.submitModePolicies.set(session.sessionId, policy)
+  }
+
+  /** @inheritdoc */
+  resolveSubmitModeOverride(running: boolean, steeringAvailable: boolean): InputSubmitMode | undefined {
+    const session = this.scopedSession('resolveSubmitModeOverride')
+    if (this.submitModePolicies.get(session.sessionId) !== 'immediate') return undefined
+    return running && steeringAvailable ? 'steer' : 'queue'
   }
 
   /**
@@ -237,14 +259,10 @@ export class ConversationController extends Service implements IConversation {
     signal?: AbortSignal,
     submissionId?: string,
   ): Promise<SubmitOutcome> {
+    const resolvedSubmissionId = submissionId ?? `client-${session.sessionId}-${crypto.randomUUID()}`
     const pending = this.pendingOutgoing.get(session.sessionId)
-    const index = pending?.findIndex(item => submissionId === undefined
-      ? item.text === text && item.imageCount === imageIds.length
-      : item.submissionId === submissionId) ?? -1
-    const resolvedSubmissionId = submissionId ?? (index >= 0 ? pending?.splice(index, 1)[0]?.submissionId : undefined)
-      ?? `client-${session.sessionId}-${Date.now()}`
-    if (submissionId !== undefined && index >= 0) pending?.splice(index, 1)
-    if (pending !== undefined && pending.length === 0) this.pendingOutgoing.delete(session.sessionId)
+    const hasLocalHandoff = pending?.delete(resolvedSubmissionId) ?? false
+    if (pending?.size === 0) this.pendingOutgoing.delete(session.sessionId)
     return this.sendSessionNow(
       session,
       text,
@@ -252,7 +270,7 @@ export class ConversationController extends Service implements IConversation {
       mode,
       signal,
       resolvedSubmissionId,
-      index >= 0,
+      hasLocalHandoff,
     )
   }
 
@@ -265,12 +283,23 @@ export class ConversationController extends Service implements IConversation {
     submissionId: string,
     hasLocalHandoff: boolean,
   ): Promise<SubmitOutcome> {
-    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, submissionId)
-    if (submitted !== undefined) return submitted
     const owner = session as SessionFace & {
-      beginOutgoing?: (id: string, content: readonly PromptContentPart[]) => void
+      beginOutgoing?: (id: string, content: readonly PromptContentPart[], mode?: InputSubmitMode) => void
+      updateOutgoing?: (id: string, status: 'failed', error: string) => void
     }
-    if (!hasLocalHandoff) owner.beginOutgoing?.(submissionId, text === '' ? [] : [{ type: 'text', text }])
+    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, submissionId)
+    if (submitted !== undefined) {
+      const outcome = await submitted
+      if (outcome.kind === 'error') {
+        owner.updateOutgoing?.(submissionId, 'failed', outcome.text ?? 'message failed')
+      }
+      return outcome
+    }
+    if (!hasLocalHandoff) owner.beginOutgoing?.(
+      submissionId,
+      text === '' ? [] : [{ type: 'text', text }],
+      mode,
+    )
     try {
       const attachments = this.draftImages(imageIds)
       if (attachments.length !== imageIds.length) {
@@ -284,8 +313,7 @@ export class ConversationController extends Service implements IConversation {
       return { kind: 'success' }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      const updater = owner as SessionFace & { updateOutgoing?: (id: string, status: 'failed', error: string) => void }
-      updater.updateOutgoing?.(submissionId, 'failed', message)
+      owner.updateOutgoing?.(submissionId, 'failed', message)
       throw error
     }
   }

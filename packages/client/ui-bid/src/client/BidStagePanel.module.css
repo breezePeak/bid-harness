@@ -24,6 +24,9 @@
 }
 
 .root {
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+
   box-sizing: border-box;
   flex: none;
   overflow: hidden;
@@ -674,16 +677,6 @@
 .mappingProgressTrack {
   width: 100%;
   height: 4px;
-  border-radius: 2px;
-  background: var(--dsw-alias-border-l1);
-  overflow: hidden;
-}
-
-.mappingProgressBar {
-  height: 100%;
-  background: var(--dsw-alias-state-business-primary);
-  border-radius: 2px;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .srOnly {

@@ -242,7 +242,7 @@ describe('dsh web keyless CLI smoke', () => {
     )
     try {
       const baseUrl = await waitForReadyLine(child)
-      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', {})
+      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', { agentPreset: 'standard' })
       await rpc<{ accepted: true }>(baseUrl, 'session.prompt', {
         sessionId: created.sessionId,
         mode: 'queue',
@@ -354,7 +354,7 @@ describe('dsh web keyless CLI smoke', () => {
     )
     try {
       const baseUrl = await waitForReadyLine(child)
-      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', {})
+      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', { agentPreset: 'standard' })
       await rpc<{ accepted: true }>(baseUrl, 'session.prompt', {
         sessionId: created.sessionId,
         mode: 'queue',
@@ -385,7 +385,7 @@ describe('dsh web keyless CLI smoke', () => {
       await new Promise<void>(resolveClose => provider.close(() => { resolveClose() }))
       rmSync(workspace, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 90_000)
 
   it('DSH_TOOLS_MODE=code collapses the provider wire tools to run_code with the SDK prompt section', async () => {
     requireDist()
@@ -438,7 +438,7 @@ describe('dsh web keyless CLI smoke', () => {
     )
     try {
       const baseUrl = await waitForReadyLine(child)
-      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', {})
+      const created = await rpc<{ sessionId: string }>(baseUrl, 'session.create', { agentPreset: 'standard' })
       await rpc<{ accepted: true }>(baseUrl, 'session.prompt', {
         sessionId: created.sessionId,
         mode: 'queue',

@@ -162,14 +162,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * instead; this one is the whole panel.
      */
     'conversation.details.tool': { kind: 'single'; scope: 'session'; owner: DetailsToolOwnerProps }
-    /**
-     * The composer takeover chain: entries are selector-routed replacements
-     * of the default InputBar. Declared by this package's 'conversation'
-     * entry; the owner dispatches the {@link ComposerChainProps} currency and
-     * routing lives in entry selectors — new takeover kinds register with
-     * zero owner changes.
-     */
+    /** Hard composer takeover chain for features that replace the ordinary composer, including the subagent read-only boundary. */
     'conversation.composer': { kind: 'chain'; scope: 'session'; owner: ComposerChainProps }
+    /** Structured pending interactions such as Question and Approval; the elected panel stacks above the ordinary InputBar. */
+    'conversation.composer.interaction': { kind: 'chain'; scope: 'session'; owner: ComposerChainProps }
     /**
      * The hero-phase Workspace picker hole: rendered by ConversationRoot
      * while the session is blank (picking another workspace switches to that
@@ -639,15 +635,12 @@ export type EmbeddedChatProps = PropsRuntime<'conversation.embedded.chat'>
   & PropsStore<ChatStore> & ChatViewInjected & PropsLocale<'conversation'>
 
 /**
- * Composer chain currency: what ConversationRoot dispatches at its
- * renderSlotChain site. The owner declares the currency only — never a
- * per-entry contract; takeover packages narrow it in their own selectors
- * (`interactions.find(i => i.kind === ...)`), so new takeover kinds register
- * with zero owner changes.
+ * Selector currency shared by the hard composer takeover and structured
+ * interaction chains. Entries narrow pending interactions in their selectors.
  */
 export interface ComposerChainProps {
   interactions: readonly PendingInteraction[]
-  /** Current conversation facts for feature-owned takeover selectors. */
+  /** Current conversation facts for feature-owned selectors. */
   session: ConversationSnapshot | undefined
 }
 
@@ -667,7 +660,7 @@ export interface HeroBrandMarkOwnerProps {
 export type ConversationSlotProps =
   PropsRuntime<'conversation'> & PropsRenderSlots<
     | 'conversation.session' | 'conversation.session.header'
-    | 'conversation.composer' | 'conversation.composer.bar'
+    | 'conversation.composer' | 'conversation.composer.interaction' | 'conversation.composer.bar'
     | 'conversation.input.overlay'
     | 'conversation.input.dock' | 'conversation.composer.dock'
     | 'conversation.input.left' | 'conversation.input.right'
@@ -759,7 +752,7 @@ export class PendingApproval {
  * from useSession in-component.
  */
 export type ApprovalComposerProps =
-  PropsRuntime<'conversation.composer'> & { matched: ApprovalWait } & PropsLocale<'conversation'>
+  PropsRuntime<'conversation.composer.interaction'> & { matched: ApprovalWait } & PropsLocale<'conversation'>
 
 /** In-memory reader position resilient to transcript width reflow. */
 export interface ChatScrollPosition {

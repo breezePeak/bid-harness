@@ -175,8 +175,9 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         }),
         useStore: (select: (state: { mode: string }) => unknown) => select({ mode: 'manual' }),
         actions: { setMode: vi.fn(), markAttempted: vi.fn(), clearAttempted: vi.fn() },
-        t: ((key: string) => key) as unknown as (_key: string) => string,
+        t: (key: string) => key,
         getDetails: vi.fn(async () => ({})),
+        setRealtimeChatMode: vi.fn(),
         setDetailsAvailable: vi.fn(),
         setComposerBlock: vi.fn(),
         selectReviewView: vi.fn(),
@@ -274,21 +275,23 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
     fireEvent.click(saveBtn)
 
     // 8. 验证调用了 remote 的 addRevisionIssue，入参正确
-    await waitFor(() => {
-      expect(harness.remoteAddIssue).toHaveBeenCalledWith({
-        scope: 'paragraphs',
-        section_id: 'SEC-1',
-        reference: expect.objectContaining({
-          scope: 'paragraphs',
-          base_content_sha256: mockChapter.content_sha256,
-          start: expect.any(Number),
-          end: expect.any(Number),
-          text: expect.any(String),
-        }),
-        instruction: '必须补充项目经理高级工程师证书扫描件',
-        suggestion: null,
-      })
+    await waitFor(() => { expect(harness.remoteAddIssue).toHaveBeenCalledOnce() })
+    const request = harness.remoteAddIssue.mock.calls[0]?.[0]
+    expect(request).toMatchObject({
+      scope: 'paragraphs',
+      section_id: 'SEC-1',
+      instruction: '必须补充项目经理高级工程师证书扫描件',
+      suggestion: null,
     })
+    const reference = request?.reference
+    expect(reference).toMatchObject({
+      scope: 'paragraphs',
+      base_content_sha256: mockChapter.content_sha256,
+    })
+    if (reference?.scope !== 'paragraphs') throw new Error('Expected a paragraph revision reference')
+    expect(typeof reference.start).toBe('number')
+    expect(typeof reference.end).toBe('number')
+    expect(typeof reference.text).toBe('string')
 
     // 9. 底部入口打开批量审核修改浮层并展示新增意见，Composer 上方不显示队列
     await openRevisionPanel()

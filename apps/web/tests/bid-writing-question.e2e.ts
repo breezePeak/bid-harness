@@ -59,9 +59,10 @@ describe('web e2e: S5 native writing requirements question', () => {
     // 等待 Bid 面板就绪并获取 agent
     await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 20_000 })
     const foundAgent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid' && candidate.session.header.cwd !== undefined)
-    if (foundAgent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
+    const workspaceCwd = foundAgent?.session.header.cwd
+    if (foundAgent === undefined || workspaceCwd === undefined) throw new Error('Missing Bid agent workspace')
     agent = foundAgent
-    workspace = new BidWorkspace(agent.session.header.cwd)
+    workspace = new BidWorkspace(workspaceCwd)
     await seedProjectArtifacts(workspace)
     // 移除 S5 生成产物，使项目处于刚刚完成 S4 待进入 S5 提问的状态
     await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
@@ -99,6 +100,9 @@ describe('web e2e: S5 native writing requirements question', () => {
       lastRun: state.last_run,
       revision: state.revision,
     })
+    await (scaffold.ctx.bid as unknown as {
+      publishWritingEntryView(session: Agent['session']): Promise<void>
+    }).publishWritingEntryView(agent.session)
 
     // 提问卡片应由 BidStagePanel 自动向 Host 请求并在页面中浮现
     const composer = page.locator('[data-question-key]')
@@ -111,6 +115,12 @@ describe('web e2e: S5 native writing requirements question', () => {
     // 输入区 textarea 存在
     const customInput = composer.getByRole('textbox')
     await expect.poll(async () => customInput.isVisible(), { timeout: 5000 }).toBe(true)
+    const ordinaryInput = page.locator('[data-composer-card] textarea')
+    await expect.poll(async () => ordinaryInput.isVisible(), { timeout: 5000 }).toBe(true)
+    await expect.poll(async () => ordinaryInput.isEnabled(), { timeout: 5000 }).toBe(true)
+    await ordinaryInput.fill('原生问题还没回答，我仍然可以输入普通聊天')
+    expect(await ordinaryInput.inputValue()).toBe('原生问题还没回答，我仍然可以输入普通聊天')
+    await ordinaryInput.fill('')
   })
 
   it('用户提交多行自定义要求后，界面与后台均可靠持久化', async () => {

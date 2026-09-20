@@ -106,9 +106,7 @@ function missingSummaryCount(
   summaries: Readonly<Record<SessionId, SessionSummary>>,
   activity?: ChildCatalogEntry['activity'],
 ): number {
-  const known = new Set(catalog?.entries
-    .filter(entry => entry.kind === 'child')
-    .map(entry => entry.id))
+  const known = new Set(catalog?.entries.map(entry => entry.id))
   return Object.values(summaries).filter(summary => (
     summary.origin === 'subagent'
     && summary.parentId === parentSessionId
@@ -282,9 +280,7 @@ function CatalogLoadingRows({
   showEmptyNotice?: boolean
   t: TranslateNS<typeof NS>
 }) {
-  const known = new Set(catalog?.entries
-    .filter(entry => entry.kind === 'child')
-    .map(entry => entry.id))
+  const known = new Set(catalog?.entries.map(entry => entry.id))
   const children = Object.values(summaries).filter(summary => (
     summary.origin === 'subagent'
     && summary.parentId === parentSessionId

@@ -844,6 +844,9 @@ export class SlotCore {
       else this.handleScopes.set(options.store, { scope: spec.scope, count: 1 })
     }
 
+    const embeddedChat = 'embeddedChat' in options && typeof options.embeddedChat === 'boolean'
+      ? options.embeddedChat
+      : undefined
     const entry: StoredEntry = {
       component,
       options: {
@@ -851,6 +854,7 @@ export class SlotCore {
         ...(options.id !== undefined ? { id: options.id } : {}),
         ...(options.order !== undefined ? { order: options.order } : {}),
         ...(options.label !== undefined ? { label: options.label } : {}),
+        ...(embeddedChat !== undefined ? { embeddedChat } : {}),
         ...(options.priority !== undefined ? { priority: options.priority } : {}),
       },
       ...(options.select !== undefined ? { select: options.select } : {}),

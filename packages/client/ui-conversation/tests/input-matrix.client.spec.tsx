@@ -109,7 +109,7 @@ describe('matrix row: plain', () => {
     fireEvent.change(textarea, { target: { value: '普通消息' } })
     expect(shell.snapshot.claim).toBeUndefined()
     fireEvent.keyDown(textarea, { key: 'Enter' })
-    expect(sink).toHaveBeenCalledWith('普通消息', [], 'queue', expect.any(AbortSignal))
+    expect(sink).toHaveBeenCalledWith('普通消息', [], 'queue', expect.any(AbortSignal), expect.any(String))
     expect(shell.snapshot.phase).toBe('plain')
     await vi.waitFor(() => { expect(shell.snapshot.phase).toBe('plain') })
     expect(shell.snapshot.claim).toBeUndefined()
@@ -301,7 +301,7 @@ describe('matrix row: locked (session disabled)', () => {
     expect((textarea).disabled).toBe(false)
     fireEvent.change(textarea, { target: { value: '排队' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
-    expect(sink).toHaveBeenCalledWith('排队', [], 'queue', expect.any(AbortSignal))
+    expect(sink).toHaveBeenCalledWith('排队', [], 'queue', expect.any(AbortSignal), expect.any(String))
   })
 })
 

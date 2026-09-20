@@ -24,6 +24,7 @@ import {
   Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidReviewWorkbench.module.css'
+import { BidProgressBar } from './BidProgressBar.tsx'
 import { isBidMainSessionSummary } from './session-authority.ts'
 
 export type { BidReviewChapterView, BidReviewWorkbenchView } from '@deepseek-ai/dsh-bid/control-plane'
@@ -362,11 +363,11 @@ export function BidReviewWorkbench({
           <div className={css.headerStats}>
             <div className={classes(css.s5Progress, progressStats.warning && css.s5ProgressWarning)} title={progressStats.title}>
               <span className={css.s5ProgressLabel}>{progressStats.label}</span>
-              <progress
-                className={css.s5ProgressBar}
-                aria-label={progressStats.title}
+              <BidProgressBar
+                ariaLabel={progressStats.title}
                 value={progressStats.value}
-                max={Math.max(progressStats.total, 1)}
+                max={progressStats.total}
+                warning={progressStats.warning}
               />
             </div>
             <Pill className={css.statPill}>

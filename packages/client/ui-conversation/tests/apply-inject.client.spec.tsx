@@ -166,7 +166,12 @@ describe('conversation slot inject API', () => {
       expect(state.getSnapshot().draft).toBe('')
       expect(b.sessionFake.prompt).toHaveBeenCalledTimes(1)
     })
-    expect(b.sessionFake.prompt).toHaveBeenCalledWith([{ type: 'text', text: 'hello' }], 'queue', expect.any(AbortSignal), 'client-1')
+    expect(b.sessionFake.prompt).toHaveBeenCalledWith(
+      [{ type: 'text', text: 'hello' }],
+      'queue',
+      expect.any(AbortSignal),
+      expect.any(String),
+    )
     // Failure: the outgoing row records failure; the editable draft stays clear.
     b.sessionFake.prompt.mockResolvedValueOnce({ ok: false, error: { code: 'agent-busy', message: 'b', details: { reason: 'b' } } })
     actions.setDraft('retry me')
@@ -198,7 +203,7 @@ describe('conversation slot inject API', () => {
     await b.runtime.dispose()
   })
 
-  it('keeps default queue admission ordered while later drafts are already handed off', async () => {
+  it('starts a later queue admission without waiting for an earlier admission', async () => {
     const b = await bench()
     let releaseFirst!: () => void
     const firstAdmission = new Promise<void>((resolve) => { releaseFirst = resolve })
@@ -212,14 +217,13 @@ describe('conversation slot inject API', () => {
     actions.setDraft('second')
     actions.submit()
     await vi.waitFor(() => {
-      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(1)
+      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(2)
       expect(state.getSnapshot().draft).toBe('')
     })
+    expect(b.sessionFake.prompt.mock.calls[1]?.[0]).toEqual([{ type: 'text', text: 'second' }])
+    expect(b.sessionFake.prompt.mock.calls[0]?.[3]).not.toBe(b.sessionFake.prompt.mock.calls[1]?.[3])
     releaseFirst()
-    await vi.waitFor(() => {
-      expect(b.sessionFake.prompt).toHaveBeenCalledTimes(2)
-      expect(b.sessionFake.prompt.mock.calls[1]?.[0]).toEqual([{ type: 'text', text: 'second' }])
-    })
+    await Promise.resolve()
     await b.runtime.dispose()
   })
 

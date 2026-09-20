@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-subagent'
+import { seedDescriptorTurn, snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import * as XLSX from 'xlsx'
 import { z as zod } from 'zod'
@@ -1745,6 +1745,11 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const handle = await this.ctx.agents.create({
         sessionId: executionSessionId,
+        seed: seedDescriptorTurn(executionSessionId, undefined, snapshotSubagentDescriptor({
+          mode: 'one-shot',
+          provider: 'bid',
+          label: 'Bid 阶段执行',
+        })),
         agentOptions: interaction.options,
         meta: {
           cwd: operation.workspace.root,

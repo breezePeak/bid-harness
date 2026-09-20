@@ -563,6 +563,50 @@ describe('prompt and cancel errors', () => {
     ])
   })
 
+  it('tracks direct steer admission as submitting before acceptance and delivering afterward', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onPrompt']>>>()
+    api.onPrompt = () => gate.promise
+    const { session } = makeSession(api)
+    const pending = session.prompt([{ type: 'text', text: '立即补充' }], 'steer', undefined, 'submission-steer')
+
+    expect(session.getSnapshot().outgoing).toMatchObject([{
+      clientSubmissionId: 'submission-steer',
+      mode: 'steer',
+      status: 'submitting',
+    }])
+    gate.resolve(ok({ accepted: true }))
+    await expect(pending).resolves.toEqual({ ok: true, value: { accepted: true } })
+    expect(session.getSnapshot().outgoing).toMatchObject([{
+      clientSubmissionId: 'submission-steer',
+      mode: 'steer',
+      status: 'delivering',
+    }])
+  })
+
+  it('removes only the outgoing row whose identity appears on the durable user event', async () => {
+    const { api, session } = makeSession()
+    api.onHistory = () => histResponse([])
+    await session.open()
+    await session.prompt([{ type: 'text', text: '相同内容' }], 'queue', undefined, 'submission-first')
+    await session.prompt([{ type: 'text', text: '相同内容' }], 'queue', undefined, 'submission-second')
+    const base = ev.user(0, '相同内容')
+    const durable = {
+      ...base,
+      data: {
+        ...base.data,
+        source: { kind: 'user', clientSubmissionId: 'submission-second' },
+      },
+    } as SessionEvent
+
+    session.handleMuxEnvelope('r' as never, { type: 'session/event', sessionId: SID, event: durable })
+
+    expect(session.getSnapshot().outgoing).toMatchObject([{
+      clientSubmissionId: 'submission-first',
+      text: '相同内容',
+    }])
+  })
+
   it('keeps a transport-uncertain submission instead of marking it as a definitive failure', async () => {
     const api = new FakeApiClient()
     api.onPrompt = () => Promise.reject(new Error('connection lost'))

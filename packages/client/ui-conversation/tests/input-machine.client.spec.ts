@@ -59,7 +59,7 @@ function enterSubmitting(m: InputMachine, name: string, args: string): { attempt
 }
 
 function staleAttempt(): SubmitAttempt {
-  return { seq: 9999, signal: new AbortController().signal, draftSnapshot: '', mode: 'queue' }
+  return { seq: 9999, signal: new AbortController().signal, submissionId: 'stale-9999', draftSnapshot: '', mode: 'queue' }
 }
 
 describe('input-machine: plain × enter', () => {
@@ -85,6 +85,15 @@ describe('input-machine: plain × enter', () => {
     m.dispatch({ type: 'draft-changed', draft: 'steer now' })
     expect(effectAt(m.dispatch({ type: 'enter', mode: 'steer' }), 0, 'default-sink'))
       .toMatchObject({ draft: 'steer now', mode: 'steer' })
+  })
+
+  it('uses the injected submission id factory for independent ordinary sends', () => {
+    const m = new InputMachine({ makeSubmissionId: seq => `submit-${seq}` })
+    m.dispatch({ type: 'draft-changed', draft: 'first' })
+    const first = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink')
+    m.dispatch({ type: 'draft-changed', draft: 'second' })
+    const second = effectAt(m.dispatch({ type: 'enter', mode: 'queue' }), 0, 'default-sink')
+    expect([first.attempt.submissionId, second.attempt.submissionId]).toEqual(['submit-1', 'submit-2'])
   })
 
   it('leading "/" enters adjudicating with a minted attempt carrying the draft snapshot', () => {

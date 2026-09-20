@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -160,12 +160,41 @@ async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact,
   ])
 }
 
+function promptedOutlinePath(workspace: BidWorkspace, prompt: string): string {
+  const scratch = prompt.match(/\.bid-harness\/runs\/[^/]+\/scratch\/outline-generation\/outline\/outline\.json/u)?.[0]
+  if (scratch === undefined) throw new Error('质量复核提示缺少暂存目录路径')
+  return join(workspace.root, scratch)
+}
+
 function modelAgent(
   workspace: BidWorkspace,
-  respond: (prompt: string, submitReview: (issues?: unknown) => Promise<unknown>) => Promise<undefined | 'error' | 'aborted'>,
+  respond: (
+    prompt: string,
+    submitReview: (issues?: unknown) => Promise<unknown>,
+    write: (args: Record<string, unknown>) => Promise<unknown>,
+    read: (args: Record<string, unknown>) => Promise<unknown>,
+  ) => Promise<undefined | 'error' | 'aborted'>,
+  options: {
+    sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+    inheritToolsFromParent?: boolean
+    write?: (args: Record<string, unknown>) => Promise<unknown>
+    read?: (args: Record<string, unknown>) => Promise<unknown>
+  } = {},
 ) {
-  const events: SessionEvent[] = []
+  const events: SessionEvent[] = options.sandboxMode === undefined ? [] : [{
+    type: 'sandbox/mode', data: { mode: options.sandboxMode },
+  } as SessionEvent]
   const definitions = new Map<string, ToolDefinition>()
+  const writeTool = {
+    name: 'write', description: 'write', parameters: { type: 'object' },
+    output: { schema: {}, render: () => [] },
+    execute: (args: unknown) => options.write?.(args as Record<string, unknown>) ?? Promise.resolve({}),
+  } as ToolDefinition
+  const readTool = {
+    name: 'read', description: 'read', parameters: { type: 'object' },
+    output: { schema: {}, render: () => [] },
+    execute: (args: unknown) => options.read?.(args as Record<string, unknown>) ?? Promise.resolve({}),
+  } as ToolDefinition
   let pending: string | undefined
   const followup = vi.fn((message: { content: Array<{ text: string }> }) => { pending = message.content[0]!.text })
   const guard = vi.fn((_guard: ToolGuard) => () => {})
@@ -182,13 +211,26 @@ function modelAgent(
       if (definition === undefined) throw new Error('quality review tool unavailable')
       return definition.execute({ issues }, { agent, signal: new AbortController().signal } as ToolRunContext)
     }
-    const reason = await respond(prompt, submitReview) ?? 'completed'
+    const write = (args: Record<string, unknown>) => (definitions.get('write') ?? writeTool)
+      .execute(args, { agent, signal: new AbortController().signal } as ToolRunContext)
+    const read = (args: Record<string, unknown>) => (definitions.get('read') ?? readTool)
+      .execute(args, { agent, signal: new AbortController().signal } as ToolRunContext)
+    const reason = await respond(prompt, submitReview, write, read) ?? 'completed'
     events.push({ type: 'turn/end', data: { reason: { kind: reason, error: { message: '测试模型中断' } } } } as SessionEvent)
   })
-  const services = { tools: { restrict: vi.fn(() => () => {}), guard, register } }
-  const agent = { id: 'session', session: { events, header: { cwd: workspace.root } },
-    ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
-    inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] }, followup, whenIdle } as unknown as Agent
+  const parent = { id: 'parent' } as Agent
+  const tools = { restrict: vi.fn(() => () => {}), guard, register,
+    get: vi.fn((name: string, scope?: Agent) => {
+      const visible = scope === agent && options.inheritToolsFromParent !== true
+        || scope === parent && options.inheritToolsFromParent === true
+      return visible ? definitions.get(name) ?? (name === 'write' ? writeTool : name === 'read' ? readTool : undefined) : undefined
+    }) }
+  Object.assign(parent, { ctx: { get: () => tools } })
+  const services = { tools, agents: { get: vi.fn((id: string) => id === 'parent' ? parent : undefined) } }
+  const agent = { id: 'session', session: { events, header: { cwd: workspace.root,
+    ...(options.inheritToolsFromParent === true ? { origin: 'subagent' as const, parentSession: 'parent' } : {}) } },
+  ctx: { get: (name: keyof typeof services) => services[name], emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+  inbox: { append: vi.fn(), prepend: vi.fn(), nextStep: [], nextTurn: [] }, followup, whenIdle } as unknown as Agent
   return { agent, followup, whenIdle, guard, register }
 }
 
@@ -232,7 +274,9 @@ describe('S3 候选错误分流', () => {
         await writeFile(join(workspace.projectRoot, kind === 'json' ? 'outline/format-repair.json' : 'outline/candidate-repair.json'),
           JSON.stringify(kind === 'json' ? reviewedOutline : fieldOperations(kind)))
       } else if (prompt.includes('Blueprint Quality Review\n')) {
-        if (++reviews === 1 && phase === 'review') await writeFile(join(workspace.projectRoot, 'outline/outline.json'), broken(kind))
+        const scratch = promptedOutlinePath(workspace, prompt)
+        await expect(readFile(scratch, 'utf8')).resolves.toContain('SEC-SCHEDULE')
+        if (++reviews === 1 && phase === 'review') await writeFile(scratch, broken(kind))
         await submitReview()
       } else {
         await publishOutline(workspace, reviewedOutline)
@@ -403,6 +447,37 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
 })
 
 describe('outline-generation Blueprint Quality Review', () => {
+  it('S3 执行通道复用父会话的文件工具', async () => {
+    const workspace = await fixture()
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    const responseCandidate = JSON.stringify({
+      schema_version: 1,
+      points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }],
+    })
+    const read = vi.fn(async () => ({}))
+    const { agent } = modelAgent(workspace, async (prompt, submitReview, write, readTool) => {
+      if (prompt.includes('评分响应点分析')) {
+        await readTool({ file_path: 'analysis/scoring.json' })
+        const output = prompt.match(/唯一输出：([^。]+scoring-response-points\.candidate\.json)/)?.[1]
+        if (output === undefined) throw new Error('响应点候选路径缺失')
+        await write({ file_path: output, content: responseCandidate })
+      } else if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+      else if (!prompt.includes('Response Point Semantic Review')) await publishOutline(workspace, researchDrivenOutline)
+    }, {
+      inheritToolsFromParent: true,
+      read,
+      write: async (args) => {
+        const output = resolve(workspace.root, String(args.file_path))
+        await mkdir(dirname(output), { recursive: true })
+        await writeFile(output, String(args.content))
+        return {}
+      },
+    })
+
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).resolves.toEqual(artifacts)
+    expect(read).toHaveBeenCalledWith({ file_path: 'analysis/scoring.json' })
+  })
+
   it('accepts structured advisory issues and lets the Host author the formal v4 report', async () => {
     const workspace = await fixture()
     const issue: OutlineQualityIssue = {
@@ -525,14 +600,42 @@ describe('outline-generation Blueprint Quality Review', () => {
     await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
     const task = buildBidStageTask('outline_generation')
     expect(task.inputs).not.toContain('analysis/scoring-response-points.json')
-    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
-      if (prompt.includes('评分响应点分析')) await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'), JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }))
+    const responseCandidate = JSON.stringify({ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })
+    const oversizedRead = vi.fn(async (args: Record<string, unknown>) => {
+      if (args.limit !== undefined) throw new Error('limit must be less than or equal to 2000')
+      return {}
+    })
+    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview, write, read) => {
+      if (prompt.includes('评分响应点分析')) {
+        await read({ file_path: 'analysis/scoring.json', limit: 10_000 })
+        const output = prompt.match(/唯一输出：([^。]+scoring-response-points\.candidate\.json)/)?.[1]
+        if (output === undefined) throw new Error('响应点候选路径缺失')
+        await write({ file_path: output, content: responseCandidate, sandbox_permissions: 'workspace-write', justification: '写入工作区候选文件' })
+      }
       else if (prompt.includes('Response Point Semantic Review')) return
       else if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
       else await publishOutline(workspace, researchDrivenOutline)
+    }, {
+      sandboxMode: 'workspace-write',
+      write: async (args) => {
+        expect(args).not.toHaveProperty('sandbox_permissions')
+        expect(args).not.toHaveProperty('justification')
+        expect(typeof args.file_path).toBe('string')
+        expect(args.content).toBe(responseCandidate)
+        const output = resolve(workspace.root, String(args.file_path))
+        await mkdir(dirname(output), { recursive: true })
+        await writeFile(output, String(args.content))
+        return {}
+      },
+      read: oversizedRead,
     })
     await expect(executeOutlineGeneration(agent, workspace, task)).resolves.toEqual(artifacts)
     expect(followup).toHaveBeenCalledTimes(4)
+    expect(oversizedRead).toHaveBeenNthCalledWith(1, { file_path: 'analysis/scoring.json', limit: 10_000 })
+    expect(oversizedRead).toHaveBeenNthCalledWith(2, { file_path: 'analysis/scoring.json' })
+    for (const [message] of followup.mock.calls) {
+      expect(message.content[0]!.text).toContain('当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification')
+    }
     const analysisPrompt = followup.mock.calls[0]![0].content[0]!.text
     expect(analysisPrompt).toContain('本次合法 ID：["SCORE-SCHEDULE"]')
     expect(analysisPrompt).not.toContain('"scoring_id":"SCORE-..."')
@@ -553,7 +656,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     let reviews = 0
     const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
       if (prompt.includes('Blueprint Quality Review\n')) {
-        if (++reviews === 1) await publishOutline(workspace, reviewedOutline)
+        if (++reviews === 1) await writeFile(promptedOutlinePath(workspace, prompt), JSON.stringify(reviewedOutline))
         await submitReview()
       } else await publishOutline(workspace, coarseOutline)
     })
@@ -906,8 +1009,8 @@ describe('S3 确定性规范化与局部续修', () => {
     const workspace = await fixture()
     const catalog = await catalogWithMissing(workspace)
     await publishOutline(workspace, applyOutlineRepair(reviewedOutline, repairSchedule, catalog, scoringArtifact))
-    const { agent } = modelAgent(workspace, async (_prompt, submitReview) => {
-      await publishOutline(workspace, reviewedOutline)
+    const { agent } = modelAgent(workspace, async (prompt, submitReview) => {
+      await writeFile(promptedOutlinePath(workspace, prompt), JSON.stringify(reviewedOutline))
       await submitReview()
     })
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 0 }))

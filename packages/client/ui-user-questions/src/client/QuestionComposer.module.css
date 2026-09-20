@@ -1,5 +1,5 @@
-/* The takeover seats where the input card sits, centered on the InputBar
-   axis at the shared content width (input card - 32): sides = clearance +
+/* The structured interaction sits above the InputBar, centered on its axis
+   at the shared content width (input card - 32): sides = clearance +
    16px so the relation also holds on narrow viewports. */
 .frame {
   display: flex;

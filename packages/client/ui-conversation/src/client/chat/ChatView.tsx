@@ -17,7 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ConversationTimelineSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { Button, IconChevronDownOutline14, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, RenderMessageImages } from '../contract/slots.ts'
-import { PendingSteeringBubble } from './MessageItem.tsx'
+import { PendingOutgoingBubble, PendingSteeringBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { formatRunDuration } from './message-chrome.ts'
 import css from './ChatView.module.css'
@@ -163,6 +163,7 @@ export function ChatView({
   const nodeStore = useSession(s => s.chat.nodes)
   const timeline = useSession(s => s.chat.timeline)
   const inbox = useSession(s => s.queue)
+  const outgoing = useSession(s => s.outgoing) ?? []
   // Workspace root off the session list row: path summaries display relative to it.
   const cwd = useSessions(s => s.byId[sessionId]?.cwd)
   const running = useSession(s => s.running)
@@ -210,6 +211,14 @@ export function ChatView({
     () => inbox.filter(item => item.placement === 'steering'),
     [inbox],
   )
+  const hostSubmissionIds = useMemo(
+    () => new Set(inbox.flatMap(item => item.clientSubmissionId === undefined ? [] : [item.clientSubmissionId])),
+    [inbox],
+  )
+  const pendingOutgoing = useMemo(
+    () => outgoing.filter(message => !hostSubmissionIds.has(message.clientSubmissionId)),
+    [hostSubmissionIds, outgoing],
+  )
   const renderMessageImages = useCallback<RenderMessageImages>(
     owner => renderSlot('conversation.message.images', { ...owner, loadImage }),
     [loadImage, renderSlot],
@@ -228,6 +237,7 @@ export function ChatView({
   const firstSeqRef = useRef<number | null>(null)
   const openedRef = useRef(false)
   const lastKeyRef = useRef<string | null>(null)
+  const lastOutgoingIdRef = useRef<string | null>(null)
   const lastSteeringIdRef = useRef<string | null>(null)
   /** Flow tip signature — follow-scroll only when this moves, never on a
    *  scroll-driven at-bottom chrome re-render (which would snap inertial
@@ -238,8 +248,9 @@ export function ChatView({
   const firstSeq = firstKey === undefined ? null : nodeStore.get(firstKey)?.anchorSeq ?? null
   const lastKey = order.at(-1) ?? null
   const lastNode = lastKey === null ? undefined : nodeStore.get(lastKey)
+  const lastOutgoingId = pendingOutgoing.at(-1)?.localId ?? null
   const lastSteeringId = pendingSteering[pendingSteering.length - 1]?.id ?? null
-  const followSig = `${openState}:${firstSeq}:${lastKey}:${order.length}:${running ? 1 : 0}:${lastSteeringId ?? ''}`
+  const followSig = `${openState}:${firstSeq}:${lastKey}:${order.length}:${running ? 1 : 0}:${lastOutgoingId ?? ''}:${lastSteeringId ?? ''}`
 
   const toBottom = (el: HTMLElement): void => {
     anchorRef.current = null
@@ -277,6 +288,7 @@ export function ChatView({
       }
       firstSeqRef.current = firstSeq
       lastKeyRef.current = lastKey
+      lastOutgoingIdRef.current = lastOutgoingId
       lastSteeringIdRef.current = lastSteeringId
       followSigRef.current = followSig
       return
@@ -293,6 +305,7 @@ export function ChatView({
       firstSeqRef.current = firstSeq
       /* v8 ignore next -- ?? arm: a prepend adds nodes, so the flow list here is never empty. */
       lastKeyRef.current = lastKey
+      lastOutgoingIdRef.current = lastOutgoingId
       lastSteeringIdRef.current = lastSteeringId
       followSigRef.current = followSig
       return
@@ -301,14 +314,16 @@ export function ChatView({
     // Own words must be visible: a new trailing user node force-scrolls
     // (send lives in the composer, so arrival is detected here, not armed there).
     const appendedUser = lastKey !== lastKeyRef.current && lastNode?.kind === 'user'
+    const appendedOutgoing = lastOutgoingId !== null && lastOutgoingId !== lastOutgoingIdRef.current
     const appendedSteering = lastSteeringId !== null && lastSteeringId !== lastSteeringIdRef.current
     const tipMoved = followSigRef.current !== followSig
     lastKeyRef.current = lastKey
+    lastOutgoingIdRef.current = lastOutgoingId
     lastSteeringIdRef.current = lastSteeringId
     followSigRef.current = followSig
     // Follow new flow content while pinned; do NOT re-pin on every render
     // merely because atBottomRef is true (scroll threshold → setState → snap).
-    if (appendedUser || appendedSteering || (tipMoved && atBottomRef.current)) toBottom(el)
+    if (appendedUser || appendedOutgoing || appendedSteering || (tipMoved && atBottomRef.current)) toBottom(el)
   })
 
   const onScrollRef = useRef(() => {})
@@ -451,6 +466,14 @@ export function ChatView({
           {/* Turn-level loading signal: rides the whole running turn (first-token
               wait, tool execution, streaming) so it never flickers per step. */}
           {running && <TurnStatus startTime={runningTurnStart} t={t} />}
+          {pendingOutgoing.map(message => (
+            <PendingOutgoingBubble
+              key={message.localId}
+              message={message}
+              renderMessageImages={renderMessageImages}
+              t={t}
+            />
+          ))}
           {pendingSteering.map(item => (
             <PendingSteeringBubble
               key={item.id}

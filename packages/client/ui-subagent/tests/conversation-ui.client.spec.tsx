@@ -188,7 +188,7 @@ describe('SubagentHeaderLineage', () => {
     expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
   })
 
-  it('keeps summary-known running children visible beside catalog diagnostics', () => {
+  it('keeps only unresolved summary children loading beside catalog diagnostics', () => {
     const missing = 'running-child' as SessionId
     const input = props(catalog({ entries: [{
       kind: 'diagnostic', id: CHILD, reason: 'corrupt',
@@ -199,8 +199,8 @@ describe('SubagentHeaderLineage', () => {
     render(<SubagentHeaderLineage {...input} />)
     hoverCatalog(screen.getByRole('button', { name: '2 个子代理，正在运行' }))
 
-    expect(screen.getByRole('heading', { name: '运行中（2）' })).toBeTruthy()
-    expect(screen.getAllByRole('treeitem', { name: '正在加载子代理' })).toHaveLength(2)
+    expect(screen.getByRole('heading', { name: '运行中（1）' })).toBeTruthy()
+    expect(screen.getAllByRole('treeitem', { name: '正在加载子代理' })).toHaveLength(1)
     expect(screen.getByRole('treeitem', { name: /会话记录损坏/ })).toBeTruthy()
   })
 

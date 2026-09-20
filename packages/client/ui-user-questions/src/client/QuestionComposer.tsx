@@ -101,13 +101,13 @@ function AnswerField(props: AnswerFieldProps) {
 }
 
 /**
- * Composer takeover boundary; the carrier key keys local drafts, so a
+ * Structured interaction boundary above the resident InputBar; the carrier key keys local drafts, so a
  * same-request replay (same key, new carrier object) preserves them.
  *
- * One takeover, two shapes: a request that declares a presentation intent this
+ * One interaction, two shapes: a request that declares a presentation intent this
  * package renders takes that shape (a plan review is one decision over one
  * plan, not a question set), and every other request takes the generic flow.
- * The routing lives here, at the one entry that owns the composer seat, so
+ * The routing lives here, at the one entry that owns the interaction seat, so
  * neither shape can claim a request the other is already rendering.
  *
  * @param props - the selector-matched pending question carrier plus the framework standard kit.

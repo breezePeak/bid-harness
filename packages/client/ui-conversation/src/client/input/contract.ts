@@ -230,6 +230,8 @@ export interface InputMachineOptions {
   readonly mergeWindowMs?: number
   /** Monotonic clock for typing-merge decisions (default: constant 0). */
   readonly now?: () => number
+  /** Pure factory for the client submission identity minted with each attempt. */
+  readonly makeSubmissionId?: (seq: number) => string
 }
 
 /** Published input state (the currency; per-session). */
@@ -260,7 +262,7 @@ export interface SubmitAttempt {
   readonly seq: number
   readonly signal: AbortSignal
   /** Stable client identity reused by any retry of this admission attempt. */
-  readonly submissionId?: string
+  readonly submissionId: string
   /** Draft at enter time; ordinary messages are locally handed off immediately. */
   readonly draftSnapshot: string
   /** Reference identities captured before the draft can change. */

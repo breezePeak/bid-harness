@@ -45,6 +45,8 @@ export const OUTLINE_CONFIRMATION_REPAIR_ACTIONS = Object.fromEntries(
 
 /** Callbacks supplied to the Bid panel without exposing client services. */
 export interface BidStagePanelInjected {
+  /** Enable or clear immediate delivery for the scoped Bid Main Session. */
+  setRealtimeChatMode: (enabled: boolean) => void
   /** 读取已发布详情并恢复各标签的可见性。 */
   getDetails: () => Promise<BidDetailsView>
   setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean, confirmingTender?: boolean) => void
@@ -149,8 +151,8 @@ export function apply(ctx: ClientContext): void {
       listener(pending)
     }
     return () => {
-      listeners?.delete(listener)
-      if (listeners?.size === 0) sectionLocateListeners.delete(sessionId)
+      listeners.delete(listener)
+      if (listeners.size === 0) sectionLocateListeners.delete(sessionId)
     }
   }
 
@@ -187,8 +189,8 @@ export function apply(ctx: ClientContext): void {
     listeners.add(listener)
     listener(workbenchActiveSessions.has(sessionId))
     return () => {
-      listeners?.delete(listener)
-      if (listeners?.size === 0) workbenchActiveListeners.delete(sessionId)
+      listeners.delete(listener)
+      if (listeners.size === 0) workbenchActiveListeners.delete(sessionId)
     }
   }
 
@@ -209,8 +211,8 @@ export function apply(ctx: ClientContext): void {
     }
     listeners.add(listener)
     return () => {
-      listeners?.delete(listener)
-      if (listeners?.size === 0) revisionQueueListeners.delete(sessionId)
+      listeners.delete(listener)
+      if (listeners.size === 0) revisionQueueListeners.delete(sessionId)
     }
   }
 
@@ -260,6 +262,11 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     store: confirmationModeStore,
     inject: (sessionId: SessionId): BidStagePanelInjected => ({
+      setRealtimeChatMode: (enabled) => {
+        const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
+        if (conversation === undefined) return
+        conversation.setSubmitModePolicy(enabled ? 'immediate' : 'default')
+      },
       getDetails: () => getDetails(sessionId),
       setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
@@ -295,9 +302,7 @@ export function apply(ctx: ClientContext): void {
         return conversation?.embeddedSurface?.('review') ?? { host: () => null, subscribe: () => () => {} }
       })(),
       requestWritingRequirements: async (intent) => {
-        const result = intent === undefined
-          ? await ctx.remote.bid.requestWritingRequirements(sessionId)
-          : await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
+        const result = await ctx.remote.bid.requestWritingRequirements(sessionId, intent)
         if (!result.ok) throw actionFailure(result.error)
         if (!result.value.ok) throw actionFailure(result.value.error)
       },
