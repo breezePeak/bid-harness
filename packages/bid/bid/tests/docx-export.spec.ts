@@ -140,6 +140,23 @@ describe('Bid DOCX export', () => {
 
   it('S6 流程图按正文 anchor 进入 Native Visio 两阶段导出', async () => {
     const { workspace } = await exportFixture()
+    const events: string[] = []
+    const nativeExport = {
+      ...fakeNativeVisioExport(),
+      finalizer: {
+        isAvailable: async () => true,
+        updateFields: async (docxPath: string) => {
+          const zip = await JSZip.loadAsync(await readFile(docxPath))
+          expect(await zip.file('word/document.xml')?.async('string')).not.toContain('BID_VISIO_OBJECT_')
+          events.push('finalize')
+        },
+      },
+    } satisfies NativeVisioExport
+    const nativeEmbed = nativeExport.word.embed.bind(nativeExport.word)
+    nativeExport.word.embed = async (...args) => {
+      await nativeEmbed(...args)
+      events.push('embed')
+    }
     await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
       section_id: 'resource', covered_must_answer: [], covered_scoring_response_point_ids: [],
@@ -157,7 +174,7 @@ describe('Bid DOCX export', () => {
     }))
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n图 1 普通图片\n\n质量控制总体流程如下。\n\n{{flow_ref:quality-control-flow}}\n\n{{flowchart:quality-control-flow}}\n')
 
-    await executeDocxExport(workspace, undefined, undefined, undefined, fakeNativeVisioExport())
+    await executeDocxExport(workspace, undefined, undefined, undefined, nativeExport)
     const markdown = await readFile(join(workspace.outputRoot, 'bid.md'), 'utf8')
     expect(markdown).toContain('```flowchart\n')
     expect(markdown).toContain('质量检查闭环')
@@ -168,6 +185,8 @@ describe('Bid DOCX export', () => {
     expect(await readFile(join(workspace.projectRoot, 'flowcharts/FLOW-RESOURCE-1-1.vsdx'), 'utf8')).toBe('fake-vsdx:FLOW-RESOURCE-1-1')
     const format = await readDocxFormat(workspace)
     expect(format.state.lastExport?.mode).toBe('editable')
+    expect(format.state.lastExport?.tocUpdateDeferred).toBeUndefined()
+    expect(events).toEqual(['embed', 'finalize'])
   })
 
   it('S6 流程图在缺少 Visio 时自动降级为图片模式导出并保留源数据', async () => {
@@ -227,6 +246,7 @@ describe('Bid DOCX export', () => {
     expect(format.state.lastExport?.mode).toBe('image_fallback')
     expect(format.state.lastExport?.reasons).toContain('未检测到 Microsoft Visio')
     expect(format.state.lastExport?.summary).toContain('已自动切换为图片兼容模式')
+    expect(format.state.lastExport?.tocUpdateDeferred).toBe(true)
   })
 
   it('S6 流程图在缺少 Word 或两者均缺时自动降级为图片模式导出', async () => {

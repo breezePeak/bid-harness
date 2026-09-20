@@ -88,7 +88,7 @@ async function fixture() {
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096, docxTemplateMaxBytes: 300 * 1024 * 1024,
       modelStageRepairAttempts: 0, evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1,
       chapterWritingCompletionRepairRounds: 1,
-      wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true } satisfies Config,
+      wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '' } satisfies Config,
     inFlight: new Map(),
     automaticOrchestrator: () => new BidOrchestrator(session, { canExecute: () => false, execute: async () => [] },
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
