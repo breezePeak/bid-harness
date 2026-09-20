@@ -148,6 +148,12 @@ function promptText(request: { prompt: readonly { type: string; text?: string }[
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
+function mappingTaskId(request: { prompt: readonly { type: string; text?: string }[] }): string {
+  const line = promptText(request).split('\n').find(value => value.startsWith('Mapping Task：'))
+  if (line === undefined) throw new Error('missing Mapping Task prompt line')
+  return (JSON.parse(line.slice('Mapping Task：'.length)) as { task_id: string }).task_id
+}
+
 it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 coverage ownership', () => {
   const source = [{ file_id: 'tender', chunk: 'chunk', line_start: 1, line_end: 1 }]
   const requirements = parseTenderRequirementsArtifact({
@@ -3540,6 +3546,95 @@ describe('S4 Host 准入与最终确认', () => {
         expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'RATE_LIMIT' })] }),
         expect.objectContaining({ accepted: true }),
       ]))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('并发 Child 首次 RATE_LIMIT 使用各自重试预算，冷却后串行恢复', async () => {
+    vi.useFakeTimers()
+    try {
+      const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-concurrent-')))
+      const fixture = mappingFixture(workspace, await writeInputs(workspace))
+      const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+        maxRepairAttempts: 0, maxConcurrency: 2, maxInfrastructureRetryAttempts: 1,
+      })
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+      for (const start of fixture.starts.slice(0, 2)) {
+        const child = fixture.children.get(String(start.request.childId))!
+        ;(child.session.events as unknown[]).push({
+          type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 rpm exhausted' } } },
+        })
+        start.complete()
+      }
+      await vi.waitFor(async () => {
+        const progress = await readEvidenceMappingProgress(workspace)
+        expect(progress?.tasks.filter(task => task.latest_issue?.includes('rpm exhausted'))).toHaveLength(2)
+      })
+      expect(fixture.starts).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+      expect(fixture.starts).toHaveLength(3)
+
+      fixture.starts[2]!.resolve()
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) })
+      fixture.starts[3]!.resolve()
+      await execution
+
+      const log = parseEvidenceMappingExecutionLog(JSON.parse(
+        await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+      ))
+      for (const task of log.tasks.filter(task => task.phase === 'initial')) {
+        expect(task.attempts).toEqual([
+          expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'RATE_LIMIT' })] }),
+          expect.objectContaining({ accepted: true }),
+        ])
+      }
+      expect(fixture.maxActive()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('并发 Child RATE_LIMIT 后只有本 Task 的重试耗尽会终止 S4', async () => {
+    vi.useFakeTimers()
+    try {
+      const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-task-budget-')))
+      const fixture = mappingFixture(workspace, await writeInputs(workspace))
+      const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+        maxRepairAttempts: 0, maxConcurrency: 2, maxInfrastructureRetryAttempts: 1,
+      })
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+      for (const start of fixture.starts.slice(0, 2)) {
+        const child = fixture.children.get(String(start.request.childId))!
+        ;(child.session.events as unknown[]).push({
+          type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 rpm exhausted' } } },
+        })
+        start.complete()
+      }
+      await vi.waitFor(async () => {
+        const progress = await readEvidenceMappingProgress(workspace)
+        expect(progress?.tasks.filter(task => task.latest_issue?.includes('rpm exhausted'))).toHaveLength(2)
+      })
+      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+      const exhaustedTaskId = mappingTaskId(fixture.starts[2]!.request.request)
+      const retryChild = fixture.children.get(String(fixture.starts[2]!.request.childId))!
+      ;(retryChild.session.events as unknown[]).push({
+        type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 rpm exhausted' } } },
+      })
+      fixture.starts[2]!.complete()
+
+      await expect(execution).rejects.toMatchObject({
+        issues: [{ code: 'RATE_LIMIT', message: expect.stringContaining('rpm exhausted') }],
+      })
+      expect(fixture.starts).toHaveLength(3)
+      const log = parseEvidenceMappingExecutionLog(JSON.parse(
+        await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+      ))
+      expect(log.tasks.find(task => task.task_id === exhaustedTaskId)?.attempts).toHaveLength(2)
+      expect(log.tasks.filter(task => task.phase === 'initial').map(task => task.attempts.length).sort()).toEqual([1, 2])
     } finally {
       vi.useRealTimers()
     }

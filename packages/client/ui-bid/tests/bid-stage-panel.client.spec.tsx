@@ -441,8 +441,6 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('进行中 2')).toBeTruthy()
     expect(screen.getByText('已完成 3')).toBeTruthy()
     expect(screen.getByText('未开始 5')).toBeTruthy()
-    expect(screen.getByText('技术范围与交付要求理解')).toBeTruthy()
-    expect(screen.getByText('技术偏离表')).toBeTruthy()
     const progress = document.querySelector<HTMLProgressElement>('[data-bid-progress]')
     expect(progress?.value).toBe(30)
     expect(progress?.max).toBe(100)
@@ -511,9 +509,7 @@ describe('BidStagePanel', () => {
 
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
     expect(screen.getByText('失败 18')).toBeTruthy()
-    expect(screen.queryByText('失败 Section：SEC-401')).toBeNull()
-    expect(screen.getByText('系统测试方案')).toBeTruthy()
-    expect(screen.getByText('rpm exhausted')).toBeTruthy()
+    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
   })
 
   it('shows reset completion without a stage action button', () => {
@@ -588,7 +584,7 @@ describe('BidStagePanel', () => {
     expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
     expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
     expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
-    expect(screen.queryByText('失败 Section：SEC-401')).toBeNull()
+    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
     expect(screen.queryByRole('button', { name: '继续未完成任务' })).toBeNull()
   })

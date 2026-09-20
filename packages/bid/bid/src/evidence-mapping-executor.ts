@@ -3811,6 +3811,48 @@ async function executeEvidenceMappingRun(
   let fatalWebFailure: MappingSubagentInfrastructureError | undefined
   const infrastructureRetries = new Map<string, number>()
   const providerCooldownUntil = new Map<string, number>()
+  const infrastructureRetryKey = (provider: string, taskId: string): string => provider === 'subagent'
+    ? `subagent:${taskId}`
+    : provider
+  let mappingAttemptConcurrency = maxConcurrency
+  let admittedMappingAttempts = 0
+  const mappingAttemptWaiters: Array<() => void> = []
+  const drainMappingAttemptWaiters = (): void => {
+    while (admittedMappingAttempts < mappingAttemptConcurrency) {
+      const resolve = mappingAttemptWaiters.shift()
+      if (resolve === undefined) return
+      admittedMappingAttempts++
+      resolve()
+    }
+  }
+  const acquireMappingAttempt = async (): Promise<void> => {
+    signal.throwIfAborted()
+    if (admittedMappingAttempts < mappingAttemptConcurrency) {
+      admittedMappingAttempts++
+      return
+    }
+    await new Promise<void>((resolve, reject) => {
+      const waiter = (): void => {
+        signal.removeEventListener('abort', abort)
+        resolve()
+      }
+      const abort = (): void => {
+        const index = mappingAttemptWaiters.indexOf(waiter)
+        if (index >= 0) mappingAttemptWaiters.splice(index, 1)
+        reject(signal.reason)
+      }
+      signal.addEventListener('abort', abort, { once: true })
+      mappingAttemptWaiters.push(waiter)
+    })
+  }
+  const releaseMappingAttempt = (): void => {
+    admittedMappingAttempts--
+    drainMappingAttemptWaiters()
+  }
+  const setMappingAttemptConcurrency = (value: number): void => {
+    mappingAttemptConcurrency = value
+    drainMappingAttemptWaiters()
+  }
   const providerFor = (name: typeof MAPPING_AGENT_TOOLS[number]): string => name === 'web_search'
     ? webPreflight?.search.selectedProviderId ?? 'web_search'
     : webPreflight?.fetch.selectedProviderId ?? 'web_fetch'
@@ -3914,7 +3956,6 @@ async function executeEvidenceMappingRun(
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
     signal.throwIfAborted()
-    await waitForProviderCooldown()
     const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
     if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
     if (log.status === 'completed') return completedTaskFromCheckpoint(mappingTask)
@@ -4374,7 +4415,11 @@ async function executeEvidenceMappingRun(
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
     for (let retry = 0; ; retry++) {
+      let releaseAttempt = false
       try {
+        await waitForProviderCooldown()
+        await acquireMappingAttempt()
+        releaseAttempt = true
         return await runTaskAttempt(mappingTask, runInputs)
       } catch (error) {
         if (error instanceof MappingSubagentInfrastructureError && error.contextOverflow) throw error
@@ -4382,13 +4427,15 @@ async function executeEvidenceMappingRun(
         const provider = error.provider === undefined || error.provider === 'subagent'
           ? 'subagent'
           : providerFor(error.provider)
-        const retries = infrastructureRetries.get(provider) ?? 0
+        if (provider === 'subagent') setMappingAttemptConcurrency(1)
+        const retryKey = infrastructureRetryKey(provider, mappingTask.task_id)
+        const retries = infrastructureRetries.get(retryKey) ?? 0
         if (retries >= maxInfrastructureRetryAttempts) {
           fatalWebFailure ??= error
           controller.abort(error)
           throw error
         }
-        infrastructureRetries.set(provider, retries + 1)
+        infrastructureRetries.set(retryKey, retries + 1)
         providerCooldownUntil.set(provider, Math.max(
           providerCooldownUntil.get(provider) ?? 0,
           Date.now() + error.retryAfterMs,
@@ -4397,7 +4444,11 @@ async function executeEvidenceMappingRun(
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'
         await persistLog()
+        releaseMappingAttempt()
+        releaseAttempt = false
         await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
+      } finally {
+        if (releaseAttempt) releaseMappingAttempt()
       }
     }
   }
