@@ -39,6 +39,9 @@ function sessionsWith(sessions: SessionSummary[]) {
       subscribe: () => () => {},
     },
     actionCalls,
+    open: (sessionId: SessionId) => {
+      actionCalls.push({ method: 'open', args: [sessionId] })
+    },
     openSubagent: (address: SubagentAddress) => {
       actionCalls.push({ method: 'openSubagent', args: [address] })
     },
@@ -103,10 +106,12 @@ describe('apply', () => {
       mode: 'continuable',
     }
     actions.openChild(address)
+    actions.openSession(sid('c2'))
     actions.refresh(sid('parent'))
     actions.setCatalogOpen(sid('parent'), true)
     expect(face.actionCalls).toEqual([
       { method: 'openSubagent', args: [address] },
+      { method: 'open', args: [sid('c2')] },
       { method: 'refreshSubagents', args: [sid('parent')] },
       { method: 'setSubagentCatalogOpen', args: [sid('parent'), true] },
     ])

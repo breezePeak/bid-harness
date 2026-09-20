@@ -47,6 +47,9 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-subagent: dictionaries')
   const sessions = ctx.sessions
   const catalogActions = (_parentSessionId: SessionId): SubagentCatalogInjected => ({
+    openSession(sessionId: SessionId) {
+      sessions.open(sessionId)
+    },
     openChild(address: SubagentAddress) {
       sessions.openSubagent(address)
     },

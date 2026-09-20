@@ -48,18 +48,19 @@ function props(
   nested: Readonly<Record<SessionId, SubagentCatalogSnapshot>> = {},
   summaries?: Readonly<Record<SessionId, SessionSummary>>,
 ) {
-  const state = {
-    ids: [CHILD],
-    byId: summaries ?? {
-      [CHILD]: {
-        id: CHILD,
-        title: '正在扫描项目文件',
-        displayTitle: 'worker',
-        running: true,
-        blank: false,
-        updatedAt: Date.now(),
-      },
+  const byId = summaries ?? {
+    [CHILD]: {
+      id: CHILD,
+      title: '正在扫描项目文件',
+      displayTitle: 'worker',
+      running: true,
+      blank: false,
+      updatedAt: Date.now(),
     },
+  }
+  const state = {
+    ids: Object.keys(byId) as SessionId[],
+    byId,
     current: PARENT, phase: 'ready',
     subagentsByParent: value === undefined ? nested : { [PARENT]: value, ...nested },
     jobsBySession: {},
@@ -71,6 +72,7 @@ function props(
   return {
     sessionId: PARENT,
     useSessions,
+    openSession: vi.fn(),
     openChild: vi.fn(),
     refresh: vi.fn(),
     setCatalogOpen: vi.fn(),
@@ -129,6 +131,69 @@ describe('SubagentHeaderLineage', () => {
     })} />)
     const inactiveTrigger = screen.getByRole('button', { name: '3 个子代理' })
     expect(inactiveTrigger.querySelector('[data-state="ongoing"]')).toBeNull()
+  })
+
+  it('shows up to three running subagent shortcuts before the history trigger', () => {
+    const child2 = 'child-2' as SessionId
+    const child3 = 'child-3' as SessionId
+    const child4 = 'child-4' as SessionId
+    const entries: ChildEntry[] = [CHILD, child2, child3, child4].map((id, index) => ({
+      kind: 'child',
+      id,
+      mode: 'continuable',
+      label: `runner-${index + 1}`,
+      activity: 'running',
+      hasChildren: false,
+    }))
+    const input = props(catalog({ entries }))
+    render(<SubagentHeaderLineage {...input} />)
+
+    const shortcuts = screen.getAllByRole('button', { name: /进入正在运行的子代理/ })
+    expect(shortcuts).toHaveLength(3)
+    expect(shortcuts[0]!.compareDocumentPosition(screen.getByRole('button', { name: '4 个子代理' }))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '进入正在运行的子代理：runner-2' }))
+    expect(input.openChild).toHaveBeenCalledWith({
+      parentSessionId: PARENT, childSessionId: child2, mode: 'continuable',
+    })
+    expect(screen.queryByRole('button', { name: '进入正在运行的子代理：runner-4' })).toBeNull()
+  })
+
+  it('shows running shortcuts from summaries before the catalog hydrates', () => {
+    const child2 = 'child-2' as SessionId
+    const child3 = 'child-3' as SessionId
+    const child4 = 'child-4' as SessionId
+    const summaries = {
+      [CHILD]: {
+        ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+        running: true, displayTitle: 'runner-1',
+      },
+      [child2]: {
+        ...summary(child2, 2), parentId: PARENT, origin: 'subagent' as const,
+        running: true, displayTitle: 'runner-2',
+      },
+      [child3]: {
+        ...summary(child3, 3), parentId: PARENT, origin: 'subagent' as const,
+        running: true, displayTitle: 'runner-3',
+      },
+      [child4]: {
+        ...summary(child4, 4), parentId: PARENT, origin: 'subagent' as const,
+        running: true, displayTitle: 'runner-4',
+      },
+    }
+    const input = props(undefined, {}, summaries)
+    render(<SubagentHeaderLineage {...input} />)
+
+    const shortcuts = screen.getAllByRole('button', { name: /进入正在运行的子代理/ })
+    expect(shortcuts).toHaveLength(3)
+    expect(shortcuts[0]!.compareDocumentPosition(screen.getByRole('button', { name: '4 个子代理，正在运行' }))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '进入正在运行的子代理：runner-2' }))
+    expect(input.openSession).toHaveBeenCalledWith(child2)
+    expect(input.openChild).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '进入正在运行的子代理：runner-4' })).toBeNull()
   })
 
   it('does not aggregate subagents reached through an ordinary fork', () => {

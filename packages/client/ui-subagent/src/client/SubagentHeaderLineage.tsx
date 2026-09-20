@@ -22,6 +22,7 @@ type ChildCatalogEntry = Extract<CatalogEntry, { kind: 'child' }>
 
 /** Business actions supplied by the slot registration. */
 export interface SubagentCatalogInjected {
+  openSession: (sessionId: SessionId) => void
   openChild: (address: SubagentAddress) => void
   refresh: (parentSessionId: SessionId) => void
   setCatalogOpen: (parentSessionId: SessionId, open: boolean) => void
@@ -52,6 +53,14 @@ interface CatalogRowProps {
   refresh: (parentSessionId: SessionId) => void
   toggleBranch: (childSessionId: SessionId) => void
   closeCatalog: () => void
+}
+
+interface RunningShortcut {
+  id: SessionId
+  label: string
+  title: string | undefined
+  path: readonly string[]
+  address: SubagentAddress | undefined
 }
 
 /** Build one status-specific forest from the loaded catalog graph. */
@@ -97,6 +106,91 @@ function catalogSectionNodes(
 
 function catalogNodeCount(nodes: readonly CatalogTreeNode[]): number {
   return nodes.reduce((count, node) => count + 1 + catalogNodeCount(node.children), 0)
+}
+
+function runningShortcuts(nodes: readonly CatalogTreeNode[]): readonly CatalogTreeNode[] {
+  const shortcuts: CatalogTreeNode[] = []
+  const visit = (items: readonly CatalogTreeNode[]): void => {
+    for (const node of items) {
+      if (shortcuts.length >= 3) return
+      shortcuts.push(node)
+      visit(node.children)
+    }
+  }
+  visit(nodes)
+  return shortcuts
+}
+
+function collectCatalogNodes(nodes: readonly CatalogTreeNode[], into: Map<SessionId, CatalogTreeNode>): void {
+  for (const node of nodes) {
+    into.set(node.entry.id, node)
+    collectCatalogNodes(node.children, into)
+  }
+}
+
+function reachesSubagentRoot(
+  summary: SessionSummary,
+  rootSessionId: SessionId,
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+): boolean {
+  const seen = new Set<SessionId>()
+  let current: SessionSummary | undefined = summary
+  while (current?.origin === 'subagent' && current.parentId !== undefined && !seen.has(current.id)) {
+    if (current.parentId === rootSessionId) return true
+    seen.add(current.id)
+    current = summaries[current.parentId]
+  }
+  return false
+}
+
+function shortcutFromCatalogNode(
+  node: CatalogTreeNode,
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+): RunningShortcut {
+  return {
+    id: node.entry.id,
+    label: node.entry.label ?? node.entry.id,
+    title: summaries[node.entry.id]?.title,
+    path: node.path,
+    address: {
+      parentSessionId: node.parentSessionId,
+      childSessionId: node.entry.id,
+      mode: node.entry.mode,
+    },
+  }
+}
+
+function summaryRunningShortcuts(
+  rootSessionId: SessionId,
+  orderedIds: readonly SessionId[],
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+  catalogNodes: ReadonlyMap<SessionId, CatalogTreeNode>,
+): readonly RunningShortcut[] {
+  const shortcuts: RunningShortcut[] = []
+  const seen = new Set<SessionId>()
+  const add = (id: SessionId): void => {
+    if (shortcuts.length >= 3 || seen.has(id)) return
+    seen.add(id)
+    const summary = summaries[id]
+    if (
+      summary === undefined
+      || !summary.running
+      || summary.origin !== 'subagent'
+      || !reachesSubagentRoot(summary, rootSessionId, summaries)
+    ) return
+    const node = catalogNodes.get(id)
+    shortcuts.push(node === undefined
+      ? {
+        id,
+        label: summary.displayTitle,
+        title: summary.title,
+        path: [],
+        address: undefined,
+      }
+      : shortcutFromCatalogNode(node, summaries))
+  }
+  for (const id of orderedIds) add(id)
+  return shortcuts
 }
 
 /** Count direct summary children not represented by the loaded catalog. */
@@ -622,11 +716,12 @@ function catalogMenuPosition(trigger: HTMLButtonElement): CSSProperties {
 /** One trigger-plus-tree dropdown over the catalog rooted at `rootSessionId`. */
 function CatalogDropdown({
   rootSessionId, currentSessionId, displayTitle, openTitle, variant, separator = false,
-  useSessions, openChild, refresh, setCatalogOpen, t,
+  useSessions, openSession, openChild, refresh, setCatalogOpen, t,
 }: CatalogDropdownProps) {
   const ancestorSwitcher = variant === 'switcher' && openTitle !== undefined
   const catalogs = useSessions(state => state.subagentsByParent)
   const summaries = useSessions(state => state.byId)
+  const sessionIds = useSessions(state => state.ids)
   const catalog = catalogs[rootSessionId]
   const [open, setOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState<CSSProperties>()
@@ -677,6 +772,21 @@ function CatalogDropdown({
     () => catalogSectionNodes(rootSessionId, catalogs, 'inactive'),
     [catalogs, rootSessionId],
   )
+  const catalogNodes = useMemo(() => {
+    const nodes = new Map<SessionId, CatalogTreeNode>()
+    collectCatalogNodes(runningNodes, nodes)
+    collectCatalogNodes(historyNodes, nodes)
+    return nodes
+  }, [historyNodes, runningNodes])
+  const shortcutNodes = useMemo(() => {
+    const fromSummaries = summaryRunningShortcuts(rootSessionId, sessionIds, summaries, catalogNodes)
+    if (fromSummaries.length >= 3) return fromSummaries
+    const existing = new Set(fromSummaries.map(node => node.id))
+    const extras = runningShortcuts(runningNodes)
+      .filter(node => !existing.has(node.entry.id))
+      .map(node => shortcutFromCatalogNode(node, summaries))
+    return [...fromSummaries, ...extras].slice(0, 3)
+  }, [catalogNodes, rootSessionId, runningNodes, sessionIds, summaries])
   const runningCount = catalogNodeCount(runningNodes)
     + missingSummaryCount(rootSessionId, catalog, summaries, 'running')
   const historyCount = catalogNodeCount(historyNodes)
@@ -883,6 +993,37 @@ function CatalogDropdown({
       onMouseLeave={scheduleHoverClose}
     >
       {separator && <span className={css.separator}>/</span>}
+      {variant === 'count' && shortcutNodes.length > 0 && (
+        <span className={css.shortcutRail} aria-hidden={false}>
+          {shortcutNodes.map((node, index) => {
+            const mode = node.address?.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
+            const { displayLabel } = resolveRowPresentation(
+              node.label,
+              node.title,
+              node.path,
+              mode,
+            )
+            return (
+              <button
+                key={node.id}
+                type="button"
+                className={`${css.shortcut} ${css[`shortcut${index + 1}` as 'shortcut1' | 'shortcut2' | 'shortcut3']}`}
+                aria-label={t('running.quickOpen', { title: displayLabel })}
+                title={displayLabel}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  if (node.address === undefined) openSession(node.id)
+                  else openChild(node.address)
+                  changeOpen(false)
+                }}
+              >
+                <span className={css.shortcutGlyph} />
+              </button>
+            )
+          })}
+        </span>
+      )}
       <button
         ref={triggerRef}
         type="button"
@@ -1006,13 +1147,13 @@ function CatalogDropdown({
  */
 export function SubagentHeaderLineage({
   lineageSessionId, displayTitle, openTitle,
-  useSessions, openChild, refresh, setCatalogOpen, t,
+  useSessions, openSession, openChild, refresh, setCatalogOpen, t,
 }: SubagentHeaderLineageProps) {
   const parentId = useSessions((state) => {
     const summary = state.byId[lineageSessionId]
     return summary?.origin === 'subagent' ? summary.parentId : undefined
   })
-  const shared = { useSessions, openChild, refresh, setCatalogOpen, t }
+  const shared = { useSessions, openSession, openChild, refresh, setCatalogOpen, t }
   if (parentId === undefined) {
     return (
       <CatalogDropdown

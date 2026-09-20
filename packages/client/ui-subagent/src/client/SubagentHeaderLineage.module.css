@@ -68,6 +68,70 @@
   height: 10px;
 }
 
+.shortcutRail {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+}
+
+.shortcut {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-l1);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.shortcut:hover,
+.shortcut:focus-visible {
+  z-index: 1;
+  border-color: currentColor;
+  outline: none;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.shortcut + .shortcut {
+  margin-left: -6px;
+}
+
+.shortcut1 {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.shortcut2 {
+  color: var(--dsw-alias-label-primary);
+}
+
+.shortcut3 {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.shortcutGlyph {
+  position: relative;
+  width: 10px;
+  height: 10px;
+}
+
+.shortcutGlyph::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  background:
+    radial-gradient(circle at 1px 1px, currentColor 1.5px, transparent 1.6px),
+    radial-gradient(circle at 7px 1px, currentColor 1.5px, transparent 1.6px),
+    radial-gradient(circle at 1px 7px, currentColor 1.5px, transparent 1.6px),
+    radial-gradient(circle at 7px 7px, currentColor 1.5px, transparent 1.6px);
+}
+
 .trigger:hover,
 .trigger:focus-visible {
   color: var(--dsw-alias-label-secondary);
