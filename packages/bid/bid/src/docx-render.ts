@@ -17,6 +17,7 @@ import { Document,
   ImageRun,
   ExternalHyperlink,
   SectionType,
+  VerticalAlign,
   WidthType,
   type ParagraphChild,
   type IParagraphOptions,
@@ -53,6 +54,39 @@ const escape = (value: string): string => value.replaceAll('&',
   '&#39;')
 const content = (node: Node): string => node.value ?? (node.children ?? []).map(content).join('')
 const mm = (value: number): number => Math.round(value * 1440 / 25.4)
+
+function textWidth(value: string): number {
+  return [...value].reduce((total, character) => total + (/^[\x00-\x7F]$/u.test(character) ? 0.52 : 1), 0)
+}
+
+function inferTableColumnWidths(table: Node): number[] {
+  const rows = table.children ?? []
+  const count = Math.max(0, ...rows.map(row => row.children?.length ?? 0))
+  if (count <= 1) return count === 0 ? [] : [1]
+  const weights = Array.from({ length: count }, (_, index) => Math.max(1,
+    rows.reduce((sum, row) => sum + textWidth(content(row.children?.[index] ?? { type: 'text', value: '' })), 0)))
+  const widths = weights.map(weight => weight / weights.reduce((sum, value) => sum + value, 0))
+  const fixed = new Set<number>()
+  while (fixed.size < count) {
+    const remaining = 1 - [...fixed].reduce((sum, index) => sum + widths[index]!, 0)
+    const remainingWeight = weights.reduce((sum, weight, index) => sum + (fixed.has(index) ? 0 : weight), 0)
+    let changed = false
+    for (const [index, weight] of weights.entries()) {
+      if (fixed.has(index)) continue
+      widths[index] = remaining * weight / remainingWeight
+      if (widths[index]! < 0.08) { widths[index] = 0.08; fixed.add(index); changed = true }
+      else if (widths[index]! > 0.45) { widths[index] = 0.45; fixed.add(index); changed = true }
+    }
+    if (!changed) break
+  }
+  const remainder = 1 - widths.reduce((sum, value) => sum + value, 0)
+  if (remainder > 0) {
+    const index = widths.reduce((best, width, candidate) => width < widths[best]! ? candidate : best, 0)
+    widths[index] = widths[index]! + remainder
+  }
+  return widths
+}
+
 const isTechnicalDeviationTableHeading = (node: Node): boolean => node.type === 'heading'
   && content(node).replace(/^\s*\d+(?:\.\d+)*\s+/u, '').trim() === '技术偏离表'
 
@@ -384,15 +418,22 @@ export async function renderDocx(
       }
       if (node.type === 'table') {
         const rows: TableRow[] = [], htmlRows: string[] = []
+        const fractions = inferTableColumnWidths(node)
+        const pageWidth = sectionLandscape ? page[1] : page[0]
+        const totalWidth = mm((pageWidth - num('page.left') - num('page.right')) * num('table.width') / 100)
+        const columnWidths = fractions.map(fraction => Math.round(totalWidth * fraction))
         for (const [rowIndex, row] of (node.children ?? []).entries()) {
           const cells: TableCell[] = [], htmlCells: string[] = []
           const role = rowIndex === 0 ? 'tableHeader' : 'tableCell'
-          for (const cell of row.children ?? []) {
+          for (const [cellIndex, cell] of (row.children ?? []).entries()) {
             const rendered = await inline(cell.children ?? [], role)
             cells.push(new TableCell({ ...(rowIndex === 0 ? { shading: { fill: str('table.fill') } } : {}),
+              width: { size: columnWidths[cellIndex] ?? 0, type: WidthType.DXA },
+              verticalAlign: rowIndex === 0 ? VerticalAlign.CENTER : VerticalAlign.TOP,
               children: [new Paragraph({ ...paragraph(role), indent: { firstLine: 0, firstLineChars: 0 },
+                spacing: { ...paragraph(role).spacing, before: 0, after: 0 },
                 children: rendered.runs })] }))
-            htmlCells.push(`<${rowIndex === 0 ? 'th' : 'td'} style="${style(role)};text-indent:0;${rowIndex === 0 ? `background:#${str('table.fill')};` : ''}border:${num('table.borderSize')}pt ${values['table.border'] === 'nil' ? 'none' : values['table.border'] === 'single' ? 'solid' : str('table.border')}">${rendered.html}</${rowIndex === 0 ? 'th' : 'td'}>`)
+            htmlCells.push(`<${rowIndex === 0 ? 'th' : 'td'} style="${style(role)};width:${(fractions[cellIndex] ?? 0) * 100}%;text-indent:0;margin-top:0;margin-bottom:0;vertical-align:${rowIndex === 0 ? 'middle' : 'top'};${rowIndex === 0 ? `background:#${str('table.fill')};` : ''}border:${num('table.borderSize')}pt ${values['table.border'] === 'nil' ? 'none' : values['table.border'] === 'single' ? 'solid' : str('table.border')}">${rendered.html}</${rowIndex === 0 ? 'th' : 'td'}>`)
           }
           rows.push(new TableRow({ tableHeader: rowIndex === 0, children: cells }))
           htmlRows.push(`<tr>${htmlCells.join('')}</tr>`)
@@ -400,6 +441,7 @@ export async function renderDocx(
         const border = { style: str('table.border') as 'single', size: num('table.borderSize') * 8 }
         doc.push(new Table({ width: { size: num('table.width'),
           type: WidthType.PERCENTAGE },
+        columnWidths,
         borders: { top: border,
           bottom: border,
           left: border,

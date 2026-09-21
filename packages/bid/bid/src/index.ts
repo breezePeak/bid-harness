@@ -419,6 +419,7 @@ export {
 } from './chapter-writing-executor.ts'
 export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
+export { TECHNICAL_DEVIATION_HEADERS, parseTechnicalDeviationTable, validateTechnicalDeviationTable } from './technical-deviation-table.ts'
 export {
   assessDocxExportPageTarget,
   executeDocxExport,

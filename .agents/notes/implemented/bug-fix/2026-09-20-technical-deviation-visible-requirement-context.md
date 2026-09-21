@@ -12,7 +12,7 @@ Status: implemented
 
 S4 由同一个 Host helper 生成 Prompt 中的 Requirement、Scoring、Response Point 与 Compliance 上下文，并限制 Research Finding 只能引用实际下发的业务记录。独立的 assigned coverage helper 同时驱动 `update_section_task` 的写入校验和 Prompt 所示 `current_coverage_ownership`。空 Requirement ownership 只允许 `section_responsibility` 与 `requirement_ids=[]`；Tool description、参数错误和 Repair 清单直接给出允许集合。
 
-S5 使用 `sectionVisibleRequirements()` 生成 Writer 与 Reviewer 的章节上下文。技术偏离表按完整 S2 Requirements 逐项形成响应索引，不显示内部 Requirement ID；章节对象和 Manifest 继续保存空 `requirement_ids`。
+S5 使用 `sectionVisibleRequirements()` 生成 Writer 与 Reviewer 的章节上下文。Writer 候选与最终磁盘正文都通过同一 Markdown AST 解析器验证唯一六列表格、S2 行数和顺序、必要单元格、具体响应及内部编号；技术偏离表按完整 S2 Requirements 逐项形成响应索引，章节对象和 Manifest 继续保存空 `requirement_ids`。
 
 ## Alternatives considered
 
@@ -24,6 +24,6 @@ S5 使用 `sectionVisibleRequirements()` 生成 Writer 与 Reviewer 的章节上
 
 ## Consequences
 
-技术偏离表在 S4 和 S5 可读取全部 S2 Requirements，但不能把它们写入 Blueprint coverage override 或 Manifest。普通章节的 Requirement 可见范围保持不变，且越界 Research 引用在工具调用时立即失败。Outline、Evidence Map、Checkpoint 和 Session 格式不变。
+技术偏离表在 S4 和 S5 可读取全部 S2 Requirements，但不能把它们写入 Blueprint coverage override 或 Manifest。空表、示例行、缺行、错序和只有状态词的响应在章节保存前失败，最终 Validator 对持久化正文重复校验。普通章节的 Requirement 可见范围保持不变，且越界 Research 引用在工具调用时立即失败。Outline、Evidence Map、Checkpoint 和 Session 格式不变。
 
 定向测试固定共用筛选函数、技术偏离表 Prompt 的全量只读上下文与空 ownership、普通章节越界引用拒绝、空 ownership Blueprint 的完整 S4 收口，以及 S5 Writer 上下文和特殊写作规则。

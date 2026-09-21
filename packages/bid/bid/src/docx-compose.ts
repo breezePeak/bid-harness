@@ -94,7 +94,8 @@ function logicalCells(row: XmlNode, gridColumns: number): LogicalCell[] {
   return children(row, 'tc').map((node) => {
     const raw = Number(attr(child(child(node, 'tcPr') ?? {}, 'gridSpan') ?? {}, 'val') ?? 1)
     const span = Number.isInteger(raw) && raw > 0 ? raw : 1
-    const result = { node, start, span, value: text(node).trim(), semantic: semanticHeader(text(node)) }
+    const value = text(node).replace(/\p{Cf}/gu, '').trim()
+    const result = { node, start, span, value, semantic: semanticHeader(value) }
     start += span
     if (gridColumns > 0 && start > gridColumns) throw new Error('DOCX 表格单元格超出 tblGrid。')
     return result
@@ -137,21 +138,21 @@ function isTechnicalDeviationTable(info: TableInfo): boolean {
   return descendants(info.node, 'tblCaption').some(node => normalized(attr(node, 'val') ?? '') === 'dshtechnicaldeviationtable')
 }
 
-function removeVerticalMerges(row: XmlNode): void {
+function removeCellMerges(row: XmlNode): void {
   for (const properties of descendants(row, 'tcPr')) {
-    properties.elements = (properties.elements ?? []).filter(node => local(node.name) !== 'vMerge')
+    properties.elements = (properties.elements ?? []).filter(node => !['vMerge', 'gridSpan'].includes(local(node.name)))
   }
 }
 
 function resizeTechnicalDeviationTable(target: TableInfo, rowCount: number): TableInfo {
   const prototype = target.rows[0]
-  if (prototype === undefined || rowCount === target.rows.length) return target
+  if (prototype === undefined) return target
   const rows = children(target.node, 'tr')
   const header = rows[0]
   if (header === undefined) return target
   const replacements = Array.from({ length: rowCount }, () => {
     const row = clone(prototype)
-    removeVerticalMerges(row)
+    removeCellMerges(row)
     return row
   })
   let inserted = false
@@ -290,6 +291,37 @@ function tableScore(target: TableInfo, source: TableInfo): number {
   return editableMatches === 0 ? -1 : editableMatches * 10 + shared
 }
 
+const technicalDeviationSemantics = ['index', 'subject', 'requirement', 'response', 'deviation', 'remark'] as const
+
+function findTechnicalDeviationSourceTable(sourceElements: XmlNode[]): TableInfo {
+  const start = sourceElements.findIndex(node => local(node.name) === 'p'
+    && paragraphStyleIds(node).includes('Heading1') && normalized(text(node)) === normalized('技术偏离表'))
+  if (start < 0) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
+  const end = sourceElements.findIndex((node, index) => index > start && local(node.name) === 'p'
+    && paragraphStyleIds(node).includes('Heading1'))
+  const section = sourceElements.slice(start + 1, end < 0 ? sourceElements.length : end)
+  const matches = section.flatMap(element => descendants({ elements: [element] }, 'tbl'))
+    .map(tableInfo).filter((item): item is TableInfo => item !== undefined)
+    .filter(info => info.gridColumns === 6 && info.header.length === 6
+      && technicalDeviationSemantics.every(semantic => info.header.some(header => header.semantic === semantic)))
+  if (matches.length === 0) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
+  if (matches.length > 1) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_AMBIGUOUS')
+  return matches[0]!
+}
+
+function assertTechnicalDeviationTable(info: TableInfo, expectedRows: number): void {
+  if (info.gridColumns !== 6 || info.header.length !== 6 || info.rows.length !== expectedRows
+    || info.rows.some(row => logicalCells(row, info.gridColumns).length !== 6)) {
+    throw new Error('BID_DOCX_TECHNICAL_DEVIATION_TARGET_INVALID')
+  }
+  for (const row of info.rows) {
+    const values = rowValues(info, row)
+    if (technicalDeviationSemantics.slice(0, 5).some(semantic => (values.get(semantic) ?? '') === '')) {
+      throw new Error('BID_DOCX_TECHNICAL_DEVIATION_FILL_INCOMPLETE')
+    }
+  }
+}
+
 function siblingLocation(root: XmlNode, target: XmlNode): { parent: XmlNode; index: number } | undefined {
   const elements = root.elements ?? []
   const index = elements.indexOf(target)
@@ -337,11 +369,16 @@ function fillTemplateTables(
   const unusedSources = new Set(sources)
   const consumed = new Map<XmlNode, XmlNode>()
   const movedCaptions: XmlNode[] = []
+  const technicalSource = targets.some(isTechnicalDeviationTable)
+    ? findTechnicalDeviationSourceTable(sourceElements) : undefined
   for (const originalTarget of targets) {
-    const source = [...unusedSources].map(candidate => ({ candidate, score: tableScore(originalTarget, candidate) }))
-      .sort((left, right) => right.score - left.score)[0]
-    if (source === undefined || source.score < 0) continue
     const technicalDeviation = isTechnicalDeviationTable(originalTarget)
+    const source = technicalDeviation && technicalSource !== undefined
+      ? { candidate: technicalSource, score: 0 }
+      : [...unusedSources].filter(candidate => candidate !== technicalSource)
+        .map(candidate => ({ candidate, score: tableScore(originalTarget, candidate) }))
+        .sort((left, right) => right.score - left.score)[0]
+    if (source === undefined || source.score < 0) continue
     const target = technicalDeviation
       ? resizeTechnicalDeviationTable(originalTarget, source.candidate.rows.length)
       : originalTarget
@@ -351,7 +388,8 @@ function fillTemplateTables(
         ?? source.candidate.rows[index]
       if (sourceRow === undefined || !sourceRows.has(sourceRow)) continue
       sourceRows.delete(sourceRow)
-      for (const editable of target.editable) {
+      const fillable = technicalDeviation ? target.header : target.editable
+      for (const editable of fillable) {
         const sourceHeader = source.candidate.header.find(header => header.semantic === editable.semantic)
         const targetCell = cellAt(targetRow, target.gridColumns, editable.start)
         const sourceCell = sourceHeader === undefined ? undefined
@@ -366,6 +404,7 @@ function fillTemplateTables(
         if (indexCell !== undefined) setCellText(indexCell.node, String(index + 1))
       }
     }
+    if (technicalDeviation) assertTechnicalDeviationTable(target, source.candidate.rows.length)
     unusedSources.delete(source.candidate)
     if (sourceRows.size === 0) {
       consumed.set(source.candidate.node, target.node)
@@ -525,7 +564,11 @@ async function mergeNumbering(
   }
   const target = await xmlPart(targetZip, 'word/numbering.xml')
   const targetRoot = descendants(target, 'numbering')[0]
-  if (targetRoot === undefined) throw new Error('DOCX numbering.xml 无效。')
+  const sourceRoot = descendants(source, 'numbering')[0]
+  if (targetRoot === undefined || sourceRoot === undefined) throw new Error('DOCX numbering.xml 无效。')
+  targetRoot.attributes = { ...(targetRoot.attributes ?? {}),
+    ...Object.fromEntries(Object.entries(sourceRoot.attributes ?? {})
+      .filter(([name]) => (name === 'xmlns' || name.startsWith('xmlns:')) && targetRoot.attributes?.[name] === undefined)) }
   let nextAbstract = Math.max(-1, ...descendants(target, 'abstractNum').map(node => Number(attr(node, 'abstractNumId')))) + 1
   let nextNum = Math.max(0, ...descendants(target, 'num').map(node => Number(attr(node, 'numId')))) + 1
   const abstractMap = new Map<string, string>(), numMap = new Map<string, string>()

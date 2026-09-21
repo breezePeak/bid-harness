@@ -363,6 +363,28 @@ describe('项目 Word 格式链路', () => {
     expect(document).toContain('<w:jc w:val="center"/>')
   })
 
+  it('普通表格按内容分配列宽并清除表内段前段后与首行缩进', async () => {
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    values['tableHeader.font'] = '方正小标宋'
+    values['tableCell.font'] = '仿宋'
+    values['tableHeader.before'] = 8
+    values['tableHeader.after'] = 8
+    values['tableCell.before'] = 8
+    values['tableCell.after'] = 8
+    const rendered = await renderDocx(await workspace(), '| 序号 | 任务名称 | 详细实施内容 |\n| --- | --- | --- |\n| 1 | 集成 | 我方将完成系统集成、联调验证、问题闭环以及完整交付记录。 |', values)
+    const document = await (await JSZip.loadAsync(rendered.bytes)).file('word/document.xml')!.async('string')
+    const widths = [...document.matchAll(/<w:gridCol w:w="(\d+)"\/>/gu)].map(match => Number(match[1]))
+    expect(new Set(widths).size).toBeGreaterThan(1)
+    expect(widths[0]).toBeLessThan(widths[2]!)
+    const table = document.match(/<w:tbl>[^]*?<\/w:tbl>/u)?.[0] ?? ''
+    expect(table).toMatch(/<w:spacing [^>]*w:before="0"[^>]*w:after="0"|<w:spacing [^>]*w:after="0"[^>]*w:before="0"/u)
+    expect(table).toContain('<w:ind w:firstLine="0" w:firstLineChars="0"/>')
+    expect(table).toContain('w:eastAsia="方正小标宋"')
+    expect(table).toContain('w:eastAsia="仿宋"')
+    expect(table).toContain('<w:vAlign w:val="center"/>')
+    expect(table).toContain('<w:vAlign w:val="top"/>')
+  })
+
   it('正文小标题保留原文，部分章节保留确认目录编号且仍使用 Word 标题样式', async () => {
     const values = defaultDocxFormatState(formatFields(defaults)).resolved
     const rendered = await renderDocx(await workspace(), '# 文档\n\n# 1 实施\n\n## 1.2 交付\n\n### 内部措施\n\n### 1.1 原文编号\n\n## 1.3 验收\n\n# 2 保障\n\n## 2.1 人员', values)

@@ -30,6 +30,8 @@ import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceCh
 import { validateFlowchartAnchors } from './flowchart.ts'
 import { missingTableCaptionLines } from './docx-numbering.ts'
 import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID } from './outline-generation-artifacts.ts'
+import { parseTechnicalDeviationTable, TechnicalDeviationTableError, validateTechnicalDeviationTable } from './technical-deviation-table.ts'
 
 const MANIFEST = 'chapters/manifest.json'
 const PLAN = 'chapters/execution-plan.json'
@@ -276,6 +278,18 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
+      if (section.id === TECHNICAL_DEVIATION_SECTION_ID) {
+        try {
+          const table = parseTechnicalDeviationTable(markdown)
+          for (const message of validateTechnicalDeviationTable(table, sectionVisibleRequirements(section, requirements))) {
+            reject(issues, 'CHAPTER_WRITING_TECHNICAL_DEVIATION_INVALID', message, chapter.content_path)
+          }
+        } catch (error) {
+          if (error instanceof TechnicalDeviationTableError) {
+            reject(issues, 'CHAPTER_WRITING_TECHNICAL_DEVIATION_INVALID', error.message, chapter.content_path)
+          } else throw error
+        }
+      }
       for (const message of validateFlowchartAnchors(markdown, chapter.flowcharts)) {
         reject(issues, 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, chapter.content_path)
       }

@@ -99,6 +99,7 @@ import {
 } from './model-stage-repair.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
+import { parseTechnicalDeviationTable, TechnicalDeviationTableError, validateTechnicalDeviationTable } from './technical-deviation-table.ts'
 import { resolveFrameworkDraftMaterials, type FrameworkDraftMaterial } from './outline-framework.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog, type ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -487,6 +488,7 @@ export function renderChapterSubagentTask(
     `Relevant Requirements：${JSON.stringify(modelContext(context.requirements))}`,
     ...(context.section.id === TECHNICAL_DEVIATION_SECTION_ID ? [
       '当前章节是系统固定的技术偏离表。Relevant Requirements 是用于逐条生成响应索引的只读 Requirement 上下文，不代表本章拥有正文 coverage。必须按 Relevant Requirements 的原顺序逐条形成技术偏离表数据，不得漏项。表格中不得输出 REQ-* 系统内部编号，应使用招标原文、原有条款编号、需求名称或 normalized/raw_text 的自然语言。本章只形成响应索引与偏离声明，不展开后续技术正文；实质性方案仍由后续确认章节承担。',
+      '本章必须且只能形成一张六列表格：序号｜标的名称｜招标技术要求｜投标响应内容｜偏离程度｜备注。Relevant Requirements 有多少条数据行就生成多少行并保持原顺序，不得合并、删减或只给示例行。“招标技术要求”填写原文或不改变含义的规范化表述；“投标响应内容”填写具体响应动作、参数、做法、成果、控制措施或对应说明，不得只写“满足、响应、符合、无偏离”等结论；无明确偏离时“偏离程度”可填“满足、响应”，“备注”无补充时可留空。',
     ] : []),
     `Relevant Scoring：${JSON.stringify(modelContext(context.scoring))}`,
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
@@ -751,6 +753,18 @@ async function validateAndBindChapterCandidate(
     path: 'markdown',
   })))
   issues.push(...chapterInternalIdentifierIssues(context, candidate.markdown))
+  if (context.section.id === TECHNICAL_DEVIATION_SECTION_ID) {
+    try {
+      const table = parseTechnicalDeviationTable(candidate.markdown)
+      issues.push(...validateTechnicalDeviationTable(table, context.requirements).map(message => ({
+        code: 'CHAPTER_WRITING_TECHNICAL_DEVIATION_INVALID', message, path: 'markdown',
+      })))
+    } catch (error) {
+      if (error instanceof TechnicalDeviationTableError) {
+        issues.push({ code: error.code, message: error.message, path: 'markdown' })
+      } else throw error
+    }
+  }
   const metadata = candidate.metadata
   const flowcharts = Array.isArray(metadata.flowcharts) ? metadata.flowcharts : []
   issues.push(...validateFlowchartAnchors(candidate.markdown, flowcharts).map(message => ({

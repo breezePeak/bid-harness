@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { fillBidCover } from '../src/docx-cover.ts'
 import { inspectDocxTemplateStructure } from '../src/docx-compose.ts'
 import { readBuiltInDocxTemplateBytes } from '../src/docx-format-store.ts'
+import { parseDocxTemplate } from '../src/docx-template.ts'
 
 describe('内置技术标 DOCX 模板', () => {
   it('保留封面、真实目录字段、技术偏离表锚点和纵横纵分节', async () => {
@@ -20,7 +21,17 @@ describe('内置技术标 DOCX 模板', () => {
     expect(document).toContain('TOC \\o "1-6" \\h \\z \\u')
     expect(settings).toMatch(/<w:updateFields w:val="true"\s*\/>/u)
     expect(document.match(/w:orient="landscape"/gu)).toHaveLength(1)
-    expect(await inspectDocxTemplateStructure(bytes)).toMatchObject({ bodyAnchor: 'content-control' })
+    expect(await inspectDocxTemplateStructure(bytes)).toMatchObject({ bodyAnchor: 'content-control', tables: [{
+      gridColumns: 6,
+      headers: ['序号', '标的名称', '招标技术要求', '投标响应内容', '偏离程度', '备注'],
+    }] })
+    const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
+    const rows = table.match(/<w:tr(?:\s[^>]*)?>[^]*?<\/w:tr>/gu) ?? []
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.match(/<w:tc>/gu)?.length)).toEqual([6, 6])
+    expect(table).not.toMatch(/<w:(?:gridSpan|vMerge)\b/u)
+    expect(table).toContain('w:fill="FFFFFF"')
+    expect((await parseDocxTemplate(bytes, '内置模板.docx')).extracted.values['table.fill']).toBe('FFFFFF')
   })
 
   it('只按稳定 tag 填充封面字段并保留 TOC', async () => {

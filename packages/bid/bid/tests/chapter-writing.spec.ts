@@ -119,6 +119,37 @@ it('技术偏离表读取全部 Requirement 但保持空 coverage ownership', ()
   expect(prompt).toContain('只读 Requirement 上下文，不代表本章拥有正文 coverage')
 })
 
+it('技术偏离表 Writer 候选在保存前拒绝空表和缺行', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-deviation-validation-')))
+  await seedReadableMaterials(workspace)
+  const base = outlineFixture().sections[1]!
+  const section = { ...base, id: TECHNICAL_DEVIATION_SECTION_ID, title: '技术偏离表', requirement_ids: [] }
+  const requirements = parseTenderRequirementsArtifact({ schema_version: 1, requirements: [1, 2].map(index => ({
+    id: `REQ-${index}`, category: '技术', raw_text: `系统应完成第 ${index} 项技术能力。`,
+    normalized_requirement: `完成第 ${index} 项技术能力`, mandatory: true, source_refs: source,
+  })) }).requirements
+  const context = { ...emptyChapterContext(section), requirements }
+  const candidate: ChapterCandidate = {
+    section_id: section.id,
+    markdown: '# 技术偏离表\n\n表 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | | | 满足 | 满足、响应 | |',
+    metadata: {
+      section_id: section.id,
+      covered_must_answer: section.must_answer,
+      covered_scoring_response_point_ids: section.scoring_response_point_ids ?? [],
+      covered_scoring_response_points: section.scoring_response_points,
+      local_materials_used: [], web_materials_used: [], additional_web_materials: [], flowcharts: [], unresolved_topics: [],
+      handoff: emptyHandoff(section.id),
+    },
+  }
+  const issues = await validateChapterCandidate(workspace, context, candidate, [])
+  expect(issues.map(issue => issue.message)).toEqual(expect.arrayContaining([
+    '期望 2 行，实际 1 行。',
+    '第 1 行“标的名称”为空。',
+    '第 1 行“招标技术要求”为空。',
+    '第 1 行“投标响应内容”缺少具体响应。',
+  ]))
+})
+
 it('段落修订保留原 metadata 和流程图定义', () => {
   const flowchart = {
     type: 'flowchart' as const, schema_version: 1, id: 'FLOW-SEC-1-integration-test-route', key: 'integration-test-route',
