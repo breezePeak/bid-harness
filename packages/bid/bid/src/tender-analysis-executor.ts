@@ -13,7 +13,6 @@ import {
 import {
   attachTenderAnalysisSubmissionRuntime,
   TENDER_ANALYSIS_PRIVATE_TOOLS,
-  TENDER_ANALYSIS_SUBMISSION_TOOLS,
   TENDER_ANALYSIS_VIEW_TOOLS,
   type TenderLocator,
 } from './tender-analysis-submission.ts'
@@ -70,91 +69,53 @@ export function renderTenderAnalysisTask(
     '使用 grep 定位候选 chunk，再用 read 阅读原文；语义被截断时读取 chunks/index.json 后继续读相邻 chunk。不得一次读取完整 document.md。',
     '优先使用 grep/read。只有表格、图片或版式关系无法从解析文本可靠判断时，才用 view_pdf_page 查看已定位的 PDF 页；不得逐页浏览整份 PDF，也不得把页面图片当作 OCR 文本来源。',
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
-    '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
-    '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 action=replace。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
+    '完整分析结果包含 project_facts、requirements、scoring_items 和 compliance_items 四个数组。项目数组字段每个语义项各占一条；未知项目字段省略，Host 自动补齐 null 或 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
+    'requirements 中每项是一个可独立响应的原子技术要求。scoring_items 只包含招标评分体系中具有独立名称及总分、权重或独立区块边界的评分大项，并在 criterion 中保留该大项的完整评分细则；大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项。compliance_items 包含每个影响技术方案的强制或合规规则。',
     '引用只提交 sources=[{file_ref,chunk,anchor_text}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id。anchor_text 必须从你已经读取到的指定 chunk 正文中逐字复制一段连续原文，仅用于定位。不要改写、概括或自行生成。一个 source 只负责一个可确定定位的原文锚点；跨行或跨 chunk 内容提交多个 source。Host 只允许 NFKC 与换行/连续空白归一化后的确定性匹配。',
-    '不得填写 quote、raw_text、file_id、source_refs、line_start、line_end、parent_ref、schema_version、analyzed_tender_files、最终 Artifact 路径或正式 REQ/SC/COM ID。Host 从真实锚点生成 quote、raw_text 和 source_refs，并固定评分 parent=null；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
-    'Requirement、Scoring、Compliance 必须显式声明 action：新增使用 action=create，且不得携带 replace_ref；修改使用 action=replace，且必须携带当前 staged 中真实存在的 replace_ref。runtime ref 只能来自 Host 工具返回值或 Host 提供的 staged snapshot；禁止根据数量、revision、排序、历史 Run 或记忆猜测 R*、S*、C*。',
-    'anchor_text 未命中时重新读取该 chunk 后逐字复制真实原文；出现多次时提交更长、更有区分度的 anchor_text。Host 会结束当前内部 Turn 并在 Repair 中保留 staged 状态。已记录条目需要修改时，使用 action=replace 和真实 runtime ref；覆盖不会改变正式 ID。',
-    '所有区域分析完成后调用 finish_tender_analysis({})。确定性校验通过后，Host 会在当前轮结束后强制发起一次全量语义复核；初次 finish 不会写入正式 Artifact。普通文字回复不会完成 S2。',
+    '不得填写或猜测任何业务 ID、runtime ref、revision、replace_ref、quote、raw_text、file_id、source_refs、line_start、line_end、parent、schema_version、analyzed_tender_files 或最终 Artifact 路径。Host 从真实锚点生成原文、引用、全部 ID、排序和固定字段；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
+    'anchor_text 未命中时重新读取该 chunk 后逐字复制真实原文；出现多次时提交更长、更有区分度的 anchor_text。',
+    '分析完成后仅调用一次 submit_tender_analysis，提交四个完整数组。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
   ].join('\n')
 }
 
 /**
- * Render the mandatory same-Agent review over the complete current S2 staged revision.
- * @param agent Live Agent that owns the staged runtime.
- * @param workspace Workspace containing the tender corpus.
- * @param task Orchestrator task for the tender-analysis stage.
- * @param snapshot Host-rendered staged records and their current revision.
- * @param locators Host-issued short references for successful tender files.
- * @returns Dynamic full-review assignment for the Agent follow-up.
- */
-export function renderTenderAnalysisQualityReviewTask(
-  agent: Agent,
-  workspace: BidWorkspace,
-  task: BidStageTask,
-  snapshot: unknown,
-  locators: readonly TenderLocator[],
-): string {
-  if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
-  const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
-  return [
-    '当前阶段：tender_analysis / Tender Analysis Quality Review',
-    `Bid Session：${agent.id}`,
-    `Project Workspace：${workspacePath}`,
-    '这是独立的强制复核轮次。重新读取每项 staged 记录对应的 tender chunk，逐项检查 Project、Requirement、Scoring 和 Compliance 的语义、记录边界及来源归属。特别检查相邻表格行之间是否发生 title、raw_text、criterion、分值或来源串配。',
-    '发现问题时使用 action=replace、对应 runtime ref 和 replace_ref 原地修正；不得按标题、分值、关键词或行位置推测并批量改写。没有问题时保持 staged 内容不变。',
-    'Tender locators：',
-    ...renderLocators(locators),
-    `当前 staged snapshot：${JSON.stringify(snapshot)}`,
-    '完成全部复核后调用 finish_tender_analysis，并将 review_revision 设置为当前最新 revision。任一提交工具返回的新 revision 都会使旧版本失效。只有 finish 返回 completed=true 才能停止。',
-  ].join('\n')
-}
-
-/**
- * Render a bounded continuation for an S2 turn that stopped before successful finish.
+ * Render a bounded continuation for an invalid or missing complete S2 submission.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
- * @param issues Recoverable issues last returned by finish, or a missing-finish issue.
- * @param snapshot Current Host-rendered staged records and their runtime references.
- * @returns Dynamic continuation that preserves the current staged submissions.
+ * @param issues Recoverable issues returned for the previous complete result.
+ * @param context Current invalid item and the original chunks cited by that item.
+ * @returns Dynamic continuation that requests one corrected complete result.
  */
 export function renderTenderAnalysisRepairTask(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
   issues: readonly StageValidationIssue[],
-  snapshot: unknown,
+  context: unknown,
 ): string {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   const workspacePath = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
-  const staged = snapshot as {
-    revision?: number
-    requirements?: Array<{ requirement_ref: string }>
-    scoring?: Array<{ scoring_ref: string }>
-    compliance?: Array<{ compliance_ref: string }>
-  }
+  const repairInstructions = context === undefined ? [
+    'Host 尚未收到完整结果。调用 submit_tender_analysis 提交 project_facts、requirements、scoring_items 和 compliance_items 四个完整数组。',
+  ] : [
+    `当前问题项与相关原文：${JSON.stringify(context)}`,
+    '修正后再次调用 submit_tender_analysis，只提交 {repair:{<repair_key>:<修正后的单个业务项>}}。不得重交完整数组，也不得提交任何 ID、revision、replace_ref 或正式 Artifact 字段。',
+  ]
   return [
-    `当前阶段：${task.stage} / Staged Submission Repair`,
+    `当前阶段：${task.stage} / Complete Submission Repair`,
     `Bid Session：${agent.id}`,
     `Project Workspace：${workspacePath}`,
-    'S2 尚未完成；当前 staged 记录仍然保留。只处理以下问题：',
+    '上一份完整 S2 结果未通过校验。只修正以下内容问题：',
     ...issues.map(issue => `- ${issue.code} | ${issue.path ?? '未指定字段'} | ${issue.message}`),
-    `当前 revision：${String(staged.revision ?? 0)}`,
-    `当前 Requirement refs：${JSON.stringify(staged.requirements?.map(item => item.requirement_ref) ?? [])}`,
-    `当前 Scoring refs：${JSON.stringify(staged.scoring?.map(item => item.scoring_ref) ?? [])}`,
-    `当前 Compliance refs：${JSON.stringify(staged.compliance?.map(item => item.compliance_ref) ?? [])}`,
-    `当前 staged snapshot：${JSON.stringify(snapshot)}`,
-    '当前 staged state 和 lastIssues 已由 Host 提供。修改已有记录时使用 action=replace，且只能使用其中真实存在的 replace_ref；缺少新记录时使用 action=create，且不得传 replace_ref。禁止根据当前数量、revision、排序、上一轮记忆或历史 Run 推算 R*、S*、C* runtime ref。',
-    `检索工具仍只允许：${task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name)).join(', ')}；必要时可用 ${TENDER_ANALYSIS_VIEW_TOOLS.join(', ')} 复核版式，并使用 ${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')} 补充、replace 或再次 finish。`,
-    '不得 write analysis/*.json、重新提交整套 Artifact 或推进 S3。只有 finish_tender_analysis 返回 completed=true 才能停止。',
+    `检索工具仍只允许：${task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name)).join(', ')}；必要时可用 ${TENDER_ANALYSIS_VIEW_TOOLS.join(', ')} 复核版式。`,
+    ...repairInstructions,
   ].join('\n')
 }
 
 /**
- * Execute S2 through staged private tools and return Host-authored Artifact references.
+ * Execute S2 through one complete-submission tool and return Host-authored Artifact references.
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
@@ -219,26 +180,19 @@ export async function executeTenderAnalysis(
     let latestIssues = runtime.lastIssues
     while (!runtime.completed) {
       options.run.signal.throwIfAborted()
-      if (runtime.phase === 'review_required') {
-        const snapshot = runtime.reviewSnapshot()
-        await runtime.beginReview()
-        await run(renderTenderAnalysisQualityReviewTask(agent, workspace, task, snapshot, runtime.locators))
-        continue
-      }
       if (attempts++ >= options.maxRepairAttempts) break
       const issues = runtime.lastIssues.length > 0 ? runtime.lastIssues : [{
-        code: 'TENDER_ANALYSIS_FINISH_REQUIRED',
-        message: '必须调用 finish_tender_analysis 并处理其返回问题；普通回复不能完成 S2。',
+        code: 'TENDER_ANALYSIS_SUBMISSION_REQUIRED',
+        message: '必须调用 submit_tender_analysis 提交四个完整数组；普通回复不能完成 S2。',
       }]
       latestIssues = issues
-      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.reviewSnapshot()))
+      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.repairContext()))
     }
     await waitForModelStageIdle(agent, options.run.signal)
     if (!runtime.completed) {
       throw new BidStageExecutionError([{
-        code: 'TENDER_ANALYSIS_STAGED_INCOMPLETE',
-        artifact: 'analysis/tender-analysis-checkpoint.json',
-        message: `S2 staged submission 未完成（phase=${runtime.phase}，revision=${String(runtime.revision)}）。最近问题：${latestIssues.map(issue => issue.code).join(', ') || '无'}。暂存摘要：${JSON.stringify(runtime.reviewSnapshot())}`,
+        code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE',
+        message: `S2 完整结果未提交或未通过校验。最近问题：${latestIssues.map(issue => issue.code).join(', ') || '无'}。`,
       }])
     }
     return artifacts

@@ -5,11 +5,13 @@ import type { DocxFormatView } from './docx-format-contract.ts'
 import { composeDocxFromTemplate, type TechnicalDeviationComposition } from './docx-compose.ts'
 import { fillBidCover, type BidCoverData } from './docx-cover.ts'
 import { readBuiltInDocxTemplateBytes, readDocxTemplateBytes } from './docx-format-store.ts'
+import type { VisualReviewAdjustments } from './docx-visual-review.ts'
 
 interface BuildDocxOptions {
   readonly flowchartMode?: 'svg' | 'visio-placeholder'
   readonly coverData?: BidCoverData
   readonly technicalDeviation?: TechnicalDeviationComposition
+  readonly visualAdjustments?: VisualReviewAdjustments
 }
 
 /**
@@ -58,5 +60,6 @@ export async function buildDocxFromResolvedTemplate(
       fixedSectionTitle: '技术偏离表',
       technicalDeviation: options.technicalDeviation ?? { mode: 'clear' },
     } : {},
+    options.visualAdjustments,
   )
 }

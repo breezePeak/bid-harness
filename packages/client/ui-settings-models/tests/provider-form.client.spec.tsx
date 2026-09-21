@@ -218,22 +218,15 @@ describe('model list editing', () => {
     })
   })
 
-  it('stores and restores a pi-ai model input-capability override', async () => {
+  it('enables pi-ai model vision with text kept by default', async () => {
     const { mutate } = await mountSection()
     openEditor('openai')
     fireEvent.click(screen.getByRole('button', { name: en.addModel }))
     fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'vision-model' } })
-    expandModel(1)
-
-    const text = screen.getByLabelText<HTMLInputElement>(`${en.modelInputText} 1`)
-    const image = screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`)
-    expect(text.checked).toBe(false)
-    expect(image.checked).toBe(false)
-    expect(screen.getByText(en.modelInputInherited)).toBeTruthy()
-    fireEvent.click(text)
-    fireEvent.click(image)
-    expect(text.checked).toBe(true)
-    expect(image.checked).toBe(true)
+    const vision = screen.getByLabelText(`${en.modelVision} 1`)
+    expect(vision.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(vision)
+    expect(vision.getAttribute('aria-pressed')).toBe('true')
 
     fireEvent.click(screen.getByText(en.apply))
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
@@ -243,7 +236,7 @@ describe('model list editing', () => {
     }])
   })
 
-  it('deletes the pi-ai input field when restoring inheritance', async () => {
+  it('disables pi-ai model vision while retaining text input', async () => {
     const { mutate } = await mountSection({
       providers: {
         openai: {
@@ -253,15 +246,16 @@ describe('model list editing', () => {
       },
     })
     openEditor('openai')
-    expandModel(1)
-    expect(screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`).checked).toBe(true)
-    fireEvent.click(screen.getByLabelText(`${en.resetModelInput} 1`))
-    expect(screen.getByText(en.modelInputInherited)).toBeTruthy()
-    expect(screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`).checked).toBe(false)
+    const vision = screen.getByLabelText(`${en.modelVision} 1`)
+    expect(vision.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(vision)
+    expect(vision.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(screen.getByText(en.apply))
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
-    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'vision-model', maxTokens: 4096 }])
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{
+      id: 'vision-model', input: ['text'], maxTokens: 4096,
+    }])
   })
 
   it('names a duplicate model id in the edit flow too', async () => {
@@ -525,9 +519,9 @@ describe('endpoint interrogation', () => {
     openEditor('openai')
 
     fireEvent.click(screen.getByText(en.fetchModels))
-    await screen.findByText(en.fetchTitle)
+    const dialog = await screen.findByRole('dialog')
     // The already-configured row starts unchecked; the new one starts checked.
-    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    const boxes = [...dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
     expect(boxes.map(box => box.checked)).toEqual([false, true])
     fireEvent.click(screen.getByText(en.fetchAdopt))
 

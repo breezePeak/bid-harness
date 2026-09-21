@@ -70,7 +70,7 @@ import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
 import type { BidCoverData } from './docx-cover.ts'
-import { buildDocxFromResolvedTemplate } from './docx-build.ts'
+import { buildDocxFromResolvedTemplate, docxTemplateHash } from './docx-build.ts'
 import { docxFingerprint, readDocxFormat, readDocxTemplateLibrary, saveDocxFormat, saveDocxFormatInterpretation,
   clearDocxExportArtifacts, invalidateDocxLastExports, registerDocxExportArtifacts,
   saveDocxTemplate, setEstimateDocxTemplate, writeDocxFormat } from './docx-format-store.ts'
@@ -98,6 +98,7 @@ import {
   type NativeVisioExport,
 } from './native-visio.ts'
 import { createNativeWordFinalizer, DOCX_TOC_UPDATE_DEFERRED } from './native-word.ts'
+import { createDocxVisualReviewer, reviewDocxVisualBlocks, type VisualReviewAdjustments, type VisualReviewModel } from './docx-visual-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { chapterContentSha256, chapterRevisionRequestSchema } from './chapter-revision.ts'
@@ -3505,7 +3506,14 @@ export class BidHostRuntime extends TypertRemoteService {
             importedFiles = await workspace.import(intakeFiles, run)
             return [{ stage: 'file_intake', type: 'manifest', path: 'manifest.json' }]
           }
-          if (task.stage === 'docx_export') return executeDocxExport(workspace, run)
+          if (task.stage === 'docx_export') return executeDocxExport(
+            workspace,
+            run,
+            undefined,
+            undefined,
+            undefined,
+            createDocxVisualReviewer(this.ctx, operation.session, run.signal),
+          )
           switch (task.stage) {
             case 'tender_analysis': return executeTenderAnalysis(agent, workspace, task, {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
@@ -4480,7 +4488,14 @@ export class BidHostRuntime extends TypertRemoteService {
               const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
               return [artifact]
             }
-            if (task.stage === 'docx_export') return executeDocxExport(workspace, run)
+            if (task.stage === 'docx_export') return executeDocxExport(
+              workspace,
+              run,
+              undefined,
+              undefined,
+              undefined,
+              createDocxVisualReviewer(this.ctx, session, run.signal),
+            )
             const repair = {
               maxRepairAttempts: this.config.modelStageRepairAttempts,
               run,
@@ -5039,7 +5054,16 @@ export class BidHostRuntime extends TypertRemoteService {
         ? { mode: 'fill', table: snapshot.technicalDeviation.table }
         : snapshot.technicalDeviation.status === 'pending' ? { mode: 'clear' } : undefined
       const source = destination.slice(0, -'.docx'.length) + '.md'
-      await workspace.exportDocxMarkdown(snapshot.markdown, destination, templateId, undefined, source, undefined, technicalDeviation)
+      await workspace.exportDocxMarkdown(
+        snapshot.markdown,
+        destination,
+        templateId,
+        undefined,
+        source,
+        undefined,
+        technicalDeviation,
+        createDocxVisualReviewer(this.ctx, session),
+      )
       const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
@@ -7078,6 +7102,8 @@ export class BidWorkspace {
    * @param sourceSnapshot - Optional project-relative Markdown snapshot published with the DOCX.
    * @param nativeExport - Optional Visio/Word capability injection; defaults to the Windows COM implementation.
    * @param technicalDeviation - Structured rows or an explicit clear operation for the built-in template.
+   * @param visualReviewer - Optional final-page reviewer used by product S6 entry points.
+   * @param visualReviewSignal - Cancellation for rendering and reviewing visual blocks.
    * @returns Workspace-relative DOCX path.
    */
   async exportDocxMarkdown(
@@ -7088,6 +7114,8 @@ export class BidWorkspace {
     sourceSnapshot?: string,
     nativeExport?: NativeVisioExport,
     technicalDeviation?: TechnicalDeviationComposition,
+    visualReviewer?: VisualReviewModel,
+    visualReviewSignal: AbortSignal = new AbortController().signal,
   ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const destinationPath = within(this.projectRoot, destination)
@@ -7097,80 +7125,113 @@ export class BidWorkspace {
     if (pending.length) throw new Error(`当前仍有 ${String(pending.length)} 项格式冲突，请先确认。`)
     const builtInTemplate = view.templateId === null
     const coverData = builtInTemplate ? await readBidCoverData(this) : undefined
-    const compose = (flowchartMode: 'svg' | 'visio-placeholder' = 'svg') => buildDocxFromResolvedTemplate(
+    const compose = (
+      flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
+      visualAdjustments: VisualReviewAdjustments = {},
+    ) => buildDocxFromResolvedTemplate(
       this,
       markdown,
       view,
       { flowchartMode, ...(coverData === undefined ? {} : { coverData }),
-        ...(technicalDeviation === undefined ? {} : { technicalDeviation }) },
+        ...(technicalDeviation === undefined ? {} : { technicalDeviation }), visualAdjustments },
     )
     const office = nativeExport ?? createNativeVisioExport()
     const flowcharts = extractFlowchartSpecs(markdown)
     if (/\{\{(?:flowchart|flow_ref):/u.test(markdown)) throw new Error('FLOWCHART_MARKER_UNRESOLVED: 正文仍包含未解析的流程图 marker。')
-    let finalBytes: Buffer
-    let assetHash: string
     const nativeFlowchartFiles: Array<{ path: string; bytes: Buffer }> = []
     let exportMode: FlowchartExportMode | undefined
     let exportReasons: readonly string[] | undefined
     let exportSummary: string | undefined
-    if (flowcharts.length === 0) {
-      const rendered = await compose()
-      finalBytes = rendered.bytes
-      await readDocxXml(finalBytes)
-      assetHash = rendered.assetHash
-    } else {
+    let editableRoot: string | undefined
+    const editablePaths = new Map<string, string>()
+    if (flowcharts.length > 0) {
       const env = await detectFlowchartExportEnvironment(office)
       exportMode = env.mode
       exportReasons = env.reasons
       exportSummary = env.summary
       if (env.mode === 'editable') {
-        const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-visio-export-'))
-        try {
-          const replacements: Array<{ placeholder: string; visioPath: string }> = []
-          for (const flowchart of flowcharts) {
-            const visioPath = resolve(temporaryRoot, `${flowchart.id}.vsdx`)
-            await office.visio.createDiagram(flowchart, visioPath)
-            nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
-            replacements.push({ placeholder: flowchartPlaceholder(flowchart), visioPath })
-          }
-          const rendered = await compose('visio-placeholder')
-          const temporaryDocx = resolve(temporaryRoot, 'rendered.docx')
-          await writeFile(temporaryDocx, rendered.bytes, { flag: 'wx' })
-          await office.word.embed(temporaryDocx, replacements)
-          const embeddedCount = await office.word.countVisioObjects(temporaryDocx)
-          if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
-          finalBytes = await readFile(temporaryDocx)
-          assetHash = rendered.assetHash
-        } finally {
-          await rm(temporaryRoot, { recursive: true, force: true })
+        editableRoot = await mkdtemp(resolve(this.root, '.dsh-visio-export-'))
+        for (const flowchart of flowcharts) {
+          const visioPath = resolve(editableRoot, `${flowchart.id}.vsdx`)
+          await office.visio.createDiagram(flowchart, visioPath)
+          editablePaths.set(flowchart.id, visioPath)
+          nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.vsdx`, bytes: await readFile(visioPath) })
         }
-        await readDocxXml(finalBytes)
       } else {
         for (const flowchart of flowcharts) {
           const renderedSvg = renderFlowchartSvg(flowchart)
           nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.svg`, bytes: Buffer.from(renderedSvg.svg, 'utf8') })
           nativeFlowchartFiles.push({ path: `flowcharts/${flowchart.id}.json`, bytes: Buffer.from(JSON.stringify(flowchart, null, 2), 'utf8') })
         }
-        const rendered = await compose('svg')
-        finalBytes = rendered.bytes
-        await readDocxXml(finalBytes)
-        assetHash = rendered.assetHash
       }
     }
     let tocUpdateDeferred = false
     const finalizer = office.finalizer ?? (nativeExport === undefined ? createNativeWordFinalizer() : undefined)
-    if (finalizer !== undefined && await finalizer.isAvailable()) {
-      const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-word-finalize-'))
-      try {
-        const temporaryDocx = resolve(temporaryRoot, 'final.docx')
-        await writeFile(temporaryDocx, finalBytes, { flag: 'wx' })
-        await finalizer.updateFields(temporaryDocx)
-        finalBytes = await readFile(temporaryDocx)
-        await readDocxXml(finalBytes)
-      } finally {
-        await rm(temporaryRoot, { recursive: true, force: true })
+    const canFinalize = finalizer !== undefined && await finalizer.isAvailable()
+    if (!canFinalize) tocUpdateDeferred = true
+    let renderCount = 0
+    const renderFinal = async (adjustments: VisualReviewAdjustments): Promise<{ bytes: Buffer; assetHash: string }> => {
+      const flowchartMode = exportMode === 'editable' ? 'visio-placeholder' : 'svg'
+      const rendered = await compose(flowchartMode, adjustments)
+      let bytes = rendered.bytes
+      if (exportMode === 'editable') {
+        if (editableRoot === undefined) throw new Error('DOCX_VISIO_TEMPORARY_ROOT_MISSING')
+        const temporaryDocx = resolve(editableRoot, `rendered-${String(++renderCount)}.docx`)
+        await writeFile(temporaryDocx, bytes, { flag: 'wx' })
+        await office.word.embed(temporaryDocx, flowcharts.map((flowchart) => {
+          const adjustment = adjustments[`flowchart_${flowchart.id}`]
+          return {
+            placeholder: flowchartPlaceholder(flowchart),
+            visioPath: editablePaths.get(flowchart.id) as string,
+            ...(adjustment !== undefined && 'scale' in adjustment ? { scale: adjustment.scale } : {}),
+          }
+        }))
+        const embeddedCount = await office.word.countVisioObjects(temporaryDocx)
+        if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
+        bytes = await readFile(temporaryDocx)
       }
-    } else tocUpdateDeferred = true
+      if (canFinalize && finalizer !== undefined) {
+        const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-word-finalize-'))
+        try {
+          const temporaryDocx = resolve(temporaryRoot, 'final.docx')
+          await writeFile(temporaryDocx, bytes, { flag: 'wx' })
+          await finalizer.updateFields(temporaryDocx)
+          bytes = await readFile(temporaryDocx)
+        } finally {
+          await rm(temporaryRoot, { recursive: true, force: true })
+        }
+      }
+      await readDocxXml(bytes)
+      return { bytes, assetHash: rendered.assetHash }
+    }
+    let finalBytes: Buffer
+    let assetHash: string
+    try {
+      if (visualReviewer === undefined) {
+        const rendered = await renderFinal({})
+        finalBytes = rendered.bytes
+        assetHash = rendered.assetHash
+      } else {
+        let latestAssetHash = ''
+        const reviewed = await reviewDocxVisualBlocks(
+          this,
+          markdown,
+          view.values,
+          await docxTemplateHash(this, view),
+          visualReviewer,
+          async (adjustments) => {
+            const rendered = await renderFinal(adjustments)
+            latestAssetHash = rendered.assetHash
+            return rendered.bytes
+          },
+          visualReviewSignal,
+        )
+        finalBytes = reviewed.bytes
+        assetHash = latestAssetHash
+      }
+    } finally {
+      if (editableRoot !== undefined) await rm(editableRoot, { recursive: true, force: true })
+    }
     const nextFormat = { ...view.state,
       lastExport: {
         path: destination,

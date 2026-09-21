@@ -7,6 +7,7 @@ import type { BidWorkspace } from './index.ts'
 import { renderDocx } from './docx-render.ts'
 import { readDocxXml } from './docx-template.ts'
 import type { TechnicalDeviationTable } from './technical-deviation-table.ts'
+import type { VisualReviewAdjustments } from './docx-visual-review.ts'
 
 interface XmlNode {
   type?: string
@@ -790,6 +791,7 @@ export async function applyTemplateContent(
  * @param mapping 模板样式角色映射。
  * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
  * @param options 模板拥有的标题、固定章节及结构化技术偏离表。
+ * @param visualAdjustments 已通过最终页面审核的块级白名单调整。
  * @returns 合成 DOCX 与正文图片摘要。
  */
 export async function composeDocxFromTemplate(
@@ -800,7 +802,8 @@ export async function composeDocxFromTemplate(
   mapping: DocxFormatInterpretation['mapping'] = {},
   flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
   options: DocxTemplateCompositionOptions = {},
+  visualAdjustments: VisualReviewAdjustments = {},
 ): Promise<{ bytes: Buffer; assetHash: string }> {
-  const rendered = await renderDocx(workspace, markdown, values, false, 'a4', flowchartMode)
+  const rendered = await renderDocx(workspace, markdown, values, false, 'a4', flowchartMode, visualAdjustments)
   return { bytes: await applyTemplateContent(templateBytes, rendered.bytes, mapping, options), assetHash: rendered.assetHash }
 }

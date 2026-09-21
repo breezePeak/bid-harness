@@ -1,11 +1,6 @@
 /** 固定 A4 的快速近似与基于所选原始模板的 LibreOffice 真实分页。 */
-import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { promisify } from 'node:util'
+import { readFile, stat } from 'node:fs/promises'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
@@ -16,12 +11,14 @@ import { readDocxFormat } from './docx-format-store.ts'
 import { buildDocxFromResolvedTemplate, docxTemplateHash } from './docx-build.ts'
 import { collectDocxChapterBody } from './docx-content.ts'
 import { captionRole } from './docx-numbering.ts'
-import { docxAssetHash, docxImageDimensions } from './docx-render.ts'
+import { docxAssetHash } from './docx-render.ts'
+import { docxImageDimensions } from './docx-image.ts'
 import type { BidWorkspace } from './index.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { renderDocxPdf } from './docx-pdf.ts'
 
 type MarkdownNode = {
   type: string
@@ -82,7 +79,6 @@ const cacheGenerations = new Map<string, number>()
 const renderedFailures = new Set<string>()
 const renderedInFlight = new Map<string, Promise<number>>()
 const pointsPerMm = 72 / 25.4
-const execFileAsync = promisify(execFile)
 const renderedCacheSchema = z.strictObject({
   version: z.literal(1),
   fingerprint: z.string().regex(/^[a-f\d]{64}$/u),
@@ -200,47 +196,13 @@ async function cachedAssetsStillMatch(entry: CacheEntry): Promise<boolean> {
   })).then(checks => checks.every(Boolean))
 }
 
-function subprocessEnvironment(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([key, item]) =>
-    item !== undefined && !/(?:KEY|SECRET|TOKEN|PASSWORD)/iu.test(key)))
-}
-
-async function libreOfficePdf(docx: Buffer): Promise<Uint8Array> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-bid-pages-'))
-  const input = join(root, 'estimate.docx')
-  const output = join(root, 'estimate.pdf')
-  try {
-    await writeFile(input, docx, { flag: 'wx', mode: 0o600 })
-    const profile = join(root, 'profile')
-    const candidates = process.platform === 'win32'
-      ? [process.env.ProgramFiles && join(process.env.ProgramFiles, 'LibreOffice/program/soffice.com'),
-        process.env['ProgramFiles(x86)'] && join(process.env['ProgramFiles(x86)'], 'LibreOffice/program/soffice.com'),
-        'soffice'].filter((item): item is string => Boolean(item))
-      : ['soffice', 'libreoffice']
-    let unavailable: unknown
-    for (const executable of candidates) {
-      try {
-        await execFileAsync(executable, [
-          `-env:UserInstallation=${pathToFileURL(profile).href}`,
-          '--headless', '--convert-to', 'pdf', '--outdir', root, input,
-        ], { cwd: root, env: subprocessEnvironment(), timeout: 120_000, maxBuffer: 1024 * 1024, windowsHide: true })
-        return await readFile(output)
-      } catch (error) {
-        unavailable = error
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
-    }
-    throw unavailable instanceof Error ? unavailable : new Error('LibreOffice 不可用。')
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-}
-
 async function pdfPageCount(bytes: Uint8Array): Promise<number> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const pdf = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise
   try { return pdf.numPages } finally { await pdf.destroy() }
 }
+
+export { renderDocxPdf } from './docx-pdf.ts'
 
 async function fastMarkdownPages(workspace: BidWorkspace, markdown: string, values: FormatValues): Promise<number> {
   const page = pageSize(values)
@@ -281,7 +243,7 @@ async function renderedPages(
     if (pending === undefined) {
       pending = (async () => {
         const docx = await buildDocxFromResolvedTemplate(workspace, markdown, view)
-        const pages = await pdfPageCount(await (options.renderPdf ?? libreOfficePdf)(docx.bytes))
+        const pages = await pdfPageCount(await (options.renderPdf ?? renderDocxPdf)(docx.bytes))
         const record = renderedCacheSchema.parse({ version: 1, fingerprint, pages })
         await writeFileAtomic(path, `${JSON.stringify(record)}\n`, { mode: 0o600, dirMode: 0o700 })
         return pages

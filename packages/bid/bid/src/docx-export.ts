@@ -21,6 +21,7 @@ import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
 import type { NativeVisioExport } from './native-visio.ts'
 import { parseTechnicalDeviationTable, type TechnicalDeviationTable } from './technical-deviation-table.ts'
+import type { VisualReviewModel } from './docx-visual-review.ts'
 
 /** 同一次正文读取产生的 DOCX Markdown 与固定技术偏离表数据。 */
 export interface DocxExportSnapshot {
@@ -67,6 +68,7 @@ export { collectDocxChapterBody } from './docx-content.ts'
  * @param destination 项目内输出路径；省略时写入固定交付文件。
  * @param templateId 本次导出模板；省略时使用 S5 页数基准，null 使用系统默认模板。
  * @param nativeExport 可选的 Visio/Word 能力注入；省略时使用当前 Windows COM 实现。
+ * @param visualReviewer 可选的最终 Word 页面视觉审核端。
  * @returns 项目输出目录中的 DOCX 产物引用。
  */
 export async function executeDocxExport(
@@ -75,6 +77,7 @@ export async function executeDocxExport(
   destination = posix.join(workspace.config.outputDirectory, 'bid.docx'),
   templateId?: DocxTemplateId | null,
   nativeExport?: NativeVisioExport,
+  visualReviewer?: VisualReviewModel,
 ): Promise<StageArtifact[]> {
   const snapshot = await collectDocxExportSnapshot(workspace, run.signal, templateId)
   if (snapshot.technicalDeviation.status === 'pending') {
@@ -92,7 +95,9 @@ export async function executeDocxExport(
   await workspace.exportDocxMarkdown(snapshot.markdown, destination, templateId, run.commits, undefined, nativeExport,
     snapshot.technicalDeviation.status === 'ready'
       ? { mode: 'fill', table: snapshot.technicalDeviation.table }
-      : undefined)
+      : undefined,
+    visualReviewer,
+    run.signal)
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 

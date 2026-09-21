@@ -1,14 +1,13 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { basename, posix } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ImageAttachmentRef, ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
-import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { within } from './index.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
@@ -24,15 +23,10 @@ import {
 import { createTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { validateTenderAnalysis, validateTenderAnalysisDraft } from './tender-analysis-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { renderPdfPage } from './pdf-page-render.ts'
 
-/** S2 tools that accept semantic records and let the Host own deterministic fields. */
-export const TENDER_ANALYSIS_SUBMISSION_TOOLS = [
-  'submit_project_fact',
-  'submit_requirement',
-  'submit_scoring_item',
-  'submit_compliance_item',
-  'finish_tender_analysis',
-] as const
+/** S2 tool that accepts one complete semantic result while the Host owns deterministic fields. */
+export const TENDER_ANALYSIS_SUBMISSION_TOOLS = ['submit_tender_analysis'] as const
 
 /** S2-private visual inspection tools for successful tender inputs. */
 export const TENDER_ANALYSIS_VIEW_TOOLS = ['view_pdf_page'] as const
@@ -125,43 +119,6 @@ interface ComplianceDraft {
   readonly source_refs: TenderSourceRef[]
 }
 
-const TENDER_ANALYSIS_CHECKPOINT_PATH = 'analysis/tender-analysis-checkpoint.json'
-const sourceRefCheckpointSchema = z.object({
-  file_id: z.string().min(1),
-  chunk: z.string().min(1),
-  line_start: z.number().int().positive(),
-  line_end: z.number().int().positive(),
-}).strict().refine(value => value.line_end >= value.line_start)
-const sourcedValueCheckpointSchema = z.object({
-  value: z.string().nullable(), source_refs: z.array(sourceRefCheckpointSchema),
-}).strict()
-const tenderAnalysisCheckpointSchema = z.object({
-  schema_version: recordOnlySchemaVersion(1),
-  origin_run_id: z.string().min(1),
-  origin_epoch: z.number().int().positive(),
-  tender_file_ids: z.array(z.string().min(1)),
-  phase: z.enum(['collecting', 'review_required', 'reviewing', 'completed']),
-  revision: z.number().int().nonnegative(),
-  singles: z.array(z.object({ field: z.enum(PROJECT_SINGLE_FIELDS), data: sourcedValueCheckpointSchema }).strict()),
-  lists: z.array(z.object({
-    field: z.enum(PROJECT_LIST_FIELDS), value: z.string().min(1), source_refs: z.array(sourceRefCheckpointSchema),
-  }).strict()),
-  requirements: z.array(z.object({ ref: z.string().regex(/^R[1-9]\d*$/u), value: z.object({
-    id: z.string().min(1), category: z.string().min(1), raw_text: z.string().min(1), normalized_requirement: z.string().min(1),
-    mandatory: z.boolean(), source_refs: z.array(sourceRefCheckpointSchema),
-  }).strict() }).strict()),
-  scoring: z.array(z.object({ ref: z.string().regex(/^S[1-9]\d*$/u), value: z.object({
-    id: z.string().min(1), group: z.string().min(1).nullable(), title: z.string().min(1), raw_text: z.string().min(1),
-    criterion: z.string().min(1), score: z.number().nullable(),
-    score_range: z.object({ min: z.number(), max: z.number() }).strict().nullable(),
-    must_answer: z.boolean(), source_refs: z.array(sourceRefCheckpointSchema),
-  }).strict() }).strict()),
-  compliance: z.array(z.object({ ref: z.string().regex(/^C[1-9]\d*$/u), value: z.object({
-    id: z.string().min(1), type: z.string().min(1), raw_text: z.string().min(1), normalized_rule: z.string().min(1),
-    severity: z.enum(['fatal', 'mandatory', 'warning']), source_refs: z.array(sourceRefCheckpointSchema),
-  }).strict() }).strict()),
-}).strict()
-
 const text = z.string().trim().min(1)
 const sourceAnchorSchema = z.object({
   file_ref: z.string().regex(/^T[1-9]\d*$/u),
@@ -169,26 +126,21 @@ const sourceAnchorSchema = z.object({
   anchor_text: text,
 }).strict()
 const sourcesSchema = z.array(sourceAnchorSchema).min(1)
-const runtimeRef = (prefix: string) => z.string().regex(new RegExp(`^${prefix}[1-9]\\d*$`, 'u'))
 
 const projectFactSchema = z.object({
   field: z.enum(PROJECT_FIELDS),
   value: z.union([text, z.null()]),
   sources: sourcesSchema,
 }).strict()
-const requirementFields = {
+const requirementSchema = z.object({
   category: text,
   normalized_requirement: text,
   mandatory: z.boolean(),
   sources: sourcesSchema,
-}
-const requirementSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('create'), ...requirementFields }).strict(),
-  z.object({ action: z.literal('replace'), replace_ref: runtimeRef('R'), ...requirementFields }).strict(),
-])
+}).strict()
 const scoreRangeSchema = z.object({ min: z.number(), max: z.number() }).strict()
   .refine(value => value.max >= value.min, 'score_range.max must be at least score_range.min')
-const scoringFields = {
+const scoringSchema = z.object({
   group: z.union([text, z.null()]),
   title: text,
   criterion: text,
@@ -196,24 +148,33 @@ const scoringFields = {
   score_range: z.union([scoreRangeSchema, z.null()]),
   must_answer: z.boolean(),
   sources: sourcesSchema,
-}
-const scoringSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('create'), ...scoringFields }).strict(),
-  z.object({ action: z.literal('replace'), replace_ref: runtimeRef('S'), ...scoringFields }).strict(),
-])
-const complianceFields = {
+}).strict()
+const complianceSchema = z.object({
   type: text,
   normalized_rule: text,
   severity: z.enum(['fatal', 'mandatory', 'warning']),
   sources: sourcesSchema,
-}
-const complianceSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('create'), ...complianceFields }).strict(),
-  z.object({ action: z.literal('replace'), replace_ref: runtimeRef('C'), ...complianceFields }).strict(),
-])
-const finishSchema = z.object({
-  review_revision: z.number().int().nonnegative().optional(),
 }).strict()
+const tenderAnalysisSubmissionSchema = z.object({
+  project_facts: z.array(projectFactSchema),
+  requirements: z.array(requirementSchema),
+  scoring_items: z.array(scoringSchema),
+  compliance_items: z.array(complianceSchema),
+}).strict()
+const tenderAnalysisRepairSchema = z.object({
+  repair: z.union([
+    z.object({ project_fact: projectFactSchema }).strict(),
+    z.object({ requirement: requirementSchema }).strict(),
+    z.object({ scoring_item: scoringSchema }).strict(),
+    z.object({ compliance_item: complianceSchema }).strict(),
+  ]),
+}).strict()
+const tenderAnalysisToolSchema = z.union([tenderAnalysisSubmissionSchema, tenderAnalysisRepairSchema])
+
+type TenderAnalysisSubmission = z.infer<typeof tenderAnalysisSubmissionSchema>
+type TenderAnalysisRepair = z.infer<typeof tenderAnalysisRepairSchema>
+
+const TENDER_ANALYSIS_CANDIDATE_PATH = 'analysis/tender-analysis-candidate.json'
 
 function schema(value: z.ZodType): Record<string, unknown> {
   return zodJsonSchema(value)
@@ -238,13 +199,6 @@ function sourceRefKey(ref: TenderSourceRef): string {
 
 function uniqueSourceRefs(values: readonly TenderSourceRef[]): TenderSourceRef[] {
   return [...new Map(values.map(value => [sourceRefKey(value), value])).values()]
-}
-
-/** Allocate the lowest unused Host-owned runtime reference. */
-function nextRuntimeRef(records: ReadonlyMap<string, unknown>, prefix: string): string {
-  let index = 1
-  while (records.has(`${prefix}${String(index)}`)) index++
-  return `${prefix}${String(index)}`
 }
 
 function maskHtmlComments(value: string): string {
@@ -387,16 +341,6 @@ interface PdfPageViewValue {
   image: ImageAttachmentRef
 }
 
-interface PdfCanvasSurface {
-  canvas: { toBuffer(type: 'image/png'): Uint8Array }
-  context: unknown
-}
-
-interface PdfCanvasFactory {
-  create(width: number, height: number): PdfCanvasSurface
-  destroy(surface: PdfCanvasSurface): void
-}
-
 const pdfPageSchema = z.object({
   file_ref: z.string().trim().min(1),
   page: z.number().int().positive(),
@@ -416,51 +360,6 @@ async function assertImageCapableRoute(agent: Agent, exec: ToolRunContext): Prom
   }
 }
 
-async function renderPdfPage(
-  sourcePath: string,
-  pageNumber: number,
-  limits: ImageAttachmentLimits,
-  signal: AbortSignal,
-): Promise<{ data: Uint8Array; pageCount: number }> {
-  signal.throwIfAborted()
-  const bytes = new Uint8Array(await readFile(sourcePath))
-  signal.throwIfAborted()
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const standardFontDataUrl = new URL('./standard_fonts/', import.meta.resolve('pdfjs-dist/package.json')).href
-  const loading = pdfjs.getDocument({ data: bytes, standardFontDataUrl })
-  const pdf = await loading.promise
-  try {
-    if (pageNumber > pdf.numPages) throw new Error(`PDF 页码超出范围：该文件共 ${String(pdf.numPages)} 页。`)
-    const page = await pdf.getPage(pageNumber)
-    const base = page.getViewport({ scale: 1 })
-    const scale = Math.min(
-      2,
-      limits.maxImageDimension / Math.max(base.width, base.height),
-      Math.sqrt(limits.maxImagePixels / (base.width * base.height)),
-    )
-    const viewport = page.getViewport({ scale })
-    const canvasFactory = pdf.canvasFactory as unknown as PdfCanvasFactory
-    const surface = canvasFactory.create(Math.ceil(viewport.width), Math.ceil(viewport.height))
-    const task = page.render({ canvas: surface.canvas, canvasContext: surface.context, viewport } as never)
-    const cancel = (): void => { task.cancel() }
-    signal.addEventListener('abort', cancel, { once: true })
-    try {
-      await task.promise
-      signal.throwIfAborted()
-      return { data: new Uint8Array(surface.canvas.toBuffer('image/png')), pageCount: pdf.numPages }
-    } catch (error: unknown) {
-      signal.throwIfAborted()
-      throw error
-    } finally {
-      signal.removeEventListener('abort', cancel)
-      page.cleanup()
-      canvasFactory.destroy(surface)
-    }
-  } finally {
-    await pdf.destroy()
-  }
-}
-
 function pdfPageContent(value: PdfPageViewValue) {
   return [
     {
@@ -474,16 +373,10 @@ function pdfPageContent(value: PdfPageViewValue) {
 /** Execution-local S2 submission state and tool registrations. */
 export interface TenderAnalysisSubmissionRuntime {
   readonly locators: readonly TenderLocator[]
-  /** Current staged-content revision. */
-  readonly revision: number
-  /** Current collection, review, or completion phase. */
-  readonly phase: 'collecting' | 'review_required' | 'reviewing' | 'completed'
   readonly completed: boolean
   readonly lastIssues: readonly StageValidationIssue[]
-  /** Return the current Host-rendered staged values for the mandatory semantic review. */
-  reviewSnapshot(): unknown
-  /** Admit the mandatory review turn after the initial model turn has ended. */
-  beginReview(): Promise<void>
+  /** Return only the current invalid item and its cited chunk text for repair. */
+  repairContext(): unknown
   /** 在下一次请求组装前挂载或卸载 S2 私有提交工具。 */
   setToolsEnabled(enabled: boolean): void
   /** Remove every execution-local tool registration. */
@@ -500,7 +393,7 @@ function artifactsList() {
 }
 
 /**
- * Register the five S2 private tools in the live Agent scope.
+ * Register the S2 inspection and complete-submission tools in the live Agent scope.
  * @param agent Live Bid Agent allowed to call the tools.
  * @param workspace Workspace receiving the final Host-authored Artifacts.
  * @param manifest Manifest frozen for this execution's tender identities and coverage.
@@ -517,116 +410,116 @@ export async function attachTenderAnalysisSubmissionRuntime(
   if (tools === undefined) throw new Error('Bid tender analysis requires tools service')
   const locators = await buildTenderLocators(workspace, manifest)
   if (locators.length === 0) throw new Error('tender-analysis-tender-missing')
-  const singles = new Map<ProjectSingleField, SourcedValue<string | null>>()
-  const lists = new Map<ProjectListField, Map<string, TenderSourceRef[]>>()
-  const requirements = new Map<string, RequirementDraft>()
-  const scoring = new Map<string, ScoringDraft>()
-  const compliance = new Map<string, ComplianceDraft>()
   let toolDisposers: Array<() => void> = []
   const definitions: ToolDefinition[] = []
   let toolsEnabled = true
   let disposed = false
-  let phase: TenderAnalysisSubmissionRuntime['phase'] = 'collecting'
-  let revision = 0
+  let completed = false
   let lastIssues: StageValidationIssue[] = []
+  let candidate: TenderAnalysisSubmission | undefined
+  let repairTarget: { kind: keyof TenderAnalysisSubmission; index: number } | undefined
+  let currentRepairContext: unknown
+  const candidatePath = within(workspace.projectRoot, TENDER_ANALYSIS_CANDIDATE_PATH)
+  await assertNoLinkedPath(workspace.root, candidatePath)
 
-  const checkpointPath = within(workspace.projectRoot, TENDER_ANALYSIS_CHECKPOINT_PATH)
-  await assertNoLinkedPath(workspace.root, checkpointPath)
-  try {
-    const saved = tenderAnalysisCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8')))
-    const tenderFileIds = locators.map(locator => locator.file_id)
-    if (JSON.stringify(saved.tender_file_ids) !== JSON.stringify(tenderFileIds)) {
-      throw new Error('tender-analysis-checkpoint-input-mismatch')
-    }
-    for (const item of saved.singles) singles.set(item.field, item.data)
-    for (const item of saved.lists) {
-      const values = lists.get(item.field) ?? new Map<string, TenderSourceRef[]>()
-      values.set(item.value, item.source_refs)
-      lists.set(item.field, values)
-    }
-    for (const item of saved.requirements) requirements.set(item.ref, item.value)
-    for (const item of saved.scoring) scoring.set(item.ref, item.value)
-    for (const item of saved.compliance) compliance.set(item.ref, item.value)
-    phase = saved.phase === 'reviewing' ? 'review_required' : saved.phase
-    revision = saved.revision
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-
-  const persistCheckpoint = async (): Promise<void> => {
-    const value = tenderAnalysisCheckpointSchema.parse({
-      schema_version: 1,
-      origin_run_id: run.runId,
-      origin_epoch: run.epoch,
-      tender_file_ids: locators.map(locator => locator.file_id),
-      phase,
-      revision,
-      singles: [...singles].map(([field, data]) => ({ field, data })),
-      lists: [...lists].flatMap(([field, values]) => [...values].map(([value, source_refs]) => ({ field, value, source_refs }))),
-      requirements: [...requirements].map(([ref, value]) => ({ ref, value })),
-      scoring: [...scoring].map(([ref, value]) => ({ ref, value })),
-      compliance: [...compliance].map(([ref, value]) => ({ ref, value })),
-    })
-    await run.commits.writeJson(checkpointPath, value)
-  }
-
-  const sources = async (values: readonly TenderSourceAnchor[]): Promise<{
+  const sources = async (values: readonly TenderSourceAnchor[], path: string): Promise<{
     quotes: string[]
     source_refs: TenderSourceRef[]
-  } | { issue: StageValidationIssue }> => {
-    try {
-      const resolved = await Promise.all(values.map(value => resolveTenderSourceAnchor(workspace, locators, value)))
-      return {
-        quotes: [...new Set(resolved.map(value => value.quote))],
-        source_refs: uniqueSourceRefs(resolved.map(value => value.source_ref)),
+    issues: StageValidationIssue[]
+  }> => {
+    const resolved: ResolvedTenderSource[] = []
+    const issues: StageValidationIssue[] = []
+    for (const [index, value] of values.entries()) {
+      try {
+        resolved.push(await resolveTenderSourceAnchor(workspace, locators, value))
+      } catch (error: unknown) {
+        const issuePath = `${path}.sources.${String(index)}`
+        if (error instanceof TenderSourceAnchorError) {
+          issues.push({ ...error.issue, path: `${issuePath}.anchor_text` })
+          continue
+        }
+        if (error instanceof ToolArgsError) {
+          issues.push({ code: 'TENDER_ANALYSIS_SOURCE_INVALID', path: issuePath, message: error.message })
+          continue
+        }
+        throw error
       }
-    } catch (error: unknown) {
-      if (error instanceof TenderSourceAnchorError) return { issue: error.issue }
-      throw error
+    }
+    return {
+      quotes: [...new Set(resolved.map(value => value.quote))],
+      source_refs: uniqueSourceRefs(resolved.map(value => value.source_ref)),
+      issues,
     }
   }
-  const recover = <T extends object>(exec: ToolRunContext, issue: StageValidationIssue | readonly StageValidationIssue[], result: T): T & {
+  const recover = <T extends object>(exec: ToolRunContext, issues: readonly StageValidationIssue[], result: T): T & {
     readonly issues: readonly StageValidationIssue[]
-    readonly revision: number
   } => {
-    lastIssues = 'code' in issue ? [issue] : [...issue]
+    lastIssues = [...issues]
     exec.concludeTurn()
-    return { ...result, issues: lastIssues, revision }
+    return { ...result, issues: lastIssues }
   }
   const operationIssue = (exec: ToolRunContext): StageValidationIssue | undefined => {
     if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
-    if (phase === 'completed') return {
+    if (completed) return {
       code: 'TENDER_ANALYSIS_OPERATION_NOT_ALLOWED',
-      message: 'S2 已完成，不能继续提交或 finish。',
-    }
-    if (phase === 'review_required') return {
-      code: 'TENDER_ANALYSIS_OPERATION_NOT_ALLOWED',
-      message: '当前初始分析已结束，等待 Host 启动独立 Review。',
+      message: 'S2 已完成，不能重复提交。',
     }
   }
-  const rejectUnknownReplaceRef = (
-    exec: ToolRunContext,
-    kind: string,
-    ref: string,
-    records: ReadonlyMap<string, unknown>,
-  ) => {
-    const current_refs = [...records.keys()]
-    return recover(exec, {
-      code: 'TENDER_ANALYSIS_REPLACE_REF_UNKNOWN',
-      path: 'replace_ref',
-      message: `未知 ${kind} runtime ref ${ref}。当前有效 refs：${current_refs.join(', ') || '无'}。`,
-    }, {
-      recorded: false,
-      rejected: true,
-      replace_ref: ref,
-      current_refs,
-      message: `未知 ${kind} runtime ref ${ref}。当前有效 refs：${current_refs.join(', ') || '无'}。`,
-    })
+  const targetForIssue = (
+    input: TenderAnalysisSubmission,
+    issue: StageValidationIssue,
+  ): { kind: keyof TenderAnalysisSubmission; index: number } => {
+    const match = /^(project_facts|requirements|scoring_items|compliance_items)(?:\.|\[)(\d+)/u.exec(issue.path ?? '')
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      return { kind: match[1] as keyof TenderAnalysisSubmission, index: Number(match[2]) }
+    }
+    if (issue.artifact === 'analysis/requirements.json') return { kind: 'requirements', index: input.requirements.length }
+    if (issue.artifact === 'analysis/scoring-origin.json') return { kind: 'scoring_items', index: input.scoring_items.length }
+    if (issue.artifact === 'analysis/compliance.json') return { kind: 'compliance_items', index: input.compliance_items.length }
+    return { kind: 'project_facts', index: input.project_facts.length }
   }
-  const accepted = async (): Promise<number> => {
-    revision++
-    await persistCheckpoint()
-    return revision
+  const prepareRepair = async (
+    input: TenderAnalysisSubmission,
+    issues: readonly StageValidationIssue[],
+  ): Promise<StageValidationIssue[]> => {
+    const issue = issues[0]
+    if (issue === undefined) throw new Error('tender-analysis-repair-issue-missing')
+    repairTarget = targetForIssue(input, issue)
+    const repairKey = repairTarget.kind === 'project_facts' ? 'project_fact'
+      : repairTarget.kind === 'requirements' ? 'requirement'
+        : repairTarget.kind === 'scoring_items' ? 'scoring_item' : 'compliance_item'
+    const item = input[repairTarget.kind][repairTarget.index] ?? null
+    const anchors = item === null ? [] : item.sources
+    const relatedChunks = []
+    const seen = new Set<string>()
+    for (const anchor of anchors) {
+      const key = `${anchor.file_ref}\0${anchor.chunk}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const locator = locators.find(value => value.file_ref === anchor.file_ref)
+      const chunk = locator?.chunks.get(anchor.chunk)
+      if (chunk !== undefined) relatedChunks.push({
+        file_ref: anchor.file_ref,
+        chunk: anchor.chunk,
+        text: await readFile(chunk.absolutePath, 'utf8'),
+      })
+    }
+    currentRepairContext = { repair_key: repairKey, issue, item, related_chunks: relatedChunks }
+    return [issue]
+  }
+  const applyRepair = (input: TenderAnalysisRepair): void => {
+    if (candidate === undefined || repairTarget === undefined) {
+      throw new ToolArgsError(['repair: 当前没有等待修正的问题项，请先提交完整结果。'])
+    }
+    const expectedKey = repairTarget.kind === 'project_facts' ? 'project_fact'
+      : repairTarget.kind === 'requirements' ? 'requirement'
+        : repairTarget.kind === 'scoring_items' ? 'scoring_item' : 'compliance_item'
+    const repair = input.repair as Record<string, unknown>
+    const value = repair[expectedKey]
+    if (value === undefined) throw new ToolArgsError([`repair: 当前只接受 ${expectedKey}。`])
+    const items = candidate[repairTarget.kind] as unknown[]
+    if (repairTarget.index === items.length) items.push(value)
+    else items[repairTarget.index] = value
   }
   const output = {
     schema: { type: 'object' as const },
@@ -672,7 +565,12 @@ export async function attachTenderAnalysisSubmissionRuntime(
         throw new Error('无法查看 PDF 页面：当前运行环境不接受 PNG 图片。')
       }
       await assertImageCapableRoute(agent, exec)
-      const rendered = await renderPdfPage(locator.source_path, input.page, attachments.imageLimits, exec.signal)
+      const rendered = await renderPdfPage(
+        new Uint8Array(await readFile(locator.source_path)),
+        input.page,
+        attachments.imageLimits,
+        exec.signal,
+      )
       const image = await attachments.saveImage({
         data: rendered.data,
         mediaType: 'image/png',
@@ -699,133 +597,99 @@ export async function attachTenderAnalysisSubmissionRuntime(
   }
 
   register({
-    name: 'submit_project_fact',
-    description: '逐项记录一个有真实 tender 引用的项目事实或摘要；数组字段由 Host 聚合去重。',
-    parameters: schema(projectFactSchema),
+    name: 'submit_tender_analysis',
+    description: '首次提交完整 S2 语义结果；校验失败后只提交 Host 指定问题项的 repair。只填写实际内容和已读取的 tender 原文位置；Host 统一生成 ID、原文引用和正式 Artifact。',
+    parameters: schema(tenderAnalysisToolSchema),
     async execute(args, exec) {
       const issue = operationIssue(exec)
-      if (issue !== undefined) return recover(exec, issue, { recorded: false, rejected: true })
-      const input = toolArgs(args, projectFactSchema)
-      const resolved = await sources(input.sources)
-      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
-      if (isSingleField(input.field)) {
-        singles.set(input.field, { value: input.value, source_refs: resolved.source_refs })
-      } else {
-        if (input.value === null) throw new ToolArgsError(['value: 数组字段必须逐项提交非空字符串。'])
-        const field = input.field
-        const values = lists.get(field) ?? new Map<string, TenderSourceRef[]>()
-        values.set(input.value, uniqueSourceRefs([...(values.get(input.value) ?? []), ...resolved.source_refs]))
-        lists.set(field, values)
+      if (issue !== undefined) return recover(exec, [issue], { completed: false })
+      const input = toolArgs(args, tenderAnalysisToolSchema)
+      if ('repair' in input) applyRepair(input)
+      else {
+        if (repairTarget !== undefined) throw new ToolArgsError(['当前只接受 Host 指定问题项的 repair，不得重新提交完整结果。'])
+        candidate = input
       }
-      return {
-        recorded: true,
-        field: input.field,
-        total_values: isSingleField(input.field) ? 1 : lists.get(input.field)?.size ?? 0,
-        revision: await accepted(),
+      if (candidate === undefined) throw new Error('tender-analysis-candidate-missing')
+      await run.commits.writeJson(candidatePath, candidate)
+      const currentCandidate = candidate
+      const singles = new Map<ProjectSingleField, SourcedValue<string | null>>()
+      const lists = new Map<ProjectListField, Map<string, TenderSourceRef[]>>()
+      const requirements: RequirementDraft[] = []
+      const scoring: ScoringDraft[] = []
+      const compliance: ComplianceDraft[] = []
+      const issues: StageValidationIssue[] = []
+
+      for (const [index, item] of currentCandidate.project_facts.entries()) {
+        const resolved = await sources(item.sources, `project_facts.${String(index)}`)
+        issues.push(...resolved.issues)
+        if (resolved.issues.length > 0) continue
+        if (isSingleField(item.field)) {
+          singles.set(item.field, { value: item.value, source_refs: resolved.source_refs })
+        } else if (item.value === null) {
+          issues.push({
+            code: 'TENDER_ANALYSIS_PROJECT_VALUE_INVALID',
+            path: `project_facts.${String(index)}.value`,
+            message: '项目数组字段必须提交非空字符串；未知字段直接省略。',
+          })
+        } else {
+          const values = lists.get(item.field) ?? new Map<string, TenderSourceRef[]>()
+          values.set(item.value, uniqueSourceRefs([...(values.get(item.value) ?? []), ...resolved.source_refs]))
+          lists.set(item.field, values)
+        }
       }
-    },
-  })
+      for (const [index, item] of currentCandidate.requirements.entries()) {
+        const resolved = await sources(item.sources, `requirements.${String(index)}`)
+        issues.push(...resolved.issues)
+        if (resolved.issues.length === 0) requirements.push({
+          id: `REQ-${String(index + 1).padStart(3, '0')}`,
+          category: item.category,
+          raw_text: resolved.quotes.join('\n'),
+          normalized_requirement: item.normalized_requirement,
+          mandatory: item.mandatory,
+          source_refs: resolved.source_refs,
+        })
+      }
+      for (const [index, item] of currentCandidate.scoring_items.entries()) {
+        const resolved = await sources(item.sources, `scoring_items.${String(index)}`)
+        issues.push(...resolved.issues)
+        if (resolved.issues.length === 0) scoring.push({
+          id: '',
+          group: item.group,
+          title: item.title,
+          raw_text: resolved.quotes.join('\n'),
+          criterion: item.criterion,
+          score: item.score,
+          score_range: item.score_range,
+          must_answer: item.must_answer,
+          source_refs: resolved.source_refs,
+        })
+      }
+      for (const [index, item] of currentCandidate.compliance_items.entries()) {
+        const resolved = await sources(item.sources, `compliance_items.${String(index)}`)
+        issues.push(...resolved.issues)
+        if (resolved.issues.length === 0) compliance.push({
+          id: `COM-${String(index + 1).padStart(3, '0')}`,
+          type: item.type,
+          raw_text: resolved.quotes.join('\n'),
+          normalized_rule: item.normalized_rule,
+          severity: item.severity,
+          source_refs: resolved.source_refs,
+        })
+      }
+      if (issues.length > 0) return recover(exec, await prepareRepair(currentCandidate, issues), { completed: false })
 
-  register({
-    name: 'submit_requirement',
-    description: 'action=create 新增 Requirement，且不得携带 replace_ref；action=replace 必须携带当前 staged 中真实存在的 R* replace_ref。runtime ref 只能来自 Host 返回或 staged snapshot，禁止猜测；Host 保持正式 REQ ID。',
-    parameters: schema(requirementSchema),
-    async execute(args, exec) {
-      const issue = operationIssue(exec)
-      if (issue !== undefined) return recover(exec, issue, { recorded: false, rejected: true })
-      const input = toolArgs(args, requirementSchema)
-      const ref = input.action === 'create' ? nextRuntimeRef(requirements, 'R') : input.replace_ref
-      const current = requirements.get(ref)
-      if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Requirement', ref, requirements)
-      const resolved = await sources(input.sources)
-      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
-      requirements.set(ref, {
-        id: current?.id ?? `REQ-${String(requirements.size + 1).padStart(3, '0')}`,
-        category: input.category,
-        raw_text: resolved.quotes.join('\n'),
-        normalized_requirement: input.normalized_requirement,
-        mandatory: input.mandatory,
-        source_refs: resolved.source_refs,
-      })
-      lastIssues = []
-      return { recorded: true, requirement_ref: ref, total_requirements: requirements.size, revision: await accepted() }
-    },
-  })
-
-  register({
-    name: 'submit_scoring_item',
-    description: 'action=create 新增 Scoring，且不得携带 replace_ref；action=replace 必须携带当前 staged 中真实存在的 S* replace_ref。runtime ref 只能来自 Host 返回或 staged snapshot，禁止猜测；Host 固定正式评分项的 parent 为 null。',
-    parameters: schema(scoringSchema),
-    async execute(args, exec) {
-      const issue = operationIssue(exec)
-      if (issue !== undefined) return recover(exec, issue, { recorded: false, rejected: true })
-      const input = toolArgs(args, scoringSchema)
-      const ref = input.action === 'create' ? nextRuntimeRef(scoring, 'S') : input.replace_ref
-      const current = scoring.get(ref)
-      if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Scoring', ref, scoring)
-      const resolved = await sources(input.sources)
-      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
-      scoring.set(ref, {
-        id: current?.id ?? `SC-${String(scoring.size + 1).padStart(3, '0')}`,
-        group: input.group,
-        title: input.title,
-        raw_text: resolved.quotes.join('\n'),
-        criterion: input.criterion,
-        score: input.score,
-        score_range: input.score_range,
-        must_answer: input.must_answer,
-        source_refs: resolved.source_refs,
-      })
-      lastIssues = []
-      return { recorded: true, scoring_ref: ref, parent_resolved: true, total_scoring_items: scoring.size, revision: await accepted() }
-    },
-  })
-
-  register({
-    name: 'submit_compliance_item',
-    description: 'action=create 新增 Compliance，且不得携带 replace_ref；action=replace 必须携带当前 staged 中真实存在的 C* replace_ref。runtime ref 只能来自 Host 返回或 staged snapshot，禁止猜测；Host 保持正式 COM ID。',
-    parameters: schema(complianceSchema),
-    async execute(args, exec) {
-      const issue = operationIssue(exec)
-      if (issue !== undefined) return recover(exec, issue, { recorded: false, rejected: true })
-      const input = toolArgs(args, complianceSchema)
-      const ref = input.action === 'create' ? nextRuntimeRef(compliance, 'C') : input.replace_ref
-      const current = compliance.get(ref)
-      if (input.action === 'replace' && current === undefined) return rejectUnknownReplaceRef(exec, 'Compliance', ref, compliance)
-      const resolved = await sources(input.sources)
-      if ('issue' in resolved) return recover(exec, resolved.issue, { recorded: false, rejected: true })
-      compliance.set(ref, {
-        id: current?.id ?? `COM-${String(compliance.size + 1).padStart(3, '0')}`,
-        type: input.type,
-        raw_text: resolved.quotes.join('\n'),
-        normalized_rule: input.normalized_rule,
-        severity: input.severity,
-        source_refs: resolved.source_refs,
-      })
-      lastIssues = []
-      return { recorded: true, compliance_ref: ref, total_compliance_items: compliance.size, revision: await accepted() }
-    },
-  })
-
-  register({
-    name: 'finish_tender_analysis',
-    description: '检查 staged S2 结果；可修正缺项返回 issues，通过后由 Host 写入并复核四个正式 Artifact。',
-    parameters: schema(finishSchema),
-    async execute(args, exec) {
-      const issue = operationIssue(exec)
-      if (issue !== undefined) return recover(exec, issue, { completed: false })
-      const input = toolArgs(args, finishSchema)
       const projectSources = uniqueSourceRefs([
         ...[...singles.values()].flatMap(value => value.source_refs),
         ...[...lists.values()].flatMap(values => [...values.values()].flat()),
       ])
       if (projectSources.length === 0) {
-        return recover(exec, {
+        const projectIssues = [{
           code: 'TENDER_ANALYSIS_PROJECT_SOURCE_MISSING',
           artifact: 'analysis/project.json',
           path: 'source_refs',
           message: '至少提交一个有真实 tender 引用的项目事实或摘要。',
-        }, { completed: false })
+        }] satisfies StageValidationIssue[]
+        return recover(exec, await prepareRepair(currentCandidate, projectIssues), { completed: false })
       }
       const project = parseTenderProjectArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
@@ -836,10 +700,10 @@ export async function attachTenderAnalysisSubmissionRuntime(
       })
       const requirementsArtifact = parseTenderRequirementsArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
-        requirements: [...requirements.values()],
+        requirements,
       })
-      const scoringItems = new Map<string, ScoringDraft & { parent: null }>()
-      for (const item of scoring.values()) {
+      const scoringItems = new Map<string, Omit<ScoringDraft, 'id'> & { parent: null }>()
+      for (const { id: _id, ...item } of scoring) {
         const key = JSON.stringify([
           item.group, item.title, item.raw_text, item.criterion, item.score, item.score_range, item.must_answer,
         ])
@@ -851,32 +715,18 @@ export async function attachTenderAnalysisSubmissionRuntime(
       }
       const scoringArtifact = parseTenderScoringArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
-        scoring_items: [...scoringItems.values()],
+        scoring_items: [...scoringItems.values()].map((item, index) => ({
+          ...item,
+          id: `SC-${String(index + 1).padStart(3, '0')}`,
+        })),
       })
       const complianceArtifact = parseTenderComplianceArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,
-        compliance_items: [...compliance.values()],
+        compliance_items: compliance,
       })
       const artifacts = { project, requirements: requirementsArtifact, scoring: scoringArtifact, compliance: complianceArtifact }
       lastIssues = await validateTenderAnalysisDraft(workspace, manifest, artifacts)
-      if (lastIssues.length > 0) return recover(exec, lastIssues, { completed: false })
-
-      if (phase === 'collecting') {
-        phase = 'review_required'
-        lastIssues = [{
-          code: 'TENDER_ANALYSIS_REVIEW_REQUIRED',
-          message: '当前 staged 分析已通过确定性校验，必须在独立复核轮次确认同一版本后才能发布。',
-        }]
-        await persistCheckpoint()
-        exec.concludeTurn()
-        return { completed: false, review_required: true, revision }
-      }
-      if (input.review_revision !== revision) {
-        return recover(exec, {
-          code: 'TENDER_ANALYSIS_REVIEW_REVISION_MISMATCH',
-          message: `复核版本必须是当前 staged revision ${String(revision)}。`,
-        }, { completed: false })
-      }
+      if (lastIssues.length > 0) return recover(exec, await prepareRepair(currentCandidate, lastIssues), { completed: false })
 
       await run.commits.publish(async (lease) => {
         for (const [path, value] of [
@@ -893,16 +743,17 @@ export async function attachTenderAnalysisSubmissionRuntime(
       })
       const validation = await validateTenderAnalysis(workspace, 'tender_analysis', artifactsList())
       if (!validation.ok) throw new Error(`tender-analysis-host-artifact-invalid:${validation.issues.map(issue => issue.code).join(',')}`)
-      phase = 'completed'
-      await persistCheckpoint()
+      completed = true
+      lastIssues = []
+      repairTarget = undefined
+      currentRepairContext = undefined
       return {
         completed: true,
-        revision,
         summary: {
           tender_files: locators.length,
-          requirements: requirements.size,
+          requirements: requirements.length,
           scoring_items: scoringItems.size,
-          compliance_items: compliance.size,
+          compliance_items: compliance.length,
         },
       }
     },
@@ -910,28 +761,9 @@ export async function attachTenderAnalysisSubmissionRuntime(
 
   return {
     locators,
-    get revision() { return revision },
-    get phase() { return phase },
-    get completed() { return phase === 'completed' },
+    get completed() { return completed },
     get lastIssues() { return lastIssues },
-    reviewSnapshot() {
-      return {
-        revision,
-        project_facts: [
-          ...[...singles].map(([field, value]) => ({ field, ...value })),
-          ...[...lists].flatMap(([field, values]) => [...values].map(([value, source_refs]) => ({ field, value, source_refs }))),
-        ],
-        requirements: [...requirements].map(([requirement_ref, { id: _id, ...value }]) => ({ requirement_ref, ...value })),
-        scoring: [...scoring].map(([scoring_ref, { id: _id, ...value }]) => ({ scoring_ref, ...value })),
-        compliance: [...compliance].map(([compliance_ref, { id: _id, ...value }]) => ({ compliance_ref, ...value })),
-      }
-    },
-    async beginReview() {
-      if (phase !== 'review_required') throw new Error('tender-analysis-review-phase-invalid')
-      phase = 'reviewing'
-      lastIssues = []
-      await persistCheckpoint()
-    },
+    repairContext() { return currentRepairContext },
     setToolsEnabled,
     dispose() {
       disposed = true

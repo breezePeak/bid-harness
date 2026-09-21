@@ -28,6 +28,8 @@ import { within, assertNoLinkedPath } from './workspace-path.ts'
 import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, parseTableCaption, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
 import { flowchartPlaceholder, type FlowchartSpec } from './flowchart.ts'
 import { renderFlowchartImage } from './flowchart-image.ts'
+import { docxImageDimensions } from './docx-image.ts'
+import { identifyVisualBlocks, type VisualReviewAdjustments } from './docx-visual-review.ts'
 type Node = {
   type: string
   value?: string | undefined
@@ -66,23 +68,25 @@ function inferTableColumnWidths(table: Node): number[] {
   const weights = Array.from({ length: count }, (_, index) => Math.max(1,
     rows.reduce((sum, row) => sum + textWidth(content(row.children?.[index] ?? { type: 'text', value: '' })), 0)))
   const widths = weights.map(weight => weight / weights.reduce((sum, value) => sum + value, 0))
+  const widthAt = (index: number): number => widths[index] ?? 0
   const fixed = new Set<number>()
   while (fixed.size < count) {
-    const remaining = 1 - [...fixed].reduce((sum, index) => sum + widths[index]!, 0)
+    const remaining = 1 - [...fixed].reduce((sum, index) => sum + widthAt(index), 0)
     const remainingWeight = weights.reduce((sum, weight, index) => sum + (fixed.has(index) ? 0 : weight), 0)
     let changed = false
     for (const [index, weight] of weights.entries()) {
       if (fixed.has(index)) continue
       widths[index] = remaining * weight / remainingWeight
-      if (widths[index]! < 0.08) { widths[index] = 0.08; fixed.add(index); changed = true }
-      else if (widths[index]! > 0.45) { widths[index] = 0.45; fixed.add(index); changed = true }
+      const width = widthAt(index)
+      if (width < 0.08) { widths[index] = 0.08; fixed.add(index); changed = true }
+      else if (width > 0.45) { widths[index] = 0.45; fixed.add(index); changed = true }
     }
     if (!changed) break
   }
   const remainder = 1 - widths.reduce((sum, value) => sum + value, 0)
   if (remainder > 0) {
-    const index = widths.reduce((best, width, candidate) => width < widths[best]! ? candidate : best, 0)
-    widths[index] = widths[index]! + remainder
+    const index = widths.reduce((best, width, candidate) => width < widthAt(best) ? candidate : best, 0)
+    widths[index] = widthAt(index) + remainder
   }
   return widths
 }
@@ -133,29 +137,7 @@ function withoutLeadingText(nodes: Node[], marker: RegExp | number): Node[] {
   return visit(nodes)
 }
 
-/**
- * 读取导出支持的图片像素尺寸；正文渲染和页数估算使用同一缩放依据。
- * @param data 已验证的项目内图片字节。
- * @returns 图片格式及原始像素尺寸。
- */
-export function docxImageDimensions(data: Buffer): { type: 'png' | 'jpg'; width: number; height: number } {
-  if (data.length >= 24 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
-    return { type: 'png', width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
-  }
-  if (data[0] !== 255 || data[1] !== 216) throw new Error('仅支持有效 PNG 或 JPEG。')
-  let offset = 2
-  while (offset + 9 < data.length) {
-    const marker = data.readUInt8(offset + 1), length = data.readUInt16BE(offset + 2)
-    if ([192, 193, 194].includes(marker)) {
-      const height = data.readUInt16BE(offset + 5), width = data.readUInt16BE(offset + 7)
-      if (width && height) return { type: 'jpg', width, height }
-      break
-    }
-    if (length < 2) break
-    offset += length + 2
-  }
-  throw new Error('无法读取图片尺寸。')
-}
+export { docxImageDimensions } from './docx-image.ts'
 async function readAssets(workspace: BidWorkspace, root: Node): Promise<Map<string, Buffer>> {
   const definitions = new Map((root.children ?? []).filter(node => node.type === 'definition').map(node => [node.identifier, node.url]))
   const assets = new Map<string, Buffer>()
@@ -211,6 +193,7 @@ export async function docxAssetHash(workspace: BidWorkspace, markdown: string): 
  * @param preview 是否在浏览器预览末尾补充缺失内容的明确示例。
  * @param pageBasis configured 保留生成格式，a4 固定为纵向 A4 供 S5 分页。
  * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
+ * @param visualAdjustments 已通过最终页面审核的块级白名单调整。
  * @returns 有效 DOCX 字节及安全的内嵌样式预览。
  */
 export async function renderDocx(
@@ -220,12 +203,14 @@ export async function renderDocx(
   preview = false,
   pageBasis: 'configured' | 'a4' = 'configured',
   flowchartMode: 'svg' | 'visio-placeholder' = 'svg',
+  visualAdjustments: VisualReviewAdjustments = {},
 ): Promise<{
   bytes: Buffer
   html: string
   assetHash: string
 }> {
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  const visualBlocks = identifyVisualBlocks(root as unknown as Node).byNode
   const assets = await readAssets(workspace, root)
   const numberHeading = createHeadingNumberer(values)
   const numberCaption = createCaptionNumberer(values)
@@ -309,7 +294,10 @@ export async function renderDocx(
           throw new Error(`无法读取图片尺寸：${url}`)
         }
         const { type, width, height } = image
-        const ratio = Math.min(1, 500 / width, 700 / height)
+        const adjustment = visualBlocks.get(node)?.blockId
+        const configured = adjustment === undefined ? undefined : visualAdjustments[adjustment]
+        const scale = configured !== undefined && 'scale' in configured ? configured.scale : 1
+        const ratio = Math.min(1, 500 / width, 700 / height) * scale
         runs.push(new ImageRun({ data,
           type,
           transformation: { width: width * ratio,
@@ -339,7 +327,10 @@ export async function renderDocx(
         const isLandscape = pageBasis !== 'a4' && (sectionLandscape || str('page.orientation') === 'landscape')
         const pageWidthMm = isLandscape ? page[1] : page[0]
         const maxContentWidthPx = Math.max(0, (pageWidthMm - num('page.left') - num('page.right')) * 96 / 25.4)
-        const ratio = Math.min(1, maxContentWidthPx / rendered.width)
+        const blockId = visualBlocks.get(node)?.blockId
+        const adjustment = blockId === undefined ? undefined : visualAdjustments[blockId]
+        const scale = adjustment !== undefined && 'scale' in adjustment ? adjustment.scale : 1
+        const ratio = Math.min(1, maxContentWidthPx / rendered.width) * scale
         const caption = numberCaption('figureCaption')
         doc.push(flowchartMode === 'visio-placeholder'
           ? new Paragraph({ ...paragraph('body'), alignment: 'center', keepLines: true, keepNext: true,
@@ -425,6 +416,9 @@ export async function renderDocx(
       if (node.type === 'table') {
         const rows: TableRow[] = [], htmlRows: string[] = []
         const fractions = inferTableColumnWidths(node)
+        const blockId = visualBlocks.get(node)?.blockId
+        const adjustment = blockId === undefined ? undefined : visualAdjustments[blockId]
+        const fontScale = adjustment !== undefined && 'fontScale' in adjustment ? adjustment.fontScale : 1
         const pageWidth = sectionLandscape ? page[1] : page[0]
         const totalWidth = mm((pageWidth - num('page.left') - num('page.right')) * num('table.width') / 100)
         const columnWidths = fractions.map(fraction => Math.round(totalWidth * fraction))
@@ -432,7 +426,7 @@ export async function renderDocx(
           const cells: TableCell[] = [], htmlCells: string[] = []
           const role = rowIndex === 0 ? 'tableHeader' : 'tableCell'
           for (const [cellIndex, cell] of (row.children ?? []).entries()) {
-            const rendered = await inline(cell.children ?? [], role)
+            const rendered = await inline(cell.children ?? [], role, { size: num(`${role}.size`) * 2 * fontScale })
             cells.push(new TableCell({ ...(rowIndex === 0 ? { shading: { fill: str('table.fill') } } : {}),
               width: { size: columnWidths[cellIndex] ?? 0, type: WidthType.DXA },
               verticalAlign: rowIndex === 0 ? VerticalAlign.CENTER : VerticalAlign.TOP,

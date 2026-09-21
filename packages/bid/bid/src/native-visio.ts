@@ -28,7 +28,7 @@ export interface VisioBackend {
 /** Native Word capability used to embed and inspect Visio OLE objects. */
 export interface WordVisioEmbedder {
   isAvailable(): Promise<boolean>
-  embed(docxPath: string, replacements: readonly { placeholder: string; visioPath: string }[]): Promise<void>
+  embed(docxPath: string, replacements: readonly { placeholder: string; visioPath: string; scale?: number }[]): Promise<void>
   countVisioObjects(docxPath: string): Promise<number>
 }
 
@@ -190,7 +190,7 @@ class NativeVisioBackend implements VisioBackend {
   }
 }
 
-function embedScript(docxPath: string, replacements: readonly { placeholder: string; visioPath: string }[]): string {
+function embedScript(docxPath: string, replacements: readonly { placeholder: string; visioPath: string; scale?: number }[]): string {
   return `$ErrorActionPreference = 'Stop'
 $docx = ${decodeScriptValue(docxPath)}
 $replacements = (${decodeScriptValue(JSON.stringify(replacements))}) | ConvertFrom-Json
@@ -215,11 +215,12 @@ try {
     $availableWidth = [double]$section.PageSetup.PageWidth - [double]$section.PageSetup.LeftMargin - [double]$section.PageSetup.RightMargin
     $originalWidth = [double]$shape.Width
     $originalHeight = [double]$shape.Height
-    if ($originalWidth -gt $availableWidth -and $availableWidth -gt 0) {
+    $ratio = if ($null -eq $replacement.scale) { 1.0 } else { [double]$replacement.scale }
+    if (($originalWidth * $ratio) -gt $availableWidth -and $availableWidth -gt 0) {
       $ratio = $availableWidth / $originalWidth
-      $shape.Width = $originalWidth * $ratio
-      $shape.Height = $originalHeight * $ratio
     }
+    $shape.Width = $originalWidth * $ratio
+    $shape.Height = $originalHeight * $ratio
   }
   $document.Save()
 } finally {
@@ -234,7 +235,7 @@ class NativeWordVisioEmbedder implements WordVisioEmbedder {
     try { await runPowerShell(runtimeScript('Word.Application')); return true } catch { return false }
   }
 
-  async embed(docxPath: string, replacements: readonly { placeholder: string; visioPath: string }[]): Promise<void> {
+  async embed(docxPath: string, replacements: readonly { placeholder: string; visioPath: string; scale?: number }[]): Promise<void> {
     if (!(await this.isAvailable())) throw new Error(`${WORD_RUNTIME_UNAVAILABLE}: 当前环境未检测到 Microsoft Word。`)
     await runPowerShell(embedScript(docxPath, replacements))
   }

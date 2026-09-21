@@ -18,7 +18,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { DiscoveredModelView, IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { formatCapacity, ModelInputCapabilities, parseCapacity } from './DeepSeekModelsEditor.tsx'
+import { formatCapacity, ModelVisionToggle, parseCapacity } from './DeepSeekModelsEditor.tsx'
 import type { DeepSeekModelDraft } from './DeepSeekModelsEditor.tsx'
 import { messageOf } from './store.ts'
 import type { en } from './locales.ts'
@@ -364,6 +364,14 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
               disabled={disabled}
               onChange={(event) => { patch(index, { name: event.target.value === '' ? undefined : event.target.value }) }}
             />
+            <ModelVisionToggle
+              model={model}
+              field="input"
+              index={index}
+              disabled={disabled}
+              t={t}
+              onChange={(value) => { patch(index, { input: value }) }}
+            />
             <button
               type="button"
               className={styles['iconButton']}
@@ -429,14 +437,6 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                     onChange={(event) => { editCapacity(index, 'maxTokens', event.target.value) }}
                   />
                 </label>
-                <ModelInputCapabilities
-                  model={model}
-                  field="input"
-                  index={index}
-                  disabled={disabled}
-                  t={t}
-                  onChange={(value) => { patch(index, { input: value }) }}
-                />
               </div>
             )
             : null}
