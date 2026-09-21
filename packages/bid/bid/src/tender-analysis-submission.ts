@@ -25,7 +25,7 @@ import { validateTenderAnalysis, validateTenderAnalysisDraft } from './tender-an
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { renderPdfPage } from './pdf-page-render.ts'
 
-/** S2 tool that accepts one complete semantic result while the Host owns deterministic fields. */
+/** S2 tool that accepts one complete result or one Host-targeted repair while the Host owns deterministic fields. */
 export const TENDER_ANALYSIS_SUBMISSION_TOOLS = ['submit_tender_analysis'] as const
 
 /** S2-private visual inspection tools for successful tender inputs. */
@@ -503,6 +503,20 @@ export async function attachTenderAnalysisSubmissionRuntime(
         chunk: anchor.chunk,
         text: await readFile(chunk.absolutePath, 'utf8'),
       })
+    }
+    if (relatedChunks.length === 0) {
+      const signal = repairTarget.kind === 'scoring_items'
+        ? /技术评分|技术评审|技术评价|评分标准|评分表|评审因素|分值|满分/u
+        : repairTarget.kind === 'requirements' ? /技术要求|功能要求|性能要求|应当|应|必须|不得/u : undefined
+      for (const locator of locators) {
+        for (const [chunkId, chunk] of locator.chunks) {
+          const text = await readFile(chunk.absolutePath, 'utf8')
+          if (signal !== undefined && !signal.test(text)) continue
+          relatedChunks.push({ file_ref: locator.file_ref, chunk: chunkId, text })
+          if (relatedChunks.length >= 3) break
+        }
+        if (relatedChunks.length >= 3) break
+      }
     }
     currentRepairContext = { repair_key: repairKey, issue, item, related_chunks: relatedChunks }
     return [issue]
