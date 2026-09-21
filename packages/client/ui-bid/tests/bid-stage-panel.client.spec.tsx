@@ -84,6 +84,7 @@ function props(
     useProjection,
     useSessions,
     setRealtimeChatMode: vi.fn(),
+    setBackgroundActivity: vi.fn(),
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
     getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null })),
@@ -1149,6 +1150,8 @@ describe('ui-bid browser plugin', () => {
   it('registers the Bid input-dock entry, scopes composer blocks, and calls the Bid Remote', async () => {
     const register = vi.fn((_definition: unknown, _component: unknown) => () => {})
     const set = vi.fn()
+    const setBackgroundActivity = vi.fn()
+    const remoteStopRun = vi.fn(async () => ({ ok: true as const, value: { accepted: true as const } }))
     const remoteRequestWritingRequirements = vi.fn<(_sessionId: string, _intent: WritingEntryIntent) => Promise<unknown>>()
       .mockResolvedValue({
         ok: true as const,
@@ -1167,12 +1170,13 @@ describe('ui-bid browser plugin', () => {
       effect: (factory: () => unknown) => factory(),
       conversationEvents: { register: conversationRegister },
       locale: { register: vi.fn(() => () => {}) },
-      conversation: { blocks: { set } },
+      conversation: { blocks: { set }, backgroundActivities: { set: setBackgroundActivity } },
       sessions: { scope: () => ({ get: () => ({ send: resumeMessage }) }) },
       remote: { bid: {
         requestWritingRequirements: remoteRequestWritingRequirements,
         autoStartChapterWriting: remoteAutoStartChapterWriting,
         getEvidenceMappingProgress: remoteGetEvidenceMappingProgress,
+        stopRun: remoteStopRun,
       } },
       slots: {
         inject: vi.fn((_name: string, factory: () => unknown) => factory()),
@@ -1181,9 +1185,12 @@ describe('ui-bid browser plugin', () => {
     } as unknown as ClientContext
 
     apply(ctx)
-    expect(conversationRegister).toHaveBeenCalledOnce()
+    expect(conversationRegister).toHaveBeenCalledTimes(2)
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.chat.node', key: 'bid-run-notice',
+    }), expect.any(Function))
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'conversation.chat.node', key: 'bid-run', locale: 'bid',
     }), expect.any(Function))
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,
@@ -1204,6 +1211,7 @@ describe('ui-bid browser plugin', () => {
     const options = registration[0] as {
       inject: (sessionId: string) => {
         setComposerBlock: (reason: string | undefined) => void
+        setBackgroundActivity: (active: boolean) => void
         uploadFiles: (files: readonly { file: File; role: 'tender' | 'outline_framework' | 'reference_bid' | 'reference' }[]) => Promise<void>
         requestWritingRequirements: (intent: WritingEntryIntent) => Promise<void>
         autoStartChapterWriting: () => Promise<void>
@@ -1215,6 +1223,13 @@ describe('ui-bid browser plugin', () => {
     expect(set).toHaveBeenLastCalledWith('session_bid', { reason: '请先上传' })
     injected.setComposerBlock(undefined)
     expect(set).toHaveBeenLastCalledWith('session_bid', undefined)
+    injected.setBackgroundActivity(true)
+    const activity = setBackgroundActivity.mock.calls.at(-1)?.[2] as { stop: () => void }
+    expect(setBackgroundActivity).toHaveBeenLastCalledWith('session_bid', 'bid-run', activity)
+    activity.stop()
+    expect(remoteStopRun).toHaveBeenCalledWith('session_bid')
+    injected.setBackgroundActivity(false)
+    expect(setBackgroundActivity).toHaveBeenLastCalledWith('session_bid', 'bid-run', undefined)
 
     const uploadFetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
       new Request(input, init)

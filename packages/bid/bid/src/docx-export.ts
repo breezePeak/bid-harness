@@ -79,6 +79,7 @@ export async function executeDocxExport(
   nativeExport?: NativeVisioExport,
   visualReviewer?: VisualReviewModel,
 ): Promise<StageArtifact[]> {
+  run.reportProgress({ phase: 'collecting', summary: '正在收集确认目录、正文与图表' })
   const snapshot = await collectDocxExportSnapshot(workspace, run.signal, templateId)
   if (snapshot.technicalDeviation.status === 'pending') {
     throw new BidStageExecutionError([{
@@ -91,6 +92,7 @@ export async function executeDocxExport(
   const absolute = within(workspace.projectRoot, source)
   await assertNoLinkedPath(workspace.root, absolute)
   run.signal.throwIfAborted()
+  run.reportProgress({ phase: 'exporting', summary: '正在生成并渲染 Word 文档' })
   await run.commits.writeText(absolute, snapshot.markdown)
   await workspace.exportDocxMarkdown(snapshot.markdown, destination, templateId, run.commits, undefined, nativeExport,
     snapshot.technicalDeviation.status === 'ready'
@@ -98,6 +100,7 @@ export async function executeDocxExport(
       : undefined,
     visualReviewer,
     run.signal)
+  run.reportProgress({ phase: 'finalizing', summary: 'Word 文档已生成，正在提交导出结果' })
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 

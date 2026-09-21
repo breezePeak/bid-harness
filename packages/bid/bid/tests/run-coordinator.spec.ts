@@ -41,6 +41,30 @@ function work(stage: BidStage): BidWorkDescriptor {
 }
 
 describe('BidRunCoordinator', () => {
+  it('publishes a bounded starting milestone and preserves latest progress at completion', async () => {
+    const { session, runs } = await fixture()
+    const run = await runs.start(work('tender_analysis'))
+
+    expect(session.events.find(event => event.type === 'bid.run.progress')).toMatchObject({
+      data: { runId: run.runId, epoch: run.epoch, stage: 'tender_analysis', progress: { phase: 'starting' } },
+    })
+    run.reportProgress({
+      phase: 'collecting',
+      summary: 'x'.repeat(300),
+      details: Array.from({ length: 7 }, (_, index) => `${String(index)}${'y'.repeat(200)}`),
+      completed: 2,
+      total: 3,
+    })
+    await runs.complete(run)
+
+    const completed = session.events.findLast(event => event.type === 'bid.run.completed')
+    expect(completed?.data.run.progress).toMatchObject({ phase: 'collecting', completed: 2, total: 3 })
+    expect(completed?.data.run.progress?.summary).toHaveLength(240)
+    expect(completed?.data.run.progress?.details).toHaveLength(5)
+    expect(completed?.data.run.progress?.details?.every(detail => detail.length <= 160)).toBe(true)
+    expect(() => { run.reportProgress({ phase: 'late', summary: 'stale' }) }).toThrow('BID_RUN_RETIRED')
+  })
+
   it('fences formal commits by Run identity, epoch, and project revision', async () => {
     const { runs, setRevision } = await fixture()
     const run = await runs.start(work('evidence_mapping'))
@@ -254,6 +278,7 @@ describe('BidRunCoordinator', () => {
 
     expect(persisted).toEqual([
       'bid.run.started',
+      'bid.run.progress',
       'bid.run.completed',
       'bid.user_confirmation.required',
     ])

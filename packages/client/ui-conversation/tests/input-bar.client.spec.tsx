@@ -19,11 +19,28 @@ import type {
   ComposerAttachment, ComposerAttachmentsOwnerProps,
 } from '../src/client/contract/slots.ts'
 import type { DraftAttachmentId } from '../src/client/input/contract.ts'
+import { ConversationBackgroundActivityRegistry } from '../src/client/input/background-activity.ts'
 import { InputBar } from '../src/client/skeleton/InputBar.tsx'
 import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
+
+describe('ConversationBackgroundActivityRegistry', () => {
+  it('keeps the remaining owner active when another contribution clears', () => {
+    const registry = new ConversationBackgroundActivityRegistry()
+    const first = { stop: vi.fn() }
+    const second = { stop: vi.fn() }
+    const sessionId = 'session' as SessionId
+    registry.set(sessionId, 'first', first)
+    registry.set(sessionId, 'second', second)
+    expect(registry.storeFor(sessionId).getSnapshot()).toBe(first)
+    registry.set(sessionId, 'first', undefined)
+    expect(registry.storeFor(sessionId).getSnapshot()).toBe(second)
+    registry.set(sessionId, 'second', undefined)
+    expect(registry.storeFor(sessionId).getSnapshot()).toBeUndefined()
+  })
+})
 
 // jsdom implements no Range geometry at all — `Range.prototype.getBoundingClientRect`
 // is absent — and the composer measures the caret with one when it restores the
@@ -93,6 +110,7 @@ interface BenchOptions {
   addImages?: (files: readonly File[]) => string | null
   commandMenuOpen?: boolean
   busyEnter?: 'queue' | 'steer'
+  backgroundStop?: () => void
   toggleCommandMenu?: (selection: { start: number; end: number }) => void
 }
 
@@ -145,6 +163,8 @@ function bench(over?: BenchOptions) {
   const stop = vi.fn()
   const removeImage = vi.fn((id: DraftAttachmentId) => { shell.removeImage(id) })
   const menuLauncher = createSnapshotStore<string | null>(over?.commandMenuOpen === true ? 'command' : null)
+  const backgroundActivity = createSnapshotStore(over?.backgroundStop === undefined
+    ? undefined : { stop: over.backgroundStop })
   const slotCalls: { key: string; owner: unknown }[] = []
   const renderSlot = ((key: string, owner: object) => {
     slotCalls.push({ key, owner })
@@ -186,6 +206,7 @@ function bench(over?: BenchOptions) {
     useNotices: bindSnapshotSelector(shell.notices),
     useLexicon: bindSnapshotSelector(shell.lexicon),
     useMenuLauncher: bindSnapshotSelector(menuLauncher),
+    useBackgroundActivity: bindSnapshotSelector(backgroundActivity),
     stop,
     command: over?.command ?? (() => Promise.resolve(true)),
     // Mirrors the real lookup chain (conversation namespace, then common).
@@ -204,7 +225,8 @@ function bench(over?: BenchOptions) {
   }
   const view = render(<InputBar {...props} />)
   const textarea = view.container.querySelector('textarea')!
-  const primaryStops = over?.running === true && (over.subagent === undefined || over.subagent.address.mode === 'continuable')
+  const primaryStops = (over?.backgroundStop !== undefined
+    || over?.running === true && (over.subagent === undefined || over.subagent.address.mode === 'continuable'))
     && (over.draft ?? '') === '' && (over.attachments?.length ?? 0) === 0
   const button = view.container.querySelector<HTMLButtonElement>(
     `button[aria-label="${primaryStops ? '停止生成' : '发送消息'}"]`,
@@ -641,6 +663,23 @@ describe('running and lock semantics', () => {
     expect(button.getAttribute('aria-label')).toBe('停止生成')
     expect(view.getAllByRole('button', { name: '停止生成' })).toHaveLength(1)
     expect(view.queryByRole('button', { name: '发送消息' })).toBeNull()
+  })
+
+  it('idle Session with background work stops that work only when the draft is empty', () => {
+    const backgroundStop = vi.fn()
+    const empty = bench({ backgroundStop })
+    expect(empty.button.getAttribute('aria-label')).toBe('停止生成')
+    fireEvent.click(empty.button)
+    expect(backgroundStop).toHaveBeenCalledTimes(1)
+    expect(empty.stop).not.toHaveBeenCalled()
+
+    const drafted = bench({ backgroundStop, draft: '后台运行时继续对话' })
+    expect(drafted.button.getAttribute('aria-label')).toBe('发送消息')
+    fireEvent.click(drafted.button)
+    expect(drafted.sink).toHaveBeenCalledWith(
+      '后台运行时继续对话', [], 'queue', expect.any(AbortSignal), expect.any(String),
+    )
+    expect(backgroundStop).toHaveBeenCalledTimes(1)
   })
 
   it('running plain Enter follows the busy-state Steer preference', () => {

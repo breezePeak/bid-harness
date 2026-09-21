@@ -56,6 +56,7 @@ describe('bid control-plane public contract', () => {
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
       'bid.run.started',
+      'bid.run.progress',
       'bid.run.start_failed',
       'bid.run.cancelling',
       'bid.run.suspended',
@@ -74,6 +75,54 @@ describe('bid control-plane public contract', () => {
       'bid.writing_entry.changed',
       'bid.schema.warning',
     ])
+  })
+
+  it('keeps only matching Run progress without changing the Workflow stage', () => {
+    const run = {
+      runId: 'run-current', stage: 'tender_analysis' as const, epoch: 3, baseProjectRevision: 4,
+      work: {
+        kind: 'stage_execution' as const, workId: 'work-current', stage: 'tender_analysis' as const,
+        requestRef: 'requests/work-current.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64),
+      },
+      status: 'running' as const, startedAt: 10, updatedAt: 10,
+    }
+    const started = reduceBidControlState(BID_INITIAL_CONTROL_STATE, {
+      type: 'bid.project.resumed',
+      data: { workflow: { stage: 'tender_analysis', gate: 'ready' }, run, lastRun: null, revision: 4 },
+    } as SessionEvent)
+    const progress = { phase: 'collecting', summary: '已整理技术要求。', completed: 28, total: 35, updatedAt: 20 }
+    const current = reduceBidControlState(started, {
+      type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: run.stage, progress },
+    } as SessionEvent)
+
+    expect(current.workflow).toEqual(started.workflow)
+    expect(current.run?.progress).toEqual(progress)
+    expect(reduceBidControlState(current, {
+      type: 'bid.run.progress', data: { runId: 'stale', epoch: run.epoch, stage: run.stage,
+        progress: { ...progress, summary: '旧 Run' } },
+    } as SessionEvent)).toBe(current)
+    expect(reduceBidControlState(current, {
+      type: 'bid.run.progress', data: { runId: run.runId, epoch: 2, stage: run.stage,
+        progress: { ...progress, summary: '旧 epoch' } },
+    } as SessionEvent)).toBe(current)
+    expect(reduceBidControlState(current, {
+      type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: 'outline_generation',
+        progress: { ...progress, summary: '旧阶段' } },
+    } as SessionEvent)).toBe(current)
+
+    const suspended = reduceBidControlState(current, {
+      type: 'bid.run.suspended',
+      data: { run: { ...current.run!, status: 'suspended', cause: 'user_stop', updatedAt: 30 } },
+    } as SessionEvent)
+    expect(suspended.run?.progress).toEqual(progress)
+    expect(suspended.lastRun?.progress).toEqual(progress)
+
+    const completed = reduceBidControlState(current, {
+      type: 'bid.run.completed',
+      data: { run: { ...current.run!, status: 'completed', updatedAt: 30 } },
+    } as SessionEvent)
+    expect(completed.run).toBeNull()
+    expect(completed.lastRun?.progress).toEqual(progress)
   })
 
   it('creates non-blocking schema warnings only for non-current values', () => {

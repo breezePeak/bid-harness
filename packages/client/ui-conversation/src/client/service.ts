@@ -22,6 +22,7 @@ import type { ComposerBlocks } from './input/blocks.ts'
 import type { ComposerSubmitHandler, ComposerSubmitHandlers, DraftAttachmentId, SessionInputResolver } from './input/contract.ts'
 import type { ComposerSubmitModePolicy, InputSubmitMode } from './contract/composer-submission.ts'
 import type { EmbeddedSurface, EmbeddedSurfaceKind } from './embedded-surface.ts'
+import type { ConversationBackgroundActivities } from './input/background-activity.ts'
 
 /**
  * The outward conversation face (`ctx.conversation`): the scope-addressed
@@ -36,6 +37,8 @@ export interface IConversation {
    * cannot import makes a session's input inert with its own reason.
    */
   readonly blocks: ComposerBlocks
+  /** Feature-owned work that remains active while the conversation Session itself is idle. */
+  readonly backgroundActivities: ConversationBackgroundActivities
   /** 为有业务引用的输入注册专用提交动作。 */
   readonly submitHandlers: ComposerSubmitHandlers
   /** Set the ordinary composer delivery policy for the caller's Session. */
@@ -124,6 +127,8 @@ export class ConversationController extends Service implements IConversation {
   readonly input: SessionInputResolver
   /** The per-session composer-block registry. */
   readonly blocks: ComposerBlocks
+  /** @inheritdoc */
+  readonly backgroundActivities: ConversationBackgroundActivities
   private readonly submissions = new Map<SessionId, ComposerSubmitHandler>()
   private readonly submitModePolicies = new Map<SessionId, ComposerSubmitModePolicy>()
   private readonly pendingOutgoing = new Map<SessionId, Set<string>>()
@@ -185,6 +190,7 @@ export class ConversationController extends Service implements IConversation {
   constructor(ctx: Context, private readonly config: {
     input: SessionInputResolver
     blocks: ComposerBlocks
+    backgroundActivities: ConversationBackgroundActivities
     selectView?: (sessionId: SessionId, viewId: string) => void
     setViewAvailable?: (sessionId: SessionId, viewId: string, available: boolean) => void
     setEmbeddedSurface?: (sessionId: SessionId, kind: EmbeddedSurfaceKind, element: HTMLElement | null) => void
@@ -193,6 +199,7 @@ export class ConversationController extends Service implements IConversation {
     super(ctx, 'conversation')
     this.input = config.input
     this.blocks = config.blocks
+    this.backgroundActivities = config.backgroundActivities
     ctx.effect(() => () => {
       this.disposed = true
       for (const url of this.createdImageUrls) revokePreview(url)

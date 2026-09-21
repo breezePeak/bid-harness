@@ -18,6 +18,7 @@ export { apply, inject } from './apply.ts'
 export { ConversationController } from './service.ts'
 export type { IConversation } from './service.ts'
 export type { ComposerSubmitForward, ComposerSubmitHandler, ComposerSubmitOutcome, DraftAttachmentId } from './input/contract.ts'
+export type { ConversationBackgroundActivities, ConversationBackgroundActivity } from './input/background-activity.ts'
 
 export type {
   CallId, ChatStoreState, SelectionTarget, ViewTab,

@@ -5,6 +5,7 @@ import type {
   BidControlState,
   BidRunDecision,
   BidRunDecisionType,
+  BidRunProgress,
   BidRunSnapshot,
   BidRunNotice,
   BidRuntimeState,
@@ -18,6 +19,7 @@ import type { WritingEntryView } from './writing-entry-contract.ts'
 export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
   'bid.run.started',
+  'bid.run.progress',
   'bid.run.start_failed',
   'bid.run.cancelling',
   'bid.run.suspended',
@@ -92,7 +94,7 @@ export function appendBidSchemaWarning(
   if (warning === undefined) return false
   if (session.events.some(event =>
     event.type === 'bid.schema.warning'
-    && event.data.warningId === warning.warningId
+    && event.data.warningId === warning.warningId,
   )) return false
 
   session.append('bid.schema.warning', warning)
@@ -109,6 +111,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
     /** One exact stage execution attempt became active. */
     'bid.run.started': { run: BidRunSnapshot }
+    /** Latest bounded milestone for the exact active Run identity. */
+    'bid.run.progress': { runId: string; epoch: number; stage: BidStage; progress: BidRunProgress }
     /** The running-state checkpoint failed before execution authority was granted. */
     'bid.run.start_failed': { runId: string; epoch: number }
     /** One exact execution attempt is draining before it can become resumable. */

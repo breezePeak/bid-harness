@@ -79,7 +79,7 @@ export type InputBarProps = ComposerBarProps
 export function InputBar({
   useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
   resolveSubmitMode, toggleCommandMenu, stop, command, t,
-  renderSlot, useNotices, useLexicon, useMenuLauncher,
+  renderSlot, useBackgroundActivity, useNotices, useLexicon, useMenuLauncher,
   useProjection, sessionId, variant, disabled: inert = false, blocked,
   workspacePickerOpen = false, onRequestWorkspace,
   placeholder, accessory, overlay, leftItems, rightItems, footer,
@@ -88,6 +88,7 @@ export function InputBar({
   const notice = useNotices(s => s)
   const lexicon = useLexicon(s => s)
   const commandMenuOpen = useMenuLauncher(source => source === 'command')
+  const backgroundActivity = useBackgroundActivity(activity => activity)
   const promptError = useSession(s => s.promptError) ?? null
   const running = useSession(s => s.running) ?? false
   const subagent = useSession(s => s.subagent) ?? null
@@ -557,12 +558,13 @@ export function InputBar({
 
   // One physical control owns the send/stop position. A non-empty draft always
   // sends; an empty draft stops only a real active session run.
-  const primaryStops = stop !== undefined && empty
-    && ((running && subagent === null) || continuable)
+  const primaryStops = (stop !== undefined || backgroundActivity !== undefined) && empty
+    && ((running && subagent === null) || continuable || backgroundActivity !== undefined)
   const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
   const onPrimary = (): void => {
     if (primaryStops) {
-      stop?.()
+      if (backgroundActivity !== undefined) backgroundActivity.stop()
+      else stop?.()
       return
     }
     if (keyboard === undefined || empty || disabled || machineBusy) return
@@ -795,7 +797,7 @@ export function InputBar({
                 type="button"
                 className={css.primary}
                 aria-label={primaryLabel}
-                disabled={primaryStops ? stop === undefined : empty || disabled || machineBusy}
+                disabled={primaryStops ? backgroundActivity === undefined && stop === undefined : empty || disabled || machineBusy}
                 onMouseDown={keepFocus}
                 onClick={onPrimary}
               >

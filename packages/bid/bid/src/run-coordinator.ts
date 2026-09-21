@@ -2,8 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { BidRunNotice, BidRunResumeIdentity, BidRunSnapshot, BidRunSuspensionCause, BidWorkDescriptor } from './control-plane-contract.ts'
+import type {
+  BidRunNotice, BidRunProgressInput, BidRunResumeIdentity, BidRunSnapshot,
+  BidRunSuspensionCause, BidWorkDescriptor,
+} from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
+import { bidRunProgressSchema } from './runtime-state.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 
 /** Run-owned admission gate for model tasks and child creation. */
@@ -230,12 +234,14 @@ export interface BidRunContext {
   readonly commits: BidCommitScope
   readonly children: BidChildScope
   readonly activities: BidRunActivityScope
+  /** Publish one bounded deterministic milestone for this exact Run. */
+  reportProgress(progress: BidRunProgressInput): void
   /** Register a Main-Agent interval that must settle before suspension. */
   bindMainAgent(scope: BidMainAgentScope): () => void
 }
 
 interface ActiveRun {
-  readonly snapshot: BidRunSnapshot
+  snapshot: BidRunSnapshot
   readonly context: BidRunContext
   readonly controller: AbortController
   readonly eventStart: number
@@ -333,12 +339,14 @@ export class BidRunCoordinator {
         commits,
         children: this.children,
         activities,
+        reportProgress: (progress) => { this.reportProgress(context, progress) },
         bindMainAgent: (scope) => {
           mainAgents.add(scope)
           return () => { mainAgents.delete(scope) }
         },
       }
       this.active = { snapshot, context, controller, eventStart, mainAgents, activities }
+      context.reportProgress({ phase: 'starting', summary: `正在开始 ${work.stage} 阶段` })
       this.onAdmitted?.(context)
       return context
     } catch (error) {
@@ -347,6 +355,26 @@ export class BidRunCoordinator {
     } finally {
       this.starting = false
     }
+  }
+
+  private reportProgress(context: BidRunContext, input: BidRunProgressInput): void {
+    const active = this.requireActive(context)
+    const progress = bidRunProgressSchema.parse({
+      ...input,
+      phase: input.phase.slice(0, 32),
+      summary: input.summary.slice(0, 240),
+      ...input.details === undefined ? {} : {
+        details: input.details.slice(0, 5).map(detail => detail.slice(0, 160)),
+      },
+      updatedAt: Date.now(),
+    })
+    active.snapshot = { ...active.snapshot, progress, updatedAt: progress.updatedAt }
+    this.session.append('bid.run.progress', {
+      runId: context.runId,
+      epoch: context.epoch,
+      stage: context.work.stage,
+      progress,
+    })
   }
 
   /**
@@ -489,6 +517,7 @@ export function createTestBidRunContext(options: {
   readonly readProjectRevision?: () => number
   readonly work?: BidWorkDescriptor
   readonly resumeOf?: BidRunResumeIdentity
+  readonly reportProgress?: (progress: BidRunProgressInput) => void
 } = {}): BidRunContext {
   const controlRevision = options.controlRevision ?? 0
   const signal = options.signal ?? new AbortController().signal
@@ -513,6 +542,7 @@ export function createTestBidRunContext(options: {
     commits: new BidCommitScope({ runId, epoch: 1, controlRevision, signal }, readProjectRevision),
     children,
     activities,
+    reportProgress: options.reportProgress ?? (() => {}),
     bindMainAgent: () => () => {},
   }
 }

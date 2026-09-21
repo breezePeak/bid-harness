@@ -42,6 +42,25 @@ export interface BidProjectWorkflow {
 /** Process state of one exact stage execution attempt. */
 export type BidRunStatus = 'running' | 'cancelling' | 'suspended' | 'completed'
 
+/** Latest bounded milestone reported by deterministic Run code. */
+export interface BidRunProgress {
+  /** Stable machine-readable phase within the current stage. */
+  readonly phase: string
+  /** Short user-visible description of the work currently in progress. */
+  readonly summary: string
+  /** Completed units, only when the executor knows an exact count. */
+  readonly completed?: number | undefined
+  /** Total units, only when the executor knows an exact count. */
+  readonly total?: number | undefined
+  /** At most five short supporting facts; never transcript or artifact content. */
+  readonly details?: readonly string[] | undefined
+  /** Host timestamp for this latest milestone. */
+  readonly updatedAt: number
+}
+
+/** Progress input accepted by a live Run; the coordinator owns its timestamp. */
+export type BidRunProgressInput = Omit<BidRunProgress, 'updatedAt'>
+
 /** Durable terminal Run notice rendered in the conversation timeline. */
 export interface BidRunNotice {
   /** Stable deduplication identity for one terminal Run outcome. */
@@ -116,6 +135,8 @@ export interface BidRunSnapshot {
   /** The prior suspended attempt; a resumed Run always receives a fresh identity. */
   readonly resumeOf?: BidRunResumeIdentity | undefined
   readonly status: BidRunStatus
+  /** Latest milestone only; prior progress remains solely in the Session event log. */
+  readonly progress?: BidRunProgress | undefined
   readonly cause?: BidRunSuspensionCause | undefined
   readonly error?: {
     readonly code?: string | undefined

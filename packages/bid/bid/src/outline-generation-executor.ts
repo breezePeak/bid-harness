@@ -366,6 +366,7 @@ export async function executeOutlineGeneration(
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.run.signal)
+  options.run.reportProgress({ phase: 'analyzing', summary: '正在分析评分项、技术要求与目录约束' })
   const frameworks = await loadOutlineFrameworkStructures(workspace)
   const path = (artifact: string): string => join(workspace.projectRoot, artifact)
   const scratchRoot = join(workspace.projectRoot, 'runs', options.run.runId, 'scratch', 'outline-generation')
@@ -610,6 +611,12 @@ export async function executeOutlineGeneration(
     if (catalog === undefined) {
       if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
       const rawCandidate = await read(RESPONSE_POINT_CANDIDATE)
+      options.run.reportProgress({
+        phase: 'analyzing',
+        summary: '正在拆解评分响应点',
+        total: scoring.scoring_items.length,
+        details: [`评分项 ${String(scoring.scoring_items.length)} 项`],
+      })
       const candidate = rawCandidate === undefined
         ? await generateResponsePointCandidate('评分响应点分析', renderResponsePointAnalysisTask(agent, task, scoring))
         : validateResponsePointCandidate(rawCandidate)
@@ -627,6 +634,12 @@ export async function executeOutlineGeneration(
     const handoff = '\n正式响应点清单（只读，不得修改、删除或重新分配编号）：' + relative(workspace.root, path(RESPONSE_POINT_CATALOG)).replaceAll('\\', '/')
       + '\n' + JSON.stringify(catalog)
     if (options.regeneration !== undefined || await read(OUTLINE_ARTIFACT) === undefined) {
+      options.run.reportProgress({
+        phase: 'generating',
+        summary: '正在生成技术标目录',
+        total: catalog.points.length,
+        details: [`评分响应点 ${String(catalog.points.length)} 项`],
+      })
       await run(renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) + handoff,
         [OUTLINE_ARTIFACT, ...(options.regeneration === undefined ? [] : [REGENERATION_CHANGE_SET])])
     }
@@ -639,6 +652,13 @@ export async function executeOutlineGeneration(
       if (attempts++ >= options.maxRepairAttempts) throw new BidStageExecutionError([
         ...issues, { code: 'OUTLINE_GENERATION_REPAIR_EXHAUSTED', message: 'S3 局部修复未通过，已保留当前目录候选。' + (repairFailure ?? '') },
       ])
+      options.run.reportProgress({
+        phase: 'repairing',
+        summary: '正在局部修正目录候选',
+        completed: attempts,
+        total: options.maxRepairAttempts,
+        details: issues.slice(0, 5).map(issue => `${issue.code}：${issue.message}`),
+      })
     }
     const validate = async (outline: OutlineArtifact): Promise<StageValidationIssue[]> => {
       const issues: StageValidationIssue[] = []
@@ -704,6 +724,13 @@ export async function executeOutlineGeneration(
       }
       const outline = candidate.outline
       await write(OUTLINE_ARTIFACT, outline)
+      options.run.reportProgress({
+        phase: 'validating',
+        summary: '正在校验目录结构与响应覆盖',
+        completed: outline.sections.length,
+        total: outline.sections.length,
+        details: [`目录节点 ${String(outline.sections.length)} 个`, `评分响应点 ${String(catalog.points.length)} 项`],
+      })
       const issues = await validate(outline)
       if (reviewBaseline !== undefined && reviewBaseline !== JSON.stringify(outline)) {
         reviewBaseline = undefined
@@ -756,6 +783,12 @@ export async function executeOutlineGeneration(
       if (reviewBaseline === undefined) {
         reviewBaseline = JSON.stringify(outline)
         await remove(QUALITY_REPORT_ARTIFACT)
+        options.run.reportProgress({
+          phase: 'validating',
+          summary: '正在进行目录质量复核',
+          completed: outline.sections.length,
+          total: outline.sections.length,
+        })
         await runQualityReview(renderBlueprintQualityReviewTask(agent, workspace, task) + handoff + '\n本轮完整复核目录：' + reviewBaseline
           + '\n本轮完整复核的招标要求、评分及合规：' + JSON.stringify({ requirements, scoring, compliance }))
         continue

@@ -36,6 +36,7 @@ import { readRevisionQueue } from './chapter-revision-queue.ts'
 import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import type { BidRunSnapshot } from './control-plane-contract.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
 const scope = z.array(z.string().min(1)).min(1)
@@ -187,6 +188,7 @@ async function inspectBidStageValue(
   const started = control.run ?? control.lastRun
   const base = {
     runtime,
+    run_progress: control.run?.progress ?? null,
     started_at: started === null ? null : new Date(started.startedAt).toISOString(),
     latest_public_events: latestPublicEvents(session),
   }
@@ -514,6 +516,23 @@ function renderSuspendedRunPrompt(stage: string, runId: string, revision: number
   ].filter(line => line !== undefined).join('\n')
 }
 
+function renderCurrentRunProgress(run: BidRunSnapshot | null): string | undefined {
+  if (run === null || (run.status !== 'running' && run.status !== 'cancelling')) return undefined
+  const progress = run.progress
+  if (progress === undefined) return '当前后台进度：阶段已启动，尚未产生首个里程碑。'
+  return [
+    '当前后台进度：',
+    `阶段：${run.stage}`,
+    `状态：${run.status}`,
+    `当前步骤：${progress.phase}`,
+    `摘要：${progress.summary}`,
+    ...progress.completed === undefined || progress.total === undefined
+      ? [] : [`完成量：${String(progress.completed)} / ${String(progress.total)}`],
+    ...progress.details?.map(detail => `补充：${detail}`) ?? [],
+    `更新时间：${new Date(progress.updatedAt).toISOString()}`,
+  ].join('\n')
+}
+
 /**
  * 按实时阶段安装 scoped tools；全局 guard 拒绝交互期间的其他 Main Agent 工具调用。
  * @param ctx Host 插件上下文，负责全部注册释放。
@@ -776,7 +795,9 @@ export function installStageInteractionTools(
             : runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
               ? renderIdleStageInteractionPrompt(runtime.stage, runtime.status) : undefined
       if (prompt === undefined) return decision
-      return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
+      const progress = renderCurrentRunProgress(control.run)
+      const context = progress === undefined ? prompt : `${prompt}\n${progress}`
+      return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)
     toolCtx.effect(() => () => {

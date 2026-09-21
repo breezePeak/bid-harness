@@ -11,6 +11,7 @@ import type {
   BidClientProjection,
   BidControlState,
   BidProjectWorkflow,
+  BidRunProgress,
   BidRunSnapshot,
   BidRuntimeState,
   BidStagePolicy,
@@ -37,6 +38,17 @@ const stageValidationIssueSchema = z.object({
   artifact: z.string().optional(),
   path: z.string().optional(),
 }).strict()
+
+/** Durable bounded Run progress shared by Session replay and project checkpoints. */
+export const bidRunProgressSchema: z.ZodType<BidRunProgress> = z.object({
+  phase: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/u),
+  summary: z.string().min(1).max(240),
+  completed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  total: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  details: z.array(z.string().min(1).max(160)).max(5).readonly().optional(),
+  updatedAt: z.number().int().nonnegative(),
+}).strict().refine(progress => progress.completed === undefined || progress.total === undefined
+  || progress.completed <= progress.total, { message: 'completed must not exceed total' })
 
 /** Durable Workflow schema used by project state and Session projection replay. */
 export const bidWorkflowSchema = z.object({
@@ -68,6 +80,7 @@ export const bidRunSchema = z.object({
     cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
   }).strict().optional(),
   status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
+  progress: bidRunProgressSchema.optional(),
   cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
   error: z.object({
     code: z.string().optional(),
@@ -220,6 +233,12 @@ function cloneWorkflow(workflow: BidProjectWorkflow): BidProjectWorkflow {
 function cloneRun(run: BidRunSnapshot | null): BidRunSnapshot | null {
   return run === null ? null : {
     ...run,
+    ...run.progress === undefined ? {} : {
+      progress: {
+        ...run.progress,
+        ...run.progress.details === undefined ? {} : { details: [...run.progress.details] },
+      },
+    },
     ...run.error === undefined ? {} : {
       error: {
         ...run.error,
@@ -329,6 +348,19 @@ export function reduceBidControlState(state: BidControlState, event: SessionEven
     case 'bid.run.started':
       return event.data.run.stage === state.workflow.stage
         ? { ...state, run: cloneRun(event.data.run) }
+        : state
+    case 'bid.run.progress':
+      return state.run?.runId === event.data.runId
+        && state.run.epoch === event.data.epoch
+        && state.run.stage === event.data.stage
+        ? { ...state, run: {
+          ...state.run,
+          progress: {
+            ...event.data.progress,
+            ...event.data.progress.details === undefined ? {} : { details: [...event.data.progress.details] },
+          },
+          updatedAt: event.data.progress.updatedAt,
+        } }
         : state
     case 'bid.run.start_failed':
       return state.run?.runId === event.data.runId && state.run.epoch === event.data.epoch

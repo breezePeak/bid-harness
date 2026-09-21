@@ -416,6 +416,11 @@ export async function attachTenderAnalysisSubmissionRuntime(
   ): Promise<StageValidationIssue[]> => {
     const issue = issues[0]
     if (issue === undefined) throw new Error('tender-analysis-repair-issue-missing')
+    run.reportProgress({
+      phase: 'repairing',
+      summary: '招标信息候选需要局部修正',
+      details: issues.slice(0, 5).map(value => `${value.code}：${value.message}`),
+    })
     repairTarget = targetForIssue(input, issue)
     const repairKey = repairTarget.kind === 'project_facts' ? 'project_fact'
       : repairTarget.kind === 'requirements' ? 'requirement'
@@ -556,6 +561,16 @@ export async function attachTenderAnalysisSubmissionRuntime(
         candidate = input
       }
       if (candidate === undefined) throw new Error('tender-analysis-candidate-missing')
+      run.reportProgress({
+        phase: 'collecting',
+        summary: '正在解析招标信息候选及原文引用',
+        details: [
+          `项目事实 ${String(candidate.project_facts.length)} 项`,
+          `技术要求 ${String(candidate.requirements.length)} 项`,
+          `评分项 ${String(candidate.scoring_items.length)} 项`,
+          `合规项 ${String(candidate.compliance_items.length)} 项`,
+        ],
+      })
       await run.commits.writeJson(candidatePath, candidate)
       const currentCandidate = candidate
       const singles = new Map<ProjectSingleField, SourcedValue<string | null>>()
@@ -671,6 +686,15 @@ export async function attachTenderAnalysisSubmissionRuntime(
         compliance_items: compliance,
       })
       const artifacts = { project, requirements: requirementsArtifact, scoring: scoringArtifact, compliance: complianceArtifact }
+      run.reportProgress({
+        phase: 'validating',
+        summary: '正在校验招标信息完整性与引用覆盖',
+        details: [
+          `技术要求 ${String(requirements.length)} 项`,
+          `评分项 ${String(scoringItems.size)} 项`,
+          `合规项 ${String(compliance.length)} 项`,
+        ],
+      })
       lastIssues = await validateTenderAnalysisDraft(workspace, manifest, artifacts)
       if (lastIssues.length > 0) return recover(exec, await prepareRepair(currentCandidate, lastIssues), { completed: false })
 

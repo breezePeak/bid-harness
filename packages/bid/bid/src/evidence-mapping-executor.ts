@@ -3709,6 +3709,23 @@ async function executeEvidenceMappingRun(
     return progressLogWrites
   }
   await persistLog()
+  const reportMappingProgress = (summary?: string): void => {
+    const completed = executionLog.tasks.filter(item => item.status === 'completed').length
+    const active = executionLog.tasks.filter(item => item.status === 'running')
+    const failed = executionLog.tasks.filter(item => item.status === 'failed').length
+    const reviewing = active.some(item => item.phase === 'final_check')
+    options.run.reportProgress({
+      phase: reviewing ? 'reviewing' : 'mapping',
+      summary: summary ?? (reviewing ? '正在复核章节资料映射' : '正在为章节映射资料与证据'),
+      completed,
+      total: executionLog.tasks.length,
+      details: [
+        ...active.slice(0, 4).map(item => `进行中：${item.title}`),
+        ...(failed === 0 ? [] : [`失败任务 ${String(failed)} 个`]),
+      ],
+    })
+  }
+  reportMappingProgress('资料映射任务已规划，正在准备执行')
   const locations = await resolveMappingCorpusLocations(workspace, manifest)
   const researchPool = new S4WebResearchPool(workspace, options.run.commits, (url, exec) => tools.execute({
     callId: CallId(`s4-web-fetch-${randomUUID()}`),
@@ -3966,6 +3983,7 @@ async function executeEvidenceMappingRun(
       log.status = 'running'
       executionLog.observed_max_concurrency = Math.max(executionLog.observed_max_concurrency, activeTasks)
       await persistLog()
+      reportMappingProgress()
       const baselineMappings = new Map<string, PartialSectionMapping>()
       const baselineSectionIds = mappingTask.task_kind === 'branch_summary'
         ? affectedSummarySections(runInputs.outline, mappingTask)
@@ -4238,6 +4256,7 @@ async function executeEvidenceMappingRun(
                 })
                 log.status = 'failed'
                 await persistLog()
+                reportMappingProgress('章节资料映射遇到基础设施错误')
                 throw webFailure
               }
               if (mappingTask.phase === 'final_check' && submissionRequest.state.captured === undefined) {
@@ -4319,6 +4338,7 @@ async function executeEvidenceMappingRun(
                 log.status = 'completed'
                 log.final_child_session_id = String(started.childId)
                 await persistLog()
+                reportMappingProgress('章节资料映射已完成，正在推进剩余任务')
                 return {
                   task: mappingTask, result: partial,
                   ...(outlineOperations === undefined ? {} : { outlineOperations }), snapshots, fetchedSnapshots,
@@ -4344,6 +4364,7 @@ async function executeEvidenceMappingRun(
                   issues: turnFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [] })
                 log.status = 'failed'
                 await persistLog()
+                reportMappingProgress('章节资料映射遇到基础设施错误')
                 throw turnFailure
               }
               const detail = error instanceof Error ? error.message : String(error)
@@ -4351,6 +4372,7 @@ async function executeEvidenceMappingRun(
               log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
               log.status = 'failed'
               await persistLog()
+              reportMappingProgress('章节资料映射失败，正在保留诊断信息')
               throw new MappingSubagentInfrastructureError(
                 latestIssues,
                 isRebuildableMappingTaskRuntimeError(error),
@@ -4378,11 +4400,13 @@ async function executeEvidenceMappingRun(
         }
         log.status = 'failed'
         await persistLog()
+        reportMappingProgress('章节资料映射未通过校验')
         throw new BidStageExecutionError(latestIssues)
       } catch (error) {
         log.status = 'failed'
         if (error instanceof MappingSubagentInfrastructureError) {
           await persistLog()
+          reportMappingProgress('章节资料映射遇到基础设施错误')
           throw error
         }
         if (log.attempts.length === attemptBase) log.attempts.push({
@@ -4391,6 +4415,7 @@ async function executeEvidenceMappingRun(
           warnings: [],
         })
         await persistLog()
+        reportMappingProgress('章节资料映射失败，正在保留诊断信息')
         if (signal.aborted) throw fatalWebFailure ?? error
         if (error instanceof BidStageExecutionError) throw error
         if (error instanceof FinalReviewTaskTooLargeError) throw error
@@ -4444,6 +4469,7 @@ async function executeEvidenceMappingRun(
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
         log.status = 'running'
         await persistLog()
+        reportMappingProgress('正在重试章节资料映射任务')
         releaseMappingAttempt()
         releaseAttempt = false
         await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)

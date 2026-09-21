@@ -337,6 +337,7 @@ export function BidStagePanel({
   useProjection,
   useSessions,
   setRealtimeChatMode,
+  setBackgroundActivity,
   setComposerBlock,
   selectReviewView,
   setReviewViewAvailable,
@@ -551,6 +552,12 @@ export function BidStagePanel({
     setRealtimeChatMode(true)
     return () => { setRealtimeChatMode(false) }
   }, [hasProjection, sessionId, setRealtimeChatMode])
+  const backgroundRunActive = hasProjection
+    && (projection.run?.status === 'running' || projection.run?.status === 'cancelling')
+  useEffect(() => {
+    setBackgroundActivity(backgroundRunActive)
+    return () => { setBackgroundActivity(false) }
+  }, [backgroundRunActive, setBackgroundActivity])
   const embedConversation = false
   const reviewViewAvailable = hasProjection && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
   const outlineReviewReady = canConfirm && projection?.runtime.stage === 'evidence_mapping'

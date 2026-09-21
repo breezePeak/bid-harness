@@ -565,13 +565,13 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executionSession?.events.find(event => event.type === 'subagent/descriptor')?.data).toMatchObject({
       mode: 'one-shot',
       provider: 'bid',
-      label: 'Bid 阶段执行',
+      label: 'S2 · 招标信息提取',
     })
     await expect(ctx.subagents.listChildren(owner.id)).resolves.toContainEqual({
       kind: 'child',
       id: SessionId(activeState.run.executionSessionId!),
       mode: 'one-shot',
-      label: 'Bid 阶段执行',
+      label: 'S2 · 招标信息提取',
       activity: 'running',
       hasChildren: false,
     })
@@ -1371,12 +1371,32 @@ describe('Workspace 项目与独立 Session', () => {
       const agent = await fresh(`live-${stage}`)
       const gate = Promise.withResolvers<never[]>()
       executor.canExecute = candidate => candidate === stage
-      executeStage.mockImplementationOnce(() => gate.promise)
+      executeStage.mockImplementationOnce((_task, run) => {
+        run.reportProgress({
+          phase: 'validating', summary: `${stage} 正在校验阶段结果`, completed: 2, total: 5,
+          details: ['已完成真实里程碑'],
+        })
+        return gate.promise
+      })
       const retry = resumeRun(ctx, agent.session)
       await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage, status: 'running' }) })
       await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
       const artifactBefore = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
       const projectBefore = await readBidProjectState(workspace)
+      const inspection = await ctx.tools.execute({
+        agent,
+        name: 'bid_stage_inspect',
+        arguments: { view: 'summary' },
+        callId: CallId(`live-${stage}-progress`),
+        signal: new AbortController().signal,
+      })
+      if (inspection.isError) throw new Error(JSON.stringify(inspection))
+      expect(inspection.value).toMatchObject({
+        run_progress: {
+          phase: 'validating', summary: `${stage} 正在校验阶段结果`, completed: 2, total: 5,
+          details: ['已完成真实里程碑'],
+        },
+      })
 
       await expect(ctx.serial('session/prompt-admission', {
         session: agent.session, mode: 'steer', content: [{ type: 'text', text: '现在做到哪了？' }],
@@ -1398,6 +1418,12 @@ describe('Workspace 项目与独立 Session', () => {
         .toContainEqual({ type: 'text', text: '当前阶段仍在执行，后台任务未停止。' })
       expect(other.session.deriveMessages().at(-1)?.content)
         .toContainEqual({ type: 'text', text: '另一个聊天也能读取同一项目进度。' })
+      const request = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
+      const requestText = request?.messages.flatMap(message => message.content)
+        .filter(block => block.type === 'text').map(block => block.text).join('\n')
+      expect(requestText).toContain(`摘要：${stage} 正在校验阶段结果`)
+      expect(requestText).toContain('完成量：2 / 5')
+      expect(requestText).toContain('补充：已完成真实里程碑')
       expect(runtime(agent.session)).toEqual({ stage, status: 'running' })
       expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
       expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(artifactBefore)

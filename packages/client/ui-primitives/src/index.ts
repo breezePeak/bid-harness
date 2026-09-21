@@ -4,6 +4,11 @@
 
 export { StateDot } from './StateDot.tsx'
 export type { StateDotState } from './StateDot.tsx'
+export { RunProgressCard } from './RunProgressCard.tsx'
+export type {
+  RunProgressCardData, RunProgressCardLabels, RunProgressCardProps,
+  RunProgressMemberData, RunProgressPhaseData, RunProgressStatus,
+} from './RunProgressCard.tsx'
 export { DisclosureRow } from './DisclosureRow.tsx'
 export type { DisclosureRowProps } from './DisclosureRow.tsx'
 export { Button } from './Button.tsx'

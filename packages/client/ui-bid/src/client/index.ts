@@ -22,6 +22,8 @@ import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbe
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { BidRunNotice } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
+import { bidRunDefinition } from './bid-run-definition.ts'
+import { BidRunCard } from './BidRunCard.tsx'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -47,6 +49,8 @@ export const OUTLINE_CONFIRMATION_REPAIR_ACTIONS = Object.fromEntries(
 export interface BidStagePanelInjected {
   /** Enable or clear immediate delivery for the scoped Bid Main Session. */
   setRealtimeChatMode: (enabled: boolean) => void
+  /** Expose the active Bid Run through the generic conversation background-work seam. */
+  setBackgroundActivity: (active: boolean) => void
   /** 读取已发布详情并恢复各标签的可见性。 */
   getDetails: () => Promise<BidDetailsView>
   setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean, confirmingTender?: boolean) => void
@@ -134,6 +138,7 @@ function actionFailure(error: {
  */
 export function apply(ctx: ClientContext): void {
   ctx.conversationEvents.register(bidRunNoticeDefinition)
+  ctx.conversationEvents.register(bidRunDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
   const pendingSectionLocate = new Map<string, string>()
@@ -259,6 +264,12 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
   }, BidRunNotice))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node',
+    key: 'bid-run',
+    locale: NS,
+    inject: () => ({ openSession: (id: SessionId) => { ctx.sessions.open(id) } }),
+  }, BidRunCard))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'bid-confirmation-mode',
@@ -294,6 +305,11 @@ export function apply(ctx: ClientContext): void {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         if (conversation === undefined) return
         conversation.setSubmitModePolicy(enabled ? 'immediate' : 'default')
+      },
+      setBackgroundActivity: (active) => {
+        ctx.conversation.backgroundActivities.set(sessionId, 'bid-run', active ? {
+          stop: () => { void ctx.remote.bid.stopRun(sessionId) },
+        } : undefined)
       },
       getDetails: () => getDetails(sessionId),
       setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {

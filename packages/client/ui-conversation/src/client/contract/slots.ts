@@ -14,6 +14,7 @@ import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives
 import type { MessageId } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ComposerBlock } from '../input/blocks.ts'
+import type { ConversationBackgroundActivity } from '../input/background-activity.ts'
 import type { EmbeddedSurfaceKind } from '../embedded-surface.ts'
 import type {
   ComposerKeyboard, DraftAttachmentId, EditSelection, InputActions, InputNotice, InputState,
@@ -597,6 +598,8 @@ export interface ComposerBarInjected {
    * order stays constant).
    */
   hooks: {
+    /** Feature-owned work active while the Session itself may be idle. */
+    backgroundActivity: ObservableSnapshot<ConversationBackgroundActivity | undefined>
     /** Latest surfaced notice (null after none; seq keys re-render of repeats). */
     notices: ObservableSnapshot<InputNotice | null>
     /** Hot plain-text reference lexicon for the decoration scan (plain-text-reference decision;

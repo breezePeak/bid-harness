@@ -22,6 +22,8 @@ import { ConversationController, UnsupportedImageMediaTypeError } from './servic
 import type { IConversation } from './service.ts'
 import { ComposerBlockRegistry } from './input/blocks.ts'
 import type { ComposerBlock } from './input/blocks.ts'
+import { ConversationBackgroundActivityRegistry } from './input/background-activity.ts'
+import type { ConversationBackgroundActivity } from './input/background-activity.ts'
 import { InputHub } from './input/hub.ts'
 import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
 import { InputBar } from './skeleton/InputBar.tsx'
@@ -74,6 +76,10 @@ const ABSENT_LEXICON = {
 }
 const ABSENT_MENU_LAUNCHER = {
   getSnapshot: (): string | null => null,
+  subscribe: () => () => {},
+}
+const ABSENT_BACKGROUND_ACTIVITY = {
+  getSnapshot: (): ConversationBackgroundActivity | undefined => undefined,
   subscribe: () => () => {},
 }
 
@@ -188,6 +194,7 @@ export function apply(ctx: Context): void {
   // here, and the bar reads its own session's store. It cannot flow the other
   // way: this package must not import the plugins that would know.
   const composerBlocks = new ComposerBlockRegistry()
+  const backgroundActivities = new ConversationBackgroundActivityRegistry()
 
   // The input machine feeds every session-scope slot
   // component through the standard provide channel — the 'input' hook plus
@@ -328,7 +335,12 @@ export function apply(ctx: Context): void {
           toggleCommandMenu: undefined,
           stop: undefined,
           command: undefined,
-          hooks: { notices: ABSENT_NOTICES, lexicon: ABSENT_LEXICON, menuLauncher: ABSENT_MENU_LAUNCHER },
+          hooks: {
+            backgroundActivity: ABSENT_BACKGROUND_ACTIVITY,
+            notices: ABSENT_NOTICES,
+            lexicon: ABSENT_LEXICON,
+            menuLauncher: ABSENT_MENU_LAUNCHER,
+          },
         }
       }
       const conversation = concreteConversation(ctx)
@@ -385,6 +397,7 @@ export function apply(ctx: Context): void {
           return result.ok && result.value.matched
         },
         hooks: {
+          backgroundActivity: backgroundActivities.storeFor(sessionId),
           notices: shell.notices,
           lexicon: shell.lexicon,
           menuLauncher: inputTriggers?.launcher ?? ABSENT_MENU_LAUNCHER,
@@ -464,6 +477,7 @@ export function apply(ctx: Context): void {
   ctx.plugin(ConversationController, {
     input: inputHub,
     blocks: composerBlocks,
+    backgroundActivities,
     selectView: (sessionId, viewId) => { viewActions.get(sessionId)?.setView(viewId) },
     setViewAvailable: (sessionId, viewId, available) => { viewAvailability.set(sessionId, viewId, available) },
     setEmbeddedSurface: (sessionId, kind, element) => { embeddedSurfaces.setHost(sessionId, kind, element) },

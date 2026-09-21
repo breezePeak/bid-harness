@@ -129,6 +129,7 @@ export async function executeTenderAnalysis(
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'tender_analysis') throw new Error('tender-analysis-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.run.signal)
+  options.run.reportProgress({ phase: 'locating', summary: '正在定位招标文件中的技术要求与评分区域' })
   const analysisRoot = join(workspace.projectRoot, 'analysis')
   await assertNoLinkedPath(workspace.root, analysisRoot)
   await mkdir(analysisRoot, { recursive: true, mode: 0o700 })
@@ -143,6 +144,11 @@ export async function executeTenderAnalysis(
   const existing = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
   if (existing.ok) return artifacts
   const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest(), options.run)
+  options.run.reportProgress({
+    phase: 'collecting',
+    summary: '正在提取招标信息与原文依据',
+    details: [`已定位 ${String(runtime.locators.length)} 份招标文件`],
+  })
   const ordinaryTools = task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name))
   const allowedTools = [...ordinaryTools, ...TENDER_ANALYSIS_PRIVATE_TOOLS]
   const allowed = new Set(allowedTools)
@@ -185,6 +191,13 @@ export async function executeTenderAnalysis(
         message: '必须调用 submit_tender_analysis 提交四个完整数组；普通回复不能完成 S2。',
       }]
       latestIssues = issues
+      options.run.reportProgress({
+        phase: 'repairing',
+        summary: '正在修正招标信息提取结果',
+        completed: attempts,
+        total: options.maxRepairAttempts,
+        details: issues.slice(0, 5).map(issue => `${issue.code}：${issue.message}`),
+      })
       await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.repairContext()))
     }
     await waitForModelStageIdle(agent, options.run.signal)
@@ -194,6 +207,7 @@ export async function executeTenderAnalysis(
         message: `S2 完整结果未提交或未通过校验。最近问题：${latestIssues.map(issue => issue.code).join(', ') || '无'}。`,
       }])
     }
+    options.run.reportProgress({ phase: 'validating', summary: '招标信息提取已通过校验，正在提交阶段结果' })
     return artifacts
   } finally {
     liftGuard?.()

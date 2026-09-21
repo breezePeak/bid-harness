@@ -1579,6 +1579,7 @@ async function reviewWritingPlanCompletion(
   options: ChapterWritingExecutionOptions,
   artifacts: StageArtifact[],
 ): Promise<StageArtifact[]> {
+  options.run.reportProgress({ phase: 'reviewing', summary: '正在进行正文整体质量验收' })
   const completedArtifacts = (): StageArtifact[] => artifacts.some(item => item.path === COMPLETION_REVIEW_PATH)
     ? artifacts
     : [...artifacts, { stage: 'chapter_writing', type: 'chapter_completion_review', path: COMPLETION_REVIEW_PATH }]
@@ -1722,6 +1723,13 @@ async function reviewWritingPlanCompletion(
       return finishReview(decision, 'round_limit')
     }
     const selected = decision.sections ?? []
+    options.run.reportProgress({
+      phase: 'repairing',
+      summary: '整体质量验收要求修正部分章节',
+      completed: recovery.rounds.length,
+      total: maxCompletionRepairRounds,
+      details: selected.slice(0, 5).map(item => `待修正：${item.section_id}`),
+    })
     const selectedRevisions = await Promise.all(selected.map(async (selected) => {
       const index = worklist.findIndex(section => section.id === selected.section_id)
       if (index < 0) throw new Error(`Main Agent selected unknown section ${selected.section_id}`)
@@ -2028,6 +2036,25 @@ async function runChapterWriting(
     return logWrites
   }
   await persistLog()
+  const reportWritingProgress = (summary?: string): void => {
+    const completed = executionLog.sections.filter(item => item.status === 'completed').length
+    const active = executionLog.sections.filter(item => item.status === 'running')
+    const failed = executionLog.sections.filter(item => item.status === 'failed').length
+    const phase = active.some(item => item.phase === 'reviewing') ? 'reviewing'
+      : active.some(item => item.phase === 'repairing') ? 'repairing' : 'writing'
+    options.run.reportProgress({
+      phase,
+      summary: summary ?? (phase === 'reviewing' ? '正在审核章节正文'
+        : phase === 'repairing' ? '正在修正章节正文' : '正在编写章节正文'),
+      completed,
+      total: executionLog.sections.length,
+      details: [
+        ...active.slice(0, 4).map(item => `${item.phase ?? 'running'}：${item.section_id}`),
+        ...(failed === 0 ? [] : [`失败章节 ${String(failed)} 个`]),
+      ],
+    })
+  }
+  reportWritingProgress('章节写作任务已规划，正在准备执行')
   const durableWebSources = new Map(webSources.sources.map(source => [source.source_id, source]))
   const mappedWebPaths = (context: ChapterContext): Map<string, readonly { start_line: number; end_line: number }[] | null> => {
     const paths = new Map<string, readonly { start_line: number; end_line: number }[] | null>()
@@ -2228,6 +2255,7 @@ async function runChapterWriting(
     log.phase = 'queued'
     log.failure_phase = null
     await persistLog()
+    reportWritingProgress()
     try {
       const dependencies: DependencyChapterContext[] = planned.depends_on.map((dependency) => {
         const prior = completed.get(dependency.section_id)
@@ -2373,6 +2401,7 @@ async function runChapterWriting(
           Object.assign(log, committed)
         })
         await logWrites
+        reportWritingProgress('章节正文已完成，正在推进剩余章节')
         return { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) }
       }
       let rejectedCandidate: unknown
@@ -2411,6 +2440,7 @@ async function runChapterWriting(
           const reviewStartedAt = new Date().toISOString()
           log.phase = 'reviewing'
           await persistLog()
+          reportWritingProgress()
           let reviewRuntime: ChapterProtocol<ChapterReview> | undefined
           const revisionReviewIssues: ChapterRevisionReviewIssue[] = batchTask?.issues.map(issue => ({
             issue_id: issue.issue_id,
@@ -2555,6 +2585,7 @@ async function runChapterWriting(
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
         await persistLog()
+        reportWritingProgress()
         if (revisionBatch !== undefined && batchTask !== undefined) {
           await updateBatchTask(sectionId, {
             status: attempt === 0 ? 'running' : 'repairing',
@@ -2799,6 +2830,7 @@ async function runChapterWriting(
       log.failure_phase = log.phase
       log.phase = null
       await persistLog()
+      reportWritingProgress('章节写作失败，正在保留诊断信息')
       if (revisionBatch !== undefined && batchTask !== undefined) {
         await updateBatchTask(sectionId, {
           status: 'failed',
