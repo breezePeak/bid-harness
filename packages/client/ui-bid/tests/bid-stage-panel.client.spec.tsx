@@ -403,8 +403,10 @@ describe('BidStagePanel', () => {
     view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'file_intake', status: 'running' },
     }), { setComposerBlock })} />)
-    expect(screen.getByText('正在上传并解析文件')).toBeTruthy()
-    expect(screen.getAllByText('正在处理…').length).toBeGreaterThan(0)
+    expect(screen.getByText('计划 · S1 资料上传')).toBeTruthy()
+    expect(screen.getByText('1 正在进行')).toBeTruthy()
+    expect(screen.queryByText('正在上传并解析文件')).toBeNull()
+    expect(screen.queryByText('正在处理…')).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'tender_analysis', status: 'pending' },
@@ -412,7 +414,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
-  it('shows the current S4 Mapping Task counts while the Host runs evidence mapping', async () => {
+  it('uses the stage plan instead of the S4 Mapping Task card while the Host runs evidence mapping', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 10,
       initial: 8,
@@ -430,25 +432,26 @@ describe('BidStagePanel', () => {
       ],
     }))
     render(<BidStagePanel {...props(projection({
+      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      run: {
+        runId: 'run-mapping', stage: 'evidence_mapping', epoch: 1, baseProjectRevision: 1,
+        work: suspendedWork, status: 'running', startedAt: 1, updatedAt: 2,
+        progress: { phase: 'mapping', summary: '正在映射', updatedAt: 2 },
+      },
       runtime: { stage: 'evidence_mapping', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(await screen.findByText('研究任务：分支 8 个 · 复核 2 个 · 共 10 个 · 已完成 3 · 进行中 2 · 未开始 5')).toBeTruthy()
-    expect(screen.getByText('研究任务')).toBeTruthy()
-    expect(screen.getByText('3 / 10 (30%)')).toBeTruthy()
-    expect(screen.getByText('分支 8')).toBeTruthy()
-    expect(screen.getByText('复核 2')).toBeTruthy()
-    expect(screen.getByText('进行中 2')).toBeTruthy()
-    expect(screen.getByText('已完成 3')).toBeTruthy()
-    expect(screen.getByText('未开始 5')).toBeTruthy()
-    const progress = document.querySelector<HTMLProgressElement>('[data-bid-progress]')
-    expect(progress?.value).toBe(30)
-    expect(progress?.max).toBe(100)
-    expect(getEvidenceMappingProgress).toHaveBeenCalledOnce()
+    expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
+    expect(screen.getByText('1 已完成 · 1 正在进行 · 1 待处理')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(screen.getByText('逐章节资料研究与映射')).toBeTruthy()
+    expect(screen.queryByText('研究任务')).toBeNull()
+    expect(document.querySelector('[data-bid-progress]')).toBeNull()
+    await waitFor(() => { expect(getEvidenceMappingProgress).toHaveBeenCalledOnce() })
   })
 
-  it('同步 S4 进度时不把未知状态显示成 0 / 0', async () => {
+  it('同步 S4 进度时不在运行计划旁显示旧进度卡', async () => {
     const progress = {
       total: 10,
       initial: 10,
@@ -469,15 +472,15 @@ describe('BidStagePanel', () => {
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(screen.queryByText('0 / 0 (0%)')).toBeNull()
-    expect(screen.getByRole('status', { name: '研究任务：进度同步中…' })).toBeTruthy()
-    expect(screen.getByText('同步中')).toBeTruthy()
+    expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
+    expect(screen.queryByText('研究任务：进度同步中…')).toBeNull()
+    expect(screen.queryByText('同步中')).toBeNull()
 
     await act(async () => {
       resolveProgress?.(progress)
       await Promise.resolve()
     })
-    expect(screen.getByText('2 / 10 (20%)')).toBeTruthy()
+    expect(screen.queryByText('2 / 10 (20%)')).toBeNull()
   })
 
   it('S4 等待启动时不读取或显示 Mapping 进度', () => {
@@ -626,7 +629,7 @@ describe('BidStagePanel', () => {
     }
   })
 
-  it('取消收尾独立显示，不把 raw cancelling 投影成正常执行', () => {
+  it('取消收尾保留同一计划并停止旋转，不显示重复状态行', () => {
     render(<BidStagePanel {...props(projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
@@ -637,14 +640,15 @@ describe('BidStagePanel', () => {
       allowedActions: ['send_message'], composer: { enabled: true },
     }), { getEvidenceMappingProgress: async () => null })} />)
 
-    expect(screen.getByText('正在停止执行器并保存已完成进度')).toBeTruthy()
-    expect(screen.getByText('正在停止…')).toBeTruthy()
+    expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
+    expect(screen.getByText('1 未收尾 · 2 待处理')).toBeTruthy()
+    expect(screen.queryByText('正在停止执行器并保存已完成进度')).toBeNull()
+    expect(screen.queryByText('正在停止…')).toBeNull()
     expect(screen.queryByText('正在处理…')).toBeNull()
     expect(screen.queryByText('收尾中 1')).toBeNull()
   })
 
   it.each([
-    ['running', '正在处理…'],
     ['waiting_user', '等待用户确认'],
     ['completed', '已完成'],
   ] as const)('S4 %s 只按阶段投影显示 %s', (status, label) => {
@@ -751,7 +755,7 @@ describe('BidStagePanel', () => {
     expect(await screen.findByText('模板已加入项目模板库')).toBeTruthy()
   })
 
-  it('clears the browser upload queue when file intake advances to tender analysis', () => {
+  it('hides the upload queue while running and clears it after file intake advances', () => {
     const view = render(<BidStagePanel {...props(projection({
       allowedActions: ['upload_files'],
     }), { uploadFiles: vi.fn(async () => []) })} />)
@@ -774,15 +778,16 @@ describe('BidStagePanel', () => {
       runtime: { stage: 'file_intake', status: 'running' },
     }), { uploadFiles: vi.fn(async () => []) })} />)
 
-    expect(screen.getByText('招标文件.pdf')).toBeTruthy()
-    expect(screen.getByText('项目资料.pdf')).toBeTruthy()
+    expect(screen.getByText('计划 · S1 资料上传')).toBeTruthy()
+    expect(screen.queryByText('招标文件.pdf')).toBeNull()
+    expect(screen.queryByText('项目资料.pdf')).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'tender_analysis', status: 'running' },
     }), { uploadFiles: vi.fn(async () => []) })} />)
 
-    expect(screen.getByText('招标分析')).toBeTruthy()
-    expect(screen.getByText('正在分析招标文件')).toBeTruthy()
+    expect(screen.getByText('计划 · S2 招标分析')).toBeTruthy()
+    expect(screen.queryByText('正在分析招标文件')).toBeNull()
     expect(screen.queryByText('招标文件.pdf')).toBeNull()
     expect(screen.queryByText('项目资料.pdf')).toBeNull()
     expect(screen.queryByText('招标文件')).toBeNull()
@@ -1185,12 +1190,12 @@ describe('ui-bid browser plugin', () => {
     } as unknown as ClientContext
 
     apply(ctx)
-    expect(conversationRegister).toHaveBeenCalledTimes(2)
+    expect(conversationRegister).toHaveBeenCalledOnce()
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.chat.node', key: 'bid-run-notice',
     }), expect.any(Function))
-    expect(register).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'conversation.chat.node', key: 'bid-run', locale: 'bid',
+    expect(register).not.toHaveBeenCalledWith(expect.objectContaining({
+      name: 'conversation.chat.node', key: 'bid-run',
     }), expect.any(Function))
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.input.dock', id: 'bid', order: -10,

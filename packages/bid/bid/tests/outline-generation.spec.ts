@@ -7,6 +7,7 @@ import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@
 import { ensureTechnicalDeviationSection, normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
 import { applyOutlineRepair } from '../src/outline-generation-repair.ts'
 import { missingOutlineResponsePoints } from '../src/outline-shared-validator.ts'
+import { outlineArtifactSha256 } from '../src/outline-confirmation-artifacts.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   BidWorkspace,
@@ -17,7 +18,6 @@ import {
   parseTenderRequirementsArtifact,
   parseScoringResponsePointCatalog,
   renderOutlineGenerationTask,
-  renderResponsePointSemanticReviewTask,
   scoringArtifactSha256,
   validateConfirmedOutline,
   validateOutlineGenerationQuality,
@@ -135,6 +135,12 @@ async function fixture(): Promise<BidWorkspace> {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-generation-')))
   await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await Promise.all([
+    writeFile(join(workspace.projectRoot, 'analysis/project.json'), JSON.stringify({
+      schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
+      project_background: ['建设背景'], project_objectives: ['建设目标'], project_scope: ['技术方案'],
+      technical_scope: ['项目实施'], delivery_scope: ['按期交付'], implementation_constraints: [],
+      key_technical_points: ['实施进度'], source_refs: [source], analyzed_tender_files: ['tender'],
+    })),
     writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify(requirements)),
     writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring)),
     writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify(compliance)),
@@ -144,20 +150,30 @@ async function fixture(): Promise<BidWorkspace> {
   return workspace
 }
 
-async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact, qualityIssues: OutlineQualityIssue[] = []): Promise<void> {
+async function publishOutline(workspace: BidWorkspace, outline: OutlineArtifact, qualityIssues?: OutlineQualityIssue[]): Promise<void> {
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
-  await Promise.all([
-    writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`),
-    writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), `${JSON.stringify({
-      schema_version: 4,
-      scope: 'technical_bid',
-      checked_requirement_ids: requirements.requirements.map(item => item.id),
-      checked_scoring_ids: scoring.scoring_items.map(item => item.id),
-      checked_scoring_response_point_ids: ['RP-000001'],
-      reviewed_section_ids: outline.sections.map(item => item.id),
-      issues: qualityIssues,
-    })}\n`),
-  ])
+  await writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`)
+  if (qualityIssues !== undefined) await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), `${JSON.stringify({
+    schema_version: 4,
+    scope: 'technical_bid',
+    checked_requirement_ids: requirements.requirements.map(item => item.id),
+    checked_scoring_ids: scoring.scoring_items.map(item => item.id),
+    checked_scoring_response_point_ids: ['RP-000001'],
+    reviewed_section_ids: outline.sections.map(item => item.id),
+    issues: qualityIssues,
+  })}\n`)
+}
+
+async function publishDraft(workspace: BidWorkspace, outline: OutlineArtifact): Promise<void> {
+  const hash = outlineArtifactSha256(outline)
+  await writeFile(join(workspace.projectRoot, 'outline/draft.json'), `${JSON.stringify({
+    schema_version: 1,
+    scope: 'technical_bid',
+    revision: 1,
+    source_outline_sha256: hash,
+    draft_outline_sha256: hash,
+    outline,
+  })}\n`)
 }
 
 function promptedOutlinePath(workspace: BidWorkspace, prompt: string): string {
@@ -271,7 +287,7 @@ describe('S3 候选错误分流', () => {
     return [{ section_index: 2, field, value: reviewedOutline.sections[2]![field] }]
   }
 
-  it.each(defects.flatMap(kind => ['draft', 'review'].map(phase => ({ kind, phase }))))('$phase 中的 $kind 错误进入同一候选修复并完整复核', async ({ kind, phase }) => {
+  it.each(defects)('初稿中的 %s 错误只进入一次候选修复并完整复核', async (kind) => {
     const workspace = await fixture()
     const formal = await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
     let reviews = 0
@@ -294,16 +310,16 @@ describe('S3 候选错误分流', () => {
       } else if (prompt.includes('Blueprint Quality Review\n')) {
         const scratch = promptedOutlinePath(workspace, prompt)
         await expect(readFile(scratch, 'utf8')).resolves.toContain('SEC-SCHEDULE')
-        if (++reviews === 1 && phase === 'review') await writeFile(scratch, broken(kind))
+        reviews++
         await submitReview()
       } else {
         await publishOutline(workspace, reviewedOutline)
-        if (phase === 'draft') await writeFile(join(workspace.projectRoot, 'outline/outline.json'), broken(kind))
+        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), broken(kind))
       }
     })
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
     expect(repairs).toBe(1)
-    expect(reviews).toBe(phase === 'review' ? 2 : 1)
+    expect(reviews).toBe(1)
     expect(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')).toBe(formal)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
     if (kind === 'json') expect(await readFile(join(workspace.projectRoot, 'outline/format-repair-source.txt'), 'utf8')).toBe(broken(kind))
@@ -340,7 +356,7 @@ describe('S3 候选错误分流', () => {
       await writeFile(join(workspace.projectRoot, 'outline/format-repair.json'), JSON.stringify(coarseOutline))
     })
     await expect(executeOutlineGeneration(failed.agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 2 })).rejects.toThrow('格式修复改变了内容')
-    expect(failed.followup).toHaveBeenCalledTimes(2)
+    expect(failed.followup).toHaveBeenCalledTimes(1)
     expect(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')).toBe(raw)
     const controller = new AbortController()
     const cancelled = modelAgent(workspace, async () => {
@@ -435,7 +451,7 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
-  it('混合遗漏保留有效局部进展，非法新引用整批拒绝且预算有界', async () => {
+  it('混合遗漏只提交一次修复，非法新引用整批拒绝', async () => {
     const workspace = await fixture()
     const outline = structuredClone(reviewedOutline)
     outline.sections[1]!.requirement_ids = []
@@ -443,24 +459,16 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     outline.sections[2]!.scoring_response_point_ids = []
     outline.sections[2]!.scoring_response_points = []
     await publishOutline(workspace, outline)
-    let turns = 0
-    const { agent } = modelAgent(workspace, async (prompt, submitReview) => {
-      if (prompt.includes('Blueprint Quality Review')) { await submitReview(); return }
-      turns++
-      const persisted = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
-      if (turns <= 2) expect(persisted).toEqual(outline)
-      if (turns === 3) expect(persisted.sections[1]!.requirement_ids).toEqual(['REQ-ORG'])
-      if (turns < 4) expect(prompt).toContain('局部关联与结构修复')
-      else expect(prompt).toContain('局部响应点修复')
-      const operations = turns === 1 ? [{ type: 'update_section', section_id: 'SEC-ORGANIZATION', requirement_ids: ['REQ-ORG'], compliance_ids: ['COMP-UNKNOWN'] }]
-        : turns === 2 ? [{ type: 'update_section', section_id: 'SEC-ORGANIZATION', requirement_ids: ['REQ-ORG'] }]
-          : turns === 3 ? [{ type: 'update_global_compliance', global_compliance_ids: ['COMP-DELIVERY'] }]
-            : [{ type: 'update_section', section_id: 'SEC-SCHEDULE', scoring_response_point_ids: ['RP-000001'], must_answer: reviewedOutline.sections[2]!.must_answer }]
-      await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(operations))
+    const { agent, followup } = modelAgent(workspace, async (prompt) => {
+      expect(prompt).toContain('局部关联与结构修复')
+      await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify([
+        { type: 'update_section', section_id: 'SEC-ORGANIZATION', requirement_ids: ['REQ-ORG'], compliance_ids: ['COMP-UNKNOWN'] },
+      ]))
     })
-    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 4 })
-    expect(turns).toBe(4)
-    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('局部操作引入非法引用或结构')
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(outline)
   })
 })
 
@@ -481,13 +489,13 @@ describe('outline-generation Blueprint Quality Review', () => {
     }, {
       read,
       write,
-      structuredOutputs: [responseCandidate, responseCandidate],
+      structuredOutputs: [responseCandidate],
     })
 
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run })).resolves.toEqual(artifacts)
     expect(read).not.toHaveBeenCalled()
     expect(write).not.toHaveBeenCalled()
-    expect(subagentStart).toHaveBeenCalledTimes(2)
+    expect(subagentStart).toHaveBeenCalledTimes(1)
     for (const [, request] of subagentStart.mock.calls) expect(request).toMatchObject({ toolFilter: { allow: [] } })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'runs', run.runId, 'scratch', 'outline-generation', 'analysis/scoring-response-points.candidate.json'), 'utf8'))).toEqual(responseCandidate)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toMatchObject({
@@ -567,7 +575,7 @@ describe('outline-generation Blueprint Quality Review', () => {
   it('keeps invalid quality-tool arguments inside the model turn and retries a missing submission once', async () => {
     const workspace = await fixture()
     let reviews = 0
-    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
+    const { agent, followup, guard } = modelAgent(workspace, async (prompt, submitReview) => {
       if (!prompt.includes('当前阶段：outline_generation / Blueprint Quality Review')) {
         await publishOutline(workspace, reviewedOutline)
         return
@@ -578,6 +586,8 @@ describe('outline-generation Blueprint Quality Review', () => {
         return
       }
       expect(prompt).toContain('submit_outline_quality_review')
+      expect(prompt).toContain('不得再修改 outline.json')
+      expect(guard.mock.calls[0]![0]({ name: 'write', arguments: { file_path: join(workspace.projectRoot, 'outline/outline.json') } } as ToolExecution)).toContain('只读')
       await submitReview([])
     })
 
@@ -605,7 +615,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const outline = structuredClone(reviewedOutline)
     outline.document_title = 'REQ-ORG 技术标'
     outline.sections[0]!.summary = '我方按 SEC-SCHEDULE 组织实施。'
-    await publishOutline(workspace, outline)
+    await publishOutline(workspace, outline, [])
 
     const result = await validateOutlineGeneration(workspace, 'outline_generation', artifacts)
     expect(result.ok).toBe(false)
@@ -653,12 +663,12 @@ describe('outline-generation Blueprint Quality Review', () => {
     if (framework === undefined) throw new Error('framework import missing')
     const referenced: OutlineArtifact = structuredClone(reviewedOutline)
     referenced.sections[1]!.framework_refs = [{ file_id: String(framework.id), heading_path: ['总体方案'] }]
-    await publishOutline(workspace, referenced)
+    await publishOutline(workspace, referenced, [])
 
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toMatchObject({ ok: true })
 
     referenced.sections[1]!.framework_refs = [{ file_id: String(framework.id), heading_path: ['不存在'] }]
-    await publishOutline(workspace, referenced)
+    await publishOutline(workspace, referenced, [])
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts))).toContain('OUTLINE_FRAMEWORK_REF_INVALID')
   })
 
@@ -672,20 +682,20 @@ describe('outline-generation Blueprint Quality Review', () => {
       if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
       else await publishOutline(workspace, researchDrivenOutline)
     }, {
-      structuredOutputs: [responseCandidate, responseCandidate],
+      structuredOutputs: [responseCandidate],
     })
     await expect(executeOutlineGeneration(agent, workspace, task)).resolves.toEqual(artifacts)
     expect(followup).toHaveBeenCalledTimes(2)
-    expect(subagentStart).toHaveBeenCalledTimes(2)
+    expect(subagentStart).toHaveBeenCalledTimes(1)
     const analysisPrompt = (subagentStart.mock.calls[0]![1] as { prompt: Array<{ text: string }> }).prompt[0]!.text
     expect(analysisPrompt).toContain('本次合法 ID：["SCORE-SCHEDULE"]')
     expect(analysisPrompt).toContain('<scoring-json>')
+    expect(analysisPrompt).toContain('本轮内部完成一次自检')
+    expect(analysisPrompt).toContain('Host 不会再启动第二个评分响应点复核 Agent')
     expect(analysisPrompt).not.toContain('"scoring_id":"SCORE-..."')
     for (const forbidden of ['scoring-response-points.candidate.json', '调用 write', 'sandbox_permissions', 'justification']) {
       expect(analysisPrompt).not.toContain(forbidden)
     }
-    const semanticPrompt = (subagentStart.mock.calls[1]![1] as { prompt: Array<{ text: string }> }).prompt[0]!.text
-    expect(semanticPrompt).toContain('本次合法 scoring_id：["SCORE-SCHEDULE"]')
     for (const index of [0, 1]) {
       const prompt = followup.mock.calls[index]![0].content[0]!.text
       expect(prompt).toContain('analysis/scoring-response-points.json')
@@ -696,18 +706,21 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(researchDrivenOutline)
   })
 
-  it('质量复核修改目录后重新复核对应版本，再由 Host 生成全部已检查清单', async () => {
+  it('质量复核修改目录后直接接受本轮版本，再由 Host 生成全部已检查清单', async () => {
     const workspace = await fixture()
     let reviews = 0
     const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
       if (prompt.includes('Blueprint Quality Review\n')) {
-        if (++reviews === 1) await writeFile(promptedOutlinePath(workspace, prompt), JSON.stringify(reviewedOutline))
+        reviews++
+        await writeFile(promptedOutlinePath(workspace, prompt), JSON.stringify(reviewedOutline))
         await submitReview()
       } else await publishOutline(workspace, coarseOutline)
     })
     await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
-    expect(reviews).toBe(2)
-    expect(followup).toHaveBeenCalledTimes(3)
+    expect(reviews).toBe(1)
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(followup.mock.calls.filter(call => call[0].content[0]!.text.includes('Blueprint Quality Review\n'))).toHaveLength(1)
+    expect(followup.mock.calls.some(call => call[0].content[0]!.text.includes('OUTLINE_GENERATION_REVIEW_INCOMPLETE'))).toBe(false)
     const report = parseOutlineQualityReport(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')))
     expect(report.reviewed_section_ids).toEqual(reviewedOutline.sections.map(section => section.id))
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
@@ -726,8 +739,8 @@ describe('outline-generation Blueprint Quality Review', () => {
       await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(invalid))
     })
     await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))).rejects.toThrow()
-    expect(followup).toHaveBeenCalledTimes(4)
-    expect(followup.mock.calls.slice(1).every(call => call[0].content[0]!.text.includes('候选字段修复'))).toBe(true)
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(followup.mock.calls[1]![0].content[0]!.text).toContain('候选字段修复')
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(invalid)
     await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -746,13 +759,13 @@ describe('outline-generation Blueprint Quality Review', () => {
     const workspace = await fixture()
     const outline = structuredClone(reviewedOutline)
     mutate(outline)
-    await publishOutline(workspace, outline)
+    await publishOutline(workspace, outline, [])
     expect(failureCodes(await validateOutlineGeneration(workspace, 'outline_generation', artifacts))).toContain(expectedCode)
   })
 
   it('requires complete quality-review identity sets but permits advisory issues', async () => {
     const workspace = await fixture()
-    await publishOutline(workspace, reviewedOutline)
+    await publishOutline(workspace, reviewedOutline, [])
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
 
     await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({
@@ -823,16 +836,6 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(task).toContain('索引重复引用不能替代正文拆分')
   })
 
-  it('reviews real itemized scoring semantics without splitting quality words or score counts', async () => {
-    const candidate = { schema_version: 1 as const, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '实施进度' }] }
-    const prompt = renderResponsePointSemanticReviewTask({ id: 'session' } as Agent, scoringArtifact, candidate)
-    expect(prompt).toContain('项目目标、预期成果')
-    expect(prompt).toContain('软件技术路线、总体设计应分别保留')
-    expect(prompt).toContain('完整、合理可行、现状分析准确清晰')
-    expect(prompt).toContain('总体方案完整、合理、可行，得5分')
-    expect(prompt).toContain('通过结构化输出返回复核后的完整候选')
-  })
-
   it('allows one response point to be covered by multiple writable sections', () => {
     const catalog = parseScoringResponsePointCatalog({ schema_version: 1, scope: 'technical_bid', scoring_sha256: scoringArtifactSha256(scoringArtifact), next_sequence: 2, points: [{ id: 'RP-000001', scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] })
     const outline: OutlineArtifact = {
@@ -847,6 +850,173 @@ describe('outline-generation Blueprint Quality Review', () => {
       })),
     }
     expect(validateConfirmedOutline(outline, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+  })
+})
+
+describe('S3 canonical 检查点恢复', () => {
+  it('RP 未正式发布时恢复重新运行一次分析，正式发布后不再运行', async () => {
+    const workspace = await fixture()
+    await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+    const invalid = modelAgent(workspace, async () => {}, {
+      structuredOutputs: [{ schema_version: 1, points: [{ scoring_id: 'UNKNOWN', order: 1, text: '错误' }] }],
+    })
+    await expect(executeOutlineGeneration(invalid.agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID')
+    expect(invalid.subagentStart).toHaveBeenCalledTimes(1)
+    await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const valid = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+      else await publishOutline(workspace, reviewedOutline)
+    }, { structuredOutputs: [{ schema_version: 1, points: [{ scoring_id: 'SCORE-SCHEDULE', order: 1, text: '说明实施阶段和进度保障' }] }] })
+    await executeOutlineGeneration(valid.agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'rp-interrupted', cause: 'host_restart' } }),
+    })
+    expect(valid.subagentStart).toHaveBeenCalledTimes(1)
+
+    await rm(join(workspace.projectRoot, 'outline/outline.json'))
+    await rm(join(workspace.projectRoot, 'outline/quality-report.json'))
+    await rm(join(workspace.projectRoot, 'outline/draft.json'))
+    const resumed = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+      else await publishOutline(workspace, reviewedOutline)
+    })
+    await executeOutlineGeneration(resumed.agent, workspace, buildBidStageTask('outline_generation'))
+    expect(resumed.subagentStart).not.toHaveBeenCalled()
+  })
+
+  it('忽略旧 Run scratch，并在没有 canonical outline 时重新生成目录', async () => {
+    const workspace = await fixture()
+    const oldScratch = join(workspace.projectRoot, 'runs', 'old-run', 'scratch', 'outline-generation', 'outline')
+    await mkdir(oldScratch, { recursive: true })
+    await writeFile(join(oldScratch, 'outline.json'), JSON.stringify(coarseOutline))
+    let generations = 0
+    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('Blueprint Quality Review\n')) await submitReview()
+      else { generations++; await publishOutline(workspace, reviewedOutline) }
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'old-run', cause: 'host_restart' } }),
+    })
+    expect(generations).toBe(1)
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+  })
+
+  it('canonical outline 已发布时跳过整本生成，只执行一次质量复核', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline)
+    const { agent, followup, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      expect(prompt).toContain('Blueprint Quality Review')
+      await submitReview()
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'outline-published', cause: 'host_restart' } }),
+    })
+    expect(subagentStart).not.toHaveBeenCalled()
+    expect(followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('Repair 未正式应用时恢复仍有唯一一次机会', async () => {
+    const workspace = await fixture()
+    await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    const interrupted = modelAgent(workspace, async () => 'error')
+    await expect(executeOutlineGeneration(interrupted.agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('未正常完成')
+    await expect(readFile(join(workspace.projectRoot, 'outline/repair-operations.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const resumed = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('局部响应点修复')) await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+      else await submitReview()
+    })
+    await executeOutlineGeneration(resumed.agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'repair-interrupted', cause: 'host_restart' } }),
+    })
+    expect(resumed.followup).toHaveBeenCalledTimes(2)
+  })
+
+  it('Quality Review 中断时保留 canonical 版本，恢复只重新执行一次完整 Review', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline)
+    const interrupted = modelAgent(workspace, async (prompt) => {
+      await writeFile(promptedOutlinePath(workspace, prompt), JSON.stringify(coarseOutline))
+      return 'error'
+    })
+    await expect(executeOutlineGeneration(interrupted.agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('未正常完成')
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const resumed = modelAgent(workspace, async (_prompt, submitReview) => { await submitReview() })
+    await executeOutlineGeneration(resumed.agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'review-interrupted', cause: 'host_restart' } }),
+    })
+    expect(resumed.followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('quality-report durable 后恢复不调用模型，只生成 Draft', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline, [])
+    const progress: Array<{ summary: string }> = []
+    const { agent, followup, subagentStart } = modelAgent(workspace, async () => { throw new Error('不应调用模型') })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({
+        resumeOf: { runId: 'review-durable', cause: 'host_restart' },
+        reportProgress: value => progress.push({ summary: value.summary }),
+      }),
+    })
+    expect(followup).not.toHaveBeenCalled()
+    expect(subagentStart).not.toHaveBeenCalled()
+    expect(progress.at(-1)?.summary).toContain('目录质量复核已完成')
+    await expect(readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')).resolves.toContain('draft_outline_sha256')
+  })
+
+  it('Draft durable 后恢复直接返回，Final Validator 失败也不重新开启模型步骤', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline, [])
+    await publishDraft(workspace, reviewedOutline)
+    const qualityPath = join(workspace.projectRoot, 'outline/quality-report.json')
+    const report = JSON.parse(await readFile(qualityPath, 'utf8')) as Record<string, unknown>
+    report.checked_requirement_ids = ['REQ-ORG']
+    await writeFile(qualityPath, JSON.stringify(report))
+    const first = modelAgent(workspace, async () => { throw new Error('不应调用模型') })
+    const returned = await executeOutlineGeneration(first.agent, workspace, buildBidStageTask('outline_generation'))
+    expect(first.followup).not.toHaveBeenCalled()
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', returned)).resolves.toMatchObject({ ok: false })
+
+    const resumed = modelAgent(workspace, async () => { throw new Error('恢复后不应调用模型') })
+    const returnedAgain = await executeOutlineGeneration(resumed.agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'validator-failed', cause: 'host_restart' } }),
+    })
+    expect(resumed.followup).not.toHaveBeenCalled()
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', returnedAgain)).resolves.toMatchObject({ ok: false })
+  })
+
+  it('Draft 内容与已记录摘要不一致时拒绝恢复且不调用模型', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline, [])
+    await publishDraft(workspace, reviewedOutline)
+    const draftPath = join(workspace.projectRoot, 'outline/draft.json')
+    const draft = JSON.parse(await readFile(draftPath, 'utf8')) as { outline: OutlineArtifact }
+    draft.outline.sections[2]!.title = '被篡改的目录'
+    await writeFile(draftPath, JSON.stringify(draft))
+    const { agent, followup, subagentStart } = modelAgent(workspace, async () => { throw new Error('不应调用模型') })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'draft-mismatch', cause: 'host_restart' } }),
+    })).rejects.toThrow('OUTLINE_GENERATION_DRAFT_MISMATCH')
+    expect(followup).not.toHaveBeenCalled()
+    expect(subagentStart).not.toHaveBeenCalled()
+  })
+
+  it('质量工具连续漏交两次后直接失败，不启动第三轮', async () => {
+    const workspace = await fixture()
+    await publishOutline(workspace, reviewedOutline)
+    const { agent, followup } = modelAgent(workspace, async () => {})
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('OUTLINE_GENERATION_QUALITY_SUBMISSION_REQUIRED')
+    expect(followup).toHaveBeenCalledTimes(2)
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 
@@ -974,7 +1144,7 @@ describe('S3 确定性规范化与局部续修', () => {
     if (!validation.ok) expect(validation.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['OUTLINE_SHARED_CONTAINER_RESPONSE_POINT_INVALID', 'OUTLINE_SHARED_RESPONSE_POINT_MISSING']))
   })
 
-  it('失败重试保留 RP 编号及目录，从遗漏处继续；未复核不能发布报告', async () => {
+  it('确定性修复正式应用后恢复不再获得第二次修复', async () => {
     const workspace = await fixture()
     const catalog = await catalogWithMissing(workspace)
     await publishOutline(workspace, reviewedOutline)
@@ -983,13 +1153,13 @@ describe('S3 确定性规范化与局部续修', () => {
     expect(failed.followup).toHaveBeenCalledTimes(1)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(reviewedOutline)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/repair-operations.json'), 'utf8'))).toEqual([])
     await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    const retry = modelAgent(workspace, async (prompt, submitReview) => {
-      if (prompt.includes('局部响应点修复')) await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
-      else await submitReview()
-    })
-    await executeOutlineGeneration(retry.agent, workspace, buildBidStageTask('outline_generation'))
-    expect(retry.followup).toHaveBeenCalledTimes(2)
+    const retry = modelAgent(workspace, async () => { throw new Error('恢复后不应再调用模型') })
+    await expect(executeOutlineGeneration(retry.agent, workspace, buildBidStageTask('outline_generation'), {
+      run: createTestBidRunContext({ resumeOf: { runId: 'prior-run', cause: 'host_restart' } }),
+    })).rejects.toThrow('已经使用过一次确定性修复')
+    expect(retry.followup).not.toHaveBeenCalled()
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
   })
 

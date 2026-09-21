@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Pure React atoms (zero cordis): StateDot, DisclosureRow, ic_ds_* icons, Button/Pill/Menu/Modal/Input, the Toast transient banner, the OnboardingSurface first-run takeover (body-portaled mask + opaque stage that holds `#root` inert for exactly its own lifetime), the markdown family (MessageText/MarkdownText/JsonBlock), the read-only JsonTree inspector, the `useAnchoredMaxHeight` hook that clamps a bottom-anchored overlay to the viewport space above its anchor (re-measured on resize, scroll, and a caller-supplied dependency), the `useAnchoredPosition` hook that holds a fixed-position floating panel under its anchor (measure, offset, clamp inside the viewport margin, re-placed on capture-phase scroll, window resize, and the panel's own size changes), TerminalBlock, DiffBlock, ReadBlock, SearchBlock, and WebBlock.
+纯 React 原语（不依赖 Cordis）：StateDot、DisclosureRow、PlanListPanel、ic_ds_* 图标、Button/Pill/Menu/Modal/Input、Toast 临时横幅、OnboardingSurface 首次运行接管层、Markdown 系列、只读 JsonTree、定位与高度 Hook，以及 TerminalBlock、DiffBlock、ReadBlock、SearchBlock 和 WebBlock。`PlanListPanel` 只拥有折叠状态、状态图标、计数和活动动画；消费者提供本地化标签、有序项目和生命周期状态。
 
 ## Hover cards
 

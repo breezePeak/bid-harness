@@ -1579,7 +1579,7 @@ async function reviewWritingPlanCompletion(
   options: ChapterWritingExecutionOptions,
   artifacts: StageArtifact[],
 ): Promise<StageArtifact[]> {
-  options.run.reportProgress({ phase: 'reviewing', summary: '正在进行正文整体质量验收' })
+  options.run.reportProgress({ phase: 'finalizing', summary: '正在进行正文整体质量验收' })
   const completedArtifacts = (): StageArtifact[] => artifacts.some(item => item.path === COMPLETION_REVIEW_PATH)
     ? artifacts
     : [...artifacts, { stage: 'chapter_writing', type: 'chapter_completion_review', path: COMPLETION_REVIEW_PATH }]

@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Bid Session browser UI. The plugin contributes `BidStagePanel` to the conversation-declared `conversation.input.dock` list and renders only when the Host-resolved Session preset is `bid` and the `bid.runtime` projection is available. The compact dock row uses the existing DSH composer geometry, state indicator, typography, and button primitives to show only the current `projection.runtime` stage and status; DSH transcript, Todo, and tool renderers remain the execution-progress UI. The client does not fold Bid events, advance stages, derive permissions, or keep a local stage or status.
+Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行或取消中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；插件不注册 Bid Run Chat Node，也不写入 `todo/write`。挂起、失败、等待和完成状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
@@ -31,4 +31,4 @@ Rendering Bid projections, selecting local files, and choosing confirmation mode
 ## Known Limitations and Deferred Work
 
 - **File intake uses one JSON/base64 request** — browser and Host memory include the encoded batch within the configured limits.
-- **The panel is a business-status row** — it does not duplicate the DSH task list or tool-call tree.
+- **一个 phase 只标识当前阶段步骤** — 计划可把有序前置步骤标为完成，但 Host 报告后续 phase 后不保留分支历史。

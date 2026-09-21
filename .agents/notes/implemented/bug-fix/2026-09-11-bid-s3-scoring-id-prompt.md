@@ -8,7 +8,7 @@ S2 Host 为评分项分配 `SC-*` 稳定 ID，但 S3 响应点分析提示曾使
 
 ## Decision
 
-S3 Host 把当前 `scoring.json` 的完整结构和全部合法评分 ID 直接注入响应点分析与语义复核 Child，要求模型逐字复制这些 ID，不提供固定 ID 格式示例。Host 对两轮 structured output 继续拒绝未知评分 ID。
+S3 Host 把当前 `scoring.json` 的完整结构和全部合法评分 ID 直接注入唯一的响应点分析 Child，要求模型逐字复制这些 ID 并在同轮自检，不提供固定 ID 格式示例。Host 对 structured output 拒绝未知评分 ID。
 
 ## Alternatives considered
 
@@ -18,8 +18,8 @@ S3 Host 把当前 `scoring.json` 的完整结构和全部合法评分 ID 直接�
 
 ## Consequences
 
-S3 两轮响应点任务都包含当前项目的精确评分 ID，降低首次生成或复核既有候选时产生未知引用的概率；Host 只在严格归属校验通过后写 Candidate，错误输出不会被静默修复或落盘。已有失败项目可直接重试 S3，由语义复核检查 Host 提供的遗留候选。
+S3 响应点任务包含当前项目的精确评分 ID，降低生成候选时产生未知引用的概率；Host 只在严格归属校验通过后写 Candidate，错误输出不会被静默修复或落盘。未发布正式清单的失败恢复会重新执行一次分析；正式清单存在时不再运行响应点 Child。
 
 ## Testing
 
-回归测试断言 S3 首轮分析和语义复核提示列出当前评分 ID，且分析提示不再包含 `SCORE-...` 固定示例。
+回归测试断言 S3 分析提示列出当前评分 ID、要求同轮自检，且不再包含 `SCORE-...` 固定示例。

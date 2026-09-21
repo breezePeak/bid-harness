@@ -626,27 +626,24 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
 export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   const workspace = new BidWorkspace(root)
   await prepareS2(workspace)
-  const prefix = relative(root, workspace.projectRoot).replaceAll('\\', '/')
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
   await rm(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'))
   await rm(join(workspace.projectRoot, 'analysis/scoring-response-points.json'))
+  await Promise.all(['outline/outline.json', 'outline/quality-report.json', 'outline/draft.json', 'outline/generation-inputs.json']
+    .map(path => rm(join(workspace.projectRoot, path), { force: true })))
   const texts = ['身份鉴别', '角色权限', '账号生命周期', '最小权限', '会话控制', '数据分类', '敏感数据保护', '访问日志', '安全告警', '异常处置', '审计留存与追溯']
   const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
   scoring.scoring_items[0]!.raw_text = '技术方案逐项说明：' + texts.join('、') + '。'
   await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
   const pointIds = texts.map((_text, index) => 'RP-' + String(index + 1).padStart(6, '0'))
   const section = outline.sections[0]!
-  section.scoring_response_point_ids = pointIds.slice(0, 10)
-  section.must_answer = texts.slice(0, 10).map(text => '说明' + text + '的实施措施。')
-  section.scoring_ids = []
+  section.scoring_response_point_ids = pointIds
+  section.must_answer = texts.map(text => '说明' + text + '的实施措施。')
+  section.scoring_ids = ['SCORE-1']
   const untouched = { ...section, id: 'SEC-SERVICE', order: 2, title: '服务组织', purpose: '说明服务组织与协同安排。',
-    must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
+    must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
   outline.sections.push(untouched)
   const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
-  candidate.sections[0] = {
-    ...candidate.sections[0]!, title: 'REQ-1 安全方案',
-    scoring_response_point_ids: [...pointIds.slice(0, 10), 'RP-999999'], scoring_ids: ['SCORE-UNKNOWN'], requirement_ids: [],
-  }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
   const writePromptArtifact = (callId: string, suffix: string, content: unknown): ScriptStep => (options) => {
     const prompt = options.messages.flatMap(message => message.content)
@@ -663,7 +660,6 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   ]
   const childScript = [
     toolCall('response-points', 'structured_output', responseCandidate),
-    toolCall('response-points-review', 'structured_output', responseCandidate),
   ]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
@@ -673,51 +669,19 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     agent.session.append('bid.stage.started', { stage, status: 'running' })
     agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
   }
-  let maxRepairAttempts = 0
   const orchestrator = new BidOrchestrator(agent.session,
-    { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts, run }) },
+    { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: 0, run }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
-  const failed = await orchestrator.runCurrentAutomaticStage()
-  if (failed.status !== 'suspended' || !failed.failureReason?.includes('RP-999999')) throw new Error('未知 RP 未进入可续修的挂起状态：' + JSON.stringify(failed))
-  const catalogBefore = await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
-  const baseline = outline
   parentScript.push(
-    toolCall('forbidden-catalog-write', 'write', { file_path: prefix + '/analysis/scoring-response-points.json', content: '{}' }),
-    writePromptArtifact('candidate-repair', '/outline/candidate-repair.json', [
-      { section_index: 0, field: 'scoring_response_point_ids', value: pointIds.slice(0, 10) },
-      { section_index: 0, field: 'scoring_ids', value: ['SCORE-1'] },
-    ]),
-    finalText('根据正式评分原文重新明确选择合法 RP 与评分关联。'),
-    writePromptArtifact('requirement-repair', '/outline/repair-operations.json', [
-      { type: 'update_section', section_id: section.id, requirement_ids: section.requirement_ids },
-    ]),
-    finalText('将招标要求关联至现有安全方案章节。'),
-    writePromptArtifact('customer-text-repair', '/outline/repair-operations.json', [{
-      type: 'update_section', section_id: section.id, title: section.title,
-    }]),
-    finalText('已用客户可理解的自然语言替换内部编号标题。'),
-    writePromptArtifact('local-repair', '/outline/repair-operations.json', [{
-      type: 'update_section', section_id: section.id, scoring_response_point_ids: pointIds,
-      must_answer: [...section.must_answer, '说明审计日志留存期限、归档责任和事件追溯流程。'],
-    }]),
-    finalText('已提交审计留存与追溯的局部修复。'),
     toolCall('quality-review', 'submit_outline_quality_review', { issues: [] }),
     finalText('逐项复核章节归属和写作指导已完成。'),
   )
-  maxRepairAttempts = 4
-  const suspended = orchestrator.controlState.run
-  if (suspended?.status !== 'suspended') throw new Error('S3 失败没有保留可恢复 Run')
-  parentScript.unshift(
-    writePromptArtifact('resumed-draft', '/outline/outline.json', candidate),
-    finalText('恢复目录候选。'),
-  )
-  const outcome = await orchestrator.resume(suspended.runId)
-  if (outcome.status !== 'waiting_user') throw new Error('S3 续修没有进入用户确认：' + JSON.stringify(outcome))
+  const outcome = await orchestrator.runCurrentAutomaticStage()
+  if (outcome.status !== 'waiting_user') throw new Error('S3 没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
-  const catalogUnchanged = catalogBefore === await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')
-  const untouchedUnchanged = JSON.stringify(baseline.sections[1]) === JSON.stringify(result.sections[1])
-  if (!catalogUnchanged || !untouchedUnchanged) throw new Error('S3 续修改变了无关内容')
-  return { failed, outcome, catalogUnchanged, untouchedUnchanged, outline: result, report,
+  const untouchedUnchanged = JSON.stringify(outline.sections[1]) === JSON.stringify(result.sections[1])
+  if (!untouchedUnchanged) throw new Error('S3 修改了无关内容')
+  return { outcome, untouchedUnchanged, outline: result, report,
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }
 }

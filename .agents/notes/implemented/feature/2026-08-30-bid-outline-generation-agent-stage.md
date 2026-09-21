@@ -8,11 +8,11 @@ Status: implemented
 
 ## Decision
 
-Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先产生候选评分响应点，再以独立语义复核检查完整评分场景；Host 随后分配稳定 `RP-*`。存在成功解析的 `outline_framework` 时，Host 把 manifest 顺序下的标题树注入任务，Agent 明确选择主框架、补充框架和无关框架，并按保留、扩展、调整或排除适配；没有框架时按评分响应点、评分项、Requirements 和需要技术作答的 Compliance 自主生成完整目录。纯资格与行政递交事项只保留为全局合规，客户正文边界由[标书内部追踪身份与客户正文分离](../bug-fix/2026-09-11-bid-customer-facing-prose-boundary.md)约束。
+Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。一个 Child 产生候选评分响应点并在同轮完成语义自检；Host 随后分配稳定 `RP-*`。存在成功解析的 `outline_framework` 时，Host 把 manifest 顺序下的标题树注入任务，Agent 明确选择主框架、补充框架和无关框架，并按保留、扩展、调整或排除适配；没有框架时按评分响应点、评分项、Requirements 和需要技术作答的 Compliance 自主生成完整目录。纯资格与行政递交事项只保留为全局合规，客户正文边界由[标书内部追踪身份与客户正文分离](../bug-fix/2026-09-11-bid-customer-facing-prose-boundary.md)约束。
 
 严格 Outline Artifact 使用扁平父子树。每个 Section 具有稳定 id、parent_id、同级 order、level、purpose、是否写作、Requirement/Scoring/Compliance/Response Point 引用、结构来源、精确 `framework_refs` 和写作指引。`origin` 只取 `framework`、`generated` 或 `mixed`；结构节点必须有子节点，可写节点必须是叶子并具有具体 `must_answer`。
 
-同一 Agent 在初稿后执行 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，并提交质量候选；Host 在当前版本正常完成复核后发布正式报告，派生字段、覆盖差集和失败重试遵循[局部续修规则](../bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。Host 确定性校验树结构、引用存在性与覆盖、数组重复、精确框架标题引用、强制 Requirement 和重点 Scoring 的可写覆盖及质量报告集合；同一 Response Point 可以出现在多个可写 Section，`issues` 可保存非阻断建议。成功后由 S3 等待首次用户确认。
+同一 Agent 在初稿后执行唯一一次 Blueprint Quality Review，按评分语义修正过粗或缺失的技术主题，在同轮自检后提交非阻断建议；Host 对复核后的当前版本执行确定性校验并发布正式报告，派生字段、覆盖差集和失败恢复遵循[局部续修规则](../bug-fix/2026-09-07-bid-outline-response-point-recovery.md)与[有界恢复规则](../bug-fix/2026-09-21-s3-bounded-outline-generation-recovery.md)。Host 确定性校验树结构、引用存在性与覆盖、数组重复、精确框架标题引用、强制 Requirement 和重点 Scoring 的可写覆盖及质量报告集合；同一 Response Point 可以出现在多个可写 Section，`issues` 可保存非阻断建议。成功后由 S3 等待首次用户确认。
 
 ## Alternatives considered
 
@@ -26,4 +26,4 @@ Bid Host 将 `outline_generation` 注册为 S3 自动 Agent 阶段。Agent 先�
 
 ## Consequences
 
-S3 在人工确认前执行响应点生成、独立语义复核、目录生成和质量复核。语义质量由 Prompt、复核和场景测试约束；Validator 限于结构、引用、覆盖和报告一致性。人工框架缺失不阻断 S3；命中的框架正文通过 `framework_refs` 进入 S5 写作上下文，但不作为事实 Evidence。
+S3 在人工确认前执行响应点生成与同轮自检、目录生成和一次质量复核。语义质量由 Prompt、自检、复核和场景测试约束；Validator 限于结构、引用、覆盖和报告一致性，并只由 Orchestrator 调用。人工框架缺失不阻断 S3；命中的框架正文通过 `framework_refs` 进入 S5 写作上下文，但不作为事实 Evidence。

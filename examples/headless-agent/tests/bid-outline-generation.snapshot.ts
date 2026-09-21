@@ -1,4 +1,4 @@
-/** 固定真实 Loader 的 S3 输入交接、只读保护、局部续修和确认停点。 */
+/** 固定真实 Loader 的 S3 单次响应点分析、目录生成、质量复核和确认停点。 */
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,9 +11,9 @@ import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-outline-generation-snapshots/', import.meta.url))
 
-it('S3 未知引用失败后续修候选、需求与 RP-000011 覆盖，并等待用户确认', async () => {
+it('S3 一次生成响应点和目录、一次质量复核后等待用户确认', async () => {
   const result = await runLoaderSmoke({
-    label: 'S3 局部响应点修复', tempDirPrefix: 'dsh-s3-outline-snapshot-',
+    label: 'S3 有界目录生成', tempDirPrefix: 'dsh-s3-outline-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-outline-generation-driver.ts', import.meta.url)),
     configPath: fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url)),
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
@@ -25,7 +25,7 @@ it('S3 未知引用失败后续修候选、需求与 RP-000011 覆盖，并等�
       if (log === undefined) throw new Error('缺少 S3 持久化会话')
       const childLogs = logs.filter(content =>
         (JSON.parse(content.split('\n')[0]!) as SessionHeader).parentSession === 's3-outline-recovery')
-      expect(childLogs).toHaveLength(2)
+      expect(childLogs).toHaveLength(1)
       for (const childLog of childLogs) {
         const toolNames = childLog.trimEnd().split('\n').flatMap((line) => {
           const record = JSON.parse(line) as { type?: string; data?: { name?: unknown } }
@@ -43,16 +43,26 @@ it('S3 未知引用失败后续修候选、需求与 RP-000011 覆盖，并等�
       })
       expect(log).toContain('RP-000011')
       expect(log).toContain('审计留存与追溯')
-      expect(log).toContain('正式响应点、确认目录与其他输入只读')
-      expect(log).toContain('局部响应点修复')
-      expect(log).toContain('候选字段修复')
-      expect(log).toContain('局部关联与结构修复')
+      expect(log).toContain('这是 S3 唯一一次完整 Blueprint Quality Review')
+      const reviewTurns = log.trimEnd().split('\n').filter((line) => {
+        const record = JSON.parse(line) as { type?: string; data?: { content?: Array<{ text?: unknown }> } }
+        return record.type === 'user/message' && record.data?.content?.some(block =>
+          typeof block.text === 'string' && block.text.includes('当前阶段：outline_generation / Blueprint Quality Review\n'))
+      })
+      expect(reviewTurns).toHaveLength(1)
+      expect(log).not.toContain('评分响应点语义复核')
+      expect(log).not.toContain('OUTLINE_GENERATION_REVIEW_INCOMPLETE')
       const transcript = normalizeSessionSnapshot(log, { sessionIds: ['s3-outline-recovery'], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
         .trimEnd().split('\n').map((line) => {
-          const record = JSON.parse(line) as { data?: { run?: { startedAt?: number; updatedAt?: number } } }
+          const record = JSON.parse(line) as { data?: {
+            progress?: { updatedAt?: number }
+            run?: { startedAt?: number; updatedAt?: number; progress?: { updatedAt?: number } }
+          } }
+          if (record.data?.progress !== undefined) record.data.progress.updatedAt = 0
           if (record.data?.run !== undefined) {
             record.data.run.startedAt = 0
             record.data.run.updatedAt = 0
+            if (record.data.run.progress !== undefined) record.data.run.progress.updatedAt = 0
           }
           return JSON.stringify(record)
         }).join('\n') + '\n'
@@ -67,9 +77,8 @@ it('S3 未知引用失败后续修候选、需求与 RP-000011 覆盖，并等�
   })
   const actual = JSON.parse(result.stdout) as Awaited<ReturnType<typeof runOutlineGenerationLoop>>
   expect(actual).toMatchObject({
-    failed: { stage: 'outline_generation', status: 'suspended' },
     outcome: { stage: 'outline_generation', status: 'waiting_user' },
-    catalogUnchanged: true, untouchedUnchanged: true, confirmationEvents: 0,
+    untouchedUnchanged: true, confirmationEvents: 0,
   })
   expect(actual.outline.sections[0]?.scoring_response_point_ids).toHaveLength(11)
   expect(actual.outline.sections[0]?.scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })

@@ -22,8 +22,6 @@ import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbe
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { BidRunNotice } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
-import { bidRunDefinition } from './bid-run-definition.ts'
-import { BidRunCard } from './BidRunCard.tsx'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -138,7 +136,6 @@ function actionFailure(error: {
  */
 export function apply(ctx: ClientContext): void {
   ctx.conversationEvents.register(bidRunNoticeDefinition)
-  ctx.conversationEvents.register(bidRunDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
   const pendingSectionLocate = new Map<string, string>()
@@ -264,12 +261,6 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
   }, BidRunNotice))
-  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
-    name: 'conversation.chat.node',
-    key: 'bid-run',
-    locale: NS,
-    inject: () => ({ openSession: (id: SessionId) => { ctx.sessions.open(id) } }),
-  }, BidRunCard))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'bid-confirmation-mode',

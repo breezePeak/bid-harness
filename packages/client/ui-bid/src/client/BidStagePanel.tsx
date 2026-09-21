@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
-import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -13,6 +13,8 @@ import {
   IconPaperclipOutline16,
   IconRefreshOutline16,
   Menu,
+  PlanListPanel,
+  type PlanListLabels,
   Portal,
   StateDot,
   Tooltip,
@@ -26,6 +28,7 @@ import { BidRevisionFloatingPanel } from './BidRevisionFloatingPanel.tsx'
 import { BidProgressBar } from './BidProgressBar.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import { isBidMainSessionSummary } from './session-authority.ts'
+import { buildBidStagePlan } from './bid-stage-plan.ts'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
@@ -893,6 +896,43 @@ export function BidStagePanel({
     : []
   const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
   const runCancelling = projection.run?.status === 'cancelling'
+  const showRunPlan = projection.runtime.status === 'running'
+  const planItems = buildBidStagePlan(projection, t)
+  const planLabels: PlanListLabels = {
+    title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.runtime.stage) + 1)}`, name: t(stageKey(projection.runtime.stage)) }),
+    completed: count => t('plan.progress.completed', { count }),
+    active: count => t('plan.progress.active', { count }),
+    unfinished: count => t('plan.progress.unfinished', { count }),
+    pending: count => t('plan.progress.pending', { count }),
+  }
+  const floatingRevision = showFloatingRevision ? (
+    <BidRevisionFloatingPanel
+      sessionId={String(sessionId)}
+      getRevisionQueue={getRevisionQueue}
+      updateRevisionIssue={updateRevisionIssue}
+      deleteRevisionIssue={deleteRevisionIssue}
+      startRevisionBatch={startRevisionBatch}
+      onLocate={(sectionId) => {
+        if (locateChapter) locateChapter(sectionId)
+        else selectReviewView('bid-review')
+      }}
+      onCompare={compareRevision}
+      isRunning={projection.runtime.status === 'running'}
+      floatingMode="fixed"
+      refreshSignal={revisionSignal}
+    />
+  ) : null
+  if (showRunPlan) return (
+    <>
+      <PlanListPanel
+        items={planItems}
+        running={!runCancelling}
+        labels={planLabels}
+        testId="bid-stage-plan"
+      />
+      {floatingRevision}
+    </>
+  )
   const progressSyncFailed = projection.runtime.stage === 'evidence_mapping'
     && mappingReadState === 'stale'
   const dotState = runCancelling || progressSyncFailed
@@ -1587,26 +1627,7 @@ export function BidStagePanel({
 
         {!canConfirm && !canConfirmAnalysis && errorNotice}
       </div>
-      {showFloatingRevision && (
-        <BidRevisionFloatingPanel
-          sessionId={String(sessionId)}
-          getRevisionQueue={getRevisionQueue}
-          updateRevisionIssue={updateRevisionIssue}
-          deleteRevisionIssue={deleteRevisionIssue}
-          startRevisionBatch={startRevisionBatch}
-          onLocate={(sectionId) => {
-            if (locateChapter) {
-              locateChapter(sectionId)
-            } else {
-              selectReviewView('bid-review')
-            }
-          }}
-          onCompare={compareRevision}
-          isRunning={projection.runtime.status === 'running'}
-          floatingMode="fixed"
-          refreshSignal={revisionSignal}
-        />
-      )}
+      {floatingRevision}
     </section>
   )
 }

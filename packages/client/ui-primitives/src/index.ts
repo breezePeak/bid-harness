@@ -9,6 +9,10 @@ export type {
   RunProgressCardData, RunProgressCardLabels, RunProgressCardProps,
   RunProgressMemberData, RunProgressPhaseData, RunProgressStatus,
 } from './RunProgressCard.tsx'
+export { PlanListPanel } from './PlanListPanel.tsx'
+export type {
+  PlanListItem, PlanListItemStatus, PlanListLabels, PlanListPanelProps,
+} from './PlanListPanel.tsx'
 export { DisclosureRow } from './DisclosureRow.tsx'
 export type { DisclosureRowProps } from './DisclosureRow.tsx'
 export { Button } from './Button.tsx'

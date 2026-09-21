@@ -42,7 +42,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await scaffold?.close()
   })
 
-  it('在空草稿显示后台 Stop，并在输入后恢复发送与持久 Run 卡', async () => {
+  it('在空草稿显示后台 Stop，并在输入后恢复发送与阶段计划', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-run-progress'))
     agent.session.append('bid.run.started', {
       run: {
@@ -60,8 +60,11 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       progress: { phase: 'collecting', summary: '正在提取招标信息与原文依据', completed: 2, total: 5, updatedAt: 2 },
     })
 
-    await page.getByText('后台任务：S2 · 招标信息提取').waitFor({ timeout: 10_000 })
-    await page.getByText('正在提取招标信息与原文依据 · 2/5').waitFor({ timeout: 10_000 })
+    await page.getByText('计划 · S2 招标分析').waitFor({ timeout: 10_000 })
+    await page.getByText('1 已完成 · 1 正在进行 · 1 待处理').waitFor({ timeout: 10_000 })
+    await page.getByRole('button', { name: /计划 · S2 招标分析/ }).click()
+    await page.getByText('整理项目、技术、评分与合规信息').waitFor({ timeout: 10_000 })
+    expect(await page.getByText('后台任务：S2 · 招标信息提取').count()).toBe(0)
     await page.getByRole('button', { name: '停止' }).waitFor({ timeout: 10_000 })
     const input = page.locator('textarea:enabled[placeholder="描述你想要构建的内容"]')
     await input.fill('请说明当前进度')
