@@ -14,7 +14,7 @@ import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
 import { parseWritingPlan } from '../src/writing-requirements.ts'
-import type { OutlineArtifact, OutlineSection } from '../src/outline-generation-artifacts.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from '../src/outline-generation-artifacts.ts'
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src/native-visio.ts'
 import { renderFlowchartImage } from '../src/flowchart-image.ts'
@@ -397,27 +397,47 @@ describe('Bid DOCX export', () => {
       .rejects.toThrow('DOCX_EXPORT_NO_SAVED_CHAPTERS')
   })
 
+  it('正式导出在固定技术偏离表缺失时于 compose 前返回业务校验问题', async () => {
+    const { workspace, outline } = await exportFixture()
+    const nextOutline = { ...outline, sections: [
+      { ...outline.sections[0]!, id: TECHNICAL_DEVIATION_SECTION_ID, parent_id: null, order: 1, level: 1, title: '技术偏离表' },
+      ...outline.sections.map(section => section.id === 'root' ? { ...section, order: 2 } : section),
+    ] }
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(nextOutline))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '尚未形成技术偏离表。')
+    const compose = vi.spyOn(workspace, 'exportDocxMarkdown')
+
+    await expect(executeDocxExport(workspace, undefined, 'deliverables/invalid-deviation.docx')).rejects.toMatchObject({
+      issues: [{
+        code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID',
+        message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节后重新导出 Word。',
+        artifact: 'chapters/sections/0001.md',
+      }],
+    })
+    expect(compose).not.toHaveBeenCalled()
+  })
+
   it('技术偏离表审核失败时仍导出表格及后续章节，保留确认目录编号', async () => {
     const { workspace, outline } = await exportFixture()
     const resource = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const nextOutline = { ...outline, sections: [
-      { ...outline.sections[0]!, id: 'deviation', parent_id: null, order: 1, level: 1, title: '技术偏离表' },
+      { ...outline.sections[0]!, id: TECHNICAL_DEVIATION_SECTION_ID, parent_id: null, order: 1, level: 1, title: '技术偏离表' },
       ...outline.sections.map(section => section.id === 'root' ? { ...section, order: 2 } : section),
     ] }
     const hash = outlineArtifactSha256(parseConfirmedOutlineArtifact(nextOutline))
     const plan = parseWritingPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')))
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(nextOutline))
     await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({ ...plan,
-      confirmed_outline_sha256: hash, sections: [{ ...plan.sections[0]!, section_id: 'deviation' }, ...plan.sections] }))
+      confirmed_outline_sha256: hash, sections: [{ ...plan.sections[0]!, section_id: TECHNICAL_DEVIATION_SECTION_ID }, ...plan.sections] }))
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
       schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: hash,
       writing_plan_version: 1, max_concurrency: 2, observed_max_concurrency: 2,
-      sections: ['deviation', 'resource', 'delivery'].map(section_id => ({
+      sections: [TECHNICAL_DEVIATION_SECTION_ID, 'resource', 'delivery'].map(section_id => ({
         section_id, depends_on: [], related_sections: [], epoch: 0, status: 'failed', phase: null, failure_phase: 'writing', attempts: [],
         final_writer_child_session_id: null, final_reviewer_child_session_id: null,
       })),
     }))
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 1 技术偏离表\n\n| 技术条款 | 响应情况 | 偏离说明 |\n| --- | --- | --- |\n| 服务范围 | 全部响应 | 无偏离 |\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 1 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 智慧平台 | 服务范围 | 我方将提供完整服务范围并完成逐项验收。 | 无偏离 | |\n')
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), resource)
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), '交付正文。')
 
@@ -431,7 +451,7 @@ describe('Bid DOCX export', () => {
     const { value: html } = await mammoth.convertToHtml({ buffer: await readFile(join(workspace.outputRoot, 'deviation.docx')) })
     expect(html).toContain('<h1>技术偏离表</h1>')
     expect(html).toContain('无偏离')
-    expect(html).toContain('<table>')
+    expect(html.match(/<table>/gu)).toHaveLength(1)
     expect(html).toContain('资源配置正文。')
     expect(html).toContain('交付正文。')
   })

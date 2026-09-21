@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import JSZip from 'jszip'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -23,7 +24,7 @@ import {
   outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState,
-  reduceBidControlState, reduceBidRuntimeState, validateTenderAnalysis,
+  reduceBidControlState, reduceBidRuntimeState, TECHNICAL_DEVIATION_SECTION_ID, validateTenderAnalysis,
   type BidStage, type BidStageExecutorPort, type BidStageValidatorPort,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1056,6 +1057,40 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readBidProjectState(workspace)).toEqual(projectBefore)
     gate.resolve([])
     await retry
+  })
+
+  it('S5 运行中固定技术偏离表未完成时清空预置行并导出后续正文', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const outline = await seedProjectArtifacts(workspace)
+    const technical = {
+      ...outline.sections[0]!,
+      id: TECHNICAL_DEVIATION_SECTION_ID,
+      order: 1,
+      title: '技术偏离表',
+      requirement_ids: [],
+      scoring_ids: [],
+      scoring_response_point_ids: [],
+      scoring_response_points: [],
+    }
+    const nextOutline = { ...outline, sections: [technical, { ...outline.sections[0]!, order: 2 }] }
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(nextOutline))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '技术偏离表尚未完成。')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '# 技术方案\n\n已有正文。\n')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
+    const agent = await fresh('partial-technical-deviation')
+
+    const exported = await ctx.bid.exportDocx(agent.session, null)
+
+    expect(exported).toMatchObject({ ok: true })
+    if (!exported.ok) throw new Error('阶段性 Word 导出失败')
+    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_TECHNICAL_DEVIATION_PENDING')
+    const bytes = await readFile(join(workspace.projectRoot, exported.value.path))
+    const document = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
+    const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
+    expect(table.match(/<w:tr(?:\s[^>]*)?>[^]*?<\/w:tr>/gu)).toHaveLength(1)
+    expect(table).not.toContain('满足、响应')
+    expect(document).toContain('已有正文')
+    expect(document).not.toContain('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
   })
 
   it('阶段重置等待执行器结束期间拒绝 Word 写入，重置结束后恢复', async () => {

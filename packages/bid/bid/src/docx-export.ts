@@ -6,6 +6,7 @@ import { collectDocxChapterBody } from './docx-content.ts'
 import { BidStageExecutionError, type BidStage, type StageArtifact, type StageValidationIssue, type StageValidationResult } from './control-plane-contract.ts'
 import type { BidWorkspace } from './index.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID } from './outline-generation-artifacts.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
@@ -19,6 +20,16 @@ import type { BidRunContext } from './run-coordinator.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
 import type { NativeVisioExport } from './native-visio.ts'
+import { parseTechnicalDeviationTable, type TechnicalDeviationTable } from './technical-deviation-table.ts'
+
+/** 同一次正文读取产生的 DOCX Markdown 与固定技术偏离表数据。 */
+export interface DocxExportSnapshot {
+  readonly markdown: string
+  readonly technicalDeviation:
+    | { status: 'ready'; table: TechnicalDeviationTable; artifact: string }
+    | { status: 'pending'; artifact: string; issue: StageValidationIssue }
+    | { status: 'absent' }
+}
 
 async function readProjectFile(workspace: BidWorkspace, path: string): Promise<string> {
   const absolute = within(workspace.projectRoot, path)
@@ -65,14 +76,23 @@ export async function executeDocxExport(
   templateId?: DocxTemplateId | null,
   nativeExport?: NativeVisioExport,
 ): Promise<StageArtifact[]> {
-  const markdown = await collectDocxMarkdown(workspace, run.signal, templateId)
+  const snapshot = await collectDocxExportSnapshot(workspace, run.signal, templateId)
+  if (snapshot.technicalDeviation.status === 'pending') {
+    throw new BidStageExecutionError([{
+      ...snapshot.technicalDeviation.issue,
+      message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节后重新导出 Word。',
+    }])
+  }
   if (!destination.endsWith('.docx')) throw new Error('bid-output-must-be-docx')
   const source = destination.slice(0, -'.docx'.length) + '.md'
   const absolute = within(workspace.projectRoot, source)
   await assertNoLinkedPath(workspace.root, absolute)
   run.signal.throwIfAborted()
-  await run.commits.writeText(absolute, markdown)
-  await workspace.exportDocxMarkdown(markdown, destination, templateId, run.commits, undefined, nativeExport)
+  await run.commits.writeText(absolute, snapshot.markdown)
+  await workspace.exportDocxMarkdown(snapshot.markdown, destination, templateId, run.commits, undefined, nativeExport,
+    snapshot.technicalDeviation.status === 'ready'
+      ? { mode: 'fill', table: snapshot.technicalDeviation.table }
+      : undefined)
   return [{ stage: 'docx_export', type: 'docx', path: destination }]
 }
 
@@ -87,6 +107,21 @@ export async function collectDocxMarkdown(
   signal?: AbortSignal,
   templateId?: DocxTemplateId | null,
 ): Promise<string> {
+  return (await collectDocxExportSnapshot(workspace, signal, templateId)).markdown
+}
+
+/**
+ * 从同一次章节读取生成 Markdown 与固定技术偏离表结构；二次读取通过后才返回。
+ * @param workspace 当前项目。
+ * @param signal 取消信号。
+ * @param templateId 本次导出模板；用于识别与 Word 相同的显式图题编号。
+ * @returns 一致的导出快照。
+ */
+export async function collectDocxExportSnapshot(
+  workspace: BidWorkspace,
+  signal?: AbortSignal,
+  templateId?: DocxTemplateId | null,
+): Promise<DocxExportSnapshot> {
   signal?.throwIfAborted()
   const outlinePath = 'outline/confirmed-outline.json'
   const outlineSource = await readProjectFile(workspace, outlinePath)
@@ -97,6 +132,24 @@ export async function collectDocxMarkdown(
     signal?.throwIfAborted()
     const content_path = `chapters/sections/${String(index + 1).padStart(4, '0')}.md`
     chapters.set(section.id, { content_path, markdown: await readSavedChapter(workspace, content_path) })
+  }
+  const technicalChapter = chapters.get(TECHNICAL_DEVIATION_SECTION_ID)
+  let technicalDeviation: DocxExportSnapshot['technicalDeviation'] = { status: 'absent' }
+  if (technicalChapter !== undefined) {
+    try {
+      technicalDeviation = {
+        status: 'ready',
+        table: parseTechnicalDeviationTable(technicalChapter.markdown),
+        artifact: technicalChapter.content_path,
+      }
+    } catch {
+      const issue = {
+        code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID',
+        message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节。',
+        artifact: technicalChapter.content_path,
+      }
+      technicalDeviation = { status: 'pending', artifact: technicalChapter.content_path, issue }
+    }
   }
   if (!outline.sections.some(section => section.writable ? chapters.get(section.id)?.markdown.trim() : section.summary?.trim())) {
     throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_NO_SAVED_CHAPTERS', message: '当前还没有已保存的正文。' }])
@@ -154,7 +207,7 @@ export async function collectDocxMarkdown(
       figureNumbers,
     ))
   }
-  return `${parts.join('\n\n')}\n`
+  return { markdown: `${parts.join('\n\n')}\n`, technicalDeviation }
 }
 
 /**

@@ -6,6 +6,7 @@ import type { DocxFormatInterpretation, FormatValues } from './docx-format-contr
 import type { BidWorkspace } from './index.ts'
 import { renderDocx } from './docx-render.ts'
 import { readDocxXml } from './docx-template.ts'
+import type { TechnicalDeviationTable } from './technical-deviation-table.ts'
 
 interface XmlNode {
   type?: string
@@ -119,7 +120,13 @@ interface FilledTemplateTables {
 export interface DocxTemplateCompositionOptions {
   omitSourceTitle?: boolean
   fixedSectionTitle?: string
+  technicalDeviation?: TechnicalDeviationComposition
 }
+
+/** 系统默认模板固定技术偏离表的确定性填充方式。 */
+export type TechnicalDeviationComposition =
+  | { mode: 'fill'; table: TechnicalDeviationTable }
+  | { mode: 'clear' }
 
 function tableInfo(node: XmlNode): TableInfo | undefined {
   const rows = children(node, 'tr')
@@ -293,33 +300,46 @@ function tableScore(target: TableInfo, source: TableInfo): number {
 
 const technicalDeviationSemantics = ['index', 'subject', 'requirement', 'response', 'deviation', 'remark'] as const
 
-function findTechnicalDeviationSourceTable(sourceElements: XmlNode[]): TableInfo {
-  const start = sourceElements.findIndex(node => local(node.name) === 'p'
-    && paragraphStyleIds(node).includes('Heading1') && normalized(text(node)) === normalized('技术偏离表'))
-  if (start < 0) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
-  const end = sourceElements.findIndex((node, index) => index > start && local(node.name) === 'p'
-    && paragraphStyleIds(node).includes('Heading1'))
-  const section = sourceElements.slice(start + 1, end < 0 ? sourceElements.length : end)
-  const matches = section.flatMap(element => descendants({ elements: [element] }, 'tbl'))
-    .map(tableInfo).filter((item): item is TableInfo => item !== undefined)
-    .filter(info => info.gridColumns === 6 && info.header.length === 6
-      && technicalDeviationSemantics.every(semantic => info.header.some(header => header.semantic === semantic)))
-  if (matches.length === 0) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
-  if (matches.length > 1) throw new Error('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_AMBIGUOUS')
-  return matches[0]!
-}
-
-function assertTechnicalDeviationTable(info: TableInfo, expectedRows: number): void {
+function assertTechnicalDeviationTable(info: TableInfo, expectedRows: number, requireContent: boolean): void {
   if (info.gridColumns !== 6 || info.header.length !== 6 || info.rows.length !== expectedRows
     || info.rows.some(row => logicalCells(row, info.gridColumns).length !== 6)) {
     throw new Error('BID_DOCX_TECHNICAL_DEVIATION_TARGET_INVALID')
   }
+  if (!requireContent) return
   for (const row of info.rows) {
     const values = rowValues(info, row)
     if (technicalDeviationSemantics.slice(0, 5).some(semantic => (values.get(semantic) ?? '') === '')) {
       throw new Error('BID_DOCX_TECHNICAL_DEVIATION_FILL_INCOMPLETE')
     }
   }
+}
+
+function fillTechnicalDeviationTable(
+  originalTarget: TableInfo,
+  composition: TechnicalDeviationComposition,
+): TableInfo {
+  const rows = composition.mode === 'fill' ? composition.table.rows : []
+  const target = resizeTechnicalDeviationTable(originalTarget, rows.length)
+  for (const [index, targetRow] of target.rows.entries()) {
+    const source = rows[index]
+    if (source === undefined) continue
+    const values: Record<(typeof technicalDeviationSemantics)[number], string> = {
+      index: String(index + 1),
+      subject: source.subject,
+      requirement: source.requirement,
+      response: source.response,
+      deviation: source.deviation,
+      remark: source.remark,
+    }
+    for (const header of target.header) {
+      const semantic = technicalDeviationSemantics.find(candidate => candidate === header.semantic)
+      if (semantic === undefined) continue
+      const targetCell = cellAt(targetRow, target.gridColumns, header.start)
+      if (targetCell !== undefined && !verticalMergeContinues(targetCell.node)) setCellText(targetCell.node, values[semantic])
+    }
+  }
+  assertTechnicalDeviationTable(target, rows.length, composition.mode === 'fill')
+  return target
 }
 
 function siblingLocation(root: XmlNode, target: XmlNode): { parent: XmlNode; index: number } | undefined {
@@ -362,6 +382,7 @@ function fillTemplateTables(
   templateBody: XmlNode,
   sourceElements: XmlNode[],
   mapping: DocxFormatInterpretation['mapping'],
+  technicalDeviation?: TechnicalDeviationComposition,
 ): FilledTemplateTables {
   const targets = descendants(templateBody, 'tbl').map(tableInfo).filter((item): item is TableInfo => item !== undefined)
   const sources = sourceElements.flatMap(element => descendants({ elements: [element] }, 'tbl'))
@@ -369,27 +390,23 @@ function fillTemplateTables(
   const unusedSources = new Set(sources)
   const consumed = new Map<XmlNode, XmlNode>()
   const movedCaptions: XmlNode[] = []
-  const technicalSource = targets.some(isTechnicalDeviationTable)
-    ? findTechnicalDeviationSourceTable(sourceElements) : undefined
   for (const originalTarget of targets) {
-    const technicalDeviation = isTechnicalDeviationTable(originalTarget)
-    const source = technicalDeviation && technicalSource !== undefined
-      ? { candidate: technicalSource, score: 0 }
-      : [...unusedSources].filter(candidate => candidate !== technicalSource)
-        .map(candidate => ({ candidate, score: tableScore(originalTarget, candidate) }))
-        .sort((left, right) => right.score - left.score)[0]
+    if (technicalDeviation !== undefined && isTechnicalDeviationTable(originalTarget)) {
+      fillTechnicalDeviationTable(originalTarget, technicalDeviation)
+      continue
+    }
+    const source = [...unusedSources]
+      .map(candidate => ({ candidate, score: tableScore(originalTarget, candidate) }))
+      .sort((left, right) => right.score - left.score)[0]
     if (source === undefined || source.score < 0) continue
-    const target = technicalDeviation
-      ? resizeTechnicalDeviationTable(originalTarget, source.candidate.rows.length)
-      : originalTarget
+    const target = originalTarget
     const sourceRows = new Set(source.candidate.rows)
     for (const [index, targetRow] of target.rows.entries()) {
       const sourceRow = matchingSourceRow(target, targetRow, source.candidate, sourceRows)
         ?? source.candidate.rows[index]
       if (sourceRow === undefined || !sourceRows.has(sourceRow)) continue
       sourceRows.delete(sourceRow)
-      const fillable = technicalDeviation ? target.header : target.editable
-      for (const editable of fillable) {
+      for (const editable of target.editable) {
         const sourceHeader = source.candidate.header.find(header => header.semantic === editable.semantic)
         const targetCell = cellAt(targetRow, target.gridColumns, editable.start)
         const sourceCell = sourceHeader === undefined ? undefined
@@ -398,13 +415,7 @@ function fillTemplateTables(
           setCellText(targetCell.node, sourceCell.value)
         }
       }
-      if (technicalDeviation) {
-        const indexHeader = target.header.find(header => header.semantic === 'index')
-        const indexCell = indexHeader === undefined ? undefined : cellAt(targetRow, target.gridColumns, indexHeader.start)
-        if (indexCell !== undefined) setCellText(indexCell.node, String(index + 1))
-      }
     }
-    if (technicalDeviation) assertTechnicalDeviationTable(target, source.candidate.rows.length)
     unusedSources.delete(source.candidate)
     if (sourceRows.size === 0) {
       consumed.set(source.candidate.node, target.node)
@@ -701,7 +712,7 @@ function insertBody(body: XmlNode, elements: XmlNode[]): void {
  * @param templateBytes 用户上传的原始 DOCX。
  * @param contentBytes 单节 DOCX 正文，最终节属性不会进入模板。
  * @param mapping 模板样式角色映射。
- * @param options 模板拥有的标题和固定章节。
+ * @param options 模板拥有的标题、固定章节及结构化技术偏离表。
  * @returns 以原模板为包骨架的 DOCX。
  */
 export async function applyTemplateContent(
@@ -725,7 +736,7 @@ export async function applyTemplateContent(
   const targetBody = documentBody(targetDocument)
   const sourceBody = documentBody(sourceDocument)
   const sourceElements = (sourceBody.elements ?? []).filter(node => local(node.name) !== 'sectPr')
-  const filled = fillTemplateTables(targetBody, sourceElements, mapping)
+  const filled = fillTemplateTables(targetBody, sourceElements, mapping, options.technicalDeviation)
   const inserted = withoutTemplateOwnedBlocks(removeConsumedBlocks(sourceElements, filled.consumed), options)
   const merged = [...inserted, ...filled.movedCaptions]
   await mergeStyles(targetZip, sourceZip, targetContentTypes, sourceContentTypes,
@@ -752,7 +763,7 @@ export async function applyTemplateContent(
  * @param values 模板提取并确认的正文排版值。
  * @param mapping 模板样式角色映射。
  * @param flowchartMode 流程图使用 SVG 预览或供 Word COM 替换的 marker。
- * @param options 模板拥有的标题和固定章节。
+ * @param options 模板拥有的标题、固定章节及结构化技术偏离表。
  * @returns 合成 DOCX 与正文图片摘要。
  */
 export async function composeDocxFromTemplate(

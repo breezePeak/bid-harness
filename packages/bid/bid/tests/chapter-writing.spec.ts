@@ -117,6 +117,7 @@ it('技术偏离表读取全部 Requirement 但保持空 coverage ownership', ()
   expect(prompt).toContain('R-1')
   expect(prompt).toContain('R-2')
   expect(prompt).toContain('只读 Requirement 上下文，不代表本章拥有正文 coverage')
+  expect(prompt).toContain('序号｜标的名称｜招标技术要求｜投标响应内容｜偏离程度｜备注')
 })
 
 it('技术偏离表 Writer 候选在保存前拒绝空表和缺行', async () => {
@@ -141,6 +142,14 @@ it('技术偏离表 Writer 候选在保存前拒绝空表和缺行', async () =>
       handoff: emptyHandoff(section.id),
     },
   }
+  const legacyIssues = await validateChapterCandidate(workspace, context, {
+    ...candidate,
+    markdown: '# 技术偏离表\n\n表 技术偏离表\n\n| 招标要求摘要 | 响应状态 | 偏离内容/原因 | 替代方案或承诺 | 正文依据章节 |\n| --- | --- | --- | --- | --- |\n| 要求 | 完全响应 | 无偏离 | 我方将完成具体技术响应并保留验收记录。 | 第二章 |',
+  }, [])
+  expect(legacyIssues).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: 'TECHNICAL_DEVIATION_HEADERS_INVALID' }),
+  ]))
+
   const issues = await validateChapterCandidate(workspace, context, candidate, [])
   expect(issues.map(issue => issue.message)).toEqual(expect.arrayContaining([
     '期望 2 行，实际 1 行。',
@@ -148,6 +157,12 @@ it('技术偏离表 Writer 候选在保存前拒绝空表和缺行', async () =>
     '第 1 行“招标技术要求”为空。',
     '第 1 行“投标响应内容”缺少具体响应。',
   ]))
+
+  const accepted = await validateChapterCandidate(workspace, context, {
+    ...candidate,
+    markdown: '# 技术偏离表\n\n表 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 测试项目 | 系统应完成第 1 项技术能力。 | 我方将完成第一项技术能力并保留实施与验收记录。 | 完全响应 | |\n| 2 | 测试项目 | 系统应完成第 2 项技术能力。 | 我方将完成第二项技术能力并保留实施与验收记录。 | 完全响应 | |',
+  }, [])
+  expect(accepted).toEqual([])
 })
 
 it('段落修订保留原 metadata 和流程图定义', () => {

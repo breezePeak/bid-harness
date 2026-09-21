@@ -82,7 +82,8 @@ import {
   DOCX_TEMPLATE_UPLOAD_PATH,
 } from './docx-format-contract.ts'
 import type { DocxFormatRequest, DocxFormatView, DocxFormatSuggestion, DocxTemplateId, DocxTemplateLibraryView, DocxTemplateUploadResult } from './docx-format-contract.ts'
-import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxMarkdown } from './docx-export.ts'
+import { assessDocxExportPageTarget, executeDocxExport, validateDocxExport, collectDocxExportSnapshot, collectDocxMarkdown } from './docx-export.ts'
+import type { TechnicalDeviationComposition } from './docx-compose.ts'
 import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-estimate.ts'
 import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -4962,7 +4963,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!isBidMainSession(session)) throw new Error('Word 预览需要标书项目会话。')
     const workspace = new BidWorkspace(projectKey(session), workspaceConfig(this.config))
     const view = await readDocxFormat(workspace, templateId)
-    const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图1 图片标题\n\n表1 表格标题\n'
+    const markdown = '# 文档标题\n\n# 1 一级标题\n\n## 1.1 二级标题\n\n这是一段正文示例……\n\n图 图片标题\n\n表 表格标题\n\n| 表头示例 | 说明 |\n| --- | --- |\n| 单元格示例 | 非正文 |\n'
     const rendered = await renderDocx(workspace, markdown, view.state.resolved, false, 'a4')
     return { ...view, fingerprint: docxFingerprint(markdown, view, rendered.assetHash), previewHtml: rendered.html }
   }
@@ -5020,13 +5021,25 @@ export class BidHostRuntime extends TypertRemoteService {
       workspace: BidWorkspace,
       control: BidControlState,
     ): Promise<BidDocxExportResult> => {
-      if (!getBidClientProjection(control).allowedActions.includes('export_docx')) {
+      const projection = getBidClientProjection(control)
+      if (!projection.allowedActions.includes('export_docx')) {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
+      const partialExport = projection.runtime.stage === 'chapter_writing'
+        && projection.runtime.status !== 'completed'
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
-      const markdown = await collectDocxMarkdown(workspace, undefined, templateId)
+      const snapshot = await collectDocxExportSnapshot(workspace, undefined, templateId)
+      if (!partialExport && snapshot.technicalDeviation.status === 'pending') {
+        throw new BidStageExecutionError([{
+          ...snapshot.technicalDeviation.issue,
+          message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节后重新导出 Word。',
+        }])
+      }
+      const technicalDeviation: TechnicalDeviationComposition | undefined = snapshot.technicalDeviation.status === 'ready'
+        ? { mode: 'fill', table: snapshot.technicalDeviation.table }
+        : snapshot.technicalDeviation.status === 'pending' ? { mode: 'clear' } : undefined
       const source = destination.slice(0, -'.docx'.length) + '.md'
-      await workspace.exportDocxMarkdown(markdown, destination, templateId, undefined, source)
+      await workspace.exportDocxMarkdown(snapshot.markdown, destination, templateId, undefined, source, undefined, technicalDeviation)
       const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
@@ -5039,10 +5052,14 @@ export class BidHostRuntime extends TypertRemoteService {
         code: DOCX_TOC_UPDATE_DEFERRED,
         message: '当前环境未检测到 Microsoft Word，已保留真实目录字段；在 Word 中打开文档时将自动请求刷新目录和页码。',
       }] : []
+      const technicalDeviationWarnings = snapshot.technicalDeviation.status === 'pending' ? [{
+        code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_PENDING',
+        message: '技术偏离表章节尚未形成可导出的完整数据，本次为阶段性 Word；技术偏离表数据行已留空，其余已保存正文已正常导出。',
+      }] : []
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
         message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
-      }, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
+      }, ...technicalDeviationWarnings, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
     try {
@@ -7060,6 +7077,7 @@ export class BidWorkspace {
    * @param commits - Long Run commit scope; independent DOCX operations may omit it.
    * @param sourceSnapshot - Optional project-relative Markdown snapshot published with the DOCX.
    * @param nativeExport - Optional Visio/Word capability injection; defaults to the Windows COM implementation.
+   * @param technicalDeviation - Structured rows or an explicit clear operation for the built-in template.
    * @returns Workspace-relative DOCX path.
    */
   async exportDocxMarkdown(
@@ -7069,6 +7087,7 @@ export class BidWorkspace {
     commits?: BidCommitScope,
     sourceSnapshot?: string,
     nativeExport?: NativeVisioExport,
+    technicalDeviation?: TechnicalDeviationComposition,
   ): Promise<string> {
     if (!this.config.enableDocxExport) throw new Error('bid-docx-export-disabled')
     const destinationPath = within(this.projectRoot, destination)
@@ -7082,7 +7101,8 @@ export class BidWorkspace {
       this,
       markdown,
       view,
-      { flowchartMode, ...(coverData === undefined ? {} : { coverData }) },
+      { flowchartMode, ...(coverData === undefined ? {} : { coverData }),
+        ...(technicalDeviation === undefined ? {} : { technicalDeviation }) },
     )
     const office = nativeExport ?? createNativeVisioExport()
     const flowcharts = extractFlowchartSpecs(markdown)

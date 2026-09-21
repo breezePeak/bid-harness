@@ -465,4 +465,23 @@ describe('Word 导出页面', () => {
     expect(feedback.closest('header')).not.toBeNull()
     expect(feedback.className).toContain('exportFeedbackError')
   })
+
+  it('导出校验失败时展示首个正文问题及其错误码', async () => {
+    const { props, actions } = fixture()
+    vi.mocked(actions.generate).mockRejectedValueOnce(Object.assign(new Error('当前已保存正文无法导出，请检查正文完整性。'), {
+      issues: [{
+        code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID',
+        message: '技术偏离表必须使用六列标准表头，请修订正文后重新导出 Word。',
+      }],
+    }))
+    render(<BidWordExport {...props}/>)
+    await screen.findByTitle('Word 效果预览')
+
+    fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
+
+    const feedback = await screen.findByText('技术偏离表必须使用六列标准表头，请修订正文后重新导出 Word。 (DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID)')
+    expect(feedback.closest('header')).not.toBeNull()
+    expect(feedback.className).toContain('exportFeedbackError')
+    expect(screen.queryByText('当前已保存正文无法导出，请检查正文完整性。 (BID_DOCX_EXPORT_FAILED)')).toBeNull()
+  })
 })

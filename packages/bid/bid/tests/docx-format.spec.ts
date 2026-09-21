@@ -344,6 +344,31 @@ describe('项目 Word 格式链路', () => {
     expect(document).not.toContain('图 图片标题')
   })
 
+  it('正文与紧邻表格的表题分别使用各自 alignment', async () => {
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    values['body.alignment'] = 'left'
+    values['tableCaption.alignment'] = 'center'
+    const rendered = await renderDocx(project, '正文。\n\n表 表格标题\n\n| 列1 | 列2 |\n| --- | --- |\n| A | B |', values)
+    expect(rendered.html).toMatch(/<p style="[^"]*text-align:left[^"]*">正文。<\/p>/u)
+    expect(rendered.html).toMatch(/<p style="[^"]*text-align:center[^"]*">表1 表格标题<\/p><table/u)
+    const document = await (await JSZip.loadAsync(rendered.bytes)).file('word/document.xml')!.async('string')
+    const caption = (document.match(/<w:p>[^]*?<\/w:p>/gu) ?? []).find(paragraph => paragraph.includes('表格标题')) ?? ''
+    expect(caption).toContain('<w:jc w:val="center"/>')
+  })
+
+  it('preview=true 在缺少合法表题组合时按表题在前、表格在后补样例', async () => {
+    const values = defaultDocxFormatState(formatFields(defaults)).resolved
+    values['body.alignment'] = 'left'
+    values['tableCaption.alignment'] = 'center'
+    const rendered = await renderDocx(await workspace(), '# 文档\n\n正文。', values, true)
+    const captionIndex = rendered.html.indexOf('表格标题排版示例（非正文）')
+    const tableIndex = rendered.html.indexOf('<table', captionIndex)
+    expect(captionIndex).toBeGreaterThan(-1)
+    expect(tableIndex).toBeGreaterThan(captionIndex)
+    expect(rendered.html.slice(rendered.html.lastIndexOf('<p', captionIndex), tableIndex)).toContain('text-align:center')
+  })
+
   it('表格只使用正文中的显式表题，不从第一行表头自动起名', async () => {
     const project = await workspace()
     const values = defaultDocxFormatState(formatFields(defaults)).resolved

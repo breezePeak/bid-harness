@@ -13,6 +13,7 @@ import type {
   FormatRole,
   FormatValue,
   FormatValues,
+  StageValidationIssue,
 } from '@deepseek-ai/dsh-bid/control-plane'
 import { Button, IconPlusOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './BidWordExport.module.css'
@@ -55,6 +56,11 @@ const estimateLabel = (value: BidPageEstimate | undefined): string => value?.sta
   ? `${value.method === 'rendered' ? '预计导出' : '约'} ${value.pages} 页`
   : value?.status === 'empty' ? '正文尚未生成' : value?.status === 'unavailable' ? '页数暂不可用' : '正在测算…'
 const templateEstimateKey = (id: DocxTemplateId | null): string => id ?? 'default'
+const exportErrorMessage = (reason: unknown): string => {
+  if (!(reason instanceof Error)) return 'Word 导出失败，请重试。'
+  const issue = (reason as Error & { readonly issues?: readonly StageValidationIssue[] }).issues?.[0]
+  return issue === undefined ? reason.message : `${issue.message} (${issue.code})`
+}
 
 /** 项目级模板库、冲突确认和样式预览。 */
 export function BidWordExport({
@@ -205,9 +211,8 @@ export function BidWordExport({
             setStatus(message)
             setExportFeedback({ status: 'success', text: message })
           } catch (reason: unknown) {
-            const message = reason instanceof Error ? reason.message : 'Word 导出失败，请重试。'
+            const message = exportErrorMessage(reason)
             setExportFeedback({ status: 'error', text: message })
-            throw reason
           }
         })
       }}>导出 Word</Button>

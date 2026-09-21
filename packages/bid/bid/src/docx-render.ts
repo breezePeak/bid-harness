@@ -90,6 +90,12 @@ function inferTableColumnWidths(table: Node): number[] {
 const isTechnicalDeviationTableHeading = (node: Node): boolean => node.type === 'heading'
   && content(node).replace(/^\s*\d+(?:\.\d+)*\s+/u, '').trim() === '技术偏离表'
 
+function hasValidTableCaptionPair(nodes: Node[], values: FormatValues): boolean {
+  return nodes.some((node, index) => node.type === 'paragraph'
+    && captionRole(values, content(node)) === 'tableCaption'
+    && nodes[index + 1]?.type === 'table')
+}
+
 function splitDocumentSections(nodes: Node[]): Array<{ landscape: boolean; nodes: Node[] }> {
   const sections: Array<{ landscape: boolean; nodes: Node[] }> = []
   let technicalDeviationDepth: number | undefined
@@ -473,14 +479,13 @@ export async function renderDocx(
       samples.push({ type: 'paragraph', children: [{ type: 'text', value: '正文排版示例（非正文）：此处展示字体、字号、行距和段落间距。' }] })
     if (!all.some(node => node.type === 'list'))
       samples.push(...fromMarkdown('- 列表样例（非正文）\n  - 嵌套列表样例').children)
-    if (!all.some(node => node.type === 'table'))
-      samples.push(...fromMarkdown('| 表头示例 | 说明 |\n| --- | --- |\n| 单元格样例 | 非正文 |',
-        { extensions: [gfm()],
-          mdastExtensions: [gfmFromMarkdown()] }).children)
+    if (!hasValidTableCaptionPair(root.children, values))
+      samples.push(...fromMarkdown('表 表格标题排版示例（非正文）\n\n| 表头示例 | 说明 |\n| --- | --- |\n| 单元格样例 | 非正文 |', {
+        extensions: [gfm()],
+        mdastExtensions: [gfmFromMarkdown()],
+      }).children)
     if (!all.some(node => /^图\s*\d/u.test(content(node))))
       samples.push({ type: 'paragraph', children: [{ type: 'text', value: '图 1 图题排版示例（非正文）' }] })
-    if (!all.some(node => /^表\s*\d/u.test(content(node))))
-      samples.push({ type: 'paragraph', children: [{ type: 'text', value: '表 1 表题排版示例（非正文）' }] })
     const sample = await blocks(samples)
     const imageSample = all.some(node => node.type === 'image' || node.type === 'imageReference') ? '' : '<figure><svg role="img" aria-label="图片占位示例，非正文" width="320" height="100" viewBox="0 0 320 100" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="318" height="98" fill="none" stroke="currentColor"/><text x="35" y="55">图片占位示例（非正文）</text></svg></figure>'
     if (samples.length || imageSample)

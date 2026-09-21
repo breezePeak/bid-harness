@@ -24,6 +24,7 @@
   "exclude": [
     "tests/bid-branch-summary.e2e.ts",
     "tests/bid-revision.e2e.ts",
+    "tests/bid-run-notice.e2e.ts",
     "tests/scaffold.ts",
     "tests/scaffold-hermetic.e2e.ts",
     "tests/startup-rpc-budget.e2e.ts",

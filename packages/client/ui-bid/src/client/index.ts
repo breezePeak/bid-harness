@@ -461,7 +461,7 @@ export function apply(ctx: ClientContext): void {
     }),
   }, BidStagePanel))
   const wordRemote = (sessionId: SessionId): BidWordExportInjected => {
-    type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
+    type Result<T> = { ok: true; value: T } | { ok: false; error: Parameters<typeof actionFailure>[0] }
     const remote = ctx.remote.bid
     const unwrap = <T>(result: Result<T>): T => { if (!result.ok) throw actionFailure(result.error); return result.value }
     return {

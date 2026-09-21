@@ -57,10 +57,17 @@ describe('DOCX 模板合成', () => {
   it('按固定章节唯一六列表格填满内置技术偏离表', async () => {
     const project = await workspace()
     const values = defaultDocxFormatState(formatFields(project.config)).resolved
-    const rows = [1, 2, 3].map(index => `| ${index} | 智慧平台 | 技术要求 ${index} 的完整原文 | 我方将执行具体响应措施 ${index}、完成验证并保留交付记录。 | 满足、响应 | |`).join('\n')
-    const markdown = `# 技术标\n\n# 技术偏离表\n\n表 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n${rows}\n\n# 实施方案\n\n正文。\n`
+    const rows = [1, 2, 3].map(index => ({
+      index: String(index),
+      subject: '智慧平台',
+      requirement: `技术要求 ${index} 的完整原文`,
+      response: `我方将执行具体响应措施 ${index}、完成验证并保留交付记录。`,
+      deviation: '满足、响应',
+      remark: '',
+    }))
+    const markdown = '# 技术标\n\n# 实施方案\n\n正文。\n'
     const result = await composeDocxFromTemplate(project, await readBuiltInDocxTemplateBytes(), markdown, values, {}, 'svg', {
-      omitSourceTitle: true, fixedSectionTitle: '技术偏离表',
+      omitSourceTitle: true, fixedSectionTitle: '技术偏离表', technicalDeviation: { mode: 'fill', table: { rows } },
     })
     const document = await (await JSZip.loadAsync(result.bytes)).file('word/document.xml')!.async('string')
     const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
@@ -71,6 +78,20 @@ describe('DOCX 模板合成', () => {
       '我方将执行具体响应措施 1、完成验证并保留交付记录。', '我方将执行具体响应措施 2、完成验证并保留交付记录。',
       '我方将执行具体响应措施 3、完成验证并保留交付记录。', '满足、响应']) expect(table).toContain(value)
     expect(table).not.toMatch(/<w:(?:gridSpan|vMerge)\b/u)
+    expect((document.match(/<w:tbl>[^]*?<\/w:tbl>/gu) ?? [])
+      .filter(candidate => candidate.includes('dsh-technical-deviation-table'))).toHaveLength(1)
+  })
+
+  it('阶段性导出清空内置技术偏离表的全部预置数据行', async () => {
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const result = await composeDocxFromTemplate(project, await readBuiltInDocxTemplateBytes(), '# 技术标\n\n# 实施方案\n\n正文。\n', values, {}, 'svg', {
+      omitSourceTitle: true, fixedSectionTitle: '技术偏离表', technicalDeviation: { mode: 'clear' },
+    })
+    const document = await (await JSZip.loadAsync(result.bytes)).file('word/document.xml')!.async('string')
+    const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
+    expect(table.match(/<w:tr(?:\s[^>]*)?>[^]*?<\/w:tr>/gu)).toHaveLength(1)
+    for (const value of ['满足、响应', '待填写', '示例']) expect(table).not.toContain(value)
   })
 
   it('合并 numbering 定义时同步源根节点使用的命名空间', async () => {
@@ -79,9 +100,12 @@ describe('DOCX 模板合成', () => {
     templateZip.file('word/numbering.xml', targetNumbering.replace(/\sxmlns:w15="[^"]+"/u, ''))
     const project = await workspace()
     const values = defaultDocxFormatState(formatFields(project.config)).resolved
-    const markdown = '# 技术标\n\n# 技术偏离表\n\n表 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 平台 | 系统应支持审计日志 | 我方将启用审计日志、执行留存检索并完成核验记录。 | 满足、响应 | |\n\n# 实施方案\n\n## 交付步骤\n\n正文。\n'
+    const markdown = '# 技术标\n\n# 技术偏离表\n\n表 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 平台 | 系统应支持审计日志 | 我方将启用审计日志、执行留存检索并完成核验记录。 | 满足、响应 | |\n\n# 实施方案\n\n## 交付步骤\n\n正文。\n\n表 普通表格\n\n| 内容 |\n| --- |\n| 说明 |\n'
     const result = await composeDocxFromTemplate(project, await templateZip.generateAsync({ type: 'nodebuffer' }), markdown, values, {}, 'svg', {
-      omitSourceTitle: true, fixedSectionTitle: '技术偏离表',
+      omitSourceTitle: true, fixedSectionTitle: '技术偏离表', technicalDeviation: { mode: 'fill', table: { rows: [{
+        index: '1', subject: '平台', requirement: '系统应支持审计日志',
+        response: '我方将启用审计日志、执行留存检索并完成核验记录。', deviation: '满足、响应', remark: '',
+      }] } },
     })
     const numbering = await (await JSZip.loadAsync(result.bytes)).file('word/numbering.xml')!.async('string')
     expect(numbering).toContain('w15:restartNumberingAfterBreak')
