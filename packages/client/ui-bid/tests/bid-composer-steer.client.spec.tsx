@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
-import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ComposerSubmitForward, ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BidComposerContext, type BidComposerContextProps } from '../src/client/BidComposerContext.tsx'
 import { CHAPTER_DRAG_TYPE, createBidRevisionStore } from '../src/client/revision-reference.ts'
 
@@ -17,7 +17,7 @@ const chapter: BidReviewChapterView = {
 
 function composer() {
   const store = createBidRevisionStore().create()
-  const sendMessage = vi.fn(async () => {})
+  const forward = vi.fn<ComposerSubmitForward>(async () => ({ kind: 'success' }))
   let submit: ComposerSubmitHandler | undefined
   const registerSubmit = vi.fn((handler: ComposerSubmitHandler) => {
     submit = handler
@@ -32,7 +32,6 @@ function composer() {
     ),
     actions: store.actions,
     getChapter: vi.fn(async () => chapter),
-    sendMessage,
     registerSubmit,
   } as BidComposerContextProps
   const view = render(<div data-composer-card=""><BidComposerContext {...props} /></div>)
@@ -42,9 +41,15 @@ function composer() {
   return {
     ...view,
     store,
-    sendMessage,
+    forward,
     drop,
-    submit: (...args: Parameters<ComposerSubmitHandler>) => submit!(...args),
+    submit: (
+      text: string,
+      imageIds: Parameters<ComposerSubmitHandler>[1],
+      signal: AbortSignal | undefined,
+      mode: Parameters<ComposerSubmitHandler>[3] = 'queue',
+      submissionId = 'submission-1',
+    ) => submit!(text, imageIds, signal, mode, submissionId, forward),
   }
 }
 
@@ -56,7 +61,7 @@ it('章节引用提交原样透传 steer 和 signal，发送成功后才清除�
   await act(async () => {
     await expect(view.submit('请继续这一节', [], signal, 'steer')).resolves.toEqual({ kind: 'success' })
   })
-  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'), 'steer', signal, undefined)
+  expect(view.forward).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'), [])
   expect(view.store.getSnapshot().reference).toBeNull()
 })
 
@@ -68,17 +73,44 @@ it('章节引用默认保留 queue，未带引用交还普通发送', async () =
   await act(async () => {
     await expect(view.submit('排队修改', [], undefined, 'queue')).resolves.toEqual({ kind: 'success' })
   })
-  expect(view.sendMessage).toHaveBeenCalledWith(expect.stringContaining('排队修改'), 'queue', undefined, undefined)
+  expect(view.forward).toHaveBeenCalledWith(expect.stringContaining('排队修改'), [])
 })
 
 it('章节引用发送失败不清除引用且不重复发送', async () => {
   const view = composer()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
-  view.sendMessage.mockRejectedValueOnce(new Error('发送失败'))
+  view.forward.mockRejectedValueOnce(new Error('发送失败'))
   await act(async () => {
     await expect(view.submit('失败后保留', [], undefined, 'steer')).rejects.toThrow('发送失败')
   })
-  expect(view.sendMessage).toHaveBeenCalledTimes(1)
+  expect(view.forward).toHaveBeenCalledTimes(1)
+  expect(view.store.getSnapshot().reference).not.toBeNull()
+})
+
+it('章节引用可随图片发送并保留图片顺序，包括仅图片消息', async () => {
+  const view = composer()
+  view.drop()
+  await screen.findByText('章节 · 1 实施方案')
+  const images = ['image-1', 'image-2'] as never
+  await act(async () => {
+    await expect(view.submit('', images, undefined, 'steer', 'submission-image')).resolves.toEqual({ kind: 'success' })
+  })
+  expect(view.forward).toHaveBeenCalledWith(expect.stringContaining('"kind":"bid_chapter_reference"'), images)
+  expect(view.store.getSnapshot().reference).toBeNull()
+})
+
+it('forward 返回失败时保留引用且不重复发送', async () => {
+  const view = composer()
+  view.drop()
+  await screen.findByText('章节 · 1 实施方案')
+  view.forward.mockResolvedValueOnce({ kind: 'error', text: '发送失败' })
+  await act(async () => {
+    await expect(view.submit('失败后保留', ['image-1'] as never, undefined)).resolves.toEqual({
+      kind: 'error',
+      text: '发送失败',
+    })
+  })
+  expect(view.forward).toHaveBeenCalledTimes(1)
   expect(view.store.getSnapshot().reference).not.toBeNull()
 })

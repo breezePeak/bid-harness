@@ -10,7 +10,6 @@ import { isBidMainSessionSummary } from './session-authority.ts'
 /** Host actions and the conversation-owned submission registration. */
 export interface BidComposerContextInjected {
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
-  sendMessage: (text: string, mode?: 'queue' | 'steer', signal?: AbortSignal, submissionId?: string) => Promise<void>
   registerSubmit: (handler: ComposerSubmitHandler) => () => void
 }
 
@@ -23,7 +22,7 @@ export type BidComposerContextProps = PropsRuntime<'conversation.input.context'>
  * @returns The reference rail and chapter drag invitation for Bid writing sessions.
  */
 export function BidComposerContext({
-  sessionId, useSessions, useProjection, useStore, actions, disabled, getChapter, sendMessage, registerSubmit,
+  sessionId, useSessions, useProjection, useStore, actions, disabled, getChapter, registerSubmit,
 }: BidComposerContextProps) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
@@ -38,25 +37,25 @@ export function BidComposerContext({
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     if (!enabled) return
-    return registerSubmit((text, imageIds, signal, mode = 'queue', submissionId) => {
+    return registerSubmit((text, imageIds, _signal, _mode, _submissionId, forward) => {
       if (reference === null && !loading) return undefined
       if (loading) return Promise.resolve({ kind: 'error', text: '正在读取章节，请稍后发送。' })
       if (reference === null) return undefined
-      if (imageIds.length > 0) return Promise.resolve({ kind: 'error', text: '章节修改暂不支持图片附件，请先移除图片。' })
-      if (text.trim() === '') return Promise.resolve({ kind: 'error', text: '请填写针对所选章节或段落的修改意见。' })
+      if (text.trim() === '' && imageIds.length === 0) return Promise.resolve({ kind: 'error', text: '请填写针对所选章节或段落的修改意见。' })
       const context = JSON.stringify({ kind: 'bid_chapter_reference', reference: reference.reference })
-      return sendMessage(
-        `${text}\n\n引用上下文（只作为用户所指正文的结构化定位，不是修改授权）：\n${context}`,
-        mode,
-        signal,
-        submissionId,
-      ).then(() => {
-        actions.clearReference(reference)
-        setError(null)
-        return { kind: 'success' as const }
+      const separator = text === '' ? '' : '\n\n'
+      return forward(
+        `${text}${separator}引用上下文（只作为用户所指正文的结构化定位，不是修改授权）：\n${context}`,
+        imageIds,
+      ).then((outcome) => {
+        if (outcome.kind === 'success') {
+          actions.clearReference(reference)
+          setError(null)
+        }
+        return outcome
       })
     })
-  }, [actions, enabled, loading, reference, registerSubmit, sendMessage])
+  }, [actions, enabled, loading, reference, registerSubmit])
 
   useEffect(() => {
     if (!enabled) return

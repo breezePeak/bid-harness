@@ -33,6 +33,7 @@ const PiAiConfig = Schema.object({
       name: Schema.string(),
       contextWindow: Schema.number(),
       maxTokens: Schema.number(),
+      input: Schema.array(Schema.union(['text', 'image'])),
     })),
     reasoning: Schema.union(['off', 'high']),
   })),
@@ -215,6 +216,52 @@ describe('model list editing', () => {
       expectedRevision: 3,
       ops: [{ op: 'set', path: ['providers', 'openai', 'models'], value: [{ id: 'acme-large', contextWindow: 65_536 }] }],
     })
+  })
+
+  it('stores and restores a pi-ai model input-capability override', async () => {
+    const { mutate } = await mountSection()
+    openEditor('openai')
+    fireEvent.click(screen.getByRole('button', { name: en.addModel }))
+    fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'vision-model' } })
+    expandModel(1)
+
+    const text = screen.getByLabelText<HTMLInputElement>(`${en.modelInputText} 1`)
+    const image = screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`)
+    expect(text.checked).toBe(false)
+    expect(image.checked).toBe(false)
+    expect(screen.getByText(en.modelInputInherited)).toBeTruthy()
+    fireEvent.click(text)
+    fireEvent.click(image)
+    expect(text.checked).toBe(true)
+    expect(image.checked).toBe(true)
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{
+      id: 'vision-model',
+      input: ['text', 'image'],
+    }])
+  })
+
+  it('deletes the pi-ai input field when restoring inheritance', async () => {
+    const { mutate } = await mountSection({
+      providers: {
+        openai: {
+          baseURL: 'https://proxy.example/v1',
+          models: [{ id: 'vision-model', input: ['text', 'image'], maxTokens: 4096 }],
+        },
+      },
+    })
+    openEditor('openai')
+    expandModel(1)
+    expect(screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`).checked).toBe(true)
+    fireEvent.click(screen.getByLabelText(`${en.resetModelInput} 1`))
+    expect(screen.getByText(en.modelInputInherited)).toBeTruthy()
+    expect(screen.getByLabelText<HTMLInputElement>(`${en.modelInputImage} 1`).checked).toBe(false)
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'vision-model', maxTokens: 4096 }])
   })
 
   it('names a duplicate model id in the edit flow too', async () => {

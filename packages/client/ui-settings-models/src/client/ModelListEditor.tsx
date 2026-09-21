@@ -18,7 +18,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { DiscoveredModelView, IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { formatCapacity, parseCapacity } from './DeepSeekModelsEditor.tsx'
+import { formatCapacity, ModelInputCapabilities, parseCapacity } from './DeepSeekModelsEditor.tsx'
 import type { DeepSeekModelDraft } from './DeepSeekModelsEditor.tsx'
 import { messageOf } from './store.ts'
 import type { en } from './locales.ts'
@@ -210,7 +210,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     })
   }
 
-  const patch = (index: number, next: Record<string, string | number | undefined>): void => {
+  const patch = (index: number, next: Record<string, unknown>): void => {
     onChange(models.map((model, at) => {
       if (at !== index) return model
       // Rebuilt rather than spread over: an emptied optional field has to leave
@@ -429,6 +429,14 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                     onChange={(event) => { editCapacity(index, 'maxTokens', event.target.value) }}
                   />
                 </label>
+                <ModelInputCapabilities
+                  model={model}
+                  field="input"
+                  index={index}
+                  disabled={disabled}
+                  t={t}
+                  onChange={(value) => { patch(index, { input: value }) }}
+                />
               </div>
             )
             : null}

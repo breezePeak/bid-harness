@@ -2,6 +2,8 @@ import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { z, ZodError } from 'zod'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -13,7 +15,7 @@ import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-plannin
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
 import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-headings.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
-import { createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
+import { ChapterWriterImageInputError, createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
 import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence, type ChapterRevisionReviewIssue } from './chapter-writing-review.ts'
 import {
   attachGlobalComplianceReview,
@@ -91,6 +93,7 @@ import {
   webMaterialIdentity,
 } from './evidence-mapping-artifacts.ts'
 import { validateFlowchartAnchors } from './flowchart.ts'
+import { renderFlowchartImage } from './flowchart-image.ts'
 import { missingTableCaptionLines } from './docx-numbering.ts'
 import {
   type ModelStageExecutionOptions,
@@ -537,6 +540,48 @@ export function renderChapterSubagentRepairTask(
     ...renderStageRepairIssues(issues),
     `只修复当前章节 ${context.section.id} 的完整正文与语义 metadata。`,
   ].join('\n')
+}
+
+function flowchartSignature(candidate: AcceptedChapterCandidate): string {
+  return JSON.stringify(candidate.metadata.flowcharts)
+}
+
+async function renderChapterFlowchartVisualFollowup(
+  agent: Agent,
+  candidate: AcceptedChapterCandidate,
+  writerCandidate: unknown,
+): Promise<ContentBlock[]> {
+  const attachments = agent.ctx.get('attachments')
+  if (attachments === undefined) {
+    throw new Error('S5 流程图视觉复核失败：当前运行环境未挂载附件存储。')
+  }
+  if (!attachments.imageLimits.mediaTypes.includes('image/png')) {
+    throw new Error('S5 流程图视觉复核失败：当前运行环境不接受 PNG 图片。')
+  }
+  if (candidate.metadata.flowcharts.length > attachments.imageLimits.maxImagesPerMessage) {
+    throw new Error(`S5 流程图视觉复核失败：本章 ${String(candidate.metadata.flowcharts.length)} 张流程图超过单消息图片上限 ${String(attachments.imageLimits.maxImagesPerMessage)}。`)
+  }
+  const rendered = await Promise.all(candidate.metadata.flowcharts.map(flowchart => renderFlowchartImage(flowchart)))
+  const refs = await attachments.saveImages(rendered.map((image, index) => ({
+    data: new Uint8Array(image.png),
+    mediaType: 'image/png' as const,
+    name: `${candidate.section_id}-flowchart-${String(index + 1)}.png`,
+  })))
+  return [
+    {
+      type: 'text',
+      text: [
+        '这是你刚刚生成的流程图真实渲染结果。请直接查看图片本身，不要根据 spec 猜测。',
+        '重点检查文字是否超出节点边框或被裁切、节点是否重叠、箭头是否穿过文字或节点、连线标签是否重叠、标题是否被截断，以及整体布局是否过挤或不可读。',
+        '如果存在问题，直接修改完整 candidate 中对应 metadata.flowcharts；如果不存在问题，原样重新提交当前完整 candidate，表示视觉确认完成。两种情况都必须再次调用 submit_chapter，不能只返回补丁或文字说明。',
+        `当前完整 candidate：${JSON.stringify(writerCandidate)}`,
+      ].join('\n'),
+    },
+    ...refs.flatMap((attachment, index): ContentBlock[] => [
+      { type: 'text', text: `流程图 ${String(index + 1)}：${candidate.metadata.flowcharts[index]?.title ?? ''}` },
+      { type: 'image', attachment },
+    ]),
+  ]
 }
 
 async function resolveChapterReadLocations(
@@ -2472,6 +2517,8 @@ async function runChapterWriting(
           return { issues: reviewIssues }
         }
       }
+      let pendingVisualPrompt: ContentBlock[] | undefined
+      let renderedFlowchartSignature: string | undefined
       const preserved = effectiveRevision === undefined && batchTask === undefined ? checkpoint?.drafts.get(sectionId) : undefined
       let firstAttempt = 0
       if (preserved !== undefined) {
@@ -2512,7 +2559,11 @@ async function runChapterWriting(
             : effectiveRevision !== undefined
               ? `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
               : contextPrompt
-        const prompt = attempt === 0 ? basePrompt : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues)
+        const visualPrompt = pendingVisualPrompt
+        pendingVisualPrompt = undefined
+        const prompt = visualPrompt ?? (attempt === 0
+          ? basePrompt
+          : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues))
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
         await persistLog()
@@ -2523,6 +2574,7 @@ async function runChapterWriting(
         }
         let retryInfrastructure = false
         let stopAfterReview = false
+        let stopAfterVisualIssue = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
@@ -2610,6 +2662,40 @@ async function runChapterWriting(
                   : [{ code: 'CHAPTER_SUBAGENT_CANDIDATE_INVALID', message: 'Chapter Subagent 返回值不符合严格 candidate Schema。' }])
             }
           }
+          if (candidate !== undefined && issues.length === 0 && candidate.metadata.flowcharts.length > 0) {
+            const signature = flowchartSignature(candidate)
+            if (signature !== renderedFlowchartSignature) {
+              if (attempt === maxWriterAttempts - 1) {
+                issues.push({
+                  code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_LIMIT',
+                  message: `流程图在 ${String(maxWriterAttempts)} 次 Writer 尝试内仍未完成对最终真实渲染图的视觉确认。`,
+                  path: 'metadata.flowcharts',
+                })
+                stopAfterVisualIssue = true
+              } else {
+                rejectedCandidate = projectChapterWriterCandidate(candidate, references)
+                try {
+                  await run.assertImageInput()
+                  pendingVisualPrompt = await renderChapterFlowchartVisualFollowup(agent, candidate, rejectedCandidate)
+                  renderedFlowchartSignature = signature
+                  issues.push({
+                    code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_REQUIRED',
+                    message: 'Host 已把真实流程图 PNG 发回同一 Writer，等待视觉确认后的完整候选。',
+                    path: 'metadata.flowcharts',
+                  })
+                } catch (error: unknown) {
+                  issues.push({
+                    code: error instanceof ChapterWriterImageInputError
+                      ? 'CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED'
+                      : 'CHAPTER_FLOWCHART_VISUAL_REVIEW_UNAVAILABLE',
+                    message: error instanceof Error ? error.message : 'S5 流程图视觉复核不可用。',
+                    path: 'metadata.flowcharts',
+                  })
+                  stopAfterVisualIssue = true
+                }
+              }
+            }
+          }
           const accepted = candidate !== undefined && issues.length === 0
           if (accepted) assertCurrentInput()
           log.attempts.push({
@@ -2666,8 +2752,13 @@ async function runChapterWriting(
             await persistLog()
             throw error
           }
-          latestStopReason = 'infrastructure-error'
-          issues.push({
+          const imageUnsupported = error instanceof ChapterWriterImageInputError
+          latestStopReason = imageUnsupported ? 'image-input-unsupported' : 'infrastructure-error'
+          issues.push(imageUnsupported ? {
+            code: 'CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED',
+            message: error.message,
+            path: 'metadata.flowcharts',
+          } : {
             code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR',
             message: '当前 Writer 会话创建、续写或结果读取失败，需要重新建立会话。',
           })
@@ -2685,13 +2776,16 @@ async function runChapterWriting(
           })
           await persistLog()
           latestIssues = issues
-          retryInfrastructure = effectiveRevision === undefined && infrastructureRetries < options.maxRepairAttempts
+          stopAfterVisualIssue = imageUnsupported
+          retryInfrastructure = !imageUnsupported && effectiveRevision === undefined
+            && infrastructureRetries < options.maxRepairAttempts
           await run.dispose()
           if (activeWriterIds.get(sectionId) === String(run.id)) activeWriterIds.delete(sectionId)
           writer = undefined
           capturedByChild.delete(String(run.id))
           if (effectiveRevision !== undefined) throw error
         }
+        if (stopAfterVisualIssue) break
         if (stopAfterReview) break
         if (retryInfrastructure) {
           infrastructureRetries += 1

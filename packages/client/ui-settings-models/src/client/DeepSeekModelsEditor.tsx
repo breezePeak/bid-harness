@@ -17,10 +17,62 @@ import styles from './ModelsSection.module.css'
 export type DeepSeekModelDraft = Record<string, unknown>
 
 /** The catalog fields this editor writes. */
-type CatalogField = 'id' | 'name' | 'contextWindow' | 'maxTokens'
+type CatalogField = 'id' | 'name' | 'contextWindow' | 'maxTokens' | 'inputModalities'
 
 /** The two token counts edited as K/M-suffixed text behind a row's disclosure. */
 type CapacityField = 'contextWindow' | 'maxTokens'
+
+type InputModality = 'text' | 'image'
+
+const INPUT_MODALITIES = ['text', 'image'] as const satisfies readonly InputModality[]
+
+/** Shared input-capability controls for DeepSeek and pi-ai model rows. */
+export function ModelInputCapabilities(props: {
+  model: DeepSeekModelDraft
+  field: 'input' | 'inputModalities'
+  index: number
+  disabled: boolean
+  t: (key: keyof typeof en) => string
+  onChange: (value: readonly InputModality[] | undefined) => void
+}): ReactNode {
+  const configured = Array.isArray(props.model[props.field])
+  const selected = new Set(configured
+    ? (props.model[props.field] as unknown[]).filter((value): value is InputModality =>
+      value === 'text' || value === 'image')
+    : [])
+  const toggle = (modality: InputModality, checked: boolean): void => {
+    if (checked) selected.add(modality)
+    else selected.delete(modality)
+    const next = INPUT_MODALITIES.filter(value => selected.has(value))
+    props.onChange(next.length === 0 ? undefined : next)
+  }
+  return <fieldset className={styles['modelCapabilities']}>
+    <legend className={styles['modelFieldLabel']}>{props.t('modelInput')}</legend>
+    {INPUT_MODALITIES.map(modality => <label key={modality} className={styles['modelCapabilityOption']}>
+      <input
+        type="checkbox"
+        checked={selected.has(modality)}
+        disabled={props.disabled}
+        aria-label={`${props.t(modality === 'text' ? 'modelInputText' : 'modelInputImage')} ${String(props.index + 1)}`}
+        onChange={(event) => { toggle(modality, event.target.checked) }}
+      />
+      {props.t(modality === 'text' ? 'modelInputText' : 'modelInputImage')}
+    </label>)}
+    <span className={styles['modelCapabilityState']}>
+      {configured ? props.t('modelInputCustomized') : props.t('modelInputInherited')}
+    </span>
+    {configured
+      ? <button
+        type="button"
+        className={styles['linkButton']}
+        disabled={props.disabled}
+        aria-label={`${props.t('resetModelInput')} ${String(props.index + 1)}`}
+        onClick={() => { props.onChange(undefined) }}
+      >{props.t('resetModelInput')}</button>
+      : null}
+    <small className={styles['modelCapabilityHint']}>{props.t('modelInputHint')}</small>
+  </fieldset>
+}
 
 /** Row index encoded in an editing-buffer key. */
 function rowOf(key: string): number {
@@ -343,6 +395,14 @@ export function DeepSeekModelsEditor(props: DeepSeekModelsEditorProps): ReactNod
                     <div className={styles['modelAdvanced']}>
                       {capacityField(model, index, 'contextWindow', props.defaultContextWindow)}
                       {capacityField(model, index, 'maxTokens', props.defaultMaxTokens)}
+                      <ModelInputCapabilities
+                        model={model}
+                        field="inputModalities"
+                        index={index}
+                        disabled={props.disabled}
+                        t={props.t}
+                        onChange={(value) => { update(index, 'inputModalities', value) }}
+                      />
                     </div>
                   )
                   : null}

@@ -518,6 +518,36 @@
   line-height: 18px;
 }
 
+.modelCapabilities {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 0 0;
+  border: 0;
+}
+
+.modelCapabilityOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.modelCapabilityState,
+.modelCapabilityHint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.modelCapabilityHint {
+  flex-basis: 100%;
+}
+
 .modelEmpty {
   padding: 12px;
   border: 1px dashed var(--dsw-alias-border-l3);

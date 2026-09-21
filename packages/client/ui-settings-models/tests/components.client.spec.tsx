@@ -588,6 +588,53 @@ describe('ModelsSection', () => {
     })
   })
 
+  it('stores and restores DeepSeek input modalities without changing sibling fields', async () => {
+    const onChange = vi.fn()
+    const model = { id: 'vision-model', maxTokens: 4096 }
+    const view = render(<DeepSeekModelsEditor
+      models={[model]}
+      overridden={true}
+      defaultContextWindow={1_000_000}
+      defaultMaxTokens={256_000}
+      t={t}
+      disabled={false}
+      onChange={onChange}
+      onReset={vi.fn()}
+    />)
+    expandRow(1)
+    fireEvent.click(screen.getByLabelText(`${en.modelInputText} 1`))
+    expect(onChange).toHaveBeenLastCalledWith([{ ...model, inputModalities: ['text'] }])
+
+    view.rerender(<DeepSeekModelsEditor
+      models={[{ ...model, inputModalities: ['text'] }]}
+      overridden={true}
+      defaultContextWindow={1_000_000}
+      defaultMaxTokens={256_000}
+      t={t}
+      disabled={false}
+      onChange={onChange}
+      onReset={vi.fn()}
+    />)
+    fireEvent.click(screen.getByLabelText(`${en.modelInputImage} 1`))
+    expect(onChange).toHaveBeenLastCalledWith([{
+      ...model,
+      inputModalities: ['text', 'image'],
+    }])
+
+    view.rerender(<DeepSeekModelsEditor
+      models={[{ ...model, inputModalities: ['text', 'image'] }]}
+      overridden={true}
+      defaultContextWindow={1_000_000}
+      defaultMaxTokens={256_000}
+      t={t}
+      disabled={false}
+      onChange={onChange}
+      onReset={vi.fn()}
+    />)
+    fireEvent.click(screen.getByLabelText(`${en.resetModelInput} 1`))
+    expect(onChange).toHaveBeenLastCalledWith([model])
+  })
+
   it('keeps unreadable context-window text on screen and refuses the write', async () => {
     const { mutate } = await mountDeepSeekCard()
     fireEvent.click(screen.getByText(en.customized))

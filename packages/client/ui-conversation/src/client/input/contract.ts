@@ -20,13 +20,20 @@ export type DraftAttachmentId = Branded<'DraftAttachmentId'>
 /** 业务提交的结果；失败时输入框保留草稿。 */
 export type ComposerSubmitOutcome = SubmitOutcome
 
+/** 以当前提交事务继续普通富内容发送；省略图片参数时沿用原始图片。 */
+export type ComposerSubmitForward = (
+  text: string,
+  imageIds?: readonly DraftAttachmentId[],
+) => Promise<ComposerSubmitOutcome>
+
 /** 返回 undefined 时使用普通消息路径；返回 Promise 后完全由业务处理，不因失败回退。 */
 export type ComposerSubmitHandler = (
   text: string,
   imageIds: readonly DraftAttachmentId[],
   signal: AbortSignal | undefined,
-  mode?: InputSubmitMode,
-  submissionId?: string,
+  mode: InputSubmitMode,
+  submissionId: string,
+  forward: ComposerSubmitForward,
 ) => Promise<ComposerSubmitOutcome> | undefined
 
 /** 每个会话最多一个业务提交处理器，由注册方释放。 */

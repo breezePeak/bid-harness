@@ -9,6 +9,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { makeTranslate, SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
 import type { QueuedMessage, SessionFace } from '@deepseek-ai/dsh-client-runtime/client'
 import { ComposerBlockRegistry } from '../src/client/input/blocks.ts'
+import type { ComposerSubmitHandler } from '../src/client/input/contract.ts'
 import { InputHub } from '../src/client/input/hub.ts'
 import { ConversationController, UnsupportedImageMediaTypeError } from '../src/client/service.ts'
 import { zh } from '../src/client/locales.ts'
@@ -78,7 +79,14 @@ describe('ConversationController', () => {
     b.shell.setDraft('仅修改引用段落')
     b.shell.submit()
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
-    expect(handler).toHaveBeenCalledWith('仅修改引用段落', [], expect.any(AbortSignal), 'queue', expect.any(String))
+    expect(handler).toHaveBeenCalledWith(
+      '仅修改引用段落',
+      [],
+      expect.any(AbortSignal),
+      'queue',
+      expect.any(String),
+      expect.any(Function),
+    )
     expect(b.prompt).not.toHaveBeenCalled()
     pending.reject(new Error('正文已更新，请重新选择。'))
     await vi.waitFor(() => {
@@ -155,6 +163,49 @@ describe('ConversationController', () => {
     b.shell.submit('steer')
     await vi.waitFor(() => { expect(handler).toHaveBeenCalledOnce() })
     expect(b.prompt).not.toHaveBeenCalled()
+    dispose()
+    await b.runtime.dispose()
+  })
+
+  it('business forwarding reuses the ordinary rich-content transaction without recursion', async () => {
+    const b = await bench()
+    const sessionId = b.runtime.sessions.behavior('s1').sessionId
+    const signal = new AbortController().signal
+    const handler = vi.fn((
+      _text: string,
+      _imageIds: readonly unknown[],
+      receivedSignal: AbortSignal | undefined,
+      mode: 'queue' | 'steer',
+      submissionId: string,
+      forward: Parameters<ComposerSubmitHandler>[5],
+    ) => {
+      expect(receivedSignal).toBe(signal)
+      expect(mode).toBe('steer')
+      expect(submissionId).toBe('submission-forward')
+      return forward('附加引用上下文')
+    })
+    const dispose = b.root.submitHandlers.register(sessionId, handler)
+    const session = b.runtime.sessions.behavior('s1')
+    b.root.beginOutgoing(session, '原始文本', [], 'submission-forward', 'steer')
+
+    await expect(b.root.sendSession(
+      session,
+      '原始文本',
+      [],
+      'steer',
+      signal,
+      'submission-forward',
+    )).resolves.toEqual({ kind: 'success' })
+
+    expect(handler).toHaveBeenCalledOnce()
+    expect(b.beginOutgoing).toHaveBeenCalledOnce()
+    expect(b.prompt).toHaveBeenCalledOnce()
+    expect(b.prompt).toHaveBeenCalledWith(
+      [{ type: 'text', text: '附加引用上下文' }],
+      'steer',
+      signal,
+      'submission-forward',
+    )
     dispose()
     await b.runtime.dispose()
   })

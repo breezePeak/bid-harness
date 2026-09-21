@@ -287,13 +287,47 @@ export class ConversationController extends Service implements IConversation {
       beginOutgoing?: (id: string, content: readonly PromptContentPart[], mode?: InputSubmitMode) => void
       updateOutgoing?: (id: string, status: 'failed', error: string) => void
     }
-    const submitted = this.submissions.get(session.sessionId)?.(text, imageIds, signal, mode, submissionId)
+    const ordinarySubmit = (forwardText: string, forwardImageIds: readonly DraftAttachmentId[] = imageIds) =>
+      this.submitRichContent(
+        session,
+        forwardText,
+        forwardImageIds,
+        mode,
+        signal,
+        submissionId,
+        hasLocalHandoff,
+      )
+    const submitted = this.submissions.get(session.sessionId)?.(
+      text,
+      imageIds,
+      signal,
+      mode,
+      submissionId,
+      ordinarySubmit,
+    )
     if (submitted !== undefined) {
       const outcome = await submitted
       if (outcome.kind === 'error') {
         owner.updateOutgoing?.(submissionId, 'failed', outcome.text ?? 'message failed')
       }
       return outcome
+    }
+    return ordinarySubmit(text)
+  }
+
+  /** Submit text and draft images through the ordinary framework-owned prompt path. */
+  private async submitRichContent(
+    session: SessionFace,
+    text: string,
+    imageIds: readonly DraftAttachmentId[],
+    mode: InputSubmitMode,
+    signal: AbortSignal | undefined,
+    submissionId: string,
+    hasLocalHandoff: boolean,
+  ): Promise<SubmitOutcome> {
+    const owner = session as SessionFace & {
+      beginOutgoing?: (id: string, content: readonly PromptContentPart[], mode?: InputSubmitMode) => void
+      updateOutgoing?: (id: string, status: 'failed', error: string) => void
     }
     if (!hasLocalHandoff) owner.beginOutgoing?.(
       submissionId,

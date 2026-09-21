@@ -12,7 +12,9 @@ import {
 } from './model-stage-repair.ts'
 import {
   attachTenderAnalysisSubmissionRuntime,
+  TENDER_ANALYSIS_PRIVATE_TOOLS,
   TENDER_ANALYSIS_SUBMISSION_TOOLS,
+  TENDER_ANALYSIS_VIEW_TOOLS,
   type TenderLocator,
 } from './tender-analysis-submission.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
@@ -27,6 +29,7 @@ const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
 }
 
 const TECHNICAL_SCORING_ANCHORS = '技术评分、技术评审、技术评价、评分标准、评分表、评审因素、分值、满分'
+const TENDER_ANALYSIS_VIEW_TOOL_NAMES: ReadonlySet<string> = new Set(TENDER_ANALYSIS_VIEW_TOOLS)
 
 function renderLocators(locators: readonly TenderLocator[]): string[] {
   return locators.flatMap(locator => [
@@ -61,10 +64,11 @@ export function renderTenderAnalysisTask(
     `首先读取：${workspacePath}/manifest.json，并确认下列全部成功 tender locator：`,
     ...renderLocators(locators),
     '只把 locator 对应的 role=tender 且 parseStatus=success 文件作为权威来源；reference、reference_bid 和 outline_framework 不得产生招标要求、评分项或合规规则。',
-    `本阶段可用普通工具仅为：${task.allowedTools.join(', ')}。另有 S2 私有工具：${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')}。不得调用 write、bash、web_search、web_fetch 或 subagent。`,
+    `本阶段可用检索工具仅为：${task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name)).join(', ')}。另有 S2 私有工具：${TENDER_ANALYSIS_PRIVATE_TOOLS.join(', ')}。不得调用 write、bash、web_search、web_fetch 或 subagent。`,
     '当前只分析技术标。保留项目背景、建设目标和范围；技术、功能、性能、接口、参数和架构要求；实施、进度、质量、测试、验收、培训、运维和技术服务要求；数据、网络和信息安全；技术评分项；以及影响技术方案的强制要求或否决条件。',
     '排除投标报价、价格评分、报价计算、付款、保证金、财务、纳税、营业执照、法定代表人、授权委托、资格审查、注册资本、纯商务信誉、纯商务评分和纯商务合同条款。人员、案例、服务和承诺按是否直接影响技术方案编写或技术评分响应判断，不得按关键词机械过滤。',
     '使用 grep 定位候选 chunk，再用 read 阅读原文；语义被截断时读取 chunks/index.json 后继续读相邻 chunk。不得一次读取完整 document.md。',
+    '优先使用 grep/read。只有表格、图片或版式关系无法从解析文本可靠判断时，才用 view_pdf_page 查看已定位的 PDF 页；不得逐页浏览整份 PDF，也不得把页面图片当作 OCR 文本来源。',
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
     '项目事实或摘要逐项调用 submit_project_fact；数组字段每次只提交一个语义项。未知单值不必提交，Host 自动填 null；未知数组由 Host 自动填 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
     '每个可独立响应的原子技术要求调用 submit_requirement。只有在招标评分体系中作为独立评审对象出现，并具有独立名称及总分、权重或独立区块边界的评分大项，才调用 submit_scoring_item；在 criterion 中保留该大项的完整评分细则。大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项；重复看到同一评分区块时使用 action=replace。每个影响技术方案的强制或合规规则调用 submit_compliance_item。',
@@ -144,7 +148,7 @@ export function renderTenderAnalysisRepairTask(
     `当前 Compliance refs：${JSON.stringify(staged.compliance?.map(item => item.compliance_ref) ?? [])}`,
     `当前 staged snapshot：${JSON.stringify(snapshot)}`,
     '当前 staged state 和 lastIssues 已由 Host 提供。修改已有记录时使用 action=replace，且只能使用其中真实存在的 replace_ref；缺少新记录时使用 action=create，且不得传 replace_ref。禁止根据当前数量、revision、排序、上一轮记忆或历史 Run 推算 R*、S*、C* runtime ref。',
-    `普通工具仍只允许：${task.allowedTools.join(', ')}；使用 ${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')} 补充、replace 或再次 finish。`,
+    `检索工具仍只允许：${task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name)).join(', ')}；必要时可用 ${TENDER_ANALYSIS_VIEW_TOOLS.join(', ')} 复核版式，并使用 ${TENDER_ANALYSIS_SUBMISSION_TOOLS.join(', ')} 补充、replace 或再次 finish。`,
     '不得 write analysis/*.json、重新提交整套 Artifact 或推进 S3。只有 finish_tender_analysis 返回 completed=true 才能停止。',
   ].join('\n')
 }
@@ -179,12 +183,13 @@ export async function executeTenderAnalysis(
   const existing = await validateTenderAnalysis(workspace, 'tender_analysis', artifacts)
   if (existing.ok) return artifacts
   const runtime = await attachTenderAnalysisSubmissionRuntime(agent, workspace, await workspace.readManifest(), options.run)
-  const allowedTools = [...task.allowedTools, ...TENDER_ANALYSIS_SUBMISSION_TOOLS]
+  const ordinaryTools = task.allowedTools.filter(name => !TENDER_ANALYSIS_VIEW_TOOL_NAMES.has(name))
+  const allowedTools = [...ordinaryTools, ...TENDER_ANALYSIS_PRIVATE_TOOLS]
   const allowed = new Set(allowedTools)
   let liftRestriction: (() => void) | undefined
   let liftGuard: (() => void) | undefined
   try {
-    liftRestriction = tools.restrict({ allow: task.allowedTools })
+    liftRestriction = tools.restrict({ allow: ordinaryTools })
     liftGuard = tools.guard(exec => allowed.has(exec.name)
       ? undefined
       : `Bid stage ${task.stage} allows only ${allowedTools.join(', ')}`)
@@ -195,7 +200,7 @@ export async function executeTenderAnalysis(
         source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
       })
       const protocol = installMainAgentProtocol(agent, {
-        privateTools: TENDER_ANALYSIS_SUBMISSION_TOOLS,
+        privateTools: TENDER_ANALYSIS_PRIVATE_TOOLS,
         internalTools: allowedTools,
         setPrivateToolsEnabled: (enabled) => { runtime.setToolsEnabled(enabled) },
         label: 'S2 Tender Analysis',

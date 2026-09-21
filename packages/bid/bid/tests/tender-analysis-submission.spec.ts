@@ -111,6 +111,84 @@ async function finishReviewed(value: Fixture): Promise<unknown> {
 }
 
 describe('tender-analysis staged submission runtime', () => {
+  it('renders one located PDF page as an image block and rejects routes without image input', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-pdf-page-')))
+    const pdf = await readFile(join(import.meta.dirname, 'fixtures/bid-document.pdf'))
+    await workspace.import([
+      { name: 'tender.pdf', role: 'tender', bytes: new Uint8Array(pdf) },
+      { name: 'appendix.md', role: 'tender', bytes: new TextEncoder().encode('补充技术要求。') },
+    ])
+    const definitions = new Map<string, ToolDefinition>()
+    let savedPng: Uint8Array | undefined
+    const saveImage = vi.fn(async (input: { data: Uint8Array; mediaType: string; name?: string }) => {
+      savedPng = input.data
+      return {
+        attachmentId: 'att-pdf-page',
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 1191,
+        height: 1684,
+        name: input.name,
+      }
+    })
+    const resolveModelInfo = vi.fn(async () => ({ inputModalities: ['text', 'image'] }))
+    const services = {
+      tools: {
+        register(definition: ToolDefinition) {
+          definitions.set(definition.name, definition)
+          return () => { definitions.delete(definition.name) }
+        },
+      },
+      attachments: {
+        imageLimits: {
+          maxImageBytes: 8_000_000,
+          maxImagesPerMessage: 4,
+          maxMessageImageBytes: 16_000_000,
+          maxImagePixels: 4_000_000,
+          maxImageDimension: 2_048,
+          mediaTypes: ['image/png'],
+        },
+        saveImage,
+      },
+      llm: { resolveModelInfo },
+    }
+    const agent = {
+      id: 'session',
+      options: { provider: 'test', model: 'vision' },
+      session: { requestHeader: () => undefined },
+      ctx: { get: (name: keyof typeof services) => services[name] },
+    } as unknown as Agent
+    const runtime = await attachTenderAnalysisSubmissionRuntime(
+      agent,
+      workspace,
+      await workspace.readManifest(),
+      createTestBidRunContext(),
+    )
+    const tool = definitions.get('view_pdf_page')
+    expect(tool).toBeDefined()
+    const exec = { agent, signal: new AbortController().signal, concludeTurn: vi.fn() } as unknown as ToolRunContext
+    const result = await tool?.execute({ file_ref: 'T1', page: 1 }, exec) as {
+      page_count: number
+      image: { attachmentId: string }
+    }
+    expect(result).toMatchObject({ page_count: 2, image: { attachmentId: 'att-pdf-page' } })
+    expect(saveImage).toHaveBeenCalledWith(expect.objectContaining({ mediaType: 'image/png', name: 'tender.pdf-page-1.png' }))
+    expect(Array.from(savedPng!.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    const rendered = tool!.output.render({ file_ref: 'T1', page: 1 }, result)
+    expect(rendered[0]?.type).toBe('text')
+    expect(rendered[0]?.type === 'text' ? rendered[0].text : '').toContain('page: 1/2')
+    expect(rendered[1]).toMatchObject({ type: 'image', attachment: { attachmentId: 'att-pdf-page' } })
+
+    resolveModelInfo.mockResolvedValueOnce({ inputModalities: ['text'] })
+    await expect(tool?.execute({ file_ref: 'T1', page: 1 }, exec)).rejects.toThrow('请切换到支持图片输入的模型')
+    await expect(tool?.execute({ file_ref: 'T9', page: 1 }, exec)).rejects.toThrow('未知 tender 引用 T9')
+    resolveModelInfo.mockResolvedValue({ inputModalities: ['text', 'image'] })
+    await expect(tool?.execute({ file_ref: 'T1', page: 3 }, exec)).rejects.toThrow('该文件共 2 页')
+    await expect(tool?.execute({ file_ref: 'T2', page: 1 }, exec)).rejects.toThrow('T2 不是 PDF')
+    expect(saveImage).toHaveBeenCalledOnce()
+    runtime.dispose()
+  })
+
   it('restores durable staged records and restarts an interrupted review at its safe boundary', async () => {
     const value = await fixture(true)
     await submitComplete(value)

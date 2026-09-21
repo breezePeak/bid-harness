@@ -1,6 +1,8 @@
 import { lstat, readFile } from 'node:fs/promises'
-import { posix } from 'node:path'
+import { basename, posix } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ImageAttachmentRef, ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-attachment'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { ZodError, z } from 'zod'
@@ -32,6 +34,15 @@ export const TENDER_ANALYSIS_SUBMISSION_TOOLS = [
   'finish_tender_analysis',
 ] as const
 
+/** S2-private visual inspection tools for successful tender inputs. */
+export const TENDER_ANALYSIS_VIEW_TOOLS = ['view_pdf_page'] as const
+
+/** Every execution-local tool admitted by the S2 protocol. */
+export const TENDER_ANALYSIS_PRIVATE_TOOLS = [
+  ...TENDER_ANALYSIS_VIEW_TOOLS,
+  ...TENDER_ANALYSIS_SUBMISSION_TOOLS,
+] as const
+
 const PROJECT_SINGLE_FIELDS = ['project_name', 'tender_name', 'purchaser', 'owner'] as const
 const PROJECT_LIST_FIELDS = [
   'project_background',
@@ -60,6 +71,10 @@ export interface TenderLocator {
   readonly chunks_path: string
   readonly chunk_index_path: string
   readonly chunks: ReadonlyMap<string, TenderChunkLocator>
+  /** Validated original input path; never rendered to the model. */
+  readonly source_path: string
+  /** Manifest-declared media type for the original input. */
+  readonly media_type: string
 }
 
 /** Model-copied original-text anchor resolved immediately against one tender chunk. */
@@ -348,6 +363,9 @@ export async function buildTenderLocators(workspace: BidWorkspace, manifest: Bid
       if (!(await lstat(absolutePath)).isFile()) throw new Error(`tender-analysis-chunk-invalid:${file.id}:${entry.id}`)
       chunks.set(entry.id, { absolutePath, artifactPath })
     }
+    const sourcePath = within(workspace.projectRoot, file.inputPath)
+    await assertNoLinkedPath(workspace.root, sourcePath)
+    if (!(await lstat(sourcePath)).isFile()) throw new Error(`tender-analysis-source-invalid:${file.id}`)
     return {
       file_ref: `T${String(index + 1)}`,
       file_id: file.id,
@@ -355,8 +373,102 @@ export async function buildTenderLocators(workspace: BidWorkspace, manifest: Bid
       chunks_path: file.chunksPath,
       chunk_index_path: file.chunkIndexPath,
       chunks,
+      source_path: sourcePath,
+      media_type: file.mediaType,
     }
   }))
+}
+
+interface PdfPageViewValue {
+  file_ref: string
+  name: string
+  page: number
+  page_count: number
+  image: ImageAttachmentRef
+}
+
+interface PdfCanvasSurface {
+  canvas: { toBuffer(type: 'image/png'): Uint8Array }
+  context: unknown
+}
+
+interface PdfCanvasFactory {
+  create(width: number, height: number): PdfCanvasSurface
+  destroy(surface: PdfCanvasSurface): void
+}
+
+const pdfPageSchema = z.object({
+  file_ref: z.string().trim().min(1),
+  page: z.number().int().positive(),
+}).strict()
+
+async function assertImageCapableRoute(agent: Agent, exec: ToolRunContext): Promise<void> {
+  const routed = agent.session.requestHeader()?.config
+  const provider = routed?.provider ?? agent.options.provider
+  const model = routed?.model ?? agent.options.model
+  const llm = agent.ctx.get('llm')
+  if (provider === undefined || model === undefined || llm === undefined) {
+    throw new Error('无法查看 PDF 页面：当前模型路由无法解析；请切换到支持图片输入的模型。')
+  }
+  const info = await llm.resolveModelInfo(provider, model, exec.signal)
+  if (info.inputModalities === undefined || !info.inputModalities.includes('image')) {
+    throw new Error(`无法查看 PDF 页面：模型“${model}”未声明图片输入能力；请切换到支持图片输入的模型。`)
+  }
+}
+
+async function renderPdfPage(
+  sourcePath: string,
+  pageNumber: number,
+  limits: ImageAttachmentLimits,
+  signal: AbortSignal,
+): Promise<{ data: Uint8Array; pageCount: number }> {
+  signal.throwIfAborted()
+  const bytes = new Uint8Array(await readFile(sourcePath))
+  signal.throwIfAborted()
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const standardFontDataUrl = new URL('./standard_fonts/', import.meta.resolve('pdfjs-dist/package.json')).href
+  const loading = pdfjs.getDocument({ data: bytes, standardFontDataUrl })
+  const pdf = await loading.promise
+  try {
+    if (pageNumber > pdf.numPages) throw new Error(`PDF 页码超出范围：该文件共 ${String(pdf.numPages)} 页。`)
+    const page = await pdf.getPage(pageNumber)
+    const base = page.getViewport({ scale: 1 })
+    const scale = Math.min(
+      2,
+      limits.maxImageDimension / Math.max(base.width, base.height),
+      Math.sqrt(limits.maxImagePixels / (base.width * base.height)),
+    )
+    const viewport = page.getViewport({ scale })
+    const canvasFactory = pdf.canvasFactory as unknown as PdfCanvasFactory
+    const surface = canvasFactory.create(Math.ceil(viewport.width), Math.ceil(viewport.height))
+    const task = page.render({ canvas: surface.canvas, canvasContext: surface.context, viewport } as never)
+    const cancel = (): void => { task.cancel() }
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      await task.promise
+      signal.throwIfAborted()
+      return { data: new Uint8Array(surface.canvas.toBuffer('image/png')), pageCount: pdf.numPages }
+    } catch (error: unknown) {
+      signal.throwIfAborted()
+      throw error
+    } finally {
+      signal.removeEventListener('abort', cancel)
+      page.cleanup()
+      canvasFactory.destroy(surface)
+    }
+  } finally {
+    await pdf.destroy()
+  }
+}
+
+function pdfPageContent(value: PdfPageViewValue) {
+  return [
+    {
+      type: 'text' as const,
+      text: `<pdf_page>\nfile_ref: ${value.file_ref}\nname: ${value.name}\npage: ${String(value.page)}/${String(value.page_count)}\n</pdf_page>`,
+    },
+    { type: 'image' as const, attachment: value.image },
+  ]
 }
 
 /** Execution-local S2 submission state and tool registrations. */
@@ -477,7 +589,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
     readonly issues: readonly StageValidationIssue[]
     readonly revision: number
   } => {
-    lastIssues = Array.isArray(issue) ? [...issue] : [issue]
+    lastIssues = 'code' in issue ? [issue] : [...issue]
     exec.concludeTurn()
     return { ...result, issues: lastIssues, revision }
   }
@@ -520,15 +632,61 @@ export async function attachTenderAnalysisSubmissionRuntime(
     schema: { type: 'object' as const },
     render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
   }
+  const registerDefinition = (registered: ToolDefinition): void => {
+    definitions.push(registered)
+    if (toolsEnabled) toolDisposers.push(tools.register(registered))
+  }
   const register = (definition: Omit<ToolDefinition, 'output'>): void => {
     const registered: ToolDefinition = {
       ...definition,
       output,
       presentCall: () => ({ card: 'generic', title: definition.name }),
     }
-    definitions.push(registered)
-    if (toolsEnabled) toolDisposers.push(tools.register(registered))
+    registerDefinition(registered)
   }
+
+  registerDefinition({
+    name: 'view_pdf_page',
+    description: '查看一个成功解析的 tender PDF 指定页。仅在 grep/read 无法可靠解释表格、图片或版式时使用；不得逐页浏览整份 PDF。',
+    parameters: schema(pdfPageSchema),
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) => pdfPageContent(value as unknown as PdfPageViewValue),
+    },
+    presentCall: (args) => {
+      const page = (args as { page?: unknown }).page
+      const suffix = typeof page === 'number' || typeof page === 'string' ? ` ${String(page)}` : ''
+      return { card: 'generic', title: `查看 PDF 页面${suffix}` }
+    },
+    async execute(args, exec) {
+      if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
+      const input = toolArgs(args, pdfPageSchema)
+      const locator = locators.find(value => value.file_ref === input.file_ref)
+      if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${input.file_ref}。`])
+      if (locator.media_type !== 'application/pdf') {
+        throw new ToolArgsError([`file_ref: ${input.file_ref} 不是 PDF，不能使用 view_pdf_page。`])
+      }
+      const attachments = agent.ctx.get('attachments')
+      if (attachments === undefined) throw new Error('无法查看 PDF 页面：当前运行环境未挂载附件存储。')
+      if (!attachments.imageLimits.mediaTypes.includes('image/png')) {
+        throw new Error('无法查看 PDF 页面：当前运行环境不接受 PNG 图片。')
+      }
+      await assertImageCapableRoute(agent, exec)
+      const rendered = await renderPdfPage(locator.source_path, input.page, attachments.imageLimits, exec.signal)
+      const image = await attachments.saveImage({
+        data: rendered.data,
+        mediaType: 'image/png',
+        name: `${basename(locator.name)}-page-${String(input.page)}.png`,
+      })
+      return {
+        file_ref: locator.file_ref,
+        name: locator.name,
+        page: input.page,
+        page_count: rendered.pageCount,
+        image,
+      } satisfies PdfPageViewValue
+    },
+  })
   const setToolsEnabled = (enabled: boolean): void => {
     if (disposed || toolsEnabled === enabled) return
     toolsEnabled = enabled

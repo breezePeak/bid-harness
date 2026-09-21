@@ -189,6 +189,11 @@ function promptText(request: SubagentStartRequest): string {
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
+function writerSectionId(request: SubagentStartRequest): string | undefined {
+  const line = promptText(request).split('\n').find(value => value.startsWith('Current Chapter Blueprint：'))
+  return line === undefined ? undefined : (JSON.parse(line.slice('Current Chapter Blueprint：'.length)) as { id: string }).id
+}
+
 function emptyHandoff(section_id: string) {
   return {
     section_id,
@@ -258,8 +263,25 @@ async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
   })}\n`)
 }
 
-function candidateFrom(request: SubagentStartRequest, _valid = true, withWebEvidence = false) {
-  if (promptText(request).includes('Writer Candidate：')) return reviewFrom(request)
+interface TestWriterCandidate {
+  markdown: string
+  metadata: {
+    local_materials_used: unknown[]
+    web_materials_used: unknown[]
+    additional_web_materials: unknown[]
+    unresolved_topics: string[]
+    handoff: Record<string, unknown>
+    flowcharts?: Array<{
+      key: string
+      title: string
+      direction?: 'TB' | 'LR'
+      nodes: Array<{ key: string; type: 'start' | 'end' | 'process' | 'decision' | 'document' | 'subprocess'; text: string }>
+      edges: Array<{ from: string; to: string; label?: string }>
+    }>
+  }
+}
+
+function candidateFrom(request: SubagentStartRequest, _valid = true, withWebEvidence = false): TestWriterCandidate {
   const line = promptText(request).split('\n').find(value => value.startsWith('Current Chapter Blueprint：'))
   if (line === undefined) throw new Error('missing blueprint')
   const section = JSON.parse(line.slice('Current Chapter Blueprint：'.length)) as {
@@ -369,6 +391,30 @@ function fixtureAgent(
   const children = new Map<SessionId, ReturnType<typeof createChild> & { request: SubagentStartRequest; cleanup: Array<() => void> }>()
   const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
   const definitions = new Map<string, ToolDefinition>()
+  const savedImages: Array<{ data: Uint8Array; mediaType: string; name?: string }> = []
+  const resolveModelInfo = vi.fn(async () => ({ inputModalities: ['text', 'image'] }))
+  const attachments = {
+    imageLimits: {
+      maxImageBytes: 8_000_000,
+      maxImagesPerMessage: 20,
+      maxMessageImageBytes: 32_000_000,
+      maxImagePixels: 8_000_000,
+      maxImageDimension: 4_096,
+      mediaTypes: ['image/png'],
+    },
+    async saveImages(inputs: Array<{ data: Uint8Array; mediaType: string; name?: string }>) {
+      savedImages.push(...inputs)
+      return inputs.map((input, index) => ({
+        attachmentId: `flowchart-${String(savedImages.length - inputs.length + index + 1)}`,
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 1_000,
+        height: 800,
+        ...(input.name === undefined ? {} : { name: input.name }),
+      }))
+    },
+  }
+  const llm = { resolveModelInfo }
   const reviewerResult = vi.fn<(request: SubagentStartRequest) => ChapterReview & {
     external_input_only?: boolean
   }>(request => reviewFrom(request))
@@ -390,8 +436,9 @@ function fixtureAgent(
       registry.set(definition.name, definition)
       return () => registry.delete(definition.name)
     } }
-    const child = { id, options: {}, whenIdle: async () => {}, session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [] }, ctx: {
-      tools: childTools, get: (name: string) => name === 'tools' ? childTools : undefined,
+    const child = { id, options: { provider: 'test', model: 'vision' }, whenIdle: async () => {}, session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [], requestHeader: () => undefined }, ctx: {
+      tools: childTools, get: (name: string) => name === 'tools' ? childTools
+        : name === 'attachments' ? attachments : name === 'llm' ? llm : undefined,
       on: (name: string, listener: (...args: unknown[]) => void) => { events.set(name, listener); return () => events.delete(name) },
     } } as unknown as Agent
     Object.assign(child.ctx, { agent: child })
@@ -591,7 +638,8 @@ function fixtureAgent(
     },
     ctx: {
       agents: { get: (id: SessionId) => children.get(id)?.child },
-      get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents : undefined,
+      get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents
+        : name === 'attachments' ? attachments : name === 'llm' ? llm : undefined,
       on: (name: string, listener: (...args: unknown[]) => void) => {
         const entries = listenerSets.get(name) ?? new Set<(...args: unknown[]) => void>()
         entries.add(listener)
@@ -655,10 +703,135 @@ function fixtureAgent(
       await call(agent, definitions, listeners, 'finish_global_compliance_review', {})
     }),
   } as unknown as Agent
-  return { agent, followup, starts, subagents, tools, guards, disposed, reviewerResult, maxActive: () => maxActive }
+  return {
+    agent, followup, starts, subagents, tools, guards, disposed, reviewerResult, savedImages, resolveModelInfo,
+    maxActive: () => maxActive,
+  }
 }
 
 describe('chapter-writing executor', () => {
+  it('把真实流程图 PNG 发回同一 Writer，修改后重新渲染并由原会话确认', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-visual-')))
+    const outline = await writeInputs(workspace)
+    let visualSubmissions = 0
+    let initialCandidate: ReturnType<typeof candidateFrom> | undefined
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      const hasImage = request.prompt.some(block => block.type === 'image')
+      if (!hasImage) {
+        const candidate = candidateFrom(request)
+        if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+        initialCandidate = {
+          ...candidate,
+          markdown: `${candidate.markdown}\n\n质量控制流程如下。\n\n{{flowchart:quality-loop}}`,
+          metadata: { ...candidate.metadata, flowcharts: [{
+            key: 'quality-loop', title: '质量控制闭环', direction: 'TB',
+            nodes: [
+              { key: 'start', type: 'start', text: '开始' },
+              { key: 'check', type: 'decision', text: '检查这一段非常长且可能造成节点内容拥挤的质量验收文字' },
+              { key: 'fix', type: 'process', text: '整改' },
+              { key: 'end', type: 'end', text: '完成' },
+            ],
+            edges: [
+              { from: 'start', to: 'check' }, { from: 'check', to: 'fix', label: '不通过' },
+              { from: 'fix', to: 'check' }, { from: 'check', to: 'end', label: '通过' },
+            ],
+          }] },
+        }
+        return { stopReason: 'completed', output: [], structured: initialCandidate }
+      }
+      visualSubmissions++
+      const candidate = structuredClone(initialCandidate!)
+      if (visualSubmissions === 1) candidate.metadata.flowcharts![0]!.nodes[1]!.text = '质量检查'
+      initialCandidate = candidate
+      return { stopReason: 'completed', output: [], structured: candidate }
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 2,
+      maxConcurrency: 1,
+    })
+
+    const firstStart = fixture.subagents.startContinuable.mock.calls.find(call => call[0].label.endsWith('章节1'))![0]
+    const visualCalls = fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))
+    expect(visualCalls).toHaveLength(2)
+    expect(visualCalls.every(call => call[1] === firstStart.childId)).toBe(true)
+    expect(visualCalls.every(call => call[2].some(block => block.type === 'text'
+      && block.text.includes('请直接查看图片本身')))).toBe(true)
+    expect(fixture.savedImages).toHaveLength(2)
+    expect(Array.from(fixture.savedImages[0]!.data.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
+    expect(fixture.subagents.start.mock.calls.every(call => call[1]?.label?.endsWith('- 审查'))).toBe(true)
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    const writerIds = log.sections.find(section => section.section_id === 'SEC-1')!.attempts
+      .filter(attempt => attempt.role === 'writer').map(attempt => attempt.child_session_id)
+    expect(new Set(writerIds)).toEqual(new Set([String(firstStart.childId)]))
+    const metadata = parseChapterMetadata(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8'),
+    ))
+    expect(metadata.flowcharts[0]?.nodes.map(node => node.text)).toContain('质量检查')
+  })
+
+  it('Writer 为 text-only 时留下明确视觉复核问题且不启动额外 Reviewer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-text-only-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      const candidate = candidateFrom(request)
+      if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+      return { stopReason: 'completed', output: [], structured: {
+        ...candidate,
+        markdown: `${candidate.markdown}\n\n{{flowchart:route}}`,
+        metadata: { ...candidate.metadata, flowcharts: [{
+          key: 'route', title: '执行流程', nodes: [
+            { key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' },
+          ], edges: [{ from: 'start', to: 'end' }],
+        }] },
+      } }
+    })
+    fixture.resolveModelInfo.mockResolvedValue({ inputModalities: ['text'] })
+
+    await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 2,
+      maxConcurrency: 1,
+    })).rejects.toThrow('CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED')
+    expect(fixture.subagents.start.mock.calls.some(call => call[1]?.label?.startsWith('1.1'))).toBe(false)
+    expect(fixture.subagents.start.mock.calls.every(call => call[1]?.label?.endsWith('- 审查'))).toBe(true)
+    expect(fixture.resolveModelInfo).toHaveBeenCalledWith('test', 'vision', expect.any(AbortSignal))
+  })
+
+  it('流程图持续变化时耗尽既有 Writer 修复预算并停止视觉重试', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-limit-')))
+    const outline = await writeInputs(workspace)
+    let version = 0
+    let current: ReturnType<typeof candidateFrom> | undefined
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      if (!request.prompt.some(block => block.type === 'image')) {
+        const candidate = candidateFrom(request)
+        if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+        current = {
+          ...candidate,
+          markdown: `${candidate.markdown}\n\n{{flowchart:route}}`,
+          metadata: { ...candidate.metadata, flowcharts: [{
+            key: 'route', title: '执行流程', nodes: [
+              { key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成 0' },
+            ], edges: [{ from: 'start', to: 'end' }],
+          }] },
+        }
+      } else {
+        current = structuredClone(current!)
+        current.metadata.flowcharts![0]!.nodes[1]!.text = `完成 ${String(++version)}`
+      }
+      return { stopReason: 'completed', output: [], structured: current }
+    })
+
+    await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1,
+      maxConcurrency: 1,
+    })).rejects.toThrow('CHAPTER_FLOWCHART_VISUAL_REVIEW_LIMIT')
+    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(1)
+    expect(fixture.subagents.start.mock.calls.some(call => call[1]?.label?.startsWith('1.1'))).toBe(false)
+    expect(fixture.subagents.start.mock.calls.every(call => call[1]?.label?.endsWith('- 审查'))).toBe(true)
+  })
+
   it('外部资质是唯一原因时跳过 Writer 修订并保留黄色关注结论', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-external-input-')))
     const outline = await writeInputs(workspace)

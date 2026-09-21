@@ -1,6 +1,7 @@
 /** 同一章节 Writer 的可续写会话、逐轮提交与取消清理。 */
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
@@ -15,9 +16,32 @@ export interface ChapterWriterChild {
    * @param prompt 本轮章节任务。
    * @returns 本轮停止原因及成功提交的候选。
    */
-  run(prompt: string): Promise<SubagentResult>
+  run(prompt: string | readonly ContentBlock[]): Promise<SubagentResult>
+  /** Require the current Writer route to declare native image input. */
+  assertImageInput(): Promise<void>
   /** 取消并等待 Writer 静止，再释放私有注册；历史会话保留。 */
   dispose(): Promise<void>
+}
+
+/** A Writer route that cannot receive Host-rendered flowchart images. */
+export class ChapterWriterImageInputError extends Error {}
+
+function promptContent(prompt: string | readonly ContentBlock[]): ContentBlock[] {
+  return typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : [...prompt]
+}
+
+async function assertImageInput(agent: Agent, signal: AbortSignal): Promise<void> {
+  const routed = agent.session.requestHeader()?.config
+  const provider = routed?.provider ?? agent.options.provider
+  const model = routed?.model ?? agent.options.model
+  const llm = agent.ctx.get('llm')
+  if (provider === undefined || model === undefined || llm === undefined) {
+    throw new ChapterWriterImageInputError('S5 流程图视觉复核失败：当前 Writer 模型路由无法解析；请切换到支持图片输入的模型后重试。')
+  }
+  const info = await llm.resolveModelInfo(provider, model, signal)
+  if (info.inputModalities === undefined || !info.inputModalities.includes('image')) {
+    throw new ChapterWriterImageInputError(`S5 流程图视觉复核失败：Writer 模型“${model}”未声明图片输入能力；请切换到支持图片输入的模型后重试。`)
+  }
 }
 
 /** 等待独占 Writer 的本轮日志；开始前的 idle 与旧 turn/end 不算本轮完成。 */
@@ -122,22 +146,34 @@ export function createChapterWriterChild(
   if (resident !== undefined) install(resident)
   return {
     id,
+    async assertImageInput() {
+      if (child === undefined) throw new ChapterWriterImageInputError('S5 Writer 会话未恢复，无法执行流程图视觉复核。')
+      await assertImageInput(child, signal)
+    },
     async run(prompt) {
       signal.throwIfAborted()
+      const content = promptContent(prompt)
       if (!started) {
+        if (content.some(block => block.type === 'image')) {
+          throw new Error('S5 Writer 首轮任务不能在会话建立前附带 Host 流程图。')
+        }
         await subagents.startContinuable({
           provider: 'spawn', childId: id, label, signal,
           request: {
-            parent, prompt: [{ type: 'text', text: prompt }], maxDepth: 1,
+            parent, prompt: content, maxDepth: 1,
             toolFilter: { allow: !webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'] },
             persona: '你是技术标章节写作 Subagent。只写指定章节；通过 submit_chapter 提交候选，并在本会话根据审查意见修改。',
           },
         })
         started = true
       } else {
+        if (content.some(block => block.type === 'image')) {
+          if (child === undefined) throw new ChapterWriterImageInputError('S5 Writer 会话未恢复，无法执行流程图视觉复核。')
+          await assertImageInput(child, signal)
+        }
         runtime?.nextRound()
         eventStart = child?.session.events.length ?? 0
-        await subagents.followup(parent, id, [{ type: 'text', text: prompt }], {
+        await subagents.followup(parent, id, content, {
           source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' }, signal,
         })
       }

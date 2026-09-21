@@ -574,8 +574,10 @@ export function apply(ctx: ClientContext): void {
           conversation?.selectView('bid-word-export')
           return Promise.resolve()
         },
-        onLocateChapter: (listener: (sectionId: string) => void) => registerSectionLocateListener(String(sessionId), listener),
-        onCompareRevision: (listener: (target: RevisionCompareTarget) => void) => registerRevisionCompareListener(String(sessionId), listener),
+        onLocateChapter: (listener: (sectionId: string) => void) =>
+          registerSectionLocateListener(String(sessionId), listener),
+        onCompareRevision: (listener: (target: RevisionCompareTarget) => void) =>
+          registerRevisionCompareListener(String(sessionId), listener),
         notifyWorkbenchMount: (active: boolean) => { setWorkbenchActive(String(sessionId), active) },
       }
     },
