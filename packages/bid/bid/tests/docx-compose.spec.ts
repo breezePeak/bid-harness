@@ -238,4 +238,78 @@ describe('DOCX 模板合成', () => {
     expect(styles).toContain('DshFigureCaption')
     expect(styles).toContain('DshTableCaption')
   })
+
+  it('正文插入完成后解包正文插入位置 content control 并保留正文与无关 content control', async () => {
+    const original = await template(false)
+    const zip = await JSZip.loadAsync(original)
+    const xml = await zip.file('word/document.xml')!.async('string')
+
+    const unrelatedControl = '<w:sdt><w:sdtPr><w:alias w:val="项目名称"/><w:tag w:val="project-name"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>示例项目名称</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+    const bodyControl = '<w:sdt><w:sdtPr><w:alias w:val="正文插入位置"/><w:tag w:val="正文插入位置"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>待替换占位</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+
+    // 将原模板中的 {{正文}} 段落替换为上述两个 content control
+    const modifiedXml = xml.replace(
+      /<w:p[^>]*>[^<]*<w:r[^>]*>[^<]*<w:t[^>]*>\{\{正文\}\}<\/w:t>[\s\S]*?<\/w:p>/u,
+      `${unrelatedControl}${bodyControl}`,
+    )
+    zip.file('word/document.xml', modifiedXml)
+    const templateWithControls = await zip.generateAsync({ type: 'nodebuffer' })
+
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const markdown = '# 实施方案\n\n本方案按照招标文件要求执行。\n\n| 参数 | 规格 |\n| --- | --- |\n| 吞吐量 | 10000 QPS |\n'
+
+    const result = await composeDocxFromTemplate(project, templateWithControls, markdown, values)
+    const resultZip = await JSZip.loadAsync(result.bytes)
+    const resultXml = await resultZip.file('word/document.xml')!.async('string')
+
+    // 1. 目标 content control 被完全移除（外壳解包）
+    expect(resultXml).not.toContain('正文插入位置')
+    expect(resultXml).not.toMatch(/<w:sdt[^>]*>[\s\S]*?正文插入位置[\s\S]*?<\/w:sdt>/u)
+
+    // 2. 正文段落、标题和表格完整保留
+    expect(resultXml).toContain('实施方案')
+    expect(resultXml).toContain('本方案按照招标文件要求执行。')
+    expect(resultXml).toContain('吞吐量')
+    expect(resultXml).toContain('10000 QPS')
+    expect(resultXml).toContain('<w:tbl>')
+
+    // 3. 无关 content control 严格保留
+    expect(resultXml).toContain('项目名称')
+    expect(resultXml).toContain('project-name')
+    expect(resultXml).toContain('示例项目名称')
+    expect(resultXml).toMatch(/<w:sdt>[\s\S]*?<w:alias w:val="项目名称"\/>[\s\S]*?<\/w:sdt>/u)
+
+    // 4. 验证正文节点不在任何 w:sdt 内部
+    const sdtMatches = resultXml.match(/<w:sdt>[\s\S]*?<\/w:sdt>/gu) ?? []
+    for (const sdt of sdtMatches) {
+      expect(sdt).not.toContain('本方案按照招标文件要求执行。')
+      expect(sdt).not.toContain('10000 QPS')
+    }
+  })
+
+  it('内置模板导出后正文插入位置 content control 已解包且其他模板字段完整保留', async () => {
+    const project = await workspace()
+    const values = defaultDocxFormatState(formatFields(project.config)).resolved
+    const markdown = '# 实施方案\n\n测试内置模板正文插入解包。\n'
+    const result = await composeDocxFromTemplate(project, await readBuiltInDocxTemplateBytes(), markdown, values)
+    const resultZip = await JSZip.loadAsync(result.bytes)
+    const resultXml = await resultZip.file('word/document.xml')!.async('string')
+
+    // 正文插入控件外壳被移除
+    expect(resultXml).not.toContain('dsh-body')
+    expect(resultXml).not.toContain('正文插入位置')
+
+    // 正文内容保留
+    expect(resultXml).toContain('实施方案')
+    expect(resultXml).toContain('测试内置模板正文插入解包。')
+
+    // 其他模板字段保留
+    for (const tag of [
+      'dsh-cover-project-name', 'dsh-cover-project-code', 'dsh-cover-bidder-name', 'dsh-cover-date',
+      'dsh-toc', 'dsh-technical-deviation-table',
+    ]) {
+      expect(resultXml).toContain(`w:val="${tag}"`)
+    }
+  })
 })

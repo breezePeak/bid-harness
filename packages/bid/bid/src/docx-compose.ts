@@ -669,19 +669,45 @@ async function mergeBodyRelationships(
   }
 }
 
+function findParentNode(root: XmlNode, target: XmlNode): XmlNode | undefined {
+  for (const item of root.elements ?? []) {
+    if (item === target) return root
+    const found = findParentNode(item, target)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+function unwrapBodyInsertionContentControl(body: XmlNode, control: XmlNode): void {
+  const content = child(control, 'sdtContent')
+  if (content === undefined) throw new Error('DOCX 正文内容控件缺少 sdtContent。')
+  const replacement = content.elements ?? []
+  const top = body.elements ?? []
+  if (top.includes(control)) {
+    const index = top.indexOf(control)
+    body.elements = [...top.slice(0, index), ...replacement, ...top.slice(index + 1)]
+    return
+  }
+  const container = top.find(node => descendants({ elements: [node] }, 'sdt').includes(control))
+  if (container !== undefined && local(container.name) === 'p') {
+    const index = top.indexOf(container)
+    body.elements = [...top.slice(0, index), ...replacement, ...top.slice(index + 1)]
+    return
+  }
+  const parent = findParentNode(body, control)
+  if (parent === undefined || parent.elements === undefined) {
+    throw new Error('DOCX 正文内容控件不在主文档正文中。')
+  }
+  const index = parent.elements.indexOf(control)
+  parent.elements = [...parent.elements.slice(0, index), ...replacement, ...parent.elements.slice(index + 1)]
+}
+
 function insertBody(body: XmlNode, elements: XmlNode[]): void {
   const control = descendants(body, 'sdt').find(node => controlNames(node).some(isBodyName))
   const content = control === undefined ? undefined : child(control, 'sdtContent')
   if (control !== undefined && content !== undefined) {
-    const top = body.elements ?? []
-    if (children(content, 'p').length || children(content, 'tbl').length || top.includes(control)) {
-      content.elements = elements
-    } else {
-      const container = top.find(node => descendants({ elements: [node] }, 'sdt').includes(control))
-      if (container === undefined) throw new Error('DOCX 正文内容控件不在主文档正文中。')
-      const index = top.indexOf(container)
-      body.elements = [...top.slice(0, index), ...elements, ...top.slice(index + 1)]
-    }
+    content.elements = elements
+    unwrapBodyInsertionContentControl(body, control)
     return
   }
   const top = body.elements ?? []
