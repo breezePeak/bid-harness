@@ -22,7 +22,7 @@ import {
 } from './runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
 import type { BidRunResumeIdentity } from './control-plane-contract.ts'
-import { safeBidRunError } from './safe-error.ts'
+import { safeBidRunError, summarizeBidValidationIssues } from './safe-error.ts'
 
 function signalAborted(signal: AbortSignal): boolean { return signal.aborted }
 
@@ -460,7 +460,11 @@ export class BidOrchestrator {
       }
       if (error instanceof BidStageAttentionRequiredError) {
         await this.runs.complete(run, () => {
-          this.attentionRequired(stage, error.message, [...error.issues])
+          this.attentionRequired(
+            stage,
+            summarizeBidValidationIssues(error.issues, '当前阶段需要处理关键问题'),
+            [...error.issues],
+          )
         })
         return 'attention_required'
       }

@@ -19,6 +19,7 @@ const quality = {
 /** 只替换模型：工具、Child 创建、错误归一化、取消和落盘均运行真实实现。 */
 export class ChapterAdapter extends LlmAdapter {
   readonly requests = new Map<string, { role: 'plan' | 'writer' | 'review'; tools: string[]; steps: number; sectionId?: string }>()
+  readonly executionChildUpdates: Array<'subagent-report' | 'subagent-settled'> = []
   writerMetadata?: (sectionId: string, step: number) => object
   repairReviews = 0
   failWriterStep?: number
@@ -35,6 +36,11 @@ export class ChapterAdapter extends LlmAdapter {
     if (lastUser?.source.kind === 'user') {
       this.publicRequestTools.push((options.tools ?? []).map(tool => tool.name).sort())
       yield* text('章节仍在后台写作，任务没有停止。')
+      return
+    }
+    if (lastUser?.source.kind === 'subagent-report' || lastUser?.source.kind === 'subagent-settled') {
+      this.executionChildUpdates.push(lastUser.source.kind)
+      yield* text('已记录 Child 执行更新。')
       return
     }
     const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')

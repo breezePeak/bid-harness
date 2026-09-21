@@ -156,6 +156,7 @@ import { registerBidRuntimeProjection, registerBidWritingEntryProjection } from 
 import { BID_INITIAL_RUNTIME_STATE, buildBidStageTask, getBidClientProjection, getBidStagePolicy } from './runtime-state.ts'
 import { BID_INITIAL_CONTROL_STATE, bidRuntimeView, reduceBidControlState } from './runtime-state.ts'
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
+import { sanitizeBidErrorText, summarizeBidValidationIssues } from './safe-error.ts'
 import { checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
@@ -216,6 +217,7 @@ import type {
   BidReviewMaterialView,
   BidRevisionTaskStatus,
   BidRuntimeState,
+  BidRunNotice,
   BidRunDecision,
   BidRunDecisionType,
   BidStage,
@@ -885,6 +887,28 @@ interface ActiveBidOperation {
   readonly stopTrackingContinuableChildren: () => void
   projectRevision: number
   suspension?: Promise<unknown>
+}
+
+interface HostExecutionUpdate {
+  readonly stage: BidStage
+  readonly status: 'suspended' | 'completed' | 'failed' | 'attention_required'
+  readonly cause?: string | undefined
+  readonly code?: string | undefined
+  readonly message: string
+  readonly issues?: readonly StageValidationIssue[] | undefined
+}
+
+/** Render the bounded terminal state that the Interaction Agent needs for its next reply. */
+function renderHostExecutionUpdate(update: HostExecutionUpdate): string {
+  return [
+    'Host execution update:',
+    `阶段：${update.stage}`,
+    `状态：${update.status}`,
+    ...(update.cause === undefined ? [] : [`原因：${sanitizeBidErrorText(update.cause)}`]),
+    ...(update.code === undefined ? [] : [`错误：${sanitizeBidErrorText(update.code)}`]),
+    `摘要：${sanitizeBidErrorText(update.message)}`,
+    ...update.issues?.slice(0, 3).map(issue => `关键问题：${sanitizeBidErrorText(issue.code)}: ${sanitizeBidErrorText(issue.message)}`) ?? [],
+  ].join('\n')
 }
 
 /** 一个在线原生问题；业务状态仍以持久化请求记录为准。 */
@@ -1742,6 +1766,16 @@ export class BidHostRuntime extends TypertRemoteService {
           this.ctx.logger.warn('Bid Run admission diagnostics unavailable.')
         }
       },
+      (notice, run) => {
+        this.injectHostExecutionUpdate(session, {
+          stage: run.stage,
+          status: run.status,
+          cause: run.cause,
+          code: run.error?.code,
+          message: run.error?.message ?? notice.message,
+          issues: run.error?.issues,
+        })
+      },
     )
     const operation: ActiveBidOperation = {
       key,
@@ -1801,14 +1835,6 @@ export class BidHostRuntime extends TypertRemoteService {
             }
           },
         }),
-      })
-      handle.agent.ctx.on('agent/pre-step', async ({ agent }, next) => {
-        const decision = await next()
-        if (agent !== handle.agent || decision.kind === 'reject') return decision
-        const messages = decision.messages.filter(message =>
-          message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
-        if (messages.length === decision.messages.length) return decision
-        return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
       })
       operation.executionHandle = handle
       return handle.agent
@@ -1882,7 +1908,7 @@ export class BidHostRuntime extends TypertRemoteService {
         run: interrupted,
         lastRun: interrupted,
       })
-      operation.session.append('bid.run.notice', {
+      const notice: BidRunNotice = {
         noticeId: `run:${interrupted.runId}:suspended`,
         supersedesTurn: null,
         runId: interrupted.runId,
@@ -1890,6 +1916,15 @@ export class BidHostRuntime extends TypertRemoteService {
         kind: 'interrupted',
         severity: 'error',
         message: '当前阶段已中断，已保存已完成进度。',
+      }
+      operation.session.append('bid.run.notice', notice)
+      this.injectHostExecutionUpdate(operation.session, {
+        stage: interrupted.stage,
+        status: interrupted.status,
+        cause: interrupted.cause,
+        code: interrupted.error?.code,
+        message: interrupted.error?.message ?? notice.message,
+        issues: interrupted.error?.issues,
       })
     }
     operation.projectRevision = state.revision
@@ -2581,6 +2616,20 @@ export class BidHostRuntime extends TypertRemoteService {
     await this.publishProjectState(operation, state)
   }
 
+  /** Queue one durable Host summary without waking an idle Interaction Agent. */
+  private injectHostExecutionUpdate(session: Session, update: HostExecutionUpdate): void {
+    const message = createUserMessage({
+      content: [{ type: 'text', text: renderHostExecutionUpdate(update) }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+    })
+    const agent = this.ctx.agents.get(session.id)
+    if (agent === undefined) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+      return
+    }
+    agent.inject(message)
+  }
+
   /** Publish one deterministic canonical mutation and revision under the project lock. */
   private async mutateProject(
     operation: ActiveBidOperation,
@@ -2624,8 +2673,6 @@ export class BidHostRuntime extends TypertRemoteService {
     ctx.on('agent/pre-step', async ({ agent }, next) => {
       const decision = await next()
       if (decision.kind === 'reject' || !isBidMainSession(agent.session)) return decision
-      const operation = this.inFlight.get(projectKey(agent.session))
-      if (operation?.session !== agent.session) return decision
       const messages = decision.messages.filter(message =>
         message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
       if (messages.length === decision.messages.length) return decision
@@ -2714,6 +2761,32 @@ export class BidHostRuntime extends TypertRemoteService {
       }
     }, { global: true })
     ctx.on('session/event', (session, event) => {
+      if (isBidMainSession(session)) {
+        if (event.type === 'bid.stage.attention_required') {
+          this.injectHostExecutionUpdate(session, {
+            stage: event.data.stage,
+            status: event.data.status,
+            cause: 'attention_required',
+            message: event.data.reason,
+            issues: event.data.issues,
+          })
+        } else if (event.type === 'bid.workflow.failed') {
+          this.injectHostExecutionUpdate(session, {
+            stage: event.data.stage,
+            status: 'failed',
+            cause: 'workflow_failed',
+            message: event.data.reason,
+            issues: event.data.issues,
+          })
+        } else if (event.type === 'bid.stage.completed'
+          && getBidStagePolicy(event.data.stage).nextStage === null) {
+          this.injectHostExecutionUpdate(session, {
+            stage: event.data.stage,
+            status: event.data.status,
+            message: '当前阶段已完成。',
+          })
+        }
+      }
       if (event.type !== 'turn/end') return
       for (const entry of this.processingWritingPlans.values()) {
         if (entry.turn !== null && event.data.turn === entry.turn && String(entry.agent.session.id) === String(session.id)) {
@@ -4891,7 +4964,11 @@ export class BidHostRuntime extends TypertRemoteService {
         await operation.runs.suspend(
           run.signal.aborted ? 'user_stop' : error instanceof BidStageExecutionError ? 'retry_exhausted' : 'executor_error',
           error instanceof BidStageExecutionError
-            ? { code: 'BID_WORK_VALIDATION_FAILED', message: error.message, issues: error.issues }
+            ? {
+                code: 'BID_WORK_VALIDATION_FAILED',
+                message: summarizeBidValidationIssues(error.issues, '当前工作校验未通过'),
+                issues: error.issues,
+              }
             : { code: 'BID_WORK_RESUME_FAILED', message: error instanceof Error ? error.message : String(error) },
         )
       }

@@ -16,7 +16,7 @@ S1–S5 和 `docx_export` 的运行态、全部完成态都允许 `send_message`
 
 S4 浏览器进度直接投影执行日志的稳定任务顺序、标题、阶段、状态、章节范围、最近 Child 身份和最近错误摘要；checkpoint 的完成事实覆盖日志瞬时状态。页面按运行中、失败、未开始、已完成分组显示任务标题，失败项只显示最近错误摘要，不读取 Child transcript。`pending` 和 `waiting_start` 没有 Mapping Progress，客户端清空旧快照且不轮询，避免把重置后的等待开始显示成同步中。
 
-Child、Writer 和 Reviewer Promise 属于 Execution Session，独立于公开回合。活跃项目的 `subagent-report` 与 `subagent-settled` 通知不进入 Interaction Session，后台任务的结构化结果仍由原调度器消费。普通消息只能由模型根据语义选择 inspect 或既有受控 mutation；发送方式、引用和关键词均不产生业务分支。
+Child、Writer 和 Reviewer Promise 属于 Execution Session，独立于公开回合。Execution Agent 消费直属 Child 的 `subagent-report` 与 `subagent-settled`；Interaction Session 始终过滤这些原始通知。Host 在 Run 挂起、attention_required 或最终完成时向 Interaction Agent 注入有界终态摘要，后台任务的完整结构化结果仍只由原调度器消费。普通消息只能由模型根据语义选择 inspect 或既有受控 mutation；发送方式、引用和关键词均不产生业务分支。终态聚合规则由[Host 终态摘要投递](../bug-fix/2026-09-21-bid-host-terminal-update-delivery.md)记录。
 
 聊天停止沿用统一 `Agent.cancel({ kind: 'user' })` 生命周期。`agent/cancel-requested` 在 inbox 变更和 abort 前同步发出，Bid Host 在任一同项目 Interaction Session 请求 Stop 且存在活动 Run 时接管该信号，先撤销提交权限，再关闭调度入口、中止 Run 并等待 Execution Session 及 Child 收敛，最后记录 `user_stop` 挂起。暂停仍由 `bid_pause_stage` 和 `bid_resume_stage` 控制当前 operation 的任务准入，不改变 Run 状态。精确恢复与停止的取舍由[统一 Run 生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md)记录。
 
@@ -34,7 +34,7 @@ Child、Writer 和 Reviewer Promise 属于 Execution Session，独立于公开�
 
 ## Verification
 
-真实 Agent Loop 回放固定内部工具链未完成，连续三条用户消息先按序进入无私有工具的公开请求，随后同一协议恢复并 finish；模型失败回放固定 `agent/error` 的错误码与消息不会被 idle 兜底覆盖。Host 测试固定 S2、S3 executor Promise 未完成，证明回复发生在阶段完成前、Run 未取消、项目检查点与 Artifact 不变，并验证另一 Session 被拒绝；S4 使用真实 in-process Mapping Child 固定模型请求，Main Agent 回复后 Child 仍存活并继续完成。Host 管理的 Child 报告不会触发 Main Agent 模型请求，Run 挂起仍保持 Composer 可用。真实 S5 Writer Promise 测试证明 Main Agent 回复先于 Writer release，Writer 随后继续通过校验。独立测试验证暂停保持当前 Run 并拦住模拟的后续调度，继续释放原调度门；聊天原生 Stop 只挂起同 Session Run，其他 Session 的取消不能越权。
+真实 Agent Loop 回放固定内部工具链未完成，连续三条用户消息先按序进入无私有工具的公开请求，随后同一协议恢复并 finish；模型失败回放固定 `agent/error` 的错误码与消息不会被 idle 兜底覆盖。Host 测试固定 S2、S3 executor Promise 未完成，证明回复发生在阶段完成前、Run 未取消、项目检查点与 Artifact 不变，并验证另一 Session 被拒绝；S4 使用真实 in-process Mapping Child 固定模型请求，Main Agent 回复后 Child 仍存活并继续完成。S2 失败回归验证 Execution Agent 收到 Child 报告、多条原始 progress 不进入 Interaction 模型请求、`bid.run.notice` 持久化，以及用户紧接提问时 Main Agent 同时取得 stage、cause、error code 和有界 issues。真实 S5 Writer Promise 测试证明 Main Agent 回复先于 Writer release，Writer 随后继续通过校验。独立测试验证暂停保持当前 Run 并拦住模拟的后续调度，继续释放原调度门；聊天原生 Stop 只挂起同 Session Run，其他 Session 的取消不能越权。
 
 ## Consequences
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -155,51 +155,52 @@ describe('tender-analysis complete submission runtime', () => {
     runtime.dispose()
   })
 
-  it('builds tender locators and normalizes only NFKC and whitespace for anchors', async () => {
+  it('accepts any trimmed non-empty anchor for a real tender chunk', async () => {
     const value = await fixture()
     expect(value.runtime.locators.map(locator => [locator.file_ref, locator.name])).toEqual([
       ['T1', 'main-tender.md'], ['T2', 'second-tender.md'],
     ])
     const locator = value.runtime.locators[0]!
     const chunk = locator.chunks.get('chunk_0001')!
-    await writeFile(chunk.absolutePath, '第一行：全角ＡＢＣ。\n第二行\t连续 空白。')
+    const content = await readFile(chunk.absolutePath, 'utf8')
     await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
-      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: '全角ABC。 第二行 连续 空白。',
+      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: '  PDF换行、空格，标点ＡＢＣ均不同。  ',
     })).resolves.toEqual({
-      quote: '全角ＡＢＣ。\n第二行\t连续 空白。',
-      source_ref: { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: 1, line_end: 2 },
+      quote: 'PDF换行、空格，标点ＡＢＣ均不同。',
+      source_ref: {
+        file_id: locator.file_id,
+        chunk: chunk.artifactPath,
+        line_start: 1,
+        line_end: content.split('\n').length,
+      },
     })
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
+      file_ref: 'T9', chunk: 'chunk_0001', anchor_text: '有效文本',
+    })).rejects.toThrow('未知 tender 引用 T9')
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
+      file_ref: 'T1', chunk: 'chunk_0004', anchor_text: '有效文本',
+    })).rejects.toThrow('chunk_0004 不属于 T1')
+    await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
+      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: ' \n\t ',
+    })).rejects.toThrow('anchor_text: 必须是非空文本')
     value.runtime.dispose()
   })
 
-  it('persists the complete candidate and exposes only the current invalid item for repair', async () => {
+  it('does not request repair when source text differs from chunk formatting', async () => {
     const value = await fixture()
     const input = completeSubmission()
-    input.requirements[0]!.sources = [source('不存在的要求', 'chunk_0002')]
-    input.scoring_items[0]!.sources = [source('不存在的评分', 'chunk_0003')]
+    input.requirements[0]!.sources = [source('  PDF提取后的换行、空格与标点不同。  ', 'chunk_0002')]
+    input.scoring_items[0]!.sources = [source('重复短语。', 'chunk_0003')]
 
-    await expect(value.call(input)).resolves.toMatchObject({
-      completed: false,
-      issues: [expect.objectContaining({
-        code: 'TENDER_ANALYSIS_ANCHOR_NOT_FOUND', path: 'requirements.0.sources.0.anchor_text',
-      })],
+    await expect(value.call(input)).resolves.toEqual({
+      completed: true,
+      summary: { tender_files: 2, requirements: 1, scoring_items: 1, compliance_items: 1 },
     })
-    expect(value.concludeTurn).toHaveBeenCalledOnce()
-    expect(value.runtime.completed).toBe(false)
-    expect(JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/tender-analysis-candidate.json'), 'utf8')))
-      .toEqual(input)
-    expect(value.runtime.repairContext()).toMatchObject({
-      repair_key: 'requirement',
-      item: input.requirements[0],
-      related_chunks: [expect.objectContaining({ file_ref: 'T1', chunk: 'chunk_0002', text: expect.stringContaining(REQUIREMENT_QUOTE) })],
-    })
-    await expect(value.call({
-      repair: { requirement: completeSubmission().requirements[0] },
-    })).resolves.toMatchObject({
-      completed: false,
-      issues: [expect.objectContaining({ path: 'scoring_items.0.sources.0.anchor_text' })],
-    })
-    await expect(readFile(join(value.workspace.projectRoot, 'analysis/project.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(value.concludeTurn).not.toHaveBeenCalled()
+    const requirements = parseTenderRequirementsArtifact(
+      JSON.parse(await readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8')),
+    )
+    expect(requirements.requirements[0]).toMatchObject({ raw_text: 'PDF提取后的换行、空格与标点不同。' })
     value.runtime.dispose()
   })
 

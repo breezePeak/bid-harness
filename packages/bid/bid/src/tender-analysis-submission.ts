@@ -71,14 +71,14 @@ export interface TenderLocator {
   readonly media_type: string
 }
 
-/** Model-copied original-text anchor resolved immediately against one tender chunk. */
+/** Model-provided source text associated with one tender chunk. */
 export interface TenderSourceAnchor {
   readonly file_ref: string
   readonly chunk: string
   readonly anchor_text: string
 }
 
-/** Exact chunk text and canonical reference selected by the Host. */
+/** Trimmed source text and chunk-wide canonical reference selected by the Host. */
 export interface ResolvedTenderSource {
   readonly quote: string
   readonly source_ref: TenderSourceRef
@@ -201,58 +201,12 @@ function uniqueSourceRefs(values: readonly TenderSourceRef[]): TenderSourceRef[]
   return [...new Map(values.map(value => [sourceRefKey(value), value])).values()]
 }
 
-function maskHtmlComments(value: string): string {
-  return value.replace(/<!--[\s\S]*?-->/gu, match => match.replace(/[^\r\n]/gu, ' '))
-}
-
-interface NormalizedOffset {
-  start: number
-  end: number
-}
-
-/** Normalize only NFKC and consecutive whitespace while retaining original offsets. */
-function normalizeAnchorText(value: string): { text: string; offsets: NormalizedOffset[] } {
-  const text: string[] = []
-  const offsets: NormalizedOffset[] = []
-  let offset = 0
-  for (const character of value) {
-    const start = offset
-    offset += character.length
-    for (const normalized of character.normalize('NFKC')) {
-      if (/\s/u.test(normalized)) {
-        const previous = offsets.at(-1)
-        if (text.at(-1) === ' ' && previous !== undefined) previous.end = offset
-        else {
-          text.push(' ')
-          offsets.push({ start, end: offset })
-        }
-        continue
-      }
-      text.push(normalized)
-      for (let index = 0; index < normalized.length; index++) offsets.push({ start, end: offset })
-    }
-  }
-  return { text: text.join(''), offsets }
-}
-
-class TenderSourceAnchorError extends Error {
-  constructor(readonly issue: StageValidationIssue) {
-    super(issue.message)
-  }
-}
-
-function lineAt(value: string, offset: number): number {
-  let line = 1
-  for (let index = 0; index < offset; index++) if (value.charCodeAt(index) === 10) line++
-  return line
-}
-
 /**
- * Resolve one copied original-text anchor to its exact chunk position.
+ * Resolve one model-provided anchor to a validated tender chunk.
  * @param workspace Workspace that owns the tender corpus.
  * @param locators Host-built tender identity table for this S2 execution.
- * @param source Model-provided short file reference, chunk id, and copied original-text anchor.
- * @returns Original chunk text and its canonical inclusive one-based line reference.
+ * @param source Model-provided short file reference, chunk id, and source text.
+ * @returns Trimmed source text and the chunk-wide canonical line reference.
  */
 export async function resolveTenderSourceAnchor(
   workspace: BidWorkspace,
@@ -263,36 +217,18 @@ export async function resolveTenderSourceAnchor(
   if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${source.file_ref}。`])
   const chunk = locator.chunks.get(source.chunk)
   if (chunk === undefined) throw new ToolArgsError([`chunk: ${source.chunk} 不属于 ${source.file_ref}。`])
+  const quote = source.anchor_text.trim()
+  if (quote.length === 0) throw new ToolArgsError(['anchor_text: 必须是非空文本。'])
   await assertNoLinkedPath(workspace.root, chunk.absolutePath)
   const content = await readFile(chunk.absolutePath, 'utf8')
-  const anchor = normalizeAnchorText(source.anchor_text).text
-  if (anchor.length === 0) throw new ToolArgsError(['anchor_text: 必须逐字复制非空原文。'])
-  const normalized = normalizeAnchorText(maskHtmlComments(content))
-  const matches: number[] = []
-  for (let index = normalized.text.indexOf(anchor); index >= 0; index = normalized.text.indexOf(anchor, index + 1)) matches.push(index)
-  if (matches.length === 0) throw new TenderSourceAnchorError({
-    code: 'TENDER_ANALYSIS_ANCHOR_NOT_FOUND', path: 'sources.anchor_text',
-    message: `anchor_text: 无法在 ${source.file_ref}/${source.chunk} 正文中定位；请重新读取该 chunk 后逐字复制真实原文。`,
-  })
-  if (matches.length > 1) throw new TenderSourceAnchorError({
-    code: 'TENDER_ANALYSIS_ANCHOR_AMBIGUOUS', path: 'sources.anchor_text',
-    message: `anchor_text: 在 ${source.file_ref}/${source.chunk} 正文中出现 ${String(matches.length)} 次；请提供更长、更有区分度的真实原文。`,
-  })
-  const matchedOffset = matches[0]
-  if (matchedOffset === undefined) throw new Error('tender-analysis-source-line-resolution-invalid')
-  const startOffset = normalized.offsets[matchedOffset]
-  const endOffset = normalized.offsets[matchedOffset + anchor.length - 1]
-  if (startOffset === undefined || endOffset === undefined) throw new Error('tender-analysis-source-line-resolution-invalid')
-  const start = startOffset.start
-  const end = endOffset.end
-  const quote = content.slice(start, end)
-  const lineStart = lineAt(content, start)
-  const lineEnd = lineAt(content, end - 1)
-  const lineCount = content.split('\n').length
-  if (lineStart < 1 || lineEnd < lineStart || lineEnd > lineCount) throw new Error('tender-analysis-source-line-resolution-invalid')
   return {
     quote,
-    source_ref: { file_id: locator.file_id, chunk: chunk.artifactPath, line_start: lineStart, line_end: lineEnd },
+    source_ref: {
+      file_id: locator.file_id,
+      chunk: chunk.artifactPath,
+      line_start: 1,
+      line_end: content.split('\n').length,
+    },
   }
 }
 
@@ -434,10 +370,6 @@ export async function attachTenderAnalysisSubmissionRuntime(
         resolved.push(await resolveTenderSourceAnchor(workspace, locators, value))
       } catch (error: unknown) {
         const issuePath = `${path}.sources.${String(index)}`
-        if (error instanceof TenderSourceAnchorError) {
-          issues.push({ ...error.issue, path: `${issuePath}.anchor_text` })
-          continue
-        }
         if (error instanceof ToolArgsError) {
           issues.push({ code: 'TENDER_ANALYSIS_SOURCE_INVALID', path: issuePath, message: error.message })
           continue

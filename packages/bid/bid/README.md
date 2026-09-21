@@ -59,7 +59,7 @@ Word 模板上传、模板库选择、格式确认、独立格式建议和导出
 
 S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合只挂载当前阶段工具，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
 
-S2、S3 和 S5 的私有协议只在 Execution Session 中运行；其 continuation、工具切换及 Child 完成通知不进入 Interaction Session。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
+S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；空闲 Agent 不被唤醒，下次用户消息会一并取得该持久 inbox 消息。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
@@ -81,7 +81,7 @@ S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度�
 
 ### S2–S5 quality control
 
-S2 在同一 live Agent 内一次提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。Host 收到完整结果后立即写入内部 candidate，再统一校验文件与 chunk 归属；模型从已读 chunk 正文逐字复制连续的 `anchor_text`，Host 仅以 NFKC 及换行或连续空白归一化做唯一确定性匹配，再回映真实位置生成 `quote`、`raw_text` 和 `source_refs`。Host 按最终数组生成正式 ID，按完整结构化内容归并重复评分并合并来源，补齐 schema version、空值、完整 tender 覆盖与 `parent=null`，把评分事实写入 `analysis/scoring-origin.json`，并初始化默认全选的 `analysis/tender-analysis-selection.json`。来源、必填字段或完整性检查失败时，下一轮只向模型提供当前问题、出错项及其引用的 chunk 原文；模型通过同一个工具提交该项的 `repair`，Host 合并回 candidate 后重验，不向模型回灌完整数组，也不维护 staged snapshot、runtime ref、revision、replace 或 finish。通过后 Host 原子写入正式文件，再由最终 Validator 独立验证 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
+S2 在同一 live Agent 内一次提交项目事实、原子技术要求、招标原文中的评分大项和影响技术方案的合规规则；评分大项保留完整细则，不在 S2 拆成评分响应点。Host 收到完整结果后立即写入内部 candidate，再统一校验 `file_ref` 对应成功解析的 tender、chunk 归属及 `anchor_text` 非空；Host 将去除首尾空白的 `anchor_text` 写入 `quote` 和 `raw_text`，并用整个 chunk 的实际行范围生成 `source_refs`，不匹配正文或计算精确行号。Host 按最终数组生成正式 ID，按完整结构化内容归并重复评分并合并来源，补齐 schema version、空值、完整 tender 覆盖与 `parent=null`，把评分事实写入 `analysis/scoring-origin.json`，并初始化默认全选的 `analysis/tender-analysis-selection.json`。来源、必填字段或完整性检查失败时，下一轮只向模型提供当前问题、出错项及其引用的 chunk 原文；模型通过同一个工具提交该项的 `repair`，Host 合并回 candidate 后重验，不向模型回灌完整数组，也不维护 staged snapshot、runtime ref、revision、replace 或 finish。通过后 Host 原子写入正式文件，再由最终 Validator 独立验证 Artifact 集合、严格 Schema、技术评分分类、完整性、重复 ID、真实 tender 来源、chunk、行号和文件覆盖；通过后 Orchestrator 才进入 `tender_analysis/waiting_user`。
 
 S2 审核页始终从 `scoring-origin.json` 展示完整评分事实，`must_answer` 与“是否纳入后续响应”分别编辑和显示；选择变更立即由 Host 写入确认草稿，刷新或换 Session 后仍可恢复。正式确认只把选中评分项及允许的规范化修改写入 `analysis/scoring.json`，未进行筛选时两份评分集合一致。S3、S4、S5 只读取 `scoring.json`；回退 S2 复用阶段重置清理 `analysis`、`outline`、`chapters` 和 `output`，不会保留依赖旧评分集合的下游产物。
 

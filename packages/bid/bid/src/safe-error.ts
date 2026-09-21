@@ -14,6 +14,16 @@ export function sanitizeBidErrorText(value: string): string {
 }
 
 /**
+ * Describe a structured validation failure without duplicating every issue into the summary.
+ * @param issues - Issues retained separately on the durable Run snapshot.
+ * @param subject - Short description of the rejected operation.
+ * @returns Bounded summary whose details remain in the structured issue list.
+ */
+export function summarizeBidValidationIssues(issues: readonly StageValidationIssue[], subject: string): string {
+  return issues.length === 0 ? subject : `${subject}，共 ${String(issues.length)} 条关键问题。`
+}
+
+/**
  * Convert an execution failure into the only durable, browser-safe error shape.
  * @param error - Untrusted execution failure.
  * @param issues - Structured validation issues to sanitize when present.
@@ -27,7 +37,9 @@ export function safeBidRunError(
   const code = typeof candidate.code === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.code)
     ? candidate.code
     : 'BID_EXECUTOR_ERROR'
-  const message = sanitizeBidErrorText(typeof candidate.message === 'string' ? candidate.message : String(error))
+  const message = sanitizeBidErrorText(issues === undefined
+    ? typeof candidate.message === 'string' ? candidate.message : String(error)
+    : summarizeBidValidationIssues(issues, '阶段执行结果未通过校验'))
   return {
     code,
     message,

@@ -31,8 +31,8 @@ it('S2 通过真实完整提交工具生成并校验原始评分 Artifact', asyn
         "name": "智慧审计平台建设项目",
         "source_lines": [
           [
-            9,
-            9,
+            1,
+            12,
           ],
         ],
         "tender_files": 1,

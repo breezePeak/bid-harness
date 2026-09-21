@@ -22,7 +22,7 @@ Long Run 的模型候选只写 `runs/<workId>/work/`，正式产物由 Commit Sc
 
 S5 的运行中计划修改和章节修订先写入 Run command journal，再唤醒内存调度器；命令效果与 applied 状态在同一 PublicationBatch 中提交，Host 重启重载 pending 命令。挂起的主 S5 Run 接受 ProjectMutation 形式的修订意图并保留自身身份；只有不存在挂起主 Run 时，独立章节修订才创建 `chapter_revision` Long Run。恢复旧 Writer 时沿用 Host 的 `webSearchEnabled` 配置安装工具 guard。
 
-每个 suspended Run 同时产生以 Run ID 派生的 `bid.run.notice`，Host restart 将孤儿 running Run 转为 suspended 时也生成同类通知。浏览器将这一单事件投影为 model-invisible 的聊天时间线行；用户停止使用中性样式，自动中断显示经统一脱敏的 code、message 和 issues。notice 记录被替代的 generic error turn，使同一次失败只显示一个主要错误节点。
+每个 suspended Run 同时产生以 Run ID 派生的 `bid.run.notice`，Host restart 将孤儿 running Run 转为 suspended 时也生成同类通知。浏览器将这一单事件投影为 model-invisible 的聊天时间线行；Host 同时把同一终态的有界摘要作为 plugin instruction 注入 Interaction Agent 的持久 inbox，但不复制 Execution 或 Child transcript。用户停止使用中性样式，自动中断显示经统一脱敏的 code、message 和最多三条 issues。notice 记录被替代的 generic error turn，使同一次失败只显示一个主要错误节点。
 
 `Agent.cancel()` 在修改 inbox 或传播 abort 前同步发出带类型原因的 `agent/cancel-requested`。Bid Host 响应任一同项目 Interaction Session 的 user cause，因此聊天原生 Stop 同时停止公开回复与当前 Run；普通消息、聊天 Provider 错误和暂停调度不会触发挂起。独立的 `stop_stage`、`retry_stage`、`bid_stop_stage` 及对应 Remote 不属于公开控制面。Interaction Session 与 Execution Session 的所有权由[独立交互与执行通道](../bug-fix/2026-09-14-bid-interaction-execution-lanes.md)记录。
 

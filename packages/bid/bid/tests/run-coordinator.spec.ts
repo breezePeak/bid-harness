@@ -76,7 +76,12 @@ describe('BidRunCoordinator', () => {
     await runs.suspend('executor_error', {
       code: 'PROVIDER_ERROR',
       message: 'Authorization: Bearer sk-secret provider response: {"request":"private"}',
-      issues: [{ code: 'UPSTREAM', message: 'api_key=hidden-token request failed' }],
+      issues: [
+        { code: 'UPSTREAM', message: 'api_key=hidden-token request failed' },
+        { code: 'ISSUE_2', message: 'second' },
+        { code: 'ISSUE_3', message: 'third' },
+        { code: 'ISSUE_4', message: 'must stay out of the compact notice' },
+      ],
     })
 
     const notices = session.events.filter(event => event.type === 'bid.run.notice')
@@ -87,6 +92,7 @@ describe('BidRunCoordinator', () => {
     expect(notices[0]?.data.message).not.toContain('sk-secret')
     expect(notices[0]?.data.message).not.toContain('private')
     expect(notices[0]?.data.message).not.toContain('hidden-token')
+    expect(notices[0]?.data.message).not.toContain('ISSUE_4')
     expect(run.signal.aborted).toBe(true)
   })
 

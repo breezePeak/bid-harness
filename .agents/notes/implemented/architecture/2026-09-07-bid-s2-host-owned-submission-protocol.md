@@ -10,7 +10,7 @@ S2 Main Agent 直接写四个完整 JSON 时同时承担招标语义判断、正
 
 `tender_analysis` 继续由同一 live Agent 在当前 Session 和 Workspace 中执行，并保持 tender-only 技术标边界、`grep → read` 检索、评分区域连续读取、最终 Validator 与用户确认。普通工具只开放 `grep` 和 `read`，版式不足时按需使用 `view_pdf_page`；阶段执行器动态注册一个 `submit_tender_analysis`，模型不能调用 `write` 生成正式 Artifact。
 
-Host 按 manifest 顺序把每个 `role=tender && parseStatus=success` 文件映射为 `T1`、`T2` 等执行期引用。提交工具的 source 只接受 `file_ref`、chunk index 中的 `chunk_*` ID 和从已读正文逐字复制的 `anchor_text`；Host 验证文件与 chunk 归属，仅以 NFKC 及连续空白归一化做唯一确定性匹配，再从未规范化的原始正文截取 quote，并按原始 chunk 中换行符计算一基、闭区间 `line_start` 和 `line_end`。锚点未命中或多次命中都返回 recoverable issue 并结束当前 Turn，分别要求重新读取后复制原文或提供更长的原文；跨行或跨 chunk 内容由多个 source 定位。该替换拒绝的语义猜测机制见 [S2 原文锚点定位协议](../bug-fix/2026-09-13-bid-s2-original-text-anchor-protocol.md)。
+Host 按 manifest 顺序把每个 `role=tender && parseStatus=success` 文件映射为 `T1`、`T2` 等执行期引用。提交工具的 source 只接受 `file_ref`、chunk index 中的 `chunk_*` ID 和非空 `anchor_text`；Host 验证文件与 chunk 归属，将去除首尾空白的文本作为 quote，并把整个 chunk 的实际行范围写入 `line_start` 和 `line_end`，不因 PDF 提取造成的换行、空格、标点或全半角差异触发 repair。该来源边界见 [S2 chunk 级来源校验](../simplification/2026-09-21-bid-s2-chunk-source-validation.md)。
 
 模型一次提交 `project_facts`、`requirements`、`scoring_items` 和 `compliance_items` 四个完整数组，只提供分类、归纳、强制性、评分规则等语义字段及真实来源。Host 在整批来源和内容通过校验后，按最终数组顺序分配三位补零的 `REQ-*`、`SC-*`、`COM-*` 正式 ID；模型不生成 runtime ref、revision、replace ref 或正式 ID。三类记录的 `raw_text` 都由 Host 连接已定位的原文 quote 生成。Scoring 只接受招标评分体系中作为独立评审对象，并具有独立名称及总分、权重或区块边界的评分大项，Host 固定正式 `parent=null`；重复评分大项按除来源和 ID 外的完整结构化内容归并并合并来源，不能只凭名称合并。
 
@@ -32,7 +32,7 @@ Host 按 manifest 顺序把每个 `role=tender && parseStatus=success` 文件映
 
 ## Consequences
 
-模型不再维护四个 JSON 文件、逐字 quote、`raw_text`、真实文件 ID、引用路径与行号、评分 parent、正式记录 ID、schema version 或 tender 覆盖。评分项边界仍由模型依据原文层级和语义判断，Host 只固定 `parent=null` 并合并结构完全相同的重复大项，不使用名称、分值或样本位置猜测层级。模型复制的原文锚点只在其已选定的 chunk 内定位，不判断语义是否忠实；S2 每轮只有一次提交调用，最终 Validator 保持为 Host 与持久化回归的独立防线。
+模型不再维护四个 JSON 文件、真实文件 ID、引用路径与行号、评分 parent、正式记录 ID、schema version 或 tender 覆盖。评分项边界仍由模型依据原文层级和语义判断，Host 只固定 `parent=null` 并合并结构完全相同的重复大项，不使用名称、分值或样本位置猜测层级。模型提供 `anchor_text`，Host 只确认其引用真实的 tender chunk，不判断文本是否出现在正文或语义是否忠实；S2 每轮只有一次提交调用，最终 Validator 保持为 Host 与持久化回归的独立防线。
 
 Keyless 源码 Loader 回放由固定模型一次提交完整结果，并检查 Host 生成的四个正式 Artifact、稳定 ID、引用行号和最终 Validator 结果。
 

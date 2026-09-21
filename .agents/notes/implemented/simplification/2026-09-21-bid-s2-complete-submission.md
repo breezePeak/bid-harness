@@ -12,7 +12,7 @@ S2 只注册一个 `submit_tender_analysis` 提交工具。模型首次调用时
 
 Host 只向修复轮次提供当前问题、对应业务项及该项引用的 chunk 原文，不回传完整 candidate。模型仍调用 `submit_tender_analysis`，但只提交 `{repair:{<repair_key>:<业务项>}}`；Host 按内部数组位置合并、覆盖 candidate 文件并重新校验。缺少某类记录时 repair 追加一个业务项。模型不接触数组位置、runtime ref、revision、replace ref、正式 ID 或 source ref。
 
-来源匹配继续只做 NFKC 和连续空白归一化，并从原始 chunk 回映 quote 与行号。完整 candidate 通过 Draft Validator 后，Host 生成连续的 `REQ-*`、`SC-*`、`COM-*` ID，归并结构相同的评分大项，原子写入既有四个正式 Artifact 和评分选择，再运行最终 Validator。S3、前端审核和后续阶段只读取既有正式 Artifact。
+来源只校验成功 tender、chunk 归属和 `anchor_text` 非空，并以整个 chunk 的行范围生成引用；具体理由见 [S2 chunk 级来源校验](2026-09-21-bid-s2-chunk-source-validation.md)。完整 candidate 通过 Draft Validator 后，Host 生成连续的 `REQ-*`、`SC-*`、`COM-*` ID，归并结构相同的评分大项，原子写入既有四个正式 Artifact 和评分选择，再运行最终 Validator。S3、前端审核和后续阶段只读取既有正式 Artifact。
 
 本记录部分替代 [S2 Host 提交协议](../architecture/2026-09-07-bid-s2-host-owned-submission-protocol.md)中的逐项提交实现，并完整吸收 staged replace 协议曾保护的语义：模型错误不能覆盖其他记录，Host 身份不能由模型猜测，未完成结果不能冒充正式 Artifact。数组位置现由 Host 私有 candidate 持有，因此运行时引用与 checkpoint revision 不再存在。
 
@@ -30,4 +30,4 @@ Host 只向修复轮次提供当前问题、对应业务项及该项引用的 ch
 
 S2 正常链路没有 `finish_tender_analysis`、create、replace、runtime ref、revision、staged snapshot 或独立 review。失败 repair 只携带一个问题项；评分项进入首次完整提交后由 Host 直接生成正式结构，不会因遗漏 finish 而丢失。
 
-内部 candidate 不是正式 Artifact，S3 和前端不会读取它。S2 进程在正式发布前中断时不恢复逐项 repair 位置；新运行重新提交完整结果并覆盖 candidate。定向测试固定 candidate 先于校验持久化、局部 repair、模型字段拒绝、评分写入、正式连续 ID、来源回映及最终 Validator，无密钥 Loader 回放固定一次完整提交路径。
+内部 candidate 不是正式 Artifact，S3 和前端不会读取它。S2 进程在正式发布前中断时不恢复逐项 repair 位置；新运行重新提交完整结果并覆盖 candidate。定向测试固定 candidate 先于校验持久化、局部 repair、模型字段拒绝、评分写入、正式连续 ID、chunk 级来源及最终 Validator，无密钥 Loader 回放固定一次完整提交路径。

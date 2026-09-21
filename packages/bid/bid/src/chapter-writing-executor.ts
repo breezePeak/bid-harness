@@ -1513,74 +1513,62 @@ export async function executeChapterWriting(
   options: ChapterWritingExecutionOptions,
 ): Promise<StageArtifact[]> {
   await options.run.scheduler.waitUntilRunnable(options.run.signal)
-  const discardOwnedChildMessages = agent.ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
-    const decision = await next()
-    if (subject !== agent || decision.kind === 'reject') return decision
-    const messages = decision.messages.filter(message =>
-      message.source.kind !== 'subagent-report' && message.source.kind !== 'subagent-settled')
-    if (messages.length === decision.messages.length) return decision
-    return messages.length === 0 ? { kind: 'reject' as const } : { ...decision, messages }
-  })
-  try {
-    if (options.revision === undefined && options.revisionBatch === undefined) {
-      const artifacts = await runChapterWriting(agent, workspace, task, options)
-      return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
-    }
-    if (options.revisionBatch !== undefined) {
-      const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
-      const worklist = buildChapterWorklist(outline)
-      const batchSectionIds = new Set(options.revisionBatch.tasks.map(task => task.section_id))
-      for (const sectionId of batchSectionIds) {
-        if (!worklist.some(section => section.id === sectionId)) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-      }
-      const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch)
-      try {
-        return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
-      } catch {
-        // Revision Batch 允许文档级 review 暂时 stale，不阻断成功章节
-        return artifacts
-      }
-    }
-    const request = chapterRevisionRequestSchema.parse(options.revision)
+  if (options.revision === undefined && options.revisionBatch === undefined) {
+    const artifacts = await runChapterWriting(agent, workspace, task, options)
+    return reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
+  }
+  if (options.revisionBatch !== undefined) {
     const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     const worklist = buildChapterWorklist(outline)
-    const index = worklist.findIndex(section => section.id === request.reference.section_id)
-    if (index < 0) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-    const serial = String(index + 1).padStart(4, '0')
-    const paths = [
-      LOG_PATH,
-      MANIFEST_PATH,
-      GLOBAL_REVIEW_PATH,
-      COMPLETION_REVIEW_PATH,
-      ...worklist.flatMap((_section, workIndex) => {
-        const workSerial = String(workIndex + 1).padStart(4, '0')
-        return [
-          `chapters/sections/${workSerial}.md`,
-          `chapters/meta/${workSerial}.json`,
-          `chapters/reviews/${workSerial}.json`,
-        ]
-      }),
-    ]
-    const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
-      const absolute = join(workspace.projectRoot, path)
-      await assertNoLinkedPath(workspace.root, absolute)
-      return [absolute, await readFile(absolute, 'utf8')]
-    })))
-    const original = backup.get(join(workspace.projectRoot, `chapters/sections/${serial}.md`))
-    if (original === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-    validateChapterRevisionReference(request, original)
-    const revision: ChapterRevisionState = { request, original, writing: false }
-    try {
-      const artifacts = await runChapterWriting(agent, workspace, task, options, revision)
-      return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
-    } catch (error: unknown) {
-      if (revision.writing) for (const [path, content] of backup) {
-        await options.run.commits.writeText(path, content)
-      }
-      throw error
+    const batchSectionIds = new Set(options.revisionBatch.tasks.map(task => task.section_id))
+    for (const sectionId of batchSectionIds) {
+      if (!worklist.some(section => section.id === sectionId)) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
     }
-  } finally {
-    discardOwnedChildMessages()
+    const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch)
+    try {
+      return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
+    } catch {
+      // Revision Batch 允许文档级 review 暂时 stale，不阻断成功章节
+      return artifacts
+    }
+  }
+  const request = chapterRevisionRequestSchema.parse(options.revision)
+  const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+  const worklist = buildChapterWorklist(outline)
+  const index = worklist.findIndex(section => section.id === request.reference.section_id)
+  if (index < 0) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+  const serial = String(index + 1).padStart(4, '0')
+  const paths = [
+    LOG_PATH,
+    MANIFEST_PATH,
+    GLOBAL_REVIEW_PATH,
+    COMPLETION_REVIEW_PATH,
+    ...worklist.flatMap((_section, workIndex) => {
+      const workSerial = String(workIndex + 1).padStart(4, '0')
+      return [
+        `chapters/sections/${workSerial}.md`,
+        `chapters/meta/${workSerial}.json`,
+        `chapters/reviews/${workSerial}.json`,
+      ]
+    }),
+  ]
+  const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
+    const absolute = join(workspace.projectRoot, path)
+    await assertNoLinkedPath(workspace.root, absolute)
+    return [absolute, await readFile(absolute, 'utf8')]
+  })))
+  const original = backup.get(join(workspace.projectRoot, `chapters/sections/${serial}.md`))
+  if (original === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+  validateChapterRevisionReference(request, original)
+  const revision: ChapterRevisionState = { request, original, writing: false }
+  try {
+    const artifacts = await runChapterWriting(agent, workspace, task, options, revision)
+    return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
+  } catch (error: unknown) {
+    if (revision.writing) for (const [path, content] of backup) {
+      await options.run.commits.writeText(path, content)
+    }
+    throw error
   }
 }
 

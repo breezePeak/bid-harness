@@ -90,6 +90,7 @@ describe('S5 真实 DSH Child 接入', () => {
       releaseWriters.resolve(undefined)
       const artifacts = await execution
       await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+      expect(adapter.executionChildUpdates).toContain('subagent-settled')
       const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
       expect(log.sections.every(section => section.status === 'completed')).toBe(true)
     } finally {

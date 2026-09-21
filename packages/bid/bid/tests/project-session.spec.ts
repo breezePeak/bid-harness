@@ -36,7 +36,7 @@ import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
 import { writeRevisionQueue, type RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
 import { writeRevisionBatch, type RevisionBatchArtifact } from '../src/chapter-revision-batch.ts'
 import { buildRevisionComparisonPath, createRevisionComparisonArtifact } from '../src/chapter-revision-comparison.ts'
-import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from '../src/control-plane-contract.ts'
+import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, BidStageExecutionError } from '../src/control-plane-contract.ts'
 import {
   DOCX_TEMPLATE_NAME_HEADER,
   DOCX_TEMPLATE_REVISION_HEADER,
@@ -86,6 +86,7 @@ function answer(text: string): StreamChunk[] {
 
 class ProjectSessionAdapter extends LlmAdapter {
   readonly script: StreamChunk[][] = []
+  readonly requests: GenerateOptions[] = []
   readonly mainSessionIds = new Set<string>()
   requestGate?: Promise<void>
   onRequest?: () => void
@@ -98,6 +99,7 @@ class ProjectSessionAdapter extends LlmAdapter {
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
     if (!this.mainSessionIds.has(String(options.sessionId)) && this.isExecutionSession?.(String(options.sessionId)) !== true) {
       this.onChildRequest?.()
       await this.childGate
@@ -1526,35 +1528,97 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('Host 管理的 Child 报告不唤醒 Main Agent', async () => {
-    const { ctx, workspace, fresh, executor, executeStage, adapter } = await fixture()
+  it('S2 Execution 接收 Child 报告，挂起后 Main Agent 读取 Host 错误摘要', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'failed' })
     const agent = await fresh('quiet-host-child-report')
     const stageGate = Promise.withResolvers<never[]>()
     void stageGate.promise.catch(() => {})
-    executor.canExecute = stage => stage === 'evidence_mapping'
+    executor.canExecute = stage => stage === 'tender_analysis'
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const retry = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'tender_analysis', status: 'running' }) })
 
-    const onRequest = vi.fn()
-    adapter.onRequest = onRequest
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: '内部研究结果。' }],
-      source: { kind: 'subagent-report', form: 'relay', senderSessionId: SessionId('mapping-child') },
+    const operation = host.inFlight.values().next().value as { executionHandle?: { agent: Agent } }
+    const execution = operation.executionHandle?.agent
+    if (execution === undefined) throw new Error('测试未找到 Execution Agent')
+    adapter.script.push(
+      answer('Execution 已接收 Child 报告。'),
+      answer('Execution 已接收 Child 结算。'),
+    )
+    execution.followup(createUserMessage({
+      content: [{ type: 'text', text: 'S2 Child 返回了中间分析。' }],
+      source: { kind: 'subagent-report', form: 'relay', senderSessionId: SessionId('analysis-child') },
     }))
-    await agent.whenIdle()
+    await execution.whenIdle()
+    execution.followup(createUserMessage({
+      content: [{ type: 'text', text: 'S2 Child 已完成。' }],
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'analysis-child completed',
+        senderSessionId: SessionId('analysis-child'),
+      },
+    }))
+    await execution.whenIdle()
 
-    expect(onRequest).not.toHaveBeenCalled()
-    stageGate.reject(new Error('模拟 S4 执行失败'))
+    const executionSources = adapter.requests.filter(request => String(request.sessionId) === String(execution.id))
+      .flatMap(request => request.messages.map(message => message.source.kind))
+    expect(executionSources).toContain('subagent-report')
+    expect(executionSources).toContain('subagent-settled')
+
+    for (let index = 0; index < 8; index++) {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: `普通 Child 进度 ${String(index + 1)}` }],
+        source: index === 7
+          ? {
+            kind: 'subagent-settled',
+            form: 'notice',
+            summary: 'analysis-child-8 completed',
+            senderSessionId: SessionId('analysis-child-8'),
+          }
+          : { kind: 'subagent-report', form: 'relay', senderSessionId: SessionId(`analysis-child-${String(index + 1)}`) },
+      }))
+    }
+    await agent.whenIdle()
+    expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(0)
+
+    stageGate.reject(new BidStageExecutionError([
+      { code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', message: '招标分析缺少必需记录。' },
+      { code: 'SECOND_ISSUE', message: '第二条关键问题。' },
+      { code: 'THIRD_ISSUE', message: '第三条关键问题。' },
+      { code: 'FOURTH_ISSUE', message: '这条不应进入 Main Agent 摘要。' },
+    ]))
     await expect(retry).resolves.toMatchObject({ ok: true, value: {
-      stage: 'evidence_mapping', status: 'suspended',
+      stage: 'tender_analysis', status: 'suspended',
     } })
+    expect(agent.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
+      data: { stage: 'tender_analysis', kind: 'interrupted', severity: 'error' },
+    })
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      runtime: { stage: 'evidence_mapping', status: 'suspended' },
+      runtime: { stage: 'tender_analysis', status: 'suspended' },
       allowedActions: ['send_message'],
     })
+
+    adapter.script.push(answer('招标分析提交不完整，Run 已挂起，可修正后恢复。'))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: '怎么回事？' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    const request = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
+    const requestText = request?.messages.flatMap(message => message.content)
+      .filter(block => block.type === 'text').map(block => block.text).join('\n')
+    expect(requestText).toContain('Host execution update:')
+    expect(requestText).toContain('阶段：tender_analysis')
+    expect(requestText).toContain('状态：suspended')
+    expect(requestText).toContain('原因：retry_exhausted')
+    expect(requestText).toContain('错误：BID_EXECUTOR_ERROR')
+    expect(requestText).toContain('TENDER_ANALYSIS_SUBMISSION_INCOMPLETE')
+    expect(requestText).toContain('THIRD_ISSUE')
+    expect(requestText).not.toContain('FOURTH_ISSUE')
+    expect(requestText).not.toContain('普通 Child 进度')
+    expect(agent.session.deriveMessages().at(-1)?.content)
+      .toContainEqual({ type: 'text', text: '招标分析提交不完整，Run 已挂起，可修正后恢复。' })
   })
 
   it('聊天 Stop 同时取消当前回复与 S4 execution lane', async () => {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { BidRunResumeIdentity, BidRunSnapshot, BidRunSuspensionCause, BidWorkDescriptor } from './control-plane-contract.ts'
+import type { BidRunNotice, BidRunResumeIdentity, BidRunSnapshot, BidRunSuspensionCause, BidWorkDescriptor } from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 
@@ -266,6 +266,7 @@ export class BidRunCoordinator {
     private readonly publication?: { readonly workspaceRoot: string; readonly projectRoot: string },
     private readonly executionSessionId?: () => string | undefined,
     private readonly onAdmitted?: BidRunAdmissionObserver,
+    private readonly onSuspended?: (notice: BidRunNotice, run: BidRunSnapshot & { status: 'suspended' }) => void,
   ) {}
 
   /** Current live Run, if any. */
@@ -420,7 +421,7 @@ export class BidRunCoordinator {
     this.session.append('bid.run.suspended', { run: snapshot })
     const superseded = this.session.events.slice(active.eventStart).findLast(event =>
       event.type === 'turn/end' && event.data.reason.kind === 'error')
-    this.session.append('bid.run.notice', {
+    const notice: BidRunNotice = {
       noticeId: `run:${snapshot.runId}:suspended`,
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
@@ -429,11 +430,13 @@ export class BidRunCoordinator {
       severity: cause === 'user_stop' ? 'info' : 'error',
       message: cause === 'user_stop'
         ? '当前任务已停止，已保存已完成进度。'
-        : [error?.code, error?.message, ...error?.issues?.map(issue => `${issue.code}: ${issue.message}`) ?? []]
+        : [error?.code, error?.message, ...error?.issues?.slice(0, 3).map(issue => `${issue.code}: ${issue.message}`) ?? []]
           .filter((value): value is string => value !== undefined)
           .map(sanitizeBidErrorText)
           .join('；') || '当前阶段已中断，已保存已完成进度。',
-    })
+    }
+    this.session.append('bid.run.notice', notice)
+    this.onSuspended?.(notice, snapshot)
     await this.checkpoint?.()
     return snapshot
   }
