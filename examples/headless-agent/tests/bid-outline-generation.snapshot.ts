@@ -25,7 +25,7 @@ it('S3 一次生成响应点和目录、一次质量复核后等待用户确认'
       if (log === undefined) throw new Error('缺少 S3 持久化会话')
       const childLogs = logs.filter(content =>
         (JSON.parse(content.split('\n')[0]!) as SessionHeader).parentSession === 's3-outline-recovery')
-      expect(childLogs).toHaveLength(1)
+      expect(childLogs).toHaveLength(4)
       for (const childLog of childLogs) {
         const toolNames = childLog.trimEnd().split('\n').flatMap((line) => {
           const record = JSON.parse(line) as { type?: string; data?: { name?: unknown } }
@@ -34,24 +34,13 @@ it('S3 一次生成响应点和目录、一次质量复核后等待用户确认'
         expect(toolNames).toEqual(['structured_output'])
       }
       const workspaceFiles = await readdir(join(cwd, '.bid-harness'), { recursive: true })
-      const candidatePath = workspaceFiles.find(path => path.replaceAll('\\', '/').endsWith(
-        '/scratch/outline-generation/analysis/scoring-response-points.candidate.json'))
-      expect(candidatePath).toBeDefined()
-      expect(JSON.parse(await readFile(join(cwd, '.bid-harness', candidatePath!), 'utf8'))).toMatchObject({ schema_version: 1 })
+      expect(workspaceFiles.some(path => path.replaceAll('\\', '/').endsWith('scoring-response-points.candidate.json'))).toBe(false)
       expect(JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/scoring-response-points.json'), 'utf8'))).toMatchObject({
         schema_version: 1, next_sequence: 12,
+        points: expect.arrayContaining([expect.objectContaining({ id: 'RP-000011', text: '说明审计留存与追溯' })]),
       })
-      expect(log).toContain('RP-000011')
-      expect(log).toContain('审计留存与追溯')
-      expect(log).toContain('这是 S3 唯一一次完整 Blueprint Quality Review')
-      const reviewTurns = log.trimEnd().split('\n').filter((line) => {
-        const record = JSON.parse(line) as { type?: string; data?: { content?: Array<{ text?: unknown }> } }
-        return record.type === 'user/message' && record.data?.content?.some(block =>
-          typeof block.text === 'string' && block.text.includes('当前阶段：outline_generation / Blueprint Quality Review\n'))
-      })
-      expect(reviewTurns).toHaveLength(1)
-      expect(log).not.toContain('评分响应点语义复核')
-      expect(log).not.toContain('OUTLINE_GENERATION_REVIEW_INCOMPLETE')
+      expect(log).not.toContain('submit_outline_quality_review')
+      expect(log).not.toContain('"name":"write"')
       const transcript = normalizeSessionSnapshot(log, { sessionIds: ['s3-outline-recovery'], cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
         .trimEnd().split('\n').map((line) => {
           const record = JSON.parse(line) as { data?: {
@@ -80,9 +69,11 @@ it('S3 一次生成响应点和目录、一次质量复核后等待用户确认'
     outcome: { stage: 'outline_generation', status: 'waiting_user' },
     untouchedUnchanged: true, confirmationEvents: 0,
   })
-  expect(actual.outline.sections[0]?.scoring_response_point_ids).toHaveLength(11)
-  expect(actual.outline.sections[0]?.scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })
+  expect(actual.outline.sections[0]).toMatchObject({ id: 'dsh-technical-deviation-table', title: '技术偏离表', order: 1 })
+  const security = actual.outline.sections.find(section => section.id === 'SEC-SECURITY')
+  expect(security?.scoring_response_point_ids).toHaveLength(11)
+  expect(security?.scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })
   const report = parseOutlineQualityReport(actual.report)
-  expect(report.reviewed_section_ids).toEqual(['SEC-SECURITY', 'SEC-SERVICE'])
+  expect(report.reviewed_section_ids).toEqual(['dsh-technical-deviation-table', 'SEC-SECURITY', 'SEC-SERVICE'])
   expect(report.checked_scoring_response_point_ids).toHaveLength(11)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

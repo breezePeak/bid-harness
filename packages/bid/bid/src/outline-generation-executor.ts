@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
-import { ToolArgsError, type ObjectJsonSchema, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { type ObjectJsonSchema, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
@@ -22,12 +21,14 @@ import {
 import {
   type OutlineArtifact,
   type OutlineQualityIssue,
+  outlineCandidateSchema,
   outlineQualityIssueSchema,
+  parseOutlineArtifact,
   parseOutlineQualityReport,
   OUTLINE_GENERATION_SCHEMA_VERSION,
   OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
 } from './outline-generation-artifacts.ts'
-import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
+import { loadOutlineFrameworkStructures, loadReferenceBidStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import {
   catalogMatchesScoring,
   parseScoringResponsePointCatalog,
@@ -37,22 +38,26 @@ import {
   scoringResponsePointCandidateSchema,
   type ScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
-import { parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderScoringArtifact, type TenderRequirementsArtifact, type TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderProjectArtifact, type TenderScoringArtifact, type TenderRequirementsArtifact, type TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { applyOutlineRepair, outlineRepairOperationSchema, outlineAssociationRepairOperationSchema } from './outline-generation-repair.ts'
 import { inspectOutlineCandidate, applyOutlineCandidateRepair, outlineCandidateRepairSchema, parseOutlineFormatRepair } from './outline-candidate-repair.ts'
+import { ensureTechnicalDeviationSection } from './outline-generation-normalization.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { installMainAgentProtocol } from './main-agent-protocol.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
+import { validateOutlineGeneration } from './outline-generation-validator.ts'
 
 const OUTLINE_ARTIFACT = 'outline/outline.json'
 const QUALITY_REPORT_ARTIFACT = 'outline/quality-report.json'
-const QUALITY_REPORT_TOOL = 'submit_outline_quality_review'
 const RESPONSE_POINT_CANDIDATE = 'analysis/scoring-response-points.candidate.json'
 const RESPONSE_POINT_CATALOG = 'analysis/scoring-response-points.json'
 const REPAIR_RECEIPT = 'outline/repair-operations.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
-const qualityReportSubmissionSchema = z.object({ issues: z.array(outlineQualityIssueSchema) }).strict()
+const outlineQualityReviewResultSchema = z.object({
+  operations: z.array(outlineAssociationRepairOperationSchema),
+  issues: z.array(outlineQualityIssueSchema),
+}).strict()
 
 // 子代理结构化输出仅接受结构约束；Host 的 Zod 解析保留全部标量约束。
 function removeUnsupportedSubagentSchemaConstraints(value: unknown): void {
@@ -64,8 +69,20 @@ function removeUnsupportedSubagentSchemaConstraints(value: unknown): void {
   const schema = value as Record<string, unknown>
   delete schema.$schema
   delete schema.minLength
+  delete schema.maxLength
+  delete schema.minItems
+  delete schema.maxItems
+  delete schema.pattern
+  delete schema.minimum
   delete schema.exclusiveMinimum
   delete schema.maximum
+  delete schema.exclusiveMaximum
+  delete schema.multipleOf
+  delete schema.format
+  if (Array.isArray(schema.anyOf)) {
+    schema.oneOf = schema.anyOf
+    delete schema.anyOf
+  }
   for (const child of Object.values(schema)) removeUnsupportedSubagentSchemaConstraints(child)
 }
 
@@ -73,6 +90,18 @@ const rawScoringResponsePointCandidateOutputSchema = zodJsonSchema(scoringRespon
 removeUnsupportedSubagentSchemaConstraints(rawScoringResponsePointCandidateOutputSchema)
 const scoringResponsePointCandidateOutputSchema: ObjectJsonSchema = {
   ...rawScoringResponsePointCandidateOutputSchema,
+  type: 'object',
+}
+const rawOutlineCandidateOutputSchema = zodJsonSchema(outlineCandidateSchema, { unrepresentable: 'any' })
+removeUnsupportedSubagentSchemaConstraints(rawOutlineCandidateOutputSchema)
+const outlineCandidateOutputSchema: ObjectJsonSchema = {
+  ...rawOutlineCandidateOutputSchema,
+  type: 'object',
+}
+const rawOutlineQualityReviewOutputSchema = zodJsonSchema(outlineQualityReviewResultSchema)
+removeUnsupportedSubagentSchemaConstraints(rawOutlineQualityReviewOutputSchema)
+const outlineQualityReviewOutputSchema: ObjectJsonSchema = {
+  ...rawOutlineQualityReviewOutputSchema,
   type: 'object',
 }
 
@@ -198,7 +227,84 @@ function renderResponsePointAnalysisTask(
     '典型逐项计分原文中的项目目标、预期成果、总体设计对相关政策与现有条件的符合性、软件技术路线、总体设计应分别保留；整体表述“总体方案完整、合理、可行，得5分”应保留为一个合理响应点，不得按分值拆成五项。',
     `scoring_id 必须逐字复制 Host 提供的 id；本次合法 ID：${JSON.stringify(scoringIds)}。`,
     '每个 scoring_id 至少一个响应点，同一评分项的 order 从 1 连续递增。稳定 RP ID 由 Host 分配。',
-    '请在本轮内部完成一次自检，然后直接返回最终候选。Host 不会再启动第二个评分响应点复核 Agent。',
+    '直接返回第一轮候选。Host 会持久化该候选，再交给独立语义复核 Child 检查遗漏、误拆和过度拆分。',
+  ].join('\n')
+}
+
+/** Render the semantic review of one durable response-point candidate. */
+function renderResponsePointReviewTask(
+  agent: Agent,
+  task: BidStageTask,
+  scoring: TenderScoringArtifact,
+  candidate: ScoringResponsePointCandidate,
+): string {
+  return [
+    `当前阶段：${task.stage} / 评分响应点语义复核`,
+    `Bid Session：${agent.id}`,
+    'Host 已提供正式评分项和已持久化的第一轮候选；你不需要也不能读取工作区。',
+    `<scoring-json>\n${JSON.stringify(scoring)}\n</scoring-json>`,
+    `<response-point-candidate>\n${JSON.stringify(candidate)}\n</response-point-candidate>`,
+    '逐项检查是否遗漏原文明列的独立内容、错误合并、过度拆碎，或把完整、合理、可行等质量判断词误作独立主题。',
+    '保留 scoring_id，按每个评分项从 1 开始连续重排 order；只返回复核后的完整候选，稳定 RP ID 仍由 Host 分配。',
+  ].join('\n')
+}
+
+interface OutlineSemanticInputs {
+  readonly project: TenderProjectArtifact
+  readonly requirements: TenderRequirementsArtifact
+  readonly scoring: TenderScoringArtifact
+  readonly compliance: TenderComplianceArtifact
+  readonly catalog: ScoringResponsePointCatalog
+  readonly frameworks: readonly OutlineFrameworkStructure[]
+  readonly referenceBids: readonly OutlineFrameworkStructure[]
+}
+
+/** Render the no-tool initial outline assignment with every authoritative input embedded. */
+function renderInitialOutlineTask(agent: Agent, task: BidStageTask, input: OutlineSemanticInputs): string {
+  return [
+    `当前阶段：${task.stage} / 初步目录生成`,
+    `Bid Session：${agent.id}`,
+    'Host 已提供完整权威输入。你不需要也不能读取工作区，只返回目录候选。',
+    `<project-json>\n${JSON.stringify(input.project)}\n</project-json>`,
+    `<requirements-json>\n${JSON.stringify(input.requirements)}\n</requirements-json>`,
+    `<scoring-json>\n${JSON.stringify(input.scoring)}\n</scoring-json>`,
+    `<compliance-json>\n${JSON.stringify(input.compliance)}\n</compliance-json>`,
+    `<response-point-catalog>\n${JSON.stringify(input.catalog)}\n</response-point-catalog>`,
+    `<outline-framework-structures>\n${JSON.stringify(input.frameworks)}\n</outline-framework-structures>`,
+    `<reference-bid-structures>\n${JSON.stringify(input.referenceBids)}\n</reference-bid-structures>`,
+    '人工框架决定主要骨架并且只有人工框架标题可以写入 framework_refs；reference_bid 只能参考目录组织，不得复制旧项目专有章节、不得写入 framework_refs，也不得优先于当前 Tender。',
+    '根据当前 Project、Requirements、Scoring、Compliance 和稳定评分响应点设计技术标详细写作 Blueprint。每个 RP 至少由一个合适的可写叶子覆盖，模型只选择 scoring_response_point_ids，快照由 Host 重建。',
+    '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果；只需材料核验的 Compliance 放入 global_compliance_ids。结构节点 writable=false 且 must_answer=[]；可写节点必须有具体 must_answer。',
+    `返回 schema_version=${OUTLINE_GENERATION_SCHEMA_VERSION}、scope="technical_bid"、document_title、global_compliance_ids、sections 的完整候选。`,
+    '不要生成“封面”“目录”或“技术偏离表”；Host 会确定性补入固定第一章，返回内容只负责第二章以后的动态技术正文目录。',
+    ...task.constraints.map(constraint => `约束：${constraint}`),
+  ].join('\n')
+}
+
+/** Render one no-tool semantic review of the exact current canonical outline. */
+function renderStructuredQualityReviewTask(
+  agent: Agent,
+  task: BidStageTask,
+  input: OutlineSemanticInputs,
+  outline: OutlineArtifact,
+  failure?: string,
+): string {
+  return [
+    `当前阶段：${task.stage} / Blueprint Quality Review`,
+    `Bid Session：${agent.id}`,
+    'Host 已提供当前完整目录和全部权威输入。你不需要也不能读取或写入工作区。',
+    `<outline-json>\n${JSON.stringify(outline)}\n</outline-json>`,
+    `<project-json>\n${JSON.stringify(input.project)}\n</project-json>`,
+    `<requirements-json>\n${JSON.stringify(input.requirements)}\n</requirements-json>`,
+    `<scoring-json>\n${JSON.stringify(input.scoring)}\n</scoring-json>`,
+    `<compliance-json>\n${JSON.stringify(input.compliance)}\n</compliance-json>`,
+    `<response-point-catalog>\n${JSON.stringify(input.catalog)}\n</response-point-catalog>`,
+    `<outline-framework-structures>\n${JSON.stringify(input.frameworks)}\n</outline-framework-structures>`,
+    `<reference-bid-structures>\n${JSON.stringify(input.referenceBids)}\n</reference-bid-structures>`,
+    '逐项检查技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否在合适的可写叶子中真实覆盖，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
+    '必须修正的问题放入 operations，使用 Host 提供的局部目录操作；不要返回整本新目录。operations 为空才表示当前 exact outline 已完成语义复核。',
+    'issues 只允许 severity=advisory，用于仍可交给用户判断的非阻断建议；阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
+    failure === undefined ? '' : `上一轮结果未能应用：${failure}`,
   ].join('\n')
 }
 
@@ -256,26 +362,6 @@ export function renderOutlineGenerationTask(
     ]),
     ...task.constraints.map(constraint => `约束：${constraint}`),
     '写完文件后停止；Host 将独立验证树结构、引用和覆盖。',
-  ].join('\n')
-}
-
-/** Render the required post-draft review assignment for the live Bid Agent. */
-function renderBlueprintQualityReviewTask(agent: Agent, workspace: BidWorkspace, task: BidStageTask): string {
-  if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
-  const root = relative(workspace.root, workspace.projectRoot).replaceAll('\\', '/')
-  return [
-    `当前阶段：${task.stage} / Blueprint Quality Review`,
-    `Bid Session：${agent.id}`,
-    '这是强制复核；即使初稿看起来完整，也必须完成后才可停止。',
-    '重新读取 Requirements、Scoring、Compliance、评分响应点目录和当前 outline.json：',
-    ...task.inputs.map(path => `- ${root}/${path}`),
-    `- ${root}/${OUTLINE_ARTIFACT}`,
-    `本阶段只允许调用：${task.allowedTools.join(', ')}、${QUALITY_REPORT_TOOL}。不得 Web Search、bash 或重新进行全库资料映射。`,
-    '逐项检查每个技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否落在合适位置；重点判断评分项实际要求证明的内容，而非只检查 ID 是否出现。投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 必须留在 global_compliance_ids，不得单独形成正文页；发现此类章节时删除或合并其技术内容。根据评分语义判断章节是否聚焦一个可独立编写的技术主题；技术响应索引、偏离表或合规清单不得集中承担正文覆盖。must_answer 必须具体。存在 Framework 时还要检查主要骨架、顺序和关键技术章节是否合理继承，框架过粗处是否按 RP 扩展，是否产生重复主题，framework_refs 与 origin 是否符合实际来源，旧项目污染是否清理。',
-    '发现章节过粗、多个明显技术主题混在一节、评分项未真实拆解、must_answer 过泛、结构与可写职责混淆或其他问题时，先修改 outline/outline.json；保留原有严格 JSON 字段和全部引用覆盖。',
-    '这是 S3 唯一一次完整 Blueprint Quality Review。必须在本轮内阅读目录、检查语义质量、直接修正阻断问题，并自行复查修改结果；Host 不会因为本轮修改了 outline 而启动第二轮完整 Review。',
-    `修正后调用 ${QUALITY_REPORT_TOOL}，只提交 issues=[{code,severity:"advisory",message}]。code 使用大写下划线标识，issues 可以记录仍需用户判断的非阻断语义建议；阻断问题必须先修复目录。`,
-    `Host 为当前复核目录生成 schema_version=${OUTLINE_QUALITY_REPORT_SCHEMA_VERSION}、scope、checked_* 和 reviewed_section_ids 并写入正式质量报告。工具返回 submitted=true 后停止；Host 会独立校验报告集合、树结构和引用覆盖。`,
   ].join('\n')
 }
 
@@ -346,7 +432,10 @@ export async function executeOutlineGeneration(
 ): Promise<StageArtifact[]> {
   if (task.stage !== 'outline_generation') throw new Error('outline-generation-executor-stage-invalid')
   await waitForModelStageIdle(agent, options.run.signal)
-  const frameworks = await loadOutlineFrameworkStructures(workspace)
+  const [frameworks, referenceBids] = await Promise.all([
+    loadOutlineFrameworkStructures(workspace),
+    loadReferenceBidStructures(workspace),
+  ])
   const path = (artifact: string): string => join(workspace.projectRoot, artifact)
   const scratchRoot = join(workspace.projectRoot, 'runs', options.run.runId, 'scratch', 'outline-generation')
   const scratchPath = (artifact: string): string => join(scratchRoot, artifact)
@@ -385,7 +474,7 @@ export async function executeOutlineGeneration(
       throw new BidStageExecutionError([{ code: 'OUTLINE_GENERATION_INPUT_INVALID', artifact, message: '正式输入缺失或损坏：' + (error instanceof Error ? error.message : String(error)) }])
     }
   }
-  await readInput('analysis/project.json', parseTenderProjectArtifact)
+  const project = await readInput('analysis/project.json', parseTenderProjectArtifact)
   const scoring = await readInput('analysis/scoring.json', parseTenderScoringArtifact)
   const requirements = await readInput('analysis/requirements.json', parseTenderRequirementsArtifact)
   const compliance = await readInput('analysis/compliance.json', parseTenderComplianceArtifact)
@@ -402,43 +491,59 @@ export async function executeOutlineGeneration(
       }])
     }
   }
-  const generateResponsePointCandidate = async (
-    label: string,
-    prompt: string,
-  ): Promise<ScoringResponsePointCandidate> => {
+  const runStructuredChild = async <T>(request: {
+    readonly label: string
+    readonly prompt: string
+    readonly outputSchema: ObjectJsonSchema
+    readonly persona: string
+    readonly parse: (value: unknown) => T
+    readonly errorCode: string
+    readonly artifact: string
+  }): Promise<T> => {
     const subagents = agent.ctx.get('subagents')
     if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
-      throw new Error('S3 评分响应点分析需要独立上下文的 spawn provider。')
+      throw new Error(`S3 ${request.label}需要独立上下文的 spawn provider。`)
     }
     await options.run.scheduler.waitUntilRunnable(options.run.signal)
     const child = await subagents.start('spawn', {
       parent: agent,
       signal: options.run.signal,
-      label,
-      prompt: [{ type: 'text', text: prompt }],
-      outputSchema: scoringResponsePointCandidateOutputSchema,
+      label: request.label,
+      prompt: [{ type: 'text', text: request.prompt }],
+      outputSchema: request.outputSchema,
       toolFilter: { allow: [] },
       maxDepth: 1,
-      persona: '你是评分响应点分析 Subagent。只分析 Host 注入的评分内容，不调用工具、不派生其他 Agent，并通过结构化输出返回完整候选。',
+      persona: request.persona,
     })
     try {
       const result = await child.result
-      if (result.stopReason !== 'completed') {
-        throw new Error(`评分响应点 Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`)
-      }
-      if (result.structured === undefined) throw new Error('评分响应点 Subagent 未返回结构化候选。')
-      return validateResponsePointCandidate(result.structured)
+      if (result.stopReason !== 'completed') throw new Error(`${request.label} Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`)
+      if (result.structured === undefined) throw new Error(`${request.label} Subagent 未返回结构化结果。`)
+      return request.parse(result.structured)
     } catch (error) {
-      if (options.run.signal.aborted) throw error
-      if (error instanceof BidStageExecutionError) throw error
+      if (options.run.signal.aborted || error instanceof BidStageExecutionError) throw error
       throw new BidStageExecutionError([{
-        code: 'OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID',
-        artifact: RESPONSE_POINT_CANDIDATE,
+        code: request.errorCode,
+        artifact: request.artifact,
         message: error instanceof Error ? error.message : String(error),
       }])
     } finally {
       await child.dispose()
     }
+  }
+  const generateResponsePointCandidate = async (
+    label: string,
+    prompt: string,
+  ): Promise<ScoringResponsePointCandidate> => {
+    return runStructuredChild({
+      label,
+      prompt,
+      outputSchema: scoringResponsePointCandidateOutputSchema,
+      persona: '你是评分响应点分析 Subagent。只分析 Host 注入的评分内容，不调用工具、不派生其他 Agent，并通过结构化输出返回完整候选。',
+      parse: validateResponsePointCandidate,
+      errorCode: 'OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID',
+      artifact: RESPONSE_POINT_CANDIDATE,
+    })
   }
   const inputVersion = createHash('sha256').update(JSON.stringify(await Promise.all(task.inputs.map(async input => [input, await read(input)])))).digest('hex')
   const previousVersion = await read('outline/generation-inputs.json')
@@ -463,71 +568,79 @@ export async function executeOutlineGeneration(
   const canonicalOutlineRaw = await read(OUTLINE_ARTIFACT)
   const qualityReportRaw = await read(QUALITY_REPORT_ARTIFACT)
   const draftRaw = await read('outline/draft.json')
-  if (options.regeneration === undefined && qualityReportRaw !== undefined) {
-    if (catalog === undefined || canonicalOutlineRaw === undefined) throw new BidStageExecutionError([{
-      code: 'OUTLINE_GENERATION_CHECKPOINT_INVALID', artifact: QUALITY_REPORT_ARTIFACT,
-      message: '质量复核检查点缺少正式响应点清单或目录。',
-    }])
-    const candidate = inspectOutlineCandidate(canonicalOutlineRaw, catalog, scoring)
-    if (candidate.kind !== 'valid') throw new BidStageExecutionError([{
-      code: 'OUTLINE_GENERATION_CHECKPOINT_INVALID', artifact: OUTLINE_ARTIFACT,
-      message: '质量复核检查点对应的目录无法解析。',
-    }, ...candidate.issues])
-    await readInput(QUALITY_REPORT_ARTIFACT, parseOutlineQualityReport)
-    const hash = outlineArtifactSha256(candidate.outline)
-    if (draftRaw !== undefined) {
-      const draft = await readInput('outline/draft.json', parseOutlineDraft)
-      if (draft.source_outline_sha256 !== hash || draft.draft_outline_sha256 !== hash
-        || outlineArtifactSha256(draft.outline) !== hash) throw new BidStageExecutionError([{
-        code: 'OUTLINE_GENERATION_DRAFT_MISMATCH', artifact: 'outline/draft.json',
-        message: '目录草稿哈希与已复核目录不一致，不能静默覆盖。请重新执行当前阶段。',
-      }])
-    } else {
-      await write('outline/draft.json', {
-        schema_version: 1,
-        scope: 'technical_bid',
-        revision: 1,
-        source_outline_sha256: hash,
-        draft_outline_sha256: hash,
-        outline: candidate.outline,
-      } satisfies OutlineDraftView)
+  if (options.regeneration === undefined && (qualityReportRaw !== undefined || draftRaw !== undefined)) {
+    let complete = false
+    if (catalog !== undefined && canonicalOutlineRaw !== undefined && qualityReportRaw !== undefined && draftRaw !== undefined) {
+      try {
+        const candidate = inspectOutlineCandidate(canonicalOutlineRaw, catalog, scoring)
+        if (candidate.kind === 'valid') {
+          parseOutlineQualityReport(JSON.parse(qualityReportRaw))
+          const draft = parseOutlineDraft(JSON.parse(draftRaw))
+          const hash = outlineArtifactSha256(candidate.outline)
+          complete = outlineArtifactSha256(parseOutlineArtifact({
+            ...candidate.outline, sections: ensureTechnicalDeviationSection(candidate.outline.sections),
+          })) === hash
+            && draft.source_outline_sha256 === hash
+            && draft.draft_outline_sha256 === hash
+            && outlineArtifactSha256(draft.outline) === hash
+            && (await validateOutlineGeneration(workspace, 'outline_generation', artifacts)).ok
+          if (complete) {
+            options.run.reportProgress({
+              phase: 'finalizing', summary: '已恢复已完成的目录与质量报告',
+              completed: candidate.outline.sections.length, total: candidate.outline.sections.length,
+            })
+            return artifacts
+          }
+        }
+      } catch { /* 不完整或陈旧的 final checkpoint 只使报告失效。 */ }
     }
-    options.run.reportProgress({
-      phase: 'finalizing',
-      summary: options.run.resumeOf === undefined ? '目录质量复核已完成，正在执行最终目录校验' : '已恢复 S3，目录质量复核已完成，继续最终验收',
-      completed: candidate.outline.sections.length,
-      total: candidate.outline.sections.length,
+    if (!complete) await options.run.commits.publish(async (lease) => {
+      await lease.remove(path(QUALITY_REPORT_ARTIFACT))
+      await lease.remove(path('outline/draft.json'))
     })
-    return artifacts
   }
-  if (options.regeneration === undefined && draftRaw !== undefined) throw new BidStageExecutionError([{
-    code: 'OUTLINE_GENERATION_CHECKPOINT_INVALID', artifact: 'outline/draft.json',
-    message: '目录草稿缺少对应的质量复核检查点，不能作为恢复依据。',
-  }])
 
   if (catalog === undefined) {
     if (options.regeneration !== undefined) throw new Error('目录重新生成缺少有效的正式响应点清单。')
+    const rawCandidate = await read(RESPONSE_POINT_CANDIDATE)
+    let candidate: ScoringResponsePointCandidate
+    if (rawCandidate === undefined) {
+      options.run.reportProgress({
+        phase: 'analyzing', summary: '正在拆解评分响应点', total: scoring.scoring_items.length,
+        details: [`评分项 ${String(scoring.scoring_items.length)} 项`],
+      })
+      candidate = await generateResponsePointCandidate('评分响应点分析', renderResponsePointAnalysisTask(agent, task, scoring))
+      await write(RESPONSE_POINT_CANDIDATE, candidate)
+    } else {
+      candidate = validateResponsePointCandidate(rawCandidate)
+      options.run.reportProgress({
+        phase: 'analyzing', summary: '已恢复评分响应点候选，继续语义复核', total: scoring.scoring_items.length,
+      })
+    }
     options.run.reportProgress({
-      phase: 'analyzing',
-      summary: '正在拆解评分响应点',
-      total: scoring.scoring_items.length,
-      details: [`评分项 ${String(scoring.scoring_items.length)} 项`],
+      phase: 'reviewing', summary: '正在复核评分响应点', total: candidate.points.length,
     })
-    const candidate = await generateResponsePointCandidate('评分响应点分析', renderResponsePointAnalysisTask(agent, task, scoring))
-    const candidatePath = scratchPath(RESPONSE_POINT_CANDIDATE)
-    await assertNoLinkedPath(workspace.root, candidatePath)
-    await options.run.commits.writeJson(candidatePath, candidate)
-    catalog = createScoringResponsePointCatalog(scoring, candidate)
+    const reviewedCandidate = await generateResponsePointCandidate(
+      '评分响应点语义复核', renderResponsePointReviewTask(agent, task, scoring, candidate),
+    )
+    catalog = createScoringResponsePointCatalog(scoring, reviewedCandidate)
     await write(RESPONSE_POINT_CATALOG, catalog)
+    await remove(RESPONSE_POINT_CANDIDATE)
+  } else {
+    await remove(RESPONSE_POINT_CANDIDATE)
+    options.run.reportProgress({ phase: 'analyzing', summary: '已恢复正式评分响应点清单', total: catalog.points.length })
   }
   const formalCatalog = catalog
+  const semanticInputs: OutlineSemanticInputs = {
+    project, requirements, scoring, compliance, catalog: formalCatalog, frameworks, referenceBids,
+  }
   const handoff = '\n正式响应点清单（只读，不得修改、删除或重新分配编号）：' + relative(workspace.root, path(RESPONSE_POINT_CATALOG)).replaceAll('\\', '/')
     + '\n' + JSON.stringify(formalCatalog)
 
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('S3 需要 tools 服务。')
   let writablePaths: string[] = []
-  const allowed = new Set([...task.allowedTools, QUALITY_REPORT_TOOL])
+  const allowed = new Set(task.allowedTools)
   const writeTool = resolveStageTool(agent, 'write')
   if (writeTool === undefined) throw new Error('S3 需要 write 工具。')
   const liftWriteShadow = tools.register({
@@ -553,11 +666,6 @@ export async function executeOutlineGeneration(
   const run = async (
     prompt: string,
     outputs: string[],
-    privateTask?: {
-      readonly names: readonly string[]
-      readonly setEnabled: (enabled: boolean) => void
-    },
-    preserveOutputs = false,
   ): Promise<void> => {
     options.run.signal.throwIfAborted()
     await options.run.scheduler.waitUntilRunnable(options.run.signal)
@@ -565,18 +673,7 @@ export async function executeOutlineGeneration(
       const candidate = scratchPath(output)
       await assertNoLinkedPath(workspace.root, candidate)
       await mkdir(join(candidate, '..'), { recursive: true, mode: 0o700 })
-      if (preserveOutputs) {
-        const formal = path(output)
-        await assertNoLinkedPath(workspace.root, formal)
-        try {
-          await copyFile(formal, candidate, constants.COPYFILE_EXCL)
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code
-          if (code !== 'EEXIST' && code !== 'ENOENT') throw error
-        }
-      } else {
-        await rm(candidate, { force: true })
-      }
+      await rm(candidate, { force: true })
       scratchArtifacts.add(output)
     }))
     writablePaths = outputs.map(scratchPath)
@@ -587,8 +684,7 @@ export async function executeOutlineGeneration(
     ), prompt) + '\n当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification；只有 read-only 下首次写入被沙箱拒绝后，才按错误提示做一次严格升级重试。'
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const protocol = installMainAgentProtocol(agent, {
-      privateTools: privateTask?.names ?? [],
-      setPrivateToolsEnabled: privateTask?.setEnabled,
+      privateTools: [],
       label: 'S3 Outline Generation',
     })
     protocol.own(message)
@@ -611,50 +707,10 @@ export async function executeOutlineGeneration(
     }
     writablePaths = []
   }
-  const runQualityReview = async (prompt: string, allowOutlineWrite: boolean): Promise<OutlineQualityIssue[] | undefined> => {
-    let submittedIssues: OutlineQualityIssue[] | undefined
-    const definition = {
-      name: QUALITY_REPORT_TOOL,
-      description: '提交当前 Blueprint Quality Review 的非阻断语义建议；Host 生成并持久化正式质量报告。',
-      parameters: zodJsonSchema(qualityReportSubmissionSchema),
-      output: {
-        schema: { type: 'object' },
-        render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
-      },
-      presentCall: () => ({ card: 'generic', title: '提交目录质量复核' }),
-      execute(args: unknown, exec: ToolRunContext) {
-        if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
-        const parsed = qualityReportSubmissionSchema.safeParse(args)
-        if (!parsed.success) {
-          throw new ToolArgsError(parsed.error.issues.map(issue => `${issue.path.join('.') || 'value'}: ${issue.message}`))
-        }
-        submittedIssues = parsed.data.issues
-        return Promise.resolve({ submitted: true, issue_count: submittedIssues.length })
-      },
-    } satisfies ToolDefinition
-    let enabled = true
-    let dispose: (() => void) | undefined = tools.register(definition)
-    const setEnabled = (next: boolean): void => {
-      if (enabled === next) return
-      enabled = next
-      if (next) dispose = tools.register(definition)
-      else { dispose?.(); dispose = undefined }
-    }
-    try {
-      await run(prompt, allowOutlineWrite ? [OUTLINE_ARTIFACT] : [], {
-        names: [QUALITY_REPORT_TOOL],
-        setEnabled,
-      }, allowOutlineWrite)
-    } finally {
-      setEnabled(false)
-    }
-    return submittedIssues
-  }
   try {
     const generated = options.regeneration !== undefined || canonicalOutlineRaw === undefined
     if (generated) {
       await remove(REPAIR_RECEIPT)
-      await remove(QUALITY_REPORT_ARTIFACT)
       options.run.reportProgress({
         phase: 'generating',
         summary: options.run.resumeOf === undefined || options.regeneration !== undefined
@@ -662,8 +718,21 @@ export async function executeOutlineGeneration(
         total: formalCatalog.points.length,
         details: [`评分响应点 ${String(formalCatalog.points.length)} 项`],
       })
-      await run(renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) + handoff,
-        [OUTLINE_ARTIFACT, ...(options.regeneration === undefined ? [] : [REGENERATION_CHANGE_SET])])
+      if (options.regeneration === undefined) {
+        const initial = await runStructuredChild({
+          label: '初步目录生成',
+          prompt: renderInitialOutlineTask(agent, task, semanticInputs),
+          outputSchema: outlineCandidateOutputSchema,
+          persona: '你是技术标初步目录生成 Subagent。只使用 Host 注入的结构化输入，不调用工具、不派生其他 Agent，并通过结构化输出返回目录候选。',
+          parse: value => outlineCandidateSchema.parse(value),
+          errorCode: 'OUTLINE_GENERATION_CANDIDATE_INVALID',
+          artifact: OUTLINE_ARTIFACT,
+        })
+        await write(OUTLINE_ARTIFACT, initial)
+      } else {
+        await run(renderOutlineGenerationTask(agent, workspace, task, options.regeneration, frameworks) + handoff,
+          [OUTLINE_ARTIFACT, REGENERATION_CHANGE_SET])
+      }
     }
     const validate = async (outline: OutlineArtifact): Promise<StageValidationIssue[]> => {
       const issues: StageValidationIssue[] = []
@@ -762,10 +831,16 @@ export async function executeOutlineGeneration(
           message: error instanceof Error ? error.message : String(error),
         }])
       }
+      if (options.regeneration === undefined) outline = parseOutlineArtifact({
+        ...outline, sections: ensureTechnicalDeviationSection(outline.sections),
+      })
       await publishOutline(outline, operations)
       repairUsed = true
     } else {
       outline = candidate.outline
+      if (options.regeneration === undefined) outline = parseOutlineArtifact({
+        ...outline, sections: ensureTechnicalDeviationSection(outline.sections),
+      })
       if (generated) await publishOutline(outline)
       else if (canonicalOutlineRaw !== JSON.stringify(outline)) await write(OUTLINE_ARTIFACT, outline)
     }
@@ -830,29 +905,50 @@ export async function executeOutlineGeneration(
 
     options.run.reportProgress({
       phase: 'reviewing',
-      summary: '正在进行最终目录质量复核',
+      summary: canonicalOutlineRaw === undefined ? '正在进行目录质量复核' : '已恢复目录候选，继续质量复核',
       completed: outline.sections.length,
       total: outline.sections.length,
     })
-    let qualityIssues = await runQualityReview(renderBlueprintQualityReviewTask(agent, workspace, task) + handoff
-      + '\n本轮完整复核目录：' + JSON.stringify(outline)
-      + '\n本轮完整复核的招标要求、评分及合规：' + JSON.stringify({ requirements, scoring, compliance }), true)
-    if (qualityIssues === undefined) {
-      qualityIssues = await runQualityReview([
-        '当前阶段：outline_generation / Blueprint Quality Review Submission',
-        `Bid Session：${agent.id}`,
-        `上一轮 Blueprint Quality Review 已完成，但未调用 ${QUALITY_REPORT_TOOL}。不得再修改 outline.json；只调用该工具提交上一轮质量复核结果，然后停止。`,
-      ].join('\n'), false)
+    let reviewFailure: string | undefined
+    let qualityIssues: OutlineQualityIssue[] | undefined
+    let reviewRounds = 0
+    while (qualityIssues === undefined) {
+      let review: z.infer<typeof outlineQualityReviewResultSchema>
+      try {
+        review = await runStructuredChild({
+          label: '目录质量复核',
+          prompt: renderStructuredQualityReviewTask(agent, task, semanticInputs, outline, reviewFailure),
+          outputSchema: outlineQualityReviewOutputSchema,
+          persona: '你是技术标目录质量复核 Subagent。只使用 Host 注入的结构化输入，不调用工具、不派生其他 Agent，只返回局部 operations 和 advisory issues。',
+          parse: value => outlineQualityReviewResultSchema.parse(value),
+          errorCode: 'OUTLINE_GENERATION_REVIEW_INVALID',
+          artifact: OUTLINE_ARTIFACT,
+        })
+        if (review.operations.length === 0) {
+          qualityIssues = review.issues
+          break
+        }
+        let reviewed = applyOutlineRepair(outline, review.operations, formalCatalog, scoring)
+        if (options.regeneration === undefined) reviewed = parseOutlineArtifact({
+          ...reviewed, sections: ensureTechnicalDeviationSection(reviewed.sections),
+        })
+        const reviewedIssues = await validate(reviewed)
+        if (reviewedIssues.length > 0) throw new Error(JSON.stringify(reviewedIssues))
+        if (outlineArtifactSha256(reviewed) === outlineArtifactSha256(outline)) throw new Error('operations 没有产生实际变化。')
+        outline = reviewed
+        await publishOutline(outline, review.operations)
+        reviewFailure = undefined
+      } catch (error) {
+        if (options.run.signal.aborted) throw error
+        reviewFailure = error instanceof Error ? error.message : String(error)
+      }
+      if (reviewRounds >= options.maxRepairAttempts) throw new BidStageExecutionError([{
+        code: 'OUTLINE_GENERATION_REVIEW_NOT_CONVERGED', artifact: OUTLINE_ARTIFACT,
+        message: `目录质量复核在独立预算内未收敛：${reviewFailure ?? '仍返回修改操作。'}`,
+      }])
+      reviewRounds += 1
     }
-    if (qualityIssues === undefined) throw new BidStageExecutionError([{
-      code: 'OUTLINE_GENERATION_QUALITY_SUBMISSION_REQUIRED', artifact: QUALITY_REPORT_ARTIFACT,
-      message: `质量复核及唯一一次协议补交均未调用 ${QUALITY_REPORT_TOOL}。`,
-    }])
-    const reviewedCandidate = inspectOutlineCandidate((await read(OUTLINE_ARTIFACT)) ?? '', formalCatalog, scoring)
-    if (reviewedCandidate.kind !== 'valid') throw new BidStageExecutionError(reviewedCandidate.issues)
-    const reviewed = reviewedCandidate.outline
-    const reviewedIssues = await validate(reviewed)
-    if (reviewedIssues.length > 0) throw new BidStageExecutionError(reviewedIssues)
+    const reviewed = outline
     const report = {
       schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
       scope: 'technical_bid' as const,
@@ -865,6 +961,17 @@ export async function executeOutlineGeneration(
     await options.run.commits.publish(async (lease) => {
       await lease.writeJson(path(OUTLINE_ARTIFACT), reviewed)
       await lease.writeJson(path(QUALITY_REPORT_ARTIFACT), report)
+      if (options.regeneration === undefined) {
+        const hash = outlineArtifactSha256(reviewed)
+        await lease.writeJson(path('outline/draft.json'), {
+          schema_version: 1,
+          scope: 'technical_bid',
+          revision: 1,
+          source_outline_sha256: hash,
+          draft_outline_sha256: hash,
+          outline: reviewed,
+        } satisfies OutlineDraftView)
+      }
     })
     scratchArtifacts.delete(OUTLINE_ARTIFACT)
     await rm(scratchPath(OUTLINE_ARTIFACT), { force: true })
@@ -875,16 +982,6 @@ export async function executeOutlineGeneration(
       await write(REGENERATION_CHANGE_SET, { ...changeSet, changes: outlineRegenerationChanges(draft.outline, reviewed).map(change => ({
         ...change, reason: changeSet.changes.find(item => item.section_id === change.section_id && item.type === change.type)?.reason ?? '响应点覆盖修复及目录质量复核',
       })) })
-    } else {
-      const hash = outlineArtifactSha256(reviewed)
-      await write('outline/draft.json', {
-        schema_version: 1,
-        scope: 'technical_bid',
-        revision: 1,
-        source_outline_sha256: hash,
-        draft_outline_sha256: hash,
-        outline: reviewed,
-      } satisfies OutlineDraftView)
     }
     options.run.reportProgress({
       phase: 'finalizing', summary: '正在执行最终目录校验',

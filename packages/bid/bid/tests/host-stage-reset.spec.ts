@@ -39,7 +39,7 @@ interface TestHost {
 }
 
 describe('Bid Host stage reset', () => {
-  it('cancels and drains running work before cleanup and rejects another reset', async () => {
+  it('cancels and drains running work before clearing every S3 checkpoint', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-'))
@@ -52,10 +52,19 @@ describe('Bid Host stage reset', () => {
     session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
     session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
 
-    const evidencePath = join(cwd, '.bid-harness', 'analysis', 'evidence-map.json')
-    const mappingCheckpointPath = join(cwd, '.bid-harness', 'analysis', 'evidence-mapping-checkpoint.json')
-    await mkdir(dirname(evidencePath), { recursive: true })
-    await Promise.all([writeFile(evidencePath, '{}\n'), writeFile(mappingCheckpointPath, '{}\n')])
+    const projectRoot = join(cwd, '.bid-harness')
+    const resetPaths = [
+      'analysis/scoring-response-points.candidate.json',
+      'analysis/scoring-response-points.json',
+      'outline/generation-inputs.json',
+      'outline/outline.json',
+      'outline/quality-report.json',
+      'outline/draft.json',
+    ].map(path => join(projectRoot, path))
+    await Promise.all(resetPaths.map(async (path) => {
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, '{}\n')
+    }))
 
     const workspace = new BidWorkspace(cwd)
     await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
@@ -82,13 +91,14 @@ describe('Bid Host stage reset', () => {
     const agent = {
       id: session.id,
       session,
+      inject: vi.fn(),
       cancel,
       whenIdle: vi.fn(() => idle.promise),
       inbox: { clear: vi.fn() },
     } as unknown as Agent
     const flush = vi.fn(async () => {})
     const drive = vi.fn()
-    const startStage = vi.fn(async () => ({ ok: true, value: { stage: 'evidence_mapping', status: 'running' } }))
+    const startStage = vi.fn(async () => ({ ok: true, value: { stage: 'outline_generation', status: 'running' } }))
     const ask = vi.fn(async ({ questions }: { questions: Array<{ id: string }> }) => ({
       answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
     }))
@@ -126,7 +136,7 @@ describe('Bid Host stage reset', () => {
       'chapter_writing',
     )).rejects.toMatchObject({ code: 'BID_STAGE_RESET_NOT_ALLOWED' })
 
-    const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, 'evidence_mapping')
+    const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, 'outline_generation')
     await vi.waitFor(() => { expect(executionCancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
     expect(operation.controller.signal.aborted).toBe(true)
     expect(cancel).not.toHaveBeenCalled()
@@ -135,16 +145,15 @@ describe('Bid Host stage reset', () => {
     await expect(BidHostRuntime.prototype.resetStage.call(
       host as unknown as BidHostRuntime,
       agent,
-      'evidence_mapping',
+      'outline_generation',
     )).rejects.toMatchObject({ code: 'BID_OPERATION_IN_PROGRESS' })
 
     prior.resolve(undefined)
     executionIdle.resolve(undefined)
-    await expect(reset).resolves.toEqual({ stage: 'evidence_mapping', status: 'waiting_start' })
-    await expect(access(evidencePath)).rejects.toThrow()
-    await expect(access(mappingCheckpointPath)).rejects.toThrow()
+    await expect(reset).resolves.toEqual({ stage: 'outline_generation', status: 'waiting_start' })
+    for (const path of resetPaths) await expect(access(path)).rejects.toThrow()
     expect(session.events.findLast(event => event.type === 'bid.stage.reset')).toMatchObject({
-      type: 'bid.stage.reset', data: { stage: 'evidence_mapping', status: 'waiting_start' },
+      type: 'bid.stage.reset', data: { stage: 'outline_generation', status: 'waiting_start' },
     })
     expect(drive).not.toHaveBeenCalled()
     expect(flush).toHaveBeenCalledWith(session)

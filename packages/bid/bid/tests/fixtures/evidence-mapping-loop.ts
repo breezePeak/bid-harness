@@ -645,21 +645,13 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   outline.sections.push(untouched)
   const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
-  const writePromptArtifact = (callId: string, suffix: string, content: unknown): ScriptStep => (options) => {
-    const prompt = options.messages.flatMap(message => message.content)
-      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
-    const paths = [...prompt.matchAll(new RegExp(`[^\\s：]+${suffix.replaceAll('.', '\\.').replaceAll('/', '\\/')}`, 'gu'))]
-    const path = paths.at(-1)?.[0]
-    if (path === undefined) throw new Error(`S3 回放 Prompt 缺少 ${suffix}`)
-    return toolCall(callId, 'write', { file_path: path, content: JSON.stringify(content) })
-  }
   const sessionId = SessionId('s3-outline-recovery')
-  const parentScript = [
-    writePromptArtifact('draft', '/outline/outline.json', candidate),
-    finalText('初步目录候选已完成。'),
-  ]
+  const parentScript: ScriptStep[] = []
   const childScript = [
-    toolCall('response-points', 'structured_output', responseCandidate),
+    toolCall('response-points-analysis', 'structured_output', responseCandidate),
+    toolCall('response-points-review', 'structured_output', responseCandidate),
+    toolCall('initial-outline', 'structured_output', candidate),
+    toolCall('quality-review', 'structured_output', { operations: [], issues: [] }),
   ]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
@@ -672,15 +664,12 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   const orchestrator = new BidOrchestrator(agent.session,
     { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: 0, run }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
-  parentScript.push(
-    toolCall('quality-review', 'submit_outline_quality_review', { issues: [] }),
-    finalText('逐项复核章节归属和写作指导已完成。'),
-  )
   const outcome = await orchestrator.runCurrentAutomaticStage()
   if (outcome.status !== 'waiting_user') throw new Error('S3 没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
-  const untouchedUnchanged = JSON.stringify(outline.sections[1]) === JSON.stringify(result.sections[1])
+  const untouchedUnchanged = JSON.stringify({ ...outline.sections[1], order: 3 })
+    === JSON.stringify(result.sections.find(item => item.id === 'SEC-SERVICE'))
   if (!untouchedUnchanged) throw new Error('S3 修改了无关内容')
   return { outcome, untouchedUnchanged, outline: result, report,
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }

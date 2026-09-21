@@ -105,6 +105,22 @@ export async function loadOutlineFrameworkStructures(workspace: BidWorkspace): P
 }
 
 /**
+ * Read successful reference bids as heading-only organization examples.
+ * @param workspace - project workspace containing the imported reference bids.
+ * @returns reference-bid heading trees in manifest order, without document body text.
+ */
+export async function loadReferenceBidStructures(workspace: BidWorkspace): Promise<OutlineFrameworkStructure[]> {
+  const manifest = await workspace.readManifest()
+  return Promise.all(manifest.files
+    .filter(file => file.role === 'reference_bid' && file.parseStatus === 'success')
+    .map(async file => ({
+      file_id: String(file.id),
+      name: file.originalName,
+      headings: await readDocumentOutlineHeadings(workspace, file),
+    })))
+}
+
+/**
  * Validate only the durable file and heading identities carried by framework references.
  * @param workspace - project workspace containing the imported framework files.
  * @param outline - outline whose Section references require validation.

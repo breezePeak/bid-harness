@@ -52,9 +52,9 @@ export function ensureTechnicalDeviationSection(sections: OutlineSection[]): Out
   const roots = remaining.filter(section => section.parent_id === null)
     .sort((left, right) => left.order - right.order)
   const rootOrder = new Map(roots.map((section, index) => [section.id, index + 2]))
-  return [...remaining.map(section => section.parent_id === null
+  return [fixed, ...remaining.map(section => section.parent_id === null
     ? { ...section, order: rootOrder.get(section.id) ?? section.order }
-    : section), fixed]
+    : section)]
 }
 
 /**
