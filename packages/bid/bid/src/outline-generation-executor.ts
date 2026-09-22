@@ -56,7 +56,7 @@ const REPAIR_RECEIPT = 'outline/repair-operations.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
 const outlineQualityReviewResultSchema = z.object({
   operations: z.array(outlineAssociationRepairOperationSchema),
-  issues: z.array(outlineQualityIssueSchema),
+  issues: z.array(outlineQualityIssueSchema.omit({ code: true })),
 }).strict()
 
 // 子代理结构化输出仅接受结构约束；Host 的 Zod 解析保留全部标量约束。
@@ -302,8 +302,9 @@ function renderStructuredQualityReviewTask(
     `<outline-framework-structures>\n${JSON.stringify(input.frameworks)}\n</outline-framework-structures>`,
     `<reference-bid-structures>\n${JSON.stringify(input.referenceBids)}\n</reference-bid-structures>`,
     '逐项检查技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否在合适的可写叶子中真实覆盖，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
-    '必须修正的问题放入 operations，使用 Host 提供的局部目录操作；不要返回整本新目录。operations 为空才表示当前 exact outline 已完成语义复核。',
+    '在本轮完成全部检查，把必须修正的问题一次性放入 operations，并自检应用这些操作后的完整目录；不要返回整本新目录。无需修正时返回 operations: []。措辞润色和可选补充放入 advisory issues，不要作为必须修改的操作。',
     'issues 只允许 severity=advisory，用于仍可交给用户判断的非阻断建议；阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
+    '每条建议只返回 severity 和 message，message 用中文说明具体业务问题；不要生成问题代码或编号。',
     failure === undefined ? '' : `上一轮结果未能应用：${failure}`,
   ].join('\n')
 }
@@ -618,7 +619,7 @@ export async function executeOutlineGeneration(
       })
     }
     options.run.reportProgress({
-      phase: 'reviewing', summary: '正在复核评分响应点', total: candidate.points.length,
+      phase: 'analyzing', summary: '正在复核评分响应点', total: candidate.points.length,
     })
     const reviewedCandidate = await generateResponsePointCandidate(
       '评分响应点语义复核', renderResponsePointReviewTask(agent, task, scoring, candidate),
@@ -831,14 +832,14 @@ export async function executeOutlineGeneration(
           message: error instanceof Error ? error.message : String(error),
         }])
       }
-      if (options.regeneration === undefined) outline = parseOutlineArtifact({
+      outline = parseOutlineArtifact({
         ...outline, sections: ensureTechnicalDeviationSection(outline.sections),
       })
       await publishOutline(outline, operations)
       repairUsed = true
     } else {
       outline = candidate.outline
-      if (options.regeneration === undefined) outline = parseOutlineArtifact({
+      outline = parseOutlineArtifact({
         ...outline, sections: ensureTechnicalDeviationSection(outline.sections),
       })
       if (generated) await publishOutline(outline)
@@ -872,6 +873,7 @@ export async function executeOutlineGeneration(
       try {
         operations = z.array(operationSchema).parse(JSON.parse((await read(REPAIR_RECEIPT)) ?? 'null'))
         repaired = applyOutlineRepair(outline, operations, formalCatalog, scoring)
+        repaired = parseOutlineArtifact({ ...repaired, sections: ensureTechnicalDeviationSection(repaired.sections) })
       } catch (error) {
         if (options.run.signal.aborted) throw error
         throw new BidStageExecutionError([...issues, {
@@ -910,7 +912,7 @@ export async function executeOutlineGeneration(
       total: outline.sections.length,
     })
     let reviewFailure: string | undefined
-    let qualityIssues: OutlineQualityIssue[] | undefined
+    let qualityIssues: Omit<OutlineQualityIssue, 'code'>[] | undefined
     let reviewRounds = 0
     while (qualityIssues === undefined) {
       let review: z.infer<typeof outlineQualityReviewResultSchema>
@@ -929,7 +931,7 @@ export async function executeOutlineGeneration(
           break
         }
         let reviewed = applyOutlineRepair(outline, review.operations, formalCatalog, scoring)
-        if (options.regeneration === undefined) reviewed = parseOutlineArtifact({
+        reviewed = parseOutlineArtifact({
           ...reviewed, sections: ensureTechnicalDeviationSection(reviewed.sections),
         })
         const reviewedIssues = await validate(reviewed)
@@ -937,14 +939,15 @@ export async function executeOutlineGeneration(
         if (outlineArtifactSha256(reviewed) === outlineArtifactSha256(outline)) throw new Error('operations 没有产生实际变化。')
         outline = reviewed
         await publishOutline(outline, review.operations)
-        reviewFailure = undefined
+        qualityIssues = review.issues
+        break
       } catch (error) {
         if (options.run.signal.aborted) throw error
         reviewFailure = error instanceof Error ? error.message : String(error)
       }
       if (reviewRounds >= options.maxRepairAttempts) throw new BidStageExecutionError([{
         code: 'OUTLINE_GENERATION_REVIEW_NOT_CONVERGED', artifact: OUTLINE_ARTIFACT,
-        message: `目录质量复核在独立预算内未收敛：${reviewFailure ?? '仍返回修改操作。'}`,
+        message: `目录质量复核结果无法应用：${reviewFailure}`,
       }])
       reviewRounds += 1
     }
@@ -952,7 +955,7 @@ export async function executeOutlineGeneration(
     const report = {
       schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
       scope: 'technical_bid' as const,
-      issues: qualityIssues,
+      issues: qualityIssues.map(issue => ({ ...issue, code: 'OUTLINE_QUALITY_ADVISORY' })),
       checked_requirement_ids: requirements.requirements.map(item => item.id),
       checked_scoring_ids: scoring.scoring_items.map(item => item.id),
       checked_scoring_response_point_ids: formalCatalog.points.map(point => point.id),

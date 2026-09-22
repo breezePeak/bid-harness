@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
-import { parseEvidenceMapArtifact, parseOutlineArtifact, parseWebEvidenceSourcesArtifact } from '@deepseek-ai/dsh-bid'
+import { parseEvidenceMapArtifact, parseOutlineArtifact, parseOutlineQualityReport, parseWebEvidenceSourcesArtifact } from '@deepseek-ai/dsh-bid'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
@@ -102,6 +102,10 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(refinementLogs.every(log => !log.includes('tool/call') || log.includes('structured_output'))).toBe(true)
 
       const projectRoot = join(cwd, '.bid-harness')
+      const quality = parseOutlineQualityReport(JSON.parse(await readFile(join(projectRoot, 'outline/quality-report.json'), 'utf8')))
+      expect(quality.issues).toEqual([{
+        code: 'OUTLINE_QUALITY_ADVISORY', severity: 'advisory', message: '建议以权限表说明授权与追溯关系。',
+      }])
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(projectRoot, 'outline/outline.json'), 'utf8')))
       expect(outline.sections[0]).toMatchObject({
         purpose: '为访问控制项目说明权限控制与安全审计措施，响应安全技术评分。',
@@ -110,7 +114,6 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       })
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       const checkpoint = JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
-        schema_version: number
         tasks: Array<{
           task_id: string
           research_assessment?: { sufficient_for_blueprint: boolean; unresolved_gaps: unknown[] }
@@ -118,7 +121,6 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
           structure_invalidated: number
         }>
       }
-      expect(checkpoint.schema_version).toBe(12)
       expect(checkpoint.tasks.find(task => task.task_id.startsWith('MAP-INIT-'))?.research_assessment)
         .toMatchObject({
           sufficient_for_blueprint: true,
@@ -157,7 +159,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
     },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    stage: 'evidence_mapping', status: 'waiting_user',
+    stage: 'evidence_mapping', status: 'waiting_user', run: null,
     state_files: [],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

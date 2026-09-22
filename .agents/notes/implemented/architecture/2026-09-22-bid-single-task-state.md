@@ -14,7 +14,7 @@ Bid 同时保存 Workflow gate、Run status、浏览器 runtime status 与重置
 
 Session 使用 `bid.project.resumed` 同步完整任务状态，并用 `bid.task.changed` 提交显式业务结果。旧阶段事件、旧 v3 resumed payload 与 `stage_start` 决策值只服务历史日志回放，生产路径不再产生它们。`bid.run.completed` 本身不改变业务状态；Run 结束必须在同一次 checkpoint 中追加明确结果。
 
-阶段重置先完成取消、静止等待、Artifact 清理与上下文替换。S2、S3、S4 在同一项目操作中提交 `ready` 后立即调用正常驱动路径；S1 与 S5 提交 `waiting_user`，其中 S5 不创建 Execution Agent。没有重置后的开始 Remote，也没有 `waiting_start` 用户问题。
+阶段重置先完成取消、静止等待、Artifact 清理与上下文替换。旧操作已进入结算时，重置等待其 `done`；否则重置与 `finishOperation()` 共用一次 Run retirement，先排空 child 再释放父 Execution Agent。S2、S3、S4 提交 `ready` 并返回重置请求后，由持有同一项目操作的后台续行调用正常驱动路径；项目锁与 Execution Agent 由该续行持有到驱动结算。S1 与 S5 提交 `waiting_user`，其中 S5 不创建 Execution Agent。没有重置后的开始 Remote，也没有 `waiting_start` 用户问题。
 
 `BidClientProjection` 直接返回 `task: BidTaskState`，权限与 composer capability 从该值生成。S6 DOCX 继续使用独立项目操作锁，不改变任务阶段或状态。
 
@@ -24,7 +24,7 @@ Session 使用 `bid.project.resumed` 同步完整任务状态，并用 `bid.task
 
 **保留派生 runtime 作为客户端兼容层。** 首次发布前没有外部消费者；兼容层会继续成为可被误用的第二真相源。
 
-**重置后保留显式开始问题。** S2–S4 的重置意图已经授权重新执行，多一次问题只增加持久决策、Remote 和恢复分支；S5 本身需要用户输入，因此直接回到 `waiting_user`。
+**重置后保留显式开始问题。** S2–S4 的重置意图已经授权重新执行，多一次问题只增加持久决策、Remote 和恢复分支；后台续行仍在重置请求返回后自动开始。S5 本身需要用户输入，因此直接回到 `waiting_user`。
 
 ## Consequences
 

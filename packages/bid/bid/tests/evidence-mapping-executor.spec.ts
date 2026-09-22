@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import SandboxedFileSystem from '../../../fs/fs-sandbox/src/index.ts'
 import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
+import { ensureTechnicalDeviationSection } from '../src/outline-generation-normalization.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
@@ -1032,11 +1033,8 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace, [TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1', 'SEC-2'])
     const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
     const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections = ensureTechnicalDeviationSection(outline.sections.slice(1))
     const deviation = outline.sections[0]!
-    Object.assign(deviation, {
-      title: '技术偏离表', purpose: '逐项形成技术响应索引。', must_answer: ['逐项响应全部技术要求。'],
-      requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
-    })
     Object.assign(outline.sections[1]!, {
       requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'],
       scoring_response_points: [{ scoring_id: 'S-1', response_point: '响应点1' }],
@@ -2991,8 +2989,8 @@ describe('evidence-mapping Agent executor', () => {
     fixture.serializeQuality.mockImplementationOnce(text => JSON.stringify({
       ...JSON.parse(text) as object,
       blocking_issues: [
-        { code: 'OUTLINE_RESPONSIBILITY_CONFLICT', section_id: 'ROOT', reason: '总体层级需要保持两个主题的边界。' },
-        { code: 'OUTLINE_REFINEMENT_MISSED', section_id: 'SEC-1', reason: 'Writing Brief 包含实施方法与质量控制两个独立主题，但 topic_dispositions 未处理。' },
+        { section_id: 'ROOT', reason: '总体层级需要保持两个主题的边界。' },
+        { section_id: 'SEC-1', reason: 'Writing Brief 包含实施方法与质量控制两个独立主题，但 topic_dispositions 未处理。' },
       ],
     }))
     const running = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
@@ -3012,7 +3010,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.outlineReviewPrompts[0]).toContain('S3→S4 结构 diff：')
     expect(fixture.outlineReviewPrompts[0]).toContain('实际 Outline Operations：')
     expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-ROOT')))
-      .toContain('OUTLINE_REFINEMENT_MISSED')
+      .toContain('OUTLINE_STRUCTURE_REVIEW')
     expect(promptText(fixture.finalStarts[0]!.request.request)).not.toContain('"identified_issues":')
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
       tasks: Array<{
@@ -3037,21 +3035,26 @@ describe('evidence-mapping Agent executor', () => {
       repair_changed_structure: false, actual_structure_operations: [] })
   })
 
-  it('目录复核拒绝字符串建议并接受正式 advisory 记录', async () => {
+  it.each([
+    ['字符串建议', { issues: ['请确认章节边界。'] }],
+    ['建议的问题代码', { issues: [{ code: 'MODEL_CODE', severity: 'advisory', message: '请确认章节边界。' }] }],
+    ['阻断问题的问题代码', { blocking_issues: [{ code: 'MODEL_CODE', section_id: 'SEC-1', reason: '章节职责冲突。' }] }],
+  ])('目录复核拒绝%s，由程序填写问题类别', async (_name, invalid) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-advisory-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
-    const advisory = { code: 'OUTLINE_PRESENTATION_ADVICE', severity: 'advisory', message: '用表格列示同一方法的步骤即可，无需新增章节。' }
+    const advisory = { severity: 'advisory', message: '用表格列示同一方法的步骤即可，无需新增章节。' }
     fixture.serializeQuality
-      .mockImplementationOnce(text => JSON.stringify({ ...JSON.parse(text) as object, issues: [advisory.message] }))
+      .mockImplementationOnce(text => JSON.stringify({ ...JSON.parse(text) as object, ...invalid }))
       .mockImplementationOnce(text => JSON.stringify({ ...JSON.parse(text) as object, issues: [advisory] }))
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     fixture.starts.forEach((start) => { start.resolve() })
     await execution
     expect(fixture.outlineReviewPrompts).toHaveLength(2)
+    expect(JSON.stringify(fixture.outlineReviewRequests[0])).not.toContain('"code"')
     expect(fixture.outlineReviewPrompts[1]).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
     const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as { issues: unknown[] }
-    expect(quality.issues).toEqual([advisory])
+    expect(quality.issues).toEqual([{ ...advisory, code: 'OUTLINE_QUALITY_ADVISORY' }])
   })
 
   it('Final Check 逐项保留未变更章节，程序发布完整 baseline 映射', async () => {

@@ -291,7 +291,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         )
         await writeFile(join(root, 'independent-review-report.json'), JSON.stringify(review, null, 2))
         if (scenario.id === 'boundary') {
-          expect(review.blockingIssues).toContainEqual(expect.objectContaining({ code: 'OUTLINE_REFINEMENT_MISSED', section_id: 'IMPLEMENTATION' }))
+          expect(review.blockingIssues).toContainEqual(expect.objectContaining({ code: 'OUTLINE_STRUCTURE_REVIEW', section_id: 'IMPLEMENTATION' }))
         } else expect(review.blockingIssues).toEqual([])
         console.info('S4 独立复核验收记录：' + root)
       } finally {

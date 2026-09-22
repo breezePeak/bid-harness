@@ -24,14 +24,16 @@ interface TestOperation {
   readonly done: Promise<void>
   readonly settle: () => void
   reservedForReset: boolean
-  executionHandle?: { agent: Agent }
+  finishing?: Promise<void>
+  retirement?: Promise<void>
+  executionHandle?: { agent: Agent; dispose?: () => Promise<void> }
 }
 
 interface TestHost {
   readonly ctx: { readonly sessions: { readonly flush: (session: unknown) => Promise<void> } }
   readonly config: Config
   readonly inFlight: Map<string, TestOperation>
-  readonly executionAgent: () => Promise<Agent>
+  readonly executionAgent: (operation: TestOperation) => Promise<Agent>
   automaticOrchestrator: (
     agent: Agent,
     workspace: { readonly projectRoot: string },
@@ -148,15 +150,176 @@ describe('Bid Host stage reset', () => {
 
     prior.resolve(undefined)
     executionIdle.resolve(undefined)
-    await expect(reset).resolves.toEqual(drivenState)
-    for (const path of resetPaths) await expect(access(path)).rejects.toThrow()
+    await expect(reset).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    expect(drive).not.toHaveBeenCalled()
+    expect(host.inFlight.has(key)).toBe(true)
     expect(session.events.findLast(event => event.type === 'bid.task.changed')).toMatchObject({
       type: 'bid.task.changed', data: { state: { stage: 'outline_generation', status: 'ready', run: null } },
     })
-    expect(drive).toHaveBeenCalledOnce()
     expect(flush).toHaveBeenCalledWith(session)
-    expect(host.inFlight.has(key)).toBe(false)
     expect(session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+    for (const path of resetPaths) await expect(access(path)).rejects.toThrow()
+    await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(host.inFlight.has(key)).toBe(false) })
+  })
+
+  it('returns the committed reset before dispatching work and keeps its execution agent alive until drive settles', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-lifetime-'))
+    const session = ctx.sessions.create(SessionId('bid-reset-lifetime'), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'outline_generation', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
+    await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
+
+    const agent = {
+      id: session.id,
+      session,
+      inject: vi.fn(),
+      cancel: vi.fn(),
+      whenIdle: vi.fn(async () => {}),
+      inbox: { clear: vi.fn() },
+    } as unknown as Agent
+    const driveGate = Promise.withResolvers<BidTaskState>()
+    const drive = vi.fn(() => driveGate.promise)
+    const dispose = vi.fn(async () => {})
+    const executionAgent = vi.fn(async (operation: TestOperation) => {
+      operation.executionHandle = { agent, dispose }
+      return agent
+    })
+    const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
+      ctx: {
+        on: vi.fn(() => () => {}),
+        fiber: ctx.fiber,
+        get: vi.fn(() => undefined),
+        agents: { get: () => agent },
+        sessions: { flush: vi.fn(async () => {}), list: () => [session] },
+        userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+        logger: { warn: vi.fn() },
+      },
+      config: {
+        allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
+        docxTemplateMaxBytes: 300 * 1024 * 1024,
+        modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
+        chapterWritingMaxConcurrency: 1, chapterWritingCompletionRepairRounds: 1,
+        wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '',
+      } satisfies Config,
+      inFlight: new Map(),
+      docxInFlight: new Set(),
+      pendingRunDecisions: new Map(),
+      pendingWritingQuestions: new Map(),
+      processingWritingPlans: new Map(),
+      writingEntryStops: new Map(),
+      unsavedWritingAnswers: new Map(),
+      executionAgent,
+      automaticOrchestrator: () => ({ drive }),
+    }) as TestHost
+
+    const resetting = BidHostRuntime.prototype.resetStage.call(
+      host as unknown as BidHostRuntime,
+      agent,
+      'outline_generation',
+    )
+    await expect(resetting).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    expect(executionAgent).not.toHaveBeenCalled()
+    expect(drive).not.toHaveBeenCalled()
+    expect(host.inFlight.values().next().value).toMatchObject({ reservedForReset: false })
+
+    await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
+    expect(dispose).not.toHaveBeenCalled()
+
+    const drivenState: BidTaskState = { stage: 'outline_generation', status: 'waiting_user', run: null }
+    driveGate.resolve(drivenState)
+    await vi.waitFor(() => { expect(dispose).toHaveBeenCalledOnce() })
+    expect(host.inFlight.size).toBe(0)
+  })
+
+  it('waits for an operation already finishing instead of retiring children through its released parent', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-finishing-'))
+    const session = ctx.sessions.create(SessionId('bid-reset-finishing'), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
+    session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    session.append('bid.stage.started', { stage: 'outline_generation', status: 'running' })
+    await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
+
+    const key = process.platform === 'win32' ? realpathSync(cwd).toLowerCase() : realpathSync(cwd)
+    const finished = Promise.withResolvers<undefined>()
+    const retire = vi.fn(async () => {
+      throw new Error('selected child teardown requires the exact live parent agent')
+    })
+    const agent = {
+      id: session.id,
+      session,
+      inject: vi.fn(),
+      cancel: vi.fn(),
+      whenIdle: vi.fn(async () => {}),
+      inbox: { clear: vi.fn() },
+    } as unknown as Agent
+    const prior: TestOperation = {
+      session,
+      workspace: new BidWorkspace(cwd),
+      key,
+      ready: true,
+      controller: new AbortController(),
+      runs: { retire },
+      done: finished.promise,
+      settle: () => { finished.resolve(undefined) },
+      reservedForReset: false,
+      finishing: finished.promise,
+      executionHandle: { agent },
+    }
+    const drive = vi.fn(async (): Promise<BidTaskState> => ({
+      stage: 'outline_generation', status: 'waiting_user', run: null,
+    }))
+    const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
+      ctx: {
+        on: vi.fn(() => () => {}),
+        fiber: ctx.fiber,
+        get: vi.fn(() => undefined),
+        agents: { get: () => agent },
+        sessions: { flush: vi.fn(async () => {}), list: () => [session] },
+        userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+        logger: { warn: vi.fn() },
+      },
+      config: {
+        allowedExtensions: ['.pdf'], maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 4096,
+        docxTemplateMaxBytes: 300 * 1024 * 1024,
+        modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
+        chapterWritingMaxConcurrency: 1, chapterWritingCompletionRepairRounds: 1,
+        wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '',
+      } satisfies Config,
+      inFlight: new Map([[key, prior]]),
+      docxInFlight: new Set(),
+      pendingRunDecisions: new Map(),
+      pendingWritingQuestions: new Map(),
+      processingWritingPlans: new Map(),
+      writingEntryStops: new Map(),
+      unsavedWritingAnswers: new Map(),
+      executionAgent: vi.fn(async () => agent),
+      automaticOrchestrator: () => ({ drive }),
+    }) as TestHost
+
+    const resetting = BidHostRuntime.prototype.resetStage.call(
+      host as unknown as BidHostRuntime,
+      agent,
+      'outline_generation',
+    )
+    await Promise.resolve()
+    expect(retire).not.toHaveBeenCalled()
+    expect(drive).not.toHaveBeenCalled()
+
+    finished.resolve(undefined)
+    await expect(resetting).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
   })
 
   it.each(BID_STAGES.filter(stage => stage !== 'docx_export'))('clears %s and applies its fixed restart policy', async (stage) => {
@@ -214,8 +377,10 @@ describe('Bid Host stage reset', () => {
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 
-    await expect(BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage))
-      .resolves.toEqual(drivenState)
+    const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage)
+    await expect(reset).resolves.toEqual(stage === 'file_intake' || stage === 'chapter_writing'
+      ? drivenState
+      : { stage, status: 'ready', run: null })
     expect(session.surface.nodes).toEqual([
       ...messages.slice(0, stageIndex).map(message => message.seq),
       session.surface.nodes.at(-1),
@@ -227,6 +392,10 @@ describe('Bid Host stage reset', () => {
     })
     expect(clear).not.toHaveBeenCalled()
     expect(cancel).not.toHaveBeenCalled()
-    expect(drive).toHaveBeenCalledTimes(stage === 'file_intake' || stage === 'chapter_writing' ? 0 : 1)
+    expect(drive).not.toHaveBeenCalled()
+    if (stage !== 'file_intake' && stage !== 'chapter_writing') {
+      await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+    }
   })
 })

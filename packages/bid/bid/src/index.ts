@@ -868,6 +868,8 @@ interface ActiveBidOperation {
   readonly done: Promise<void>
   readonly settle: () => void
   reservedForReset: boolean
+  finishing?: Promise<void>
+  retirement?: Promise<void>
   interaction?: boolean
   executionSessionId?: SessionId
   executionHandle?: AgentHandle
@@ -1730,6 +1732,7 @@ export class BidHostRuntime extends TypertRemoteService {
       stageControl,
       {
         drain: async () => {
+          if (continuableChildren.size === 0) return
           const agent = holder.current?.executionHandle?.agent
           if (agent !== undefined) await this.ctx.subagents.drainContinuableChildren(agent, [...continuableChildren])
         },
@@ -1867,18 +1870,27 @@ export class BidHostRuntime extends TypertRemoteService {
     })}`)
   }
 
-  /** 先持久化稳定状态，再释放项目；重置接管期间保留锁。 */
-  private async finishOperation(_session: Session, operation: ActiveBidOperation, persist = true): Promise<void> {
+  /** 先持久化稳定状态，再释放项目；并发调用共享同一个结算边界。 */
+  private finishOperation(session: Session, operation: ActiveBidOperation, persist = true): Promise<void> {
+    operation.finishing ??= this.finishOperationOnce(session, operation, persist)
+    return operation.finishing
+  }
+
+  private async finishOperationOnce(_session: Session, operation: ActiveBidOperation, persist: boolean): Promise<void> {
     const key = operation.key
     try {
       if (operation.ready && persist) {
-        if (operation.runs.current !== undefined && this.inFlight.get(key) === operation) {
-          operation.suspension ??= operation.runs.suspend('executor_error', {
-            message: '阶段执行已中断，已保存完成进度。',
-          })
+        if (operation.retirement !== undefined) {
+          await operation.retirement
+        } else {
+          if (operation.runs.current !== undefined && this.inFlight.get(key) === operation) {
+            operation.suspension ??= operation.runs.suspend('executor_error', {
+              message: '阶段执行已中断，已保存完成进度。',
+            })
+          }
+          await operation.suspension
+          if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
         }
-        await operation.suspension
-        if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
       }
     } finally {
       try {
@@ -3618,6 +3630,32 @@ export class BidHostRuntime extends TypertRemoteService {
     )
   }
 
+  /** 重置请求返回已提交状态后，再让同一项目操作继续自动阶段。 */
+  private async finishResetStage(
+    interactionAgent: Agent,
+    operation: ActiveBidOperation,
+    stage: BidStage,
+  ): Promise<void> {
+    try {
+      const executionAgent = await this.executionAgent(operation, stage)
+      await this.automaticOrchestrator(
+        executionAgent,
+        operation.workspace,
+        operation.controller.signal,
+        operation,
+      ).drive()
+      await this.ctx.sessions.flush(operation.session)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`Bid 重置后的阶段续行失败：${String(error)}`)
+    } finally {
+      try {
+        await this.finishOperation(operation.session, operation)
+      } finally {
+        if (bidSessionTaskState(operation.session).status === 'suspended') this.ensureRunDecision(interactionAgent)
+      }
+    }
+  }
+
   /**
    * Pause or resume only future task starts in the active stage operation.
    * @param session Main Agent Session that owns the active project operation.
@@ -3648,7 +3686,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * stage and every later stage are removed.
    * @param agent - live Bid Agent receiving the scoped command.
    * @param stage - current or earlier stage named by that command.
-   * @returns S2-S4 running or settled state; S1 and S5 wait for user input.
+   * @returns S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。
    */
   async resetStage(agent: Agent, stage: BidStage): Promise<BidTaskState> {
     const { session } = agent
@@ -3669,23 +3707,29 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     const prior = this.inFlight.get(key)
     const priorExecutionAgent = prior?.executionHandle?.agent
+    let priorRetirement: Promise<void> | undefined
     if (prior !== undefined) {
       if (prior.reservedForReset || prior.session !== session) {
         throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', '当前项目已有 Bid 操作正在执行。')
       }
       const runtime = bidSessionTaskState(session)
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
+      if (prior.finishing === undefined) priorRetirement = prior.retirement ??= prior.runs.retire()
       this.inFlight.delete(key)
     }
     const operation = this.beginOperation(session)
     operation.reservedForReset = true
     let resetCompleted = false
+    let detached = false
     try {
       if (prior !== undefined) {
-        await prior.runs.retire()
-        prior.controller.abort()
-        priorExecutionAgent?.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
-        await Promise.all([prior.done, priorExecutionAgent?.whenIdle()])
+        if (priorRetirement !== undefined) {
+          prior.controller.abort()
+          priorExecutionAgent?.cancel({ kind: 'hook', reason: 'bid-stage-reset' })
+          await Promise.all([priorRetirement, prior.done, priorExecutionAgent?.whenIdle()])
+        } else {
+          await prior.done
+        }
       }
       const runtime = await this.prepareOperation(operation)
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
@@ -3754,15 +3798,18 @@ export class BidHostRuntime extends TypertRemoteService {
       await this.ctx.sessions.flush(session)
       resetCompleted = true
       if (resetState.status !== 'ready') return bidSessionTaskState(session)
-      const executionAgent = await this.executionAgent(operation, stage)
-      const orchestrator = this.automaticOrchestrator(executionAgent, workspace, operation.controller.signal, operation)
-      return orchestrator.drive()
+      operation.reservedForReset = false
+      detached = true
+      setImmediate(() => { void this.finishResetStage(agent, operation, stage) })
+      return bidSessionTaskState(session)
     } finally {
       operation.reservedForReset = false
-      try {
-        await this.finishOperation(session, operation)
-      } finally {
-        if (resetCompleted && bidSessionTaskState(session).status === 'suspended') this.ensureRunDecision(agent)
+      if (!detached) {
+        try {
+          await this.finishOperation(session, operation)
+        } finally {
+          if (resetCompleted && bidSessionTaskState(session).status === 'suspended') this.ensureRunDecision(agent)
+        }
       }
     }
   }
@@ -4403,10 +4450,15 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  /** Stop the active background Bid Run, including work that outlived the Main Agent turn. */
+  /**
+   * 停止当前会话回复及项目后台 Run，保留待处理的用户消息。
+   * @param session 发起停止的 Bid 主会话。
+   * @returns 后台任务停止并保存状态后确认接受。
+   */
   @Remote('stopRun')
   async stopRun(session: Session): Promise<{ accepted: true }> {
     if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
+    this.ctx.agents.get(session.id)?.cancel({ kind: 'user' }, { keepInbox: true })
     await this.handleUserStop(session)
     return { accepted: true }
   }
@@ -5189,9 +5241,9 @@ export class BidHostRuntime extends TypertRemoteService {
         admittedRun,
       ))
       workSettled = true
-       await operation.runs.complete(run, () => {
-         session.append('bid.task.changed', { state: runtime })
-       })
+      await operation.runs.complete(run, () => {
+        session.append('bid.task.changed', { state: runtime })
+      })
       return { ok: true, value: await this.getReviewChapter(session, parsed.data.reference.section_id) }
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : ''

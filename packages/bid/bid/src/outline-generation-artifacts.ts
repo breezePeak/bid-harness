@@ -65,7 +65,7 @@ export const outlineCandidateSchema = outlineArtifactSchema.extend({
 
 /** Non-blocking semantic finding retained by the S3 Blueprint Quality Review. */
 export const outlineQualityIssueSchema = z.object({
-  code: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/u),
+  code: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/u).describe('由程序填写的诊断类别。'),
   severity: z.literal('advisory'),
   message: z.string().trim().min(1),
 }).strict()

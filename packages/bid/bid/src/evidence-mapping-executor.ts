@@ -44,6 +44,7 @@ import {
   parseOutlineArtifact,
   parseOutlineQualityReport,
   type OutlineArtifact,
+  type OutlineQualityIssue,
   type OutlineQualityReport,
 } from './outline-generation-artifacts.ts'
 import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperation } from './outline-confirmation-edits.ts'
@@ -3208,13 +3209,11 @@ function outlineQualityOutputSchema(inputs: EvidenceMappingInputs): ObjectJsonSc
     checked_scoring_ids: ids(inputs.scoring.scoring_items.map(item => item.id)),
     checked_scoring_response_point_ids: ids(inputs.responsePoints.points.map(item => item.id)),
     issues: { type: 'array', items: closedObject({
-      code: { type: 'string', description: '大写下划线问题代码。' },
       severity: { type: 'string', const: 'advisory' },
       message: { type: 'string', description: '非阻断建议的具体业务理由。' },
     }),
     description: '仅记录不阻断发布的业务层级、章节边界或覆盖建议；没有问题时返回空数组。' },
     blocking_issues: { type: 'array', items: closedObject({
-      code: { type: 'string', description: '大写下划线问题代码；遗漏目录深化使用 OUTLINE_REFINEMENT_MISSED。' },
       section_id: stringChoice(inputs.outline.sections.map(section => section.id), '问题所在的当前章节；Host 据此定位 Section 子树。'),
       reason: { type: 'string', description: '具体结构问题及业务理由。' },
     }), description: '目录过粗、任务越界、扩展缺少依据或职责冲突等必须返回相关章节；不能以资料符合修改后任务为由放行。' },
@@ -3285,9 +3284,9 @@ export async function reviewRefinedOutline(
     '目录结构和 Writing Brief 已由各 Section 任务研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
     '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理；不重新检索或重生成整本目录。',
     '这是目录质量的独立第二意见，不以第一次 KEEP 为依据。先独立阅读 Structure Review Cards 的 S3 职责、最终 Blueprint 和中性 Research Findings，再核对已有判断。优先检查叶子过粗、过度拆分、同级职责重复或断裂，以及重要主题的目录导航价值；最后核对 Requirement/Scoring/Response Point 覆盖。引用身份和结构操作绑定由 Host 检查，不把 bookkeeping 当作本次主要任务。',
-    '进行 Hidden Heading Pressure 验收：假设 S5 禁止自行创建正式目录标题，逐叶判断能否自然、完整地写成技术标正文。若多个不同对象、方法体系、输入输出或成果质量责任只能依赖事实上的子标题表达，应提出 OUTLINE_REFINEMENT_MISSED。连续流程或没有独立评分点不能单独证明 KEEP；同一方法的普通步骤、参数和短注意事项也不应机械成节。不得用固定节点数量、维度条数、关键词或零新增判断。',
+    '进行 Hidden Heading Pressure 验收：假设 S5 禁止自行创建正式目录标题，逐叶判断能否自然、完整地写成技术标正文。若多个不同对象、方法体系、输入输出或成果质量责任只能依赖事实上的子标题表达，应在 blocking_issues 中说明遗漏的目录深化。连续流程或没有独立评分点不能单独证明 KEEP；同一方法的普通步骤、参数和短注意事项也不应机械成节。不得用固定节点数量、维度条数、关键词或零新增判断。',
     '区分“同一方法内部的处理步骤”与“需要分别论证的技术任务”：每个步骤都能列出输入、输出和责任，不能仅据此认定需要正式章节。核对它们是否仍对同一对象运用同一方法、形成同一成果，并尝试用段落衔接、步骤列表和表格完整表达。若这些表达足够，保留叶子；若不足，blocking issue 必须指出实际方法或成果责任的差异及具体定位障碍，不能只罗列 writing_dimensions 或偏好更多标题。例行登记、过程质量记录和结果交接也不自动获得独立章节。',
-    '通过结构化输出返回质量报告；issues 只记录非阻断建议。遗漏深化使用 code=OUTLINE_REFINEMENT_MISSED；具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回 code、当前 section_id 与业务理由，Host 会只重开所属 Section 子树。不能把资料命中当作扩大章节任务的依据。',
+    '通过结构化输出返回质量报告；issues 只返回 severity=advisory 和具体建议 message。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回已有 section_id 与业务理由 reason，Host 会只重开所属 Section 子树。不要生成问题代码或编号。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
     `Structure Review Cards：${JSON.stringify(cards)}`,
     `全书覆盖依据：${JSON.stringify({
@@ -3339,10 +3338,13 @@ export async function reviewRefinedOutline(
       else try {
         const violations = validateJsonSchemaValue(outlineQualityOutputSchema(inputs), result.structured)
         if (violations.length > 0) throw new ToolArgsError(violations)
-        const { blocking_issues: blocking, ...report } = result.structured as Record<string, unknown>
-        blockingIssues = blocking as OutlineStructureIssue[]
+        const { blocking_issues: blocking, issues: advisory, ...report } = result.structured as Record<string, unknown>
+        blockingIssues = (blocking as Omit<OutlineStructureIssue, 'code'>[])
+          .map(issue => ({ ...issue, code: 'OUTLINE_STRUCTURE_REVIEW' }))
         quality = parseOutlineQualityReport({
           ...report,
+          issues: (advisory as Omit<OutlineQualityIssue, 'code'>[])
+            .map(issue => ({ ...issue, code: 'OUTLINE_QUALITY_ADVISORY' })),
           schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
           reviewed_section_ids: inputs.outline.sections.map(section => section.id),
         })

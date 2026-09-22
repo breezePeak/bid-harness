@@ -8,13 +8,13 @@ S3 把响应点复核、目录修复和质量复核放在共享重试循环中�
 
 ## Decision
 
-S3 按固定步骤执行：一个响应点分析 Child 在同轮完成语义自检；目录 JSON 格式修复至多一次；字段、引用、结构和覆盖的确定性修复合并为至多一次；Blueprint Quality Review 完整执行一次，漏交质量工具时只允许一次没有目录写权限的协议续行。任何步骤失败都立即结束当前 Run，不存在共享 attempts、review baseline 或不完整复核状态。
+S3 按固定步骤执行：响应点分析 Child 产生候选，独立语义复核 Child 检查候选；目录 JSON 格式修复至多一次；字段、引用、结构和覆盖的确定性修复合并为至多一次；Blueprint Quality Review 通过无文件工具的 Child 返回局部 operations 和 advisory issues。合法复核结果应用后结束该步骤；格式或操作错误按独立的 `maxRepairAttempts` 预算重试，耗尽后结束当前 Run。
 
 确定性修复应用成功时，Host 在同一 Commit Scope 中原子写入 `outline/outline.json` 与 `outline/repair-operations.json`。回执是已消耗修复机会的事实记录；恢复发现回执后只校验当前正式目录，仍有问题就失败，不再启动修复轮次。新目录生成或用户请求重新生成会使旧回执和质量报告失效。
 
-正式恢复链依次使用 `analysis/scoring-response-points.json`、`outline/outline.json`、`outline/repair-operations.json`、`outline/quality-report.json` 和 `outline/draft.json`。未发布正式响应点清单时重新运行一次分析；已有清单时不再运行响应点 Child。已有目录但没有质量报告时只运行一次质量复核；质量报告有效时不再调用模型并补齐 Draft；Draft 存在时必须与正式目录的实际内容摘要和记录摘要一致。旧 Run scratch 不参与恢复，继续运行只复用正式 Artifact；阶段 reset 删除正式 S3 及下游产物后才从头开始。
+正式恢复链使用 `analysis/scoring-response-points.candidate.json`、`analysis/scoring-response-points.json`、`outline/outline.json`、`outline/repair-operations.json`、`outline/quality-report.json` 和 `outline/draft.json`。已有候选时只补做响应点复核，已有正式清单时不再运行响应点 Child。已有目录但没有质量报告时从质量复核继续；质量报告和匹配 Draft 完整有效时不再调用模型，Draft 缺失或内容摘要不匹配时重新复核。旧 Run scratch 不参与恢复，继续运行只复用正式 Artifact；阶段 reset 删除正式 S3 及下游产物后才从头开始。
 
-质量复核可以在唯一完整轮次内修改目录，但必须在同轮自检并提交报告。Host 对修改后的目录重新解析、规范化并执行确定性校验，然后原子发布目录与质量报告。格式修复、确定性修复和质量复核不调用正式阶段 Validator；执行器只返回 Artifact 描述，由 Orchestrator 在阶段边界调用一次正式 Validator。
+质量复核在同轮提交全部必要修改并自检修改后的目录，可选润色放入非阻断建议。Host 对操作结果重新解析、规范化并执行确定性校验，保存有效目录与操作回执，再原子发布目录、质量报告及 Draft。合法修改不触发新的完整复核；无变化操作、非法引用和格式错误仍会拒绝。问题类别由程序填写，模型只提交建议内容，见[复核问题类别归属](2026-09-22-bid-review-issue-code-ownership.md)。格式修复、确定性修复和质量复核不调用正式阶段 Validator；执行器只返回 Artifact 描述，由 Orchestrator 在阶段边界调用一次正式 Validator。
 
 ## Alternatives considered
 
@@ -28,6 +28,6 @@ S3 按固定步骤执行：一个响应点分析 Child 在同轮完成语义自�
 
 ## Consequences
 
-正常 S3 只有一个响应点 Child、一次目录生成和一次完整质量复核；协议漏交最多增加一次纯提交续行。中断恢复由正式 Artifact 决定，不依赖内存计数或旧 scratch；已完成质量报告和 Draft 的 Run 不会重新调用模型。修复回执是新的正式阶段内文件，但不改变对外 Outline、质量报告、Draft 或工作流状态 Schema。
+正常 S3 使用两个响应点 Child、一次目录生成和一次完整质量复核；复核格式或操作错误才消耗独立重试预算。中断恢复由正式 Artifact 决定，不依赖内存计数或旧 scratch；已完成质量报告和匹配 Draft 的 Run 不会重新调用模型。复核修改沿用原有阶段、局部操作和修复回执，不改变对外 Outline、质量报告、Draft 或工作流状态 Schema。
 
-无密钥 Loader 回放覆盖正常路径和确认停点，单元测试覆盖响应点、目录、修复、质量报告、Draft 各检查点以及 continue 与 reset 的差异。真实模型仍负责响应点拆分和目录语义质量，确定性校验不能替代真实 Web 项目的人工抽查。
+无密钥 Loader 回放覆盖零重试预算下应用复核修改、保留建议和进入确认停点，单元测试覆盖拒绝模型生成问题代码、无变化及非法操作拒绝、各 Artifact 检查点以及 continue 与 reset 的差异。真实模型仍负责响应点拆分和目录语义质量，确定性校验不能替代真实 Web 项目的人工抽查。

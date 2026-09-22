@@ -16,7 +16,7 @@ S4 Section Child 在研究后用单个 `outline_capacity=adequate` 概括当前�
 
 `lock_section_outline` 读取最新 `topic_dispositions`。`separate_section` 必须具有由结构操作绑定的当前子树可写节点，该节点相对任务基线具有真实树结构变化；`covered_elsewhere` 必须指向存在且非当前 Section 的节点；其他归位由必填 placement 和 reason 完成。自由文本 `comparison` 只补充整体对照，不能替代逐主题状态和最终结构校验。目录允许没有结构变化，且不按固定层级、节点数、标题或行业词判定充分性。
 
-现有 `reviewRefinedOutline()` 通过 Structure Review Cards 独立检查研究主题、Writing Brief 与实际目录的一致性，以及重复拆分、过度拆分和职责冲突；遗漏深化以 `OUTLINE_REFINEMENT_MISSED` 写入既有 `blocking_issues`。`structureRepairTasks()` 把重叠问题归并为最上层受影响子树并生成 `MAP-REPAIR-*`，动态叶任务和其他已完成 Section 沿用[逐叶队列](../architecture/2026-09-11-s4-leaf-mapping-task-scope.md)。
+现有 `reviewRefinedOutline()` 通过 Structure Review Cards 独立检查研究主题、Writing Brief 与实际目录的一致性，以及重复拆分、过度拆分和职责冲突；阻断问题通过已有章节与业务理由返回，程序填写 `OUTLINE_STRUCTURE_REVIEW`，见[复核问题类别归属](2026-09-22-bid-review-issue-code-ownership.md)。`structureRepairTasks()` 把重叠问题归并为最上层受影响子树并生成 `MAP-REPAIR-*`，动态叶任务和其他已完成 Section 沿用[逐叶队列](../architecture/2026-09-11-s4-leaf-mapping-task-scope.md)。
 
 私有 S4 checkpoint v10 分别保存 Research Assessment 与 Structure Assessment；正式 Outline、Evidence Map v10 和 S5 输入不携带这些私有判断。旧 checkpoint 必须重置 S4。
 
@@ -34,4 +34,4 @@ S4 Section Child 在研究后用单个 `outline_capacity=adequate` 概括当前�
 
 每次结构判断逐项记录研究主题的归位理由；新增 Section ID 及真实目标绑定由 Host 保存。Host 能拒绝虚假依据、未知或自身的外部目标、未落实的独立成节主题和非法最终树，但不能证明模型列出了所有业务主题；全书 Reviewer 通过 Writing Brief、研究发现与结构差异发现这类遗漏。
 
-定向测试覆盖无依据主题、未成功本地读取或 Web Fetch 的引用、未知或自身 `covered_elsewhere`、未形成结构变化的 `separate_section`、全部主题合理留章内的零结构变化、数量不固定的拆分与新叶入队、`OUTLINE_REFINEMENT_MISSED` 到 `MAP-REPAIR-*` 的局部回流、无关 Section 不重跑及正式 S5 输入不携带研究状态。模型可见提示和真实 Loader 回放固定新 schema、归位规则与 Web 决策机制。
+定向测试覆盖无依据主题、未成功本地读取或 Web Fetch 的引用、未知或自身 `covered_elsewhere`、未形成结构变化的 `separate_section`、全部主题合理留章内的零结构变化、数量不固定的拆分与新叶入队、`OUTLINE_STRUCTURE_REVIEW` 到 `MAP-REPAIR-*` 的局部回流、无关 Section 不重跑及正式 S5 输入不携带研究状态。模型可见提示和真实 Loader 回放固定新 schema、归位规则与 Web 决策机制。

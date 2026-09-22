@@ -31,6 +31,8 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 ## 控制面 Runtime
 
+`stopRun` 同时取消发起停止的会话回复和项目后台 Run，保留待处理的用户消息；后台执行收敛并保存挂起状态后返回。主会话空闲时也可停止后台 Run。
+
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
 `BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 `running` 时，Host 在项目锁内将其确定性改为 `suspended(host_restart)`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
@@ -41,7 +43,7 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`webSearchEnabled` 是 Bid 唯一的联网业务开关，默认开启，并同时控制 `web_search` 与 `web_fetch`；`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8；`chapterWritingCompletionRepairRounds` 单独限制 S5 整书验收后的修订轮数，默认为 3，不随并发数变化。
 
-`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact。S2、S3、S4 在同一操作中先提交 `ready` 再立即进入正常执行；S5 回到 `waiting_user` 且不创建执行 Agent；内部 S1 重置同样回到 `waiting_user`。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
+`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact。旧操作已经开始结算时，重置等待其完成；否则重置与操作收尾共用一次 Run retirement，排空 child 后才释放父 Execution Agent。S2、S3、S4 提交 `ready` 并结束重置请求后，由持有同一项目操作的后台续行进入正常执行；续行结算前不释放 Execution Agent 或项目锁。S5 回到 `waiting_user` 且不创建 Execution Agent；内部 S1 重置同样回到 `waiting_user`。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；执行器错误或修复耗尽挂起当前 Run，Workflow 的业务进度不回退。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
 
@@ -61,14 +63,18 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getDetails` 只读已发布详情：S2 确认后继续返回最终招标信息；S3 确认后读取 `outline/initial-confirmed-outline.json`，S4 执行期间保持该版本，等待确认时读取已生成目录，S4 确认后读取 `outline/confirmed-outline.json`。详情读取依赖恢复后的项目状态和原有产物，不新增工作流事件或磁盘格式，也不改变确认接口的编辑准入。
 
+S3 的评分响应点拆解与语义复核都上报 `analyzing`，对应计划第一步；`reviewing` 只用于目录确定性校验通过后的目录质量复核。首次执行和候选恢复遵守相同的进度含义，评分响应点复核失败时不标记目录生成或校验已完成。
+
 ## Model Experience
 ## S2–S5 质量控制
+
+S3 初次生成、按反馈重新生成和目录修复均由 Host 固定第一章为“技术偏离表”，使用 `dsh-technical-deviation-table`、`parent_id=null`、`order=1`、`level=1`、`writable=true`。自动补入的章节保留空需求与评分归属；S4 按该固定 ID 读取全部技术需求作为只读研究上下文，实质性正文覆盖仍由后续章节承担。
 
 S2 首次提取后立即执行 Validator；通过时进入 `tender_analysis/waiting_user`。技术评分提取先以 grep 定位评分区域，再从 `chunks/index.json` 的相邻关系读取连续小窗口，并只用一次轻量 grep 寻找远距离的额外评分区域。Requirement、Scoring item 和 Compliance item 的 `raw_text` 可以在引用原文含义内提取、压缩、去冗余和原子化，但不得改变关键数字、单位、强制语义或新增要求。每条 Project fact、Requirement、Scoring 和 Compliance 提交及 Review phase 都原子写入 Run 栅栏保护的 `analysis/tender-analysis-checkpoint.json`；恢复校验 tender 文件身份并把中断的 reviewing 收敛到 `review_required`。正式 Artifact 已完整通过 Validator 时直接复用，否则从检查点继续。重置任一阶段会取消待处理输入，并从模型可见上下文移除该阶段及后续阶段的消息；原始会话日志仍用于审计和回放。
 
 S3 先按评分语义产生候选响应点，再由独立语义复核回看评分场景是否完整；Host 用评分 Artifact 哈希和单调序列建立稳定目录。Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录，按主框架、补充框架和无关框架明确适配，并在 Section 上保存精确 `framework_refs`。目录只组织需要向采购方展开的技术方案、实施措施和交付成果；纯投标资格、企业资质证书及行政递交要求留在 `global_compliance_ids`，不生成要求解读章节。目录质量复核负责语义粒度；Host 只校验确定性的 Schema、树、ID、覆盖和框架引用，不要求响应点全局唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
 
-S3 初稿、复核修改及失败重试共用候选修复入口。JSON 格式修复保留原文且只允许序列化标点与空白变化；字段错误只修改定位范围，未知 RP 或评分由模型重新选择合法关联。RP 覆盖、需求/合规/框架引用与结构问题分流至有相应字段权限的局部操作，成功进展保留，非法操作不覆盖候选。所有修复共享次数上限和取消机制，完整语义复核前不发布质量报告；正式输入损坏或版本变化要求通过阶段重置处理。
+S3 的 JSON 格式修复保留原文且只允许序列化标点与空白变化；字段错误只修改定位范围，未知 RP 或评分由模型重新选择合法关联。RP 覆盖、需求/合规/框架引用与结构问题使用有相应字段权限的局部操作，非法操作不覆盖候选。质量复核在同轮提交全部必要修改、自检修改后的目录并返回非阻断建议；Host 应用操作并通过确定性校验后发布质量报告及待确认草稿。可选润色只作为建议，合法修改不会触发新一轮完整复核。格式或操作错误使用独立的 `maxRepairAttempts` 重试预算，耗尽后保留目录供继续运行。正式输入损坏或版本变化要求通过阶段重置处理。S3 与 S4 目录复核的模型输出不包含问题代码或编号：建议只返回 `severity` 与 `message`，S4 阻断问题只返回已有 `section_id` 与 `reason`；程序分别填写固定诊断类别 `OUTLINE_QUALITY_ADVISORY` 和 `OUTLINE_STRUCTURE_REVIEW`。
 
 S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。未完成时，修复轮次同时接收 Host 根据当前研究、Blueprint、结构判断、锁定、映射和复核状态生成的顺序清单，避免仅凭错误文本猜测下一项工具调用。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。单个 Mapping Task 只对显式的子任务物化、恢复和结果通道故障做固定有界重试；429、Provider 文本和 retry-after 不在 S4 内解释或退避，由统一 Run 挂起与恢复边界处理。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
 

@@ -20,7 +20,8 @@ import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/ds
 import {
   BID_INITIAL_TASK_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   BidRunCoordinator,
-  bidProjectTaskState, buildBidStageTask, checkpointBidProjectState as checkpointStoredBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
+  bidProjectTaskState, buildBidStageTask, checkpointBidProjectState as checkpointStoredBidProjectState,
+  getBidClientProjection, parseEvidenceMapArtifact,
   outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState,
@@ -1481,7 +1482,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(active.controller.signal.aborted).toBe(false)
   })
 
-  it('阶段失败只回收当前运行登记的 continuable 子代理，不关闭恢复会话', async () => {
+  it('阶段失败且未登记 continuable 子代理时不执行子代理回收', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -1492,10 +1493,8 @@ describe('Workspace 项目与独立 Session', () => {
     executor.execute.mockRejectedValueOnce(new Error('mapping transport failed'))
 
     await expect(resumeRun(ctx, agent.session)).resolves.toMatchObject({ ok: true })
-    await vi.waitFor(() => { expect(drainChildren).toHaveBeenCalledOnce() })
-    expect(drainChildren.mock.calls[0]?.[0].id).not.toBe(agent.id)
-    expect(drainChildren.mock.calls[0]?.[1]).toEqual([])
-
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+    expect(drainChildren).not.toHaveBeenCalled()
     expect(drainDescendants).not.toHaveBeenCalled()
   })
 
@@ -1651,7 +1650,7 @@ describe('Workspace 项目与独立 Session', () => {
       .toContainEqual({ type: 'text', text: '招标分析提交不完整，Run 已挂起，可修正后恢复。' })
   })
 
-  it('聊天 Stop 同时取消当前回复与 S4 execution lane', async () => {
+  it.each(['session', 'remote'] as const)('%s Stop 同时取消当前回复与 S4 execution lane', async (entry) => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -1672,14 +1671,20 @@ describe('Workspace 项目与独立 Session', () => {
     adapter.script.push(answer('这条回复不应完成。'))
     agent.steer(createUserMessage({ content: [{ type: 'text', text: '查看当前进度' }], source: { kind: 'user' } }))
     await requestStarted.promise
-    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    let stopping: Promise<{ accepted: true }> | undefined
+    if (entry === 'remote') stopping = ctx.bid.stopRun(agent.session)
+    else agent.cancel({ kind: 'user' }, { keepInbox: true })
     responseGate.resolve(undefined)
     await agent.whenIdle()
 
     await vi.waitFor(() => { expect(run.signal.aborted).toBe(true) })
     stageGate.resolve([])
     await retry
+    await stopping
     await ctx.bid.stopRun(agent.session)
+    expect(agent.session.events.findLast(event => event.type === 'turn/end')).toMatchObject({
+      data: { reason: { kind: 'aborted' } },
+    })
     expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
     expect(host.inFlight.size).toBe(0)
     adapter.script.push(answer('停止后仍可继续聊天。'))
@@ -1843,7 +1848,10 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const a = await fresh('session-a')
     executor.canExecute = stage => stage === 'outline_generation'
-    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'waiting_user', run: null })
+    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    await vi.waitFor(() => {
+      expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user', run: null })
+    })
     expect(executor.execute).toHaveBeenCalledOnce()
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'outline/repair-operations.json'))).rejects.toMatchObject({ code: 'ENOENT' })

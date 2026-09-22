@@ -372,7 +372,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
-  const quality = JSON.stringify({ schema_version: 4, scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [], blocking_issues: [] })
+  const quality = JSON.stringify({ scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [{ severity: 'advisory', message: '建议以权限表说明授权与追溯关系。' }], blocking_issues: [] })
   const manifest = await workspace.readManifest()
   const [corpus] = await resolveMappingCorpusLocations(workspace, manifest)
   const tender = manifest.files.find(file => file.role === 'tender')!
@@ -651,7 +651,10 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
     toolCall('response-points-analysis', 'structured_output', responseCandidate),
     toolCall('response-points-review', 'structured_output', responseCandidate),
     toolCall('initial-outline', 'structured_output', candidate),
-    toolCall('quality-review', 'structured_output', { operations: [], issues: [] }),
+    toolCall('quality-review', 'structured_output', {
+      operations: [{ type: 'update_section', section_id: 'SEC-SECURITY', title: '访问控制、安全审计与追溯' }],
+      issues: [{ severity: 'advisory', message: '请确认安全审计与追溯安排。' }],
+    }),
   ]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))

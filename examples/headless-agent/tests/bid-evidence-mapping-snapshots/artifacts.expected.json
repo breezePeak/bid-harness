@@ -44,7 +44,6 @@
     ]
   },
   "map": {
-    "schema_version": 11,
     "section_mappings": [
       {
         "local_materials": [
@@ -78,7 +77,6 @@
     ]
   },
   "ledger": {
-    "schema_version": 2,
     "stage": "evidence_mapping",
     "sources": [
       {
