@@ -3,7 +3,7 @@ import { mkdir, readFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
-import { BID_INITIAL_RUNTIME_STATE, BidWorkspace, checkpointBidProjectState, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
+import { BID_INITIAL_TASK_STATE, BidWorkspace, checkpointBidProjectState, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { seedConversation, seedProjectArtifacts, summarizeDocxHeadingNumbering } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
 
@@ -14,7 +14,7 @@ try {
   ctx = await boot('bid-project-session-snapshot', configPath)
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
+  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
   const host = ctx.bid as unknown as { readonly inFlight: Map<string, { done: Promise<void> }> }
   const createFresh = async (id: string, cwd = process.cwd()) => {
     const initialized = Promise.withResolvers<undefined>()
@@ -40,7 +40,7 @@ try {
   await mkdir(exportRoot)
   const exportWorkspace = new BidWorkspace(exportRoot)
   await seedProjectArtifacts(exportWorkspace)
-  await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'pending' })
+  await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'ready', run: null })
   const exporting = await createFresh('export-session-a', exportRoot)
   const automaticExport = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
   const startingFormat = await ctx.bid.getDocxFormat(exporting, null)
@@ -54,7 +54,7 @@ try {
   const completedDetails = await ctx.bid.getDetails(completed)
   const restoredFormat = await ctx.bid.getDocxFormat(completed, null)
   process.stdout.write(`${JSON.stringify({
-    runtime: b.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
+    task: b.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE),
     messages: b.deriveMessages(), nodes: b.surface.nodes,
     parentSession: b.header.parentSession ?? null, seedLength: b.header.seedLength ?? null,
     outlineTitles: outline.sections.map(section => section.title),
@@ -69,8 +69,8 @@ try {
         tender: completedDetails.tender?.project.project_name,
         outline: completedDetails.outline?.sections.map(section => section.title), body: completedDetails.body,
       },
-      runtime: exporting.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
-      nextRuntime: completed.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
+      task: exporting.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE),
+      nextTask: completed.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE),
       messages: completed.deriveMessages(),
       executions: [...exporting.events, ...completed.events].filter(event => event.type === 'bid.stage.started' && event.data.stage === 'docx_export').length,
       docxAvailable: docx.length > 0 && docx.subarray(0, 2).toString() === 'PK',

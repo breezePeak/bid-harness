@@ -1,11 +1,10 @@
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {
   BidClientAction,
-  BidControlState,
   BidPromptAdmission,
-  BidRuntimeState,
   BidStage,
   BidStageTask,
+  BidTaskState,
   BidWorkDescriptor,
   StageArtifact,
   StageValidationResult,
@@ -13,12 +12,11 @@ import type {
 } from './control-plane-contract.ts'
 import { BidStageAttentionRequiredError, BidStageExecutionError } from './control-plane-contract.ts'
 import {
-  BID_INITIAL_CONTROL_STATE,
-  bidRuntimeView,
+  BID_INITIAL_TASK_STATE,
   buildBidStageTask,
   getBidClientProjection,
   getBidStagePolicy,
-  reduceBidControlState,
+  reduceBidTaskState,
 } from './runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
 import type { BidRunResumeIdentity } from './control-plane-contract.ts'
@@ -64,11 +62,11 @@ export type BidStageContextTransition = (fromStage: BidStage, toStage: BidStage)
 
 /** Result of validating and recording one explicit user-confirmed stage. */
 export type BidStageConfirmationResult =
-  | { readonly ok: true; readonly state: BidRuntimeState }
+  | { readonly ok: true; readonly state: BidTaskState }
   | { readonly ok: false; readonly validation: StageValidationResult & { readonly ok: false } }
 
 /** Durable outcome of one executor and validator attempt. */
-export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'attention_required' | 'failed' | 'aborted'
+export type StageExecutionSettlement = 'completed' | 'waiting_user' | 'failed' | 'aborted'
 
 /** Stable rejection codes for host-side Bid operation admission. */
 export type BidOrchestratorErrorCode =
@@ -79,7 +77,6 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RESUME_NOT_ALLOWED'
-  | 'BID_STAGE_START_NOT_ALLOWED'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
@@ -103,7 +100,7 @@ export class BidOrchestratorError extends Error {
 
 /** Session-scoped Bid state driver over the shared DSH session event log. */
 export class BidOrchestrator {
-  private operation: Promise<BidRuntimeState> | undefined
+  private operation: Promise<BidTaskState> | undefined
   private readonly runs: BidRunCoordinator
 
   /**
@@ -134,14 +131,9 @@ export class BidOrchestrator {
     )
   }
 
-  /** Split Workflow and Run state replayed from the Session log. */
-  get controlState(): BidControlState {
-    return this.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-  }
-
   /** Current state replayed from the session log. */
-  get state(): BidRuntimeState {
-    return bidRuntimeView(this.controlState)
+  get state(): BidTaskState {
+    return this.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   }
 
   /** Read cancellation without retaining a stale narrowing across an await. */
@@ -150,12 +142,12 @@ export class BidOrchestrator {
   }
 
   /**
-   * Drive pending stages after file intake until user input, failure, or final completion. Concurrent callers share the same drive.
+   * Drive ready stages after file intake until user input, failure, or final completion. Concurrent callers share the same drive.
    * A fresh file-intake stage waits for {@link runCurrentProgramStage} because its executor requires user files. A running state
    * without this instance's operation is a replayed interruption; the driver records failure so the Host can offer a full retry.
    * @returns the state at the stopping point.
    */
-  drive(): Promise<BidRuntimeState> {
+  drive(): Promise<BidTaskState> {
     if (this.operation !== undefined) return this.operation
     return this.begin(() => {
       const state = this.state
@@ -173,43 +165,19 @@ export class BidOrchestrator {
   resume(
     suspendedRunId: string,
     onAccepted?: (run: BidRunContext) => void,
-  ): Promise<BidRuntimeState> {
+  ): Promise<BidTaskState> {
     this.assertIdle()
-    const control = this.controlState
-    const suspended = control.run
-    if (suspended?.status !== 'suspended' || suspended.runId !== suspendedRunId || suspended.stage !== control.workflow.stage) {
+    const state = this.state
+    if (state.status !== 'suspended' || state.run.runId !== suspendedRunId) {
       throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the requested suspended Bid Run is no longer current')
     }
+    const suspended = state.run
     return this.begin(async () => {
       const resumeOf: BidRunResumeIdentity = {
         runId: suspended.runId,
         cause: suspended.cause ?? 'host_restart',
       }
-      const settlement = await this.executeStage(suspended.stage, resumeOf, suspended.work, onAccepted)
-      return settlement === 'completed' ? this.driveLoop() : this.state
-    })
-  }
-
-  /**
-   * Start the stage selected by a completed reset and continue to its normal stopping point.
-   * @returns the state at validation, failure, or workflow completion.
-   * @throws {@link BidOrchestratorError} unless the current stage is waiting for this explicit start.
-   */
-  startResetStage(): Promise<BidRuntimeState> {
-    this.assertIdle()
-    const state = this.state
-    if (state.status !== 'waiting_start' || state.stage === 'file_intake') {
-      throw new BidOrchestratorError(
-        'BID_STAGE_START_NOT_ALLOWED',
-        `cannot start Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
-      )
-    }
-    return this.begin(async () => {
-      if (getBidStagePolicy(state.stage).userGate === 'before_execution') {
-        this.session.append('bid.user_confirmation.required', { stage: state.stage, status: 'waiting_user' })
-        return this.state
-      }
-      const settlement = await this.executeStage(state.stage)
+      const settlement = await this.executeStage(state.stage, resumeOf, suspended.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -217,13 +185,13 @@ export class BidOrchestrator {
   /**
    * Execute the current program-owned stage once without driving its successor.
    * @returns the log-derived state after the stage records completion or failure.
-   * @throws {@link BidOrchestratorError} unless the current stage is an idle pending or failed program stage.
+   * @throws {@link BidOrchestratorError} unless the current stage is an idle ready program stage.
    */
-  runCurrentProgramStage(): Promise<BidRuntimeState> {
+  runCurrentProgramStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (policy.executor !== 'program' || (state.status !== 'pending' && state.status !== 'failed')) {
+    if (policy.executor !== 'program' || state.status !== 'ready') {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -236,15 +204,15 @@ export class BidOrchestrator {
   }
 
   /**
-   * Execute the current pending automatic stage once and stop at its successor.
+   * Execute the current ready automatic stage once and stop at its successor.
    * @returns the state after one executor and Validator settlement.
-   * @throws {@link BidOrchestratorError} unless an idle non-user, non-file-intake stage is pending.
+   * @throws {@link BidOrchestratorError} unless an idle non-user, non-file-intake stage is ready.
    */
-  runCurrentAutomaticStage(): Promise<BidRuntimeState> {
+  runCurrentAutomaticStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (state.status !== 'pending' || state.stage === 'file_intake' || policy.userGate === 'before_execution') {
+    if (state.status !== 'ready' || state.stage === 'file_intake' || policy.userGate === 'before_execution') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -257,13 +225,13 @@ export class BidOrchestrator {
   }
 
   /**
-   * Execute a pending before-execution stage after its Host-owned plan has been confirmed.
+   * Execute a ready before-execution stage after its Host-owned plan has been confirmed.
    * @returns State after the confirmed stage settles.
    */
-  runConfirmedStage(): Promise<BidRuntimeState> {
+  runConfirmedStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'pending' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
+    if (state.status !== 'ready' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -321,15 +289,18 @@ export class BidOrchestrator {
     stage: BidStage,
     artifacts: StageArtifact[],
     completeRun?: (commitWorkflow: () => void) => Promise<void>,
-  ): Promise<BidRuntimeState> {
+  ): Promise<BidTaskState> {
     this.assertIdle()
-    const control = this.controlState
+    const state = this.state
     const policy = getBidStagePolicy(stage)
-    if (control.workflow.stage !== stage || control.workflow.gate !== 'waiting_user'
+    const confirmationWorkRunning = state.status === 'running'
+      && state.run.work.kind === 'outline_confirmation'
+      && state.run.work.stage === stage
+    if (state.stage !== stage || (state.status !== 'waiting_user' && !confirmationWorkRunning)
       || policy.userGate !== 'after_validation') {
       throw new BidOrchestratorError(
         'BID_CONFIRM_NOT_ALLOWED',
-        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(control.workflow.stage)} and gate is ${JSON.stringify(control.workflow.gate)}`,
+        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {
@@ -359,7 +330,7 @@ export class BidOrchestrator {
   }
 
   /**
-   * Admit an ordinary composer message only for a pending agent stage.
+   * Admit an ordinary composer message only for a ready agent stage.
    * @param input - untrusted client text.
    * @returns an accepted stage input or a stable host rejection reason.
    */
@@ -372,11 +343,11 @@ export class BidOrchestrator {
       }
     }
     if (input.trim().length === 0) return { admitted: false, reason: 'bid.prompt_empty' }
-    return { admitted: true, stage: projection.runtime.stage, input }
+    return { admitted: true, stage: projection.task.stage, input }
   }
 
   /** Install one operation before its first async step, then release the slot after settlement. */
-  private begin(run: () => Promise<BidRuntimeState>): Promise<BidRuntimeState> {
+  private begin(run: () => Promise<BidTaskState>): Promise<BidTaskState> {
     const operation = Promise.resolve().then(run)
     this.operation = operation
     void operation.then(
@@ -403,11 +374,11 @@ export class BidOrchestrator {
   }
 
   /** Continue the automatic control loop from the current log-derived state. */
-  private async driveLoop(): Promise<BidRuntimeState> {
+  private async driveLoop(): Promise<BidTaskState> {
     while (true) {
       if (this.isAborted()) return this.state
       const state = this.state
-      if (state.status !== 'pending') return state
+      if (state.status !== 'ready') return state
       if (state.stage === 'file_intake') return state
       const policy = getBidStagePolicy(state.stage)
       if (policy.userGate === 'before_execution') {
@@ -466,7 +437,7 @@ export class BidOrchestrator {
             [...error.issues],
           )
         })
-        return 'attention_required'
+        return 'waiting_user'
       }
       if (error instanceof BidStageExecutionError) {
         await this.runs.suspend('retry_exhausted', safeBidRunError(error, error.issues))
@@ -518,7 +489,7 @@ export class BidOrchestrator {
     return this.prepareContextTransition(stage, nextStage)
   }
 
-  /** Validate artifacts without changing Workflow or Run ownership. */
+  /** Validate artifacts without changing task or Run ownership. */
   private async validate(stage: BidStage, artifacts: StageArtifact[], run: BidRunContext): Promise<StageValidationResult> {
     let result: StageValidationResult
     try {
@@ -532,6 +503,8 @@ export class BidOrchestrator {
 
   /** Preserve usable S5 artifacts when a bounded business correction cannot reach its confirmed target. */
   private attentionRequired(stage: BidStage, reason: string, issues: StageValidationIssue[]): void {
-    this.session.append('bid.stage.attention_required', { stage, status: 'attention_required', reason, issues })
+    this.session.append('bid.task.changed', {
+      state: { stage, status: 'waiting_user', run: null, reason, issues },
+    })
   }
 }

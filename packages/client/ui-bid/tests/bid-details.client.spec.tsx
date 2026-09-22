@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { BidClientProjection, BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidDetailsView, BidStage, BidTaskState } from '@deepseek-ai/dsh-bid/control-plane'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { BidDetails } from '../src/client/BidDetails.tsx'
 
@@ -48,11 +48,34 @@ function expectFinalDetails() {
   expect(current.querySelector('[draggable="true"]')).toBeNull()
 }
 
-function props(runtime: BidClientProjection['runtime'], patch: Partial<Parameters<typeof BidDetails>[0]> = {}): Parameters<typeof BidDetails>[0] {
+type FixtureRuntime = { readonly stage: BidStage; readonly status: BidTaskState['status'] | 'pending' }
+
+function fixtureTask(runtime: FixtureRuntime): BidTaskState {
+  if (runtime.status === 'pending') return { stage: runtime.stage, status: 'ready', run: null }
+  if (runtime.status === 'running' || runtime.status === 'suspended') {
+    const run = {
+      runId: `details-${runtime.stage}`, epoch: 1, baseProjectRevision: 0,
+      work: {
+        kind: 'stage_execution' as const, workId: `details-${runtime.stage}-work`, stage: runtime.stage,
+        requestRef: `details-${runtime.stage}`, requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64),
+      },
+      startedAt: 1, updatedAt: 1,
+    }
+    return runtime.status === 'running'
+      ? { stage: runtime.stage, status: 'running', run }
+      : { stage: runtime.stage, status: 'suspended', run: { ...run, cause: 'user_stop' } }
+  }
+  if (runtime.status === 'failed') {
+    return { stage: runtime.stage, status: 'failed', run: null, failure: { message: '阶段执行失败' } }
+  }
+  return { stage: runtime.stage, status: runtime.status, run: null }
+}
+
+function props(runtime: FixtureRuntime, patch: Partial<Parameters<typeof BidDetails>[0]> = {}): Parameters<typeof BidDetails>[0] {
   return {
     sessionId: 'bid', kind: 'outline',
     useSessions: (selector: (state: unknown) => unknown) => selector({ byId: { bid: { agentPreset: 'bid' } } }),
-    useProjection: () => ({ runtime, allowedActions: [] }),
+    useProjection: () => ({ task: fixtureTask(runtime), allowedActions: [], composer: { enabled: true } }),
     getDetails: vi.fn(async () => details),
     setReviewSurface: vi.fn(),
     ...patch,
@@ -157,7 +180,11 @@ it.each([
   const getDetails = vi.fn(async () => details)
   const view = render(<BidDetails {...props({ stage, status: 'waiting_user' }, {
     kind, setReviewSurface, getDetails,
-    useProjection: (() => ({ runtime: { stage, status: 'waiting_user' }, allowedActions: [action] })),
+    useProjection: (() => ({
+      task: fixtureTask({ stage, status: 'waiting_user' }),
+      allowedActions: [action],
+      composer: { enabled: true },
+    })),
   })} />)
   await waitFor(() => { expect(setReviewSurface).toHaveBeenCalledWith(expect.any(HTMLDivElement)) })
   expect(getDetails).not.toHaveBeenCalled()

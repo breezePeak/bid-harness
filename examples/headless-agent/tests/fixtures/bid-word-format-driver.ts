@@ -13,7 +13,7 @@ const ctx = await boot('bid-word-format-e2e', process.argv[2]!)
 try {
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
   const ready = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => { if (session.id === 'word-format' && event.type === 'bid.project.resumed') ready.resolve(undefined) }, { global: true })
   const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('word-format'), agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, meta: { cwd: process.cwd(), agentPreset: 'bid' } })

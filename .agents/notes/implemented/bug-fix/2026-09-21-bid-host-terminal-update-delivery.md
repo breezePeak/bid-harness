@@ -2,6 +2,8 @@
 
 Status: implemented
 
+业务 attention 的外层状态已由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)归一为带原因的 `waiting_user`；终态摘要投递规则保持有效。
+
 ## Problem
 
 Execution Agent 的预步过滤丢弃直属 Child 的 report 和 settled 消息，而 Interaction Agent 只有 model-invisible 的 `bid.run.notice`。Run 失败后用户立即追问时，Main Agent 可能既不知道 Child 的结算，也看不到 Host 已持久化的挂起原因。

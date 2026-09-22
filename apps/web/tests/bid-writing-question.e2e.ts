@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   BidWorkspace,
+  bidProjectTaskState,
   checkpointBidProjectState,
   BID_WRITING_ENTRY_PROJECTION_KEY,
   type WritingRequest,
@@ -93,11 +94,9 @@ describe('web e2e: S5 native writing requirements question', () => {
     onTestFailed(() => saveFailureShot(page, 's5-writing-question'))
 
     // 发布进入 S5 waiting_user 状态
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
     agent.session.append('bid.project.resumed', {
-      workflow: state.workflow,
-      run: state.run,
-      lastRun: state.last_run,
+      state: bidProjectTaskState(state),
       revision: state.revision,
     })
     await (scaffold.ctx.bid as unknown as {

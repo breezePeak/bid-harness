@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type BidRunData, type BidStage, type BidTaskState, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -43,14 +43,84 @@ const savedProgress = {
   tasks: [],
 }
 
-function projection(patch: Partial<BidClientProjection> = {}): BidClientProjection {
+type ProjectionFixturePatch = Omit<Partial<BidClientProjection>, 'task'> & {
+  task?: BidTaskState
+  workflow?: unknown
+  runtime?: {
+    stage: BidStage
+    status: 'pending' | 'waiting_start' | 'attention_required' | BidTaskState['status']
+    failureReason?: string
+    failureIssues?: readonly StageValidationIssue[]
+  }
+  run?: Partial<BidRunData> & {
+    stage?: BidStage
+    status?: string
+    cause?: 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart'
+    error?: { message: string }
+  } | null
+}
+
+function fixtureRun(stage: BidStage, patch: ProjectionFixturePatch['run']): BidRunData {
+  const { stage: _stage, status: _status, cause: _cause, error: _error, ...run } = patch ?? {}
   return {
-    workflow: { stage: 'file_intake', gate: 'ready' },
-    run: null,
-    runtime: { stage: 'file_intake', status: 'pending' },
+    runId: 'run-fixture',
+    epoch: 1,
+    baseProjectRevision: 1,
+    work: {
+      kind: 'stage_execution',
+      workId: `work-${stage}`,
+      stage,
+      requestRef: `requests/${stage}.json`,
+      requestSha256: '0'.repeat(64),
+      inputFingerprint: '0'.repeat(64),
+    },
+    startedAt: 1,
+    updatedAt: 2,
+    ...run,
+  }
+}
+
+function fixtureTask(patch: ProjectionFixturePatch): BidTaskState {
+  if (patch.task !== undefined) return patch.task
+  const runtime = patch.runtime ?? { stage: 'file_intake' as const, status: 'pending' as const }
+  const status = runtime.status === 'pending' || runtime.status === 'waiting_start'
+    ? 'ready'
+    : runtime.status === 'attention_required' ? 'failed' : runtime.status
+  if (status === 'running') return { stage: runtime.stage, status, run: fixtureRun(runtime.stage, patch.run) }
+  if (status === 'suspended') {
+    return {
+      stage: runtime.stage,
+      status,
+      run: {
+        ...fixtureRun(runtime.stage, patch.run),
+        cause: patch.run?.cause ?? 'user_stop',
+        ...(patch.run?.error === undefined && runtime.failureReason === undefined
+          ? {}
+          : { error: patch.run?.error ?? { message: runtime.failureReason! } }),
+      },
+    }
+  }
+  if (status === 'failed') {
+    return {
+      stage: runtime.stage,
+      status,
+      run: null,
+      failure: {
+        message: runtime.failureReason ?? '阶段执行失败',
+        ...(runtime.failureIssues === undefined ? {} : { issues: runtime.failureIssues }),
+      },
+    }
+  }
+  return { stage: runtime.stage, status, run: null }
+}
+
+function projection(patch: ProjectionFixturePatch = {}): BidClientProjection {
+  const { runtime: _runtime, workflow: _workflow, run: _run, task: _task, ...projectionPatch } = patch
+  return {
+    task: fixtureTask(patch),
     allowedActions: [],
     composer: { enabled: false, reason: 'bid.upload_required' },
-    ...patch,
+    ...projectionPatch,
   }
 }
 
@@ -483,7 +553,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByText('2 / 10 (20%)')).toBeNull()
   })
 
-  it('S4 等待启动时不读取或显示 Mapping 进度', () => {
+  it('S4 ready 时不读取或显示 Mapping 进度', () => {
     const getEvidenceMappingProgress = vi.fn()
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
@@ -491,8 +561,8 @@ describe('BidStagePanel', () => {
       composer: { enabled: true },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(screen.getByText('阶段已重置完毕，请确认后开始执行')).toBeTruthy()
-    expect(screen.getByText('等待开始')).toBeTruthy()
+    expect(screen.getByText('正在整理项目证据')).toBeTruthy()
+    expect(screen.getByText('等待处理')).toBeTruthy()
     expect(screen.queryByText('研究任务')).toBeNull()
     expect(screen.queryByText('同步中')).toBeNull()
     expect(screen.queryByText('正在同步映射进度…')).toBeNull()
@@ -516,15 +586,15 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
   })
 
-  it('shows reset completion without a stage action button', () => {
+  it('shows ready reset state without a stage action button', () => {
     render(<BidStagePanel {...props(projection({
       runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
       allowedActions: ['send_message'],
       composer: { enabled: true },
     }))} />)
 
-    expect(screen.getByText('阶段已重置完毕，请确认后开始执行')).toBeTruthy()
-    expect(screen.getByText('等待开始')).toBeTruthy()
+    expect(screen.getByText('正在整理项目证据')).toBeTruthy()
+    expect(screen.getByText('等待处理')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '开始本阶段' })).toBeNull()
   })
 
@@ -629,7 +699,7 @@ describe('BidStagePanel', () => {
     }
   })
 
-  it('取消收尾保留同一计划并停止旋转，不显示重复状态行', () => {
+  it('运行状态只由 task 判别项决定，不读取旧 Run 内层状态', () => {
     render(<BidStagePanel {...props(projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
@@ -641,7 +711,7 @@ describe('BidStagePanel', () => {
     }), { getEvidenceMappingProgress: async () => null })} />)
 
     expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
-    expect(screen.getByText('1 未收尾 · 2 待处理')).toBeTruthy()
+    expect(screen.getByText(/1 正在进行.*2 待处理/)).toBeTruthy()
     expect(screen.queryByText('正在停止执行器并保存已完成进度')).toBeNull()
     expect(screen.queryByText('正在停止…')).toBeNull()
     expect(screen.queryByText('正在处理…')).toBeNull()

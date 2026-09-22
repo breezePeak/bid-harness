@@ -43,7 +43,7 @@ try {
   await agent.whenIdle()
   const parentRequestCount = requests.filter(request => request.sessionId === agent.id).length
   const initialRequestCount = requests.length
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
   const user = ctx.sessions.create(SessionId('revision-user'), {
     meta: { cwd: process.cwd(), agentPreset: 'bid' },
   })

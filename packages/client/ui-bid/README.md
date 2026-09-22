@@ -10,9 +10,9 @@ Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.
 
 批量审核历史中的已完成意见可打开对应 task 的 Markdown 前后快照，固定左侧显示修改后、右侧显示修改前。顶层 Markdown block 组成共享双列行，新增或删除的缺失侧保留自然等高空单元格；两列共用正文阅读区的单一垂直滚动位置。旧记录缺少快照时只提示无法还原，章节标题仍提供普通正文定位。
 
-After an S2–S5 reset, the panel renders the Host-owned `waiting_start` state, keeps the composer disabled, and exposes one “Start this stage” action backed by `bid/startStage`. Reset itself never starts model execution.
+S2–S4 reset clears downstream artifacts, publishes `ready`, and immediately drives the selected stage in the same Host operation. S5 reset publishes `waiting_user` with no Run or child execution so the existing writing-requirements flow can collect the next explicit user decision.
 
-输入框左侧工具栏为每个 Bid Session 提供“手动确认 / 自动确认”选择，默认手动且不写入项目状态。自动确认模式在 S2 使用审核页当前编辑结果确认；S3/S4 等待 Draft 保存后，按阶段、revision 和 SHA-256 最多提交一次确认；S5 调用正式 Host Action 生成无用户原话的默认 Writing Plan 并启动正文。自动操作失败不循环重试，`failed` 与 `waiting_start` 始终保留人工处理。
+输入框左侧工具栏为每个 Bid Session 提供“手动确认 / 自动确认”选择，默认手动且不写入项目状态。自动确认模式在 S2 使用审核页当前编辑结果确认；S3/S4 等待 Draft 保存后，按阶段、revision 和 SHA-256 最多提交一次确认；S5 调用正式 Host Action 生成无用户原话的默认 Writing Plan 并启动正文。自动操作失败不循环重试，`failed` 与 `suspended` 始终保留人工处理。
 
 ## Word 导出页面
 

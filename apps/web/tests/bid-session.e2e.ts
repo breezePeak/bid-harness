@@ -357,7 +357,7 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
     ])
     expect(agent.session.events.some(event => (
-      event.type === 'bid.run.started' && event.data.run.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
     ))).toBe(true)
 
     const sessionCwd = agent.session.header.cwd
@@ -422,7 +422,7 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
     ])
     expect(persisted.events.some(event => (
-      event.type === 'bid.run.started' && event.data.run.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
     ))).toBe(true)
 
     const warningStart = tripwire.warnings.length
@@ -453,7 +453,7 @@ describe('web e2e: Bid file intake', () => {
     if (agent === undefined) throw new Error('Bid Session has no live Agent')
     const cwd = agent.session.header.cwd
     if (cwd === undefined) throw new Error('Bid Session has no workspace cwd')
-    if ((await readBidProjectState(new BidWorkspace(cwd)))?.runtime.stage === 'file_intake') {
+    if ((await readBidProjectState(new BidWorkspace(cwd)))?.stage === 'file_intake') {
       analysisAdapter.setSession(cwd, bid.sessionId)
       const tenderBytes = await readFile(INTAKE_FIXTURE)
       const intake = await fetch(`${scaffold.baseUrl}/api/bid-upload`, {
@@ -636,7 +636,7 @@ describe('web e2e: Bid file intake', () => {
     const workspace = new BidWorkspace(bidCwd)
     analysisAdapter.setSession(bidCwd, bid.sessionId, true)
     const startedRunsBefore = agent.session.events.filter(event => (
-      event.type === 'bid.run.started' && event.data.run.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
     )).length
 
     let promptPosts = 0
@@ -650,16 +650,15 @@ describe('web e2e: Bid file intake', () => {
 
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
-    if ((await readBidProjectState(workspace))?.runtime.stage === 'file_intake') {
+    if ((await readBidProjectState(workspace))?.stage === 'file_intake') {
       const chooserReady = page.waitForEvent('filechooser')
       await page.getByRole('button', { name: '招标文件', exact: true }).click()
       await (await chooserReady).setFiles(INTAKE_FIXTURE)
       await page.getByRole('button', { name: '上传并解析' }).click()
     } else {
-      expect(await scaffold.ctx.bid.resetStage(agent, 'tender_analysis')).toEqual({
-        stage: 'tender_analysis', status: 'waiting_start',
+      expect(await scaffold.ctx.bid.resetStage(agent, 'tender_analysis')).toMatchObject({
+        stage: 'tender_analysis', status: 'suspended',
       })
-      expect(await scaffold.ctx.bid.startStage(agent.session)).toMatchObject({ ok: true })
     }
     await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 30_000 })
     await panel.getByText('已挂起', { exact: true }).waitFor({ timeout: 15_000 })
@@ -668,7 +667,7 @@ describe('web e2e: Bid file intake', () => {
     expect(await panel.getByRole('button', { name: '重试' }).count()).toBe(0)
 
     const saved = await readBidProjectState(workspace)
-    if (saved?.run?.status !== 'suspended') throw new Error('S2 failure did not persist a suspended Run')
+    if (saved?.status !== 'suspended') throw new Error('S2 failure did not persist a suspended Run')
     analysisAdapter.setSession(bidCwd, bid.sessionId)
     await scaffold.ctx.bid.resumeCurrentRun(agent.session, saved.run.runId, saved.revision)
     await panel.getByText('等待用户确认', { exact: true }).waitFor({ timeout: 30_000 })
@@ -677,9 +676,9 @@ describe('web e2e: Bid file intake', () => {
     expect(promptPosts).toBe(0)
     expect(retryPosts).toBe(0)
     expect(agent.session.events.filter(event => (
-      event.type === 'bid.run.started' && event.data.run.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
     ))).toHaveLength(startedRunsBefore + 2)
-    expect(agent.session.events.some(event => event.type === 'bid.run.suspended' && event.data.run.stage === 'tender_analysis')).toBe(true)
+    expect(agent.session.events.some(event => event.type === 'bid.run.suspended' && event.data.run.work.stage === 'tender_analysis')).toBe(true)
     expect(bidStageLifecycle(agent.session.events)
       .some(event => event.stage === 'outline_generation' && event.type === 'bid.stage.started')).toBe(false)
   }, 120_000)

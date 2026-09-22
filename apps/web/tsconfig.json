@@ -80,6 +80,7 @@
     "tests/bid-session.e2e.ts",
     "tests/bid-outline-review.e2e.ts",
     "tests/bid-writing-question.e2e.ts",
+    "tests/bid-run-progress.e2e.ts",
     "tests/shipped-composition.e2e.ts",
     "tests/schedule-after.e2e.ts",
     "tests/feedback-command.e2e.ts",

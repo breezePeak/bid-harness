@@ -22,7 +22,6 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
      * 一次 S6 最终 Word 页面视觉审核请求；不进入正文对话上下文。
-     * @mode emit
      * @param blockId 被审核的稳定视觉块标识。
      * @param inputHash 内容、模板、页面、样式及版本的联合摘要。
      * @param messages 当前页及相邻页图片与短审核约束。

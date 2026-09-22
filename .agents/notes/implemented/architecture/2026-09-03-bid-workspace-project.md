@@ -2,6 +2,8 @@
 
 Status: implemented
 
+项目状态的 version 3 结构已由[单一任务状态机](2026-09-22-bid-single-task-state.md)替代；Workspace 所有权、项目锁和 Session 隔离规则保持有效。
+
 ## Problem
 
 把 Bid 产物与阶段状态归属于 Session 会使同一工作区的新聊天从 S1 开始，且无法读取已有分析、目录和章节。用 fork 保留项目进度又会复制聊天与模型上下文，违背新聊天的含义；仅共享文件而保留 Session 锁还允许两个会话并发改写同一项目。

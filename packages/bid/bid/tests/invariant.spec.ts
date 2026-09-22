@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as BidInvariant from '../src/invariant.ts'
-import { BID_INITIAL_RUNTIME_STATE } from '../src/runtime-state.ts'
+import { BID_INITIAL_TASK_STATE } from '../src/runtime-state.ts'
 
 describe('Bid 项目修订号约束', () => {
   it('允许重复修订，拒绝回退且卸载后移除检查', async () => {
@@ -13,7 +13,7 @@ describe('Bid 项目修订号约束', () => {
     const companion = await ctx.plugin(BidInvariant)
     try {
       const session = ctx.sessions.create()
-      const append = (revision: number) => session.append('bid.project.resumed', { runtime: BID_INITIAL_RUNTIME_STATE, revision })
+      const append = (revision: number) => session.append('bid.project.resumed', { state: BID_INITIAL_TASK_STATE, revision })
       append(12)
       expect(() => append(12)).not.toThrow()
       expect(() => append(13)).not.toThrow()

@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只读取当前 `projection.runtime` 的阶段与状态，不使用聊天流、Main Agent、Subagent 或工具的运行状态推导阶段是否执行；Main Agent 运行状态只在阶段已挂起时显示独立的恢复检查提示。客户端把 durable `bid.run.notice` 投影为聊天时间线中的终端 Run 提示：错误默认显示一行红色小字号概述，悬停时显示展开箭头，展开后保留完整诊断；它不推进阶段、不推导权限，也不保存本地阶段或状态。
+标书会话浏览器 UI。插件把 `BidStagePanel` 贡献到会话声明的 `conversation.input.dock` 列表，并且只在 Host 解析出的 Session Preset 为 `bid` 且 `bid.runtime` Projection 可用时渲染。紧凑状态行复用 DSH Composer 的布局、状态标记、字体和按钮，只读取当前 `projection.task` 的阶段与状态，不使用聊天流、Main Agent、Subagent 或工具的运行状态推导阶段是否执行；Main Agent 运行状态只在阶段已挂起时显示独立的恢复检查提示。客户端把 durable `bid.run.notice` 投影为聊天时间线中的终端 Run 提示：错误默认显示一行红色小字号概述，悬停时显示展开箭头，展开后保留完整诊断；它不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 `projection.allowedActions` 控制上传、目录决策和 Word 导出控件是否可用，Host 投影的文件限制配置选择器和规则文案。文件选择会把浏览器 `File` 对象保留在本地，直到用户明确上传整个批次。上传控件把原始文件交给同源 S1 二进制端点，不调用 `session.prompt()`；只有刷新的 Host Projection 才会报告业务进度。Run 挂起时 Composer 保持可用，状态行固定显示“已挂起”并停止阶段动画，同时显示挂起原因和安全错误；恢复、重跑和停止由 Host 通过 DSH 原生用户提问呈现，面板不提供阶段操作按钮。时间线以持久化通知显示停止或中断，不把通知送入模型上下文。目录确认提供“使用该目录”和“修改目录”两行：前者提交当前目录编辑，后者要求非空修改意见并调用 `bid/regenerateOutline`，由 Host 重新执行 S4 后返回目录确认。
 
@@ -16,7 +16,7 @@ S3 确认前使用临时“审核项”入口，确认后由“目录详情”�
 
 Word 格式页从 Host 读取模板字节上限，默认显示 300 MiB。选择模板后，浏览器把 `File` 直接作为独立同源二进制请求体发送；Session、文件名、长度和配置 revision 位于小型请求头，模板字节不进入配置 Remote 的 JSON。Host 在同一上传操作中完成 OOXML 提取、模板正文格式说明解释、证据合并和冲突检测；页面只显示主要格式表与固定效果预览，冲突单元格只接受证据值确认，底部“导出 Word”同时生成并下载文件。
 
-S2–S5 重置完成后，面板显示 `waiting_start` 并保持 Composer 可用。Host 在同一 Session 的 DSH 原生用户提问空间中提供当前阶段重跑或停止选项；回答重跑后才调用 `bid/startStage`，避免重置操作在用户确认前自动消耗模型调用。普通聊天消息不会被当作该问题的答案。
+S2–S4 重置会删除后续产物、发布 `ready`，并在同一个 Host 操作中立即驱动所选阶段。S5 重置发布无 Run、无子执行的 `waiting_user`，继续复用正文整体要求提问收集下一次明确用户决策。
 
 S4 的任务进度在 `running`、`waiting_user`、`suspended` 和 `completed` 状态下保持可见，分别显示 Host 返回的初始任务数、补充任务数、完成数、运行数、未开始数和失败数。挂起后停止轮询但保留最后一次持久化进度，并列出失败任务负责的 Section。初始数量等于初步确认目录中的可写叶子数；目录深化和最终用户编辑产生的补映射计入补充数量，任务名称使用真实章节标题路径。
 

@@ -1,14 +1,12 @@
 import { z } from 'zod'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { BidClientProjection, BidControlState } from './control-plane-contract.ts'
+import type { BidClientProjection, BidTaskState } from './control-plane-contract.ts'
 import { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY } from './control-plane-contract.ts'
 import {
-  BID_INITIAL_CONTROL_STATE,
-  bidControlStateSchema,
-  bidRunSchema,
-  bidWorkflowSchema,
+  BID_INITIAL_TASK_STATE,
+  bidTaskStateSchema,
   getBidClientProjection,
-  reduceBidControlState,
+  reduceBidTaskState,
 } from './runtime-state.ts'
 import {
   BID_WRITING_ENTRY_PROJECTION_KEY,
@@ -26,7 +24,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 
   interface SessionProjectionStateMap {
     /** Replayable Bid state derived from the shared session log. */
-    [BID_RUNTIME_PROJECTION_KEY]: BidControlState
+    [BID_RUNTIME_PROJECTION_KEY]: BidTaskState
     /** Replayable S5 writing entry view derived from bid.writing_entry.changed events. */
     [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
   }
@@ -34,16 +32,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 }
 
 const clientProjectionSchema = z.object({
-  workflow: bidWorkflowSchema,
-  run: bidRunSchema.nullable(),
-  runtime: z.object({
-    stage: z.enum(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export']),
-    status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'suspended', 'attention_required', 'failed', 'completed']),
-    failureReason: z.string().optional(),
-    failureIssues: z.array(z.object({
-      code: z.string(), message: z.string(), artifact: z.string().optional(), path: z.string().optional(),
-    }).strict()).readonly().optional(),
-  }).strict(),
+  task: bidTaskStateSchema,
   allowedActions: z.array(z.enum(BID_CLIENT_ACTIONS)),
   composer: z.union([
     z.object({ enabled: z.literal(true) }),
@@ -81,14 +70,14 @@ export function registerBidRuntimeProjection(
 ): () => void {
   return registry.register({
     key: BID_RUNTIME_PROJECTION_KEY,
-    stateSchema: bidControlStateSchema,
-    init: () => BID_INITIAL_CONTROL_STATE,
-    apply: reduceBidControlState,
+    stateSchema: bidTaskStateSchema,
+    init: () => BID_INITIAL_TASK_STATE,
+    apply: reduceBidTaskState,
     wire: {
       viewSchema: clientProjectionSchema,
       view: state => getBidClientProjection(state, fileLimits),
     },
-    stateVersion: 11,
+    stateVersion: 12,
   })
 }
 /**

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { expect, it } from 'vitest'
-import { BidWorkspace, checkpointBidProjectState, outlineArtifactSha256 } from '@deepseek-ai/dsh-bid'
+import { BidWorkspace, bidProjectTaskState, checkpointBidProjectState, outlineArtifactSha256 } from '@deepseek-ai/dsh-bid'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { seedConversation, seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/project-session.ts'
 import { assertFixtureInventory, captureStableAria, compareOrRefreshGolden, launchWebScaffold, watchConsole } from './scaffold.ts'
@@ -52,8 +52,8 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
       artifact.confirmed_outline_sha256 = outlineArtifactSha256(outline)
       await writeFile(absolute, `${JSON.stringify(artifact)}\n`)
     }
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
-    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+    agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
     await scaffold.ctx.sessions.flush(agent.session)
 
     const reader = page.getByRole('main', { name: '正文阅读' })

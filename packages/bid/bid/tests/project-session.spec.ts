@@ -18,14 +18,14 @@ import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import {
-  BID_INITIAL_CONTROL_STATE, BID_INITIAL_RUNTIME_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
+  BID_INITIAL_TASK_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   BidRunCoordinator,
-  buildBidStageTask, checkpointBidProjectState as checkpointStoredBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
+  bidProjectTaskState, buildBidStageTask, checkpointBidProjectState as checkpointStoredBidProjectState, getBidClientProjection, parseEvidenceMapArtifact,
   outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState,
-  reduceBidControlState, reduceBidRuntimeState, TECHNICAL_DEVIATION_SECTION_ID, validateTenderAnalysis,
-  type BidStage, type BidStageExecutorPort, type BidStageValidatorPort,
+  reduceBidTaskState, TECHNICAL_DEVIATION_SECTION_ID, validateTenderAnalysis,
+  type BidRunData, type BidStage, type BidStageExecutorPort, type BidStageValidatorPort, type BidTaskState, type BidTaskStatus,
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
@@ -121,36 +121,43 @@ afterEach(async () => {
 })
 
 function runtime(session: Session) {
-  return session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+  return session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
 }
+
+type TestTaskSeed =
+  | BidTaskState
+  | { readonly stage: BidStage; readonly status: BidTaskStatus | 'pending' | 'waiting_start'; readonly failureReason?: string }
 
 async function checkpointBidProjectState(
   workspace: BidWorkspace,
-  state: Parameters<typeof checkpointStoredBidProjectState>[1],
+  state: TestTaskSeed,
 ) {
-  if (!('status' in state) || state.status !== 'running' && state.status !== 'failed') {
-    return checkpointStoredBidProjectState(workspace, state)
+  const seed = state
+  if (seed.status !== 'running' && seed.status !== 'failed') {
+    const status = seed.status === 'pending' || seed.status === 'waiting_start' ? 'ready' : seed.status
+    return checkpointStoredBidProjectState(workspace, { stage: seed.stage, status, run: null } as BidTaskState)
   }
-  const work = await persistStageExecutionWork(workspace, state.stage)
+  const work = await persistStageExecutionWork(workspace, seed.stage)
   const previous = await readBidProjectState(workspace)
-  const run = {
+  const run: BidRunData = {
     runId: work.workId,
-    stage: state.stage,
-    epoch: (previous?.last_run?.epoch ?? 0) + 1,
+    epoch: (previous?.status === 'running' || previous?.status === 'suspended' ? previous.run.epoch : 0) + 1,
     baseProjectRevision: previous?.revision ?? 0,
     work,
-    status: state.status === 'running' ? 'running' as const : 'suspended' as const,
-    ...(state.status === 'failed' ? {
-      cause: 'executor_error' as const,
-      error: { message: state.failureReason ?? 'executor failed' },
-    } : {}),
     startedAt: Date.now(),
     updatedAt: Date.now(),
   }
+  if (seed.status === 'running') {
+    return checkpointStoredBidProjectState(workspace, { stage: seed.stage, status: 'running', run })
+  }
   return checkpointStoredBidProjectState(workspace, {
-    workflow: { stage: state.stage, gate: 'ready' },
-    run,
-    lastRun: run,
+    stage: seed.stage,
+    status: 'suspended',
+    run: {
+      ...run,
+      cause: 'executor_error',
+      error: { message: 'failureReason' in seed ? seed.failureReason ?? 'executor failed' : 'executor failed' },
+    },
   })
 }
 
@@ -319,9 +326,7 @@ describe('Workspace 项目与独立 Session', () => {
     await expect(ctx.serial('session/prompt-admission', {
       session: child, mode: 'queue', content: [{ type: 'text', text: '内部任务' }],
     })).resolves.toBeUndefined()
-    await expect(ctx.bid.startStage(child)).resolves.toMatchObject({
-      ok: false, error: { code: 'BID_SESSION_REQUIRED' },
-    })
+    await expect(ctx.bid.resetStage(childAgent, 'tender_analysis')).rejects.toThrow('Stage reset requires a Bid Session')
     await expect(ctx.bid.getDetails(child)).rejects.toThrow('BID_SESSION_REQUIRED')
     await expect(ctx.bid.getDocxTemplateLibrary(child)).rejects.toThrow('Word 模板库需要标书项目会话')
     const executeDocx = vi.fn(async () => undefined)
@@ -362,24 +367,20 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.getDocxTemplateLibrary(main.session)).toEqual(library)
   })
 
-  it('pending and failed Bid stages expose bounded public inspection without starting a Run', async () => {
+  it('ready and suspended Bid stages expose bounded public inspection without starting a Run', async () => {
     const { ctx, workspace, fresh, host } = await fixture()
     await seedProjectArtifacts(workspace)
     const cases = [
       ['file_intake', 'pending', 'ready'],
       ['tender_analysis', 'pending', 'ready'],
-      ['evidence_mapping', 'waiting_start', 'waiting_start'],
-      ['tender_analysis', 'failed', 'failed'],
+      ['evidence_mapping', 'waiting_start', 'ready'],
+      ['tender_analysis', 'failed', 'suspended'],
       ['docx_export', 'pending', 'ready'],
     ] as const
 
-    for (const [stage, status, gate] of cases) {
-      await checkpointBidProjectState(workspace, {
-        workflow: { stage, gate },
-        run: null,
-        lastRun: null,
-      })
-      const agent = await fresh(`idle-${stage}-${status}`)
+    for (const [stage, seedStatus, expectedStatus] of cases) {
+      await checkpointBidProjectState(workspace, { stage, status: seedStatus })
+      const agent = await fresh(`idle-${stage}-${seedStatus}`)
 
       await expect(ctx.serial('session/prompt-admission', {
         session: agent.session,
@@ -393,11 +394,11 @@ describe('Workspace 项目与独立 Session', () => {
         agent,
         name: 'bid_stage_inspect',
         arguments: { view: 'summary' },
-        callId: CallId(`idle-${stage}-${status}`),
+        callId: CallId(`idle-${stage}-${seedStatus}`),
         signal: new AbortController().signal,
       })
       expect(inspected.isError, JSON.stringify(inspected)).toBe(false)
-      expect(inspected.value).toMatchObject({ runtime: { stage, status } })
+      expect(inspected.value).toMatchObject({ task: { stage, status: expectedStatus } })
       expect(host.inFlight.size).toBe(0)
       expect(agent.session.events.some(event => event.type === 'bid.stage.started')).toBe(false)
       expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
@@ -421,7 +422,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
 
     expect(inspected).toMatchObject({ isError: false, value: {
-      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
+      task: { stage: 'evidence_mapping', status: 'ready', run: null },
       current_artifacts_summary: { outline_sections: outline.sections.length },
       sections: expect.arrayContaining([expect.objectContaining({
         section: expect.objectContaining({ id: outline.sections[0]!.id }),
@@ -516,7 +517,7 @@ describe('Workspace 项目与独立 Session', () => {
     const fork = vi.spyOn(ctx.sessions, 'fork')
     const b = await fresh('session-b')
 
-    expect(runtime(b.session)).toEqual(state)
+    expect(runtime(b.session)).toMatchObject(state)
     expect(b.session.header.parentSession).toBeUndefined()
     expect(b.session.header.seedLength).toBeUndefined()
     expect(b.session.surface.nodes).toEqual([])
@@ -548,12 +549,12 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'tender_analysis'
     executeStage.mockImplementationOnce(() => gate.promise)
     const resumed = resumeRun(ctx, owner.session)
-    await vi.waitFor(() => { expect(runtime(owner.session)).toEqual({ stage: 'tender_analysis', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(owner.session)).toMatchObject({ stage: 'tender_analysis', status: 'running' }) })
     await vi.waitFor(async () => {
-      expect((await readBidProjectState(workspace))?.run?.status).toBe('running')
+      expect((await readBidProjectState(workspace))?.status).toBe('running')
     })
     const activeState = await readBidProjectState(workspace)
-    if (activeState?.run?.status !== 'running') throw new Error('测试项目没有活动 Run')
+    if (activeState?.status !== 'running') throw new Error('测试项目没有活动 Run')
     expect(activeState.run).toMatchObject({ interactionSessionId: owner.id })
     expect(activeState.run.executionSessionId).toBeTruthy()
     expect(activeState.run.executionSessionId).not.toBe(owner.id)
@@ -578,12 +579,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     const observer = await fresh('active-observer', workspace.root, false)
     const mirrored = observer.session.events.findLast(event => event.type === 'bid.project.resumed')
-    expect(mirrored?.data).toEqual({
-      workflow: activeState.workflow,
-      run: activeState.run,
-      lastRun: activeState.last_run,
-      revision: activeState.revision,
-    })
+    expect(mirrored?.data).toEqual({ state: bidProjectTaskState(activeState), revision: activeState.revision })
     expect(mirrored !== undefined && 'runtime' in mirrored.data).toBe(false)
     expect(host.inFlight.size).toBe(1)
 
@@ -617,8 +613,9 @@ describe('Workspace 项目与独立 Session', () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const a = await fresh('session-a')
     expect(await readBidProjectState(workspace)).toMatchObject({
-      schema_version: 3,
-      workflow: { stage: 'file_intake', gate: 'ready' },
+      schema_version: 4,
+      stage: 'file_intake',
+      status: 'waiting_user',
       run: null,
     })
     await seedProjectArtifacts(workspace)
@@ -652,7 +649,10 @@ describe('Workspace 项目与独立 Session', () => {
       return []
     })
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
-    expect(confirmation).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'suspended', failureReason: '模拟 S3 模型失败' } })
+    expect(confirmation).toMatchObject({
+      ok: true,
+      value: { stage: 'outline_generation', status: 'suspended', run: { error: { message: '模拟 S3 模型失败' } } },
+    })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
     const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
     const confirmedScoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
@@ -663,14 +663,14 @@ describe('Workspace 项目与独立 Session', () => {
     expect(JSON.stringify(b.session.deriveMessages())).toContain('SC-009')
     expect(JSON.stringify(b.session.deriveMessages())).not.toContain('analysis/scoring.json')
     expect(JSON.stringify(b.session.events)).toContain('SC-009')
-    expect(await resumeRun(ctx, b.session)).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
+    expect(await resumeRun(ctx, b.session)).toMatchObject({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
     expect(s3Contexts).toHaveLength(2)
     expect(s3Contexts.every(context => !context.includes('SC-009'))).toBe(true)
     expect(s3Contexts.some(context => context.includes('analysis/scoring.json'))).toBe(true)
     expect((await readBidProjectState(workspace))!.revision).toBeGreaterThan(before)
-    expect(runtime(a.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user' })
+    expect(runtime(a.session)).toMatchObject({ stage: 'outline_generation', status: 'waiting_user' })
     const c = await fresh('session-c')
-    expect(runtime(c.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user' })
+    expect(runtime(c.session)).toMatchObject({ stage: 'outline_generation', status: 'waiting_user' })
     expect((await ctx.bid.getDetails(c.session)).tender?.project.project_name).toBe('项目 B')
   })
 
@@ -681,15 +681,17 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, failed)
     await fresh('session-a')
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended', failureReason: '章节执行失败' })
-    expect(getBidClientProjection(b.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)).allowedActions).toContain('send_message')
+    expect(runtime(b.session)).toMatchObject({
+      stage: 'chapter_writing', status: 'suspended', run: { error: { message: '章节执行失败' } },
+    })
+    expect(getBidClientProjection(b.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)).allowedActions).toContain('send_message')
     expect(await ctx.bid.getReviewWorkbench(b.session)).toMatchObject({ outline: [{ section_id: 'SEC-1', writing_status: 'completed', content_available: true }], summary: { content_count: 1 } })
     expect(await ctx.bid.getReviewChapter(b.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
     executor.canExecute = stage => stage === 'chapter_writing'
-    expect(await resumeRun(ctx, b.session)).toEqual({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
+    expect(await resumeRun(ctx, b.session)).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
     expect(executor.execute.mock.calls[0]?.[0].stage).toBe('chapter_writing')
     expect(typeof executor.execute.mock.calls[0]?.[1].runId).toBe('string')
-    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'chapter_writing', status: 'completed', run: null })
   }, 30000)
 
   it('S5 工作台投影已保存审核报告，并从失败执行记录读取章节原因', async () => {
@@ -972,11 +974,11 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'docx_export', status: 'completed' })
     await fresh('session-a')
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
+    expect(runtime(b.session)).toMatchObject({ stage: 'docx_export', status: 'completed' })
     expect(executor.execute).not.toHaveBeenCalled()
     expect(getBidClientProjection(runtime(b.session)).allowedActions).toEqual(['send_message', 'export_docx', 'revise_chapter'])
     expect(await ctx.bid.exportDocx(b.session, null)).toMatchObject({ ok: true })
-    expect(runtime(b.session)).toEqual({ stage: 'docx_export', status: 'completed' })
+    expect(runtime(b.session)).toMatchObject({ stage: 'docx_export', status: 'completed' })
   })
 
   it('S5 完成后可重复导出独立 Word 文件且不改变审核阶段', async () => {
@@ -996,7 +998,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(first.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
     expect(second.value.path).not.toBe(first.value.path)
     expect((await readFile(join(workspace.projectRoot, first.value.path))).readUInt32LE(0)).toBe(0x04034b50)
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
     expect(await readBidProjectState(workspace)).toEqual(projectBefore)
     expect(stageReservation).not.toHaveBeenCalled()
   })
@@ -1015,7 +1017,7 @@ describe('Workspace 项目与独立 Session', () => {
     const retry = resumeRun(ctx, agent.session)
     try {
       await vi.waitFor(() => {
-        expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+        expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
         expect(executeStage).toHaveBeenCalledOnce()
       })
       const active = host.inFlight.get(key)
@@ -1025,7 +1027,7 @@ describe('Workspace 项目与独立 Session', () => {
       expect(active).toMatchObject({ controller: { signal: { aborted: false } } })
     } finally { host.docxInFlight.delete(key) }
     await vi.waitFor(() => {
-      expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
       expect(host.inFlight.size).toBe(1)
     })
 
@@ -1053,7 +1055,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(exported.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
     expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_CONTENT_SNAPSHOT')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文')
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.size).toBe(1)
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
     expect(await readBidProjectState(workspace)).toEqual(projectBefore)
@@ -1142,9 +1144,11 @@ describe('Workspace 项目与独立 Session', () => {
     if (!exported.ok) throw new Error('已有正文应可导出')
     expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_CONTENT_SNAPSHOT')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文。')
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'suspended', failureReason: '部分章节失败' })
+    expect(runtime(agent.session)).toMatchObject({
+      stage: 'chapter_writing', status: 'suspended', run: { error: { message: '部分章节失败' } },
+    })
     expect(await readBidProjectState(workspace)).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'suspended', failureReason: '部分章节失败' },
+      stage: 'chapter_writing', status: 'suspended', run: { error: { message: '部分章节失败' } },
     })
   })
 
@@ -1160,8 +1164,8 @@ describe('Workspace 项目与独立 Session', () => {
       content: [{ type: 'text', text: '为什么第二章这样安排？' }],
     })).resolves.toBeUndefined()
 
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
-    expect(await readBidProjectState(workspace)).toMatchObject({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'chapter_writing', status: 'completed', run: null })
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).resolves.toContain('已有正文')
@@ -1230,14 +1234,14 @@ describe('Workspace 项目与独立 Session', () => {
     expect(result, JSON.stringify(result)).toMatchObject({
       isError: false,
       value: {
-        runtime: { stage: 'chapter_writing', status: 'completed' },
+        task: { stage: 'chapter_writing', status: 'completed', run: null },
         task_contract_context: {
           requirements: { requirements: [{ id: 'REQ-1' }] },
           evidence: { section_mappings: [{ section_id: 'SEC-1' }] },
         },
       },
     })
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
     expect(host.inFlight.size).toBe(0)
     expect(executeStage).not.toHaveBeenCalled()
   })
@@ -1252,7 +1256,7 @@ describe('Workspace 项目与独立 Session', () => {
     vi.mocked(executor.execute).mockImplementationOnce(() => gate.promise)
     const retry = resumeRun(ctx, agent.session)
     await vi.waitFor(() => {
-      expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
       expect(host.inFlight.size).toBe(1)
     })
 
@@ -1274,7 +1278,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     expect(adapter.script).toEqual([])
     expect(agent.session.events.some(event => event.type === 'tool/call' && event.data.name === 'bid_stage_inspect')).toBe(true)
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.size).toBe(1)
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
 
@@ -1286,12 +1290,12 @@ describe('Workspace 项目与独立 Session', () => {
     await agent.whenIdle()
     stopErrorCapture()
     expect(replyErrors).toHaveLength(1)
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
     expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
     gate.resolve([])
     await retry
 
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
     expect(agent.session.events.some(event => event.type === 'bid.stage.completed' && event.data.stage === 'chapter_writing')).toBe(true)
     await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
@@ -1303,7 +1307,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
     const agent = await fresh('steer-during-s4')
     const suspended = await readBidProjectState(workspace)
-    if (suspended?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 S4 Run')
+    if (suspended?.status !== 'suspended') throw new Error('测试项目没有挂起 S4 Run')
 
     const stageGate = Promise.withResolvers<never[]>()
     void stageGate.promise.catch(() => {})
@@ -1312,10 +1316,10 @@ describe('Workspace 项目与独立 Session', () => {
     const retry = resumeRun(ctx, agent.session)
     await vi.waitFor(() => {
       expect(host.inFlight.size).toBe(1)
-      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
     })
     const beforeSteer = await readBidProjectState(workspace)
-    if (beforeSteer?.run?.status !== 'running') throw new Error('S4 Run 未进入运行态')
+    if (beforeSteer?.status !== 'running') throw new Error('S4 Run 未进入运行态')
     const active = host.inFlight.values().next().value as { controller: AbortController }
     const requestStarted = Promise.withResolvers<undefined>()
     const releaseChatStep = Promise.withResolvers<undefined>()
@@ -1350,8 +1354,8 @@ describe('Workspace 项目与独立 Session', () => {
     expect(duringSteer?.run).toMatchObject({
       runId: beforeSteer.run.runId,
       work: { workId: beforeSteer.run.work.workId },
-      status: 'running',
     })
+    expect(duringSteer?.status).toBe('running')
     expect(executeStage).toHaveBeenCalledOnce()
     expect(active.controller.signal.aborted).toBe(false)
 
@@ -1379,7 +1383,7 @@ describe('Workspace 项目与独立 Session', () => {
         return gate.promise
       })
       const retry = resumeRun(ctx, agent.session)
-      await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage, status: 'running' }) })
+      await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage, status: 'running' }) })
       await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
       const artifactBefore = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
       const projectBefore = await readBidProjectState(workspace)
@@ -1424,7 +1428,7 @@ describe('Workspace 项目与独立 Session', () => {
       expect(requestText).toContain(`摘要：${stage} 正在校验阶段结果`)
       expect(requestText).toContain('完成量：2 / 5')
       expect(requestText).toContain('补充：已完成真实里程碑')
-      expect(runtime(agent.session)).toEqual({ stage, status: 'running' })
+      expect(runtime(agent.session)).toMatchObject({ stage, status: 'running' })
       expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
       expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(artifactBefore)
       expect(await readBidProjectState(workspace)).toEqual(projectBefore)
@@ -1445,7 +1449,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'tender_analysis'
     executeStage.mockImplementationOnce(() => tenderGate.promise)
     const retry = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'tender_analysis', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'tender_analysis', status: 'running' }) })
 
     adapter.script.push(toolCall('bid_pause_stage', {}), answer('已暂停后续任务调度；当前任务继续安全收敛。'))
     agent.steer(createUserMessage({ content: [{ type: 'text', text: '暂停当前阶段' }], source: { kind: 'user' } }))
@@ -1472,7 +1476,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(active.stageControl.paused()).toBe(false)
     tenderGate.resolve(tenderArtifacts)
     const retryResult = await retry
-    expect(retryResult).toEqual({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
+    expect(retryResult).toMatchObject({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
     expect(executeStage.mock.calls).toHaveLength(1)
     expect(active.controller.signal.aborted).toBe(false)
   })
@@ -1544,11 +1548,11 @@ describe('Workspace 项目与独立 Session', () => {
       expect(agent.session.deriveMessages().at(-1)?.content)
         .toContainEqual({ type: 'text', text: 'Mapping Child 仍在后台执行。' })
       expect(ctx.agents.get(childId)).toBeDefined()
-      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
       expect(host.inFlight.values().next().value).toMatchObject({ controller: { signal: { aborted: false } } })
       releaseChild.resolve(undefined)
       await retry
-      expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
     } finally {
       releaseChild.resolve(undefined)
     }
@@ -1564,7 +1568,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'tender_analysis'
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const retry = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'tender_analysis', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'tender_analysis', status: 'running' }) })
 
     const operation = host.inFlight.values().next().value as { executionHandle?: { agent: Agent } }
     const execution = operation.executionHandle?.agent
@@ -1623,7 +1627,7 @@ describe('Workspace 项目与独立 Session', () => {
       data: { stage: 'tender_analysis', kind: 'interrupted', severity: 'error' },
     })
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      runtime: { stage: 'tender_analysis', status: 'suspended' },
+      task: { stage: 'tender_analysis', status: 'suspended' },
       allowedActions: ['send_message'],
     })
 
@@ -1656,7 +1660,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'evidence_mapping'
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const retry = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' }) })
     await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
     const run = executeStage.mock.calls[0]?.[1]
     if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
@@ -1676,7 +1680,7 @@ describe('Workspace 项目与独立 Session', () => {
     stageGate.resolve([])
     await retry
     await ctx.bid.stopRun(agent.session)
-    expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'suspended', failureReason: undefined })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
     expect(host.inFlight.size).toBe(0)
     adapter.script.push(answer('停止后仍可继续聊天。'))
     agent.steer(createUserMessage({ content: [{ type: 'text', text: '停止后继续聊天' }], source: { kind: 'user' } }))
@@ -1693,7 +1697,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'evidence_mapping'
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const resumed = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => { expect(runtime(agent.session)).toEqual({ stage: 'evidence_mapping', status: 'running' }) })
+    await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' }) })
     await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
     const run = executeStage.mock.calls[0]?.[1]
     if (run === undefined) throw new Error('恢复执行没有 Run 上下文')
@@ -1705,7 +1709,8 @@ describe('Workspace 项目与独立 Session', () => {
     await resumed
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
     expect(await readBidProjectState(workspace)).toMatchObject({
-      run: { runId: run.runId, stage: 'evidence_mapping', status: 'suspended', cause: 'user_stop' },
+      stage: 'evidence_mapping', status: 'suspended',
+      run: { runId: run.runId, work: { stage: 'evidence_mapping' }, cause: 'user_stop' },
     })
   })
 
@@ -1715,7 +1720,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
     const agent = await fresh('retry-exhausted-state-sync')
     const before = await readBidProjectState(workspace)
-    if (before?.run?.status !== 'suspended') throw new Error('测试项目没有可恢复的 S4 Run')
+    if (before?.status !== 'suspended') throw new Error('测试项目没有可恢复的 S4 Run')
     executor.canExecute = stage => stage === 'evidence_mapping'
     validator.validate = async () => ({ ok: false, issues: [{
       code: 'EVIDENCE_MAPPING_TASK_FAILED',
@@ -1726,20 +1731,17 @@ describe('Workspace 项目与独立 Session', () => {
     await expect(ctx.bid.resumeCurrentRun(agent.session, before.run.runId, before.revision))
       .resolves.toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
     expect(await readBidProjectState(workspace)).toMatchObject({
-      workflow: { stage: 'evidence_mapping', gate: 'ready' },
+      stage: 'evidence_mapping',
+      status: 'suspended',
       run: {
-        stage: 'evidence_mapping',
-        status: 'suspended',
+        work: { stage: 'evidence_mapping' },
         cause: 'retry_exhausted',
         error: { issues: [{ code: 'EVIDENCE_MAPPING_TASK_FAILED', message: 'SEC-401 映射重试耗尽。' }] },
       },
-      runtime: { stage: 'evidence_mapping', status: 'suspended' },
     })
     expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      workflow: { stage: 'evidence_mapping', gate: 'ready' },
-      run: { status: 'suspended', cause: 'retry_exhausted' },
-      runtime: { stage: 'evidence_mapping', status: 'suspended' },
+      task: { stage: 'evidence_mapping', status: 'suspended', run: { cause: 'retry_exhausted' } },
     })
   })
 
@@ -1777,7 +1779,7 @@ describe('Workspace 项目与独立 Session', () => {
     }))
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
     const agent = await fresh('stale-s4-progress')
-    const oldView = getBidClientProjection(agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE))
+    const oldView = getBidClientProjection(agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
     const unchanged = structuredClone(oldView)
     const before = agent.session.events.length
 
@@ -1786,11 +1788,13 @@ describe('Workspace 项目与独立 Session', () => {
 
     const correction = agent.session.events.at(-1)
     expect(agent.session.events.length).toBe(before + 1)
-    expect(correction).toMatchObject({ type: 'bid.project.resumed', data: { run: { status: 'suspended' } } })
+    expect(correction).toMatchObject({
+      type: 'bid.project.resumed', data: { state: { stage: 'evidence_mapping', status: 'suspended' } },
+    })
     expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
     expect(oldView).toEqual(unchanged)
 
-    const current = getBidClientProjection(agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE))
+    const current = getBidClientProjection(agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
     await expect(ctx.bid.getEvidenceMappingProgress(agent.session, current)).resolves.toMatchObject({
       total: 1, completed: 0, running: 0, failed: 1,
     })
@@ -1822,35 +1826,33 @@ describe('Workspace 项目与独立 Session', () => {
     try {
       const b = await fresh('session-b')
       expect(flush).toHaveBeenCalledWith(a.session)
-      expect(runtime(b.session)).toEqual(state)
+      expect(runtime(b.session)).toMatchObject(state)
       expect(b.session.deriveMessages()).toEqual([])
       const restored = (await readBidProjectState(workspace))!
-      expect(restored.runtime).toEqual(saved.runtime)
+      expect(restored).toMatchObject({ stage: saved.stage, status: saved.status })
       expect(restored.revision).toBeGreaterThanOrEqual(saved.revision)
       expect(executor.execute).not.toHaveBeenCalled()
     } finally { release() }
   })
 
-  it('reset 删除后续产物并等待用户确认，确认后才执行当前阶段', async () => {
+  it('reset 删除后续产物并在同一操作驱动当前阶段', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), '[]')
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const a = await fresh('session-a')
-    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'waiting_start' })
-    expect(executor.execute).not.toHaveBeenCalled()
+    executor.canExecute = stage => stage === 'outline_generation'
+    expect(await ctx.bid.resetStage(a, 'outline_generation')).toEqual({ stage: 'outline_generation', status: 'waiting_user', run: null })
+    expect(executor.execute).toHaveBeenCalledOnce()
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'outline/repair-operations.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     const b = await fresh('session-b')
-    expect(runtime(b.session)).toEqual({ stage: 'outline_generation', status: 'waiting_start' })
+    expect(runtime(b.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user', run: null })
     expect(b.session.deriveMessages()).toEqual([])
-    executor.canExecute = stage => stage === 'outline_generation'
-    expect(await ctx.bid.startStage(b.session)).toEqual({ ok: true, value: { stage: 'outline_generation', status: 'waiting_user' } })
-    expect(executor.execute).toHaveBeenCalledOnce()
   })
 
-  it('重置完成后即使取消先触发 idle 也会提出阶段开始问题', async () => {
+  it('S5 重置后保持等待用户输入且不提出已删除的阶段开始问题', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
@@ -1861,12 +1863,9 @@ describe('Workspace 项目与独立 Session', () => {
     const dispose = ctx.userQuestions.registerProvider({ ask: asked })
     try {
       await expect(ctx.bid.resetStage(agent, 'chapter_writing')).resolves.toEqual({
-        stage: 'chapter_writing', status: 'waiting_start',
+        stage: 'chapter_writing', status: 'waiting_user', run: null,
       })
-      await vi.waitFor(() => {
-        expect(asked).toHaveBeenCalledOnce()
-        expect(asked.mock.calls[0]?.[0].questions[0]?.question).toContain('正文编写')
-      })
+      expect(asked).not.toHaveBeenCalled()
     } finally { dispose() }
   })
 
@@ -1907,10 +1906,10 @@ describe('Workspace 项目与独立 Session', () => {
     const dispose = ctx.userQuestions.registerProvider({ ask: asked })
     try {
       const b = await fresh('session-b')
-      expect(runtime(b.session)).toEqual({ stage: 'chapter_writing', status: 'suspended' })
+      expect(runtime(b.session)).toMatchObject({ stage: 'chapter_writing', status: 'suspended' })
       expect(await readBidProjectState(workspace)).toMatchObject({
-        workflow: { stage: 'chapter_writing', gate: 'ready' },
-        run: { stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
+        stage: 'chapter_writing', status: 'suspended',
+        run: { work: { stage: 'chapter_writing' }, cause: 'host_restart' },
       })
       await vi.waitFor(() => {
         expect(asked).toHaveBeenCalledOnce()
@@ -1925,45 +1924,44 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('S1 停止后从 durable raw request 重新装载原始上传字节', async () => {
+  it('S1 挂起后从 durable raw request 重新装载原始上传字节', async () => {
     const { ctx, workspace, fresh } = await fixture({ realOrchestrator: true })
-    const agent = await fresh('file-intake-resume')
-    const originalImport = workspace.import.bind(workspace)
-    const entered = Promise.withResolvers<undefined>()
-    const release = Promise.withResolvers<undefined>()
-    const firstImport = vi.spyOn(BidWorkspace.prototype, 'import').mockImplementation(async function (this: BidWorkspace, files, run) {
-      entered.resolve(undefined)
-      await release.promise
-      return originalImport(files, run)
-    })
     const bytes = new TextEncoder().encode('技术要求：恢复时必须读取原始上传。')
-    const uploading = ctx.bid.uploadIncomingFiles(agent.session, [{ name: 'tender.md', role: 'tender', bytes }])
-    await entered.promise
-    const running = await readBidProjectState(workspace)
-    expect(running?.run).toMatchObject({ status: 'running', work: { kind: 'file_intake' } })
-    if (running?.run === null || running?.run === undefined) throw new Error('S1 Run 未持久化')
-    await expect(readFile(join(workspace.projectRoot, running.run.work.requestRef), 'utf8'))
+    const workId = 'file-intake-resume-work'
+    const bytesRef = `requests/${workId}/files/0001`
+    await mkdir(join(workspace.projectRoot, 'requests', workId, 'files'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, bytesRef), bytes)
+    const records = [{
+      name: 'tender.md', role: 'tender' as const, bytes_ref: bytesRef, size: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    }]
+    const work = await persistBidWorkRequest(
+      workspace, 'file_intake', 'file_intake', { files: records }, records, workId,
+    )
+    const suspended = await checkpointStoredBidProjectState(workspace, {
+      stage: 'file_intake',
+      status: 'suspended',
+      run: {
+        runId: 'file-intake-suspended', epoch: 1, baseProjectRevision: 0, work,
+        cause: 'user_stop', startedAt: 1, updatedAt: 2,
+      },
+    })
+    await expect(readFile(join(workspace.projectRoot, work.requestRef), 'utf8'))
       .resolves.toContain('bytes_ref')
-    agent.cancel({ kind: 'user' })
-    release.resolve(undefined)
-    await uploading
-    await ctx.bid.stopRun(agent.session)
-    firstImport.mockRestore()
-
+    const agent = await fresh('file-intake-resume')
     const restored = Promise.withResolvers<readonly { name: string; bytes: Uint8Array }[]>()
     const resumedImport = vi.spyOn(BidWorkspace.prototype, 'import').mockImplementation(async (files) => {
       restored.resolve(files)
       throw new Error('stop after durable reload')
     })
-    const suspended = await readBidProjectState(workspace)
-    if (suspended?.run?.status !== 'suspended') throw new Error('S1 Run 未挂起')
+    if (suspended.status !== 'suspended') throw new Error('S1 Run 未挂起')
     await ctx.bid.resumeCurrentRun(agent.session, suspended.run.runId, suspended.revision)
     const resumedFiles = await restored.promise
     expect(resumedFiles).toHaveLength(1)
     expect(resumedFiles[0]?.name).toBe('tender.md')
     expect(Buffer.from(resumedFiles[0]!.bytes)).toEqual(Buffer.from(bytes))
     resumedImport.mockRestore()
-  })
+  }, 30_000)
 
   it('恢复必须匹配挂起 Run 身份与项目 revision', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -1971,7 +1969,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
     const agent = await fresh('resume-cas')
     const saved = await readBidProjectState(workspace)
-    if (saved?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    if (saved?.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
 
     await expect(ctx.bid.resumeCurrentRun(agent.session, 'other-run', saved.revision))
       .rejects.toMatchObject({ code: 'BID_RESUME_NOT_ALLOWED' })
@@ -2037,7 +2035,7 @@ describe('Workspace 项目与独立 Session', () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
-    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_RUNTIME_STATE)
+    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_TASK_STATE)
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
       answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
     }))
@@ -2054,25 +2052,22 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('原生重跑选项只重置并启动当前阶段', async () => {
+  it('原生重跑选项通过 reset 在同一操作驱动当前阶段', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
-    const reset = vi.spyOn(ctx.bid, 'resetStage').mockResolvedValue(BID_INITIAL_RUNTIME_STATE)
-    const start = vi.spyOn(ctx.bid, 'startStage').mockResolvedValue({ ok: true, value: BID_INITIAL_RUNTIME_STATE })
+    const reset = vi.spyOn(ctx.bid, 'resetStage').mockResolvedValue({ stage: 'evidence_mapping', status: 'waiting_user', run: null })
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
       answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
     }))
     const dispose = ctx.userQuestions.registerProvider({ ask: asked })
     try {
       const agent = await fresh('native-recovery-restart')
-      await vi.waitFor(() => { expect(start).toHaveBeenCalledOnce() })
+      await vi.waitFor(() => { expect(reset).toHaveBeenCalledOnce() })
       expect(reset).toHaveBeenCalledWith(agent, 'evidence_mapping')
-      expect(start).toHaveBeenCalledWith(agent.session)
     } finally {
       dispose()
       reset.mockRestore()
-      start.mockRestore()
     }
   })
 
@@ -2082,7 +2077,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const agent = await fresh('suspended-s5-revision')
     const before = await readBidProjectState(workspace)
-    if (before?.run?.status !== 'suspended') throw new Error('测试项目没有挂起 S5 Run')
+    if (before?.status !== 'suspended') throw new Error('测试项目没有挂起 S5 Run')
     const markdown = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
 
     const result = await ctx.tools.execute({
@@ -2108,9 +2103,9 @@ describe('Workspace 项目与独立 Session', () => {
     const after = await readBidProjectState(workspace)
     expect(after?.run).toMatchObject({
       runId: before.run.runId,
-      status: 'suspended',
       work: { workId: before.run.work.workId },
     })
+    expect(after?.status).toBe('suspended')
     expect(after?.revision).toBe(before.revision + 1)
     expect(await readBidChapterCommandJournal(workspace, before.run.work.workId)).toMatchObject([{
       status: 'pending',
@@ -2144,14 +2139,14 @@ describe('Workspace 项目与独立 Session', () => {
       const operationC = resumeRun(ctx, c.session)
       await vi.waitFor(() => { expect(executor.execute).toHaveBeenCalledTimes(2) })
       const d = await fresh('session-d', alias, false)
-      expect(runtime(d.session)).toEqual({ stage: 'chapter_writing', status: 'running' })
+      expect(runtime(d.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
       expect(d.session.deriveMessages()).toEqual([])
       expect(await ctx.bid.getReviewChapter(d.session, 'SEC-1')).toMatchObject({ markdown: '# 技术方案\n\n已有正文。\n' })
       gate.resolve(undefined)
       expect((await operationA).ok).toBe(true)
       expect((await operationC).ok).toBe(true)
       await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-      expect(runtime(d.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+      expect(runtime(d.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
       expect(executor.execute).toHaveBeenCalledTimes(2)
     } finally { gate.resolve(undefined); await operationA }
   })
@@ -2196,7 +2191,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     expect(executeStage).not.toHaveBeenCalled()
     expect(host.inFlight.size).toBe(0)
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
   })
 
   it('S5 历史对比按 issue 定位 task 快照，旧记录明确不可用', async () => {
@@ -2326,7 +2321,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
     expect(inspected.isError, JSON.stringify(inspected)).toBe(false)
     expect(inspected.value).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'completed' },
+      task: { stage: 'chapter_writing', status: 'completed', run: null },
     })
 
     const planned = await ctx.tools.execute({
@@ -2385,7 +2380,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(execResult.tasks[0]?.failure?.code).toBe('STALE_BASE')
 
     expect(executeStage).not.toHaveBeenCalled()
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
 
     const batchArtifact = JSON.parse(await readFile(join(workspace.projectRoot, `chapters/revisions/batches/${batchId}.json`), 'utf8')) as { status: string; tasks: Array<{ status: string }> }
     expect(batchArtifact.status).toBe('completed')
@@ -2443,7 +2438,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(batchArtifact.tasks[0]?.status).toBe('queued')
 
     expect(executeStage).not.toHaveBeenCalled()
-    expect(runtime(agent.session)).toEqual({ stage: 'chapter_writing', status: 'completed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
   })
 
   it('S5 批量修订：不同 section 的原 Writer 来自不同 parent 时拒绝执行', async () => {

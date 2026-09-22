@@ -82,7 +82,7 @@ async function setupS5Fixture() {
   const outline = await seedProjectArtifacts(workspace)
   await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
   await rm(join(workspace.projectRoot, 'chapters/writing-request.json'), { force: true })
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
 
   const host = ctx.bid as unknown as { inFlight: Map<string, unknown>; resetStage: InstanceType<typeof BidHostRuntime>['resetStage'] }
 
@@ -877,7 +877,7 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
         answer: { question_id: 'stop-req-t2', kind: 'no_additional_requirements', selected: ['没有，开始编写'] },
       }
       await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(consumedRecord))
-      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'pending' })
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
 
       const hostAny = host as unknown as HostInternals
       await hostAny.handleUserStop(agent.session)
@@ -901,7 +901,7 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
 
       const plan = createAutomaticWritingPlan(outline, sha256)
       await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify(plan, null, 2), 'utf8')
-      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
 
       const hostAny = host as unknown as HostInternals
       await hostAny.handleUserStop(agent.session)

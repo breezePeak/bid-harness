@@ -1,4 +1,4 @@
-import type { BidRunSnapshot, StageValidationIssue } from './control-plane-contract.ts'
+import type { BidTaskFailure, StageValidationIssue } from './control-plane-contract.ts'
 
 const SECRET = /(?:authorization\s*[:=]\s*bearer\s+|bearer\s+|(?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;"']+/giu
 const PROVIDER_PAYLOAD = /(?:provider\s+(?:payload|response)|raw\s+(?:payload|response))\s*[:=][\s\S]*/giu
@@ -32,7 +32,7 @@ export function summarizeBidValidationIssues(issues: readonly StageValidationIss
 export function safeBidRunError(
   error: unknown,
   issues?: readonly StageValidationIssue[],
-): NonNullable<BidRunSnapshot['error']> {
+): BidTaskFailure {
   const candidate = error as { code?: unknown; message?: unknown }
   const code = typeof candidate.code === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.code)
     ? candidate.code

@@ -1,41 +1,78 @@
-/** Workspace 级 Bid 控制状态的持久化；Host 项目锁串行化所有写入。 */
+/** Workspace 级 Bid 任务状态持久化；Host 项目锁串行化所有写入。 */
 
 import { readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
-import type { BidControlState, BidRuntimeState } from './control-plane-contract.ts'
-import { bidControlStateSchema, bidRuntimeView, controlStateFromLegacyRuntime } from './runtime-state.ts'
+import type { BidTaskState } from './control-plane-contract.ts'
+import {
+  bidTaskStateSchema,
+  legacyBidControlStateSchema,
+  legacyBidRuntimeSchema,
+  normalizeLegacyBidControlState,
+} from './runtime-state.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 
-const projectStateSchema = z.object({
+const projectMetadataSchema = z.object({
+  schema_version: recordOnlySchemaVersion(4),
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  updated_at: z.number().int().nonnegative(),
+}).passthrough()
+
+const legacyProjectStateSchema = z.object({
   schema_version: recordOnlySchemaVersion(3),
-  workflow: bidControlStateSchema.shape.workflow,
-  run: bidControlStateSchema.shape.run,
-  last_run: bidControlStateSchema.shape.lastRun,
+  workflow: legacyBidControlStateSchema.shape.workflow,
+  run: legacyBidControlStateSchema.shape.run,
+  last_run: legacyBidControlStateSchema.shape.lastRun,
+  runtime: legacyBidRuntimeSchema.optional(),
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   updated_at: z.number().int().nonnegative(),
 }).strict()
 
-/** 仅保存项目控制状态，不携带 Session 身份或聊天上下文。 */
-export type BidProjectState = z.infer<typeof projectStateSchema> & { readonly runtime: BidRuntimeState }
+/** 持久化元数据与唯一任务状态；读取旧 v3 后也只向调用方暴露此结构。 */
+export type BidProjectState = BidTaskState & {
+  readonly schema_version: number
+  readonly revision: number
+  readonly updated_at: number
+}
 
 type ProjectWorkspace = { readonly root: string; readonly projectStatePath: string }
 
-function exposeRuntime(state: z.infer<typeof projectStateSchema>): BidProjectState {
-  return Object.defineProperty(state, 'runtime', {
-    enumerable: false,
-    value: bidRuntimeView({ workflow: state.workflow, run: state.run, lastRun: state.last_run }),
-  }) as BidProjectState
+/** Return the authoritative task portion of a persisted project record. */
+export function bidProjectTaskState(state: BidProjectState): BidTaskState {
+  const { schema_version: _schemaVersion, revision: _revision, updated_at: _updatedAt, ...task } = state
+  return bidTaskStateSchema.parse(task)
+}
+
+/** Parse the current single-state format, then normalize the legacy v3 structure. */
+export function parseBidProjectState(value: unknown): BidProjectState {
+  const metadata = projectMetadataSchema.safeParse(value)
+  if (metadata.success) {
+    const { schema_version, revision, updated_at, ...candidate } = metadata.data
+    const task = bidTaskStateSchema.safeParse(candidate)
+    if (task.success) return { schema_version, revision, updated_at, ...task.data }
+  }
+
+  const legacy = legacyProjectStateSchema.parse(value)
+  return {
+    schema_version: 4,
+    revision: legacy.revision,
+    updated_at: legacy.updated_at,
+    ...normalizeLegacyBidControlState({
+      workflow: legacy.workflow,
+      run: legacy.run,
+      lastRun: legacy.last_run,
+    }),
+  }
 }
 
 /**
  * 读取项目状态；未创建时返回 undefined，格式无效时拒绝读取。
- * 不改写执行状态；Host 在项目锁内判断 running 是否因后端停止而中断。
+ * Host 在项目锁内把没有对应 live operation 的 `running` 转换为 `suspended`。
  * @param workspace 项目所在的 Workspace 和状态文件路径。
- * @returns 文件中的项目状态和修订号。
+ * @returns 规范化后的项目任务状态和修订号。
  */
 export async function readBidProjectState(workspace: ProjectWorkspace): Promise<BidProjectState | undefined> {
   await reconcileBidPublications(workspace.root, dirname(workspace.projectStatePath))
@@ -48,10 +85,7 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
     throw error
   }
   try {
-    const value: unknown = JSON.parse(raw)
-    const current = projectStateSchema.safeParse(value)
-    if (current.success) return exposeRuntime(current.data)
-    projectStateSchema.parse(value)
+    return parseBidProjectState(JSON.parse(raw))
   } catch (cause: unknown) {
     throw new Error(`bid-invalid-project-state: ${workspace.projectStatePath}`, { cause })
   }
@@ -64,39 +98,35 @@ export async function readBidProjectState(workspace: ProjectWorkspace): Promise<
  */
 export async function writeBidProjectState(workspace: ProjectWorkspace, state: BidProjectState): Promise<void> {
   await assertNoLinkedPath(workspace.root, workspace.projectStatePath)
-  const validated = projectStateSchema.parse({
-    schema_version: 3,
-    workflow: state.workflow,
-    run: state.run,
-    last_run: state.last_run,
+  const task = bidProjectTaskState(state)
+  const validated: BidProjectState = {
+    schema_version: 4,
     revision: state.revision,
     updated_at: state.updated_at,
-  })
+    ...task,
+  }
   await writeFileAtomic(workspace.projectStatePath, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
 /**
- * 在 Host 已持有的项目锁内保存 runtime，成功写入后修订号递增一次。
+ * 在 Host 已持有的项目锁内保存任务状态，成功写入后修订号递增一次。
  * @param workspace 项目所在的 Workspace 和状态文件路径。
- * @param control 当前操作结束或启动恢复后的项目控制状态。
+ * @param task 当前操作结束或启动恢复后的唯一任务状态。
  * @returns 已提交的项目状态，首次修订号为 1。
  */
 export async function checkpointBidProjectState(
   workspace: ProjectWorkspace,
-  control: BidControlState | BidRuntimeState,
+  task: BidTaskState,
 ): Promise<BidProjectState> {
   const previous = await readBidProjectState(workspace)
-  const normalized = 'workflow' in control ? control : controlStateFromLegacyRuntime(control, previous?.revision ?? 0)
-  if (previous !== undefined && JSON.stringify({ workflow: previous.workflow, run: previous.run, lastRun: previous.last_run })
-    === JSON.stringify(normalized)) return previous
-  const state = exposeRuntime({
-    schema_version: 3,
-    workflow: normalized.workflow,
-    run: normalized.run,
-    last_run: normalized.lastRun,
+  const normalized = bidTaskStateSchema.parse(task)
+  if (previous !== undefined && JSON.stringify(bidProjectTaskState(previous)) === JSON.stringify(normalized)) return previous
+  const state: BidProjectState = {
+    schema_version: 4,
     revision: (previous?.revision ?? 0) + 1,
     updated_at: Date.now(),
-  })
+    ...normalized,
+  }
   await writeBidProjectState(workspace, state)
   return state
 }
@@ -105,37 +135,27 @@ export async function checkpointBidProjectState(
  * 将短时 canonical mutation 与项目修订号作为一个 publication 提交。
  * @param workspace 项目所在的 Workspace 和状态文件路径。
  * @param expectedRevision 调用方读取并持有锁时观察到的修订号。
- * @param control mutation 完成后的项目控制状态。
+ * @param task mutation 完成后的唯一任务状态。
  * @param mutate 在同一 publication 内写入 canonical artifact 的回调。
  * @returns 已提交且修订号递增一次的项目状态。
  */
 export async function commitBidProjectMutation(
   workspace: ProjectWorkspace,
   expectedRevision: number,
-  control: BidControlState | BidRuntimeState,
+  task: BidTaskState,
   mutate: (lease: BidPublicationLease) => Promise<void>,
 ): Promise<BidProjectState> {
   const previous = await readBidProjectState(workspace)
   if ((previous?.revision ?? 0) !== expectedRevision) throw new Error('BID_PROJECT_REVISION_CONFLICT')
-  const normalized = 'workflow' in control ? control : controlStateFromLegacyRuntime(control, expectedRevision)
-  const state = exposeRuntime({
-    schema_version: 3,
-    workflow: normalized.workflow,
-    run: normalized.run,
-    last_run: normalized.lastRun,
+  const state: BidProjectState = {
+    schema_version: 4,
     revision: expectedRevision + 1,
     updated_at: Date.now(),
-  })
+    ...bidTaskStateSchema.parse(task),
+  }
   await publishBidBatch(workspace.root, dirname(workspace.projectStatePath), async (lease) => {
     await mutate(lease)
-    await lease.writeJson(workspace.projectStatePath, {
-      schema_version: 3,
-      workflow: state.workflow,
-      run: state.run,
-      last_run: state.last_run,
-      revision: state.revision,
-      updated_at: state.updated_at,
-    })
+    await lease.writeJson(workspace.projectStatePath, state)
   })
   return state
 }

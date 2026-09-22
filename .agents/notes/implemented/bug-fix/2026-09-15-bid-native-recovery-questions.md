@@ -2,6 +2,8 @@
 
 Status: implemented
 
+重置后的 `waiting_start` 与 `stage_start` 分支已由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)替代；挂起 Run 的原生恢复问题继续有效。
+
 ## Problem
 
 阶段挂起、自动重试耗尽和阶段重置后的下一步选择同时存在于阶段状态与聊天交互中。阶段卡按钮和普通聊天恢复文本不能稳定承载问题身份，也无法在 Host 重启后恢复一个未回答的选择；重复恢复入口还可能让已完成任务再次启动。

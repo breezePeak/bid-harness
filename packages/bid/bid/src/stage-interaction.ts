@@ -18,9 +18,8 @@ import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderR
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import {
-  BID_INITIAL_CONTROL_STATE,
-  bidRuntimeView,
-  reduceBidControlState,
+  BID_INITIAL_TASK_STATE,
+  reduceBidTaskState,
 } from './runtime-state.ts'
 import {
   initialWritingPlanInputSchema,
@@ -36,7 +35,7 @@ import { readRevisionQueue } from './chapter-revision-queue.ts'
 import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import type { BidRunSnapshot } from './control-plane-contract.ts'
+import type { BidRunData } from './control-plane-contract.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
 const scope = z.array(z.string().min(1)).min(1)
@@ -183,16 +182,15 @@ async function inspectBidStageValue(
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view: 'summary' | 'task_contract_context' = 'summary',
 ) {
-  const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-  const runtime = bidRuntimeView(control)
-  const started = control.run ?? control.lastRun
+  const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+  const started = task.run
   const base = {
-    runtime,
-    run_progress: control.run?.progress ?? null,
+    task,
+    run_progress: task.run?.progress ?? null,
     started_at: started === null ? null : new Date(started.startedAt).toISOString(),
     latest_public_events: latestPublicEvents(session),
   }
-  if (runtime.stage === 'file_intake') {
+  if (task.stage === 'file_intake') {
     const manifest = await workspace.readManifest()
     const files = manifest.files
     return {
@@ -205,14 +203,14 @@ async function inspectBidStageValue(
       current_artifacts_summary: { manifest: files.length === 0 ? 'pending' as const : 'available' as const },
     }
   }
-  const scoringPath = runtime.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
+  const scoringPath = task.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
   const [project, requirements, scoring, compliance] = await Promise.all([
     readOptionalStageJson(workspace, 'analysis/project.json', parseTenderProjectArtifact),
     readOptionalStageJson(workspace, 'analysis/requirements.json', parseTenderRequirementsArtifact),
     readOptionalStageJson(workspace, scoringPath, parseTenderScoringArtifact),
     readOptionalStageJson(workspace, 'analysis/compliance.json', parseTenderComplianceArtifact),
   ])
-  if (runtime.stage === 'tender_analysis') {
+  if (task.stage === 'tender_analysis') {
     const selection = scoring === null ? null : await readOptionalStageJson(
       workspace, 'analysis/tender-analysis-selection.json', value => parseTenderScoringSelection(value, scoring),
     )
@@ -222,12 +220,12 @@ async function inspectBidStageValue(
       scoring_items: scoring?.scoring_items.length ?? 0,
       compliance_items: compliance?.compliance_items.length ?? 0,
     }
-    return view === 'task_contract_context' || runtime.status === 'waiting_user'
+    return view === 'task_contract_context' || task.status === 'waiting_user'
       ? { ...base, project, requirements, scoring, selected_scoring_ids: selection?.selected_scoring_ids ?? [], compliance,
         progress_summary: summary, current_artifacts_summary: summary }
       : { ...base, progress_summary: summary, current_artifacts_summary: summary }
   }
-  if (runtime.stage === 'chapter_writing' || runtime.stage === 'docx_export') {
+  if (task.stage === 'chapter_writing' || task.stage === 'docx_export') {
     const outline = await readOptionalStageJson(workspace, 'outline/confirmed-outline.json', parseOutlineArtifact)
     if (outline === null) return {
       ...base,
@@ -347,20 +345,20 @@ async function inspectBidStageValue(
     }
   }
   const workingOutline = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
-  const initialConfirmedOutline = runtime.stage === 'evidence_mapping' && workingOutline === null
+  const initialConfirmedOutline = task.stage === 'evidence_mapping' && workingOutline === null
     ? await readOptionalStageJson(workspace, 'outline/initial-confirmed-outline.json', parseOutlineArtifact)
     : null
   const draft = workingOutline === null ? null : await getOrCreateOutlineDraft(workspace)
   const response_points = await readOptionalStageJson(workspace, 'analysis/scoring-response-points.json', parseScoringResponsePointCatalog)
-  const evidence = runtime.stage === 'evidence_mapping'
+  const evidence = task.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) : null
   const mappings = new Map(evidence?.section_mappings.map(item => [item.section_id, item]))
-  const mappingPlan = runtime.stage === 'evidence_mapping'
+  const mappingPlan = task.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-mapping-plan.json', parseEvidenceMappingPlan) : null
-  const mappingProgress = runtime.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
-  const mappingTasks = runtime.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
+  const mappingProgress = task.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
+  const mappingTasks = task.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
   const sections = draft?.outline.sections ?? initialConfirmedOutline?.sections ?? []
-  const includeMappingDetails = view === 'task_contract_context' || runtime.status === 'waiting_user'
+  const includeMappingDetails = view === 'task_contract_context' || task.status === 'waiting_user'
   const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
     ...(includeMappingDetails ? { evidence: mappings.get(item.section.id) ?? null } : {}),
     local_material_count: mappings.get(item.section.id)?.local_materials.length ?? 0,
@@ -451,7 +449,7 @@ export function renderStageInteractionPrompt(stage: string): string {
  * @param stage 投影到提示中的阶段名。
  * @returns 只把已提交工具结果视为状态变化的模型规则。
  */
-export function renderChapterWritingInteractionPrompt(status: 'running' | 'attention_required' | 'completed', stage = 'chapter_writing'): string {
+export function renderChapterWritingInteractionPrompt(status: 'running' | 'completed', stage = 'chapter_writing'): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先理解用户是在提问、解释已有正文，还是明确要求改变写作计划；不得用关键词、引用或发送方式替代语义判断。',
@@ -492,18 +490,16 @@ export function renderLiveStageInteractionPrompt(stage: string, status: 'running
 
 function renderIdleStageInteractionPrompt(
   stage: string,
-  status: 'pending' | 'waiting_start' | 'failed',
+  status: 'ready' | 'failed',
 ): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
     '不得自行开始、重启、重置或推进阶段，也不得把普通聊天当成 Host 原生阶段决策。',
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
-    status === 'pending'
-      ? '阶段尚未开始。普通消息不会启动阶段；阶段启动继续由现有 Host action 或原生阶段决策负责。'
-      : status === 'waiting_start'
-        ? 'Host 正等待正式启动或恢复决定。普通聊天不等于该决定，不得偷偷启动阶段。'
-        : '当前阶段失败且没有可运行任务。先解释失败原因；恢复、重跑或停止继续走已有 Host 恢复协议。',
+    status === 'ready'
+      ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
+      : '当前阶段失败且没有可运行任务。先解释失败原因。',
   ].join('\n')
 }
 
@@ -516,14 +512,13 @@ function renderSuspendedRunPrompt(stage: string, runId: string, revision: number
   ].filter(line => line !== undefined).join('\n')
 }
 
-function renderCurrentRunProgress(run: BidRunSnapshot | null): string | undefined {
-  if (run === null || (run.status !== 'running' && run.status !== 'cancelling')) return undefined
+function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
+  if (run === null) return undefined
   const progress = run.progress
   if (progress === undefined) return '当前后台进度：阶段已启动，尚未产生首个里程碑。'
   return [
     '当前后台进度：',
-    `阶段：${run.stage}`,
-    `状态：${run.status}`,
+    `阶段：${run.work.stage}`,
     `当前步骤：${progress.phase}`,
     `摘要：${progress.summary}`,
     ...progress.completed === undefined || progress.total === undefined
@@ -547,15 +542,10 @@ export function installStageInteractionTools(
   ctx.inject(['tools'], (toolCtx) => {
     const mounted = new Map<Agent, { scope: string; dispose: () => void }>()
     const sync = (agent: Agent): void => {
-      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-      const runtime = bidRuntimeView(control)
-      const suspended = control.run?.status === 'suspended' ? control.run : undefined
-      const stage = isBidMainSession(agent.session)
-        && (runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
-          || runtime.status === 'waiting_user' || runtime.status === 'running' || runtime.status === 'completed'
-          || runtime.status === 'attention_required' || suspended !== undefined)
-        ? runtime.stage : undefined
-      const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? runtime.status : `suspended:${suspended.runId}`}`
+      const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+      const suspended = task.status === 'suspended' ? task.run : undefined
+      const stage = isBidMainSession(agent.session) ? task.stage : undefined
+      const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const existing = mounted.get(agent)
       if (existing?.scope === scope) return
       existing?.dispose()
@@ -563,16 +553,16 @@ export function installStageInteractionTools(
       if (stage === undefined) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-      const available = runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
+      const available = task.status === 'ready' || task.status === 'failed'
         ? [names[0]]
         : suspended !== undefined
-          ? suspended.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
+          ? task.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
             ? [names[0], names[4], names[5]]
             : [names[0]]
-          : runtime.status !== 'waiting_user'
-            ? runtime.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(runtime.status === 'running' ? names.slice(8, 10) : [])]
-              : runtime.stage === 'docx_export' && runtime.status === 'completed' ? [names[0], names[5], names[6], names[7]]
-                : runtime.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
+          : task.status !== 'waiting_user'
+            ? task.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(task.status === 'running' ? names.slice(8, 10) : [])]
+              : task.stage === 'docx_export' && task.status === 'completed' ? [names[0], names[5], names[6], names[7]]
+                : task.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
             : stage === 'tender_analysis' ? names.slice(0, 1)
               : stage === 'outline_generation' ? names.slice(0, 3)
                 : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
@@ -581,7 +571,7 @@ export function installStageInteractionTools(
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
-        if (runtime.status === 'waiting_user') {
+        if (task.status === 'waiting_user') {
           disposers.push(tools.restrict({ allow: [] }))
         }
         for (const name of available) {
@@ -724,7 +714,7 @@ export function installStageInteractionTools(
         for (const dispose of disposers.reverse()) dispose()
         throw error
       }
-      mounted.set(agent, { scope: `${stage}:${runtime.status}`, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
+      mounted.set(agent, { scope: `${stage}:${task.status}`, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
     }
     const publicRestrictions = new Map<Agent, () => void>()
     const claimState = new Map<Agent, { boundary: string; hasUser: boolean }>()
@@ -736,18 +726,15 @@ export function installStageInteractionTools(
       const subject = exec.agent
       const session = subject?.session
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
-      const control = session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-      const runtime = bidRuntimeView(control)
-      if ((runtime.status === 'waiting_user' || control.run?.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
+      const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+      if ((task.status === 'waiting_user' || task.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
         && !names.includes(exec.name as typeof names[number])) return 'BID_STAGE_TOOL_REQUIRED'
     }))
     toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       if (!isBidMainSession(agent.session)) return
-      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-      const runtime = bidRuntimeView(control)
-      if (runtime.status !== 'pending' && runtime.status !== 'waiting_start' && runtime.status !== 'failed'
-        && runtime.status !== 'running' && runtime.status !== 'completed' && runtime.status !== 'attention_required'
-        && control.run?.status !== 'suspended') return
+      const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+      if (task.status !== 'ready' && task.status !== 'failed' && task.status !== 'running'
+        && task.status !== 'completed' && task.status !== 'suspended') return
       const previous = claimState.get(agent)
       const prior = agent.session.events.findLast(event => event.type === 'step/end' && event.data.turn === turn)
       const priorStep = prior?.type === 'step/end' ? prior.data.step : 0
@@ -776,26 +763,25 @@ export function installStageInteractionTools(
     }, { global: true })
     toolCtx.on('agent/pre-step', async ({ agent, messages }, next) => {
       const decision = await next()
-      const control = agent.session.events.reduce(reduceBidControlState, BID_INITIAL_CONTROL_STATE)
-      const runtime = bidRuntimeView(control)
+      const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       if (decision.kind === 'reject' || !isBidMainSession(agent.session) || !messages.some(message => message.source.kind === 'user')) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
-      const suspended = control.run?.status === 'suspended' ? control.run : undefined
+      const suspended = task.status === 'suspended' ? task.run : undefined
       const prompt = suspended !== undefined ? renderSuspendedRunPrompt(
-        runtime.stage,
+        task.stage,
         suspended.runId,
         resumed?.type === 'bid.project.resumed' ? resumed.data.revision : suspended.baseProjectRevision,
         suspended.error?.message,
-      ) : runtime.status === 'waiting_user' ? renderStageInteractionPrompt(runtime.stage)
-        : (runtime.stage === 'chapter_writing' && (runtime.status === 'running' || runtime.status === 'attention_required' || runtime.status === 'completed')
-          || runtime.stage === 'docx_export' && runtime.status === 'completed')
-          ? renderChapterWritingInteractionPrompt(runtime.status, runtime.stage)
-          : runtime.status === 'running' || runtime.status === 'completed'
-            ? renderLiveStageInteractionPrompt(runtime.stage, runtime.status)
-            : runtime.status === 'pending' || runtime.status === 'waiting_start' || runtime.status === 'failed'
-              ? renderIdleStageInteractionPrompt(runtime.stage, runtime.status) : undefined
+      ) : task.status === 'waiting_user' ? renderStageInteractionPrompt(task.stage)
+        : (task.stage === 'chapter_writing' && (task.status === 'running' || task.status === 'completed')
+          || task.stage === 'docx_export' && task.status === 'completed')
+          ? renderChapterWritingInteractionPrompt(task.status, task.stage)
+          : task.status === 'running' || task.status === 'completed'
+            ? renderLiveStageInteractionPrompt(task.stage, task.status)
+            : task.status === 'ready' || task.status === 'failed'
+              ? renderIdleStageInteractionPrompt(task.stage, task.status) : undefined
       if (prompt === undefined) return decision
-      const progress = renderCurrentRunProgress(control.run)
+      const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined
       const context = progress === undefined ? prompt : `${prompt}\n${progress}`
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })

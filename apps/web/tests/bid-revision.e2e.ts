@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { expect, it } from 'vitest'
-import { BidWorkspace, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
+import { BidWorkspace, bidProjectTaskState, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { seedConversation, seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/project-session.ts'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -55,8 +55,8 @@ it('段落引用与图片经普通富内容链路进入同一条主 Agent 消息
     await seedProjectArtifacts(workspace)
     const markdown = '# 1 技术方案\n\n首段保留。\n\n选中第一段。\n\n选中第二段。\n\n末段保留。\n'
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), markdown)
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
-    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+    agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
     await scaffold.ctx.sessions.flush(agent.session)
     const directWorkbench = await (scaffold.ctx.bid as unknown as {
       getReviewWorkbench(session: Session): Promise<{ outline: readonly unknown[] }>

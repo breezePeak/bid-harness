@@ -3,14 +3,24 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
-  BID_STAGES,
   BID_RUNTIME_PROJECTION_KEY,
   getBidClientProjection,
   registerBidRuntimeProjection,
+  type BidRunData,
+  type BidTaskState,
 } from '@deepseek-ai/dsh-bid'
 
+const run: BidRunData = {
+  runId: 'run-1', epoch: 1, baseProjectRevision: 1,
+  work: {
+    kind: 'stage_execution', workId: 'work-1', stage: 'evidence_mapping',
+    requestRef: 'requests/work-1.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64),
+  },
+  startedAt: 1, updatedAt: 2,
+}
+
 describe('Bid client projection', () => {
-  it('相同项目状态的新修订不推送投影，失败问题变化仍刷新客户端', async () => {
+  it('只投影 task，并在唯一状态变化时刷新', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)
     const projections = await ctx.plugin(SessionProjectionRegistry)
@@ -19,29 +29,19 @@ describe('Bid client projection', () => {
     const unsubscribe = ctx.sessionProjections.onChanged(listener)
     try {
       const session = ctx.sessions.create()
-      const waiting = { stage: 'evidence_mapping' as const, status: 'waiting_user' as const }
-      session.append('bid.project.resumed', { runtime: waiting, revision: 1 })
-      expect(listener).toHaveBeenCalledTimes(1)
-      session.append('bid.project.resumed', { runtime: { ...waiting }, revision: 2 })
+      const waiting: BidTaskState = { stage: 'evidence_mapping', status: 'waiting_user', run: null }
+      session.append('bid.project.resumed', { state: waiting, revision: 1 })
+      session.append('bid.project.resumed', { state: waiting, revision: 2 })
       expect(listener).toHaveBeenCalledTimes(1)
 
-      const failed = {
-        stage: 'chapter_writing' as const, status: 'failed' as const, failureReason: '章节缺少资料。',
-        failureIssues: [{ code: 'MISSING_EVIDENCE', message: '缺少施工参数。', artifact: 'chapters/section-1.md', path: 'body' }],
-      }
-      session.append('bid.project.resumed', { runtime: failed, revision: 3 })
-      expect(listener).toHaveBeenCalledTimes(2)
-      session.append('bid.project.resumed', { runtime: {
-        ...failed,
-        failureIssues: [{ path: 'body', artifact: 'chapters/section-1.md', message: '缺少施工参数。', code: 'MISSING_EVIDENCE' }],
-      }, revision: 4 })
-      expect(listener).toHaveBeenCalledTimes(2)
-      session.append('bid.project.resumed', { runtime: {
-        ...failed, failureIssues: [{ ...failed.failureIssues[0]!, message: '缺少项目进度参数。' }],
-      }, revision: 5 })
-      expect(listener).toHaveBeenCalledTimes(3)
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime.failureIssues?.[0]?.message)
-        .toBe('缺少项目进度参数。')
+      session.append('bid.task.changed', {
+        state: { stage: 'chapter_writing', status: 'failed', run: null,
+          failure: { message: '章节缺少资料。', issues: [{ code: 'MISSING_EVIDENCE', message: '缺少施工参数。' }] } },
+      })
+      const view = ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]
+      expect(view?.task).toMatchObject({ status: 'failed', failure: { message: '章节缺少资料。' } })
+      expect(view).not.toHaveProperty('runtime')
+      expect(view).not.toHaveProperty('run')
     } finally {
       unsubscribe()
       disposeProjection()
@@ -50,44 +50,20 @@ describe('Bid client projection', () => {
     }
   })
 
-  it('持久化的挂起 Run 会再次推送权威投影', async () => {
-    const ctx = new Context()
-    const sessions = await ctx.plugin(SessionStore)
-    const projections = await ctx.plugin(SessionProjectionRegistry)
-    const disposeProjection = registerBidRuntimeProjection(ctx.sessionProjections)
-    const listener = vi.fn()
-    const unsubscribe = ctx.sessionProjections.onChanged(listener)
-    try {
-      const session = ctx.sessions.create()
-      const run = {
-        runId: 'run-1', stage: 'evidence_mapping' as const, epoch: 1, baseProjectRevision: 1,
-        work: {
-          kind: 'stage_execution' as const, workId: 'work-1', stage: 'evidence_mapping' as const,
-          requestRef: 'requests/work-1.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64),
-        },
-        status: 'suspended' as const, cause: 'retry_exhausted' as const,
-        error: { message: '模型修复次数已用尽。' }, startedAt: 1, updatedAt: 2,
-      }
-      const control = { workflow: { stage: 'evidence_mapping' as const, gate: 'ready' as const }, run, lastRun: run }
-
-      session.append('bid.project.resumed', { ...control, revision: 2 })
-      expect(listener).toHaveBeenCalledTimes(1)
-      session.append('bid.project.resumed', { ...control, revision: 3 })
-
-      expect(listener).toHaveBeenCalledTimes(2)
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-        runtime: { stage: 'evidence_mapping', status: 'suspended' },
-        allowedActions: ['send_message'],
-      })
-    } finally {
-      unsubscribe()
-      disposeProjection()
-      await projections.dispose()
-      await sessions.dispose()
-    }
+  it('从 task 状态生成 Host 准入动作', () => {
+    expect(getBidClientProjection({ stage: 'file_intake', status: 'waiting_user', run: null }).allowedActions)
+      .toEqual(['upload_files', 'send_message'])
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user', run: null }).allowedActions)
+      .toEqual(['confirm_outline', 'regenerate_outline', 'send_message'])
+    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'running', run: { ...run,
+      work: { ...run.work, stage: 'chapter_writing' } } }).allowedActions)
+      .toEqual(['send_message', 'export_docx'])
+    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'suspended', run: {
+      ...run, cause: 'retry_exhausted', error: { message: '模型修复次数已用尽。' },
+    } }).allowedActions).toEqual(['send_message'])
   })
 
-  it('将项目恢复事件应用到当前 Session，并继续处理当前阶段确认', async () => {
+  it('继续结构化读取旧 resumed payload，但输出单一 task', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)
     const projections = await ctx.plugin(SessionProjectionRegistry)
@@ -95,28 +71,10 @@ describe('Bid client projection', () => {
     try {
       const session = ctx.sessions.create()
       session.append('bid.project.resumed', {
-        runtime: { stage: 'evidence_mapping', status: 'waiting_user' }, revision: 12,
+        runtime: { stage: 'outline_generation', status: 'waiting_start' }, revision: 3,
       })
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-        runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
-        allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
-        composer: { enabled: true },
-      })
-      session.append('bid.user_confirmation.received', { stage: 'evidence_mapping', confirmed: true })
-      session.append('bid.stage.completed', { stage: 'evidence_mapping', status: 'completed', artifacts: [] })
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
-        .toEqual({ stage: 'chapter_writing', status: 'pending' })
-      session.append('bid.project.resumed', {
-        runtime: { stage: 'outline_generation', status: 'pending' }, revision: 14,
-      })
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
-        .toEqual({ stage: 'outline_generation', status: 'pending' })
-      session.append('bid.project.resumed', {
-        runtime: { stage: 'chapter_writing', status: 'completed' }, revision: 15,
-      })
-      session.append('bid.user_confirmation.required', { stage: 'chapter_writing', status: 'waiting_user' })
-      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.runtime)
-        .toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.task)
+        .toEqual({ stage: 'outline_generation', status: 'ready', run: null })
     } finally {
       disposeProjection()
       await projections.dispose()
@@ -124,171 +82,21 @@ describe('Bid client projection', () => {
     }
   })
 
-  it('derives allowed actions and composer capability from host runtime state', () => {
-    expect(getBidClientProjection({ stage: 'file_intake', status: 'pending' })).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'pending' },
-      allowedActions: ['upload_files', 'send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'pending' })).toMatchObject({
-      runtime: { stage: 'tender_analysis', status: 'pending' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'docx_export', status: 'pending' })).toMatchObject({
-      runtime: { stage: 'docx_export', status: 'pending' },
-      allowedActions: ['send_message', 'export_docx'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_start' })).toMatchObject({
-      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-    for (const stage of BID_STAGES) {
-      expect(getBidClientProjection({ stage, status: 'running' })).toMatchObject({
-        runtime: { stage, status: 'running' },
-        allowedActions: stage === 'chapter_writing'
-          ? ['send_message', 'export_docx'] : ['send_message'],
-        composer: { enabled: true },
-      })
-    }
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'waiting_user' })).toMatchObject({
-      runtime: { stage: 'tender_analysis', status: 'waiting_user' },
-      allowedActions: ['confirm_tender_analysis', 'send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'outline_generation', status: 'waiting_user' })).toMatchObject({
-      runtime: { stage: 'outline_generation', status: 'waiting_user' },
-      allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user' })).toMatchObject({
-      runtime: { stage: 'evidence_mapping', status: 'waiting_user' },
-      allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'waiting_user' })).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'waiting_user' },
-      allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({
-      stage: 'file_intake', status: 'failed', failureReason: 'document needs OCR',
-    })).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'suspended', failureReason: 'document needs OCR' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({
-      stage: 'tender_analysis', status: 'failed', failureReason: 'invalid citation',
-    })).toMatchObject({
-      runtime: { stage: 'tender_analysis', status: 'suspended', failureReason: 'invalid citation' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'failed' })).toMatchObject({
-      runtime: { stage: 'chapter_writing', status: 'suspended' },
-      allowedActions: ['send_message', 'export_docx', 'revise_chapter'],
-      composer: { enabled: true },
-    })
-    for (const stage of BID_STAGES) {
-      expect(getBidClientProjection({ stage, status: 'completed' })).toMatchObject({
-        runtime: { stage, status: 'completed' },
-        allowedActions: stage === 'chapter_writing' || stage === 'docx_export'
-          ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
-        composer: { enabled: true },
-      })
-    }
-  })
-
-  it('keeps public chat admitted across the complete Bid stage lifecycle', () => {
-    const cases = [
-      ['file_intake', 'pending'],
-      ['file_intake', 'running'],
-      ['tender_analysis', 'pending'],
-      ['tender_analysis', 'waiting_user'],
-      ['outline_generation', 'pending'],
-      ['outline_generation', 'waiting_user'],
-      ['evidence_mapping', 'waiting_start'],
-      ['evidence_mapping', 'running'],
-      ['evidence_mapping', 'waiting_user'],
-      ['chapter_writing', 'pending'],
-      ['chapter_writing', 'running'],
-      ['chapter_writing', 'waiting_user'],
-      ['chapter_writing', 'attention_required'],
-      ['chapter_writing', 'completed'],
-      ['docx_export', 'pending'],
-      ['docx_export', 'running'],
-      ['docx_export', 'completed'],
-    ] as const
-
-    for (const [stage, status] of cases) {
-      const projection = getBidClientProjection({ stage, status })
-      expect(projection.composer, `${stage}/${status}`).toEqual({ enabled: true })
-      expect(projection.allowedActions, `${stage}/${status}`).toContain('send_message')
-    }
-  })
-
-  it('registers bid.runtime as a whole-value DSH session projection', async () => {
+  it('注册后的空日志以 S1 waiting_user 为初始状态', async () => {
     const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SessionProjectionRegistry)
-    registerBidRuntimeProjection(ctx.sessionProjections)
-    const session = ctx.sessions.create()
-
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'pending' },
-      allowedActions: ['upload_files', 'send_message'],
-      composer: { enabled: true },
-    })
-
-    const resetSession = ctx.sessions.create()
-    resetSession.append('bid.project.resumed', {
-      runtime: { stage: 'evidence_mapping', status: 'waiting_start' }, revision: 1,
-    })
-    expect(ctx.sessionProjections.snapshot(resetSession).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-      runtime: { stage: 'evidence_mapping', status: 'waiting_start' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-
-    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-
-    session.append('bid.stage.failed', {
-      stage: 'file_intake', status: 'failed', reason: 'document needs OCR', issues: [{
-        code: 'DOCUMENT_INVALID',
-        artifact: 'manifest.json',
-        path: 'files[0]',
-        message: 'document cannot be parsed',
-      }],
-    })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-      runtime: {
-        stage: 'file_intake',
-        status: 'suspended',
-        failureReason: 'document needs OCR',
-        failureIssues: [{ code: 'DOCUMENT_INVALID', artifact: 'manifest.json', path: 'files[0]', message: 'document cannot be parsed' }],
-      },
-      allowedActions: ['send_message'],
-      composer: { enabled: true },
-    })
-
-    session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-      runtime: { stage: 'file_intake', status: 'running' },
-      allowedActions: ['send_message'],
-    })
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
-      'runtime.failureReason',
-    )
-    expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).not.toHaveProperty(
-      'runtime.failureIssues',
-    )
+    const sessions = await ctx.plugin(SessionStore)
+    const projections = await ctx.plugin(SessionProjectionRegistry)
+    const disposeProjection = registerBidRuntimeProjection(ctx.sessionProjections)
+    try {
+      const session = ctx.sessions.create()
+      expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
+        task: { stage: 'file_intake', status: 'waiting_user', run: null },
+        allowedActions: ['upload_files', 'send_message'],
+      })
+    } finally {
+      disposeProjection()
+      await projections.dispose()
+      await sessions.dispose()
+    }
   })
 })

@@ -2,6 +2,8 @@
 
 Status: implemented
 
+任务状态结构与磁盘 version 3 已由[单一任务状态机](2026-09-22-bid-single-task-state.md)部分替代；本记录继续约束 Work Descriptor、Run fencing、Commit Scope、Activity Scope、恢复核对和 PublicationBatch。
+
 ## Problem
 
 一个扁平阶段状态同时表达业务进度和进程执行，会把停止、Provider 故障、后端重启和业务校验失败压成同一个 failed。阶段级停止工具与重试 RPC 又绕开聊天原生取消，使 UI、Main Agent、Host 和各执行器分别拥有一部分停止与恢复规则；迟到的模型或 Child 结果仍可能在停止后提交正式 Artifact。

@@ -2,6 +2,8 @@
 
 Status: implemented
 
+`waiting_start` 与 `start_stage` 状态分支已由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)替代；手动或自动确认模式及 Writing Plan 规则保持有效。
+
 ## Problem
 
 Bid 流程的 S2、S3、S4 都停在确认门禁，S5 还依赖 Main Agent 询问写作要求和用户明确授权。仅由客户端自动点击已有按钮会在 S5 已经发出询问后才发生，而且现有写作计划工具要求真实用户消息引用，无法实现不询问、不伪造用户要求的连续自动执行。

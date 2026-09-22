@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState } from '@deepseek-ai/dsh-bid'
+import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 
@@ -31,7 +31,7 @@ function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */
 export async function runFullOutlineRegenerationLoop(ctx: Context, root: string) {
   const { agent, workspace, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
-  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
+  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
   await ctx.plugin(SessionProjectionRegistry)
   if (ctx.get('userQuestions') === undefined) await ctx.plugin(UserQuestionService)
   await ctx.plugin(BidHostRuntime)
@@ -60,14 +60,14 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
   await waitHostOperation()
   return { result, draft: await getOrCreateOutlineDraft(workspace),
     canonicalPreserved: await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8') === original,
-    state: agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE),
+    state: agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE),
     transitions: agent.session.events.slice(start).filter(event => event.type.startsWith('bid.') && event.type !== 'bid.project.resumed').map(event => event.type) }
 }
 
 /** @param ctx 真实 Loader 或测试装配。 @param root 临时工作区。 @returns 不含环境路径的阶段交互结果。 */
 export async function runStageInteractionLoop(ctx: Context, root: string, checkRejections = false) {
   const { agent, workspace, parentScript, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
-  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
+  await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
   if (ctx.get('sessionProjections') === undefined) await ctx.plugin(SessionProjectionRegistry)
   if (ctx.get('userQuestions') === undefined) await ctx.plugin(UserQuestionService)
   const hostFiber = ctx.get('bid') === undefined ? ctx.plugin(BidHostRuntime) : undefined
@@ -140,7 +140,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     })
   const calls = agent.session.events.slice(before).filter(event => event.type === 'tool/call').map(event => event.data.name)
   const failures = agent.session.events.slice(before).filter(event => event.type === 'tool/result').filter(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError))
-  const state = agent.session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE)
+  const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   const visibleTools = ctx.tools.schemas(agent).map(tool => tool.name)
   const confirmations = agent.session.events.slice(before).filter(event => event.type === 'bid.user_confirmation.received' || event.type === 'bid.stage.completed').length
   await ctx.sessions.flush(agent.session)

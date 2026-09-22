@@ -2,6 +2,8 @@
 
 Status: implemented
 
+本记录中的旧 `pending`、`waiting_start` 与 `attention_required` 状态词由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)归一；交互通道、inspect、steer 和停止所有权保持有效。
+
 ## Problem
 
 Bid 长阶段曾把 Composer、Stage operation 和 Main Agent 当前轮次当成同一生命周期。S2–S4 运行时拒绝消息，S5 的专用交错只覆盖部分私有协议；直接开放输入又会让用户消息与 finish 工具、Child 完成通知或阶段取消互相抢占。用户无法在 Child、Writer 或 Reviewer 运行时立即询问进度，也无法分别停止一条聊天回复和当前阶段任务。

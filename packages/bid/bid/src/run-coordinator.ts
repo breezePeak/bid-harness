@@ -3,8 +3,8 @@ import { rm } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {
-  BidRunNotice, BidRunProgressInput, BidRunResumeIdentity, BidRunSnapshot,
-  BidRunSuspensionCause, BidWorkDescriptor,
+  BidRunData, BidRunNotice, BidRunProgressInput, BidRunResumeIdentity,
+  BidRunSuspensionCause, BidTaskFailure, BidWorkDescriptor,
 } from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { bidRunProgressSchema } from './runtime-state.ts'
@@ -241,7 +241,7 @@ export interface BidRunContext {
 }
 
 interface ActiveRun {
-  snapshot: BidRunSnapshot
+  snapshot: BidRunData
   readonly context: BidRunContext
   readonly controller: AbortController
   readonly eventStart: number
@@ -260,7 +260,7 @@ export class BidRunCoordinator {
   private epoch = 0
   private active: ActiveRun | undefined
   private starting = false
-  private suspension: Promise<BidRunSnapshot | undefined> | undefined
+  private suspension: Promise<(BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure }) | undefined> | undefined
 
   constructor(
     private readonly session: Session,
@@ -272,7 +272,7 @@ export class BidRunCoordinator {
     private readonly publication?: { readonly workspaceRoot: string; readonly projectRoot: string },
     private readonly executionSessionId?: () => string | undefined,
     private readonly onAdmitted?: BidRunAdmissionObserver,
-    private readonly onSuspended?: (notice: BidRunNotice, run: BidRunSnapshot & { status: 'suspended' }) => void,
+    private readonly onSuspended?: (notice: BidRunNotice, run: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure }) => void,
   ) {}
 
   /** Current live Run, if any. */
@@ -301,16 +301,14 @@ export class BidRunCoordinator {
     const controlRevision = this.checkpoint === undefined ? baseProjectRevision : baseProjectRevision + 1
     const now = Date.now()
     const executionSessionId = this.executionSessionId?.()
-    const snapshot: BidRunSnapshot = {
+    const snapshot: BidRunData = {
       runId: randomUUID(),
       interactionSessionId: this.session.id,
       ...(executionSessionId === undefined ? {} : { executionSessionId }),
-      stage: work.stage,
       work,
       epoch,
       baseProjectRevision,
       controlRevision,
-      status: 'running',
       ...(resumeOf === undefined ? {} : { resumeOf }),
       startedAt: now,
       updatedAt: now,
@@ -380,9 +378,9 @@ export class BidRunCoordinator {
   /**
    * Settle a Run and its owning Workflow transition in one durable checkpoint.
    * @param context - Active Run authority to complete.
-   * @param commitWorkflow - Synchronous event commit for the Workflow outcome owned by this Run.
+   * @param commitOutcome - Synchronous event commit for the task outcome owned by this Run.
    */
-  async complete(context: BidRunContext, commitWorkflow?: () => void): Promise<void> {
+  async complete(context: BidRunContext, commitOutcome: () => void): Promise<void> {
     context.commits.assertWritable(context)
     const active = this.requireActive(context)
     active.activities.retire()
@@ -390,9 +388,9 @@ export class BidRunCoordinator {
     await active.activities.whenDrained()
     await context.commits.whenDrained()
     this.session.append('bid.run.completed', {
-      run: { ...active.snapshot, status: 'completed', updatedAt: Date.now() },
+      run: { ...active.snapshot, updatedAt: Date.now() },
     })
-    commitWorkflow?.()
+    commitOutcome()
     await this.checkpoint?.()
     if (this.active === active) this.active = undefined
   }
@@ -405,8 +403,8 @@ export class BidRunCoordinator {
    */
   suspend(
     cause: BidRunSuspensionCause,
-    error?: BidRunSnapshot['error'],
-  ): Promise<BidRunSnapshot | undefined> {
+    error?: BidTaskFailure,
+  ): Promise<(BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure }) | undefined> {
     if (this.suspension !== undefined) return this.suspension
     const active = this.active
     if (active === undefined) return Promise.resolve(undefined)
@@ -417,19 +415,17 @@ export class BidRunCoordinator {
   private async settleSuspension(
     active: ActiveRun,
     cause: BidRunSuspensionCause,
-    error?: BidRunSnapshot['error'],
-  ): Promise<BidRunSnapshot | undefined> {
+    error?: BidTaskFailure,
+  ): Promise<(BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure }) | undefined> {
     this.scheduler.close()
     active.context.commits.retire()
     active.activities.retire()
     const mainAgents = [...active.mainAgents]
-    const cancelling: BidRunSnapshot & { status: 'cancelling' } = {
-      ...active.snapshot,
-      status: 'cancelling',
-      ...(error === undefined ? {} : { error }),
-      updatedAt: Date.now(),
-    }
-    this.session.append('bid.run.cancelling', { run: cancelling })
+    this.session.append('bid.run.cancelling', {
+      runId: active.snapshot.runId,
+      epoch: active.snapshot.epoch,
+      stage: active.snapshot.work.stage,
+    })
     await this.checkpoint?.()
     for (const scope of mainAgents) scope.discardOwnedInbox()
     active.controller.abort({ kind: 'hook', reason: `bid-run-${cause}` })
@@ -439,10 +435,10 @@ export class BidRunCoordinator {
     await active.activities.whenDrained()
     await active.context.commits.whenDrained()
     if (this.active !== active) return undefined
-    const snapshot: BidRunSnapshot & { status: 'suspended' } = {
-      ...cancelling,
-      status: 'suspended',
+    const snapshot: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure } = {
+      ...active.snapshot,
       cause,
+      ...(error === undefined ? {} : { error }),
       updatedAt: Date.now(),
     }
     this.active = undefined
@@ -453,7 +449,7 @@ export class BidRunCoordinator {
       noticeId: `run:${snapshot.runId}:suspended`,
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
-      stage: snapshot.stage,
+      stage: snapshot.work.stage,
       kind: cause === 'user_stop' ? 'stopped' : 'interrupted',
       severity: cause === 'user_stop' ? 'info' : 'error',
       message: cause === 'user_stop'

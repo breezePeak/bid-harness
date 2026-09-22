@@ -16,31 +16,18 @@ export const BID_STAGES = [
 /** One fixed Bid Harness business stage. */
 export type BidStage = typeof BID_STAGES[number]
 
-/** Business gates that survive any individual execution attempt. */
-export const BID_WORKFLOW_GATES = [
+/** The only durable statuses of a Bid task. */
+export const BID_TASK_STATUSES = [
   'ready',
-  'waiting_start',
+  'running',
   'waiting_user',
-  'attention_required',
-  'completed',
+  'suspended',
   'failed',
+  'completed',
 ] as const
 
-/** One durable business gate independent of a live execution attempt. */
-export type BidWorkflowGate = typeof BID_WORKFLOW_GATES[number]
-
-/** Durable Bid business progress. */
-export interface BidProjectWorkflow {
-  readonly stage: BidStage
-  readonly gate: BidWorkflowGate
-  /** Reason a project cannot be trusted to continue. */
-  readonly failureReason?: string | undefined
-  /** Browser-safe details for an unrecoverable project failure. */
-  readonly failureIssues?: readonly StageValidationIssue[] | undefined
-}
-
-/** Process state of one exact stage execution attempt. */
-export type BidRunStatus = 'running' | 'cancelling' | 'suspended' | 'completed'
+/** One authoritative Bid task status. */
+export type BidTaskStatus = typeof BID_TASK_STATUSES[number]
 
 /** Latest bounded milestone reported by deterministic Run code. */
 export interface BidRunProgress {
@@ -82,8 +69,8 @@ export interface BidRunNotice {
 /** Why one Run stopped before completing its stage. */
 export type BidRunSuspensionCause = 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart'
 
-/** Durable decision families presented for a recoverable Bid boundary. */
-export type BidRunDecisionType = 'run_recovery' | 'stage_start'
+/** Durable decision family presented for a recoverable Bid boundary. */
+export type BidRunDecisionType = 'run_recovery'
 
 /** Structured result of one native user-question decision. */
 export type BidRunDecision = 'continue' | 'restart_stage' | 'stop'
@@ -118,14 +105,20 @@ export interface BidWorkDescriptor {
   readonly inputFingerprint: string
 }
 
-/** Persisted identity and settlement of one stage execution attempt. */
-export interface BidRunSnapshot {
+/** Browser-safe failure details persisted at a task boundary. */
+export interface BidTaskFailure {
+  readonly code?: string | undefined
+  readonly message: string
+  readonly issues?: readonly StageValidationIssue[] | undefined
+}
+
+/** Persisted execution data for one running attempt. */
+export interface BidRunData {
   readonly runId: string
   /** 接纳 Run 且持续处理公开聊天的顶层 Session。 */
   readonly interactionSessionId?: string | undefined
   /** Host 持有且执行 Run 模型工作的 Session。 */
   readonly executionSessionId?: string | undefined
-  readonly stage: BidStage
   readonly epoch: number
   readonly baseProjectRevision: number
   /** Revision after this Run's `running` state was durably published. */
@@ -134,40 +127,33 @@ export interface BidRunSnapshot {
   readonly work: BidWorkDescriptor
   /** The prior suspended attempt; a resumed Run always receives a fresh identity. */
   readonly resumeOf?: BidRunResumeIdentity | undefined
-  readonly status: BidRunStatus
   /** Latest milestone only; prior progress remains solely in the Session event log. */
   readonly progress?: BidRunProgress | undefined
-  readonly cause?: BidRunSuspensionCause | undefined
-  readonly error?: {
-    readonly code?: string | undefined
-    readonly message: string
-    readonly issues?: readonly StageValidationIssue[] | undefined
-  } | undefined
   readonly startedAt: number
   readonly updatedAt: number
 }
 
-/** Authoritative project control state; active execution never changes the Workflow gate. */
-export interface BidControlState {
-  readonly workflow: BidProjectWorkflow
-  readonly run: BidRunSnapshot | null
-  readonly lastRun: BidRunSnapshot | null
-}
-
-/** Derived browser statuses retained for the existing Bid panel. */
-export const STAGE_RUN_STATUSES = [
-  'pending',
-  'waiting_start',
-  'running',
-  'waiting_user',
-  'suspended',
-  'attention_required',
-  'failed',
-  'completed',
-] as const
-
-/** Derived browser status; Host decisions use {@link BidControlState}. */
-export type StageRunStatus = typeof STAGE_RUN_STATUSES[number]
+/** Authoritative Bid task state; its discriminant makes invalid Run combinations unrepresentable. */
+export type BidTaskState =
+  | { readonly stage: BidStage; readonly status: 'ready'; readonly run: null }
+  | { readonly stage: BidStage; readonly status: 'running'; readonly run: BidRunData }
+  | {
+    readonly stage: BidStage
+    readonly status: 'waiting_user'
+    readonly run: null
+    readonly reason?: string | undefined
+    readonly issues?: readonly StageValidationIssue[] | undefined
+  }
+  | {
+    readonly stage: BidStage
+    readonly status: 'suspended'
+    readonly run: BidRunData & {
+      readonly cause: BidRunSuspensionCause
+      readonly error?: BidTaskFailure | undefined
+    }
+  }
+  | { readonly stage: BidStage; readonly status: 'failed'; readonly run: null; readonly failure: BidTaskFailure }
+  | { readonly stage: BidStage; readonly status: 'completed'; readonly run: null }
 
 /** Current count of Host-owned S4 Mapping Tasks by execution state. */
 export interface BidEvidenceMappingProgress {
@@ -197,16 +183,6 @@ export interface BidEvidenceMappingProgress {
     readonly child_session_id: string | null
     readonly latest_issue: string | null
   }[]
-}
-
-/** Flattened compatibility view derived from Workflow and Run state. */
-export interface BidRuntimeState {
-  stage: BidStage
-  status: StageRunStatus
-  /** Host-recorded error for the current failed or suspended stage. */
-  readonly failureReason?: string | undefined
-  /** Browser-safe validation details for the current failed or suspended stage. */
-  readonly failureIssues?: readonly StageValidationIssue[] | undefined
 }
 
 /** The sole client-visible projection key for Bid runtime state. */
@@ -317,13 +293,9 @@ export type BidComposerCapability =
   | { enabled: true }
   | { enabled: false; reason: BidComposerReason }
 
-/** Host-produced client view of Bid runtime state and currently admitted actions. */
+/** Host-produced client view of the authoritative task state and currently admitted actions. */
 export interface BidClientProjection {
-  /** Durable business progress, independent of the current Run. */
-  workflow: BidProjectWorkflow
-  /** Current or most recently suspended Run. */
-  run: BidRunSnapshot | null
-  runtime: BidRuntimeState
+  task: BidTaskState
   allowedActions: readonly BidClientAction[]
   composer: BidComposerCapability
   /** File-name suffixes accepted by the Host, including the leading dot. */
@@ -426,35 +398,23 @@ export interface BidFileIntakeFileResult {
 
 /** Result returned after one dedicated Bid file-intake request settles. */
 export type BidFileIntakeResult =
-  | { readonly ok: true; readonly value: BidRuntimeState; readonly files?: readonly BidFileIntakeFileResult[] | undefined }
+  | { readonly ok: true; readonly value: BidTaskState; readonly files?: readonly BidFileIntakeFileResult[] | undefined }
   | { readonly ok: false; readonly error: BidFileIntakeFailure }
 
 /** Stable result of an S3 or S4 outline-confirmation request. */
 export type BidOutlineConfirmationResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: true; readonly value: BidTaskState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
 
 /** Stable result of an S3 or S4 outline-regeneration request. */
 export type BidOutlineRegenerationResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: true; readonly value: BidTaskState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_REGENERATE_NOT_ALLOWED' | 'BID_OUTLINE_FEEDBACK_REQUIRED' | 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_REGENERATE_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current?: import('./outline-confirmation-artifacts.ts').OutlineDraftView } }
 
 /** Stable result of an S2 tender-analysis confirmation request. */
 export type BidTenderAnalysisConfirmationResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: true; readonly value: BidTaskState }
   | { readonly ok: false; readonly error: { readonly code: 'BID_SESSION_REQUIRED' | 'BID_OPERATION_IN_PROGRESS' | 'BID_CONFIRM_NOT_ALLOWED' | 'BID_INVALID_TENDER_ANALYSIS_EDIT' | 'BID_CONFIRM_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[] } }
-
-/** Stable business rejection codes returned by the post-reset stage start action. */
-export type BidStageStartErrorCode =
-  | 'BID_SESSION_REQUIRED'
-  | 'BID_OPERATION_IN_PROGRESS'
-  | 'BID_STAGE_START_NOT_ALLOWED'
-  | 'BID_STAGE_START_FAILED'
-
-/** Result returned after the user starts a reset stage. */
-export type BidStageStartResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
-  | { readonly ok: false; readonly error: { readonly code: BidStageStartErrorCode; readonly message: string } }
 
 /** Stable rejection codes for the two S5 waiting-user actions. */
 export type BidChapterWritingGateErrorCode =
@@ -467,7 +427,7 @@ export type BidChapterWritingGateErrorCode =
 
 /** Result of requesting manual requirements or starting S5 with the automatic default plan. */
 export type BidChapterWritingGateResult =
-  | { readonly ok: true; readonly value: BidRuntimeState }
+  | { readonly ok: true; readonly value: BidTaskState }
   | { readonly ok: false; readonly error: { readonly code: BidChapterWritingGateErrorCode; readonly message: string } }
 
 /** Stable business rejection codes returned by an on-demand DOCX export. */

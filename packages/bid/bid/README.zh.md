@@ -25,23 +25,23 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 ## 控制面类型
 
-本包导出固定的 `BidStage`、`BidWorkflowGate` 与 `BidRunStatus`，以及 `BidControlState`、`BidRunContext`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 S1 与 DOCX 模板二进制端点常量、`BidFileIntakeResult`、`DocxTemplateUploadResult`、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。`BidRuntimeState` 只保留为浏览器兼容视图，Host 决策使用 Workflow 与 Run 分离的控制状态。
+本包导出固定的 `BidStage` 与 `BidTaskStatus`，以及判别联合 `BidTaskState`、`BidRunContext`、`BidStagePolicy`、`BidStageTask`、`StageArtifact` 和 `StageValidationResult`。`BidTaskState` 是唯一业务状态，只有 `running` 与 `suspended` 分支携带 Run 执行数据。browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 还会导出 S1 与 DOCX 模板二进制端点常量、`BidFileIntakeResult`、`DocxTemplateUploadResult`、Host 允许的 action 列表和 composer capability，而不会加载文档解析器或 Node 模块。
 
-`bid.*` 记录通过声明合并接入现有 `@deepseek-ai/dsh-session` `SessionEventMap`。`bid.project.resumed` 只把 Workflow、当前 Run、最近 Run 和 revision 写入当前 Session，用于初始化或同步 `bid.runtime` Projection；Run 开始、挂起和完成分别使用独立事件，业务不可恢复失败使用 Workflow 失败事件。事件不保存文档、Artifact 原文、绝对路径或调用栈；`StageValidationIssue` 使用稳定 `code`、项目相对 `artifact`、Schema `path` 和安全 `message`。
+`bid.*` 记录通过声明合并接入现有 `@deepseek-ai/dsh-session` `SessionEventMap`。`bid.project.resumed` 把唯一任务状态和 revision 写入当前 Session，用于初始化或同步 `bid.runtime` Projection；`bid.task.changed` 提交显式业务结果，Run 开始、挂起和完成事件只描述执行尝试。事件不保存文档、Artifact 原文、绝对路径或调用栈；`StageValidationIssue` 使用稳定 `code`、项目相对 `artifact`、Schema `path` 和安全 `message`。
 
 ## 控制面 Runtime
 
-`project-state.json` 是项目进度的持久化来源，schema version 3 保存 `workflow`、`run`、`last_run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。旧 schema version 会被拒绝。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 ready，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
+`project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
-`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidControlState()` 归约当前 Session 已同步的状态。Workflow 只记录业务阶段和确认门，Run 记录一次执行尝试的身份、epoch、基线 revision、状态和停止原因。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 running 或 cancelling Run 时，Host 将其确定性挂起为 `host_restart`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 `running` 时，Host 在项目锁内将其确定性改为 `suspended(host_restart)`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
-`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `BidClientProjection`；扁平 `runtime` 从 Workflow 与 Run 派生，Run 挂起时明确返回 `suspended`，不会退化为 `pending`。`allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage、聊天或 Agent 活动推导业务状态和权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
+`registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `{ task: BidTaskState, ... }`，不再投影第二套 runtime、workflow 或最近 Run 状态。`allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage、聊天或 Agent 活动推导业务状态和权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
 
 Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 Session 进入通用 Prompt 路径。`webSearchEnabled` 是 Bid 唯一的联网业务开关，默认开启，并同时控制 `web_search` 与 `web_fetch`；`evidenceMappingMaxConcurrency` 和 `chapterWritingMaxConcurrency` 分别限制 S4 Mapping Subagent 与 S5 Chapter Subagent 的同时运行数量，均默认为 3，可配置为 1–8；`chapterWritingCompletionRepairRounds` 单独限制 S5 整书验收后的修订轮数，默认为 3，不随并发数变化。
 
-`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact、追加 `bid.stage.reset`，并停在 `waiting_start`。Host 随后通过 DSH 原生用户提问提供当前阶段重跑或停止选项，选择重跑后才从阶段入口执行。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
+`bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact。S2、S3、S4 在同一操作中先提交 `ready` 再立即进入正常执行；S5 回到 `waiting_user` 且不创建执行 Agent；内部 S1 重置同样回到 `waiting_user`。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；执行器错误或修复耗尽挂起当前 Run，Workflow 的业务进度不回退。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
 

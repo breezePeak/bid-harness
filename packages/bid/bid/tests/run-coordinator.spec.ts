@@ -55,7 +55,7 @@ describe('BidRunCoordinator', () => {
       completed: 2,
       total: 3,
     })
-    await runs.complete(run)
+    await runs.complete(run, () => {})
 
     const completed = session.events.findLast(event => event.type === 'bid.run.completed')
     expect(completed?.data.run.progress).toMatchObject({ phase: 'collecting', completed: 2, total: 3 })
@@ -81,7 +81,7 @@ describe('BidRunCoordinator', () => {
     const first = runs.suspend('user_stop')
     const second = runs.suspend('executor_error', { message: 'late failure' })
 
-    await expect(second).resolves.toMatchObject({ runId: run.runId, status: 'suspended', cause: 'user_stop' })
+    await expect(second).resolves.toMatchObject({ runId: run.runId, cause: 'user_stop' })
     await first
     expect(scheduler.closed).toBe(true)
     expect(children.drain).toHaveBeenCalledOnce()
@@ -128,14 +128,14 @@ describe('BidRunCoordinator', () => {
 
     expect(run.signal.aborted).toBe(true)
     expect(() => { run.commits.assertWritable(run) }).toThrow('BID_RUN_RETIRED')
-    await expect(runs.complete(run)).rejects.toThrow('BID_RUN_RETIRED')
+    await expect(runs.complete(run, () => {})).rejects.toThrow('BID_RUN_RETIRED')
     expect(session.events.filter(event => event.type === 'bid.run.completed')).toHaveLength(0)
   })
 
   it('assigns a new identity and epoch to the next completed stage attempt', async () => {
     const { runs } = await fixture()
     const oldRun = await runs.start(work('tender_analysis'))
-    await runs.complete(oldRun)
+    await runs.complete(oldRun, () => {})
 
     const replacement = await runs.start(work('outline_generation'))
 
@@ -241,7 +241,7 @@ describe('BidRunCoordinator', () => {
     checkpoints[0]!.resolve(8)
     const run = await starting
 
-    const completing = runs.complete(run)
+    const completing = runs.complete(run, () => {})
     await vi.waitFor(() => {
       expect(session.events.findLast(event => event.type === 'bid.run.completed')).toBeDefined()
       expect(checkpoints).toHaveLength(2)

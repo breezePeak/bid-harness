@@ -28,12 +28,11 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         [
           {
             "data": {
-              "lastRun": null,
               "revision": 1,
-              "run": null,
-              "workflow": {
-                "gate": "waiting_user",
+              "state": {
+                "run": null,
                 "stage": "evidence_mapping",
+                "status": "waiting_user",
               },
             },
             "type": "bid.project.resumed",
@@ -41,16 +40,17 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         ]
       `)
       expect(JSON.parse(await readFile(join(cwd, '.bid-harness/project-state.json'), 'utf8'))).toMatchObject({
-        schema_version: 3,
+        schema_version: 4,
         revision: 1,
-        workflow: { stage: 'evidence_mapping', gate: 'waiting_user' },
+        stage: 'evidence_mapping',
+        status: 'waiting_user',
         run: null,
-        last_run: null,
       })
       const exported = join(cwd, 'export-project/.bid-harness')
       expect(JSON.parse(await readFile(join(exported, 'project-state.json'), 'utf8'))).toMatchObject({
-        schema_version: 3,
-        workflow: { stage: 'docx_export', gate: 'ready' },
+        schema_version: 4,
+        stage: 'docx_export',
+        status: 'ready',
         run: null,
       })
       const format = JSON.parse(await readFile(join(exported, 'word-export/default.config.json'), 'utf8')) as { lastExport: { path: string } }
@@ -93,14 +93,16 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
           ],
         },
         "messages": [],
-        "nextRuntime": {
+        "nextTask": {
+          "run": null,
           "stage": "docx_export",
-          "status": "pending",
+          "status": "ready",
         },
         "previewIsFixedSample": true,
-        "runtime": {
+        "task": {
+          "run": null,
           "stage": "docx_export",
-          "status": "pending",
+          "status": "ready",
         },
         "unchanged": true,
       },
@@ -112,7 +114,8 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       ],
       "parentSession": null,
       "previousMessageCount": 3,
-      "runtime": {
+      "task": {
+        "run": null,
         "stage": "evidence_mapping",
         "status": "waiting_user",
       },

@@ -148,7 +148,7 @@ export function BidReviewWorkbench({
   const [reviewInstruction, setReviewInstruction] = useState('')
   const [reviewSaving, setReviewSaving] = useState(false)
   const [reviewError, setReviewError] = useState<string | null>(null)
-  const ready = projection?.runtime.stage === 'chapter_writing' || projection?.runtime.stage === 'docx_export'
+  const ready = projection?.task.stage === 'chapter_writing' || projection?.task.stage === 'docx_export'
   const exportReady = ready && projection.allowedActions.includes('export_docx')
 
   useEffect(() => { setContextMenu(null) }, [chapter, sessionId])
@@ -211,7 +211,7 @@ export function BidReviewWorkbench({
         const currentWorkbench = latestWorkbenchRef.current
         const revisionBatchActive = currentWorkbench?.revision_batch?.status === 'planning'
           || currentWorkbench?.revision_batch?.status === 'running'
-        const shouldPoll = ready && (projection.runtime.status === 'running' || revisionBatchActive)
+        const shouldPoll = ready && (projection.task.status === 'running' || revisionBatchActive)
         if (!disposed && shouldPoll) timer = window.setTimeout(poll, 1000)
       })
     }
@@ -221,7 +221,7 @@ export function BidReviewWorkbench({
       if (timer !== undefined) window.clearTimeout(timer)
       requestVersion.current++
     }
-  }, [projection?.runtime.status, ready, refresh, revision])
+  }, [projection?.task.status, ready, refresh, revision])
 
   const rows = useMemo(() => {
     const items = workbench?.outline ?? []
@@ -479,7 +479,7 @@ export function BidReviewWorkbench({
       </header>
 
       {error !== null && <div className={css.error}>{error}</div>}
-      {projection.runtime.status === 'pending' && <p>等待开始章节写作。</p>}
+      {projection.task.status === 'ready' && <p>等待开始章节写作。</p>}
 
       {workbench !== null && (
         <Modal

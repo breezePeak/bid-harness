@@ -4,12 +4,39 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Page } from 'playwright'
 import { expect, it } from 'vitest'
-import { BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog, outlineArtifactSha256, type OutlineArtifact } from '@deepseek-ai/dsh-bid'
+import {
+  BidWorkspace,
+  bidProjectTaskState,
+  checkpointBidProjectState,
+  createScoringResponsePointCatalog,
+  outlineArtifactSha256,
+  type BidStage,
+  type BidTaskState,
+  type OutlineArtifact,
+} from '@deepseek-ai/dsh-bid'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh, saveFailureShot, ZH_BROWSER_LOCALE } from './support.ts'
 import { seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/project-session.ts'
+
+type PublishedTask = { readonly stage: BidStage; readonly status: 'running' | 'waiting_user' | 'completed' }
+
+function publishedTask({ stage, status }: PublishedTask): BidTaskState {
+  if (status !== 'running') return { stage, status, run: null }
+  return {
+    stage,
+    status,
+    run: {
+      runId: `web-${stage}`, epoch: 1, baseProjectRevision: 0,
+      work: {
+        kind: 'stage_execution', workId: `web-${stage}-work`, stage,
+        requestRef: `web-${stage}`, requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64),
+      },
+      startedAt: 1, updatedAt: 1,
+    },
+  }
+}
 
 async function dragSection(page: Page, title: string, target: string): Promise<void> {
   const originalTitles = await page.getByLabel('技术标目录', { exact: true }).locator('input').evaluateAll(elements => elements.map(element => (element as HTMLInputElement).value))
@@ -49,12 +76,10 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     const workspace = new BidWorkspace(agent.session.header.cwd)
     await seedProjectArtifacts(workspace)
-    const publish = async (runtime: Parameters<typeof checkpointBidProjectState>[1]) => {
-      const state = await checkpointBidProjectState(workspace, runtime)
+    const publish = async (task: PublishedTask) => {
+      const state = await checkpointBidProjectState(workspace, publishedTask(task))
       agent.session.append('bid.project.resumed', {
-        workflow: state.workflow,
-        run: state.run,
-        lastRun: state.last_run,
+        state: bidProjectTaskState(state),
         revision: state.revision,
       })
     }
@@ -250,8 +275,8 @@ it('S5 运行中可打开 Word 导出并提示仅导出已保存章节', async (
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '查看当前正文' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
-    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+    const state = await checkpointBidProjectState(workspace, publishedTask({ stage: 'chapter_writing', status: 'running' }))
+    agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
 
     await page.getByRole('tab', { name: '正文详情', exact: true }).click()
     const exportButton = page.getByRole('button', { name: '导出 Word', exact: true })
@@ -309,8 +334,8 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
       await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
     }
     await rm(join(workspace.projectRoot, 'outline/confirmed-outline.json'))
-    const state = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
-    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+    const state = await checkpointBidProjectState(workspace, publishedTask({ stage: 'evidence_mapping', status: 'waiting_user' }))
+    agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
     await page.getByRole('tab', { name: '目录详情', exact: true }).click()
     await page.getByText('S4 · 深化目录与材料审核', { exact: true }).waitFor()
     const draft = await scaffold.ctx.bid.getOutlineDraft(agent.session)

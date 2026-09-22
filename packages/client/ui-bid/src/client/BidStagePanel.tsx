@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
-import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageRunStatus, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, BidTaskStatus, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
@@ -103,14 +103,12 @@ function stageKey(stage: BidStage): BidKey {
   return `stage.${stage}`
 }
 
-function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'error' | undefined {
+function statusDot(status: BidTaskStatus): 'done' | 'warning' | 'ongoing' | 'error' | undefined {
   switch (status) {
-    case 'pending': return undefined
-    case 'waiting_start': return 'warning'
+    case 'ready': return undefined
     case 'waiting_user': return 'warning'
     case 'running': return 'ongoing'
     case 'suspended': return 'warning'
-    case 'attention_required': return 'warning'
     case 'failed': return 'error'
     case 'completed': return 'done'
   }
@@ -118,14 +116,12 @@ function statusDot(status: StageRunStatus): 'done' | 'warning' | 'ongoing' | 'er
   return exhaustive
 }
 
-function statusKey(status: StageRunStatus): BidKey {
+function statusKey(status: BidTaskStatus): BidKey {
   switch (status) {
-    case 'pending': return 'status.pending'
-    case 'waiting_start': return 'status.waiting_start'
+    case 'ready': return 'status.pending'
     case 'running': return 'status.running'
     case 'waiting_user': return 'status.waiting_user'
     case 'suspended': return 'status.suspended'
-    case 'attention_required': return 'status.failed'
     case 'failed': return 'status.failed'
     case 'completed': return 'status.completed'
   }
@@ -133,8 +129,7 @@ function statusKey(status: StageRunStatus): BidKey {
   return exhaustive
 }
 
-function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
-  if (status === 'waiting_start') return 'prompt.stage_waiting_start'
+function promptKey(stage: BidStage, status: BidTaskStatus): BidKey {
   if (status === 'suspended') return 'prompt.stage_suspended'
   switch (stage) {
     case 'file_intake':
@@ -142,7 +137,7 @@ function promptKey(stage: BidStage, status: StageRunStatus): BidKey {
       if (status === 'failed') return 'prompt.file_intake_failed'
       return 'prompt.file_intake'
     case 'tender_analysis':
-      if (status === 'pending') return 'prompt.tender_analysis_pending'
+      if (status === 'ready') return 'prompt.tender_analysis_pending'
       return status === 'waiting_user' ? 'prompt.tender_analysis_confirmation' : 'prompt.tender_analysis'
     case 'evidence_mapping': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.evidence_mapping'
     case 'outline_generation': return status === 'waiting_user' ? 'prompt.outline_confirmation' : 'prompt.outline_generation'
@@ -395,15 +390,14 @@ export function BidStagePanel({
   } | null>(null)
   const [mappingReadState, setMappingReadState] = useState<'loading' | 'ready' | 'stale'>('loading')
 
-  const progressStage = projection?.runtime.stage
-  const progressStatus = projection?.runtime.status
-  const progressRunId = projection?.run?.runId ?? null
-  const progressWorkId = projection?.run?.work.workId ?? null
+  const progressStage = projection?.task.stage
+  const progressStatus = projection?.task.status
+  const progressRunId = projection?.task.run?.runId ?? null
+  const progressWorkId = projection?.task.run?.work.workId ?? null
   const progressReaderAvailable = getEvidenceMappingProgress !== undefined
   const mappingProgressObservable = isBidSession
     && progressStage === 'evidence_mapping'
-    && progressStatus !== 'pending'
-    && progressStatus !== 'waiting_start'
+    && progressStatus !== 'ready'
   const progressInput = useRef({ projection, getEvidenceMappingProgress })
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
@@ -500,7 +494,7 @@ export function BidStagePanel({
         if (progress !== null) {
           setMappingSnapshot(previous => ({
             sessionId,
-            workId: observed.run?.work.workId ?? progressWorkId
+            workId: observed.task.run?.work.workId ?? progressWorkId
               ?? (previous?.sessionId === sessionId ? previous.workId : null),
             progress,
           }))
@@ -514,7 +508,7 @@ export function BidStagePanel({
       } finally {
         inFlight = false
         if (isActive()) {
-          const status = progressInput.current.projection?.runtime.status
+          const status = progressInput.current.projection?.task.status
           timer = window.setTimeout(() => { void refresh() }, status === 'running' ? 1000 : 5000)
         }
       }
@@ -555,18 +549,17 @@ export function BidStagePanel({
     setRealtimeChatMode(true)
     return () => { setRealtimeChatMode(false) }
   }, [hasProjection, sessionId, setRealtimeChatMode])
-  const backgroundRunActive = hasProjection
-    && (projection.run?.status === 'running' || projection.run?.status === 'cancelling')
+  const backgroundRunActive = hasProjection && projection.task.status === 'running'
   useEffect(() => {
     setBackgroundActivity(backgroundRunActive)
     return () => { setBackgroundActivity(false) }
   }, [backgroundRunActive, setBackgroundActivity])
   const embedConversation = false
-  const reviewViewAvailable = hasProjection && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
-  const outlineReviewReady = canConfirm && projection?.runtime.stage === 'evidence_mapping'
+  const reviewViewAvailable = hasProjection && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
+  const outlineReviewReady = canConfirm && projection?.task.stage === 'evidence_mapping'
   const reviewViewId = canConfirmAnalysis ? 'bid-tender'
     : canConfirm ? outlineReviewReady ? 'bid-outline' : 'bid-confirmation' : 'bid-review'
-  const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.runtime.stage}:${projection.runtime.status}` : null
+  const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.task.stage}:${projection.task.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   const [, setReviewWorkbenchActive] = useState(false)
   useEffect(() => {
@@ -584,7 +577,7 @@ export function BidStagePanel({
 
   const showFloatingRevision = hasProjection
     && isBidSession
-    && (projection.runtime.stage === 'chapter_writing' || projection.runtime.stage === 'docx_export')
+    && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
     && getRevisionQueue !== undefined
 
   useEffect(() => {
@@ -613,7 +606,7 @@ export function BidStagePanel({
     } else setDetailsAvailable(null)
     return () => { active = false }
   }, [
-    hasProjection, sessionId, projection?.runtime.stage, projection?.runtime.status,
+    hasProjection, sessionId, projection?.task.stage, projection?.task.status,
     getDetails, setDetailsAvailable, reviewStateKey, reviewViewId, canConfirm, outlineReviewReady, selectReviewView,
   ])
 
@@ -634,29 +627,29 @@ export function BidStagePanel({
   }, [reviewStateKey, reviewViewAvailable, selectReviewView, reviewViewId])
 
   useEffect(() => {
-    if (projection?.runtime.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
+    if (projection?.task.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
     selectedFilesSessionId.current = sessionId
     selectedFilesRef.current = []
     selectedTemplateRef.current = null
     setSelectedFiles([])
     setSelectedTemplate(null)
     setDocxTemplateMessage('')
-  }, [projection?.runtime.stage, sessionId])
+  }, [projection?.task.stage, sessionId])
 
   useEffect(() => {
-    if (!hasProjection || projection.runtime.stage !== 'file_intake') { setDocxLibrary(null); return }
+    if (!hasProjection || projection.task.stage !== 'file_intake') { setDocxLibrary(null); return }
     let active = true
     void getDocxLibrary().then((value) => { if (active) setDocxLibrary(value) }, (reason: unknown) => {
       if (active) setDocxTemplateMessage(reason instanceof Error ? reason.message : 'Word 模板库读取失败。')
     })
     return () => { active = false }
-  }, [getDocxLibrary, hasProjection, projection?.runtime.stage, sessionId])
+  }, [getDocxLibrary, hasProjection, projection?.task.stage, sessionId])
 
   useEffect(() => {
     setOutlineFeedback('')
     setUpdatedForConfirmation(false)
     draftRef.current = null
-  }, [sessionId, projection?.runtime.stage])
+  }, [sessionId, projection?.task.stage])
 
   useEffect(() => {
     requestEpoch.current += 1
@@ -666,7 +659,7 @@ export function BidStagePanel({
       actionErrorVisible.current = false
       setRequestError(null)
     }
-  }, [sessionId, projection?.runtime.stage, projection?.runtime.status])
+  }, [sessionId, projection?.task.stage, projection?.task.status])
 
   useEffect(() => {
     setReviewContext(null)
@@ -678,7 +671,7 @@ export function BidStagePanel({
       if (active) setRequestError({ message: reason instanceof Error ? reason.message : String(reason), issues: [] })
     })
     return () => { active = false }
-  }, [canConfirm, getOutlineReviewContext, sessionId, projection?.runtime.stage])
+  }, [canConfirm, getOutlineReviewContext, sessionId, projection?.task.stage])
 
 
   useEffect(() => {
@@ -713,19 +706,19 @@ export function BidStagePanel({
   const chapterManualKey = `${sessionId}:chapter_writing:manual`
   const chapterAutomaticKey = `${sessionId}:chapter_writing:automatic`
   useEffect(() => {
-    if (projection?.runtime.stage !== 'tender_analysis' || projection.runtime.status !== 'waiting_user') {
+    if (projection?.task.stage !== 'tender_analysis' || projection.task.status !== 'waiting_user') {
       actions.clearAttempted(tenderAutomaticKey)
     }
-    if (projection?.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user') {
+    if (projection?.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user') {
       actions.clearAttempted(chapterManualKey)
       actions.clearAttempted(chapterAutomaticKey)
     }
-  }, [actions, chapterAutomaticKey, chapterManualKey, projection?.runtime.stage, projection?.runtime.status, tenderAutomaticKey])
+  }, [actions, chapterAutomaticKey, chapterManualKey, projection?.task.stage, projection?.task.status, tenderAutomaticKey])
 
   useEffect(() => {
     if (confirmationMode !== 'automatic' || !canConfirm || confirmOutline === undefined || draft === null
       || draftSaveState !== 'saved' || requestPending !== null) return
-    const key = `${sessionId}:${projection?.runtime.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
+    const key = `${sessionId}:${projection?.task.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
     if (automaticAttempts.includes(key)) return
     actions.markAttempted(key)
     invoke('confirm', async () => {
@@ -737,11 +730,11 @@ export function BidStagePanel({
     })
   }, [
     actions, automaticAttempts, canConfirm, confirmationMode, confirmOutline, draft,
-    draftSaveState, invoke, projection?.runtime.stage, requestPending, sessionId,
+    draftSaveState, invoke, projection?.task.stage, requestPending, sessionId,
   ])
 
   useEffect(() => {
-    if (!hasProjection || projection.runtime.stage !== 'chapter_writing' || projection.runtime.status !== 'waiting_user'
+    if (!hasProjection || projection.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user'
       || requestPending !== null) return
     if (writingEntry === null || writingEntry === undefined || writingEntry.phase !== 'empty') return
     const automatic = confirmationMode === 'automatic'
@@ -765,9 +758,9 @@ export function BidStagePanel({
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const s5WaitingUser = isBidSession
-    && projection.runtime.stage === 'chapter_writing'
-    && projection.run === null
-    && (projection.runtime.status === 'waiting_user' || projection.runtime.status === 'pending')
+    && projection.task.stage === 'chapter_writing'
+    && projection.task.run === null
+    && (projection.task.status === 'waiting_user' || projection.task.status === 'ready')
   const accept = projection.allowedExtensions?.join(',')
   const rules = fileRules(projection, t)
 
@@ -887,19 +880,18 @@ export function BidStagePanel({
     setRequestError(null)
   }
 
-  const isFailedOrSuspended = projection.runtime.status === 'failed' || projection.runtime.status === 'suspended'
-  const hostFailureReason = isFailedOrSuspended
-    ? projection.runtime.failureReason
-    : undefined
-  const hostFailureIssues = isFailedOrSuspended
-    ? projection.runtime.failureIssues ?? []
-    : []
+  const isFailedOrSuspended = projection.task.status === 'failed' || projection.task.status === 'suspended'
+  const hostFailure = projection.task.status === 'failed'
+    ? projection.task.failure
+    : projection.task.status === 'suspended' ? projection.task.run.error : undefined
+  const hostFailureReason = hostFailure?.message
+  const hostFailureIssues = hostFailure?.issues ?? []
   const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
-  const runCancelling = projection.run?.status === 'cancelling'
-  const showRunPlan = projection.runtime.status === 'running'
+  const runCancelling = false
+  const showRunPlan = projection.task.status === 'running'
   const planItems = buildBidStagePlan(projection, t)
   const planLabels: PlanListLabels = {
-    title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.runtime.stage) + 1)}`, name: t(stageKey(projection.runtime.stage)) }),
+    title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.task.stage) + 1)}`, name: t(stageKey(projection.task.stage)) }),
     completed: count => t('plan.progress.completed', { count }),
     active: count => t('plan.progress.active', { count }),
     unfinished: count => t('plan.progress.unfinished', { count }),
@@ -917,7 +909,7 @@ export function BidStagePanel({
         else selectReviewView('bid-review')
       }}
       onCompare={compareRevision}
-      isRunning={projection.runtime.status === 'running'}
+      isRunning={projection.task.status === 'running'}
       floatingMode="fixed"
       refreshSignal={revisionSignal}
     />
@@ -933,16 +925,16 @@ export function BidStagePanel({
       {floatingRevision}
     </>
   )
-  const progressSyncFailed = projection.runtime.stage === 'evidence_mapping'
+  const progressSyncFailed = projection.task.stage === 'evidence_mapping'
     && mappingReadState === 'stale'
   const dotState = runCancelling || progressSyncFailed
     ? 'warning'
-    : statusDot(projection.runtime.status)
-  const displayStage = projection.runtime.stage === 'docx_export' ? 'chapter_writing' : projection.runtime.stage
-  const mappingActivelyRunning = projection.runtime.status === 'running' && !runCancelling
+    : statusDot(projection.task.status)
+  const displayStage = projection.task.stage === 'docx_export' ? 'chapter_writing' : projection.task.stage
+  const mappingActivelyRunning = projection.task.status === 'running' && !runCancelling
   const mappingRunningLabel = runCancelling
     ? 'mapping.tasks.settling'
-    : projection.runtime.status === 'suspended'
+    : projection.task.status === 'suspended'
       ? 'mapping.tasks.interrupted'
       : mappingActivelyRunning
         ? 'mapping.tasks.running'
@@ -1142,7 +1134,7 @@ export function BidStagePanel({
                 )
               })()
             ) : (
-              t(promptKey(displayStage, projection.runtime.status))
+              t(promptKey(displayStage, projection.task.status))
             )}
           </span>
           <span className={css.runtimeStatus}>
@@ -1150,7 +1142,7 @@ export function BidStagePanel({
               ? t('status.cancelling')
               : progressSyncFailed
                 ? t('status.sync_unavailable')
-                : t(statusKey(projection.runtime.status))}
+                : t(statusKey(projection.task.status))}
           </span>
         </div>
 
@@ -1163,7 +1155,7 @@ export function BidStagePanel({
           </p>
         )}
 
-        {projection.runtime.status === 'suspended' && mainAgentRunning && (
+        {projection.task.status === 'suspended' && mainAgentRunning && (
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
         )}
 
@@ -1250,8 +1242,8 @@ export function BidStagePanel({
                 feedback={outlineRevision}
                 notice={<>{updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}{errorNotice}</>}
                 reviewContext={reviewContext}
-                stage={projection.runtime.stage}
-                displayMode={projection.runtime.stage === 'evidence_mapping' ? 'final_candidate' : 'initial'}
+                stage={projection.task.stage}
+                displayMode={projection.task.stage === 'evidence_mapping' ? 'final_candidate' : 'initial'}
                 draftSaveState={draftSaveState}
                 revision={draft?.revision}
                 onUpdateSection={updateSection}
@@ -1296,7 +1288,7 @@ export function BidStagePanel({
           </div>
         </Portal>}
 
-        {projection.runtime.stage === 'file_intake' && queuedFiles.length > 0 && (
+        {projection.task.stage === 'file_intake' && queuedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
             {queuedFiles.map(({ file, role, id, progress, status, error }) => {
               const sizeText = formatFileSize(file.size)
@@ -1348,7 +1340,7 @@ export function BidStagePanel({
           </ul>
         )}
 
-        {projection.runtime.stage === 'file_intake' && (
+        {projection.task.stage === 'file_intake' && (
           <div aria-label="Word 模板">
             <input ref={docxTemplateInput} className={css.fileInput} type="file" accept=".docx" onChange={selectedDocxTemplate}/>
             {docxTemplateMessage && <p className={css.docxTemplateMessage} role="status">{docxTemplateMessage}</p>}
@@ -1455,7 +1447,7 @@ export function BidStagePanel({
           )}
           {s5WaitingUser && writingEntry !== null && writingEntry !== undefined && (
             <>
-              {projection.runtime.status === 'waiting_user' && writingEntry.phase === 'empty' && (
+              {projection.task.status === 'waiting_user' && writingEntry.phase === 'empty' && (
                 <>
                   <Button
                     size="sm"

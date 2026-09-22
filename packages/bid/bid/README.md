@@ -29,15 +29,15 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ## Control plane types
 
-The package exports the fixed `BidStage` and `StageRunStatus` values plus `BidRuntimeState`, `BidStagePolicy`, `BidStageTask`, `StageArtifact`, and `StageValidationResult`. The browser-safe `@deepseek-ai/dsh-bid/control-plane` subpath additionally exports `BidClientProjection`, the `BidUploadFile` request and `BidFileIntakeResult` response, its Host-admitted action list, and composer capability without loading document parsers or Node modules. `BID_STAGES` and `STAGE_RUN_STATUSES` are the runtime enumerations for validators and clients; their derived union types prevent a second stage or status vocabulary.
+本包导出固定的 `BidStage`、`BidTaskStatus` 和唯一判别联合 `BidTaskState`。只有 `running` 与 `suspended` 分支携带 Run 执行数据；browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 直接向客户端暴露同一状态结构。
 
 The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
 
 ## Control plane runtime
 
-`project-state.json` 保存 Workspace 级项目进度；新 Session 通过 `bid.project.resumed` 初始化当前控制面，不复制旧聊天。`BidOrchestrator` 在执行所用 Session 中通过 `reduceBidRuntimeState()` 归约已同步的状态。详见[项目生命周期](README.zh.md#控制面-runtime)。 `runCurrentProgramStage()` executes the pending or failed program-owned stage once. `drive()` follows each current `StagePolicy` while the Executor reports `canExecute(stage)`, and stops at user input, an unsupported pending stage, failure, or final completion. Fresh project intake waits for the dedicated upload action because its executor requires the admitted file batch. `retry()`, `confirm()`, `admitAction()`, and `admitPrompt()` enforce state and permissions on the Host.
+`project-state.json` 使用 v4 扁平结构保存 Workspace 级项目进度；结构合法的 v3 会在读取时归一。新 Session 通过 `bid.project.resumed` 初始化当前控制面，不复制旧聊天。`BidOrchestrator` 在执行所用 Session 中通过 `reduceBidTaskState()` 归约已同步状态，详见[项目生命周期](README.zh.md#控制面-runtime)。
 
-`registerBidRuntimeProjection()` registers the same reducer as the `bid.runtime` DSH Session Projection. Its `BidClientProjection` exposes only Host-admitted actions, composer capability, and Host-configured file limits. S1 through S5 form the linear writing workflow. S6 is an on-demand export action available beside the completed S5 review workbench.
+`registerBidRuntimeProjection()` 把相同归约器注册为 `bid.runtime` DSH Session Projection。`BidClientProjection` 以 `task` 直接暴露唯一状态，并附带 Host 准入 action、composer capability 和文件限制；S6 DOCX 仍是独立的按需操作。
 
 ### 执行与恢复所有权
 
@@ -67,7 +67,7 @@ Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包
 
 S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，再由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问“开始正文编写前，是否还有其他整体写作要求？”，并提供“没有，开始编写”及自定义输入；刷新或换 Session 不会重复询问，也不会启动 Writer。回答持久化后，Main Agent 读取 `task_contract_context.writing_request` 制定首次 Writing Plan；Host 将自定义回答原文加入顶层 `user_requirements`，不伪造 `user_message_refs`，并通过 `bid_confirm_writing_plan` 保存 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
 
-全自动模式只在 `chapter_writing/waiting_user` 调用 `auto_start_chapter_writing`。Host 读取最终确认目录，生成覆盖全部可写叶节且 `user_message_refs`、`user_requirements` 均为空的 schema v3 默认 Writing Plan，运行 `validateWritingPlan()` 后原子写入，并追加既有确认事件；正文仍由 `runConfirmedStage()` 启动。该路径不创建询问标记、不伪造用户原话，也不直接伪造阶段启动事件。确认模式只由客户端 Session store 持有；Host 仍拒绝在 `failed`、`waiting_start` 或其他阶段状态调用自动启动。
+全自动模式只在 `chapter_writing/waiting_user` 调用 `auto_start_chapter_writing`。Host 读取最终确认目录，生成覆盖全部可写叶节且 `user_message_refs`、`user_requirements` 均为空的 schema v3 默认 Writing Plan，运行 `validateWritingPlan()` 后原子写入，并由 `ready` 直接进入正文执行。该路径不创建询问标记、不伪造用户原话。确认模式只由客户端 Session store 持有；Host 仍拒绝在 `failed` 或其他阶段状态调用自动启动。
 
 S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的新要求才调用 `bid_confirm_writing_plan`。Host 把新计划送入当前调度器，不取消无关 Writer 或 Reviewer：未开始章节读取新契约，已完成的受影响章节进入定向修复，运行中的受影响章节递增输入 epoch 并丢弃迟到旧结果。`chapters/applied-writing-plan.json` 记录执行日志采用的计划版本；模型决定 `revision.affected_section_ids`，程序只扩展真实强依赖下游。正文引用作为结构化上下文进入 Main Agent；引用本身不等于修订，只有明确修改才调用 `bid_revise_chapter`。
 
@@ -134,7 +134,7 @@ S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果�
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
 
-阶段重置不会自动开始执行。Host 会先取消并等待当前 Agent 树静止，清理目标阶段及其后续 Artifact，再将 S2–S5 置为 `waiting_start`；Host 通过 DSH 原生用户提问提供当前阶段重跑或停止选项，明确选择重跑后才进入该阶段的正常执行路径。重启后内存执行记录缺失也不会跳过 Agent drain。
+阶段重置会先取消并等待当前 Agent 树静止，再清理目标阶段及其后续 Artifact。S2–S4 在同一操作中提交 `ready` 后立即进入正常执行；S1 与 S5 回到 `waiting_user`，且 S5 不创建执行 Agent。重启后内存执行记录缺失也不会跳过 Agent drain。
 
 ## Model Experience
 

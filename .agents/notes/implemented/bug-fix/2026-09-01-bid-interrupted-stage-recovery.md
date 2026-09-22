@@ -2,6 +2,8 @@
 
 Status: implemented
 
+重置后的 `waiting_start`、开始 Remote 与二次确认已由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)替代；中断 Run 的 `host_restart` 挂起、重置静止顺序和上下文清理仍有效。
+
 ## Problem
 
 Bid 阶段开始时会持久化 `bid.stage.started`，但 Host 进程在 Executor 或 Validator 结束前停止时无法写入完成或失败事件。Session 恢复后只能归约出 `running`；新进程中没有对应的执行操作，Projection 却仍禁用操作区并要求用户等待，因此项目无法继续。

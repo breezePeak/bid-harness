@@ -2,22 +2,24 @@ import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
-  BidControlState,
+  BidRunData,
   BidRunDecision,
   BidRunDecisionType,
   BidRunProgress,
-  BidRunSnapshot,
   BidRunNotice,
-  BidRuntimeState,
   BidStage,
+  BidTaskFailure,
+  BidTaskState,
   StageArtifact,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import type { LegacyBidControlState, LegacyBidRuntimeState } from './runtime-state.ts'
 import type { WritingEntryView } from './writing-entry-contract.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
+  'bid.task.changed',
   'bid.run.started',
   'bid.run.progress',
   'bid.run.start_failed',
@@ -105,24 +107,30 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
      * 将 Workspace 的项目进度应用到当前聊天的 Bid 投影，不附带聊天历史。
-     * @param runtime 已持久化的项目控制状态。
+     * @param state 已持久化的项目任务状态。
      * @param revision 项目状态文件的修订号。
      */
-    'bid.project.resumed': ({ runtime: BidRuntimeState } | BidControlState) & { revision: number }
+    'bid.project.resumed': (
+      | { state: BidTaskState }
+      | LegacyBidControlState
+      | { runtime: LegacyBidRuntimeState }
+    ) & { revision: number }
+    /** One Host-owned transition of the authoritative task state. */
+    'bid.task.changed': { state: BidTaskState }
     /** One exact stage execution attempt became active. */
-    'bid.run.started': { run: BidRunSnapshot }
+    'bid.run.started': { run: BidRunData }
     /** Latest bounded milestone for the exact active Run identity. */
     'bid.run.progress': { runId: string; epoch: number; stage: BidStage; progress: BidRunProgress }
     /** The running-state checkpoint failed before execution authority was granted. */
     'bid.run.start_failed': { runId: string; epoch: number }
     /** One exact execution attempt is draining before it can become resumable. */
-    'bid.run.cancelling': { run: BidRunSnapshot & { status: 'cancelling' } }
+    'bid.run.cancelling': { runId: string; epoch: number; stage: BidStage }
     /** One exact execution attempt stopped without changing business progress. */
-    'bid.run.suspended': { run: BidRunSnapshot & { status: 'suspended' } }
+    'bid.run.suspended': { run: BidRunData & { cause: import('./control-plane-contract.ts').BidRunSuspensionCause; error?: BidTaskFailure } }
     /** Model-invisible terminal Run row for the conversation timeline. */
     'bid.run.notice': BidRunNotice
     /** One exact execution attempt settled after committing its stage outcome. */
-    'bid.run.completed': { run: BidRunSnapshot & { status: 'completed' } }
+    'bid.run.completed': { run: BidRunData }
     /** Project progress cannot be continued or reconciled safely. */
     'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
     /** A stage began execution and is the control plane's current running stage. */
@@ -145,18 +153,14 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param issues Browser-safe validation details when validation rejected Artifacts.
      */
     'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
-    /**
-     * A user command cleared the current and later stages and now waits for an explicit start.
-     * @param stage Current stage selected by the scoped reset command.
-     * @param status Stable post-reset user gate.
-     */
-    'bid.stage.reset': { stage: BidStage; status: 'pending' | 'waiting_start' }
-    /** Native DSH question required before a suspended Run or reset stage can proceed. */
+    /** Legacy reset event retained only for historical Session replay. */
+    'bid.stage.reset': { stage: BidStage; status?: 'pending' | 'waiting_start' | 'ready' | 'waiting_user' }
+    /** Native DSH question required before a suspended Run can proceed; stage_start is legacy replay data. */
     'bid.run.decision.required': {
       decisionKey: string
       stage: BidStage
       runId: string
-      decisionType: BidRunDecisionType
+      decisionType: BidRunDecisionType | 'stage_start'
       question: AskUserQuestionItem
     }
     /** The explicit option selected for one previously requested native question. */
@@ -164,7 +168,7 @@ declare module '@deepseek-ai/dsh-session/types' {
       decisionKey: string
       stage: BidStage
       runId: string
-      decisionType: BidRunDecisionType
+      decisionType: BidRunDecisionType | 'stage_start'
       decision: BidRunDecision
     }
     /** A stage is waiting for an explicit user decision. */

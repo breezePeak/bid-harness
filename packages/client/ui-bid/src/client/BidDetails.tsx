@@ -29,7 +29,7 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
   const label = kind === 'confirmation' ? '审核项' : kind === 'tender' ? '招标详情' : '目录详情'
   const confirming = kind === 'confirmation' || (kind === 'tender'
     ? projection?.allowedActions.includes('confirm_tender_analysis')
-    : projection?.runtime.stage === 'evidence_mapping' && projection.allowedActions.includes('confirm_outline'))
+    : projection?.task.stage === 'evidence_mapping' && projection.allowedActions.includes('confirm_outline'))
   useEffect(() => {
     let active = true
     setDetails(null)
@@ -40,7 +40,7 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
       })
     }
     return () => { active = false }
-  }, [sessionId, isBid, isSubagent, projection?.runtime.stage, projection?.runtime.status, confirming, getDetails])
+  }, [sessionId, isBid, isSubagent, projection?.task.stage, projection?.task.status, confirming, getDetails])
   if (isSubagent || projection === undefined || (!isBid && !confirming)) return null
   if (confirming) return (
     <section className={css.confirmationContainer} aria-label={label}>
@@ -61,7 +61,7 @@ export function BidDetails({ sessionId, useSessions, useProjection, kind, getDet
     <section className={css.confirmationContainer} aria-label="目录详情">
       <OutlineConfirmationReview key={`${sessionId}:${presentation.source}`} outline={details.outline} readOnly
         hideStats
-        stage={projection.runtime.stage}
+        stage={projection.task.stage}
         displayMode={presentation.source === 'initial_confirmed' ? 'initial' : presentation.source}
         notice={presentation.errors.map(message => <p role="alert" key={message}>{message}</p>)}
         reviewContext={details.tender === null ? null : {

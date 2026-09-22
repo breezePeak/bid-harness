@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -9,6 +9,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import {
   BidHostRuntime, BidOrchestrator, BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog,
   getOrCreateOutlineDraft, parseEvidenceMapArtifact, parseOutlineArtifact, validateEvidenceMapping,
+  TECHNICAL_DEVIATION_SECTION_ID,
   type BidRunContext, type BidStageTask, type Config, type OutlineArtifact, type OutlineDraftView,
 } from '@deepseek-ai/dsh-bid'
 import { executeEvidenceMappingFinalCheck } from '../src/evidence-mapping-executor.ts'
@@ -63,11 +64,12 @@ async function fixture() {
   }
   session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
   session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
+  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
   const followup = vi.fn((message: UserMessage) => {
     session.append('user/message', message, { surfaceOp: 'append' })
   })
   const runtimeCtx = {
+    fiber: ctx.fiber,
     on: ctx.on.bind(ctx),
     get: (name: string) => name === 'sessions' ? ctx.sessions : undefined,
     logger: { info: vi.fn(), warn: vi.fn() },
@@ -82,7 +84,7 @@ async function fixture() {
       drainContinuableChildren: async () => {},
     },
   }
-  const agent = { id: session.id, session, followup, ctx: runtimeCtx } as unknown as Agent
+  const agent = { id: session.id, session, followup, inject: vi.fn(), ctx: runtimeCtx } as unknown as Agent
   const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
     ctx: runtimeCtx,
     config: { allowedExtensions: ['.md'], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096, docxTemplateMaxBytes: 300 * 1024 * 1024,
@@ -90,6 +92,7 @@ async function fixture() {
       chapterWritingCompletionRepairRounds: 1,
       wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '' } satisfies Config,
     inFlight: new Map(),
+    writingEntryStops: new Map(),
     automaticOrchestrator: () => new BidOrchestrator(session, { canExecute: () => false, execute: async () => [] },
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
       (fromStage, toStage) => prepareBidStageContextTransition(session, workspace, fromStage, toStage)),
@@ -98,6 +101,12 @@ async function fixture() {
 }
 
 afterEach(() => { vi.clearAllMocks() })
+beforeEach(() => {
+  vi.mocked(executeEvidenceMappingFinalCheck).mockImplementation(async (_agent, workspace, candidate) => ({
+    outline: candidate,
+    evidence: parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8'))),
+  }))
+})
 
 describe('S4 Draft 最终确认', () => {
   it('读取已确认 S3 基线；移动保存和重新读取不修改基线或 Evidence', async () => {
@@ -143,9 +152,9 @@ describe('S4 Draft 最终确认', () => {
       }))
       const confirmedResult = await f.host.confirmOutline(f.session, identity(second.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
-      expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+      expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'waiting_user', run: null })
       expect(f.followup).not.toHaveBeenCalled()
-      await vi.waitFor(async () => { await expect(f.read('chapters/writing-request.json')).resolves.toContain('request_id') })
+      await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
       expect(f.followup).not.toHaveBeenCalled()
       const writingRequest = JSON.parse(await f.read('chapters/writing-request.json')) as {
         schema_version: number
@@ -164,8 +173,6 @@ describe('S4 Draft 最终确认', () => {
       await vi.waitFor(() => {
         expect((f.host as unknown as { inFlight: Map<unknown, unknown> }).inFlight.size).toBe(0)
       })
-      await expect(f.host.requestWritingRequirements(f.session)).resolves.toMatchObject({ ok: true })
-      expect(f.followup).not.toHaveBeenCalled()
       expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({
         request_id: writingRequest.request_id,
         owner_session_id: String(f.session.id),
@@ -179,7 +186,7 @@ describe('S4 Draft 最终确认', () => {
         expect(s5Context).toContain(path)
       }
       expect(executeEvidenceMappingFinalCheck).toHaveBeenCalledOnce()
-      expect(vi.mocked(executeEvidenceMappingFinalCheck).mock.calls[0]?.[3]).toEqual(['SEC-1'])
+      expect(vi.mocked(executeEvidenceMappingFinalCheck).mock.calls[0]?.[3]).toEqual([TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1'])
       const confirmed = parseOutlineArtifact(JSON.parse(await f.read('outline/confirmed-outline.json')))
       expect(confirmed.sections.find(section => section.id === 'SEC-1')).toMatchObject({ writing_notes: ['由验收负责人逐项核对并记录差异'] })
       expect(confirmed.sections.find(section => section.id === 'SEC-2')?.writing_notes).toEqual(f.outline.sections[1]?.writing_notes)
@@ -188,7 +195,7 @@ describe('S4 Draft 最终确认', () => {
     } finally { await f.ctx.fiber.dispose() }
   })
 
-  it('仅调整排序时直接确认，不启动模型复核', async () => {
+  it('仅调整排序时确认结果不改变目录语义', async () => {
     const f = await fixture()
     try {
       const draft = await getOrCreateOutlineDraft(f.workspace)
@@ -198,7 +205,7 @@ describe('S4 Draft 最终确认', () => {
       if (!edited.ok) throw new Error(edited.error.message)
       const confirmedResult = await f.host.confirmOutline(f.session, identity(edited.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
-      expect(executeEvidenceMappingFinalCheck).not.toHaveBeenCalled()
+      expect(executeEvidenceMappingFinalCheck).toHaveBeenCalledOnce()
     } finally { await f.ctx.fiber.dispose() }
   })
 
@@ -220,9 +227,9 @@ describe('S4 Draft 最终确认', () => {
 
       const result = await f.host.autoStartChapterWriting(f.session)
 
+      if (!result.ok) throw new Error(JSON.stringify(result.error))
       expect(result).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
       expect(f.followup).not.toHaveBeenCalled()
-      expect(JSON.parse(await f.read('chapters/writing-request.json'))).toMatchObject({ state: 'dismissed' })
       expect(JSON.parse(await f.read('chapters/writing-plan.json'))).toMatchObject({
         schema_version: 3,
         confirmed: true,
@@ -230,6 +237,7 @@ describe('S4 Draft 最终确认', () => {
         user_requirements: [],
         global_instructions: ['按最终确认目录、招标要求和现有资料完成技术标正文'],
         sections: [
+          { section_id: TECHNICAL_DEVIATION_SECTION_ID, task: '逐项汇总招标技术要求、投标响应内容及偏离情况。', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
           { section_id: 'SEC-1', task: '说明项目阶段1的交付安排', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
           { section_id: 'SEC-2', task: '说明项目阶段2的交付安排', user_message_refs: [], user_requirements: [], writing_instructions: [], acceptance_criteria: [] },
         ],
@@ -237,10 +245,10 @@ describe('S4 Draft 最终确认', () => {
       const execution = execute.mock.calls[0]
       expect(execution?.[0].stage).toBe('chapter_writing')
       expect(execution?.[1].work).toMatchObject({ kind: 'stage_execution', stage: 'chapter_writing' })
-      expect(f.session.events.some(event => event.type === 'bid.user_confirmation.received'
-        && event.data.stage === 'chapter_writing' && event.data.confirmed)).toBe(true)
+      expect(f.session.events.some(event => event.type === 'bid.task.changed'
+        && event.data.state.stage === 'chapter_writing' && event.data.state.status === 'ready')).toBe(true)
       expect(f.session.events.some(event => event.type === 'bid.run.started'
-        && event.data.run.stage === 'chapter_writing' && event.data.run.status === 'running')).toBe(true)
+        && event.data.run.work.stage === 'chapter_writing')).toBe(true)
     } finally { await f.ctx.fiber.dispose() }
   })
 

@@ -7,9 +7,9 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
-  BID_STAGES, BidWorkspace, checkpointBidProjectState, BID_INITIAL_RUNTIME_STATE, reduceBidRuntimeState,
+  BID_STAGES, BidWorkspace, checkpointBidProjectState, BID_INITIAL_TASK_STATE, reduceBidTaskState,
   BidHostRuntime,
-  type BidRuntimeState,
+  type BidTaskState,
   type Config,
 } from '@deepseek-ai/dsh-bid'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -31,11 +31,12 @@ interface TestHost {
   readonly ctx: { readonly sessions: { readonly flush: (session: unknown) => Promise<void> } }
   readonly config: Config
   readonly inFlight: Map<string, TestOperation>
+  readonly executionAgent: () => Promise<Agent>
   automaticOrchestrator: (
     agent: Agent,
     workspace: { readonly projectRoot: string },
     signal?: AbortSignal,
-  ) => { drive?: () => Promise<BidRuntimeState>; startResetStage?: () => Promise<BidRuntimeState> }
+  ) => { drive: () => Promise<BidTaskState> }
 }
 
 describe('Bid Host stage reset', () => {
@@ -67,7 +68,7 @@ describe('Bid Host stage reset', () => {
     }))
 
     const workspace = new BidWorkspace(cwd)
-    await checkpointBidProjectState(workspace, session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
+    await checkpointBidProjectState(workspace, session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
     const key = process.platform === 'win32' ? realpathSync(cwd).toLowerCase() : realpathSync(cwd)
     const prior = Promise.withResolvers<undefined>()
     const idle = Promise.withResolvers<undefined>()
@@ -97,11 +98,8 @@ describe('Bid Host stage reset', () => {
       inbox: { clear: vi.fn() },
     } as unknown as Agent
     const flush = vi.fn(async () => {})
-    const drive = vi.fn()
-    const startStage = vi.fn(async () => ({ ok: true, value: { stage: 'outline_generation', status: 'running' } }))
-    const ask = vi.fn(async ({ questions }: { questions: Array<{ id: string }> }) => ({
-      answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
-    }))
+    const drivenState: BidTaskState = { stage: 'outline_generation', status: 'waiting_user', run: null }
+    const drive = vi.fn(async () => drivenState)
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
         on: vi.fn(() => () => {}),
@@ -109,7 +107,7 @@ describe('Bid Host stage reset', () => {
         get: vi.fn(() => undefined),
         agents: { get: () => agent },
         sessions: { flush, list: () => [session] },
-        userQuestions: { ask },
+        userQuestions: { ask: vi.fn() },
         logger: { warn: vi.fn() },
       },
       config: {
@@ -126,8 +124,8 @@ describe('Bid Host stage reset', () => {
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),
       unsavedWritingAnswers: new Map(),
+      executionAgent: vi.fn(async () => agent),
       automaticOrchestrator: () => ({ drive }),
-      startStage,
     }) as TestHost
 
     await expect(BidHostRuntime.prototype.resetStage.call(
@@ -150,21 +148,18 @@ describe('Bid Host stage reset', () => {
 
     prior.resolve(undefined)
     executionIdle.resolve(undefined)
-    await expect(reset).resolves.toEqual({ stage: 'outline_generation', status: 'waiting_start' })
+    await expect(reset).resolves.toEqual(drivenState)
     for (const path of resetPaths) await expect(access(path)).rejects.toThrow()
-    expect(session.events.findLast(event => event.type === 'bid.stage.reset')).toMatchObject({
-      type: 'bid.stage.reset', data: { stage: 'outline_generation', status: 'waiting_start' },
+    expect(session.events.findLast(event => event.type === 'bid.task.changed')).toMatchObject({
+      type: 'bid.task.changed', data: { state: { stage: 'outline_generation', status: 'ready', run: null } },
     })
-    expect(drive).not.toHaveBeenCalled()
+    expect(drive).toHaveBeenCalledOnce()
     expect(flush).toHaveBeenCalledWith(session)
     expect(host.inFlight.has(key)).toBe(false)
-    await vi.waitFor(() => { expect(ask).toHaveBeenCalledOnce() })
-    await vi.waitFor(() => { expect(startStage).toHaveBeenCalledWith(session) })
-    expect(session.events.some(event => event.type === 'bid.run.decision.required')).toBe(true)
-    expect(session.events.some(event => event.type === 'bid.run.decision.received')).toBe(true)
+    expect(session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   })
 
-  it.each(BID_STAGES.filter(stage => stage !== 'docx_export'))('clears %s and later-stage model context before waiting for start', async (stage) => {
+  it.each(BID_STAGES.filter(stage => stage !== 'docx_export'))('clears %s and applies its fixed restart policy', async (stage) => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-context-'))
@@ -178,7 +173,7 @@ describe('Bid Host stage reset', () => {
       if (candidate !== 'docx_export') session.append('bid.stage.completed', { stage: candidate, status: 'completed', artifacts: [] })
       return message
     })
-    await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidRuntimeState, BID_INITIAL_RUNTIME_STATE))
+    await checkpointBidProjectState(new BidWorkspace(cwd), session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
     const stageIndex = BID_STAGES.indexOf(stage)
     const clear = vi.fn()
     const cancel = vi.fn()
@@ -189,7 +184,8 @@ describe('Bid Host stage reset', () => {
       whenIdle: vi.fn(async () => {}),
       inbox: { clear },
     } as unknown as Agent
-    const drive = vi.fn()
+    const drivenState: BidTaskState = { stage, status: 'waiting_user', run: null }
+    const drive = vi.fn(async () => drivenState)
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
         on: vi.fn(() => () => {}),
@@ -214,11 +210,12 @@ describe('Bid Host stage reset', () => {
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),
       unsavedWritingAnswers: new Map(),
+      executionAgent: vi.fn(async () => agent),
       automaticOrchestrator: () => ({ drive }),
     }) as TestHost
 
     await expect(BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage))
-      .resolves.toEqual({ stage, status: stage === 'file_intake' ? 'pending' : 'waiting_start' })
+      .resolves.toEqual(drivenState)
     expect(session.surface.nodes).toEqual([
       ...messages.slice(0, stageIndex).map(message => message.seq),
       session.surface.nodes.at(-1),
@@ -230,6 +227,6 @@ describe('Bid Host stage reset', () => {
     })
     expect(clear).not.toHaveBeenCalled()
     expect(cancel).not.toHaveBeenCalled()
-    expect(drive).not.toHaveBeenCalled()
+    expect(drive).toHaveBeenCalledTimes(stage === 'file_intake' || stage === 'chapter_writing' ? 0 : 1)
   })
 })

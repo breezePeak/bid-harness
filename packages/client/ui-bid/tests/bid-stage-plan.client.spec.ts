@@ -5,18 +5,17 @@ import { zh } from '../src/client/locales.ts'
 
 const t = (key: keyof typeof zh): string => zh[key]
 
-function projection(stage: BidStage, phase?: string): Pick<BidClientProjection, 'runtime' | 'run'> {
+function projection(stage: BidStage, phase?: string): Pick<BidClientProjection, 'task'> {
   return {
-    runtime: { stage, status: 'running' },
-    run: phase === undefined ? null : {
-      runId: 'run', stage, epoch: 1, baseProjectRevision: 1,
+    task: { stage, status: 'running', run: {
+      runId: 'run', epoch: 1, baseProjectRevision: 1,
       work: {
         kind: 'stage_execution', workId: 'work', stage,
         requestRef: 'request.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
       },
-      status: 'running', startedAt: 1, updatedAt: 2,
-      progress: { phase, summary: phase, updatedAt: 2 },
-    },
+      startedAt: 1, updatedAt: 2,
+      ...(phase === undefined ? {} : { progress: { phase, summary: phase, updatedAt: 2 } }),
+    } },
   }
 }
 

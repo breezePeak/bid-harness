@@ -4,7 +4,7 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { BidWorkspace, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
+import { BidWorkspace, bidProjectTaskState, checkpointBidProjectState, type BidRunData } from '@deepseek-ai/dsh-bid'
 import { launchWebScaffold, watchConsole, type WebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh, saveFailureShot, ZH_BROWSER_LOCALE } from './support.ts'
 
@@ -15,6 +15,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
   let browser: Browser
   let page: Page
   let agent: Agent
+  let run: BidRunData
   let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
@@ -32,8 +33,17 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     if (found === undefined || found.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     agent = found
     const workspace = new BidWorkspace(found.session.header.cwd)
-    const state = await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'running' })
-    agent.session.append('bid.project.resumed', { revision: state.revision, runtime: state.runtime })
+    run = {
+      runId: 'web-progress', interactionSessionId: String(agent.session.id), executionSessionId: 'execution',
+      epoch: 1, baseProjectRevision: 0,
+      work: {
+        kind: 'stage_execution', workId: 'web-progress-work', stage: 'tender_analysis',
+        requestRef: 'web-progress', requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64),
+      },
+      startedAt: 1, updatedAt: 1,
+    }
+    const state = await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'running', run })
+    agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
   }, 120_000)
 
   afterAll(async () => {
@@ -44,17 +54,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
 
   it('在空草稿显示后台 Stop，并在输入后恢复发送与阶段计划', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-run-progress'))
-    agent.session.append('bid.run.started', {
-      run: {
-        runId: 'web-progress', interactionSessionId: String(agent.session.id), executionSessionId: 'execution',
-        stage: 'tender_analysis', epoch: 1, baseProjectRevision: 1, controlRevision: 1,
-        work: {
-          kind: 'stage_execution', workId: 'web-progress-work', stage: 'tender_analysis',
-          requestRef: 'web-progress', requestSha256: 'a'.repeat(64), inputFingerprint: 'web-progress',
-        },
-        status: 'running', startedAt: 1, updatedAt: 1,
-      },
-    })
+    agent.session.append('bid.run.started', { run })
     agent.session.append('bid.run.progress', {
       runId: 'web-progress', epoch: 1, stage: 'tender_analysis',
       progress: { phase: 'collecting', summary: '正在提取招标信息与原文依据', completed: 2, total: 5, updatedAt: 2 },

@@ -1,4 +1,4 @@
-/** Bid-preset human commands that rewind a workflow stage before native Host confirmation. */
+/** Bid-preset human commands that rewind a task stage under Host ownership. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -14,10 +14,10 @@ const COMMANDS: ReadonlyArray<{
   readonly stage: BidStage
   readonly label: string
 }> = [
-  { name: 'bid-reset-s2', description: '回退招标分析阶段（S2），确认后再开始', stage: 'tender_analysis', label: '招标分析' },
-  { name: 'bid-reset-s3', description: '回退初步目录阶段（S3），确认后再开始', stage: 'outline_generation', label: '初步目录' },
-  { name: 'bid-reset-s4', description: '回退资料映射阶段（S4），确认后再开始', stage: 'evidence_mapping', label: '资料映射' },
-  { name: 'bid-reset-s5', description: '回退章节编写阶段（S5），确认后再开始', stage: 'chapter_writing', label: '章节编写' },
+  { name: 'bid-reset-s2', description: '回退并重新执行招标分析阶段（S2）', stage: 'tender_analysis', label: '招标分析' },
+  { name: 'bid-reset-s3', description: '回退并重新执行初步目录阶段（S3）', stage: 'outline_generation', label: '初步目录' },
+  { name: 'bid-reset-s4', description: '回退并重新执行资料映射阶段（S4）', stage: 'evidence_mapping', label: '资料映射' },
+  { name: 'bid-reset-s5', description: '回退章节编写阶段（S5）并等待写作要求', stage: 'chapter_writing', label: '章节编写' },
 ]
 
 /** Execute one argument-free, stage-specific reset command. */
@@ -34,7 +34,7 @@ async function resetStage(
     const state = await ctx.bid.resetStage(invocation.agent, stage)
     return {
       kind: 'success',
-      text: `${label}阶段已重置完毕，等待你确认后开始执行。当前状态：${state.stage} / ${state.status}。`,
+      text: `${label}阶段重置已应用。当前状态：${state.stage} / ${state.status}。`,
     }
   } catch (error: unknown) {
     if (error instanceof BidOrchestratorError) {
@@ -50,8 +50,7 @@ async function resetStage(
 }
 
 /**
- * Register S2–S5 reset commands only inside the Bid agent preset; the post-reset
- * start decision is presented by the shared DSH user-question provider.
+ * Register S2–S5 reset commands only inside the Bid agent preset.
  * @param ctx - agent-scoped Context carrying the Host Bid runtime and command registry.
  */
 export function apply(ctx: Context): void {

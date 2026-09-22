@@ -61,13 +61,11 @@ function stepsFor(stage: BidStage, phase: string): readonly StagePlanStep[] {
 
 /** Project the latest Host milestone onto the stage's ordered display steps. */
 export function buildBidStagePlan(
-  projection: Pick<BidClientProjection, 'runtime' | 'run'>,
+  projection: Pick<BidClientProjection, 'task'>,
   t: TranslateBid,
 ): readonly PlanListItem[] {
-  const phase = projection.run?.stage === projection.runtime.stage
-    ? projection.run.progress?.phase ?? 'starting'
-    : 'starting'
-  const steps = stepsFor(projection.runtime.stage, phase)
+  const phase = projection.task.run?.progress?.phase ?? 'starting'
+  const steps = stepsFor(projection.task.stage, phase)
   const matched = steps.findIndex(step => step.phases.includes(phase))
   const active = matched < 0 ? 0 : matched
   return steps.map((step, index) => ({

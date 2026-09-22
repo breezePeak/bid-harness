@@ -6,7 +6,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import * as resetCommands from '../src/stage-reset-commands.ts'
 
 class FakeBidRuntime extends Service {
-  readonly resetStage = vi.fn(async (_agent: Agent, stage: string) => ({ stage, status: 'waiting_start' as const }))
+  readonly resetStage = vi.fn(async (_agent: Agent, stage: string) => ({ stage, status: 'waiting_user' as const, run: null }))
 
   constructor(ctx: Context) {
     super(ctx, 'bid')
@@ -37,7 +37,7 @@ describe('Bid stage reset commands', () => {
       signal: new AbortController().signal,
     })).resolves.toEqual({
       kind: 'success',
-      text: '初步目录阶段已重置完毕，等待你确认后开始执行。当前状态：outline_generation / waiting_start。',
+      text: '初步目录阶段重置已应用。当前状态：outline_generation / waiting_user。',
     })
     expect((ctx.bid as unknown as FakeBidRuntime).resetStage).toHaveBeenCalledWith(agent, 'outline_generation')
 

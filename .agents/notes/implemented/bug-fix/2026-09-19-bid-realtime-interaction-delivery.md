@@ -2,6 +2,8 @@
 
 Status: implemented
 
+本记录中的旧 `pending`、`waiting_start` 状态词由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)归一为 `ready`；实时投递和提交身份规则保持有效。
+
 ## Problem
 
 Bid Run 已由独立 Interaction Agent 执行，但部分 Host 阶段仍关闭主会话输入框，普通输入在 Agent 忙碌时沿用全局排队策略；客户端又曾把尚未由 Host 受理的 outgoing 行混入 QueueDock，并在引用序列化、图片提交和 `Session.prompt` 之间丢失或重建提交身份。结果是 S1-S6 的聊天准入、投递模式、展示位置和正式消息接管没有形成同一条可验证的生命周期。

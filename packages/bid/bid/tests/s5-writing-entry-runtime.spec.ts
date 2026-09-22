@@ -75,7 +75,7 @@ async function setupS5Fixture(adapter = new ControllableMockLlmAdapter()) {
   const outline = await seedProjectArtifacts(workspace)
   await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
   await rm(join(workspace.projectRoot, 'chapters/writing-request.json'), { force: true })
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user' })
+  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
   const hash = outlineArtifactSha256(outline)
   await writeFile(
     join(workspace.projectRoot, 'outline/confirmation.json'),

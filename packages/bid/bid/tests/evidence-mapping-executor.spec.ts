@@ -3717,7 +3717,7 @@ describe('S4 Host 准入与最终确认', () => {
     }
     session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
     session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user' })
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
     Object.assign(fixture.agent, { session })
     const draft = await getOrCreateOutlineDraft(workspace)
     const run = createTestBidRunContext()

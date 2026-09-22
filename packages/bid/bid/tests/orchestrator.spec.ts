@@ -34,24 +34,62 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
-    await expect(orchestrator.confirmValidatedStage('tender_analysis', artifacts('tender_analysis'))).resolves.toEqual({ ok: true, state: { stage: 'outline_generation', status: 'waiting_user' } })
-    await expect(orchestrator.confirmValidatedStage('outline_generation', artifacts('outline_generation'))).resolves.toEqual({ ok: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
-    await expect(orchestrator.confirmValidatedStage('evidence_mapping', artifacts('evidence_mapping'))).resolves.toEqual({ ok: true, state: { stage: 'chapter_writing', status: 'waiting_user' } })
+    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user', run: null })
+    await expect(orchestrator.confirmValidatedStage('tender_analysis', artifacts('tender_analysis'))).resolves.toEqual({ ok: true, state: { stage: 'outline_generation', status: 'waiting_user', run: null } })
+    await expect(orchestrator.confirmValidatedStage('outline_generation', artifacts('outline_generation'))).resolves.toEqual({ ok: true, state: { stage: 'evidence_mapping', status: 'waiting_user', run: null } })
+    await expect(orchestrator.confirmValidatedStage('evidence_mapping', artifacts('evidence_mapping'))).resolves.toEqual({ ok: true, state: { stage: 'chapter_writing', status: 'waiting_user', run: null } })
     expect(execute.mock.calls.map(call => call[0].stage)).toEqual(['tender_analysis', 'outline_generation', 'evidence_mapping'])
     current.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
-    await expect(orchestrator.runConfirmedStage()).resolves.toEqual({ stage: 'chapter_writing', status: 'completed' })
+    await expect(orchestrator.runConfirmedStage()).resolves.toEqual({ stage: 'chapter_writing', status: 'completed', run: null })
     expect(execute.mock.calls.map(call => call[0].stage)).toEqual(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
   })
 
-  it('starts a reset S5 at the writing-requirements gate without executing chapters', async () => {
+  it('keeps a reset S5 at the writing-requirements gate without executing chapters', async () => {
     const current = await session()
     const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
     const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute }, { validate: async () => ({ ok: true }) })
-    current.append('bid.project.resumed', { runtime: { stage: 'chapter_writing', status: 'waiting_start' }, revision: 1 })
+    current.append('bid.project.resumed', { state: { stage: 'chapter_writing', status: 'waiting_user', run: null }, revision: 1 })
 
-    await expect(orchestrator.startResetStage()).resolves.toEqual({ stage: 'chapter_writing', status: 'waiting_user' })
+    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'chapter_writing', status: 'waiting_user', run: null })
     expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('commits an outline confirmation from its explicit running Work', async () => {
+    const current = await session()
+    current.append('bid.project.resumed', {
+      state: { stage: 'evidence_mapping', status: 'waiting_user', run: null },
+      revision: 4,
+    })
+    const run = {
+      runId: 'run-outline-confirmation',
+      epoch: 1,
+      baseProjectRevision: 4,
+      work: {
+        kind: 'outline_confirmation' as const,
+        workId: 'work-outline-confirmation',
+        stage: 'evidence_mapping' as const,
+        requestRef: 'requests/work-outline-confirmation.json',
+        requestSha256: '0'.repeat(64),
+        inputFingerprint: '1'.repeat(64),
+      },
+      startedAt: 1,
+      updatedAt: 1,
+    }
+    current.append('bid.run.started', { run })
+    const orchestrator = new BidOrchestrator(
+      current,
+      { canExecute: () => false, execute: async () => [] },
+      { validate: async () => ({ ok: true }) },
+    )
+
+    await expect(orchestrator.commitPrevalidatedStage(
+      'evidence_mapping',
+      artifacts('evidence_mapping'),
+      async (commitWorkflow) => {
+        current.append('bid.run.completed', { run })
+        commitWorkflow()
+      },
+    )).resolves.toEqual({ stage: 'chapter_writing', status: 'waiting_user', run: null })
   })
 
   it('keeps non-S2 validation issues out of the run error summary', async () => {
@@ -62,13 +100,12 @@ describe('BidOrchestrator', () => {
       { canExecute: () => true, execute: async task => artifacts(task.stage) },
       { validate: async () => ({ ok: false, issues: [issue] }) },
     )
-    current.append('bid.project.resumed', { runtime: { stage: 'chapter_writing', status: 'waiting_start' }, revision: 1 })
-
-    await orchestrator.startResetStage()
+    current.append('bid.project.resumed', { state: { stage: 'chapter_writing', status: 'waiting_user', run: null }, revision: 1 })
     current.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
     await expect(orchestrator.runConfirmedStage()).resolves.toMatchObject({ stage: 'chapter_writing', status: 'suspended' })
-    expect(orchestrator.controlState.run).toMatchObject({
+    expect(orchestrator.state).toMatchObject({ status: 'suspended', run: {
       error: { code: 'BID_STAGE_VALIDATION_FAILED', message: '当前阶段结果未通过校验。', issues: [issue] },
+    },
     })
   })
 
@@ -83,11 +120,11 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
     await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'suspended' })
-    expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'retry_exhausted',
-      error: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } })
+    expect(orchestrator.state).toMatchObject({ status: 'suspended', run: { cause: 'retry_exhausted',
+      error: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } } })
   })
 
-  it('starts a reset stage only after the explicit post-reset confirmation', async () => {
+  it('starts a reset S2 directly from ready without a second confirmation', async () => {
     const current = await session()
     const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
     const orchestrator = new BidOrchestrator(
@@ -97,15 +134,13 @@ describe('BidOrchestrator', () => {
     )
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
-    current.append('bid.stage.reset', { stage: 'tender_analysis', status: 'waiting_start' })
+    current.append('bid.task.changed', { state: { stage: 'tender_analysis', status: 'ready', run: null } })
 
-    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_start' })
-    expect(execute).not.toHaveBeenCalled()
-    await expect(orchestrator.startResetStage()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+    await expect(orchestrator.drive()).resolves.toEqual({ stage: 'tender_analysis', status: 'waiting_user', run: null })
     expect(execute).toHaveBeenCalledOnce()
     expect(execute.mock.calls[0]?.[0].stage).toBe('tender_analysis')
     expect(typeof execute.mock.calls[0]?.[1].runId).toBe('string')
-    expect(() => orchestrator.startResetStage()).toThrow(expect.objectContaining({ code: 'BID_STAGE_START_NOT_ALLOWED' }))
+    expect(current.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   })
 
   it('leaves a cancelled stage for reset without recording a failure', async () => {
@@ -128,7 +163,7 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
     await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'suspended' })
-    expect(orchestrator.controlState.run).toMatchObject({ status: 'suspended', cause: 'user_stop' })
+    expect(orchestrator.state).toMatchObject({ status: 'suspended', run: { cause: 'user_stop' } })
     expect(current.events.some(event => event.type === 'bid.stage.failed')).toBe(false)
   })
 
@@ -159,7 +194,7 @@ describe('BidOrchestrator', () => {
     current.append('bid.user_confirmation.required', { stage: 'tender_analysis', status: 'waiting_user' })
 
     await expect(orchestrator.confirmValidatedStage('tender_analysis', artifacts('tender_analysis')))
-      .resolves.toMatchObject({ ok: true, state: { stage: 'outline_generation', status: 'waiting_user' } })
+      .resolves.toMatchObject({ ok: true, state: { stage: 'outline_generation', status: 'waiting_user', run: null } })
     expect(order).toEqual([
       'validate',
       'prepare:tender_analysis:outline_generation',
@@ -192,7 +227,7 @@ describe('BidOrchestrator', () => {
       ok: false,
       validation: { ok: false, issues: [{ code: 'INVALID_FINAL_ARTIFACT', message: '拒绝最终产物' }] },
     })
-    expect(orchestrator.state).toEqual({ stage: 'tender_analysis', status: 'waiting_user' })
+    expect(orchestrator.state).toEqual({ stage: 'tender_analysis', status: 'waiting_user', run: null })
     expect(current.deriveMessages()).toEqual(before)
     expect(prepare).not.toHaveBeenCalled()
   })
@@ -201,21 +236,25 @@ describe('BidOrchestrator', () => {
     const current = await session()
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
-    current.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
-    current.append('bid.stage.failed', { stage: 'tender_analysis', status: 'failed', reason: '模型失败' })
     const prepare = vi.fn(async () => () => {})
+    let valid = false
     const orchestrator = new BidOrchestrator(
       current,
       { canExecute: () => true, execute: async task => artifacts(task.stage) },
-      { validate: async () => ({ ok: true }) },
+      { validate: async () => valid
+        ? { ok: true }
+        : { ok: false, issues: [{ code: 'MODEL_FAILED', message: '模型失败' }] } },
       undefined,
       prepare,
     )
 
-    const suspended = orchestrator.controlState.run
-    expect(suspended?.status).toBe('suspended')
-    await expect(orchestrator.resume(suspended!.runId)).resolves.toEqual({
-      stage: 'tender_analysis', status: 'waiting_user',
+    await orchestrator.runCurrentAutomaticStage()
+    const suspended = orchestrator.state
+    expect(suspended.status).toBe('suspended')
+    if (suspended.status !== 'suspended') throw new Error('测试未进入挂起态')
+    valid = true
+    await expect(orchestrator.resume(suspended.run.runId)).resolves.toEqual({
+      stage: 'tender_analysis', status: 'waiting_user', run: null,
     })
     expect(prepare).not.toHaveBeenCalled()
   })

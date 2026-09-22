@@ -84,8 +84,8 @@ export function BidWordExport({
   const [uploading, setUploading] = useState(false)
   const [exportFeedback, setExportFeedback] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
   const editFormatButton = useRef<HTMLButtonElement | null>(null)
-  const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.runtime.status === 'completed' && ['chapter_writing',
-    'docx_export'].includes(projection.runtime.stage))
+  const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.task.status === 'completed' && ['chapter_writing',
+    'docx_export'].includes(projection.task.stage))
 
   const triggerEstimate = useCallback((templateId: DocxTemplateId | null): void => {
     void estimatePages(templateId).then((value) => {
@@ -145,7 +145,7 @@ export function BidWordExport({
   const conflictFor = (keys: string[]): FormatConflict | undefined => unresolved.find(conflict => keys.includes(conflict.key))
   const templateMaxBytes = library?.templateMaxBytes ?? 0
   const templateMaxMiB = Math.floor(templateMaxBytes / 1024 / 1024)
-  const partialExportMessage = projection?.runtime.stage === 'chapter_writing' && projection.runtime.status !== 'completed'
+  const partialExportMessage = projection?.task.stage === 'chapter_writing' && projection.task.status !== 'completed'
     ? '按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。'
     : ''
   const value = (key: string): FormatValue => view?.state.resolved[key] ?? ''

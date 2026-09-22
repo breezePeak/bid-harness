@@ -2,13 +2,14 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   BID_SESSION_EVENT_TYPES,
   appendBidSchemaWarning,
-  BID_INITIAL_CONTROL_STATE,
+  BID_INITIAL_TASK_STATE,
   createBidSchemaWarning,
   BID_STAGES,
   getBidStagePolicy,
-  STAGE_RUN_STATUSES,
+  BID_TASK_STATUSES,
   parseBidReviewWorkbenchView,
-  reduceBidControlState,
+  reduceBidTaskState,
+  suspendForHostRestart,
   type BidSessionEventMap,
   type BidStagePolicy,
   type BidStageTask,
@@ -52,9 +53,10 @@ describe('bid control-plane public contract', () => {
       'chapter_writing',
       'docx_export',
     ])
-    expect(STAGE_RUN_STATUSES).toEqual(['pending', 'waiting_start', 'running', 'waiting_user', 'suspended', 'attention_required', 'failed', 'completed'])
+    expect(BID_TASK_STATUSES).toEqual(['ready', 'running', 'waiting_user', 'suspended', 'failed', 'completed'])
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
+      'bid.task.changed',
       'bid.run.started',
       'bid.run.progress',
       'bid.run.start_failed',
@@ -77,52 +79,72 @@ describe('bid control-plane public contract', () => {
     ])
   })
 
-  it('keeps only matching Run progress without changing the Workflow stage', () => {
+  it('keeps only matching Run progress in the single task state', () => {
     const run = {
-      runId: 'run-current', stage: 'tender_analysis' as const, epoch: 3, baseProjectRevision: 4,
+      runId: 'run-current', epoch: 3, baseProjectRevision: 4,
       work: {
         kind: 'stage_execution' as const, workId: 'work-current', stage: 'tender_analysis' as const,
         requestRef: 'requests/work-current.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64),
       },
-      status: 'running' as const, startedAt: 10, updatedAt: 10,
+      startedAt: 10, updatedAt: 10,
     }
-    const started = reduceBidControlState(BID_INITIAL_CONTROL_STATE, {
+    const started = reduceBidTaskState(BID_INITIAL_TASK_STATE, {
       type: 'bid.project.resumed',
-      data: { workflow: { stage: 'tender_analysis', gate: 'ready' }, run, lastRun: null, revision: 4 },
+      data: { state: { stage: 'tender_analysis', status: 'running', run }, revision: 4 },
     } as SessionEvent)
     const progress = { phase: 'collecting', summary: '已整理技术要求。', completed: 28, total: 35, updatedAt: 20 }
-    const current = reduceBidControlState(started, {
-      type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: run.stage, progress },
+    const current = reduceBidTaskState(started, {
+      type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: run.work.stage, progress },
     } as SessionEvent)
 
-    expect(current.workflow).toEqual(started.workflow)
+    expect(current.stage).toBe('tender_analysis')
     expect(current.run?.progress).toEqual(progress)
-    expect(reduceBidControlState(current, {
-      type: 'bid.run.progress', data: { runId: 'stale', epoch: run.epoch, stage: run.stage,
+    expect(reduceBidTaskState(current, {
+      type: 'bid.run.progress', data: { runId: 'stale', epoch: run.epoch, stage: run.work.stage,
         progress: { ...progress, summary: '旧 Run' } },
     } as SessionEvent)).toBe(current)
-    expect(reduceBidControlState(current, {
-      type: 'bid.run.progress', data: { runId: run.runId, epoch: 2, stage: run.stage,
+    expect(reduceBidTaskState(current, {
+      type: 'bid.run.progress', data: { runId: run.runId, epoch: 2, stage: run.work.stage,
         progress: { ...progress, summary: '旧 epoch' } },
     } as SessionEvent)).toBe(current)
-    expect(reduceBidControlState(current, {
+    expect(reduceBidTaskState(current, {
       type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: 'outline_generation',
         progress: { ...progress, summary: '旧阶段' } },
     } as SessionEvent)).toBe(current)
 
-    const suspended = reduceBidControlState(current, {
+    const suspended = reduceBidTaskState(current, {
       type: 'bid.run.suspended',
-      data: { run: { ...current.run!, status: 'suspended', cause: 'user_stop', updatedAt: 30 } },
+      data: { run: { ...current.run!, cause: 'user_stop', updatedAt: 30 } },
     } as SessionEvent)
+    expect(suspended.status).toBe('suspended')
     expect(suspended.run?.progress).toEqual(progress)
-    expect(suspended.lastRun?.progress).toEqual(progress)
 
-    const completed = reduceBidControlState(current, {
+    const completed = reduceBidTaskState(current, {
       type: 'bid.run.completed',
-      data: { run: { ...current.run!, status: 'completed', updatedAt: 30 } },
+      data: { run: { ...current.run!, updatedAt: 30 } },
     } as SessionEvent)
-    expect(completed.run).toBeNull()
-    expect(completed.lastRun?.progress).toEqual(progress)
+    expect(completed).toBe(current)
+  })
+
+  it('把遗留 running 确定性转换为 host_restart 挂起', () => {
+    const running = reduceBidTaskState(BID_INITIAL_TASK_STATE, {
+      type: 'bid.task.changed',
+      data: { state: { stage: 'evidence_mapping', status: 'ready', run: null } },
+    } as SessionEvent)
+    const active = reduceBidTaskState(running, {
+      type: 'bid.run.started',
+      data: { run: {
+        runId: 'run-restart', epoch: 2, baseProjectRevision: 4,
+        work: { kind: 'stage_execution', workId: 'work-restart', stage: 'evidence_mapping',
+          requestRef: 'requests/work-restart.json', requestSha256: '1'.repeat(64), inputFingerprint: '2'.repeat(64) },
+        startedAt: 10, updatedAt: 10,
+      } },
+    } as SessionEvent)
+
+    expect(suspendForHostRestart(active, 20)).toMatchObject({
+      stage: 'evidence_mapping', status: 'suspended',
+      run: { runId: 'run-restart', cause: 'host_restart', updatedAt: 20 },
+    })
   })
 
   it('creates non-blocking schema warnings only for non-current values', () => {
@@ -147,7 +169,7 @@ describe('bid control-plane public contract', () => {
     expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({ type: 'bid.schema.warning', data: { reason: 'mismatch', stage: 'outline_generation' } })
     expect(events[1]).toMatchObject({ type: 'bid.schema.warning', data: { reason: 'missing', stage: 'chapter_writing' } })
-    expect(reduceBidControlState(BID_INITIAL_CONTROL_STATE, { type: 'bid.schema.warning', data: warning1 } as SessionEvent)).toEqual(BID_INITIAL_CONTROL_STATE)
+    expect(reduceBidTaskState(BID_INITIAL_TASK_STATE, { type: 'bid.schema.warning', data: warning1 } as SessionEvent)).toEqual(BID_INITIAL_TASK_STATE)
   })
 
   it('keeps every Bid durable event readable by the persistence runtime', () => {
@@ -253,7 +275,7 @@ describe('bid control-plane public contract', () => {
     }>()
     expectTypeOf<SessionEventMap['bid.stage.reset']>().toEqualTypeOf<{
       stage: 'file_intake' | 'tender_analysis' | 'outline_generation' | 'evidence_mapping' | 'chapter_writing' | 'docx_export'
-      status: 'pending' | 'waiting_start'
+      status?: 'pending' | 'waiting_start' | 'ready' | 'waiting_user'
     }>()
     expectTypeOf<SessionEventMap['bid.user_confirmation.received']>().toEqualTypeOf<
       | {
