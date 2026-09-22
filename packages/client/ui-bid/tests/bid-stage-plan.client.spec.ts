@@ -20,6 +20,21 @@ function projection(stage: BidStage, phase?: string): Pick<BidClientProjection, 
 }
 
 describe('buildBidStagePlan', () => {
+  it.each(['waiting_user', 'completed'] as const)('S4 %s 保留全部完成的计划', (status) => {
+    const current = projection('evidence_mapping', 'reviewing')
+    expect(buildBidStagePlan({ task: { ...current.task, status, run: null } }, t).map(item => item.status))
+      .toEqual(['completed', 'completed', 'completed'])
+  })
+
+  it.each([
+    ['analyzing', ['in_progress', 'pending', 'pending', 'pending', 'pending']],
+    ['generating', ['completed', 'in_progress', 'pending', 'pending', 'pending']],
+    ['validating', ['completed', 'completed', 'in_progress', 'pending', 'pending']],
+    ['reviewing', ['completed', 'completed', 'completed', 'in_progress', 'pending']],
+  ] as const)('S3 的 %s 只完成已经经过的步骤', (phase, statuses) => {
+    expect(buildBidStagePlan(projection('outline_generation', phase), t).map(item => item.status)).toEqual(statuses)
+  })
+
   it.each([
     ['file_intake', undefined, '接收并解析项目资料'],
     ['tender_analysis', 'collecting', '整理项目、技术、评分与合规信息'],

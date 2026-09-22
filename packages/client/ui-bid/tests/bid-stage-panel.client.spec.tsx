@@ -484,7 +484,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
-  it('uses the stage plan instead of the S4 Mapping Task card while the Host runs evidence mapping', async () => {
+  it('S4 运行计划表头显示研究任务计数，停止后保留同一计划并取消运行标记', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 10,
       initial: 8,
@@ -501,7 +501,7 @@ describe('BidStagePanel', () => {
           section_ids: ['SEC-2'], child_session_id: 'child-2', latest_issue: null },
       ],
     }))
-    render(<BidStagePanel {...props(projection({
+    const runningProjection = projection({
       workflow: { stage: 'evidence_mapping', gate: 'ready' },
       run: {
         runId: 'run-mapping', stage: 'evidence_mapping', epoch: 1, baseProjectRevision: 1,
@@ -510,15 +510,43 @@ describe('BidStagePanel', () => {
       },
       runtime: { stage: 'evidence_mapping', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
-    }), { getEvidenceMappingProgress })} />)
+    })
+    const view = render(<BidStagePanel {...props(runningProjection, { getEvidenceMappingProgress })} />)
 
     expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
     expect(screen.getByText('1 已完成 · 1 正在进行 · 1 待处理')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(screen.getByRole('button', { expanded: true })).toBeTruthy()
     expect(screen.getByText('逐章节资料研究与映射')).toBeTruthy()
     expect(screen.queryByText('研究任务')).toBeNull()
     expect(document.querySelector('[data-bid-progress]')).toBeNull()
     await waitFor(() => { expect(getEvidenceMappingProgress).toHaveBeenCalledOnce() })
+    expect(await screen.findByTitle('已完成 3')).toBeTruthy()
+    expect(screen.getByTitle('进行中 2')).toBeTruthy()
+    expect(screen.getByTitle('未开始 5')).toBeTruthy()
+    expect(screen.getByTitle('分支数 10（初始 8，补充复核 2，失败 0）').textContent).toBe('10')
+    expect(screen.getByRole('status').textContent).toBe('10/3/2/530%')
+    expect(screen.getByTitle('完成百分比 30%（已完成 3 / 共 10）').textContent).toBe('30%')
+    const plan = screen.getByTestId('bid-stage-plan')
+    fireEvent.click(screen.getByRole('button', { expanded: true }))
+    expect(screen.queryByText('逐章节资料研究与映射')).toBeNull()
+    expect(screen.getByTitle('进行中 2')).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props({
+      ...runningProjection,
+      task: { ...runningProjection.task, status: 'suspended', run: {
+        ...runningProjection.task.run!, cause: 'user_stop',
+      } },
+    }, { getEvidenceMappingProgress })} />)
+    expect(screen.getByTestId('bid-stage-plan')).toBe(plan)
+    expect(screen.getByRole('button', { expanded: false })).toBeTruthy()
+    expect(screen.getByTitle('待恢复 2')).toBeTruthy()
+    expect(screen.queryByTitle('进行中 2')).toBeNull()
+    expect(document.querySelector('[data-summary-status="running"]')).toBeNull()
+    expect(document.querySelector('[data-bid-progress]')).toBeNull()
+
+    view.rerender(<BidStagePanel {...props(runningProjection, { getEvidenceMappingProgress })} />)
+    expect(await screen.findByTitle('进行中 2')).toBeTruthy()
+    expect(screen.getByTestId('bid-stage-plan')).toBe(plan)
   })
 
   it('同步 S4 进度时不在运行计划旁显示旧进度卡', async () => {
@@ -543,14 +571,18 @@ describe('BidStagePanel', () => {
     }), { getEvidenceMappingProgress })} />)
 
     expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
-    expect(screen.queryByText('研究任务：进度同步中…')).toBeNull()
+    expect(screen.getByText('研究任务：进度同步中…')).toBeTruthy()
     expect(screen.queryByText('同步中')).toBeNull()
 
     await act(async () => {
       resolveProgress?.(progress)
       await Promise.resolve()
     })
-    expect(screen.queryByText('2 / 10 (20%)')).toBeNull()
+    expect(screen.getByTitle('完成百分比 20%（已完成 2 / 共 10）')).toBeTruthy()
+    expect(screen.getByTitle('已完成 2')).toBeTruthy()
+    expect(screen.getByTitle('进行中 3')).toBeTruthy()
+    expect(screen.getByTitle('未开始 5')).toBeTruthy()
+    expect(document.querySelector('[data-bid-progress]')).toBeNull()
   })
 
   it('S4 ready 时不读取或显示 Mapping 进度', () => {
@@ -581,8 +613,8 @@ describe('BidStagePanel', () => {
       allowedActions: [], composer: { enabled: false, reason: 'bid.stage_failed' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
-    expect(screen.getByText('失败 18')).toBeTruthy()
+    expect(await screen.findByTitle('完成百分比 44%（已完成 14 / 共 32）')).toBeTruthy()
+    expect(screen.getByTitle('分支数 32（初始 32，补充复核 0，失败 18）')).toBeTruthy()
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
   })
 
@@ -657,7 +689,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByText('正在处理…')).toBeNull()
     expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
     expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
-    expect(await screen.findByText('14 / 32 (44%)')).toBeTruthy()
+    expect(await screen.findByTitle('完成百分比 44%（已完成 14 / 共 32）')).toBeTruthy()
     expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
     expect(screen.queryByRole('button', { name: '继续未完成任务' })).toBeNull()
@@ -683,12 +715,12 @@ describe('BidStagePanel', () => {
       }), { getEvidenceMappingProgress })} />)
 
       await act(async () => { await Promise.resolve(); await Promise.resolve() })
-      expect(screen.getByText('34 / 41 (83%)')).toBeTruthy()
-      expect(screen.getByText('待恢复 1')).toBeTruthy()
+      expect(screen.getByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
+      expect(screen.getByTitle('待恢复 1')).toBeTruthy()
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
       expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(2)
-      expect(screen.getByText('34 / 41 (83%)')).toBeTruthy()
+      expect(screen.getByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
       expect(screen.getByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeTruthy()
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })

@@ -35,6 +35,7 @@
 
 .header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -61,7 +62,7 @@
 }
 
 .progress {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: 13px;
@@ -74,6 +75,7 @@
 
 .chevron {
   display: grid;
+  margin-left: auto;
   flex: none;
   place-items: center;
   color: var(--dsw-alias-label-tertiary);
@@ -136,4 +138,53 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.summary {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: max-content;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  font: var(--dsw-font-xs-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.summaryItem {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.summaryItem[data-summary-status='completed'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.summaryItem[data-summary-status='running'] {
+  color: var(--dsw-alias-brand-primary);
+  animation: plan-summary-pulse 1.5s ease-in-out infinite;
+}
+
+.summarySeparator {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.summaryItem[data-summary-status='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+@keyframes plan-summary-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .summaryItem[data-summary-status='running'],
+  .glyphProgress {
+    animation: none;
+  }
 }

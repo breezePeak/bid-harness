@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { Fragment, useId, useState } from 'react'
 import { IconChecklistOutline14, IconChevronDownOutline14, IconChevronUpOutline14 } from './icons/index.tsx'
 import css from './PlanListPanel.module.css'
 
@@ -27,6 +27,19 @@ export interface PlanListPanelProps {
   readonly running: boolean
   readonly labels: PlanListLabels
   readonly testId?: string | undefined
+  /** 表头进度后的带框摘要；状态由调用方提供。 */
+  readonly summary?: {
+    readonly label: string
+    readonly items: readonly {
+      readonly key: string
+      readonly text: string
+      /** 数字的悬浮说明，同时供辅助技术读取。 */
+      readonly title?: string
+      /** 此项前的可见分隔符。 */
+      readonly separator?: string
+      readonly status: 'pending' | 'completed' | 'running' | 'failed' | 'neutral'
+    }[]
+  } | undefined
 }
 
 /** Local exhaustiveness helper for the closed visual status union. */
@@ -99,8 +112,8 @@ function progressLabel(items: readonly PlanListItem[], running: boolean, labels:
 }
 
 /** Render a collapsible plan list without owning the plan lifecycle. */
-export function PlanListPanel({ items, running, labels, testId }: PlanListPanelProps) {
-  const [collapsed, setCollapsed] = useState(true)
+export function PlanListPanel({ items, running, labels, testId, summary }: PlanListPanelProps) {
+  const [collapsed, setCollapsed] = useState(false)
   if (items.length === 0) return null
 
   return (
@@ -115,8 +128,20 @@ export function PlanListPanel({ items, running, labels, testId }: PlanListPanelP
           <span className={css.lead} aria-hidden><IconChecklistOutline14 /></span>
           <span className={css.title}>{labels.title}</span>
           <span className={css.progress}>{progressLabel(items, running, labels)}</span>
+          {summary && (
+            <span className={css.summary} role="status" aria-label={summary.label}>
+              {summary.items.map(item => (
+                <Fragment key={item.key}>
+                  {item.separator && <span className={css.summarySeparator} aria-hidden>{item.separator}</span>}
+                  <span title={item.title} aria-label={item.title} data-summary-status={item.status} className={css.summaryItem}>
+                    {item.text}
+                  </span>
+                </Fragment>
+              ))}
+            </span>
+          )}
           <span className={css.chevron} aria-hidden>
-            {collapsed ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
+            {collapsed ? <IconChevronDownOutline14 /> : <IconChevronUpOutline14 />}
           </span>
         </button>
         {!collapsed && (

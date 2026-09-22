@@ -25,7 +25,6 @@ import type { BidKey } from './locales.ts'
 import { OutlineConfirmationReview } from './OutlineConfirmationReview.tsx'
 import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import { BidRevisionFloatingPanel } from './BidRevisionFloatingPanel.tsx'
-import { BidProgressBar } from './BidProgressBar.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import { isBidMainSessionSummary } from './session-authority.ts'
 import { buildBidStagePlan } from './bid-stage-plan.ts'
@@ -887,8 +886,7 @@ export function BidStagePanel({
   const hostFailureReason = hostFailure?.message
   const hostFailureIssues = hostFailure?.issues ?? []
   const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
-  const runCancelling = false
-  const showRunPlan = projection.task.status === 'running'
+  const showRunPlan = projection.task.status === 'running' || mappingProgressObservable
   const planItems = buildBidStagePlan(projection, t)
   const planLabels: PlanListLabels = {
     title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.task.stage) + 1)}`, name: t(stageKey(projection.task.stage)) }),
@@ -914,31 +912,18 @@ export function BidStagePanel({
       refreshSignal={revisionSignal}
     />
   ) : null
-  if (showRunPlan) return (
-    <>
-      <PlanListPanel
-        items={planItems}
-        running={!runCancelling}
-        labels={planLabels}
-        testId="bid-stage-plan"
-      />
-      {floatingRevision}
-    </>
-  )
   const progressSyncFailed = projection.task.stage === 'evidence_mapping'
     && mappingReadState === 'stale'
-  const dotState = runCancelling || progressSyncFailed
+  const dotState = progressSyncFailed
     ? 'warning'
     : statusDot(projection.task.status)
   const displayStage = projection.task.stage === 'docx_export' ? 'chapter_writing' : projection.task.stage
-  const mappingActivelyRunning = projection.task.status === 'running' && !runCancelling
-  const mappingRunningLabel = runCancelling
-    ? 'mapping.tasks.settling'
-    : projection.task.status === 'suspended'
-      ? 'mapping.tasks.interrupted'
-      : mappingActivelyRunning
-        ? 'mapping.tasks.running'
-        : 'mapping.tasks.unfinished'
+  const mappingActivelyRunning = projection.task.status === 'running' && mappingReadState === 'ready'
+  const mappingRunningLabel = projection.task.status === 'suspended'
+    ? 'mapping.tasks.interrupted'
+    : mappingActivelyRunning
+      ? 'mapping.tasks.running'
+      : 'mapping.tasks.unfinished'
 
   const persistOperation = (operation: OutlineEditOperation): void => {
     if (applyOutlineDraftOperations === undefined) return
@@ -1082,7 +1067,6 @@ export function BidStagePanel({
     failed_section_ids: [],
     tasks: [],
   }
-  const showMappingProgress = mappingProgressObservable
   const mappingPercent = visibleMappingProgress.total > 0
     ? Math.min(100, Math.round((visibleMappingProgress.completed / visibleMappingProgress.total) * 100))
     : 0
@@ -1097,11 +1081,48 @@ export function BidStagePanel({
       running: visibleMappingProgress.running,
       notStarted: visibleMappingProgress.not_started,
     })
+  const runPlan = showRunPlan ? (
+    <PlanListPanel
+      items={planItems}
+      running={projection.task.status === 'running'}
+      labels={planLabels}
+      testId="bid-stage-plan"
+      summary={mappingProgressObservable ? {
+        label: mappingAccessibilityLabel,
+        items: mappingProgressPending
+          ? [{ key: 'syncing', text: t('mapping.progress_pending'), status: 'pending' }]
+          : [
+            { key: 'total', text: String(visibleMappingProgress.total), title: t('mapping.tasks.branches', {
+              total: visibleMappingProgress.total, initial: visibleMappingProgress.initial,
+              supplemental: visibleMappingProgress.supplemental, failed: visibleMappingProgress.failed,
+            }), status: 'neutral' },
+            { key: 'completed', text: String(visibleMappingProgress.completed), title: t('mapping.tasks.completed', { count: visibleMappingProgress.completed }), separator: '/', status: 'completed' },
+            { key: 'running', text: String(visibleMappingProgress.running), title: t(mappingRunningLabel, { count: visibleMappingProgress.running }), separator: '/', status: mappingActivelyRunning && visibleMappingProgress.running > 0 ? 'running' : 'pending' },
+            { key: 'pending', text: String(visibleMappingProgress.not_started), title: t('mapping.tasks.not_started', { count: visibleMappingProgress.not_started }), separator: '/', status: 'pending' },
+            { key: 'percent', text: `${String(mappingPercent)}%`, title: t('mapping.tasks.percent', {
+              percent: mappingPercent, completed: visibleMappingProgress.completed, total: visibleMappingProgress.total,
+            }), status: 'completed' },
+          ],
+      } : undefined}
+    />
+  ) : null
+  const mappingSyncNotice = mappingProgressObservable && mappingReadState !== 'ready' ? (
+    <p className={css.agentStatus} role="status">
+      {mappingReadState === 'stale'
+        ? t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')
+        : t(mappingProgress === null ? 'mapping.sync_waiting' : 'mapping.sync_waiting_cached')}
+    </p>
+  ) : null
+  if (projection.task.status === 'running') return <>
+    {runPlan}
+    {mappingSyncNotice}
+    {floatingRevision}
+  </>
   const queuedFiles: readonly (SelectedFile | SelectedTemplate)[] = selectedTemplate === null
     ? selectedFiles
     : [...selectedFiles, selectedTemplate]
 
-  return (
+  const stagePanel = (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
         <div className={css.statusRow}>
@@ -1110,9 +1131,7 @@ export function BidStagePanel({
             : <StateDot state={dotState} />}
           <span className={css.stage}>{t(stageKey(displayStage))}</span>
           <span className={css.message} role={hasFailureInfo ? 'alert' : 'status'}>
-            {runCancelling ? (
-              t('prompt.stage_cancelling')
-            ) : hasFailureInfo ? (
+            {hasFailureInfo ? (
               (() => {
                 const { summary, detail } = formatFailureDisplay(hostFailureReason, hostFailureIssues, t)
                 return (
@@ -1138,94 +1157,23 @@ export function BidStagePanel({
             )}
           </span>
           <span className={css.runtimeStatus}>
-            {runCancelling
-              ? t('status.cancelling')
-              : progressSyncFailed
-                ? t('status.sync_unavailable')
-                : t(statusKey(projection.task.status))}
+            {progressSyncFailed
+              ? t('status.sync_unavailable')
+              : t(statusKey(projection.task.status))}
           </span>
         </div>
 
-        {mappingProgressObservable
-          && mappingReadState !== 'ready' && (
-          <p className={css.agentStatus} role="status">
-            {mappingReadState === 'stale'
-              ? t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')
-              : t(mappingProgress === null ? 'mapping.sync_waiting' : 'mapping.sync_waiting_cached')}
-          </p>
-        )}
+        {mappingSyncNotice}
 
         {projection.task.status === 'suspended' && mainAgentRunning && (
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>
         )}
 
 
-        {showMappingProgress && (
-          <div
-            className={css.mappingCard}
-            role="status"
-            aria-label={mappingAccessibilityLabel}
-          >
-            <span className={css.srOnly}>
-              {mappingAccessibilityLabel}
-            </span>
-            <div className={css.mappingHeader}>
-              <div className={css.mappingTitleGroup}>
-                <span className={css.mappingTitle}>{t('mapping.tasks.title')}</span>
-                <span className={css.mappingRatio}>
-                  {mappingProgressPending
-                    ? t('mapping.progress_pending')
-                    : `${String(visibleMappingProgress.completed)} / ${String(visibleMappingProgress.total)} (${String(mappingPercent)}%)`}
-                </span>
-              </div>
-              <div className={css.mappingPills}>
-                {mappingProgressPending ?
-                  <span className={`${css.pill} ${css.pillPending}`}>
-                    {t('mapping.tasks.syncing')}
-                  </span>
-                  : <>
-                    <span className={`${css.pill} ${css.pillDefault}`}>
-                      {t('mapping.tasks.initial', { count: visibleMappingProgress.initial })}
-                    </span>
-                    {visibleMappingProgress.supplemental > 0 && (
-                      <span className={`${css.pill} ${css.pillDefault}`}>
-                        {t('mapping.tasks.supplemental', { count: visibleMappingProgress.supplemental })}
-                      </span>
-                    )}
-                    {visibleMappingProgress.running > 0 && (
-                      <span className={`${css.pill} ${mappingActivelyRunning ? css.pillRunning : css.pillPending}`}>
-                        {mappingActivelyRunning && <span className={css.runningDot} />}
-                        {t(mappingRunningLabel, { count: visibleMappingProgress.running })}
-                      </span>
-                    )}
-                    {visibleMappingProgress.completed > 0 && (
-                      <span className={`${css.pill} ${css.pillCompleted}`}>
-                        {t('mapping.tasks.completed', { count: visibleMappingProgress.completed })}
-                      </span>
-                    )}
-                    {visibleMappingProgress.not_started > 0 && (
-                      <span className={`${css.pill} ${css.pillPending}`}>
-                        {t('mapping.tasks.not_started', { count: visibleMappingProgress.not_started })}
-                      </span>
-                    )}
-                    {visibleMappingProgress.failed > 0 && (
-                      <span className={`${css.pill} ${css.pillFailed}`}>
-                        {t('mapping.tasks.failed', { count: visibleMappingProgress.failed })}
-                      </span>
-                    )}
-                  </>
-                }
-              </div>
-            </div>
-            <div className={css.mappingProgressTrack}>
-              <BidProgressBar value={mappingPercent} max={100} />
-            </div>
-            {visibleMappingProgress.failed_section_ids.length > 0 && (
-              <p className={css.mappingFailureSections}>
-                {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
-              </p>
-            )}
-          </div>
+        {mappingProgressObservable && visibleMappingProgress.failed_section_ids.length > 0 && (
+          <p className={css.mappingFailureSections}>
+            {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
+          </p>
         )}
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
@@ -1622,4 +1570,5 @@ export function BidStagePanel({
       {floatingRevision}
     </section>
   )
+  return <>{runPlan}{stagePanel}</>
 }

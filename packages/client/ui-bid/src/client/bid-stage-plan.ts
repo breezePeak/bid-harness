@@ -53,7 +53,7 @@ const REPAIR_STEPS = {
 
 function stepsFor(stage: BidStage, phase: string): readonly StagePlanStep[] {
   const steps: readonly StagePlanStep[] = STAGE_STEPS[stage]
-  const repair = REPAIR_STEPS[stage as keyof typeof REPAIR_STEPS]
+  const repair = (REPAIR_STEPS as Partial<Record<BidStage, StagePlanStep>>)[stage]
   if (phase !== 'repairing' || repair === undefined) return steps
   const insertAfter = stage === 'chapter_writing' ? 3 : 2
   return [...steps.slice(0, insertAfter), repair, ...steps.slice(insertAfter)]
@@ -67,7 +67,8 @@ export function buildBidStagePlan(
   const phase = projection.task.run?.progress?.phase ?? 'starting'
   const steps = stepsFor(projection.task.stage, phase)
   const matched = steps.findIndex(step => step.phases.includes(phase))
-  const active = matched < 0 ? 0 : matched
+  const finished = projection.task.status === 'waiting_user' || projection.task.status === 'completed'
+  const active = finished ? steps.length : matched < 0 ? 0 : matched
   return steps.map((step, index) => ({
     key: step.key,
     content: t(step.label),

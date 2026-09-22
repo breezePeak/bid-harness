@@ -2,7 +2,9 @@
 
 [English](README.md) | 中文
 
-纯 React 原子组件（零 cordis）：StateDot、DisclosureRow、ic_ds_* 图标、Button/Pill/Menu/Modal/Input/Textarea、Toast 短时横幅、OnboardingSurface 首次使用接管层（portal 到 body 的遮罩加不透明展示层，在且仅在自身生命周期内保持 `#root` 为 `inert`）、markdown 家族（MessageText/MarkdownText/JsonBlock）、只读 JsonTree 检查器、`useAnchoredMaxHeight` 钩子（把底部锚定的浮层高度收敛到锚点上方的视口空间，并在 resize、scroll 与调用方提供的依赖变化时重新测量）、`useAnchoredPosition` 钩子（让固定定位的浮动面板跟住锚点：测量、偏移、按视口边距钳制，并在捕获阶段滚动、窗口缩放与面板自身尺寸变化时重新定位）、TerminalBlock、DiffBlock、ReadBlock、SearchBlock，以及 WebBlock。`Textarea` 透传标准 React textarea 属性，支持禁用与无障碍属性，并复用现有输入 token。
+纯 React 原子组件（零 cordis）：StateDot、DisclosureRow、默认展开且可折叠的 PlanListPanel、ic_ds_* 图标、Button/Pill/Menu/Modal/Input/Textarea、Toast 短时横幅、OnboardingSurface 首次使用接管层（portal 到 body 的遮罩加不透明展示层，在且仅在自身生命周期内保持 `#root` 为 `inert`）、markdown 家族（MessageText/MarkdownText/JsonBlock）、只读 JsonTree 检查器、`useAnchoredMaxHeight` 钩子（把底部锚定的浮层高度收敛到锚点上方的视口空间，并在 resize、scroll 与调用方提供的依赖变化时重新测量）、`useAnchoredPosition` 钩子（让固定定位的浮动面板跟住锚点：测量、偏移、按视口边距钳制，并在捕获阶段滚动、窗口缩放与面板自身尺寸变化时重新定位）、TerminalBlock、DiffBlock、ReadBlock、SearchBlock，以及 WebBlock。`Textarea` 透传标准 React textarea 属性，支持禁用与无障碍属性，并复用现有输入 token。
+
+`PlanListPanel.summary` 接收纯数据摘要，在表头进度后显示带框状态统计，支持逐项悬浮说明与分隔符；完成使用绿色，待处理使用灰色，运行使用蓝色呼吸闪烁，失败使用红色。调用方负责区分活动执行与停止后的未完成状态；摘要在计划折叠时仍可见，窄窗口允许换行，减少动态效果设置会关闭动画。
 
 ## 悬浮卡片
 
