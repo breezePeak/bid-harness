@@ -316,6 +316,20 @@ export interface BidClientProjection {
   maxTotalBytes?: number | undefined
 }
 
+/** Host 从能力 Work 的不可变请求与检查点读取的计划摘要。 */
+export interface BidCapabilityPlanView {
+  readonly workId: string
+  readonly title: string
+  readonly scope: string
+  readonly status: 'queued' | 'running' | 'awaiting_input' | 'suspended' | 'completed' | 'failed'
+  readonly steps: readonly {
+    readonly id: string
+    readonly capability: string
+    readonly status: 'pending' | 'running' | 'awaiting_input' | 'completed' | 'failed'
+    readonly detail: string | null
+  }[]
+}
+
 /** 已发布阶段详情；S4 执行期间的目录保持为 S3 确认版本。 */
 export interface BidDetailsView {
   tender: import('./tender-analysis-confirmation.ts').TenderAnalysisConfirmationView | null

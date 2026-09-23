@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
+import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import { applyOutlineEdits, BID_DOCX_EXPORT_PROJECTION_KEY, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, BidTaskStatus, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
@@ -27,7 +28,7 @@ import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import { BidRevisionFloatingPanel } from './BidRevisionFloatingPanel.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import { isBidMainSessionSummary } from './session-authority.ts'
-import { buildBidStagePlan, buildDocxExportPlan } from './bid-stage-plan.ts'
+import { buildBidStagePlan, buildCapabilityTaskPlan, buildDocxExportPlan } from './bid-stage-plan.ts'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
@@ -340,6 +341,7 @@ export function BidStagePanel({
   setReviewViewAvailable,
   reviewSurface,
   getDetails,
+  getCapabilityTaskPlan,
   setDetailsAvailable,
   uploadFiles,
   getDocxLibrary,
@@ -389,6 +391,30 @@ export function BidStagePanel({
     progress: BidEvidenceMappingProgress
   } | null>(null)
   const [mappingReadState, setMappingReadState] = useState<'loading' | 'ready' | 'stale'>('loading')
+  const [capabilitySnapshot, setCapabilitySnapshot] = useState<{
+    sessionId: typeof sessionId
+    plan: BidCapabilityPlanView | null
+  } | null>(null)
+  const capabilityPlan = capabilitySnapshot?.sessionId === sessionId ? capabilitySnapshot.plan : null
+  const [bodyAvailable, setBodyAvailable] = useState(false)
+
+  useEffect(() => {
+    if (!isBidSession) return
+    let active = true
+    let timer: number | undefined
+    const refresh = async (): Promise<void> => {
+      try {
+        const plan = await getCapabilityTaskPlan()
+        if (active) setCapabilitySnapshot({ sessionId, plan })
+      } catch {
+        // 短暂读取失败时保留上次 Host 摘要，下次轮询重试。
+      } finally {
+        if (active) timer = window.setTimeout(() => { void refresh() }, 2000)
+      }
+    }
+    void refresh()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [getCapabilityTaskPlan, isBidSession, sessionId])
 
   const progressStage = projection?.task.stage
   const progressStatus = projection?.task.status
@@ -555,7 +581,8 @@ export function BidStagePanel({
     return () => { setBackgroundActivity(false) }
   }, [backgroundRunActive, setBackgroundActivity])
   const embedConversation = false
-  const reviewViewAvailable = hasProjection && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
+  const reviewViewAvailable = hasProjection && (bodyAvailable
+    || projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
   const outlineReviewReady = canConfirm && projection?.task.stage === 'evidence_mapping'
   const reviewViewId = canConfirmAnalysis ? 'bid-tender'
     : canConfirm ? outlineReviewReady ? 'bid-outline' : 'bid-confirmation' : 'bid-review'
@@ -595,6 +622,7 @@ export function BidStagePanel({
     if (hasProjection) {
       void getDetails().then((details) => {
         if (!active) return
+        setBodyAvailable(details.body)
         setDetailsAvailable(details, canConfirm && !outlineReviewReady, canConfirmAnalysis)
         if (reviewStateKey !== null && reviewReady.current !== reviewStateKey) {
           reviewReady.current = reviewStateKey
@@ -887,7 +915,8 @@ export function BidStagePanel({
   const hostFailureReason = hostFailure?.message
   const hostFailureIssues = hostFailure?.issues ?? []
   const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
-  const showRunPlan = projection.task.status === 'running' || mappingProgressObservable
+  const showRunPlan = (projection.task.status === 'running' || mappingProgressObservable)
+    && projection.task.run?.work.kind !== 'capability_task'
   const planItems = buildBidStagePlan(projection, t)
   const planLabels: PlanListLabels = {
     title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.task.stage) + 1)}`, name: t(stageKey(projection.task.stage)) }),
@@ -1107,6 +1136,23 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
+  const capabilityRunPlan = capabilityPlan !== null ? (
+    <div>
+      <PlanListPanel
+        items={buildCapabilityTaskPlan(capabilityPlan, t)}
+        running={capabilityPlan.status === 'running'}
+        labels={{ ...planLabels, title: capabilityPlan.title }}
+        testId="bid-capability-plan"
+      />
+      <p role={capabilityPlan.status === 'failed' ? 'alert' : 'status'} className={css.agentStatus}>
+        {capabilityPlan.status === 'queued' ? t('capability.queued')
+          : capabilityPlan.status === 'awaiting_input' ? t('capability.awaiting_input')
+            : t(`status.${capabilityPlan.status}`)} · {capabilityPlan.scope === 'project'
+          ? t('capability.scope.project') : capabilityPlan.scope}
+        {capabilityPlan.steps.flatMap(step => step.detail === null ? [] : [step.detail]).join('；')}
+      </p>
+    </div>
+  ) : null
   const exportPlan = docxExport !== null && docxExport !== undefined ? (
     <div>
       <PlanListPanel
@@ -1128,6 +1174,7 @@ export function BidStagePanel({
   ) : null
   if (projection.task.status === 'running') return <>
     {runPlan}
+    {capabilityRunPlan}
     {exportPlan}
     {mappingSyncNotice}
     {floatingRevision}
@@ -1584,5 +1631,5 @@ export function BidStagePanel({
       {floatingRevision}
     </section>
   )
-  return <>{runPlan}{exportPlan}{stagePanel}</>
+  return <>{runPlan}{capabilityRunPlan}{exportPlan}{stagePanel}</>
 }

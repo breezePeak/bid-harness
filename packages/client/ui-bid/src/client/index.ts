@@ -6,6 +6,7 @@
  * Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -51,6 +52,8 @@ export interface BidStagePanelInjected {
   setBackgroundActivity: (active: boolean) => void
   /** 读取已发布详情并恢复各标签的可见性。 */
   getDetails: () => Promise<BidDetailsView>
+  /** 读取当前能力 Work 或已登记请求的只读步骤摘要。 */
+  getCapabilityTaskPlan: () => Promise<BidCapabilityPlanView | null>
   setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean, confirmingTender?: boolean) => void
   /** Mirror the Host composer capability into the existing session block. */
   setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
@@ -303,6 +306,11 @@ export function apply(ctx: ClientContext): void {
         } : undefined)
       },
       getDetails: () => getDetails(sessionId),
+      getCapabilityTaskPlan: async () => {
+        const result = await ctx.remote.bid.getCapabilityTaskPlan(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
       setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         conversation?.setViewAvailable('bid-tender', confirmingTender || details?.tender != null)

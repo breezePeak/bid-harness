@@ -1,4 +1,4 @@
-import type { BidClientProjection, BidStage, DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidCapabilityPlanView, BidClientProjection, BidStage, DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
 import type { PlanListItem } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { BidKey } from './locales.ts'
 
@@ -85,4 +85,19 @@ export function buildDocxExportPlan(operation: DocxExportOperation, t: Translate
     content: t(step.label),
     status: index < active ? 'completed' : index === active ? 'in_progress' : 'pending',
   }))
+}
+
+/** 显示 Host 检查点中的实际能力步骤；失败和等待输入保留在当前步骤。 */
+export function buildCapabilityTaskPlan(plan: BidCapabilityPlanView, t: TranslateBid): readonly PlanListItem[] {
+  return plan.steps.map((step) => {
+    const key = `capability.${step.capability}` as BidKey
+    const label = t(key)
+    return {
+      key: step.id,
+      content: label === key ? t('capability.unknown') : label,
+      status: step.status === 'completed' ? 'completed'
+        : step.status === 'running' || step.status === 'awaiting_input' || step.status === 'failed'
+          ? 'in_progress' : 'pending',
+    }
+  })
 }

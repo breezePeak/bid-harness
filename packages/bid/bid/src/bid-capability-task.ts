@@ -216,7 +216,13 @@ export async function persistCapabilityTaskRequest(
     await verifyCapabilityTaskScope(workspace, task.scope, outline)
   }
   const existing = await findCapabilityTaskRequest(workspace, authorization)
-  if (existing !== null) return existing
+  if (existing !== null) {
+    const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, existing))
+    if (JSON.stringify(saved.task) !== JSON.stringify(bidCapabilityTaskSchema.parse(task))) {
+      throw new Error('BID_CAPABILITY_USER_MESSAGE_TASK_CONFLICT')
+    }
+    return existing
+  }
   const inputSources = await Promise.all([...new Set(inputPaths)].sort().map(async (path) => {
     const digest = await fileHash(workspace, path)
     if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${path}`)

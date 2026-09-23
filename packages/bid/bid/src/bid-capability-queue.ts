@@ -6,7 +6,7 @@ import type { BidWorkspace } from './index.ts'
 import type { BidCommitLease, BidRunContext } from './run-coordinator.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { BID_CAPABILITIES } from './bid-capability-registry.ts'
-import { readBidChapterCommandJournal, writeBidChapterCommandJournal,
+import { readBidChapterCommandJournal, withBidCommandJournalLock, writeBidChapterCommandJournal,
   type BidChapterCommandRecord } from './chapter-command-journal.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -63,7 +63,7 @@ export async function enqueueCapabilityRequest(
     throw new Error('BID_CAPABILITY_QUEUE_REQUEST_CONFLICT')
   }
   if (existingRequest === undefined) await run.commits.writeJson(absolute, request)
-  await run.commits.publish(async (lease) => {
+  await run.commits.publish(lease => withBidCommandJournalLock(workspace, run.work.workId, async () => {
     const records = await readBidChapterCommandJournal(workspace, run.work.workId)
     const existing = records.find((record) => {
       const parsed = commandSchema.safeParse(record.command)
@@ -80,7 +80,7 @@ export async function enqueueCapabilityRequest(
       request_ref: path, request_sha256: digest(request) })
     await writeBidChapterCommandJournal(workspace, run.work.workId,
       [...records, { id: randomUUID(), status: 'pending', command }], lease)
-  })
+  }))
   return { queue_id: id, request_ref: path }
 }
 
@@ -142,8 +142,8 @@ export async function pendingCapabilityWorkIds(workspace: BidWorkspace): Promise
 export async function markCapabilityRequestApplied(
   workspace: BidWorkspace, originWorkId: string, recordId: string, run: BidRunContext,
 ): Promise<void> {
-  await run.commits.publish(lease => markCapabilityRequestAppliedWithLease(
-    workspace, originWorkId, recordId, lease))
+  await run.commits.publish(lease => withBidCommandJournalLock(workspace, originWorkId,
+    () => markCapabilityRequestAppliedWithLease(workspace, originWorkId, recordId, lease)))
 }
 
 /** 在已有项目 mutation 内确认先前接纳的 Work，避免重启后再启动一个 Run。 */
@@ -175,9 +175,11 @@ export async function cancelCapabilityRequestsForReset(
       BID_CAPABILITIES[step.call.capability].requires.some(input => removes(within(workspace.projectRoot,
         input === 'manifest' ? 'manifest.json' : input))))).map(item => item.recordId))
     if (invalid.size === 0) continue
-    const records = await readBidChapterCommandJournal(workspace, workId)
-    await writeBidChapterCommandJournal(workspace, workId, records.map(record => invalid.has(record.id)
-      ? { ...record, status: 'canceled' as const } : record), lease)
+    await withBidCommandJournalLock(workspace, workId, async () => {
+      const records = await readBidChapterCommandJournal(workspace, workId)
+      await writeBidChapterCommandJournal(workspace, workId, records.map(record => invalid.has(record.id)
+        ? { ...record, status: 'canceled' as const } : record), lease)
+    })
     canceled += invalid.size
   }
   return canceled

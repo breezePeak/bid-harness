@@ -36,6 +36,7 @@ export type {
   BidChapterWritingGateErrorCode,
   BidChapterWritingGateResult,
   BidClientProjection,
+  BidCapabilityPlanView,
   BidComposerCapability,
   BidComposerReason,
   BidDocumentRole,

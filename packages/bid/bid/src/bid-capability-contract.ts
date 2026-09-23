@@ -66,7 +66,7 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('chapter.review'), input: z.object({ reason: instruction }).strict() }).strict(),
   z.object({ capability: z.literal('document.review'), input: z.object({ reason: instruction }).strict() }).strict(),
   z.object({ capability: z.literal('docx.export'), input: z.object({
-    template_id: z.string().min(1).nullable(),
+    template_id: z.string().regex(/^[a-f0-9]{64}$/u).nullable(),
   }).strict() }).strict(),
 ])
 

@@ -91,7 +91,7 @@ import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
 import { BID_CAPABILITIES, defaultBidCapabilityForStage, executeDefaultBidCapability,
   validateDefaultBidCapability } from './bid-capability-registry.ts'
 import { askCapabilityTaskInput, executeCapabilityTask, readCapabilityAwaitingInput,
-  persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema,
+  persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
@@ -204,7 +204,7 @@ import { writingEntryIntentSchema } from './writing-entry-contract.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidBeforeStageStart } from './orchestrator.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
-import { readBidChapterCommandJournal, writeBidChapterCommandJournal, type BidChapterCommandRecord } from './chapter-command-journal.ts'
+import { readBidChapterCommandJournal, withBidCommandJournalLock, writeBidChapterCommandJournal, type BidChapterCommandRecord } from './chapter-command-journal.ts'
 import type {
   BidDetailsView,
   BidChapterRevisionRequest,
@@ -233,6 +233,7 @@ import type {
   BidStage,
   BidWorkDescriptor,
   BidTaskState,
+  BidCapabilityPlanView,
   BidDocumentRole,
   BidBinaryUploadFile,
   BidUploadFile,
@@ -310,6 +311,7 @@ export type {
   BidRevisionIssueReference,
   BidRevisionQueueErrorCode,
   BidRevisionComparisonResult,
+  BidCapabilityPlanView,
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES, appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 export type { BidSchemaWarning, BidSchemaWarningReason, BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
@@ -1049,11 +1051,11 @@ class HostChapterWritingControl implements ChapterWritingControl {
     const commits = this.commits
     if (workspace === undefined || workId === undefined || commits === undefined) throw new Error('BID_CHAPTER_COMMAND_JOURNAL_UNBOUND')
     const record: BidChapterCommandRecord = { id: randomUUID(), status: 'pending', command }
-    this.writes = this.writes.then(async () => {
+    this.writes = this.writes.then(() => withBidCommandJournalLock(workspace, workId, async () => {
       const records = [...await readBidChapterCommandJournal(workspace, workId), record]
       await writeBidChapterCommandJournal(workspace, workId, records, commits)
       this.records = records
-    })
+    }))
     await this.writes
     this.commands.push({ ...command, commandId: record.id })
     for (const listener of this.listeners) listener()
@@ -1092,12 +1094,12 @@ class HostChapterWritingControl implements ChapterWritingControl {
     const ids = new Set(commands.flatMap(command => command.commandId === undefined ? [] : [command.commandId]))
     this.writes = this.writes.then(async () => {
       let records: BidChapterCommandRecord[] = []
-      await commits.publish(async (lease) => {
+      await commits.publish(lease => withBidCommandJournalLock(workspace, workId, async () => {
         records = (await readBidChapterCommandJournal(workspace, workId))
           .map(record => ids.has(record.id) ? { ...record, status: 'applied' as const } : record)
         await write(lease)
         await writeBidChapterCommandJournal(workspace, workId, records, lease)
-      })
+      }))
       this.records = records
     })
     await this.writes
@@ -5146,6 +5148,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (message?.type !== 'user/message') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
     const first = task.steps[0]
     if (first === undefined) throw new Error('BID_CAPABILITY_EMPTY_TASK')
+    const exportStep = this.capabilityExportStep(task)
     const authorization = { session_id: String(session.id), message_id: String(message.data.id) }
     const key = projectKey(session)
     const active = this.inFlight.get(key)
@@ -5156,17 +5159,49 @@ export class BidHostRuntime extends TypertRemoteService {
         message: '能力任务已在当前 Work 命令日志登记；当前 Run 收敛后按顺序执行。' }
     }
     if (active !== undefined) await active.done
+    const executionTask = exportStep === null ? task : { ...task, steps: task.steps.slice(0, -1) }
     const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
       ? 'manifest.json' : path)
-    const state = await this.runCapabilityTask(agent, task, authorization, inputs)
+    const state = executionTask.steps.length === 0 ? bidSessionTaskState(session)
+      : await this.runCapabilityTask(agent, executionTask, authorization, inputs)
+    if (state.status === 'failed' || state.status === 'suspended') {
+      return { accepted: true, queued: false, state }
+    }
+    const exported = exportStep === null ? null : await this.exportDocxWithIdentity(session,
+      exportStep.input.template_id as DocxTemplateId | null,
+      this.capabilityExportIdentity(authorization, exportStep.input.template_id))
+    if (exported !== null && !exported.ok) throw new Error(exported.error.message)
     const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+    if (executionTask.steps.length === 0) return { accepted: true, queued: false, state,
+      export_path: exported?.ok ? exported.value.path : null }
     const work = await findCapabilityTaskRequest(canonical, authorization)
     if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
     const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
     return { accepted: true, queued: false, work_id: work.workId, state,
       result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
       changed_artifacts: receipt?.files.map(file => file.path) ?? [],
-      removed_artifacts: receipt?.removed_paths ?? [] }
+      removed_artifacts: receipt?.removed_paths ?? [],
+      export_path: exported?.ok ? exported.value.path : null }
+  }
+
+  /** 导出只能作为任务的最后一步，由独立导出操作读取已提交正文。 */
+  private capabilityExportStep(task: BidCapabilityTask): Extract<BidCapabilityTask['steps'][number]['call'],
+    { capability: 'docx.export' }> | null {
+    const positions = task.steps.flatMap((step, index) => step.call.capability === 'docx.export' ? [index] : [])
+    if (positions.length === 0) return null
+    if (positions.length !== 1 || positions[0] !== task.steps.length - 1) {
+      throw new Error('BID_CAPABILITY_EXPORT_MUST_BE_LAST_STEP')
+    }
+    const call = task.steps.at(-1)?.call
+    if (call?.capability !== 'docx.export') throw new Error('BID_CAPABILITY_EXPORT_MISSING')
+    return call
+  }
+
+  private capabilityExportIdentity(
+    authorization: CapabilityTaskRequest['authorization'], templateId: string | null,
+  ): string {
+    return createHash('sha256').update(`${authorization.session_id}\0${authorization.message_id}\0docx.export\0${templateId ?? 'default'}`)
+      .digest('hex').slice(0, 32)
   }
 
   /** 当前 Work 收敛后只消费登记过的请求，后续步骤取得独立 Run。 */
@@ -5183,9 +5218,13 @@ export class BidHostRuntime extends TypertRemoteService {
       if (agent?.session !== session || pending.request.authorization.session_id !== String(session.id)) return
       const first = pending.request.task.steps[0]
       if (first === undefined) throw new Error('BID_CAPABILITY_QUEUE_EMPTY_TASK')
+      const exportStep = this.capabilityExportStep(pending.request.task)
+      const executionTask = exportStep === null ? pending.request.task
+        : { ...pending.request.task, steps: pending.request.task.steps.slice(0, -1) }
       const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
         ? 'manifest.json' : path)
-      const existing = await findCapabilityTaskRequest(workspace, pending.request.authorization)
+      const existing = executionTask.steps.length === 0 ? null
+        : await findCapabilityTaskRequest(workspace, pending.request.authorization)
       if (existing !== null) {
         const started = session.events.some(event => event.type === 'bid.run.started'
           && event.data.run.work.workId === existing.workId)
@@ -5193,19 +5232,39 @@ export class BidHostRuntime extends TypertRemoteService {
           const completed = session.events.some(event => event.type === 'bid.run.completed'
             && event.data.run.work.workId === existing.workId)
           if (!completed) return
-          const operation = this.beginOperation(session)
-          try {
-            const current = await this.prepareOperation(operation)
-            await this.mutateProject(operation, lease => markCapabilityRequestAppliedWithLease(
-              workspace, originWorkId, pending.recordId, lease), current)
-          } finally {
-            await this.finishOperation(session, operation)
+          if (exportStep === null) {
+            await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
+            continue
           }
-          continue
         }
       }
-      await this.runCapabilityTask(agent, pending.request.task, pending.request.authorization, inputs,
-        run => markCapabilityRequestApplied(workspace, originWorkId, pending.recordId, run))
+      if (executionTask.steps.length > 0 && (existing === null || !session.events.some(event =>
+        event.type === 'bid.run.completed' && event.data.run.work.workId === existing.workId))) {
+        const outcome = await this.runCapabilityTask(agent, executionTask, pending.request.authorization, inputs,
+          exportStep === null ? run => markCapabilityRequestApplied(workspace, originWorkId, pending.recordId, run)
+            : undefined)
+        if (outcome.status === 'suspended' || outcome.status === 'failed') return
+      }
+      if (exportStep !== null) {
+        const exported = await this.exportDocxWithIdentity(session,
+          exportStep.input.template_id as DocxTemplateId | null,
+          this.capabilityExportIdentity(pending.request.authorization, exportStep.input.template_id))
+        if (!exported.ok) throw new Error(exported.error.message)
+        await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
+      }
+    }
+  }
+
+  private async acknowledgeQueuedCapability(
+    session: Session, workspace: BidWorkspace, originWorkId: string, recordId: string,
+  ): Promise<void> {
+    const operation = this.beginOperation(session)
+    try {
+      const current = await this.prepareOperation(operation)
+      await this.mutateProject(operation, lease => withBidCommandJournalLock(workspace, originWorkId,
+        () => markCapabilityRequestAppliedWithLease(workspace, originWorkId, recordId, lease)), current)
+    } finally {
+      await this.finishOperation(session, operation)
     }
   }
 
@@ -5262,6 +5321,13 @@ export class BidHostRuntime extends TypertRemoteService {
       const work = await persistCapabilityTaskRequest(operation.workspace, session, current.stage, selected,
         authorization, inputPaths, current)
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, work))
+      if (session.events.some(event => event.type === 'bid.run.completed'
+        && event.data.run.work.workId === work.workId)) {
+        if (await readCapabilityPublicationReceipt(operation.workspace, work.workId, work.requestSha256) === null) {
+          throw new Error('BID_CAPABILITY_COMPLETED_RECEIPT_MISSING')
+        }
+        return current
+      }
       const execution = await this.executionAgent(operation, current.stage)
       const run = await operation.runs.start(work)
       admitted = true
@@ -5677,8 +5743,31 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('exportDocx')
   async exportDocx(session: Session, templateId: DocxTemplateId | null): Promise<BidDocxExportResult> {
+    return this.exportDocxWithIdentity(session, templateId)
+  }
+
+  /** 用户能力任务复用独立导出生命周期，稳定身份用于重启去重。 */
+  private async exportDocxWithIdentity(
+    session: Session, templateId: DocxTemplateId | null, operationId?: string,
+  ): Promise<BidDocxExportResult> {
     if (!isBidMainSession(session)) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
+    }
+    if (operationId !== undefined) {
+      const prior = session.events.findLast(event => event.type === 'bid.docx_export.changed'
+        && event.data.operation.operationId === operationId)
+      if (prior?.type === 'bid.docx_export.changed' && prior.data.operation.status === 'completed') {
+        const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+        const previousPath = within(workspace.projectRoot, prior.data.operation.path)
+        await assertNoLinkedPath(workspace.root, previousPath)
+        try {
+          await readFile(previousPath)
+          return { ok: true, value: { path: prior.data.operation.path,
+            warnings: prior.data.operation.warnings } }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
     }
     const existing = this.docxExports.get(session.id)
     if (existing !== undefined) return existing
@@ -5742,7 +5831,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }] : []
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
-        message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
+        message: `Word 已按已保存正文快照 ${createHash('sha256').update(snapshot.markdown).digest('hex').slice(0, 12)} 生成；缺失正文的章节已标注。`,
       }, ...technicalDeviationWarnings, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
@@ -5759,7 +5848,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
       const startedAt = Date.now()
-      const base = { operationId: randomBytes(16).toString('hex'), templateId, startedAt }
+      const base = { operationId: operationId ?? randomBytes(16).toString('hex'), templateId, startedAt }
       let current: DocxExportOperation = {
         ...base, updatedAt: startedAt, status: 'running', phase: 'collecting', message: '正在收集目录和已保存正文',
       }
@@ -6581,8 +6670,6 @@ export class BidHostRuntime extends TypertRemoteService {
   /** Admit the S5 workbench while writing is running or after its last result. */
   private requireReviewWorkspace(session: Session): BidWorkspace {
     if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
-    const runtime = bidSessionTaskState(session)
-    if (runtime.stage !== 'chapter_writing' && runtime.stage !== 'docx_export') throw new Error('BID_REVIEW_NOT_ALLOWED')
     return new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
   }
 
@@ -6810,6 +6897,74 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。
+   * @param session 项目公开主会话。
+   * @returns 最近任务的只读摘要；尚无能力任务时为 null。
+   */
+  @Remote('getCapabilityTaskPlan')
+  async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null> {
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const task = bidSessionTaskState(session)
+    const current = task.status === 'running' || task.status === 'suspended' ? task.run : null
+    if (current?.work.kind !== 'capability_task') {
+      for (const workId of await pendingCapabilityWorkIds(workspace)) {
+        const pending = (await readPendingCapabilityRequests(workspace, workId))[0]
+        if (pending === undefined || pending.request.authorization.session_id !== String(session.id)) continue
+        return { workId: pending.request.queue_id, title: pending.request.task.goal,
+          scope: pending.request.task.scope.kind === 'project' ? 'project'
+            : pending.request.task.scope.kind === 'sections' ? pending.request.task.scope.section_ids.join(', ')
+              : pending.request.task.scope.reference.section_id,
+          status: 'queued', steps: pending.request.task.steps.map((step, index) => ({
+            id: `${pending.request.queue_id}:${index}`, capability: step.call.capability,
+            status: 'pending', detail: null,
+          })) }
+      }
+    }
+    const lastStarted = session.events.findLast(event => event.type === 'bid.run.started')
+    const run = current?.work.kind === 'capability_task' ? current
+      : lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
+        ? lastStarted.data.run : null
+    if (run !== null) {
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, run.work))
+      const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
+      await assertNoLinkedPath(workspace.root, path)
+      let checkpoint: ReturnType<typeof capabilityTaskCheckpointSchema.parse> | null = null
+      try { checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8'))) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (checkpoint !== null && (checkpoint.work_id !== run.work.workId
+        || checkpoint.request_sha256 !== run.work.requestSha256)) {
+        throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
+      }
+      const completed = session.events.some(event => event.type === 'bid.run.completed'
+        && event.data.run.work.workId === run.work.workId)
+      const status: BidCapabilityPlanView['status'] = completed ? 'completed'
+        : current?.work.workId === run.work.workId
+          ? task.status === 'suspended'
+            ? task.run.cause === 'awaiting_input' ? 'awaiting_input' : 'suspended'
+            : 'running'
+          : 'failed'
+      return {
+        workId: run.work.workId, title: request.task.goal,
+        scope: request.task.scope.kind === 'project' ? 'project'
+          : request.task.scope.kind === 'sections' ? request.task.scope.section_ids.join(', ')
+            : request.task.scope.reference.section_id,
+        status,
+        steps: (checkpoint?.steps ?? request.task.steps.map((step, index) => ({
+          step_id: `${run.work.workId}:${index}`, step, status: 'pending' as const,
+        }))).map((record, index) => ({
+          id: record.step_id, capability: record.step.call.capability,
+          status: status === 'failed' && index === checkpoint?.steps.findIndex(step => step.status === 'running')
+            ? 'failed' as const : record.status,
+          detail: 'result' in record ? [...record.result.missing_topics,
+            ...record.result.warnings].join('；') || null : null,
+        })),
+      }
+    }
+    return null
+  }
+
+  /**
    * Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.
    * @param session - Bid Session that owns the S4 execution log.
    * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
@@ -6838,8 +6993,14 @@ export class BidHostRuntime extends TypertRemoteService {
     await this.reconcileDocxExport(session)
     const task = bidSessionTaskState(session)
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
-    const body = task.stage === 'chapter_writing' || task.stage === 'docx_export'
-    const finalOutline = body || (task.stage === 'evidence_mapping' && task.status === 'completed')
+    const body = (await readChapterLocations(workspace)).size > 0
+    const confirmedPath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
+    await assertNoLinkedPath(workspace.root, confirmedPath)
+    let confirmedExists = false
+    try { await readFile(confirmedPath); confirmedExists = true } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const finalOutline = confirmedExists || (task.stage === 'evidence_mapping' && task.status === 'completed')
     const reviewingOutline = task.stage === 'evidence_mapping' && task.status === 'waiting_user'
     const initialOutline = task.stage === 'evidence_mapping' || (task.stage === 'outline_generation' && task.status === 'completed')
     const tenderReady = task.stage !== 'file_intake' && (task.stage !== 'tender_analysis' || task.status === 'waiting_user' || task.status === 'completed')
@@ -7796,7 +7957,7 @@ export class BidWorkspace {
    */
   async exportDocx(
     source: string,
-    destination = `${this.config.outputDirectory}/技术标.docx`,
+    destination: string = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
     nativeExport?: NativeVisioExport,
@@ -7823,7 +7984,7 @@ export class BidWorkspace {
    */
   async exportDocxMarkdown(
     markdown: string,
-    destination = `${this.config.outputDirectory}/技术标.docx`,
+    destination: string = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
     sourceSnapshot?: string,

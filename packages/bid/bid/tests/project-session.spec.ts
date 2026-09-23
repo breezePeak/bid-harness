@@ -606,6 +606,10 @@ describe('Workspace 项目与独立 Session', () => {
     expect(queued.isError, JSON.stringify(queued)).toBe(false)
     expect(queued.value).toMatchObject({ accepted: true, queued: true })
     expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toHaveLength(1)
+    expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({
+      status: 'queued', title: '更正第一条招标要求',
+      steps: [{ capability: 'tender.update', status: 'pending' }],
+    })
     gate.resolve([])
     const settled = await retry
     expect(settled).toMatchObject({ ok: true })
@@ -618,6 +622,9 @@ describe('Workspace 项目与独立 Session', () => {
     }, { timeout: 10_000 })
     expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toEqual([])
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) }, { timeout: 10_000 })
+    expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({
+      status: 'completed', steps: [{ capability: 'tender.update', status: 'completed' }],
+    })
   }, 20_000)
 
   it('S4 reset 后 inspect 从 S3 已确认目录恢复章节摘要但不伪造 Draft', async () => {
@@ -648,7 +655,7 @@ describe('Workspace 项目与独立 Session', () => {
     } })
   })
 
-  it('详情从已发布产物恢复，S4 运行中忽略正在改写的目录', async () => {
+  it('详情按已发布目录和正文展示，阶段标签不隐藏现有内容', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
     for (const [path, title] of [
@@ -666,33 +673,30 @@ describe('Workspace 项目与独立 Session', () => {
       confirmed_outline_sha256: outlineArtifactSha256(finalOutline),
     }))
     const cases = [
-      ['file_intake', 'pending', false, null, false],
-      ['tender_analysis', 'waiting_user', true, null, false],
-      ['outline_generation', 'pending', true, null, false],
-      ['outline_generation', 'waiting_user', true, null, false],
-      ['evidence_mapping', 'pending', true, 'S3 已确认目录', false],
-      ['evidence_mapping', 'failed', true, 'S3 已确认目录', false],
-      ['evidence_mapping', 'waiting_user', true, 'S4 已生成目录', false],
-      ['chapter_writing', 'pending', true, 'S4 最终确认目录', true],
-      ['chapter_writing', 'failed', true, 'S4 最终确认目录', true],
-      ['chapter_writing', 'completed', true, 'S4 最终确认目录', true],
-      ['docx_export', 'completed', true, 'S4 最终确认目录', true],
+      ['file_intake', 'pending', false],
+      ['tender_analysis', 'waiting_user', true],
+      ['outline_generation', 'pending', true],
+      ['outline_generation', 'waiting_user', true],
+      ['evidence_mapping', 'pending', true],
+      ['evidence_mapping', 'failed', true],
+      ['evidence_mapping', 'waiting_user', true],
+      ['chapter_writing', 'pending', true],
+      ['chapter_writing', 'failed', true],
+      ['chapter_writing', 'completed', true],
+      ['docx_export', 'completed', true],
     ] as const
-    for (const [index, [stage, status, tender, title, body]] of cases.entries()) {
+    for (const [index, [stage, status, tender]] of cases.entries()) {
       await checkpointBidProjectState(workspace, { stage, status })
       const agent = await fresh(`details-${String(index)}`)
       executor.execute.mockClear()
       const details = await ctx.bid.getDetails(agent.session)
       expect(details.tender !== null).toBe(tender)
-      expect(details.outline?.sections[0]?.title ?? null).toBe(title)
-      expect(details.body).toBe(body)
-      if (title === null) expect(details.outlinePresentation).toBeNull()
-      else if (body || stage === 'evidence_mapping' && status === 'waiting_user') {
-        expect(details.outlinePresentation?.source).toBe(body ? 'final_confirmed' : 'final_candidate')
-        expect(details.outlinePresentation?.baseline?.sections[0]?.title).toBe('S3 已确认目录')
-        expect(details.outlinePresentation?.evidence?.section_mappings[0]?.missing_topics).toEqual(['待补充实施材料'])
-        expect(details.outlinePresentation?.errors).toEqual([])
-      } else expect(details.outlinePresentation).toEqual({ source: 'initial_confirmed', baseline: null, evidence: null, errors: [] })
+      expect(details.outline?.sections[0]?.title).toBe('S4 最终确认目录')
+      expect(details.body).toBe(true)
+      expect(details.outlinePresentation?.source).toBe('final_confirmed')
+      expect(details.outlinePresentation?.baseline?.sections[0]?.title).toBe('S3 已确认目录')
+      expect(details.outlinePresentation?.evidence?.section_mappings[0]?.missing_topics).toEqual(['待补充实施材料'])
+      expect(details.outlinePresentation?.errors).toEqual([])
       expect(executor.execute).not.toHaveBeenCalled()
     }
   })
@@ -1212,6 +1216,9 @@ describe('Workspace 项目与独立 Session', () => {
     if (!first.ok || !second.ok) throw new Error('DOCX export failed')
     expect(first.value.path).toMatch(/^output\/bid-\d+-[a-f0-9]{6}\.docx$/u)
     expect(second.value.path).not.toBe(first.value.path)
+    const source = await readFile(join(workspace.projectRoot, first.value.path.replace(/\.docx$/u, '.md')))
+    expect(first.value.warnings?.find(warning => warning.code === 'DOCX_EXPORT_CONTENT_SNAPSHOT')?.message)
+      .toContain(createHash('sha256').update(source).digest('hex').slice(0, 12))
     expect((await readFile(join(workspace.projectRoot, first.value.path))).readUInt32LE(0)).toBe(0x04034b50)
     expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
     const exportEvents = agent.session.events.filter(event => event.type === 'bid.docx_export.changed')
@@ -1224,6 +1231,56 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readBidProjectState(workspace)).toEqual(projectBefore)
     expect(stageReservation).not.toHaveBeenCalled()
   })
+
+  it('公共 docx.export 能力调用独立导出，重放同一用户消息不重复生成', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-docx-export')
+    agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '导出 Word' }],
+      source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const execute = () => ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
+      goal: '导出当前 Word', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+        call: { capability: 'docx.export', input: { template_id: null } } }],
+    } }, callId: CallId('capability-docx-export'), signal: new AbortController().signal })
+    const first = await execute()
+    const second = await execute()
+    expect(first.isError, JSON.stringify(first)).toBe(false)
+    expect(second.value).toMatchObject({ export_path: (first.value as { export_path: string }).export_path })
+    expect(agent.session.events.filter(event => event.type === 'bid.docx_export.changed'
+      && event.data.operation.status === 'completed')).toHaveLength(1)
+  }, 20_000)
+
+  it('同一句修改并导出先提交能力 Work，再取独立 Word 快照', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    const firstBodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    await writeFile(firstBodyPath, '# 章节1\n\n实施范围与交付步骤。\n')
+    const firstMetadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
+    const firstMetadata = JSON.parse(await readFile(firstMetadataPath, 'utf8')) as Record<string, unknown>
+    await writeFile(firstMetadataPath, JSON.stringify({ ...firstMetadata, flowcharts: [] }))
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-update-export')
+    agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '更正要求并导出' }],
+      source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
+      goal: '更正要求并导出', scope: { kind: 'project' }, steps: [
+        { scope: { source: 'task' }, call: { capability: 'tender.update', input: {
+          operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
+            fields: { normalized_requirement: '交付范围包含测试' } }],
+        } } },
+        { scope: { source: 'task' }, call: { capability: 'docx.export', input: { template_id: null } } },
+      ],
+    } }, callId: CallId('capability-update-export'), signal: new AbortController().signal })
+    expect(result.isError, JSON.stringify(result)).toBe(false)
+    const value = result.value as { changed_artifacts: string[]; export_path: string }
+    expect(value.changed_artifacts).toContain('analysis/requirements.json')
+    expect((await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
+      .toContain('交付范围包含测试')
+    expect((await readFile(join(workspace.projectRoot, value.export_path))).readUInt32LE(0)).toBe(0x04034b50)
+    expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation)
+      .toMatchObject({ status: 'completed', path: value.export_path })
+  }, 30_000)
 
   it('同会话并发点击共享当前导出，刷新时投影保持同一个任务', async () => {
     const { ctx, workspace, fresh } = await fixture()

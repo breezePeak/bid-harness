@@ -69,7 +69,9 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getTenderAnalysisForConfirmation` 返回 S2 的四个 Artifact；`bid/confirmTenderAnalysis` 只允许编辑规范化项目、要求、评分与合规字段。原文、分值、ID、`source_refs` 与招标文件覆盖集合不在操作协议中。Host 原子替换四个原路径文件并再次执行完整 S2 Validator；无效输入返回问题并保持 `waiting_user`，通过后才完成 S2 并启动 S3。
 
-`bid/getDetails` 只读已发布详情：S2 确认后继续返回最终招标信息；S3 确认后读取 `outline/initial-confirmed-outline.json`，S4 执行期间保持该版本，等待确认时读取已生成目录，S4 确认后读取 `outline/confirmed-outline.json`。详情读取依赖恢复后的项目状态和原有产物，不新增工作流事件或磁盘格式，也不改变确认接口的编辑准入。
+`bid/getDetails` 只读已发布详情：已存在的 `outline/confirmed-outline.json` 与章节位置决定最终目录和正文入口是否可见；没有最终目录时仍按首次确认边界显示初始或候选目录。阶段标签不会隐藏已有正式正文，也不改变确认接口的编辑准入。
+
+Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
 
 S3 的评分响应点拆解与语义复核都上报 `analyzing`，对应计划第一步；`reviewing` 只用于目录确定性校验通过后的目录质量复核。首次执行和候选恢复遵守相同的进度含义，评分响应点复核失败时不标记目录生成或校验已完成。
 
