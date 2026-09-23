@@ -151,6 +151,54 @@ export async function executeCapabilityOutlineUpdate(
     requirements, scoring, compliance, catalog))
   const validation = validateOutlineDraftForConfirmation(outline, requirements, scoring, compliance, catalog)
   if (!validation.ok) throw new Error(`BID_OUTLINE_CAPABILITY_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)
+  return coordinateCapabilityOutline(context, old, outline, input, new Set())
+}
+
+/**
+ * 资料研究更新章节写作说明后，沿用目录任务的确认哈希和章节索引协调。
+ * @param context 当前步骤候选与真实用户任务身份。
+ * @param outline 研究完成并已通过资料校验的目录候选。
+ * @param researchedIds 本轮已完成资料研究的叶节。
+ * @returns 精确协调文件及仍待完成的正文任务。
+ */
+export async function adoptCapabilityResearchedOutline(
+  context: BidCapabilityExecutionContext, outline: OutlineArtifact, researchedIds: ReadonlySet<string>,
+): ReturnType<typeof executeCapabilityOutlineUpdate> {
+  const workspace = context.working
+  const old = (await readCapabilityOutlineBaseline(workspace)).outline
+  const facts = await Promise.all([
+    requiredJson(workspace, 'analysis/requirements.json'), requiredJson(workspace, 'analysis/scoring.json'),
+    requiredJson(workspace, 'analysis/compliance.json'), requiredJson(workspace, 'analysis/scoring-response-points.json'),
+  ])
+  const validation = validateOutlineDraftForConfirmation(outline,
+    parseTenderRequirementsArtifact(facts[0]), parseTenderScoringArtifact(facts[1]),
+    parseTenderComplianceArtifact(facts[2]), parseScoringResponsePointCatalog(facts[3]))
+  if (!validation.ok) throw new Error(`BID_OUTLINE_CAPABILITY_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)
+  const before = new Map(old.sections.map(section => [section.id, section]))
+  const changed = outline.sections.filter(section => JSON.stringify(before.get(section.id)) !== JSON.stringify(section))
+  if (JSON.stringify({ ...old, sections: [] }) !== JSON.stringify({ ...outline, sections: [] })
+    || outline.sections.length !== old.sections.length
+    || changed.some((section) => {
+      const previous = before.get(section.id)
+      return previous === undefined || previous.parent_id !== section.parent_id || previous.order !== section.order
+        || previous.title !== section.title || previous.writable !== section.writable
+        || context.sectionIds !== null && !context.sectionIds.has(section.id)
+    }) || [...researchedIds].some(id => !outline.sections.some(section => section.id === id && section.writable))) {
+    throw new Error('BID_EVIDENCE_RESEARCH_OUTLINE_SCOPE_INVALID')
+  }
+  return coordinateCapabilityOutline(context, old, outline, {
+    operations: [], business_bindings: [], content_assignments: [], allow_content_deletion: false,
+    defer_content_migration: false,
+  }, researchedIds)
+}
+
+async function coordinateCapabilityOutline(
+  context: BidCapabilityExecutionContext, old: OutlineArtifact, outline: OutlineArtifact,
+  input: OutlineUpdate, researchedIds: ReadonlySet<string>,
+): ReturnType<typeof executeCapabilityOutlineUpdate> {
+  const workspace = context.working
+  const base = await readCapabilityOutlineBaseline(workspace)
+  const oldIds = new Set(old.sections.map(section => section.id))
   const newIds = new Set(outline.sections.filter(section => !oldIds.has(section.id)).map(section => section.id))
   if (context.sectionIds !== null && input.business_bindings.some(binding => !context.sectionIds?.has(binding.section_id)
     && !newIds.has(binding.section_id))) throw new Error('BID_OUTLINE_CAPABILITY_SCOPE_INVALID')
@@ -285,8 +333,9 @@ export async function executeCapabilityOutlineUpdate(
   const nextManifest = manifest === undefined ? undefined : { ...manifest, confirmed_outline_sha256: hash,
     chapters: manifest.chapters.filter(entry => newLeafIds.has(entry.section_id) && !staleReview.has(entry.section_id)) }
   const evidence = evidenceRaw === undefined || !outlineChanged ? undefined : {
-    section_mappings: reconcileSectionEvidence(outline, parseEvidenceMapArtifact(evidenceRaw)).section_mappings
-      .map(mapping => affected.has(mapping.section_id) ? { ...mapping,
+    section_mappings: (researchedIds.size > 0 ? parseEvidenceMapArtifact(evidenceRaw).section_mappings
+      : reconcileSectionEvidence(outline, parseEvidenceMapArtifact(evidenceRaw)).section_mappings)
+      .map(mapping => affected.has(mapping.section_id) && !researchedIds.has(mapping.section_id) ? { ...mapping,
         missing_topics: [...new Set([...mapping.missing_topics, '目录调整后需复核资料适用性'])] } : mapping),
   }
   const draft = parseOutlineDraft({ ...base, source_outline_sha256: hash,

@@ -43,6 +43,8 @@ S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到�
 
 目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 先由独立子会话提出结构操作，再基于 Host 分配的新章节 ID 分配业务引用。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
 
+`evidence.research` 的局部能力复用 S4 remap：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。研究不开放目录结构工具；需要深化时先执行独立目录步骤。研究更新章节写作说明后同步当前确认目录及相关写作索引，新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划与检查点留在步骤候选内，不随能力结果发布。
+
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `{ task: BidTaskState, ... }`，不再投影第二套 runtime、workflow 或最近 Run 状态。`allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage、聊天或 Agent 活动推导业务状态和权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。

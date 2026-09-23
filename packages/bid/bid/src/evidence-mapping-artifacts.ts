@@ -102,6 +102,11 @@ const evidenceMappingTaskSchema = z.object({
   section_ids: z.array(z.string().min(1)),
   outline_edit_scope_id: z.string().min(1).optional(),
   research_candidate_task_ids: z.array(z.string().min(1)).optional(),
+  coverage_candidates: z.object({
+    requirement_ids: z.array(z.string().min(1)),
+    scoring_ids: z.array(z.string().min(1)),
+    scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
+  }).strict().optional(),
   summary_section_ids: z.array(z.string().min(1)).optional(),
   review_issues: z.array(z.string().min(1)).optional(),
   heading_path: z.array(z.string().min(1)).min(1),

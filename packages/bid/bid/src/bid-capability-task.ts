@@ -79,6 +79,8 @@ export interface CapabilityTaskDispatcher {
   /** 返回当前能力可写的精确项目相对路径。 */
   allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace,
     stepId: string): Promise<ReadonlySet<string>>
+  /** 对执行中生成的受账本约束文件补充精确路径；恢复时也从当前候选重算。 */
+  allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace): Promise<ReadonlySet<string>>
   /** 在候选项目执行一个业务能力；返回真实变更结果和精确删除文件。 */
   execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{
     readonly result: BidCapabilityResult
@@ -504,6 +506,21 @@ export async function executeCapabilityTask(
         }
       }
     }
+    if (saved.step.call.capability === 'evidence.research') {
+      for (const path of ['outline/reassignment.json', 'outline/draft.json']) {
+        const digest = await fileHash(working, path)
+        if (digest !== undefined) inputSources.set(path, digest)
+      }
+      if (outline !== undefined) {
+        const selected = scope.sectionIds ?? new Set(outline.sections.map(section => section.id))
+        for (const section of outline.sections.filter(section => section.writable && selected.has(section.id))) {
+          const location = await readChapterLocation(working, section.id)
+          if (location === null) continue
+          const digest = await fileHash(working, location.contentPath)
+          if (digest !== undefined) inputSources.set(location.contentPath, digest)
+        }
+      }
+    }
     const stepInputSha256 = bidInputFingerprint({ call: saved.step.call, scope: saved.step.scope,
       previous: previous?.result ?? null, sources: [...inputSources], answer: inputAnswer ?? null })
     if (saved.status === 'running' && saved.input_sha256 !== stepInputSha256) {
@@ -511,8 +528,9 @@ export async function executeCapabilityTask(
     }
     const recovered = await readCapabilityStepReceipt(working, saved.step_id, stepInputSha256)
     if (recovered !== null) {
-      if (recovered.files.some(file => !writes.has(file.path))
-        || recovered.removed_paths.some(path => !writes.has(path))) {
+      const restoredWrites = new Set([...writes, ...(await dispatcher.allowedWritesAfter?.(saved.step.call, working) ?? [])])
+      if (recovered.files.some(file => !restoredWrites.has(file.path))
+        || recovered.removed_paths.some(path => !restoredWrites.has(path))) {
         throw new Error('BID_CAPABILITY_STEP_RECEIPT_SCOPE_INVALID')
       }
       const next = capabilityTaskCheckpointSchema.parse({ ...checkpoint, steps: checkpoint.steps.map((step, position) =>
@@ -550,6 +568,8 @@ export async function executeCapabilityTask(
       ...(inputAnswer === undefined ? {} : { inputAnswer }),
     }
     const execution = await dispatcher.execute(saved.step.call, context)
+    const postWrites = await dispatcher.allowedWritesAfter?.(saved.step.call, stepWorking) ?? new Set<string>()
+    const validatedContext = { ...context, allowedWrites: new Set([...writes, ...postWrites]) }
     const currentOutline = await readOutline(stepWorking)
     const knownIds = new Set(currentOutline?.sections.map(section => section.id) ?? [])
     if (scope.sectionIds !== null && currentOutline !== undefined) {
@@ -567,8 +587,8 @@ export async function executeCapabilityTask(
         authorizedNewDescendants.add(section.id)
       }
     }
-    const result = await validateCapabilityResult(context, execution.result, knownIds)
-    await dispatcher.validate(saved.step.call, context, result)
+    const result = await validateCapabilityResult(validatedContext, execution.result, knownIds)
+    await dispatcher.validate(saved.step.call, validatedContext, result)
     if (result.needs_input) {
       const questionId = `capability:${run.work.workId}:${saved.step_id}`
       const next = capabilityTaskCheckpointSchema.parse({ ...checkpoint, steps: checkpoint.steps.map((step, position) =>
@@ -584,7 +604,8 @@ export async function executeCapabilityTask(
     }))
     const removedPaths = [...new Set(execution.removedPaths ?? [])]
     for (const path of removedPaths) {
-      if (!writes.has(path) || result.changed_artifacts.includes(path) || await fileHash(stepWorking, path) !== undefined) {
+      if (!validatedContext.allowedWrites.has(path) || result.changed_artifacts.includes(path)
+        || await fileHash(stepWorking, path) !== undefined) {
         throw new Error(`BID_CAPABILITY_RESULT_REMOVAL_INVALID: ${path}`)
       }
     }

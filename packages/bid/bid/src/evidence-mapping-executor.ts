@@ -76,6 +76,8 @@ import {
 } from './web-evidence-source-artifacts.ts'
 import { S4WebResearchPool } from './web-research-pool.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath, webEvidenceChunkSourceId } from './web-evidence-chunks.ts'
+import { outlineReassignmentSchema } from './outline-capability-update.ts'
+import { readChapterLocation } from './chapter-storage.ts'
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -773,9 +775,12 @@ function mappingTaskAssignedCoverage(outline: OutlineArtifact, task: EvidenceMap
     : new Set(task.section_ids)
   const assignedSections = outline.sections.filter(section => assignedIds.has(section.id))
   return {
-    requirement_ids: uniqueStrings(assignedSections.flatMap(section => section.requirement_ids)),
-    scoring_ids: uniqueStrings(assignedSections.flatMap(section => section.scoring_ids)),
-    scoring_response_point_ids: uniqueStrings(assignedSections.flatMap(section => section.scoring_response_point_ids ?? [])),
+    requirement_ids: uniqueStrings([...assignedSections.flatMap(section => section.requirement_ids),
+      ...task.coverage_candidates?.requirement_ids ?? []]),
+    scoring_ids: uniqueStrings([...assignedSections.flatMap(section => section.scoring_ids),
+      ...task.coverage_candidates?.scoring_ids ?? []]),
+    scoring_response_point_ids: uniqueStrings([...assignedSections.flatMap(section => section.scoring_response_point_ids ?? []),
+      ...task.coverage_candidates?.scoring_response_point_ids ?? []]),
   }
 }
 
@@ -1535,9 +1540,21 @@ async function validateCompletedMappingState(
     }
   }
   validateOutlineSharedStructure(researched.sections, issues)
-  validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
+  const queuedNewLeaves = taskOwnsOutlineRefinement(task)
+    && hasQueuedNewLeafCoverage(inputs.outline, researched, result)
+  // 新叶由后续独立研究任务绑定业务 ID；整本覆盖仍在全部任务合并后校验。
+  if (!queuedNewLeaves && task.coverage_candidates === undefined) validateOutlineSharedCoverage(researched, inputs.requirements,
+    inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
   if (taskOwnsOutlineRefinement(task)) await validateOutlineFrameworkRefs(workspace, researched, issues)
   return issues
+}
+
+function hasQueuedNewLeafCoverage(
+  before: OutlineArtifact, after: OutlineArtifact, result: EvidenceMappingPartialResult,
+): boolean {
+  const known = new Set(before.sections.map(section => section.id))
+  return buildWritableSectionWorklist(after).some(section => !known.has(section.id)
+    && !result.section_mappings.some(mapping => mapping.section_id === section.id))
 }
 
 interface MappingCompletion {
@@ -2124,6 +2141,32 @@ async function readOptionalJson(workspace: BidWorkspace, path: string): Promise<
     if (record(error)?.code === 'ENOENT') return undefined
     throw error
   }
+}
+
+async function localRemapContext(
+  workspace: BidWorkspace, task: EvidenceMappingTask,
+): Promise<{ readonly retired: unknown[]; readonly drafts: unknown[] }> {
+  const raw = await readOptionalJson(workspace, 'outline/reassignment.json')
+  const scope = new Set(task.section_ids)
+  const retired = raw === undefined ? [] : outlineReassignmentSchema.parse(raw).retired_sections
+    .filter(section => section.target_section_ids.some(id => scope.has(id)))
+    .map(section => ({ source_section_id: section.source_section_id,
+      target_section_ids: section.target_section_ids.filter(id => scope.has(id)),
+      evidence_mapping: section.evidence_mapping }))
+  const drafts = await Promise.all(task.section_ids.map(async (id) => {
+    const location = await readChapterLocation(workspace, id)
+    if (location === null) return undefined
+    const absolute = join(workspace.projectRoot, location.contentPath)
+    await assertNoLinkedPath(workspace.root, absolute)
+    let markdown: string
+    try { markdown = await readFile(absolute, 'utf8') } catch (error) {
+      if (record(error)?.code === 'ENOENT') return undefined
+      throw error
+    }
+    return { section_id: id, content_sha256: createHash('sha256').update(markdown).digest('hex'),
+      excerpt: markdown.slice(0, 12_000) }
+  }))
+  return { retired, drafts: drafts.filter(value => value !== undefined) }
 }
 
 async function writeJson(path: string, value: unknown, commits: BidCommitScope): Promise<void> {
@@ -2874,7 +2917,10 @@ async function validateRefinedTask(
     section_mappings: [...taskOperations.map(change => change.after), ...result?.section_mappings ?? []],
     refinement_suggestions: [],
   }], inputs.responsePoints)
-  validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
+  if (task.coverage_candidates === undefined
+    && (result === undefined || !hasQueuedNewLeafCoverage(inputs.outline, researched, result))) {
+    validateOutlineSharedCoverage(researched, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, issues)
+  }
   await validateOutlineFrameworkRefs(workspace, researched, issues)
   return { issues, writableIds: mappingTaskSections(researched, task).map(section => section.id) }
 }
@@ -2922,6 +2968,14 @@ function dynamicLeafMappingTasks(
     const rootId = taskOutlineEditRootId(item.task)
     const root = rootId === undefined ? undefined : after.sections.find(section => section.id === rootId)
     if (root === undefined || root.writable) continue
+    const previousScope = sectionSubtreeIds(before, root.id)
+    const formerLeaves = buildWritableSectionWorklist(before).filter(section => previousScope.has(section.id)
+      && !after.sections.some(current => current.id === section.id && current.writable))
+    const coverageCandidates = {
+      requirement_ids: uniqueStrings(formerLeaves.flatMap(section => section.requirement_ids)),
+      scoring_ids: uniqueStrings(formerLeaves.flatMap(section => section.scoring_ids)),
+      scoring_response_point_ids: uniqueStrings(formerLeaves.flatMap(section => section.scoring_response_point_ids ?? [])),
+    }
     const scope = sectionSubtreeIds(after, root.id)
     for (const section of buildWritableSectionWorklist(after)) {
       if (!scope.has(section.id) || previousWritable.has(section.id)) continue
@@ -2942,6 +2996,7 @@ function dynamicLeafMappingTasks(
         research_candidate_task_ids: uniqueStrings([
           ...item.task.research_candidate_task_ids ?? [], item.task.task_id,
         ]),
+        coverage_candidates: coverageCandidates,
         title: section.title,
         heading_path: sectionEvidenceContext(after, section).heading_path,
       })
@@ -3469,7 +3524,10 @@ async function executeEvidenceMappingRun(
     outline: parseOutlineArtifact(outlineRaw),
     frameworks,
   }
-  const confirmedS3 = parseOutlineArtifact(await readJson(workspace, 'outline/initial-confirmed-outline.json'))
+  const initialOutlineRaw = localRun
+    ? await readOptionalJson(workspace, 'outline/initial-confirmed-outline.json')
+    : await readJson(workspace, 'outline/initial-confirmed-outline.json')
+  const confirmedS3 = parseOutlineArtifact(initialOutlineRaw ?? inputs.outline)
   const publishedOutline = localRun ? parseOutlineArtifact(await readJson(workspace, OUTLINE_PATH)) : confirmedS3
   const userChanges = localRun ? outlineTaskDifferences(options.remap?.previous_outline ?? publishedOutline, inputs.outline) : []
   if (!catalogMatchesScoring(inputs.responsePoints, inputs.scoring)) throw new Error('evidence-mapping-response-point-catalog-mismatch')
@@ -4150,6 +4208,7 @@ async function executeEvidenceMappingRun(
           })),
         }]
       })
+      const remapContext = options.remap === undefined ? undefined : await localRemapContext(workspace, mappingTask)
       const basePrompt = [renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask, webSearchEnabled),
         `current_section_baseline：${JSON.stringify(sectionBaseline)}`,
         `scoped_diffs：${JSON.stringify({
@@ -4167,6 +4226,11 @@ async function executeEvidenceMappingRun(
             })))}`]
           : []),
         `scoped_candidate_refs：${JSON.stringify(scopedCandidates)}`,
+        ...(remapContext === undefined ? [] : [
+          `retired_section_material_candidates：${JSON.stringify(remapContext.retired)}`,
+          `current_chapter_draft_context：${JSON.stringify(remapContext.drafts)}`,
+          '退役章节资料仅是候选；逐一判断其对当前新章节的适用性，再检索缺口。当前正文草稿只辅助确定检索意图，不能登记为 Evidence。',
+        ]),
         `research_candidates：${JSON.stringify(researchCandidates)}`,
         '传入的 research_candidates 只是前置研究读过的候选。Candidate 不是 Evidence；必须结合当前 Section 职责、Requirement、Scoring 和 Response Point 重新读取并判断，Host 不会自动写入 local_materials 或 web_materials。',
         ...(currentSectionMappings.length === 0 ? [] : [`current_section_mapping：${JSON.stringify(currentSectionMappings)}`]),
