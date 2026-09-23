@@ -212,6 +212,7 @@ describe('目录能力候选', () => {
 
   it('先设计目录再迁移原文时，旧正文保持可恢复且待迁移标记随后清空', async () => {
     const { workspace, context, stepId } = await fixture()
+    const priorPlan = parseWritingPlan(await readJson(workspace, 'chapters/writing-plan.json'))
     const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const children = [1, 2].map(index => `SEC-${prefix}-${String(index)}`)
@@ -224,6 +225,15 @@ describe('目录能力候选', () => {
         scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }],
       content_assignments: [], allow_content_deletion: false, defer_content_migration: true,
     })
+    const plan = parseWritingPlan(await readJson(workspace, 'chapters/writing-plan.json'))
+    const childCriteria = children.map(id => plan.sections.find(section => section.section_id === id)?.acceptance_criteria[0])
+    const priorIds = [...priorPlan.document_acceptance,
+      ...priorPlan.sections.flatMap(section => section.acceptance_criteria)].map(item => Number(item.id.slice(3)))
+    expect(childCriteria.map(item => Number(item?.id.slice(3))))
+      .toEqual([Math.max(...priorIds) + 1, Math.max(...priorIds) + 2])
+    expect(childCriteria.map(item => item?.scope)).toEqual(children.map(id => ({ kind: 'section', section_id: id })))
+    expect(plan.sections.find(section => section.section_id === 'SEC-2')?.acceptance_criteria[0]?.id)
+      .toBe(priorPlan.sections.find(section => section.section_id === 'SEC-2')?.acceptance_criteria[0]?.id)
     expect(await readJson(workspace, 'chapters/pending-reorganization.json')).toMatchObject({ pending_source_section_ids: ['SEC-1'] })
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
     const blocks = indexChapterContentBlocks('SEC-1', original)

@@ -291,7 +291,12 @@ function criterionKey(criterion: AcceptanceCriterionInput): string {
   })
 }
 
-function nextCriterionId(previous?: WritingPlan): () => string {
+/**
+ * 从全部既有条件分配下一组 AC 身份，退役章节身份不会被新章节复用。
+ * @param previous 当前 Writing Plan。
+ * @returns 每次调用产生一个新的章节或文档条件 ID。
+ */
+export function nextCriterionId(previous?: WritingPlan): () => string {
   const prior = previous === undefined ? [] : [
     ...previous.document_acceptance,
     ...previous.sections.flatMap(section => section.acceptance_criteria),

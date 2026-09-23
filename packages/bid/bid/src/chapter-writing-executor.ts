@@ -176,20 +176,44 @@ export interface ChapterWritingControl {
 }
 
 /** Host-owned S5 repair and concurrency limits. */
-export interface ChapterWritingExecutionOptions extends ModelStageExecutionOptions {
+interface ChapterWritingBaseOptions extends ModelStageExecutionOptions {
   /** Whether Chapter Writers may receive the registered Web tools. */
   webSearchEnabled?: boolean
   /** Maximum Chapter Subagents that may run simultaneously. */
   maxConcurrency: number
   /** Maximum Main-Agent-selected whole-document repair rounds. */
   maxCompletionRepairRounds?: number
-  /** 只续用目标章节已保存的 Writer；其余章节保持原文。 */
-  revision?: BidChapterRevisionRequest
-  /** 批量修订执行输入；复用现有调度机制处理多 section 修订。 */
-  revisionBatch?: RevisionBatchExecutionInput
-  /** 当前 Host 操作的运行中计划及定向修订命令。 */
-  control?: ChapterWritingControl
 }
+
+/** 仅对指定叶节运行 Writer/Reviewer，范围外强依赖只返回影响。 */
+export interface ScopedChapterWritingInput {
+  readonly targetSectionIds: readonly string[]
+  readonly mode: 'write' | 'review'
+  readonly instruction: string
+  readonly seedBySectionId?: ReadonlyMap<string, string>
+  readonly affectedDependentIds?: Set<string>
+}
+
+/** 互斥的完整写作、单章修订、批量修订与局部能力路径。 */
+export type ChapterWritingExecutionOptions = ChapterWritingBaseOptions & (
+  | { readonly revision?: never
+    readonly revisionBatch?: never
+    readonly scoped?: never
+    /** 当前 Host 操作的运行中计划及定向修订命令。 */
+    readonly control?: ChapterWritingControl }
+  | { readonly revision: BidChapterRevisionRequest
+    readonly revisionBatch?: never
+    readonly scoped?: never
+    readonly control?: never }
+  | { readonly revision?: never
+    readonly revisionBatch: RevisionBatchExecutionInput
+    readonly scoped?: never
+    readonly control?: never }
+  | { readonly revision?: never
+    readonly revisionBatch?: never
+    readonly scoped: ScopedChapterWritingInput
+    readonly control?: never }
+)
 
 /** Focused inputs and Host-owned output locations for one S5 chapter. */
 export interface ChapterContext {
@@ -1546,6 +1570,13 @@ export async function executeChapterWriting(
   options: ChapterWritingExecutionOptions,
 ): Promise<StageArtifact[]> {
   await options.run.scheduler.waitUntilRunnable(options.run.signal)
+  if (options.scoped !== undefined) {
+    const ids = options.scoped.targetSectionIds
+    if (ids.length === 0 || new Set(ids).size !== ids.length || options.scoped.instruction.trim() === '') {
+      throw new Error('BID_CHAPTER_WRITING_SCOPE_INVALID')
+    }
+    return runChapterWriting(agent, workspace, task, options)
+  }
   if (options.revision === undefined && options.revisionBatch === undefined) {
     const artifacts = await runChapterWriting(agent, workspace, task, options)
     return reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
@@ -1836,10 +1867,17 @@ interface ChapterRevisionState {
 }
 
 async function runChapterWriting(
-  agent: Agent, workspace: BidWorkspace, task: BidStageTask, options: ChapterWritingExecutionOptions,
+  agent: Agent, workspace: BidWorkspace, task: BidStageTask,
+  options: ChapterWritingBaseOptions & {
+    readonly revision?: BidChapterRevisionRequest
+    readonly revisionBatch?: RevisionBatchExecutionInput
+    readonly scoped?: ScopedChapterWritingInput
+    readonly control?: ChapterWritingControl
+  },
   revision?: ChapterRevisionState,
   revisionBatch?: RevisionBatchExecutionInput,
 ): Promise<StageArtifact[]> {
+  const scoped = options.scoped
   if (task.stage !== 'chapter_writing') throw new Error('chapter-writing-executor-stage-invalid')
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
     throw new Error('chapter-writing-max-concurrency-invalid')
@@ -1903,6 +1941,10 @@ async function runChapterWriting(
   const chaptersRoot = join(workspace.projectRoot, 'chapters')
   await assertNoLinkedPath(workspace.root, chaptersRoot)
   const worklist = buildChapterWorklist(outline)
+  const scopedIds = scoped === undefined ? undefined : new Set(scoped.targetSectionIds)
+  if (scopedIds !== undefined && [...scopedIds].some(id => !worklist.some(section => section.id === id))) {
+    throw new Error('BID_CHAPTER_WRITING_SCOPE_INVALID')
+  }
   const storagePlan = await planChapterLocations(workspace, worklist.map(section => section.id))
   const storageLocation = (sectionId: string): ChapterLocation => {
     const assigned = storagePlan.locations.get(sectionId)
@@ -2152,6 +2194,7 @@ async function runChapterWriting(
   const pending = new Set(worklist
     .filter(section => !completed.has(section.id))
     .filter(section => revisionBatch === undefined || batchTaskBySection.has(section.id))
+    .filter(section => scopedIds === undefined || scopedIds.has(section.id))
     .map(section => section.id))
   type SectionSettlement =
     | { readonly sectionId: string; readonly chapter: CompletedChapter }
@@ -2167,6 +2210,23 @@ async function runChapterWriting(
     ...(checkpoint?.reusableWriterIds ?? []),
   ])
   const activeWriterIds = new Map<string, string>()
+  const scopedReviewRequestSha256 = (sectionId: string, candidate: AcceptedChapterCandidate): string => {
+    const context = contexts.get(sectionId)
+    const relation = planSections.get(sectionId)
+    if (context === undefined || relation === undefined || scoped === undefined) {
+      throw new Error(`BID_CHAPTER_REVIEW_CONTEXT_UNAVAILABLE: ${sectionId}`)
+    }
+    const dependencies = relation.depends_on.map((dependency) => {
+      const chapter = completed.get(dependency.section_id)
+      if (chapter === undefined) throw new Error(`BID_CHAPTER_REVIEW_DEPENDENCY_INCOMPLETE: ${dependency.section_id}`)
+      return { section_id: dependency.section_id, candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
+        handoff: chapter.candidate.metadata.handoff }
+    })
+    return createHash('sha256').update(JSON.stringify({ instruction: scoped.instruction,
+      candidate_sha256: chapterCandidateSha256(candidate.markdown), metadata: candidate.metadata,
+      context, relation, global_consistency_notes: plan.global_consistency_notes, dependencies,
+    })).digest('hex')
+  }
   let commandWake = Promise.withResolvers<void>()
   const liftCommandWake = options.control?.subscribe(() => { commandWake.resolve() })
 
@@ -2198,6 +2258,10 @@ async function runChapterWriting(
     let invalidated = false
     for (const dependent of plan.sections.filter(item =>
       item.depends_on.some(dependency => dependency.section_id === sectionId))) {
+      if (scopedIds !== undefined && !scopedIds.has(dependent.section_id)) {
+        scoped?.affectedDependentIds?.add(dependent.section_id)
+        continue
+      }
       const context = contexts.get(dependent.section_id)
       if (context === undefined || (!completed.has(dependent.section_id) && !running.has(dependent.section_id))) continue
       if (completed.has(dependent.section_id)) {
@@ -2211,6 +2275,46 @@ async function runChapterWriting(
       invalidated = true
     }
     if (invalidated) await persistLog()
+  }
+
+  if (scoped !== undefined) {
+    for (const sectionId of scopedIds ?? []) {
+      if (scoped.mode === 'review') {
+        const accepted = completed.get(sectionId)
+        const log = executionLog.sections.find(item => item.section_id === sectionId)
+        const context = contexts.get(sectionId)
+        if (accepted !== undefined && log !== undefined && context !== undefined) {
+          const identity = scopedReviewRequestSha256(sectionId, accepted.candidate)
+          const saved = parseChapterReviewArtifact(await readJson(workspace, context.reviewPath))
+          if (saved.request_sha256 !== identity) {
+            const writerChildSessionId = log.final_writer_child_session_id
+            if (writerChildSessionId === null) throw new Error(`BID_CHAPTER_REVIEW_BODY_UNAVAILABLE: ${sectionId}`)
+            checkpoint?.drafts.set(sectionId, { candidate: accepted.candidate, writerChildSessionId })
+            completed.delete(sectionId)
+            pending.add(sectionId)
+            log.epoch += 1
+            sectionEpochs.set(sectionId, log.epoch)
+            log.status = 'pending'
+            log.phase = 'queued'
+            log.final_reviewer_child_session_id = null
+          }
+        }
+        if (!completed.has(sectionId) && !checkpoint?.drafts.has(sectionId)) {
+          throw new Error(`BID_CHAPTER_REVIEW_BODY_UNAVAILABLE: ${sectionId}`)
+        }
+        continue
+      }
+      if (!completed.has(sectionId)) continue
+      const context = contexts.get(sectionId)
+      if (context === undefined) throw new Error(`BID_CHAPTER_WRITING_SCOPE_INVALID: ${sectionId}`)
+      const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+      invalidateSection(sectionId)
+      pendingRevisions.set(sectionId, {
+        instruction: scoped.instruction,
+        reference: { scope: 'chapter', section_id: sectionId, content_sha256: chapterContentSha256(markdown) },
+      })
+    }
+    await persistLog()
   }
 
   const applyCommands = async (): Promise<void> => {
@@ -2435,6 +2539,7 @@ async function runChapterWriting(
               candidate_sha256: candidateSha256,
               writer_child_session_id: writerChildSessionId,
               reviewer_child_session_id: reviewerChildSessionId,
+              ...(scoped?.mode === 'review' ? { request_sha256: scopedReviewRequestSha256(sectionId, candidate) } : {}),
             })
             // The scope admission is the completion linearization point: stop
             // waits for this whole publication before it exposes suspension.
@@ -2516,6 +2621,7 @@ async function runChapterWriting(
             label: reviewLabel,
             parent: agent,
             prompt: [{ type: 'text', text: [renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision),
+              ...(scoped?.mode === 'review' ? [`本次审核重点：${scoped.instruction}`] : []),
               options.recovery !== undefined && (options.recovery.unit === sectionId
                 || options.recovery.unit === options.run.work.workId || options.recovery.unit.includes(serial))
                 ? renderBidRecoveryContext(options.recovery) : '',
@@ -2600,6 +2706,10 @@ async function runChapterWriting(
           writerChildSessionId: preserved.writerChildSessionId,
           reviewerChildSessionId: reviewed.reviewerChildSessionId,
         }
+        if (scoped?.mode === 'review') {
+          return await finishChapter(preserved.candidate, reviewed.review,
+            preserved.writerChildSessionId, reviewed.reviewerChildSessionId, false)
+        }
         if (reviewed.review.verdict !== 'repair' || options.maxRepairAttempts === 0) {
           return await finishChapter(
             preserved.candidate, reviewed.review,
@@ -2620,8 +2730,13 @@ async function runChapterWriting(
         const contextPrompt = renderChapterSubagentTask(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
         )
+        const seed = scoped?.seedBySectionId?.get(sectionId)
+        const freshPrompt = scoped === undefined ? contextPrompt : [contextPrompt,
+          `本次局部写作要求：${scoped.instruction}`,
+          ...(seed === undefined ? [] : [`已分配给本节的原文草稿（需要核验并改写为本项目正文）：\n${seed}`]),
+        ].join('\n\n')
         const basePrompt = effectiveRevision === undefined && batchTask === undefined || revisionOriginal === undefined
-          ? contextPrompt
+          ? freshPrompt
           : batchTask !== undefined
             ? `${contextPrompt}\n\n${renderRevisionBatchSectionPrompt(batchTask, revisionOriginal)}`
             : effectiveRevision !== undefined
@@ -3012,11 +3127,12 @@ async function runChapterWriting(
     } catch {}
   }
   const existingChapterMap = new Map(existingChapters.map(c => [c.section_id, c]))
-  const entries = worklist.map((section) => {
+  const entries = worklist.flatMap((section) => {
     const chapter = completed.get(section.id)
-    if (chapter !== undefined) return chapter.entry
+    if (chapter !== undefined) return [chapter.entry]
     const existing = existingChapterMap.get(section.id)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) return [existing]
+    if (scoped !== undefined) return []
     throw new Error(`Bid chapter manifest missing completed section ${section.id}`)
   })
   if (revision !== undefined || revisionBatch !== undefined) {
@@ -3028,7 +3144,7 @@ async function runChapterWriting(
     confirmed_outline_sha256: outlineHash,
     chapters: entries,
   }, options.run.commits)
-  try {
+  if (scoped === undefined) try {
     const chaptersForGlobalReview: GlobalComplianceChapter[] = []
     for (const section of worklist) {
       const chapter = completed.get(section.id)
@@ -3066,14 +3182,16 @@ async function runChapterWriting(
     if (revisionBatch === undefined) throw error
   }
   if (options.control?.pending() === true) return runChapterWriting(agent, workspace, task, options)
-  if (revision === undefined && revisionBatch === undefined) await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
-    schema_version: 1,
-    plan_version: writingPlan.plan_version,
-  }, options.run.commits)
+  if (revision === undefined && revisionBatch === undefined && scoped === undefined) {
+    await writeJson(join(workspace.projectRoot, APPLIED_WRITING_PLAN_PATH), {
+      schema_version: 1,
+      plan_version: writingPlan.plan_version,
+    }, options.run.commits)
+  }
   return [
     { stage: 'chapter_writing', type: 'chapter_execution_plan', path: PLAN_PATH },
     { stage: 'chapter_writing', type: 'chapter_execution_log', path: LOG_PATH },
     { stage: 'chapter_writing', type: 'chapter_manifest', path: MANIFEST_PATH },
-    { stage: 'chapter_writing', type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH },
+    ...(scoped === undefined ? [{ stage: 'chapter_writing' as const, type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }] : []),
   ]
 }

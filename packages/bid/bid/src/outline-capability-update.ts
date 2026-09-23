@@ -12,7 +12,7 @@ import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTe
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseEvidenceMapArtifact, sectionEvidenceMappingSchema } from './evidence-mapping-artifacts.ts'
 import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSectionWorklist } from './section-evidence-context.ts'
-import { parseWritingPlan, writingPlanSchema, type WritingPlan } from './writing-requirements.ts'
+import { nextCriterionId, parseWritingPlan, writingPlanSchema, type WritingPlan } from './writing-requirements.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterWritingManifestSchema, parseChapterWritingManifest, parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { planChapterLocations, readChapterLocation } from './chapter-storage.ts'
@@ -95,11 +95,15 @@ export async function previewCapabilityOutline(
 function synchronizeWritingPlan(plan: WritingPlan, outline: OutlineArtifact, hash: string,
   affected: ReadonlySet<string>): WritingPlan {
   const old = new Map(plan.sections.map(section => [section.section_id, section]))
+  const nextId = nextCriterionId(plan)
   return parseWritingPlan({ ...plan, plan_version: plan.plan_version + 1,
     confirmed_outline_sha256: hash,
     sections: buildWritableSectionWorklist(outline).map(section => old.get(section.id) ?? {
       section_id: section.id, task: section.purpose, user_message_refs: [], user_requirements: [],
-      writing_instructions: [], acceptance_criteria: [],
+      writing_instructions: section.writing_notes,
+      acceptance_criteria: [{ id: nextId(), scope: { kind: 'section', section_id: section.id },
+        description: `完成“${section.title}”的章节任务：${section.purpose}`,
+        priority: 'required', evaluator: { kind: 'semantic' } }],
     }),
     revision: { summary: '目录变更后的章节任务对齐', affected_section_ids: [...affected],
       base_plan_version: plan.plan_version },
