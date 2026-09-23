@@ -58,8 +58,10 @@ const legacyChapterExecutionLogSchema = z.object({
   writing_plan_version: z.number().int().positive(),
   max_concurrency: z.number().int().min(1).max(8),
   observed_max_concurrency: z.number().int().min(0).max(8),
+  next_storage_serial: z.number().int().min(1).max(10_000).optional(),
   sections: z.array(z.object({
     section_id: z.string().min(1),
+    storage_serial: z.number().int().min(1).max(9_999).optional(),
     depends_on: z.array(z.string().min(1)),
     related_sections: z.array(z.string().min(1)),
     epoch: z.number().int().nonnegative(),
@@ -78,8 +80,11 @@ export const chapterExecutionLogSchema = z.object({
   writing_plan_version: z.number().int().positive(),
   max_concurrency: z.number().int().min(1).max(8),
   observed_max_concurrency: z.number().int().min(0).max(8),
+  /** 旧日志在持有项目提交权限时补齐；序号 10000 表示四位路径已满。 */
+  next_storage_serial: z.number().int().min(1).max(10_000).optional(),
   sections: z.array(z.object({
     section_id: z.string().min(1),
+    storage_serial: z.number().int().min(1).max(9_999).optional(),
     depends_on: z.array(z.string().min(1)),
     related_sections: z.array(z.string().min(1)),
     epoch: z.number().int().nonnegative(),

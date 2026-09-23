@@ -27,6 +27,7 @@ import type { BoundChapterCandidate, ChapterMetadata } from '../src/chapter-writ
 import type { ChapterReview } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterCandidateSha256 } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
+import { chapterLocation } from '../src/chapter-storage.ts'
 import { renderFlowchartImage } from '../src/flowchart-image.ts'
 import { validateChapterWriting } from '../src/chapter-writing-validator.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
@@ -95,7 +96,7 @@ it('技术偏离表读取全部 Requirement 但保持空 coverage ownership', ()
   })
   const context = pickChapterContext({
     section,
-    sequence: 1,
+    location: chapterLocation(section.id, 1),
     project: parseTenderProjectArtifact({
       schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
       project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
@@ -1496,7 +1497,7 @@ describe('chapter-writing executor', () => {
     })
     const context = pickChapterContext({
       section: outlineFixture().sections[1]!,
-      sequence: 1,
+      location: chapterLocation('SEC-1', 1),
       project: parseTenderProjectArtifact({
         schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
         project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],

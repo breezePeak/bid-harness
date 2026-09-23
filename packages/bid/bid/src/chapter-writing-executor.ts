@@ -15,6 +15,7 @@ import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
 import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-headings.ts'
+import { ensureChapterLocations, planChapterLocations, readChapterLocations, type ChapterLocation } from './chapter-storage.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { ChapterWriterImageInputError, createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
 import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence, type ChapterRevisionReviewIssue } from './chapter-writing-review.ts'
@@ -199,6 +200,8 @@ export interface ChapterContext {
   outlineSections: Array<Pick<OutlineSection, 'id' | 'parent_id' | 'title' | 'purpose' | 'must_answer'>>
   contentPath: string
   metadataPath: string
+  reviewPath: string
+  storageSerial: number
   project: ReturnType<typeof parseTenderProjectArtifact>
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>['requirements']
   scoring: ReturnType<typeof parseTenderScoringArtifact>['scoring_items']
@@ -280,12 +283,12 @@ function localIdentity(material: LocalEvidenceMaterial): string {
 
 /**
  * 从确认目录派生全书职责与本节路径，并筛选本节相关的 S2/S4 记录。
- * @param raw 已解析的阶段输入、确认目录、当前章节和输出顺序。
+ * @param raw 已解析的阶段输入、确认目录、当前章节和固定位置。
  * @returns 本节写作资料、目录职责及 Host 确定的输出位置。
  */
 export function pickChapterContext(raw: {
   section: OutlineSection
-  sequence: number
+  location: ChapterLocation
   project: ReturnType<typeof parseTenderProjectArtifact>
   requirements: ReturnType<typeof parseTenderRequirementsArtifact>
   scoring: ReturnType<typeof parseTenderScoringArtifact>
@@ -310,8 +313,10 @@ export function pickChapterContext(raw: {
     outlineSections: raw.outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (
       { id, parent_id, title, purpose, must_answer }
     )),
-    contentPath: `chapters/sections/${String(raw.sequence).padStart(4, '0')}.md`,
-    metadataPath: `chapters/meta/${String(raw.sequence).padStart(4, '0')}.json`,
+    contentPath: raw.location.contentPath,
+    metadataPath: raw.location.metadataPath,
+    reviewPath: raw.location.reviewPath,
+    storageSerial: raw.location.storageSerial,
     project: raw.project,
     requirements: sectionVisibleRequirements(raw.section, raw.requirements),
     scoring: raw.scoring.scoring_items.filter(item => scoringIds.has(item.id)),
@@ -1208,8 +1213,8 @@ async function loadChapterCheckpoint(
         await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
         const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
         const metadata = parseChapterMetadata(await readJson(workspace, context.metadataPath))
-        const serial = context.contentPath.slice(-7, -3)
-        const reviewPath = `chapters/reviews/${serial}.json`
+        const serial = String(context.storageSerial).padStart(4, '0')
+        const reviewPath = context.reviewPath
         const candidateSha256 = chapterCandidateSha256(markdown)
         if (metadata.section_id !== section.id
         || !log.attempts.some(attempt => attempt.role === 'writer' && attempt.accepted
@@ -1565,19 +1570,18 @@ export async function executeChapterWriting(
   const worklist = buildChapterWorklist(outline)
   const index = worklist.findIndex(section => section.id === request.reference.section_id)
   if (index < 0) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-  const serial = String(index + 1).padStart(4, '0')
+  const locations = await readChapterLocations(workspace)
+  const selectedLocation = locations.get(request.reference.section_id)
+  if (selectedLocation === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
   const paths = [
     LOG_PATH,
     MANIFEST_PATH,
     GLOBAL_REVIEW_PATH,
     COMPLETION_REVIEW_PATH,
-    ...worklist.flatMap((_section, workIndex) => {
-      const workSerial = String(workIndex + 1).padStart(4, '0')
-      return [
-        `chapters/sections/${workSerial}.md`,
-        `chapters/meta/${workSerial}.json`,
-        `chapters/reviews/${workSerial}.json`,
-      ]
+    ...worklist.flatMap((section) => {
+      const assigned = locations.get(section.id)
+      if (assigned === undefined) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${section.id}`)
+      return [assigned.contentPath, assigned.metadataPath, assigned.reviewPath]
     }),
   ]
   const backup = new Map(await Promise.all(paths.map(async (path): Promise<[string, string]> => {
@@ -1585,7 +1589,7 @@ export async function executeChapterWriting(
     await assertNoLinkedPath(workspace.root, absolute)
     return [absolute, await readFile(absolute, 'utf8')]
   })))
-  const original = backup.get(join(workspace.projectRoot, `chapters/sections/${serial}.md`))
+  const original = backup.get(join(workspace.projectRoot, selectedLocation.contentPath))
   if (original === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
   validateChapterRevisionReference(request, original)
   const revision: ChapterRevisionState = { request, original, writing: false }
@@ -1615,6 +1619,7 @@ async function reviewWritingPlanCompletion(
   const outlineHash = outlineArtifactSha256(outline)
   let writingPlan = parseWritingPlan(await readJson(workspace, 'chapters/writing-plan.json'))
   const worklist = buildChapterWorklist(outline)
+  const locations = await readChapterLocations(workspace)
   const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item.number]))
   type Estimate = Awaited<ReturnType<typeof estimateChapterWritingPages>>
   const measure = async (): Promise<{ estimate?: Estimate; reason?: string }> => {
@@ -1624,11 +1629,12 @@ async function reviewWritingPlanCompletion(
   }
   const snapshot = async (estimate?: Estimate) => {
     const contents = new Map<string, string>()
-    const sections = await Promise.all(worklist.map(async (section, index) => {
-      const serial = String(index + 1).padStart(4, '0')
-      const markdown = await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+    const sections = await Promise.all(worklist.map(async (section) => {
+      const assigned = locations.get(section.id)
+      if (assigned === undefined) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${section.id}`)
+      const markdown = await readFile(join(workspace.projectRoot, assigned.contentPath), 'utf8')
       contents.set(section.id, markdown)
-      const review = parseChapterReviewArtifact(await readJson(workspace, `chapters/reviews/${serial}.json`))
+      const review = parseChapterReviewArtifact(await readJson(workspace, assigned.reviewPath))
       const compact = markdown.replace(/\s+/gu, ' ').trim()
       return {
         section_id: section.id,
@@ -1761,9 +1767,9 @@ async function reviewWritingPlanCompletion(
       details: selected.slice(0, 5).map(item => `待修正：${item.section_id}`),
     })
     const selectedRevisions = await Promise.all(selected.map(async (selected) => {
-      const index = worklist.findIndex(section => section.id === selected.section_id)
-      if (index < 0) throw new Error(`Main Agent selected unknown section ${selected.section_id}`)
-      const contentPath = join(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`)
+      const assigned = locations.get(selected.section_id)
+      if (assigned === undefined) throw new Error(`Main Agent selected unknown section ${selected.section_id}`)
+      const contentPath = join(workspace.projectRoot, assigned.contentPath)
       const before = await readFile(contentPath, 'utf8')
       const request: BidChapterRevisionRequest = {
         instruction: `${selected.instruction}\n\nMain Agent 整体计划验收：${decision.reason}。只处理本章合理承担的未满足要求，保留无关正文、目录和已核验事实。`,
@@ -1897,9 +1903,15 @@ async function runChapterWriting(
   const chaptersRoot = join(workspace.projectRoot, 'chapters')
   await assertNoLinkedPath(workspace.root, chaptersRoot)
   const worklist = buildChapterWorklist(outline)
-  const contexts = new Map(worklist.map((section, index) => [section.id, pickChapterContext({
+  const storagePlan = await planChapterLocations(workspace, worklist.map(section => section.id))
+  const storageLocation = (sectionId: string): ChapterLocation => {
+    const assigned = storagePlan.locations.get(sectionId)
+    if (assigned === undefined) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${sectionId}`)
+    return assigned
+  }
+  const contexts = new Map(worklist.map(section => [section.id, pickChapterContext({
     section,
-    sequence: index + 1,
+    location: storageLocation(section.id),
     project,
     requirements,
     scoring,
@@ -2035,7 +2047,7 @@ async function runChapterWriting(
       })
     }
   }
-  const executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
+  let executionLog: ChapterExecutionLog = checkpoint?.executionLog ?? {
     schema_version: CHAPTER_EXECUTION_LOG_SCHEMA_VERSION,
     scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash,
@@ -2055,6 +2067,7 @@ async function runChapterWriting(
       final_reviewer_child_session_id: null,
     })),
   }
+  executionLog = await ensureChapterLocations(workspace, executionLog, storagePlan, options.run.commits)
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
     if (revision !== undefined || revisionBatch !== undefined) return Promise.resolve()
@@ -2220,9 +2233,10 @@ async function runChapterWriting(
       const issues = validateWritingPlan(next, outline)
       if (issues.length > 0) throw new Error(issues.join('; '))
       writingPlan = next
-      for (const [index, section] of worklist.entries()) {
+      for (const section of worklist) {
         const context = pickChapterContext({
-          section, sequence: index + 1, project, requirements, scoring, compliance, evidence,
+          section, location: storageLocation(section.id),
+          project, requirements, scoring, compliance, evidence,
           responsePointCatalog: responsePointCatalog.points, outline, writingPlan,
         })
         await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
@@ -2342,7 +2356,7 @@ async function runChapterWriting(
       const chapterWebSources = () => [...durableWebSources.values()].filter(source => chapterWebSourceIds.has(source.source_id)
         || source.chapter_context?.section_id === context.section.id)
       await appendChapterWebReferences(workspace, references, chapterWebSources())
-      const serial = context.contentPath.slice(-7, -3)
+      const serial = String(context.storageSerial).padStart(4, '0')
       const commandRevision = pendingRevisions.get(sectionId)
       const effectiveRevision = revision?.request ?? commandRevision
       const revisionOriginal = revision?.original ?? (effectiveRevision === undefined && batchTask === undefined
@@ -2361,7 +2375,7 @@ async function runChapterWriting(
       ): Promise<CompletedChapter> => {
         signal.throwIfAborted()
         assertCurrentInput()
-        const reviewPath = `chapters/reviews/${serial}.json`
+        const reviewPath = context.reviewPath
         const candidateSha256 = chapterCandidateSha256(candidate.markdown)
         if (effectiveRevision !== undefined && revisionOriginal !== undefined) {
           validateChapterRevisionReference(effectiveRevision, await readFile(join(workspace.projectRoot, context.contentPath), 'utf8'))
@@ -3016,7 +3030,7 @@ async function runChapterWriting(
   }, options.run.commits)
   try {
     const chaptersForGlobalReview: GlobalComplianceChapter[] = []
-    for (const [index, section] of worklist.entries()) {
+    for (const section of worklist) {
       const chapter = completed.get(section.id)
       if (chapter !== undefined) {
         chaptersForGlobalReview.push({
@@ -3026,8 +3040,7 @@ async function runChapterWriting(
           candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
         })
       } else {
-        const serial = String(index + 1).padStart(4, '0')
-        const md = await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+        const md = await readFile(join(workspace.projectRoot, storageLocation(section.id).contentPath), 'utf8')
         chaptersForGlobalReview.push({
           section_id: section.id,
           title: section.title,

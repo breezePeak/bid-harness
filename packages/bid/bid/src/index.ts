@@ -89,6 +89,7 @@ import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-e
 import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
+import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
   createNativeVisioExport,
@@ -3181,10 +3182,13 @@ export class BidHostRuntime extends TypertRemoteService {
         const queue = await readRevisionQueue(workspace)
         const outline = (await confirmedOutline(workspace)).outline
         const worklist = buildWritableSectionWorklist(outline)
+        const locations = await readChapterLocations(workspace)
         const sectionHashes = new Map<string, string>()
-        for (const [index, section] of worklist.entries()) {
+        for (const section of worklist) {
+          const assigned = locations.get(section.id)
+          if (assigned === undefined) continue
           try {
-            const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`), 'utf8')
+            const markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
             sectionHashes.set(section.id, chapterContentSha256(markdown))
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -3240,7 +3244,11 @@ export class BidHostRuntime extends TypertRemoteService {
           within(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
         )))
         const worklist = buildChapterWorklist(outline)
-        const sectionSerials = new Map(worklist.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+        const locations = await readChapterLocations(workspace)
+        const sectionSerials = new Map(worklist.flatMap((section) => {
+          const assigned = locations.get(section.id)
+          return assigned === undefined ? [] : [[section.id, String(assigned.storageSerial).padStart(4, '0')] as const]
+        }))
         const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
           const issues = task.issue_ids.map((id) => {
             const issue = issueMap.get(id)
@@ -5221,7 +5229,11 @@ export class BidHostRuntime extends TypertRemoteService {
               within(operation.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
             )))
             const worklistForSettle = buildChapterWorklist(outlineForSettle)
-            const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+            const settledLocations = await readChapterLocations(operation.workspace)
+            const serialsForSettle = new Map(worklistForSettle.flatMap((section) => {
+              const assigned = settledLocations.get(section.id)
+              return assigned === undefined ? [] : [[section.id, String(assigned.storageSerial).padStart(4, '0')] as const]
+            }))
             const settled = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
             const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
             await commitRevisionBatchExecutionSettlement(operation.workspace, settled.queue, completedBatch)
@@ -5756,12 +5768,14 @@ export class BidHostRuntime extends TypertRemoteService {
           .then(value => parseWritingPlan(JSON.parse(value))),
       ])
       const worklist = buildChapterWorklist(outline)
+      const locations = await readChapterLocations(candidate.workspace)
       const scheduled = batchExecutionInput.tasks.map((task) => {
         const index = worklist.findIndex(section => section.id === task.section_id)
         const section = worklist[index]
         const writerId = writerIds.get(task.section_id)
-        if (section === undefined || writerId === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-        return { task, value: { serial: String(index + 1).padStart(4, '0'), title: section.title, writerId } }
+        const assigned = locations.get(task.section_id)
+        if (section === undefined || writerId === undefined || assigned === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+        return { task, value: { location: assigned, title: section.title, writerId } }
       })
       const customerTextContext = {
         outline,
@@ -5797,7 +5811,7 @@ export class BidHostRuntime extends TypertRemoteService {
             workspace: candidate.workspace,
             batchId: batchExecutionInput.batchId,
             task: item.task,
-            serial: item.value.serial,
+            location: item.value.location,
             title: item.value.title,
             writerId: item.value.writerId,
             signal: candidate.run.signal,
@@ -5959,23 +5973,25 @@ export class BidHostRuntime extends TypertRemoteService {
       log = parseOrMigrateChapterExecutionLog(logValue)
     } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
+    const locations = await readChapterLocations(workspace)
     const rowContents = await Promise.all(outline.sections.map(async (section) => {
       const index = worklist.findIndex(item => item.id === section.id)
-      const serial = String(index + 1).padStart(4, '0')
+      const assigned = locations.get(section.id)
+      const serial = assigned === undefined ? null : String(assigned.storageSerial).padStart(4, '0')
       const execution = log?.sections.find(item => item.section_id === section.id)
       let contentAvailable = !section.writable && section.summary !== undefined
       let markdown = !section.writable ? section.summary ?? '' : ''
       let review: BidReviewChapterView['review'] = { status: 'not_started', issues: [] }
-      if (section.writable && index >= 0) {
+      if (section.writable && index >= 0 && assigned !== undefined && serial !== null) {
         try {
-          markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+          markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
           contentAvailable = markdown.trim().length > 0
         } catch { markdown = ''; contentAvailable = false }
         let artifact: ChapterReviewArtifact | undefined
         try {
-          const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8'))
+          const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, assigned.reviewPath), 'utf8'))
           schemaWarningAppended = appendBidSchemaWarning(session, createBidSchemaWarning(
-            `chapters/reviews/${serial}.json`, CHAPTER_REVIEW_SCHEMA_VERSION,
+            assigned.reviewPath, CHAPTER_REVIEW_SCHEMA_VERSION,
             typeof reviewValue === 'object' && reviewValue !== null ? (reviewValue as { schema_version?: unknown }).schema_version : undefined,
             task.stage,
           )) || schemaWarningAppended
@@ -6158,7 +6174,9 @@ export class BidHostRuntime extends TypertRemoteService {
           }
           const index = worklist.findIndex(section => section.id === chapter.section_id)
           if (index < 0) throw new Error('stale-global-compliance-review')
-          const serial = String(index + 1).padStart(4, '0')
+          const assigned = locations.get(chapter.section_id)
+          if (assigned === undefined) throw new Error('stale-global-compliance-review')
+          const serial = String(assigned.storageSerial).padStart(4, '0')
           const semantic = await resolveSemanticRevisionPath(
             workspace, serial, chapter.section_id, expected, chapter.candidate_sha256,
           )
@@ -6225,12 +6243,15 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, flowcharts: [], content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
-    const serial = String(index + 1).padStart(4, '0')
+    const assigned = await readChapterLocation(workspace, section.id)
+    const serial = assigned === null ? null : String(assigned.storageSerial).padStart(4, '0')
     let markdown: string | null = null
-    try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
+    if (assigned !== null) {
+      try { markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8') } catch { markdown = null }
+    }
     let flowcharts: import('./flowchart.ts').FlowchartSpec[] = []
-    try {
-      const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/meta/${serial}.json`), 'utf8')))
+    if (assigned !== null) try {
+      const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, assigned.metadataPath), 'utf8')))
       flowcharts = metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
     } catch { /* 旧章节没有流程图 metadata，或章节仍在写作。 */ }
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
@@ -6240,10 +6261,11 @@ export class BidHostRuntime extends TypertRemoteService {
       execution = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.find(item => item.section_id === section.id)
     } catch { /* S5 初始化时执行日志可能尚不可用。 */ }
     let artifact: ChapterReviewArtifact | undefined
-    try {
-      artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+    if (assigned !== null) try {
+      artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, assigned.reviewPath), 'utf8')))
     } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-    if (artifact !== undefined && (markdown === null || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
+    if (artifact !== undefined && (markdown === null || serial === null
+      || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
       artifact = undefined
     }
     const review = projectChapterReview(section.id, artifact, execution)
@@ -6294,8 +6316,10 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!section.writable) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
     const index = buildChapterWorklist(outline).findIndex(item => item.id === sectionId)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
-    const serial = String(index + 1).padStart(4, '0')
-    const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+    const assigned = await readChapterLocation(workspace, sectionId)
+    if (assigned === null) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${sectionId}`)
+    const serial = String(assigned.storageSerial).padStart(4, '0')
+    const markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
     return { section, markdown, serial }
   }
 

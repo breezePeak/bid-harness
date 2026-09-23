@@ -131,6 +131,8 @@ Writer 或 Reviewer 异常结束时，执行日志和阶段失败消息保留 Pr
 
 S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证当前计划版本、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份；正文与 metadata 合法但 Reviewer 报告缺失或协议过期时保留正文并只重新审核，未完成、正文损坏、身份失效或当前计划明确影响的章节及其全部强依赖下游才重置为 pending。弱关联不传播失效，无关的合法 completed 继续复用。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查；执行日志记录强依赖正文 Hash 供追溯，输入有效性按实际传给下游的 handoff Hash 判断。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。文档级报告逐项绑定其检查过的章节 Hash 与资料证据，未变化项可在恢复时复用，变化项重新审核。
 
+可写章节的 `section_id` 与四位文件序号分别表示业务身份和磁盘位置。Host 在 `execution-log.json` 保存 `storage_serial` 和单调递增的 `next_storage_serial`；旧项目从 metadata 和 Manifest 中交叉核对已有位置，在正式写操作中补齐日志。目录移动、改名和插章不重排旧文件；工作台、修订、估页及 Word 导出按章节身份读取位置，导出顺序仍按当前确认目录。缺少可证明身份的旧正文或相互矛盾的归属会返回存储诊断，不按目录位置猜测。
+
 候选 Web 来源缺失、Hash 错误或路径不安全时，预检及 W 引用表向 Writer 标明不可用，不影响无关章节，也不删掉对应写作要求；实际引用仍在当前提交工具中校验账本身份与正文。已发 W 在同章修复中保留编号，不因过滤或追加来源重编号。整体账本错误和 Host 写盘失败仍会使执行失败。
 
 正文、metadata 和 review 的最终写入之间允许取消，完成日志排队期间也允许取消。串行队列实际开始一次原子完成日志替换后允许提交收敛；磁盘写入成功才发布共享 completed 状态。提交前取消的候选不视为完成，提交后的章节可恢复；全书 manifest 与文档级合规报告开始写入前再次检查取消。理由与取舍见[检查点与故障隔离](../../../.agents/notes/implemented/bug-fix/2026-09-04-bid-chapter-checkpoint-fault-isolation.md)和[全局合规审核](../../../.agents/notes/implemented/bug-fix/2026-09-09-bid-s5-global-compliance-review.md)。

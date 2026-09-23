@@ -1018,11 +1018,11 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('concurrent-export')
-    const entered = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
     const original = BidWorkspace.prototype.exportDocxMarkdown
     const render = vi.spyOn(BidWorkspace.prototype, 'exportDocxMarkdown').mockImplementation(async function (this: BidWorkspace, ...args) {
-      entered.resolve()
+      entered.resolve(undefined)
       await release.promise
       return original.apply(this, args)
     })
@@ -1033,13 +1033,13 @@ describe('Workspace 项目与独立 Session', () => {
       expect(running?.data.operation).toMatchObject({ status: 'running', phase: 'exporting' })
       const second = ctx.bid.exportDocx(agent.session, null)
       expect(agent.session.events.filter(event => event.type === 'bid.docx_export.changed')).toHaveLength(2)
-      release.resolve()
+      release.resolve(undefined)
       const [a, b] = await Promise.all([first, second])
       expect(a).toEqual(b)
       expect(render).toHaveBeenCalledOnce()
       expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation)
         .toMatchObject({ status: 'completed' })
-    } finally { release.resolve(); render.mockRestore() }
+    } finally { release.resolve(undefined); render.mockRestore() }
   })
 
   it('导出校验返回拒绝时发布失败态，宿主恢复时结算遗留运行态', async () => {
@@ -1140,8 +1140,14 @@ describe('Workspace 项目与独立 Session', () => {
     }
     const nextOutline = { ...outline, sections: [technical, { ...outline.sections[0]!, order: 2 }] }
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(nextOutline))
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '技术偏离表尚未完成。')
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '# 技术方案\n\n已有正文。\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '技术偏离表尚未完成。')
+    await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0002.json'), JSON.stringify({
+      section_id: TECHNICAL_DEVIATION_SECTION_ID, covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: TECHNICAL_DEVIATION_SECTION_ID, decisions: [], terminology: [], numbers_and_parameters: [],
+        interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+    }))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
     const agent = await fresh('partial-technical-deviation')
 

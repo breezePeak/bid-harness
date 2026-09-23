@@ -29,6 +29,7 @@ import {
 import { readCurrentWritingPlan } from './writing-entry-state.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
+import { readChapterLocation } from './chapter-storage.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
 import { readRevisionQueue } from './chapter-revision-queue.ts'
@@ -361,7 +362,9 @@ async function inspectBidStageValue(
     if (reference !== undefined) {
       const index = buildWritableSectionWorklist(outline).findIndex(section => section.id === reference.section_id)
       if (index < 0) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-      const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`), 'utf8')
+      const assigned = await readChapterLocation(workspace, reference.section_id)
+      if (assigned === null) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${reference.section_id}`)
+      const markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
       validateChapterRevisionReference({ instruction: 'inspect', reference }, markdown)
       const selected = reference.scope === 'paragraphs' ? reference.text : markdown
       chapter = {

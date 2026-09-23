@@ -17,6 +17,7 @@ import type { BidWorkspace } from './index.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
+import { readChapterLocations } from './chapter-storage.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { renderDocxPdf } from './docx-pdf.ts'
 
@@ -377,9 +378,11 @@ export async function estimateChapterWritingPages(
   options: { readonly method?: 'fast' | 'rendered'; readonly templateId?: DocxTemplateId | null; readonly rendered?: RenderedPageEstimateOptions } = {},
 ): Promise<ChapterWritingPageEstimate> {
   const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item]))
-  const paths = new Map(buildWritableSectionWorklist(outline).map((section, index) => (
-    [section.id, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`] as const
-  )))
+  const locations = await readChapterLocations(workspace)
+  const paths = new Map(buildWritableSectionWorklist(outline).flatMap((section) => {
+    const assigned = locations.get(section.id)
+    return assigned === undefined ? [] : [[section.id, assigned.contentPath] as const]
+  }))
   const sections: PageEstimateSection[] = await Promise.all(outline.sections.map(async (section) => {
     const position = positions.get(section.id)
     if (position === undefined) throw new Error(`目录章节缺少导出位置：${section.id}`)

@@ -7,6 +7,7 @@ import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import { ensureTechnicalDeviationSection } from '../src/outline-generation-normalization.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
+import { chapterLocation } from '../src/chapter-storage.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
@@ -3419,7 +3420,7 @@ describe('S4 Host 准入与最终确认', () => {
     const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8')))
     const context = pickChapterContext({
       section: outline.sections.find(section => section.id === 'SEC-1')!,
-      sequence: 1,
+      location: chapterLocation('SEC-1', 1),
       project: parseTenderProjectArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))),
       requirements: parseTenderRequirementsArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8'))),
       scoring,
