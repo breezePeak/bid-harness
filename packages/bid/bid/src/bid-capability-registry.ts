@@ -3,6 +3,19 @@ import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { BidWorkspace } from './index.ts'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { BidStage, BidStageTask, StageArtifact, StageValidationResult } from './control-plane-contract.ts'
+import type { BidRunContext } from './run-coordinator.ts'
+import type { ModelStageExecutionOptions } from './model-stage-repair.ts'
+import type { ChapterWritingControl } from './chapter-writing-executor.ts'
+import { executeTenderAnalysis } from './tender-analysis-executor.ts'
+import { executeOutlineGeneration } from './outline-generation-executor.ts'
+import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
+import { executeChapterWriting } from './chapter-writing-executor.ts'
+import { validateTenderAnalysis } from './tender-analysis-validator.ts'
+import { validateOutlineGeneration } from './outline-generation-validator.ts'
+import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
+import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { readChapterLocation } from './chapter-storage.ts'
 import { validateChapterParagraphReference } from './chapter-revision.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
@@ -28,6 +41,77 @@ export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
   'chapter.review': { requires: ['chapters/execution-log.json'], result: 'review' },
   'document.review': { requires: ['chapters/execution-log.json'], result: 'review' },
   'docx.export': { requires: ['outline/confirmed-outline.json'], result: 'export' },
+}
+
+/** 默认路线只选择已有能力；阶段门禁和后继阶段仍由 Orchestrator 管理。 */
+export const DEFAULT_BID_STAGE_CAPABILITIES = {
+  tender_analysis: 'tender.analyze',
+  outline_generation: 'outline.generate',
+  evidence_mapping: 'evidence.research',
+  chapter_writing: 'chapter.write',
+} as const satisfies Partial<Record<BidStage, BidCapabilityId>>
+
+export type DefaultBidCapabilityId = typeof DEFAULT_BID_STAGE_CAPABILITIES[keyof typeof DEFAULT_BID_STAGE_CAPABILITIES]
+
+/** 默认执行所需的 Host 配置和已授权运行身份。 */
+export interface DefaultBidCapabilityContext {
+  readonly agent: Agent
+  readonly workspace: BidWorkspace
+  readonly run: BidRunContext
+  readonly maxRepairAttempts: number
+  readonly evidenceMappingMaxConcurrency: number
+  readonly chapterWritingMaxConcurrency: number
+  readonly chapterWritingCompletionRepairRounds: number
+  readonly webSearchEnabled: boolean
+  readonly writingControl: ChapterWritingControl
+  readonly recovery?: ModelStageExecutionOptions['recovery']
+}
+
+/** 从默认阶段查找业务能力，不把内部 StageTask 当作公共能力授权。 */
+export function defaultBidCapabilityForStage(stage: BidStage): DefaultBidCapabilityId | undefined {
+  return DEFAULT_BID_STAGE_CAPABILITIES[stage as keyof typeof DEFAULT_BID_STAGE_CAPABILITIES]
+}
+
+/** 用现有执行器运行默认能力；S5 的章节审核仍由原执行器统一调度。 */
+export function executeDefaultBidCapability(
+  capability: DefaultBidCapabilityId,
+  task: BidStageTask,
+  context: DefaultBidCapabilityContext,
+): Promise<StageArtifact[]> {
+  const { agent, workspace, run } = context
+  const repair = {
+    maxRepairAttempts: context.maxRepairAttempts,
+    run,
+    ...context.recovery === undefined ? {} : { recovery: context.recovery },
+  }
+  switch (capability) {
+    case 'tender.analyze': return executeTenderAnalysis(agent, workspace, task, repair)
+    case 'outline.generate': return executeOutlineGeneration(agent, workspace, task, repair)
+    case 'evidence.research': return executeEvidenceMapping(agent, workspace, task, {
+      ...repair,
+      maxConcurrency: context.evidenceMappingMaxConcurrency,
+      webSearchEnabled: context.webSearchEnabled,
+    })
+    case 'chapter.write': return executeChapterWriting(agent, workspace, task, {
+      ...repair,
+      maxConcurrency: context.chapterWritingMaxConcurrency,
+      maxCompletionRepairRounds: context.chapterWritingCompletionRepairRounds,
+      webSearchEnabled: context.webSearchEnabled,
+      control: context.writingControl,
+    })
+  }
+}
+
+/** 使用能力对应的现有整阶段 Validator 核对默认路线的完整产物。 */
+export function validateDefaultBidCapability(
+  capability: DefaultBidCapabilityId, workspace: BidWorkspace, stage: BidStage, artifacts: StageArtifact[],
+): Promise<StageValidationResult> {
+  switch (capability) {
+    case 'tender.analyze': return validateTenderAnalysis(workspace, stage, artifacts)
+    case 'outline.generate': return validateOutlineGeneration(workspace, stage, artifacts)
+    case 'evidence.research': return validateEvidenceMapping(workspace, stage, artifacts)
+    case 'chapter.write': return validateChapterWriting(workspace, stage, artifacts)
+  }
 }
 
 /** 解析后的范围由真实 ID 构成；null 表示用户授权项目级范围。 */

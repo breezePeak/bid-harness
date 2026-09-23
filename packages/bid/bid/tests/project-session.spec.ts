@@ -268,6 +268,23 @@ async function fixture(options: {
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('上传入口把 S1 Work 交给与恢复入口相同的默认编排器', async () => {
+    const { ctx, fresh, host } = await fixture()
+    const agent = await fresh('shared-capability-route')
+    const next = { stage: 'tender_analysis', status: 'waiting_user', run: null } as const
+    const route = vi.spyOn(host, 'automaticOrchestrator').mockReturnValue({
+      runCurrentProgramStage: vi.fn(async () => next),
+      drive: vi.fn(async () => next),
+    } as unknown as BidOrchestrator)
+    const result = await ctx.bid.uploadIncomingFiles(agent.session, [{
+      name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('项目技术要求'),
+    }])
+    expect(result).toMatchObject({ ok: true, value: next })
+    expect(route).toHaveBeenCalledOnce()
+    expect(route.mock.calls[0]?.[0].id).toBe(agent.id)
+    expect(route.mock.calls[0]?.[1]).toBeInstanceOf(BidWorkspace)
+  })
+
   it('S5 由 Host 在释放项目锁后建立原生写作要求问题并保存真实回答', async () => {
     const { ctx, workspace, fresh, host, executeStage } = await fixture()
     await seedProjectArtifacts(workspace)

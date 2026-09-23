@@ -31,7 +31,6 @@ import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 import { validateFileIntake } from './file-intake-validator.ts'
-import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis, validateTenderAnalysisCandidate } from './tender-analysis-validator.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import {
@@ -66,7 +65,6 @@ import {
   type ChapterWritingControl,
   type FlowchartVisualReviewPolicy,
 } from './chapter-writing-executor.ts'
-import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
@@ -90,6 +88,7 @@ import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
+import { defaultBidCapabilityForStage, executeDefaultBidCapability, validateDefaultBidCapability } from './bid-capability-registry.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
@@ -222,6 +221,7 @@ import type {
   BidRunDecision,
   BidRunDecisionType,
   BidStage,
+  BidWorkDescriptor,
   BidTaskState,
   BidDocumentRole,
   BidBinaryUploadFile,
@@ -3837,13 +3837,19 @@ export class BidHostRuntime extends TypertRemoteService {
     workspace: BidWorkspace,
     signal: AbortSignal | undefined,
     operation: ActiveBidOperation,
+    intake?: {
+      readonly incoming: readonly IncomingFile[]
+      readonly failures: readonly BidFileIntakeFileResult[]
+      readonly work: BidWorkDescriptor
+      readonly onImported: (files: ImportedFile[]) => void
+    },
   ): BidOrchestrator {
     let intakeFiles: IncomingFile[] = []
     let importedFiles: ImportedFile[] = []
     return new BidOrchestrator(
       operation.session,
       {
-        canExecute: stage => stage === 'file_intake' || stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
+        canExecute: stage => stage === 'file_intake' || defaultBidCapabilityForStage(stage) !== undefined,
         execute: async (task, run) => {
           this.setExecutionAgentStage(operation, agent, task.stage)
           await run.scheduler.waitUntilRunnable(run.signal)
@@ -3851,6 +3857,10 @@ export class BidHostRuntime extends TypertRemoteService {
             if (run.work.kind !== 'file_intake') throw new Error('BID_FILE_INTAKE_WORK_REQUIRED')
             intakeFiles = await readFileIntakeWork(workspace, run.work)
             importedFiles = await workspace.import(intakeFiles, run)
+            intake?.onImported(importedFiles)
+            if (intake !== undefined && intake.failures.length > 0) {
+              throw new Error('file intake could not decode every selected file')
+            }
             return [{ stage: 'file_intake', type: 'manifest', path: 'manifest.json' }]
           }
           if (task.stage === 'docx_export') return executeDocxExport(
@@ -3861,47 +3871,33 @@ export class BidHostRuntime extends TypertRemoteService {
             undefined,
             createDocxVisualReviewer(this.ctx, operation.session, run.signal),
           )
-          switch (task.stage) {
-            case 'tender_analysis': return executeTenderAnalysis(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'evidence_mapping': return executeEvidenceMapping(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-              webSearchEnabled: this.config.webSearchEnabled,
-              run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'outline_generation': return executeOutlineGeneration(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts, run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'chapter_writing': {
-              await operation.writingControl.bind(workspace, run.work.workId, run.commits)
-              return executeChapterWriting(agent, workspace, task, {
-                maxRepairAttempts: this.config.modelStageRepairAttempts,
-                maxConcurrency: this.config.chapterWritingMaxConcurrency,
-                maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
-                webSearchEnabled: this.config.webSearchEnabled,
-                run,
-                control: operation.writingControl,
-                ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-              })
-            }
+          const capability = defaultBidCapabilityForStage(task.stage)
+          if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${task.stage}`)
+          if (capability === 'chapter.write') {
+            await operation.writingControl.bind(workspace, run.work.workId, run.commits)
           }
+          return executeDefaultBidCapability(capability, task, {
+            agent, workspace, run,
+            maxRepairAttempts: this.config.modelStageRepairAttempts,
+            evidenceMappingMaxConcurrency: this.config.evidenceMappingMaxConcurrency,
+            chapterWritingMaxConcurrency: this.config.chapterWritingMaxConcurrency,
+            chapterWritingCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+            webSearchEnabled: this.config.webSearchEnabled,
+            writingControl: operation.writingControl,
+            ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
+          })
         },
       },
       {
         validate: (stage, artifacts) => {
           switch (stage) {
-            case 'file_intake': return validateFileIntake(workspace, importedFiles, stage, artifacts, intakeFiles)
+            case 'file_intake': return validateFileIntake(workspace, importedFiles, stage, artifacts, intake?.incoming ?? intakeFiles)
             case 'docx_export': return validateDocxExport(workspace, stage, artifacts)
-            case 'tender_analysis': return validateTenderAnalysis(workspace, stage, artifacts)
-            case 'evidence_mapping': return validateEvidenceMapping(workspace, stage, artifacts)
-            case 'chapter_writing': return validateChapterWriting(workspace, stage, artifacts)
-            case 'outline_generation': return validateOutlineGeneration(workspace, stage, artifacts)
+            default: {
+              const capability = defaultBidCapabilityForStage(stage)
+              if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${stage}`)
+              return validateDefaultBidCapability(capability, workspace, stage, artifacts)
+            }
           }
         },
       },
@@ -3913,9 +3909,8 @@ export class BidHostRuntime extends TypertRemoteService {
         toStage,
       ),
       operation.runs,
-      async (stage) => {
-        return persistHostWork(workspace, 'stage_execution', stage, { stage })
-      },
+      async stage => stage === 'file_intake' && intake !== undefined
+        ? intake.work : persistHostWork(workspace, 'stage_execution', stage, { stage }),
       this.createBeforeStageStart(operation, workspace),
     )
   }
@@ -4816,74 +4811,12 @@ export class BidHostRuntime extends TypertRemoteService {
       validateBidFileBatch(incoming, workspace.config)
       const intakeWork = await persistFileIntakeWork(workspace, incoming)
       let imported: ImportedFile[] = []
-      const orchestrator = new BidOrchestrator(
-        session,
-        {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
-          execute: async (task, run) => {
-            await run.scheduler.waitUntilRunnable(run.signal)
-            if (task.stage === 'file_intake') {
-              try {
-                const durableFiles = await readFileIntakeWork(workspace, run.work)
-                imported = await workspace.import(durableFiles, run)
-              } catch {
-                throw new Error('file intake could not persist the selected files')
-              }
-              if (failures.length > 0) {
-                throw new Error('file intake could not decode every selected file')
-              }
-              const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
-              return [artifact]
-            }
-            if (task.stage === 'docx_export') return executeDocxExport(
-              workspace,
-              run,
-              undefined,
-              undefined,
-              undefined,
-              createDocxVisualReviewer(this.ctx, session, run.signal),
-            )
-            const repair = {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              run,
-            }
-            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
-            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
-              ...repair,
-              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-              webSearchEnabled: this.config.webSearchEnabled,
-            })
-            if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
-            return executeChapterWriting(agent, workspace, task, {
-              ...repair,
-              maxConcurrency: this.config.chapterWritingMaxConcurrency,
-              maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
-              webSearchEnabled: this.config.webSearchEnabled,
-              control: operation.writingControl,
-            })
-          },
-        },
-        {
-          validate: (stage, artifacts) => stage === 'docx_export'
-            ? validateDocxExport(workspace, stage, artifacts)
-            : stage === 'file_intake'
-              ? validateFileIntake(workspace, imported, stage, artifacts, incoming)
-              : stage === 'tender_analysis'
-                ? validateTenderAnalysis(workspace, stage, artifacts)
-                : stage === 'evidence_mapping'
-                  ? validateEvidenceMapping(workspace, stage, artifacts)
-                  : stage === 'outline_generation'
-                    ? validateOutlineGeneration(workspace, stage, artifacts)
-                    : validateChapterWriting(workspace, stage, artifacts),
-        },
-        operation.controller.signal,
-        undefined,
-        operation.runs,
-        async (stage) => {
-          if (stage === 'file_intake') return intakeWork
-          return persistHostWork(workspace, 'stage_execution', stage, { stage })
-        },
-      )
+      const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation, {
+        incoming,
+        failures,
+        work: intakeWork,
+        onImported: (files) => { imported = files },
+      })
       await orchestrator.runCurrentProgramStage()
       const next = await orchestrator.drive()
       await this.ctx.sessions.flush(session)
