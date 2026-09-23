@@ -15,6 +15,7 @@ import type {
   BidTaskState,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import { defaultBidNextStage, defaultBidUserGate } from './default-route.ts'
 
 const stageValidationIssueSchema = z.object({
   code: z.string(),
@@ -131,20 +132,20 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
   file_intake: {
     stage: 'file_intake', executor: 'program', requiredInputs: [], allowedTools: [],
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'], requiredArtifacts: ['manifest.json'],
-    validator: 'file-intake-validator', userGate: 'none', nextStage: 'tender_analysis',
+    validator: 'file-intake-validator', userGate: defaultBidUserGate('file_intake'), nextStage: defaultBidNextStage('file_intake'),
   },
   tender_analysis: {
     stage: 'tender_analysis', executor: 'agent', requiredInputs: ['manifest.json'], allowedTools: ['grep', 'read', 'view_pdf_page'],
     forbiddenTools: ['write', 'bash', 'web_search', 'web_fetch', 'subagent'], requiredArtifacts: [
       'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring-origin.json', 'analysis/compliance.json',
-    ], validator: 'tender-analysis-validator', userGate: 'after_validation', nextStage: 'outline_generation',
+    ], validator: 'tender-analysis-validator', userGate: defaultBidUserGate('tender_analysis'), nextStage: defaultBidNextStage('tender_analysis'),
   },
   outline_generation: {
     stage: 'outline_generation', executor: 'agent', requiredInputs: [
       'manifest.json', 'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
     ], allowedTools: ['read', 'write'], forbiddenTools: ['grep', 'bash', 'web_search'], requiredArtifacts: [
       'analysis/scoring-response-points.json', 'outline/outline.json', 'outline/quality-report.json',
-    ], validator: 'outline-generation-validator', userGate: 'after_validation', nextStage: 'evidence_mapping',
+    ], validator: 'outline-generation-validator', userGate: defaultBidUserGate('outline_generation'), nextStage: defaultBidNextStage('outline_generation'),
   },
   evidence_mapping: {
     stage: 'evidence_mapping', executor: 'agent', requiredInputs: [
@@ -152,7 +153,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/scoring-response-points.json', 'analysis/compliance.json', 'outline/initial-confirmed-outline.json',
     ], allowedTools: ['read', 'write'], forbiddenTools: ['bash'], requiredArtifacts: [
       'analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json',
-    ], validator: 'evidence-mapping-validator', userGate: 'after_validation', nextStage: 'chapter_writing',
+    ], validator: 'evidence-mapping-validator', userGate: defaultBidUserGate('evidence_mapping'), nextStage: defaultBidNextStage('evidence_mapping'),
   },
   chapter_writing: {
     stage: 'chapter_writing', executor: 'agent', requiredInputs: [
@@ -161,12 +162,12 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/web-evidence-sources.json', 'outline/confirmed-outline.json',
     ], allowedTools: ['grep', 'read', 'web_search', 'web_fetch'], forbiddenTools: ['bash', 'write'], requiredArtifacts: [
       'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json', 'chapters/global-compliance-review.json',
-    ], validator: 'chapter-writing-validator', userGate: 'before_execution', nextStage: null,
+    ], validator: 'chapter-writing-validator', userGate: defaultBidUserGate('chapter_writing'), nextStage: defaultBidNextStage('chapter_writing'),
   },
   docx_export: {
     stage: 'docx_export', executor: 'program', requiredInputs: ['outline/confirmed-outline.json', 'chapters/manifest.json'],
     allowedTools: [], forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'], requiredArtifacts: ['output/bid.docx'],
-    validator: 'docx-export-validator', userGate: 'none', nextStage: null,
+    validator: 'docx-export-validator', userGate: defaultBidUserGate('docx_export'), nextStage: defaultBidNextStage('docx_export'),
   },
 }
 

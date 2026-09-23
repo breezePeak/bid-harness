@@ -31,6 +31,8 @@ import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { readChapterLocation } from './chapter-storage.ts'
 import { bidProjectInspectSchema } from './bid-project-inspect.ts'
+import { bidCapabilityTaskSchema } from './bid-capability-contract.ts'
+import { zodJsonSchema } from './zod-json-schema.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
 import { readRevisionQueue } from './chapter-revision-queue.ts'
@@ -55,6 +57,7 @@ const recoveryArtifactPaths = new Set([
 /** 在工具执行入口重新验证阶段操作参数，CAS 必须来自最近一次 inspect。 */
 export const stageInteractionSchema = z.union([
   z.object({ action: z.literal('bid_project_inspect'), query: bidProjectInspectSchema }).strict(),
+  z.object({ action: z.literal('bid_run_task'), task: bidCapabilityTaskSchema }).strict(),
   z.object({
     action: z.literal('bid_stage_inspect'),
     view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
@@ -98,6 +101,7 @@ const names = [
   'bid_resume_stage',
   'bid_set_flowchart_visual_review',
   'bid_project_inspect',
+  'bid_run_task',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -496,7 +500,7 @@ export function renderStageInteractionPrompt(stage: string): string {
   if (stage === 'chapter_writing') return [
     '当前 Bid 阶段：chapter_writing；当前状态：waiting_user。',
     '正式写作尚未开始。先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
-    '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；需要改变目录时，引导用户重置并重新确认 S4，不得偷偷改目录。',
+    '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；用户明确要求改变目录时，可调用 bid_run_task 组合目录、资料与写作能力。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
     '初始整体写作要求由 Host 原生提问；先读取 task_contract_context.writing_request 中已保存的真实回答和 writing_request_id，不要再次询问这个初始问题。Host 会在首次计划提交时把原生自定义回答原文加入 user_requirements。',
     '只追问影响执行的关键歧义或冲突。若原生回答尚未保存，不得提交首次计划，也不得把普通聊天消息当作首次授权。原生回答不是 user/message，不要伪造 user_message_refs；已有真实用户消息仍可按语义引用。',
@@ -511,7 +515,7 @@ export function renderStageInteractionPrompt(stage: string): string {
     `当前 Bid 阶段：${stage}；当前状态：waiting_user。`,
     '你正在与用户进行当前阶段的交互修改。先调用 bid_stage_inspect 读取最新目录、评分点、资料和缺口。',
     '按 inspect 返回的 number、标题和父子关系，把“第三章”“3.2”“服务方案下面第二个”解析到实际 section.id；编号不是 Section ID。只有存在歧义时才询问用户，不要求用户提供内部 ID。',
-    '只能使用当前可见阶段工具修改目录或资料，不得直接 write Artifact、调用其他工具绕过校验或自动推进阶段。',
+    '明确修改可调用 bid_run_task 组合所需能力，不得直接 write Artifact 或绕过 Host 校验；首次整本确认仍由原生确认入口处理。',
     '目录拆分用 split_section，合并同级可写叶子用 merge_sections；局部重生成用 bid_outline_regenerate_scope。修改后重新 inspect 获取新 ID 与 revision。',
     '资料不对、重新匹配用 bid_evidence_remap(mode=replace)；资料不足、再补充用 supplement。传具体章节只处理该章节，传结构分支处理其可写后代。标题微调不强制 remap；用户要求修改并重新找资料时，修改后 remap 新范围。',
     '普通聊天中的“可以”“没问题”“这样可以吗”不是正式确认。修改完成后告知“已更新，请重新确认”，只有用户点击正式确认按钮才能进入下一阶段。',
@@ -528,6 +532,7 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'compl
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先理解用户是在提问、解释已有正文，还是明确要求改变写作计划；不得用关键词、引用或发送方式替代语义判断。',
+    '用户明确要求修改目录、招标理解、资料或正文时，可用 bid_run_task 按真实范围安排能力步骤；只讨论时保持只读。局部任务结果不等于全书重新验收。',
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     ...(status === 'running' ? ['用户明确说“不要视觉检查”“不用视觉检查”“跳过流程图视觉检查”时，调用 bid_set_flowchart_visual_review(policy="skip")；明确说“恢复视觉检查”“继续检查流程图”时，调用 bid_set_flowchart_visual_review(policy="required")。这是执行策略，不得写入 Writing Plan，不得调用 bid_confirm_writing_plan.patch；工具成功前不得声称策略已生效。'] : []),
@@ -559,8 +564,8 @@ export function renderLiveStageInteractionPrompt(stage: string, status: 'running
     '你正在处理公开用户消息，后台阶段任务与 Child/Subagent 继续运行。先判断用户是在询问、解释现状，还是明确要求改变任务；不得按关键词、引用或发送方式判断意图。',
     '进度、资料范围和设计原因只调用 bid_stage_inspect 读取有界 Host 快照并回答；不得直接读写 Artifact、停止阶段、重启阶段或创建新的阶段请求。',
     status === 'completed'
-      ? '阶段产物保持完成态。普通问答不得重开阶段或修改产物；当前没有受控修改工具时，应说明可用的正式重置或后续阶段入口。'
-      : '普通消息不拥有阶段生命周期，也不取消当前模型任务或已启动的 Child。当前没有受控修改工具时，应说明修改需要等待现有阶段到达正式交互边界。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。停止任务只使用聊天界面的原生停止。',
+      ? '普通问答不修改产物；用户明确要求变更时可调用 bid_run_task，按实际资料和范围安排步骤，保留默认路线的首次确认。'
+      : '普通消息不取消当前模型任务或已启动的 Child。用户明确要求变更时可调用 bid_run_task；若已有操作持有项目，Host 返回占用状态。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。停止任务只使用聊天界面的原生停止。',
   ].join('\n')
 }
 
@@ -571,7 +576,7 @@ function renderIdleStageInteractionPrompt(
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
-    '不得自行开始、重启、重置或推进阶段，也不得把普通聊天当成 Host 原生阶段决策。',
+    '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。',
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
@@ -606,6 +611,13 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
     `更新时间：${new Date(progress.updatedAt).toISOString()}`,
   ].join('\n')
 }
+
+const CAPABILITY_TASK_GUIDANCE = [
+  '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。',
+  'tender.update 更正规范化理解或评分选择；outline.update/refine 调整目录，chapter.reorganize 分配旧正文；evidence.research 更新资料；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。按用户真实目标选择最少步骤。',
+  '任务根范围用 project、实际 section_ids 或带原文哈希的 paragraphs；步骤可继承根范围，也可引用前一步真实 target_section_ids。不要从“全部”“流程”等字词机械扩大范围。',
+  '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。工具返回的接受、执行和发布状态以 Host 结果为准。',
+].join('\n')
 
 /**
  * 按实时阶段安装 scoped tools；全局 guard 拒绝交互期间的其他 Main Agent 工具调用。
@@ -652,7 +664,7 @@ export function installStageInteractionTools(
             : stage === 'tender_analysis' ? names.slice(0, 1)
               : stage === 'outline_generation' ? names.slice(0, 3)
                 : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
-      const installed = [...available, 'bid_project_inspect', ...(recoveryAvailable ? [recoveryTool] : [])]
+      const installed = [...available, 'bid_project_inspect', 'bid_run_task', ...(recoveryAvailable ? [recoveryTool] : [])]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
@@ -660,11 +672,11 @@ export function installStageInteractionTools(
       try {
         if (task.status === 'waiting_user') {
           disposers.push(tools.restrict({ allow: bound?.type === 'bid.goal.bound'
-            ? ['get_goal', 'update_goal', 'bid_project_inspect', ...(recoveryAvailable ? ['bid_stage_inspect', recoveryTool] : [])]
-            : ['bid_project_inspect'] }))
+            ? ['get_goal', 'update_goal', 'bid_project_inspect', 'bid_run_task', ...(recoveryAvailable ? ['bid_stage_inspect', recoveryTool] : [])]
+            : ['bid_project_inspect', 'bid_run_task'] }))
         }
         for (const name of installed) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_confirm_writing_plan'
+          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
             ? {} : { ...cas }
           const required = Object.keys(properties)
@@ -684,12 +696,16 @@ export function installStageInteractionTools(
           if (name === 'bid_project_inspect') {
             properties.query = { type: 'object', properties: {
               object: { type: 'string', enum: ['tender', 'outline', 'evidence', 'writing_plan', 'chapters', 'execution', 'task', 'recovery'] },
-              part: { type: 'string', enum: ['project', 'requirements', 'scoring', 'compliance'] },
+              part: { type: 'string', enum: ['project', 'requirements', 'scoring', 'scoring_origin', 'selection', 'compliance', 'impact'] },
               source: { type: 'string', enum: ['committed', 'candidate'] },
               section_ids: strings, page: { type: 'integer' }, page_size: { type: 'integer' },
               offset: { type: 'integer' }, max_chars: { type: 'integer' },
             }, required: ['object'], additionalProperties: false }
             required.push('query')
+          }
+          if (name === 'bid_run_task') {
+            properties.task = zodJsonSchema(bidCapabilityTaskSchema)
+            required.push('task')
           }
           if (name === recoveryTool) {
             parameters = { oneOf: [{ type: 'object', properties: {
@@ -806,16 +822,17 @@ export function installStageInteractionTools(
             description: name === recoveryTool ? '仅对 bid_stage_inspect(view=recovery) 返回的当前失败目标提交改进处理办法；Host 验证后异步恢复原任务。'
               : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                 : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
-                  : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
-                    : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
-                      : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                        : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                          : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                            : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
-                              : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
-                                : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                                  : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                                    : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                  : name === 'bid_run_task' ? '用当前真实用户消息授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
+                    : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
+                      : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
+                        : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
+                          : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                            : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                              : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
+                                : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
+                                  : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                                    : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                                      : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
@@ -916,7 +933,7 @@ export function installStageInteractionTools(
                 ? renderIdleStageInteractionPrompt(task.stage, task.status) : undefined
       if (prompt === undefined) return decision
       const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined
-      const context = progress === undefined ? prompt : `${prompt}\n${progress}`
+      const context = `${prompt}\n${CAPABILITY_TASK_GUIDANCE}${progress === undefined ? '' : `\n${progress}`}`
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)

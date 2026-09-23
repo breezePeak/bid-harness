@@ -50,6 +50,7 @@ import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
+import { seedCapabilityProject } from './capability-fixture.ts'
 
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
@@ -535,7 +536,7 @@ describe('Workspace 项目与独立 Session', () => {
       })).resolves.toBeUndefined()
 
       expect(ctx.tools.schemas(agent).filter(tool => tool.name.startsWith('bid_')).map(tool => tool.name))
-        .toEqual(['bid_stage_inspect', 'bid_project_inspect'])
+        .toEqual(['bid_stage_inspect', 'bid_project_inspect', 'bid_run_task'])
       const project = await ctx.tools.execute({
         agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline', page_size: 1 } },
         callId: CallId(`project-${stage}-${seedStatus}`), signal: new AbortController().signal,
@@ -554,6 +555,27 @@ describe('Workspace 项目与独立 Session', () => {
       expect(agent.session.events.some(event => event.type === 'bid.stage.started')).toBe(false)
       expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
     }
+  })
+
+  it('主 Agent 工具以真实用户消息执行跨阶段能力任务并返回发布文件', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-main-tool')
+    const message = createUserMessage({ content: [{ type: 'text', text: '更正第一条招标要求的理解' }],
+      source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
+      goal: '更正第一条招标要求的理解', scope: { kind: 'project' }, steps: [{
+        scope: { source: 'task' }, call: { capability: 'tender.update', input: { operations: [{
+          type: 'update_requirement', requirement_id: 'REQ-1',
+          fields: { normalized_requirement: '明确实施边界' },
+        }] } },
+      }],
+    } }, callId: CallId('capability-main-tool'), signal: new AbortController().signal })
+    expect(result.isError, JSON.stringify(result)).toBe(false)
+    expect(result.value).toMatchObject({ accepted: true, state: { stage: 'chapter_writing', status: 'completed' },
+      changed_artifacts: expect.arrayContaining(['analysis/requirements.json']) })
   })
 
   it('S4 reset 后 inspect 从 S3 已确认目录恢复章节摘要但不伪造 Draft', async () => {
@@ -1426,9 +1448,7 @@ describe('Workspace 项目与独立 Session', () => {
       sections: Array<{ user_requirements: string[] }>
       revision: { affected_section_ids: string[] }
     }
-    expect(plan.user_requirements).toEqual([
-      '没有特殊要求，直接开始', '第二章写详细一点。', '对，其他章节不用动。',
-    ])
+    expect(plan.user_requirements).toEqual(['没有特殊要求，直接开始'])
     expect(plan.sections[0]?.user_requirements).toEqual(['第二章写详细一点。', '对，其他章节不用动。'])
     expect(plan.revision.affected_section_ids).toEqual(['SEC-1'])
   })

@@ -29,7 +29,8 @@ export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
   readonly result: 'artifacts' | 'review' | 'export'
 }>> = {
   'tender.analyze': { requires: ['manifest'], result: 'artifacts' },
-  'tender.update': { requires: ['analysis/project.json', 'analysis/requirements.json', 'analysis/scoring-origin.json'], result: 'artifacts' },
+  'tender.update': { requires: ['analysis/project.json', 'analysis/requirements.json',
+    'analysis/scoring-origin.json', 'analysis/compliance.json'], result: 'artifacts' },
   'outline.generate': { requires: ['analysis/requirements.json', 'analysis/scoring.json'], result: 'artifacts' },
   'outline.update': { requires: ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
     'analysis/compliance.json', 'analysis/scoring-response-points.json'], result: 'artifacts' },

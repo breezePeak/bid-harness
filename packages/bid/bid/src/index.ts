@@ -88,12 +88,14 @@ import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
-import { defaultBidCapabilityForStage, executeDefaultBidCapability, validateDefaultBidCapability } from './bid-capability-registry.ts'
+import { BID_CAPABILITIES, defaultBidCapabilityForStage, executeDefaultBidCapability,
+  validateDefaultBidCapability } from './bid-capability-registry.ts'
 import { askCapabilityTaskInput, executeCapabilityTask, readCapabilityAwaitingInput,
-  persistCapabilityTaskRequest, capabilityTaskRequestSchema,
+  persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
+import { createBidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
@@ -898,6 +900,7 @@ interface ActiveBidOperation {
   executionSessionId?: SessionId
   executionHandle?: AgentHandle
   executionStage?: BidStage
+  defaultWritingRunAdmitted?: boolean
   readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
   readonly runs: BidRunCoordinator
@@ -1660,6 +1663,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly pendingCapabilityInputs = new Map<string, Promise<void>>()
   private readonly pendingCapabilityInputControllers = new Map<string, AbortController>()
   private capabilityTaskDispatcher: CapabilityTaskDispatcher | undefined
+  private readonly builtInCapabilityDispatcher: CapabilityTaskDispatcher
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
@@ -1838,6 +1842,9 @@ export class BidHostRuntime extends TypertRemoteService {
         if (run.work.kind === 'stage_execution' && run.work.stage === 'tender_analysis') {
           this.bidGoalBridge?.onS2Admitted(current.session, run)
         }
+        if (run.work.kind === 'stage_execution' && run.work.stage === 'chapter_writing') {
+          current.defaultWritingRunAdmitted = true
+        }
       },
       (notice, run) => {
         this.injectHostExecutionUpdate(session, {
@@ -1984,7 +1991,8 @@ export class BidHostRuntime extends TypertRemoteService {
         if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
         operation.settle()
         const settledTask = bidSessionTaskState(operation.session)
-        if (settledTask.stage === 'chapter_writing' && settledTask.status === 'completed') {
+        if (operation.defaultWritingRunAdmitted && settledTask.stage === 'chapter_writing'
+          && settledTask.status === 'completed') {
           this.bidGoalBridge?.complete(operation.session)
         }
         this.bidGoalBridge?.request(operation.session)
@@ -2845,6 +2853,7 @@ export class BidHostRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
     this.config = config
+    this.builtInCapabilityDispatcher = createBidCapabilityDispatcher(config)
     for (const authority of config.trustedHosts) assertBidUploadTrustedAuthority(authority)
     ctx.effect(
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
@@ -3214,6 +3223,27 @@ export class BidHostRuntime extends TypertRemoteService {
     if (request.action === 'bid_project_inspect') {
       const canonical = new BidWorkspace(key, workspaceConfig(this.config))
       return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
+    }
+    if (request.action === 'bid_run_task') {
+      const message = session.events.findLast(event => event.type === 'user/message'
+        && event.data.source.kind === 'user')
+      if (message?.type !== 'user/message') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+      const first = request.task.steps[0]
+      if (first === undefined) throw new Error('BID_CAPABILITY_EMPTY_TASK')
+      const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
+        ? 'manifest.json' : path)
+      const authorization = {
+        session_id: String(session.id), message_id: String(message.data.id),
+      }
+      const state = await this.runCapabilityTask(agent, request.task, authorization, inputs)
+      const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+      const work = await findCapabilityTaskRequest(canonical, authorization)
+      if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
+      const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
+      return { accepted: true, work_id: work.workId, state,
+        result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
+        changed_artifacts: receipt?.files.map(file => file.path) ?? [],
+        removed_artifacts: receipt?.removed_paths ?? [] }
     }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
@@ -5104,7 +5134,7 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<BidTaskState> {
     const session = agent.session
     assertBidMainSession(session)
-    if (this.ctx.agents.get(session.id) !== agent || this.capabilityTaskDispatcher === undefined) {
+    if (this.ctx.agents.get(session.id) !== agent) {
       throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
     }
     const operation = this.beginOperation(session)
@@ -5131,8 +5161,7 @@ export class BidHostRuntime extends TypertRemoteService {
     agent: Agent, operation: ActiveBidOperation, run: BidRunContext, request: CapabilityTaskRequest,
   ): Promise<BidTaskState> {
     try {
-      const dispatcher = this.capabilityTaskDispatcher
-      if (dispatcher === undefined) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+      const dispatcher = this.capabilityTaskDispatcher ?? this.builtInCapabilityDispatcher
       const outcome = await run.activities.track(() => executeCapabilityTask(
         operation.workspace, run, dispatcher, agent, operation.session,
       ))
@@ -5249,7 +5278,6 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<BidTaskState> {
     const payload = await readHostWork(operation.workspace, suspended.work)
     if (suspended.work.kind === 'capability_task') {
-      if (this.capabilityTaskDispatcher === undefined) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
       const run = await operation.runs.start(suspended.work, { runId: suspended.runId, cause: suspended.cause })
       onAccepted?.(run)
       return this.executeAdmittedCapabilityTask(agent, operation, run, capabilityTaskRequestSchema.parse(payload))

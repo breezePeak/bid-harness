@@ -15,8 +15,10 @@ import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts
 import { webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { buildBidStageTask } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { assertChapterRevisionScope, renderChapterRevisionTask,
+  validateChapterRevisionReference } from './chapter-revision.ts'
 
-type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.review' }>
+type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.revise' | 'chapter.review' }>
 
 /** S5 已校验的 Host 运行配置。 */
 export interface WritingCapabilitySettings {
@@ -99,12 +101,26 @@ export async function executeWritingCapability(
   call: WritingCall, context: BidCapabilityExecutionContext, settings: WritingCapabilitySettings,
 ): Promise<{ readonly result: BidCapabilityResult }> {
   const workspace = context.working
-  const { ids, paths } = await selectedLocations(workspace, context.sectionIds)
+  const revisionId = call.capability === 'chapter.revise' ? call.input.reference.section_id : undefined
+  if (revisionId !== undefined && context.sectionIds !== null && !context.sectionIds.has(revisionId)) {
+    throw new Error('BID_CHAPTER_REVISION_SCOPE_INVALID')
+  }
+  const { ids, paths } = await selectedLocations(workspace, revisionId === undefined
+    ? context.sectionIds : new Set([revisionId]))
+  let revisionOriginal: string | undefined
+  if (call.capability === 'chapter.revise') {
+    const location = await planChapterLocations(workspace, buildChapterWorklist(
+      parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))).map(section => section.id))
+    const contentPath = location.locations.get(call.input.reference.section_id)?.contentPath
+    if (contentPath === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
+    revisionOriginal = await readFile(within(workspace.projectRoot, contentPath), 'utf8')
+    validateChapterRevisionReference(call.input, revisionOriginal)
+  }
   const beforePaths = new Set([...paths, 'chapters/execution-plan.json', 'chapters/execution-log.json',
     'chapters/manifest.json', 'analysis/web-evidence-sources.json', ...await sourcePaths(workspace)])
   const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await fileHash(workspace, path)] as const)))
   const seedBySectionId = new Map<string, string>()
-  if (call.capability === 'chapter.write') {
+  if (call.capability !== 'chapter.review') {
     const log = before.get('chapters/execution-log.json') === undefined ? undefined
       : parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
     const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -117,12 +133,23 @@ export async function executeWritingCapability(
     }
   }
   const affected = new Set<string>()
+  let instruction: string
+  if (call.capability === 'chapter.revise') {
+    if (revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
+    instruction = renderChapterRevisionTask(call.input, revisionOriginal)
+  } else instruction = call.capability === 'chapter.write' ? call.input.instruction : call.input.reason
   await executeChapterWriting(context.agent, workspace, buildBidStageTask('chapter_writing'), {
     ...settings, run: context.run,
-    scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.write' ? 'write' : 'review',
-      instruction: call.capability === 'chapter.write' ? call.input.instruction : call.input.reason,
+    scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
+      instruction,
       seedBySectionId, affectedDependentIds: affected },
   })
+  if (call.capability === 'chapter.revise') {
+    const contentPath = [...paths].find(path => path.includes('/sections/') && path.endsWith('.md'))
+    if (contentPath === undefined || revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
+    assertChapterRevisionScope(call.input, revisionOriginal,
+      await readFile(within(workspace.projectRoot, contentPath), 'utf8'))
+  }
   for (const path of await sourcePaths(workspace)) {
     if (before.get(path) !== undefined && before.get(path) !== await fileHash(workspace, path)) {
       throw new Error(`BID_CHAPTER_WRITING_SOURCE_CHANGED: ${path}`)
@@ -152,7 +179,7 @@ export async function executeWritingCapability(
     }))).flat() : []
   return { result: {
     target_section_ids: ids, changed_artifacts: changed,
-    change_summary: `${call.capability === 'chapter.write' ? '已编写并审核' : '已审核'} ${String(ids.length)} 个章节`,
+    change_summary: `${call.capability === 'chapter.review' ? '已审核' : '已编写并审核'} ${String(ids.length)} 个章节`,
     warnings: [...affected].map(id => `强依赖章节 ${id} 的交接需要重新核查；本次未改写其正文。`)
       .concat(reviewConcerns),
     missing_topics: manifest.chapters.filter(entry => selected.has(entry.section_id))

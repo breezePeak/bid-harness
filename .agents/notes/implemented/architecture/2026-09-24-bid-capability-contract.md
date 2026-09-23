@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`bid-capability-contract.ts` 列出固定能力 ID，每个能力有独立业务输入 schema；用户目标、非空实际章节 ID 或带原文 Hash 的段落引用属于模型输入，Work、步骤身份、输入摘要、工作副本及允许写入集合属于 Host。步骤范围只能取任务根范围、前一步已完成结果的 `target_section_ids` 或明确已有 ID。`bid-capability-registry.ts` 保存静态输入前提和结果类别，并在 Host 完成步骤前核对真实章节、允许写入的文件及其存在性。默认 S2–S5 执行适配器已经接入，其他跨阶段写入能力仍未开放；契约本身不授予写权限。
+`bid-capability-contract.ts` 列出固定能力 ID，每个能力有独立业务输入 schema；用户目标、非空实际章节 ID 或带原文 Hash 的段落引用属于模型输入，Work、步骤身份、输入摘要、工作副本及允许写入集合属于 Host。步骤范围只能取任务根范围、前一步已完成结果的 `target_section_ids` 或明确已有 ID。`bid-capability-registry.ts` 保存静态输入前提和结果类别，并在 Host 完成步骤前核对真实章节、允许写入的文件及其存在性。`bid_run_task` 把真实用户消息授权的有序步骤交给 Host 内建分派器，局部能力不受项目阶段名限制；默认整本路线仍由原生阶段执行器与首次确认点推进。适配器只执行已经实现的能力，缺少输入或执行器时返回明确错误；契约本身不授予写权限。
 
 `bid_project_inspect` 由 Bid Main Agent 在各阶段使用，按招标理解、目录、资料映射、写作计划、正文、执行结果与任务诊断读取项目。读取请求有对象、来源、真实章节 ID 和分页参数；不存在的对象返回 `available=false`。正文返回 Hash、字符偏移、总长度、`complete` 与下一偏移，不把片段伪装成完整正文。正式与候选工作副本必须明确选择；没有候选时不回退到正式项目。旧 `bid_stage_inspect` 继续承担阶段摘要与恢复视图。
 
