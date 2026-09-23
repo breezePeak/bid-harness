@@ -7,7 +7,7 @@ import type { AskUserQuestionAnswerItem } from '@deepseek-ai/dsh-user-questions/
 import { outlineEditOperationSchema } from './outline-confirmation-edits.ts'
 import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
 import { tenderAnalysisEditOperationSchema } from './tender-analysis-confirmation.ts'
-import { writingPlanInputSchema } from './writing-requirements.ts'
+import { writingPlanInputSchema, type WritingMessageSession } from './writing-requirements.ts'
 import { chapterBlockAssignmentSchema } from './chapter-content-reuse.ts'
 import { outlineBusinessBindingSchema } from './outline-confirmation-edits.ts'
 
@@ -98,6 +98,8 @@ export interface BidCapabilityExecutionContext {
   readonly canonical: BidWorkspace
   readonly working: BidWorkspace
   readonly agent: Agent
+  /** 保存用户原话与能力授权的 Interaction Session。 */
+  readonly sourceSession?: WritingMessageSession
   readonly run: BidRunContext
   readonly sectionIds: ReadonlySet<string> | null
   /** 结构操作产出并经 Host 核对属于任务根范围的新后代。 */

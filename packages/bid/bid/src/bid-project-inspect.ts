@@ -12,6 +12,7 @@ import { parseBidProjectState } from './project-state.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -21,7 +22,8 @@ const sectionIds = z.array(z.string().min(1)).min(1)
 
 /** 面向主 Agent 的明确读取请求。 */
 export const bidProjectInspectSchema = z.discriminatedUnion('object', [
-  z.object({ object: z.literal('tender'), part: z.enum(['project', 'requirements', 'scoring', 'compliance']), ...page, ...source }).strict(),
+  z.object({ object: z.literal('tender'), part: z.enum(['project', 'requirements', 'scoring', 'scoring_origin',
+    'selection', 'compliance', 'impact']), ...page, ...source }).strict(),
   z.object({ object: z.literal('outline'), ...page, ...source }).strict(),
   z.object({ object: z.literal('evidence'), section_ids: sectionIds.optional(), ...page, ...source }).strict(),
   z.object({ object: z.literal('writing_plan'), section_ids: sectionIds.optional(), ...page, ...source }).strict(),
@@ -78,12 +80,15 @@ export async function inspectBidProject(
 ): Promise<BidProjectInspectResult> {
   const request = bidProjectInspectSchema.parse(input)
   const workspace = request.source === 'candidate' ? candidate : canonical
+  const tenderArtifact = request.object === 'tender' ? `analysis/${request.part === 'scoring_origin' ? 'scoring-origin'
+    : request.part === 'selection' ? 'tender-analysis-selection'
+      : request.part === 'impact' ? 'tender-update-impact' : request.part}.json` : undefined
   const artifactFor = (object: typeof request.object): string => object === 'outline' ? 'outline/confirmed-outline.json'
     : object === 'evidence' ? 'analysis/evidence-map.json'
       : object === 'writing_plan' ? 'chapters/writing-plan.json'
         : object === 'execution' ? 'chapters/execution-log.json'
           : object === 'chapters' ? 'chapters/sections'
-            : object === 'tender' ? `analysis/${request.object === 'tender' ? request.part : 'project'}.json`
+            : object === 'tender' ? tenderArtifact ?? 'analysis/project.json'
               : 'project-state.json'
   const artifact = artifactFor(request.object)
   const base = { object: request.object, source: request.source, artifact }
@@ -135,8 +140,18 @@ export async function inspectBidProject(
   if (request.object === 'tender') {
     if (request.part === 'project') header = parseTenderProjectArtifact(value)
     else if (request.part === 'requirements') items = parseTenderRequirementsArtifact(value).requirements
-    else if (request.part === 'scoring') items = parseTenderScoringArtifact(value).scoring_items
-    else items = parseTenderComplianceArtifact(value).compliance_items
+    else if (request.part === 'scoring' || request.part === 'scoring_origin') {
+      items = parseTenderScoringArtifact(value).scoring_items
+    } else if (request.part === 'selection') {
+      const originRaw = await optionalText(workspace, 'analysis/scoring-origin.json')
+      if (originRaw === undefined) return { ...base, available: false, missing: 'analysis/scoring-origin.json' }
+      header = parseTenderScoringSelection(value, parseTenderScoringArtifact(JSON.parse(originRaw)))
+    } else if (request.part === 'impact') {
+      header = z.object({ schema_version: z.literal(1), changed_requirement_ids: z.array(z.string()),
+        changed_scoring_ids: z.array(z.string()), changed_compliance_ids: z.array(z.string()),
+        project_changed: z.boolean(), affected_section_ids: z.array(z.string()),
+        stale_artifacts: z.array(z.string()) }).strict().parse(value)
+    } else items = parseTenderComplianceArtifact(value).compliance_items
   } else if (request.object === 'outline') items = parseOutlineArtifact(value).sections
   else if (request.object === 'evidence') items = parseEvidenceMapArtifact(value).section_mappings
   else if (request.object === 'writing_plan') {

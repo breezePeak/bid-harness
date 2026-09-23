@@ -560,7 +560,8 @@ export async function executeCapabilityTask(
     }) }
     const authorizedNewDescendants = new Set<string>()
     const context: BidCapabilityExecutionContext = {
-      canonical, working: stepWorking, agent, run: candidateRun, sectionIds: scope.sectionIds,
+      canonical, working: stepWorking, agent, sourceSession: session,
+      run: candidateRun, sectionIds: scope.sectionIds,
       authorizedNewDescendants,
       stepDirectory: stepPaths.root, inputSources, baselineHashes: baseline, allowedWrites: writes,
       stepId: saved.step_id, inputSha256: stepInputSha256,
