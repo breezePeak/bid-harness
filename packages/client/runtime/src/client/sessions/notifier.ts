@@ -98,6 +98,13 @@ export class Notifier {
       this.dirty = false
       this.rebuild()
     }
-    for (const listener of this.listeners) listener()
+    // Subscriptions created during delivery wait for the next publication.
+    for (const listener of [...this.listeners]) {
+      try {
+        listener()
+      } catch (error) {
+        console.error('[web-runtime] snapshot listener threw:', error)
+      }
+    }
   }
 }

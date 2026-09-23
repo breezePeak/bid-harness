@@ -78,7 +78,7 @@ interface ClientTransportGlobal {
 }
 
 /**
- * The ctx.connection service API: the API client plus a one-shot
+ * The ctx.connection service API: the API client plus a single-owner
  * controller starter (the runtime plugin supplies sinks when its object layer
  * is ready — connection stays consumer-agnostic).
  */
@@ -94,7 +94,7 @@ export interface ConnectionHandle {
   /**
    * Start the connect/pump/reconnect loop with the consumer's frame sinks.
    * One consumer owns the streams (the runtime object layer); a second call
-   * throws.
+   * throws until the current owner stops. The next owner starts a fresh loop.
    * @param sinks - frame/state callbacks.
    * @param config - reconnect/backoff tunables.
    * @returns stop handle for the loop.
@@ -157,13 +157,40 @@ export function apply(ctx: Context): void {
           sinks.onStateChange?.(state)
         },
       }, config ?? {})
-      controller.start()
-      return {
-        stop: () => {
+      const stop = ctx.effect(() => {
+        const pageWindow = typeof window === 'undefined' ? undefined : window
+        const pageDocument = typeof document === 'undefined' ? undefined : document
+        let backgrounded = pageDocument?.visibilityState === 'hidden'
+        const markBackgrounded = (): void => { backgrounded = true }
+        const resume = (): void => {
+          if (!backgrounded || pageDocument?.visibilityState === 'hidden') return
+          backgrounded = false
+          controller.reconnect()
+        }
+        const onVisibility = (): void => {
+          if (pageDocument?.visibilityState === 'hidden') markBackgrounded()
+          else resume()
+        }
+        const onOnline = (): void => {
+          backgrounded = pageDocument?.visibilityState === 'hidden'
+          controller.reconnect()
+        }
+        pageWindow?.addEventListener('blur', markBackgrounded)
+        pageWindow?.addEventListener('focus', resume)
+        pageWindow?.addEventListener('online', onOnline)
+        pageDocument?.addEventListener('visibilitychange', onVisibility)
+        controller.start()
+        return () => {
+          pageWindow?.removeEventListener('blur', markBackgrounded)
+          pageWindow?.removeEventListener('focus', resume)
+          pageWindow?.removeEventListener('online', onOnline)
+          pageDocument?.removeEventListener('visibilitychange', onVisibility)
           controller.stop()
+          started = false
           publishDescription(undefined)
-        },
-      }
+        }
+      }, 'connection: browser recovery and stream loop')
+      return { stop }
     },
   }
   ctx.provide('connection', handle)

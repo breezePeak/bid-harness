@@ -10,6 +10,7 @@ const microtask = (): Promise<void> => new Promise((resolve) => { queueMicrotask
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('Notifier', () => {
@@ -126,5 +127,37 @@ describe('Notifier', () => {
     await microtask()
     notifier.notifyNow()
     expect(calls).toBe(1)
+  })
+
+  it('notifies a resubscribed listener only once per publication', () => {
+    const notifier = new Notifier(() => undefined)
+    let calls = 0
+    let unsubscribe = (): void => {}
+    const listener = (): void => {
+      calls++
+      unsubscribe()
+      // Bound re-entry so an unbounded dispatcher fails without hanging the test.
+      if (calls < 4) unsubscribe = notifier.subscribe(listener)
+    }
+    unsubscribe = notifier.subscribe(listener)
+
+    notifier.notifyNow()
+    expect(calls).toBe(1)
+    notifier.notifyNow()
+    expect(calls).toBe(2)
+    unsubscribe()
+  })
+
+  it('reports a listener failure and continues notifying other listeners', () => {
+    const notifier = new Notifier(() => undefined)
+    const error = new Error('subscriber failed')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const healthyListener = vi.fn()
+    notifier.subscribe(() => { throw error })
+    notifier.subscribe(healthyListener)
+
+    expect(() => { notifier.notifyNow() }).not.toThrow()
+    expect(healthyListener).toHaveBeenCalledOnce()
+    expect(report).toHaveBeenCalledWith('[web-runtime] snapshot listener threw:', error)
   })
 })

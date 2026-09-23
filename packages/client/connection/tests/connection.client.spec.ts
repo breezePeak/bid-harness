@@ -20,6 +20,99 @@ function subscribedFrame(lastSeq = 0) {
 }
 
 describe('connection lifecycle', () => {
+  it.each(['reconnect', 'restart'] as const)('握手未完成时 %s 立即建立新连接，旧响应晚到不能发布状态', async (action) => {
+    const api = new FakeApiClient()
+    const firstDescribe = deferred<Awaited<ReturnType<FakeApiClient['onDescribe']>>>()
+    const originalDescribe = api.onDescribe
+    api.onDescribe = vi.fn().mockImplementationOnce(() => firstDescribe.promise).mockImplementation(originalDescribe)
+    const describe = vi.spyOn(api.host, 'describe')
+    const connected = vi.fn()
+    const states: ConnectionState[] = []
+    const controller = new ConnectionController(api, {
+      onConnected: connected,
+      onStateChange: state => states.push(state),
+    }, FAST)
+    controller.start()
+    try {
+      await vi.waitFor(() => { expect(describe).toHaveBeenCalledTimes(1) })
+      if (action === 'restart') {
+        controller.stop()
+        controller.reconnect()
+        controller.start()
+        controller.start()
+      } else {
+        controller.reconnect()
+        controller.reconnect()
+      }
+      await vi.waitFor(() => { expect(connected).toHaveBeenCalledTimes(1) })
+      expect(describe).toHaveBeenCalledTimes(2)
+      expect(describe.mock.calls[0]?.[1]?.aborted).toBe(true)
+      expect(api.openMuxCount).toBe(1)
+      expect(states).toEqual(action === 'restart' ? ['connected'] : ['reconnecting', 'connected'])
+
+      firstDescribe.resolve(ok({ version: 'old', cwd: '/old', attachedSessions: 0, home: '/old', canOpenPath: false }))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(connected).toHaveBeenCalledTimes(1)
+      expect(connected).toHaveBeenCalledWith(expect.objectContaining({ version: '0-fake' }))
+    } finally {
+      controller.stop()
+    }
+  })
+
+  it('主动恢复立即结束退避，停机清除重试定时器', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const api = new FakeApiClient()
+    const originalDescribe = api.onDescribe
+    api.onDescribe = vi.fn().mockRejectedValueOnce(new Error('offline')).mockImplementation(originalDescribe)
+    const connected = vi.fn()
+    const controller = new ConnectionController(api, { onConnected: connected }, {
+      ...FAST, backoffBaseMs: 60_000, backoffMaxMs: 60_000,
+    })
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.callsOf('host.describe')).toHaveLength(1)
+      expect(connected).not.toHaveBeenCalled()
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(connected).toHaveBeenCalledTimes(1)
+      expect(api.callsOf('host.describe')).toHaveLength(2)
+
+      api.failStreams(new Error('offline again'))
+      await vi.advanceTimersByTimeAsync(0)
+      controller.stop()
+      expect(vi.getTimerCount()).toBe(0)
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(api.callsOf('host.describe')).toHaveLength(2)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+      warn.mockRestore()
+    }
+  })
+
+  it('停机后未完成的握手晚到不发布连接或重新启动流', async () => {
+    const api = new FakeApiClient()
+    const describe = deferred<Awaited<ReturnType<FakeApiClient['onDescribe']>>>()
+    api.onDescribe = () => describe.promise
+    const connected = vi.fn()
+    const state = vi.fn()
+    const controller = new ConnectionController(api, { onConnected: connected, onStateChange: state }, FAST)
+    controller.start()
+    await vi.waitFor(() => { expect(api.openMuxCount).toBe(1) })
+    controller.stop()
+    await vi.waitFor(() => { expect(api.openMuxCount).toBe(0) })
+    describe.resolve(ok({ version: 'old', cwd: '/old', attachedSessions: 0, home: '/old', canOpenPath: true }))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(connected).not.toHaveBeenCalled()
+    expect(state).not.toHaveBeenCalled()
+    expect(api.callsOf('host.describe')).toHaveLength(1)
+  })
+
   it('announces connected after describe + both streams open, then pumps frames to sinks', async () => {
     const api = new FakeApiClient()
     const muxSeen: string[] = []

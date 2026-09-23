@@ -93,15 +93,36 @@ function escapeXml(value: string): string {
     .replaceAll('"', '&quot;').replaceAll("'", '&apos;')
 }
 
-function textLines(value: string, max = 18): string[] {
+const TEXT_LINE_CHARS = 16
+const TEXT_CHAR_WIDTH = 14
+const TEXT_LINE_HEIGHT = 18
+const NODE_PAD_X = 16
+const NODE_PAD_Y = 12
+
+function textLines(value: string, max = TEXT_LINE_CHARS): string[] {
   const chars = Array.from(value.trim())
   const lines: string[] = []
   for (let index = 0; index < chars.length; index += max) lines.push(chars.slice(index, index + max).join(''))
   return lines.length > 0 ? lines : ['']
 }
 
+function textBlockSize(text: string): { width: number; height: number } {
+  const lines = textLines(text)
+  return {
+    width: Math.max(...lines.map(line => Array.from(line).length)) * TEXT_CHAR_WIDTH,
+    height: lines.length * TEXT_LINE_HEIGHT,
+  }
+}
+
 function nodeSize(node: FlowchartNode): { width: number; height: number } {
-  return { width: node.type === 'decision' ? 190 : 180, height: Math.max(56, textLines(node.text).length * 18 + 20) }
+  const text = textBlockSize(node.text)
+  if (node.type === 'decision') {
+    return { width: text.width * 2 + NODE_PAD_X * 2, height: text.height * 2 + NODE_PAD_Y * 2 }
+  }
+  return {
+    width: Math.max(96, text.width + NODE_PAD_X * 2),
+    height: Math.max(48, text.height + NODE_PAD_Y * 2),
+  }
 }
 
 function nodeShape(node: FlowchartNode, x: number, y: number, width: number, height: number): string {
@@ -145,34 +166,35 @@ export interface FlowchartLayout {
  * @param spec Validated flowchart specification.
  * @returns Node positions and the canvas size in CSS pixels.
  */
-export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
+function flowchartLevels(spec: FlowchartSpec): Map<string, number> {
   const incoming = new Map(spec.nodes.map(node => [node.id, 0]))
   const outgoing = new Map<string, string[]>(spec.nodes.map(node => [node.id, []]))
   for (const edge of spec.edges) {
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1)
     outgoing.get(edge.from)?.push(edge.to)
   }
-  const nodeLevels = new Map<string, number>()
+  const levels = new Map<string, number>()
   const queue = spec.nodes.filter(node => (incoming.get(node.id) ?? 0) === 0).map(node => node.id)
-  if (queue.length === 0 && spec.nodes.length > 0) {
-    const first = spec.nodes[0]
-    if (first !== undefined) queue.push(first.id)
-  }
+  if (queue.length === 0 && spec.nodes[0] !== undefined) queue.push(spec.nodes[0].id)
   const queued = new Set(queue)
   while (queue.length > 0) {
     const id = queue.shift()
     if (id === undefined) continue
-    const level = nodeLevels.get(id) ?? 0
     for (const next of outgoing.get(id) ?? []) {
-      if (nodeLevels.has(next)) continue
-      nodeLevels.set(next, level + 1)
+      if (levels.has(next)) continue
+      levels.set(next, (levels.get(id) ?? 0) + 1)
       if (!queued.has(next)) {
         queued.add(next)
         queue.push(next)
       }
     }
   }
-  for (const node of spec.nodes) if (!nodeLevels.has(node.id)) nodeLevels.set(node.id, 0)
+  for (const node of spec.nodes) if (!levels.has(node.id)) levels.set(node.id, 0)
+  return levels
+}
+
+export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
+  const nodeLevels = flowchartLevels(spec)
   const groups = new Map<number, FlowchartNode[]>()
   for (const node of spec.nodes) {
     const level = nodeLevels.get(node.id)
@@ -207,6 +229,89 @@ export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
   const width = Math.max(320, ...[...positions.values()].map(value => value.x + value.width + margin))
   const height = Math.max(180, ...[...positions.values()].map(value => value.y + value.height + margin))
   return { positions, width, height }
+}
+
+interface FlowchartPoint {
+  readonly x: number
+  readonly y: number
+}
+
+function routeAround(
+  from: FlowchartBox,
+  to: FlowchartBox,
+  bounds: { width: number; height: number },
+  direction: FlowchartDirection,
+): FlowchartPoint[] {
+  const lane = 18
+  const exit = 24
+  if (direction === 'TB') {
+    const fromSide = from.x + from.width / 2 <= bounds.width / 2 ? 'left' : 'right'
+    const toSide = to.x + to.width / 2 <= bounds.width / 2 ? 'left' : 'right'
+    const side = fromSide === toSide ? fromSide : from.y >= to.y ? fromSide : toSide
+    const x = side === 'left' ? Math.min(from.x, to.x) - lane : Math.max(from.x + from.width, to.x + to.width) + lane
+    const start = { x: from.x + from.width / 2, y: from.y + from.height }
+    const end = { x: to.x + to.width / 2, y: to.y }
+    return [start, { x: start.x, y: start.y + exit }, { x, y: start.y + exit }, { x, y: end.y - exit }, { x: end.x, y: end.y - exit }, end]
+  }
+  const fromSide = from.y + from.height / 2 <= bounds.height / 2 ? 'top' : 'bottom'
+  const toSide = to.y + to.height / 2 <= bounds.height / 2 ? 'top' : 'bottom'
+  const side = fromSide === toSide ? fromSide : from.x >= to.x ? fromSide : toSide
+  const y = side === 'top' ? Math.min(from.y, to.y) - lane : Math.max(from.y + from.height, to.y + to.height) + lane
+  const start = { x: from.x + from.width, y: from.y + from.height / 2 }
+  const end = { x: to.x, y: to.y + to.height / 2 }
+  return [start, { x: start.x + exit, y: start.y }, { x: start.x + exit, y }, { x: end.x - exit, y }, { x: end.x - exit, y: end.y }, end]
+}
+
+function shortenEnd(points: FlowchartPoint[], marker: number): FlowchartPoint[] {
+  const end = points.at(-1)
+  const previous = points.at(-2)
+  if (end === undefined || previous === undefined) return points
+  const dx = end.x - previous.x
+  const dy = end.y - previous.y
+  const length = Math.hypot(dx, dy)
+  if (length <= marker) return points
+  return [...points.slice(0, -1), { x: end.x - dx / length * marker, y: end.y - dy / length * marker }]
+}
+
+function labelPlacement(points: FlowchartPoint[]): FlowchartPoint & { anchor: 'start' | 'middle' } {
+  let longest = 0
+  let segment = { from: points[0] ?? { x: 0, y: 0 }, to: points[1] ?? points[0] ?? { x: 0, y: 0 } }
+  for (let index = 0; index < points.length - 1; index++) {
+    const from = points[index]!
+    const to = points[index + 1]!
+    const length = Math.hypot(to.x - from.x, to.y - from.y)
+    if (length >= longest) {
+      longest = length
+      segment = { from, to }
+    }
+  }
+  if (segment.from.y === segment.to.y) {
+    return { x: Math.min(segment.from.x, segment.to.x) + 8, y: segment.from.y - 8, anchor: 'start' }
+  }
+  return { x: (segment.from.x + segment.to.x) / 2, y: (segment.from.y + segment.to.y) / 2 - 8, anchor: 'middle' }
+}
+
+function edgeRoute(
+  edge: FlowchartEdge,
+  from: FlowchartBox,
+  to: FlowchartBox,
+  bounds: { width: number; height: number },
+  direction: FlowchartDirection,
+  levels: ReadonlyMap<string, number>,
+): FlowchartPoint[] {
+  const fromLevel = levels.get(edge.from) ?? 0
+  const toLevel = levels.get(edge.to) ?? 0
+  if (toLevel <= fromLevel) return routeAround(from, to, bounds, direction)
+  if (direction === 'TB') {
+    const start = { x: from.x + from.width / 2, y: from.y + from.height }
+    const end = { x: to.x + to.width / 2, y: to.y }
+    const lane = start.y + Math.max(24, (end.y - start.y) / 2)
+    return start.x === end.x ? [start, end] : [start, { x: start.x, y: lane }, { x: end.x, y: lane }, end]
+  }
+  const start = { x: from.x + from.width, y: from.y + from.height / 2 }
+  const end = { x: to.x, y: to.y + to.height / 2 }
+  const lane = start.x + Math.max(24, (end.x - start.x) / 2)
+  return start.y === end.y ? [start, end] : [start, { x: lane, y: start.y }, { x: lane, y: end.y }, end]
 }
 
 function flowchartKey(spec: FlowchartSpec): string {
@@ -380,21 +485,36 @@ export function renderFlowchartSvg(spec: FlowchartSpec): FlowchartSvg {
   const issues = validateFlowchartSpec(spec)
   if (issues.length > 0) throw new Error(`Flowchart 无法渲染：${issues.join('；')}`)
   const { positions, width, height } = layoutFlowchart(spec)
-  const edges = spec.edges.map((edge) => {
+  const levels = flowchartLevels(spec)
+  const routes = spec.edges.map((edge) => {
     const from = positions.get(edge.from), to = positions.get(edge.to)
     if (from === undefined || to === undefined) throw new Error('Flowchart 布局缺少连线节点。')
-    const x1 = from.x + from.width / 2, y1 = from.y + from.height / 2
-    const x2 = to.x + to.width / 2, y2 = to.y + to.height / 2
-    const label = edge.label === undefined ? '' : `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 6}" text-anchor="middle" font-family="Microsoft YaHei,Arial,sans-serif" font-size="12" fill="#475569">${escapeXml(edge.label)}</text>`
-    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>${label}`
+    return { edge, points: edgeRoute(edge, from, to, { width, height }, spec.direction, levels) }
+  })
+  const canvas = routes.flatMap(route => route.points).reduce((bounds, point) => ({
+    left: Math.min(bounds.left, point.x), top: Math.min(bounds.top, point.y),
+    right: Math.max(bounds.right, point.x), bottom: Math.max(bounds.bottom, point.y),
+  }), { left: 0, top: 0, right: width, bottom: height })
+  const pad = 24
+  const origin = { x: Math.min(0, canvas.left - pad), y: Math.min(0, canvas.top - pad) }
+  const canvasWidth = Math.max(width, canvas.right + pad) - origin.x
+  const canvasHeight = Math.max(height, canvas.bottom + pad) - origin.y
+  const shifted = (point: FlowchartPoint): FlowchartPoint => ({ x: point.x - origin.x, y: point.y - origin.y })
+  const edges = routes.map(({ edge, points }) => {
+    const visible = shortenEnd(points.map(shifted), 8)
+    const path = visible.map(point => `${point.x},${point.y}`).join(' ')
+    const labelPoint = edge.label === undefined ? undefined : labelPlacement(visible)
+    const label = labelPoint === undefined ? '' : `<text x="${labelPoint.x}" y="${labelPoint.y}" text-anchor="${labelPoint.anchor}" font-family="Microsoft YaHei,Arial,sans-serif" font-size="12" fill="#475569">${escapeXml(edge.label ?? '')}</text>`
+    return `<polyline points="${path}" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>${label}`
   }).join('')
   const nodes = spec.nodes.map((node) => {
     const position = positions.get(node.id)
     if (position === undefined) throw new Error('Flowchart 布局缺少节点。')
-    return nodeShape(node, position.x, position.y, position.width, position.height)
+    const placed = shifted(position)
+    return nodeShape(node, placed.x, placed.y, position.width, position.height)
   }).join('')
   return {
-    width, height,
-    svg: `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeXml(spec.title)}" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#64748b"/></marker></defs><rect width="100%" height="100%" fill="white"/>${edges}${nodes}</svg>`,
+    width: canvasWidth, height: canvasHeight,
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeXml(spec.title)}" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#64748b"/></marker></defs><rect width="100%" height="100%" fill="white"/>${edges}${nodes}</svg>`,
   }
 }

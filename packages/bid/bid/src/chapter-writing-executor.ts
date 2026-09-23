@@ -572,8 +572,9 @@ async function renderChapterFlowchartVisualFollowup(
       type: 'text',
       text: [
         '这是你刚刚生成的流程图真实渲染结果。请直接查看图片本身，不要根据 spec 猜测。',
-        '重点检查文字是否超出节点边框或被裁切、节点是否重叠、箭头是否穿过文字或节点、连线标签是否重叠、标题是否被截断，以及整体布局是否过挤或不可读。',
-        '如果存在问题，直接修改完整 candidate 中对应 metadata.flowcharts；如果不存在问题，原样重新提交当前完整 candidate，表示视觉确认完成。两种情况都必须再次调用 submit_chapter，不能只返回补丁或文字说明。',
+        '图题由导出排版放在图片下方，不在本图中；不要因为图片没有标题而修改流程图。',
+        '只在文字超出节点边框、节点互相重叠、箭头穿过节点或文字、连线标签互相重叠或压住节点时，修改对应 metadata.flowcharts。',
+        '如果图片没有这些问题，原样重新提交当前完整 candidate，表示视觉确认完成。两种情况都必须再次调用 submit_chapter，不能只返回补丁或文字说明。',
         `当前完整 candidate：${JSON.stringify(writerCandidate)}`,
       ].join('\n'),
     },

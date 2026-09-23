@@ -15,17 +15,23 @@ import { seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/p
 const SHIPPED_PRESETS = fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url))
 
 class PendingReplyAdapter extends LlmAdapter {
-  readonly started = Promise.withResolvers<undefined>()
+  started = Promise.withResolvers<undefined>()
+  readonly reply = Promise.withResolvers<string>()
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const signal = options.signal
     if (signal === undefined) throw new Error('模型请求缺少取消信号')
     signal.throwIfAborted()
+    const aborted = Promise.withResolvers<string>()
+    const onAbort = (): void => { aborted.resolve('') }
+    signal.addEventListener('abort', onAbort, { once: true })
     this.started.resolve(undefined)
-    await new Promise<void>((resolve) => {
-      signal.addEventListener('abort', () => { resolve() }, { once: true })
-    })
+    const text = await Promise.race([this.reply.promise, aborted.promise])
+    signal.removeEventListener('abort', onAbort)
     signal.throwIfAborted()
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
@@ -37,7 +43,29 @@ describe('web e2e: Bid 后台 Run 进度', () => {
   let agent: Agent
   let run: BidRunData
   let tripwire: ReturnType<typeof watchConsole>
+  let dropDownlink = false
+  let droppedFrames = 0
+  let socketConnections = 0
   const adapter = new PendingReplyAdapter()
+
+  async function startEvidenceMapping(): Promise<BidWorkspace> {
+    const workspace = new BidWorkspace(agent.session.header.cwd!)
+    await seedProjectArtifacts(workspace)
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
+      schema_version: 5, max_concurrency: 2, observed_max_concurrency: 2,
+      tasks: ['completed', 'completed', 'completed', 'running', 'running', 'pending', 'pending', 'pending', 'pending', 'pending'].map((status, index) => ({
+        task_id: `MAP-${String(index + 1)}`, title: `研究任务 ${String(index + 1)}`,
+        phase: index < 8 ? 'initial' : 'final_check', status, attempts: [], final_child_session_id: null,
+      })),
+    }))
+    run = { ...run, runId: 'web-s4-progress', epoch: run.epoch + 1,
+      work: { ...run.work, stage: 'evidence_mapping', workId: 'web-s4-work' },
+      progress: { phase: 'mapping', summary: '逐章节资料研究与映射', updatedAt: 4 },
+    }
+    const active = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'running', run })
+    agent.session.append('bid.project.resumed', { revision: active.revision, state: bidProjectTaskState(active) })
+    return workspace
+  }
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
@@ -47,6 +75,15 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     browser = await chromium.launch()
     page = await browser.newPage({ locale: ZH_BROWSER_LOCALE, viewport: { width: 1440, height: 900 } })
     tripwire = watchConsole(page)
+    // 下行停滞不会发出 close，恢复只能依靠浏览器重新连接并补齐历史。
+    await page.routeWebSocket('**/api/events.*', (socket) => {
+      socketConnections += 1
+      const server = socket.connectToServer()
+      server.onMessage((message) => {
+        if (dropDownlink) droppedFrames += 1
+        else socket.send(message)
+      })
+    })
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
@@ -150,21 +187,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
 
   it('S4 运行和挂起共用计划表头统计，状态颜色与动画跟随 Host', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-s4-summary'))
-    const workspace = new BidWorkspace(agent.session.header.cwd!)
-    await seedProjectArtifacts(workspace)
-    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
-      schema_version: 5, max_concurrency: 2, observed_max_concurrency: 2,
-      tasks: ['completed', 'completed', 'completed', 'running', 'running', 'pending', 'pending', 'pending', 'pending', 'pending'].map((status, index) => ({
-        task_id: `MAP-${String(index + 1)}`, title: `研究任务 ${String(index + 1)}`,
-        phase: index < 8 ? 'initial' : 'final_check', status, attempts: [], final_child_session_id: null,
-      })),
-    }))
-    run = { ...run, runId: 'web-s4-progress', epoch: 3,
-      work: { ...run.work, stage: 'evidence_mapping', workId: 'web-s4-work' },
-      progress: { phase: 'mapping', summary: '逐章节资料研究与映射', updatedAt: 4 },
-    }
-    const active = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'running', run })
-    agent.session.append('bid.project.resumed', { revision: active.revision, state: bidProjectTaskState(active) })
+    const workspace = await startEvidenceMapping()
     const plan = page.getByTestId('bid-stage-plan')
     await plan.getByTitle('进行中 2', { exact: true }).waitFor({ timeout: 15_000 })
     expect(await plan.getByTitle('已完成 3', { exact: true }).count()).toBe(1)
@@ -217,5 +240,77 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await compareOrRefreshGolden(join(snapshots, 's4-summary.expected.md'), [
       '## 运行中', runningSnapshot, '## 已停止', stoppedSnapshot,
     ].join('\n\n'), scaffold.mode)
+  })
+
+  it('S4 运行时切到后台，返回后无需刷新恢复聊天回复和完整布局', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-s4-background-reply'))
+    await startEvidenceMapping()
+    const plan = page.getByTestId('bid-stage-plan')
+    await plan.getByTitle('进行中 2', { exact: true }).waitFor({ timeout: 15_000 })
+    const input = page.locator('[data-composer-card] textarea:enabled')
+    adapter.started = Promise.withResolvers<undefined>()
+    await input.fill('S4 还在执行，当前资料映射进展如何？')
+    await page.getByRole('button', { name: '发送', exact: true }).click()
+    await adapter.started.promise
+    const timeOrigin = await page.evaluate(() => performance.timeOrigin)
+    const otherPage = await page.context().newPage()
+    let syntheticVisibility = false
+    try {
+      dropDownlink = true
+      await otherPage.bringToFront()
+      syntheticVisibility = await page.evaluate(() => {
+        window.dispatchEvent(new Event('blur'))
+        if (document.visibilityState === 'hidden') return false
+        // 无头 Chromium 可能让两个标签页都保持 visible，显式补齐同一浏览器生命周期。
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+        document.dispatchEvent(new Event('visibilitychange'))
+        return true
+      })
+      const reply = 'S4 资料映射仍在运行：已完成 3 项，正在执行 2 项，待开始 5 项。'
+      const settled = scaffold.whenTurnSettled()
+      adapter.reply.resolve(reply)
+      await settled
+      expect(droppedFrames).toBeGreaterThan(0)
+      expect(await page.getByText(reply, { exact: true }).count()).toBe(0)
+
+      const previousConnections = socketConnections
+      dropDownlink = false
+      await page.bringToFront()
+      await page.evaluate((synthetic) => {
+        if (synthetic) Reflect.deleteProperty(document, 'visibilityState')
+        document.dispatchEvent(new Event('visibilitychange'))
+        window.dispatchEvent(new Event('focus'))
+      }, syntheticVisibility)
+      syntheticVisibility = false
+      await page.getByText(reply, { exact: true }).waitFor({ timeout: 15_000 })
+      await expect.poll(() => socketConnections).toBeGreaterThanOrEqual(previousConnections + 2)
+      expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin)
+      expect(await page.locator('[class*="frame"]').isVisible()).toBe(true)
+      expect(await page.getByRole('tree').isVisible()).toBe(true)
+      expect(await input.isVisible()).toBe(true)
+      expect(await plan.isVisible()).toBe(true)
+      expect(await page.locator('[data-slot-error]').count()).toBe(0)
+      expect(tripwire.pageErrors).toEqual([])
+      await input.fill('返回后可以继续发送消息')
+      expect(await page.getByRole('button', { name: '发送', exact: true }).isEnabled()).toBe(true)
+      await input.fill('')
+
+      const snapshots = fileURLToPath(new URL('./snapshots/bid-run-progress', import.meta.url))
+      if (scaffold.mode === 'refresh') await mkdir(snapshots, { recursive: true })
+      const responseSnapshot = await captureStableAria(page,
+        `[data-chat-flow-kind="assistant-step"]:has-text("${reply}")`, scaffold.workspaceCwd)
+      const planSnapshot = await captureStableAria(page, '[data-testid="bid-stage-plan"]', scaffold.workspaceCwd)
+      await compareOrRefreshGolden(join(snapshots, 's4-background-reply.expected.md'), [
+        '## 返回浏览器后的回复', responseSnapshot, '## 后台阶段进度', planSnapshot,
+      ].join('\n\n'), scaffold.mode)
+    } finally {
+      dropDownlink = false
+      await page.evaluate((synthetic) => {
+        if (synthetic) Reflect.deleteProperty(document, 'visibilityState')
+      }, syntheticVisibility)
+      await otherPage.close()
+      agent.cancel({ kind: 'user' }, { keepInbox: true })
+      await agent.whenIdle()
+    }
   })
 })

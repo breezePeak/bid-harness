@@ -10,6 +10,8 @@ The node half guards every entry under `/api` before bridging or upgrading (`src
 
 ## `/api` WebSocket downlinks
 
+浏览器从隐藏或失焦状态返回前台、或网络恢复在线时，连接层重建两条下行连接，并通过既有重连回调补读会话。一次切回触发的 `focus` 和 `visibilitychange` 合并处理；恢复不刷新页面，也不重发用户消息。取消读取立即结束本地迭代，不等待网络连接的关闭握手；停止连接会释放对应页面监听器。
+
 `/api/events.mux` and `/api/events.host` each accept a WebSocket upgrade and send only the corresponding `ServerRequest` text messages to the browser; the client sends no application data over these sockets. If either socket ends, the current connection generation fails and rebuilds both streams; readiness still requires both sockets to be open and the `host.describe` HTTP call to succeed. Host teardown terminates both sockets, aborts their sources, and waits for source cleanup before returning. Ordinary network GETs to these paths return 426 with no SSE fallback; `toFetchHandler`'s SSE codec serves only the isomorphic in-process carrier.
 
 ## Model Experience

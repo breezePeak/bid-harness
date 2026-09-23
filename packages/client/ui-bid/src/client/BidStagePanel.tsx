@@ -1106,11 +1106,9 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
-  const mappingSyncNotice = mappingProgressObservable && mappingReadState !== 'ready' ? (
+  const mappingSyncNotice = mappingProgressObservable && mappingReadState === 'stale' ? (
     <p className={css.agentStatus} role="status">
-      {mappingReadState === 'stale'
-        ? t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')
-        : t(mappingProgress === null ? 'mapping.sync_waiting' : 'mapping.sync_waiting_cached')}
+      {t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')}
     </p>
   ) : null
   if (projection.task.status === 'running') return <>

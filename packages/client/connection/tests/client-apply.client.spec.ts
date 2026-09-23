@@ -9,6 +9,7 @@ import type { RpcMessage } from '../src/client/api.ts'
 import { RpcId } from '../src/client/api.ts'
 import { FixtureApiClient } from '../src/client/fixture.ts'
 import { WebApiClient } from '../src/client/web-api-client.ts'
+import { ok } from './fake-api.client.ts'
 
 type Win = { location?: { hostname: string; search: string; origin?: string } }
 type WebSocketGlobal = { WebSocket?: typeof WebSocket }
@@ -24,6 +25,7 @@ class FakeWebSocket extends EventTarget {
 
   readonly url: string
   readyState = FakeWebSocket.CONNECTING
+  stallClose = false
 
   constructor(url: string | URL) {
     super()
@@ -38,6 +40,10 @@ class FakeWebSocket extends EventTarget {
 
   close(): void {
     if (this.readyState === FakeWebSocket.CLOSED) return
+    if (this.stallClose) {
+      this.readyState = FakeWebSocket.CLOSING
+      return
+    }
     this.readyState = FakeWebSocket.CLOSED
     this.dispatchEvent(new Event('close'))
   }
@@ -48,14 +54,14 @@ class FakeWebSocket extends EventTarget {
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   delete (globalThis as Win).location
   sockets.length = 0
   if (originalWebSocket === undefined) delete (globalThis as WebSocketGlobal).WebSocket
   else globalThis.WebSocket = originalWebSocket
 })
 
-async function mount(): Promise<ConnectionHandle> {
-  const ctx = new Context()
+async function mount(ctx = new Context()): Promise<ConnectionHandle> {
   await ctx.plugin({ apply, inject: [] })
   const handle = ctx.get('connection') as ConnectionHandle | undefined
   if (handle === undefined) throw new Error('ctx.connection not provided')
@@ -63,6 +69,107 @@ async function mount(): Promise<ConnectionHandle> {
 }
 
 describe('connection client apply', () => {
+  it('停止后允许新消费者接管，重复旧 stop 不影响新连接', async () => {
+    ;(globalThis as Win).location = { hostname: 'localhost', search: '?fixture' }
+    const handle = await mount()
+    const firstConnected = vi.fn()
+    const first = handle.start({ onConnected: firstConnected })
+    await vi.waitFor(() => { expect(firstConnected).toHaveBeenCalledTimes(1) })
+    first.stop()
+    const secondConnected = vi.fn()
+    const second = handle.start({ onConnected: secondConnected })
+    try {
+      await vi.waitFor(() => { expect(secondConnected).toHaveBeenCalledTimes(1) })
+      const description = handle.hostDescription.getSnapshot()
+      first.stop()
+      expect(handle.hostDescription.getSnapshot()).toBe(description)
+      expect(() => handle.start({})).toThrow(/already owned by another consumer/)
+    } finally {
+      second.stop()
+    }
+  })
+
+  it.each(['stop', 'dispose'] as const)('页面恢复只重建一次连接，%s 后移除恢复监听', async (cleanup) => {
+    const pageWindow = new EventTarget()
+    const pageDocument = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', pageWindow)
+    vi.stubGlobal('document', pageDocument)
+    ;(globalThis as Win).location = { hostname: 'localhost', search: '', origin: 'http://localhost:3080' }
+    ;(globalThis as WebSocketGlobal).WebSocket = FakeWebSocket as unknown as typeof WebSocket
+    const ctx = new Context()
+    const handle = await mount(ctx)
+    const describe = vi.spyOn(handle.api.host, 'describe').mockResolvedValue(ok({
+      version: 'browser', cwd: '/f', attachedSessions: 0, home: '/h', canOpenPath: true,
+    }))
+    const connected = vi.fn()
+    const loop = handle.start({ onConnected: connected })
+    try {
+      await vi.waitFor(() => { expect(connected).toHaveBeenCalledTimes(1) })
+      pageWindow.dispatchEvent(new Event('focus'))
+      pageDocument.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      expect(sockets).toHaveLength(2)
+
+      pageWindow.dispatchEvent(new Event('blur'))
+      pageDocument.visibilityState = 'hidden'
+      pageDocument.dispatchEvent(new Event('visibilitychange'))
+      pageWindow.dispatchEvent(new Event('focus'))
+      expect(sockets).toHaveLength(2)
+      pageDocument.visibilityState = 'visible'
+      pageDocument.dispatchEvent(new Event('visibilitychange'))
+      pageWindow.dispatchEvent(new Event('focus'))
+      await vi.waitFor(() => { expect(connected).toHaveBeenCalledTimes(2) })
+      expect(sockets).toHaveLength(4)
+      expect(sockets.slice(0, 2).every(socket => socket.readyState === FakeWebSocket.CLOSED)).toBe(true)
+
+      pageWindow.dispatchEvent(new Event('blur'))
+      pageWindow.dispatchEvent(new Event('focus'))
+      pageWindow.dispatchEvent(new Event('focus'))
+      await vi.waitFor(() => { expect(connected).toHaveBeenCalledTimes(3) })
+      expect(sockets).toHaveLength(6)
+      pageWindow.dispatchEvent(new Event('online'))
+      await vi.waitFor(() => { expect(connected).toHaveBeenCalledTimes(4) })
+      expect(sockets).toHaveLength(8)
+
+      if (cleanup === 'stop') loop.stop()
+      else await ctx.fiber.dispose()
+      expect(handle.hostDescription.getSnapshot()).toBeUndefined()
+      pageWindow.dispatchEvent(new Event('blur'))
+      pageWindow.dispatchEvent(new Event('focus'))
+      pageWindow.dispatchEvent(new Event('online'))
+      pageDocument.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      expect(sockets).toHaveLength(8)
+      expect(sockets.every(socket => socket.readyState === FakeWebSocket.CLOSED)).toBe(true)
+      expect(connected).toHaveBeenCalledTimes(4)
+    } finally {
+      loop.stop()
+      await ctx.fiber.dispose()
+      describe.mockRestore()
+    }
+  })
+
+  it('取消 WebSocket 无需等待 close 事件，并丢弃排队及晚到帧', async () => {
+    ;(globalThis as Win).location = { hostname: 'localhost', search: '', origin: 'http://localhost:3080' }
+    ;(globalThis as WebSocketGlobal).WebSocket = FakeWebSocket as unknown as typeof WebSocket
+    const client = (await mount()).api
+    const abort = new AbortController()
+    const iterator = client.events.mux({}, abort.signal)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    const socket = sockets[0]!
+    socket.stallClose = true
+    const frame = JSON.stringify({
+      type: 'server-request', rpcId: 'stale', method: 'session/subscribed',
+      payload: { type: 'session/subscribed', sessionId: 'session-browser', lastSeq: 8 },
+    })
+    socket.receive(frame)
+    abort.abort()
+    socket.receive(frame)
+    await expect(pending).resolves.toMatchObject({ done: true })
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSING)
+  })
+
   it('mounts ctx.connection with the real client when no ?fixture switch is present', async () => {
     ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
     const handle = await mount()

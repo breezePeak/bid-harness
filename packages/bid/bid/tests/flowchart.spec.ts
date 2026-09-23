@@ -104,4 +104,62 @@ describe('flowchart contract', () => {
       expectNoOverlappingNodes(spec!)
     }
   })
+
+  it('长中文留在节点内，回边和标签不穿过节点', () => {
+    const [spec] = normalizeFlowchartInputs('SEC-RENDER', [{
+      key: 'review-loop', title: '复核闭环', direction: 'TB',
+      nodes: [
+        { key: 'start', type: 'start', text: '接收县级成果' },
+        { key: 'check', type: 'decision', text: '核对地类边界及相关属性是否符合年度变更要求' },
+        { key: 'fix', type: 'process', text: '退回县级补充举证并复核' },
+        { key: 'end', type: 'end', text: '形成市级核查意见' },
+      ],
+      edges: [
+        { from: 'start', to: 'check' },
+        { from: 'check', to: 'fix', label: '不符合' },
+        { from: 'fix', to: 'check', label: '再次提交' },
+        { from: 'check', to: 'end', label: '符合' },
+      ],
+    }])
+    const layout = layoutFlowchart(spec!)
+    const rendered = renderFlowchartSvg(spec!)
+    for (const node of spec!.nodes) {
+      const box = layout.positions.get(node.id)!
+      const textWidth = Math.max(...node.text.match(/.{1,16}/gsu)!.map(line => Array.from(line).length)) * 14
+      const textHeight = node.text.match(/.{1,16}/gsu)!.length * 18
+      if (node.type === 'decision') {
+        expect(box.width).toBeGreaterThanOrEqual(textWidth * 2 + 32)
+        expect(box.height).toBeGreaterThanOrEqual(textHeight * 2 + 24)
+      } else {
+        expect(box.width).toBeGreaterThanOrEqual(textWidth + 32)
+        expect(box.height).toBeGreaterThanOrEqual(textHeight + 24)
+      }
+    }
+    expect(rendered.svg).not.toContain('<line ')
+    const routes = [...rendered.svg.matchAll(/<polyline points="([^"]+)"/gu)].map(match => match[1]!)
+    expect(routes).toHaveLength(4)
+    const points = (value: string) => value.split(' ').map((point) => {
+      const [x, y] = point.split(',').map(Number)
+      return { x: x!, y: y! }
+    })
+    const boxes = [...layout.positions.values()]
+    const first = points(routes[0]!)
+    const origin = { x: boxes[0]!.x + boxes[0]!.width / 2 - first[0]!.x, y: boxes[0]!.y + boxes[0]!.height - first[0]!.y }
+    for (const route of routes) {
+      const interior = points(route).slice(1, -1)
+      for (const point of interior) for (const box of boxes) {
+        expect(point.x + origin.x > box.x && point.x + origin.x < box.x + box.width
+          && point.y + origin.y > box.y && point.y + origin.y < box.y + box.height).toBe(false)
+      }
+    }
+    const labels = [...rendered.svg.matchAll(/<text x="([^"]+)" y="([^"]+)" text-anchor="[^"]+" font-family="Microsoft YaHei,Arial,sans-serif" font-size="12"[^>]*>([^<]+)<\/text>/gu)]
+    expect(labels.map(match => match[3])).toEqual(expect.arrayContaining(['不符合', '再次提交', '符合']))
+    for (const label of labels) {
+      const x = Number(label[1]) + origin.x
+      const y = Number(label[2]) + origin.y
+      for (const box of boxes) {
+        expect(x > box.x && x < box.x + box.width && y > box.y && y < box.y + box.height).toBe(false)
+      }
+    }
+  })
 })

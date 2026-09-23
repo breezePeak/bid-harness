@@ -4,6 +4,8 @@ English | [中文](README.zh.md)
 
 Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行或取消中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；插件不注册 Bid Run Chat Node，也不写入 `todo/write`。挂起、失败、等待和完成状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
+S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，正常同步不追加独立提示行。读取失败仍显示错误说明，后续轮询继续重试。
+
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
 面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。

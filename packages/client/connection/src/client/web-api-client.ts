@@ -47,8 +47,9 @@ export class WebApiClient extends AbstractApiClient {
       wake?.()
       wake = undefined
     }
-    const handleOpen = (): void => { onOpen?.() }
+    const handleOpen = (): void => { if (!signal.aborted) onOpen?.() }
     const handleMessage = (event: MessageEvent): void => {
+      if (signal.aborted) return
       let full: ServerRequest
       let frame: F
       try {
@@ -64,6 +65,8 @@ export class WebApiClient extends AbstractApiClient {
     }
     const handleClose = (): void => { enqueue({ kind: 'end' }) }
     const handleAbort = (): void => {
+      inbox.length = 0
+      enqueue({ kind: 'end' })
       if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) socket.close()
     }
     socket.addEventListener('open', handleOpen)

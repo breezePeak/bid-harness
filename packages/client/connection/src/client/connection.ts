@@ -24,6 +24,7 @@ const CONNECTION_DEFAULTS: Required<ConnectionConfig> = {
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
   return new Promise((resolve) => {
     const t = setTimeout(done, ms)
     signal.addEventListener('abort', done, { once: true })
@@ -59,10 +60,10 @@ export interface ConnectionSinks {
  * not kill the pump — a broken business layer must not drag down the connection layer).
  */
 export class ConnectionController {
-  private generation = 0
   private attempt = 0
   private current: AbortController | null = null
-  private running = false
+  private lifetime: AbortController | null = null
+  private retryImmediately = false
   private lastState: ConnectionState | null = null
   private readonly config: Required<ConnectionConfig>
 
@@ -76,16 +77,24 @@ export class ConnectionController {
 
   /** Idempotent: begin the connect/pump/reconnect loop. */
   start(): void {
-    if (this.running) return
-    this.running = true
-    void this.loop()
+    if (this.lifetime !== null) return
+    this.lifetime = new AbortController()
+    void this.loop(this.lifetime.signal)
   }
 
   /** Stop the loop and abort the current generation's streams. */
   stop(): void {
-    this.running = false
+    this.lifetime?.abort()
+    this.lifetime = null
     this.current?.abort()
     this.current = null
+  }
+
+  /** Replace both streams immediately, including during a pending handshake or retry delay. */
+  reconnect(): void {
+    if (this.lifetime === null) return
+    this.retryImmediately = true
+    this.current?.abort()
   }
 
   private backoffDelay(attempt: number): number {
@@ -94,21 +103,16 @@ export class ConnectionController {
     return cap / 2 + Math.random() * (cap / 2)
   }
 
-  /** Read through a method: stop() flips the flag across awaits, so narrowing from the loop condition must not stick. */
-  private isRunning(): boolean {
-    return this.running
-  }
-
   /** Re-read both mutable liveness guards after a potentially reentrant sink. */
   private isGenerationActive(controller: AbortController): boolean {
-    return this.isRunning() && !controller.signal.aborted
+    return this.current === controller && !controller.signal.aborted
   }
 
-  private async loop(): Promise<void> {
-    while (this.running) {
-      const gen = ++this.generation
+  private async loop(lifetime: AbortSignal): Promise<void> {
+    while (!lifetime.aborted) {
       const ac = new AbortController()
       this.current = ac
+      this.retryImmediately = false
 
       /* v8 ignore next -- initializer placeholder: the Promise executor
        * below runs synchronously and replaces it before anyone can call it. */
@@ -121,31 +125,33 @@ export class ConnectionController {
       ])
 
       const failed = new Promise<void>((resolve) => {
-        const settle = (): void => {
-          if (gen === this.generation && !ac.signal.aborted) ac.abort()
-          resolve()
-        }
-        void this.pumpStream(this.api.events.mux({}, ac.signal, muxOpened), this.sinks.onMuxEnvelope, settle)
-        void this.pumpStream(this.api.events.host({}, ac.signal, hostOpened), this.sinks.onHostEnvelope, settle)
+        ac.signal.addEventListener('abort', () => { resolve() }, { once: true })
       })
+      const settle = (): void => { ac.abort() }
+      void this.pumpStream(this.api.events.mux({}, ac.signal, muxOpened), ac.signal, this.sinks.onMuxEnvelope, settle)
+      void this.pumpStream(this.api.events.host({}, ac.signal, hostOpened), ac.signal, this.sinks.onHostEnvelope, settle)
 
+      const timeout = new AbortController()
       try {
         // Strict readiness handshake: describe proves unary reachability, onOpen
         // proves each physical stream is established before any frame —
         // only then may onConnected fire, so the resync it triggers cannot outrun the
         // subscribed baseline. The timeout guards against a carrier that never fires onOpen
         // (see ConnectionConfig.streamOpenTimeoutMs).
-        const timeout = new AbortController()
-        const [description] = await Promise.all([
-          this.api.host.describe({}),
-          Promise.race([streamsOpen, sleep(this.config.streamOpenTimeoutMs, timeout.signal)]),
+        const handshake = await Promise.race([
+          Promise.all([
+            this.api.host.describe({}, ac.signal),
+            Promise.race([streamsOpen, sleep(this.config.streamOpenTimeoutMs, timeout.signal)]),
+          ]),
+          failed.then(() => undefined),
         ])
-        timeout.abort()
-        const descriptionResult = description.result
+        if (handshake === undefined || !this.isGenerationActive(ac)) {
+          throw new Error('generation aborted during readiness handshake')
+        }
+        const descriptionResult = handshake[0].result
         if (!descriptionResult.ok) {
           throw new Error(`host.describe failed: ${descriptionResult.error.code}: ${descriptionResult.error.message}`)
         }
-        if (ac.signal.aborted) throw new Error('generation aborted during readiness handshake')
         this.attempt = 0
         this.emitState('connected')
         // A state sink may synchronously stop this controller. Do not publish
@@ -156,14 +162,19 @@ export class ConnectionController {
       } catch {
         // Transport failure: treat as generation failure, fall through to the shared backoff.
         if (!ac.signal.aborted) ac.abort()
+      } finally {
+        timeout.abort()
       }
 
       await failed
-      if (!this.isRunning()) return
+      if (lifetime.aborted) return
+      const idle = new AbortController()
+      this.current = idle
       this.emitState('reconnecting')
+      if (lifetime.aborted) return
+      if (this.retryImmediately) continue
       this.attempt += 1
       console.warn(`[web-runtime] connection lost, retry #${this.attempt}`)
-      const idle = new AbortController()
       await sleep(this.backoffDelay(this.attempt), idle.signal)
     }
   }
@@ -177,12 +188,13 @@ export class ConnectionController {
 
   private async pumpStream<F extends { type: string }>(
     stream: AsyncIterable<RpcRequest<F>>,
+    signal: AbortSignal,
     sink: ((envelope: RpcRequest<F>) => void) | undefined,
     onEnd: () => void,
   ): Promise<void> {
     try {
       for await (const envelope of stream) {
-        if (envelope.payload.type === 'stream/error') break
+        if (signal.aborted || envelope.payload.type === 'stream/error') break
         if (sink !== undefined) this.callSink(() => { sink(envelope) })
       }
     } catch {

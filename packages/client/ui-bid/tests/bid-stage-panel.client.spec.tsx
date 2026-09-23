@@ -573,6 +573,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('计划 · S4 目录生成/资料映射')).toBeTruthy()
     expect(screen.getByText('研究任务：进度同步中…')).toBeTruthy()
     expect(screen.queryByText('同步中')).toBeNull()
+    expect(screen.getAllByRole('status')).toEqual(within(screen.getByTestId('bid-stage-plan')).getAllByRole('status'))
 
     await act(async () => {
       resolveProgress?.(progress)
@@ -583,6 +584,25 @@ describe('BidStagePanel', () => {
     expect(screen.getByTitle('进行中 3')).toBeTruthy()
     expect(screen.getByTitle('未开始 5')).toBeTruthy()
     expect(document.querySelector('[data-bid-progress]')).toBeNull()
+  })
+
+  it('S4 返回前台重同步时保留进度且不追加同步提示行', async () => {
+    const getEvidenceMappingProgress = vi.fn(async (): Promise<typeof savedProgress | null> => savedProgress)
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'evidence_mapping', status: 'running' },
+      composer: { enabled: true },
+    }), { getEvidenceMappingProgress })} />)
+
+    expect(await screen.findByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
+    const plan = screen.getByTestId('bid-stage-plan')
+    getEvidenceMappingProgress.mockResolvedValueOnce(null)
+
+    await act(async () => { fireEvent.focus(window) })
+
+    expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('bid-stage-plan')).toBe(plan)
+    expect(screen.getByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
+    expect(screen.getAllByRole('status')).toEqual(within(plan).getAllByRole('status'))
   })
 
   it('S4 ready 时不读取或显示 Mapping 进度', () => {
