@@ -57,6 +57,7 @@ import {
   renderStageRepairIssues,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
+import { renderBidRecoveryContext } from './bid-recovery.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import {
@@ -4184,7 +4185,11 @@ async function executeEvidenceMappingRun(
           `当前任务是局部 ${options.remap.mode} 资料映射，仅处理 Mapping Task.section_ids。`,
           `用户要求：${options.remap.reason ?? '重新研究选中章节的资料。'}`,
           ...(options.remap.mode === 'supplement' ? ['已有资料通过 current_section_mapping 和 scoped_candidate_refs 提供。'] : []),
-        ])].join('\n')
+        ]), ...(options.recovery !== undefined
+          && (options.recovery.unit === mappingTask.task_id
+            || options.recovery.unit === options.run.work.workId
+            || mappingTask.section_ids.includes(options.recovery.unit))
+          ? [renderBidRecoveryContext(options.recovery)] : [])].join('\n')
       log.prompt_context_stats = {
         task_id: mappingTask.task_id,
         scoped_section_count: currentSectionScope.length,
@@ -4403,7 +4408,7 @@ async function executeEvidenceMappingRun(
         log.status = 'failed'
         await persistLog()
         reportMappingProgress('章节资料映射未通过校验')
-        throw new BidStageExecutionError(latestIssues)
+        throw new BidStageExecutionError(latestIssues.map(issue => ({ ...issue, artifact: mappingTask.task_id })))
       } catch (error) {
         log.status = 'failed'
         if (error instanceof MappingSubagentInfrastructureError) {
@@ -4798,11 +4803,13 @@ async function executeEvidenceMappingRun(
     for (const reviewTask of plan.tasks.filter(item => item.phase === 'final_check')) {
       const saved = checkpointTasks.get(reviewTask.task_id)
       if (saved?.completed !== true) {
-        closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_INCOMPLETE', message: `Final Review 任务 ${reviewTask.task_id} 尚未完成。` })
+        closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_INCOMPLETE', artifact: reviewTask.task_id,
+          message: `Final Review 任务 ${reviewTask.task_id} 尚未完成。` })
         continue
       }
       if (saved.result.task_id !== reviewTask.task_id) {
-        closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_TASK_MISMATCH', message: `Final Review 任务 ${reviewTask.task_id} 的检查点归属不一致。` })
+        closureIssues.push({ code: 'EVIDENCE_MAPPING_FINAL_REVIEW_TASK_MISMATCH', artifact: reviewTask.task_id,
+          message: `Final Review 任务 ${reviewTask.task_id} 的检查点归属不一致。` })
       }
       for (const sectionId of reviewTask.section_ids) {
         const owner = leafOwners.get(sectionId)

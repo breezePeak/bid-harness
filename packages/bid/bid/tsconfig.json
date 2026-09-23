@@ -9,6 +9,8 @@
     { "path": "../../core/session" },
     { "path": "../../interaction/commands" },
     { "path": "../../fs/fs" },
+    { "path": "../../goal/goal" },
+    { "path": "../../goal/goal-round-driver" },
     { "path": "../../session/session-projection" },
     { "path": "../../subagent/subagent" },
     { "path": "../../preset/agent-presets" },

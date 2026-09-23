@@ -55,7 +55,7 @@ import {
   type ChapterExecutionLog,
   type ChapterExecutionPlan,
 } from './chapter-writing-plan-artifacts.ts'
-import { BidStageAttentionRequiredError, type BidChapterRevisionRequest, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageAttentionRequiredError, BidStageExecutionError, type BidChapterRevisionRequest, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
 import {
   assertChapterRevisionBatchScope,
   assertChapterRevisionScope,
@@ -101,6 +101,7 @@ import {
   renderStageRepairIssues,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
+import { renderBidRecoveryContext } from './bid-recovery.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineConfirmationArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
 import { parseTechnicalDeviationTable, TechnicalDeviationTableError, validateTechnicalDeviationTable } from './technical-deviation-table.ts'
@@ -1342,6 +1343,7 @@ async function loadValidPlan(
   maxRepairAttempts: number,
   run: BidRunContext,
   persist = true,
+  recovery?: ModelStageExecutionOptions['recovery'],
 ): Promise<ChapterExecutionPlan> {
   const tools = agent.ctx.get('tools')
   if (tools === undefined) throw new Error('Bid chapter planning requires tools service')
@@ -1356,7 +1358,9 @@ async function loadValidPlan(
   try {
     run.signal.throwIfAborted()
     const plan = await runMainAgentProtocol(
-      agent, renderChapterExecutionPlanTask(agent, workspace, outline, outlineHash, inputs), CHAPTER_PLAN_TOOLS, runtime, run,
+      agent, [renderChapterExecutionPlanTask(agent, workspace, outline, outlineHash, inputs),
+        recovery?.unit === PLAN_PATH || recovery?.unit === run.work.workId ? renderBidRecoveryContext(recovery) : '',
+      ].filter(Boolean).join('\n'), CHAPTER_PLAN_TOOLS, runtime, run,
     )
     run.signal.throwIfAborted()
     await assertNoLinkedPath(workspace.root, absolutePlanPath)
@@ -1485,6 +1489,7 @@ async function writeGlobalComplianceReview(
   maxRepairAttempts: number,
   run: BidRunContext,
   writingPlan?: WritingPlan,
+  recovery?: ModelStageExecutionOptions['recovery'],
 ): Promise<void> {
   let saved: GlobalComplianceReviewArtifact | undefined
   try { saved = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH)) } catch { /* 缺失或旧版本结果不参与当前核验。 */ }
@@ -1506,7 +1511,9 @@ async function writeGlobalComplianceReview(
   try {
     run.signal.throwIfAborted()
     const report = await runMainAgentProtocol(
-      agent, renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained, writingPlan),
+      agent, [renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, retained, writingPlan),
+        recovery?.unit === GLOBAL_REVIEW_PATH || recovery?.unit === run.work.workId ? renderBidRecoveryContext(recovery) : '',
+      ].filter(Boolean).join('\n'),
       GLOBAL_COMPLIANCE_REVIEW_TOOLS, runtime, run,
     )
     run.signal.throwIfAborted()
@@ -1732,9 +1739,11 @@ async function reviewWritingPlanCompletion(
     let decision: ChapterWritingCompletionDecision
     try {
       const globalReview = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH))
-      decision = await runMainAgentProtocol(agent, renderChapterWritingCompletionTask({
+      decision = await runMainAgentProtocol(agent, [renderChapterWritingCompletionTask({
         plan: writingPlan, hostResults, sections: current.sections, globalReview,
-      }), CHAPTER_WRITING_COMPLETION_TOOLS, reviewRuntime, options.run)
+      }), options.recovery?.unit === COMPLETION_REVIEW_PATH || options.recovery?.unit === options.run.work.workId
+        ? renderBidRecoveryContext(options.recovery) : '',
+      ].filter(Boolean).join('\n'), CHAPTER_WRITING_COMPLETION_TOOLS, reviewRuntime, options.run)
     } finally { reviewRuntime.dispose() }
     if (decision.action === 'complete') {
       return finishReview(decision)
@@ -1968,7 +1977,7 @@ async function runChapterWriting(
     const previousPlan = checkpointPlan
     plan = await loadValidPlan(
       agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan }, options.maxRepairAttempts,
-      options.run,
+      options.run, true, options.recovery,
     )
     if (checkpoint !== undefined && previousPlan !== undefined) {
       const update = scopedPlanUpdate(previousPlan, plan, writingPlanInvalidations)
@@ -2222,7 +2231,7 @@ async function runChapterWriting(
       const previousPlan = plan
       plan = await loadValidPlan(
         agent, workspace, outline, outlineHash, { project, requirements, scoring, compliance, writingPlan },
-        options.maxRepairAttempts, options.run, false,
+        options.maxRepairAttempts, options.run, false, options.recovery,
       )
       const update = scopedPlanUpdate(
         previousPlan, plan,
@@ -2492,7 +2501,11 @@ async function runChapterWriting(
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
-            prompt: [{ type: 'text', text: renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision) }],
+            prompt: [{ type: 'text', text: [renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision),
+              options.recovery !== undefined && (options.recovery.unit === sectionId
+                || options.recovery.unit === options.run.work.workId || options.recovery.unit.includes(serial))
+                ? renderBidRecoveryContext(options.recovery) : '',
+            ].filter(Boolean).join('\n') }],
             signal,
             toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
             maxDepth: 1,
@@ -2610,6 +2623,15 @@ async function runChapterWriting(
         const prompt = visualPrompt ?? (attempt === 0
           ? basePrompt
           : renderChapterSubagentRepairTask(context, basePrompt, rejectedCandidate, latestIssues))
+        const recoveryText = options.recovery !== undefined
+          && (options.recovery.unit === sectionId || options.recovery.unit === options.run.work.workId
+            || options.recovery.unit.includes(serial))
+          ? renderBidRecoveryContext(options.recovery) : undefined
+        const recoveryPrompt = recoveryText === undefined
+          ? prompt
+          : typeof prompt === 'string'
+            ? `${prompt}\n${recoveryText}`
+            : [...prompt, { type: 'text' as const, text: recoveryText }]
         const startedAt = new Date().toISOString()
         log.phase = attempt === 0 ? 'writing' : 'repairing'
         await persistLog()
@@ -2666,7 +2688,7 @@ async function runChapterWriting(
         const issues: StageValidationIssue[] = []
         try {
           let result: Awaited<ReturnType<ChapterWriterChild['run']>>
-          try { result = await run.run(prompt) } finally { childSetups.delete(label) }
+          try { result = await run.run(recoveryPrompt) } finally { childSetups.delete(label) }
           signal.throwIfAborted()
           latestStopReason = result.stopReason
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
@@ -2859,6 +2881,9 @@ async function runChapterWriting(
 
         return finished
       }
+      if (latestStopReason === 'completed' && latestIssues.length > 0) {
+        throw new BidStageExecutionError(latestIssues.map(issue => ({ ...issue, artifact: sectionId })))
+      }
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
       if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
@@ -2877,7 +2902,7 @@ async function runChapterWriting(
           },
         })
       }
-      if (error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
+      if (error instanceof BidStageExecutionError || error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
       throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`, { cause: error })
     } finally {
       if (writer !== undefined) {
@@ -3022,6 +3047,7 @@ async function runChapterWriting(
       options.maxRepairAttempts,
       options.run,
       writingPlan,
+      options.recovery,
     )
   } catch (error) {
     if (revisionBatch === undefined) throw error

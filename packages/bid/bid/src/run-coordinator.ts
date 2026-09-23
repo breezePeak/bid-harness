@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { rm } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFile, rm, stat } from 'node:fs/promises'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {
@@ -9,6 +9,7 @@ import type {
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { bidRunProgressSchema } from './runtime-state.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
+import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 /** Run-owned admission gate for model tasks and child creation. */
 export interface BidRunScheduler {
@@ -272,7 +273,10 @@ export class BidRunCoordinator {
     private readonly publication?: { readonly workspaceRoot: string; readonly projectRoot: string },
     private readonly executionSessionId?: () => string | undefined,
     private readonly onAdmitted?: BidRunAdmissionObserver,
-    private readonly onSuspended?: (notice: BidRunNotice, run: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure }) => void,
+    private readonly onSuspended?: (
+      notice: BidRunNotice,
+      run: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure },
+    ) => void,
   ) {}
 
   /** Current live Run, if any. */
@@ -435,10 +439,14 @@ export class BidRunCoordinator {
     await active.activities.whenDrained()
     await active.context.commits.whenDrained()
     if (this.active !== active) return undefined
+    const candidateSha256 = error?.recovery === undefined || this.publication === undefined
+      ? undefined : await this.candidateFingerprint(active.snapshot.work, error)
+    const observedError = error?.recovery === undefined || candidateSha256 === undefined ? error
+      : { ...error, recovery: { ...error.recovery, candidateSha256 } }
     const snapshot: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure } = {
       ...active.snapshot,
       cause,
-      ...(error === undefined ? {} : { error }),
+      ...(observedError === undefined ? {} : { error: observedError }),
       updatedAt: Date.now(),
     }
     this.active = undefined
@@ -456,13 +464,32 @@ export class BidRunCoordinator {
         ? '当前任务已停止，已保存已完成进度。'
         : [error?.code, error?.message, ...error?.issues?.slice(0, 3).map(issue => `${issue.code}: ${issue.message}`) ?? []]
           .filter((value): value is string => value !== undefined)
-          .map(sanitizeBidErrorText)
+          .map(value => sanitizeBidErrorText(value))
           .join('；') || '当前阶段已中断，已保存已完成进度。',
     }
     this.session.append('bid.run.notice', notice)
     this.onSuspended?.(notice, snapshot)
     await this.checkpoint?.()
     return snapshot
+  }
+
+  /** Hash only named, bounded failed candidates after their owning activity has drained. */
+  private async candidateFingerprint(work: BidWorkDescriptor, error: BidTaskFailure): Promise<string | undefined> {
+    if (this.publication === undefined) return undefined
+    const artifacts = error.issues?.flatMap(issue => issue.artifact === undefined ? [] : [issue.artifact]).slice(0, 5) ?? []
+    const candidates = artifacts.flatMap(artifact => work.stage === 'outline_generation'
+      ? [artifact, `outline/diagnostics/${work.workId}-${createHash('sha256').update(artifact).digest('hex').slice(0, 8)}.json`]
+      : [artifact])
+    const hashes: Array<[string, string]> = []
+    for (const candidate of [...new Set(candidates)]) {
+      try {
+        const path = within(this.publication.projectRoot, candidate)
+        await assertNoLinkedPath(this.publication.workspaceRoot, path)
+        if ((await stat(path)).size > 80_000) continue
+        hashes.push([candidate, createHash('sha256').update(await readFile(path)).digest('hex')])
+      } catch { /* A missing or unreadable failed candidate does not grant recovery authority. */ }
+    }
+    return hashes.length === 0 ? undefined : createHash('sha256').update(JSON.stringify(hashes)).digest('hex')
   }
 
   /** Retire and drain an internal reset or teardown without publishing a user-resumable suspension. */

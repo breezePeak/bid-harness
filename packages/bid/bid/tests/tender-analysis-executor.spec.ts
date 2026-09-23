@@ -82,11 +82,17 @@ describe('tender-analysis Agent executor', () => {
 
     const error = await executeTenderAnalysis(
       agent, workspace, buildBidStageTask('tender_analysis'),
-      { maxRepairAttempts: 1, run: createTestBidRunContext() },
+      { maxRepairAttempts: 1, run: createTestBidRunContext(), recovery: {
+        workId: 'test-work', unit: 'analysis/project.json', instruction: '核对项目字段并补齐来源。',
+        issues: [{ code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失' }],
+      } },
     ).then(() => undefined, (caught: unknown) => caught as { name: string; issues: Array<{ code: string }> })
     expect(error).toMatchObject({
       name: 'BidStageExecutionError',
-      issues: [expect.objectContaining({ code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE' })],
+      issues: [
+        expect.objectContaining({ code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE' }),
+        expect.objectContaining({ code: 'TENDER_ANALYSIS_SUBMISSION_REQUIRED' }),
+      ],
     })
     expect(services.tools.restrict).toHaveBeenCalledWith({ allow: ['grep', 'read'] })
     expect(policies[0]?.({ name: 'write' })).toContain('allows only')
@@ -94,9 +100,12 @@ describe('tender-analysis Agent executor', () => {
     const initial = followup.mock.calls[0]?.[0] as { content: Array<{ text: string }> }
     const repair = followup.mock.calls[1]?.[0] as { content: Array<{ text: string }> }
     expect(initial.content[0]?.text).toContain('submit_tender_analysis')
+    expect(initial.content[0]?.text).toContain('核对项目字段并补齐来源。')
+    expect(initial.content[0]?.text).toContain('TENDER_ANALYSIS_SUBMISSION_INCOMPLETE')
     expect(initial.content[0]?.text).toContain('四个完整数组')
     expect(initial.content[0]?.text).toContain('不得填写或猜测任何业务 ID')
     expect(repair.content[0]?.text).toContain('TENDER_ANALYSIS_SUBMISSION_REQUIRED')
+    expect(repair.content[0]?.text).toContain('核对项目字段并补齐来源。')
     expect(repair.content[0]?.text).not.toContain('staged snapshot')
     expect(services.tools.register).toHaveBeenCalledTimes(2)
     expect(definitions.size).toBe(0)

@@ -41,6 +41,8 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.writing_entry.changed',
   'bid.docx_export.changed',
   'bid.schema.warning',
+  'bid.goal.bound',
+  'bid.goal.recovery.requested',
 ] as const
 
 /** One Bid Harness event type persisted in the shared DSH session log. */
@@ -195,6 +197,32 @@ declare module '@deepseek-ai/dsh-session/types' {
     'bid.docx_export.changed': { operation: DocxExportOperation }
     /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
     'bid.schema.warning': BidSchemaWarning
+    /**
+     * Host-bound native Goal for one S2 entry; later stages reuse its identity.
+     * @mode emit
+     * @param goalId Native Goal identity.
+     * @param ownerSessionId Main Session identity.
+     * @param initialS2WorkId Admitted S2 work identity.
+     */
+    'bid.goal.bound': { goalId: string; ownerSessionId: string; initialS2WorkId: string }
+    /**
+     * One accepted, durable recovery instruction for the exact failed work.
+     * @mode emit
+     * @param goalId Native Goal authorizing this recovery.
+     * @param ownerSessionId Main Session identity.
+     * @param target Exact failed Run or writing request.
+     * @param unit Failed business unit.
+     * @param instruction Bounded sanitized repair instruction.
+     * @param progressFingerprint Business problem and checkpoint before recovery.
+     */
+    'bid.goal.recovery.requested': {
+      goalId: string
+      ownerSessionId: string
+      target: { kind: 'run'; workId: string; runId: string } | { kind: 'writing_plan'; requestId: string; attemptId: string }
+      unit: string
+      instruction: string
+      progressFingerprint: string
+    }
   }
 }
 

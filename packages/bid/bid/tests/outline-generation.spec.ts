@@ -52,6 +52,16 @@ const artifacts: StageArtifact[] = [
 ]
 const source = { file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }
 
+function subagentPrompt(request: Record<string, unknown>): string {
+  const prompt = request.prompt
+  if (!Array.isArray(prompt)) throw new Error('subagent request has no prompt')
+  const first = prompt[0]
+  if (typeof first !== 'object' || first === null || !('text' in first) || typeof first.text !== 'string') {
+    throw new Error('subagent prompt has no text')
+  }
+  return first.text
+}
+
 const requirements = {
   schema_version: 1,
   requirements: [
@@ -513,10 +523,17 @@ describe('outline-generation Blueprint Quality Review', () => {
       structuredOutputs: [responseCandidate, responseCandidate, researchDrivenOutline, { operations: [], issues: [] }],
     })
 
-    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run })).resolves.toEqual(artifacts)
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run, recovery: {
+      workId: run.work.workId, unit: 'analysis/scoring-response-points.candidate.json',
+      instruction: '补齐遗漏的评分响应点。', issues: [{ code: 'OUTLINE_RESPONSE_POINT_CANDIDATE_INVALID',
+        artifact: 'analysis/scoring-response-points.candidate.json', message: '遗漏评分项' }],
+    } })).resolves.toEqual(artifacts)
     expect(read).not.toHaveBeenCalled()
     expect(write).not.toHaveBeenCalled()
     expect(subagentStart).toHaveBeenCalledTimes(4)
+    expect(subagentPrompt(subagentStart.mock.calls[0]![1])).toContain('补齐遗漏的评分响应点。')
+    expect(subagentPrompt(subagentStart.mock.calls[1]![1])).toContain('补齐遗漏的评分响应点。')
+    expect(subagentPrompt(subagentStart.mock.calls[2]![1])).not.toContain('补齐遗漏的评分响应点。')
     for (const [, request] of subagentStart.mock.calls) expect(request).toMatchObject({ toolFilter: { allow: [] } })
     await expect(readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readFile(join(workspace.projectRoot, 'runs', run.runId, 'scratch', 'outline-generation', 'analysis/scoring-response-points.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })

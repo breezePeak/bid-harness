@@ -21,6 +21,13 @@ export interface ModelStageExecutionOptions {
   maxRepairAttempts: number
   /** Exact Run authority required for cancellation, scheduling, and formal commits. */
   run: BidRunContext
+  /** Host-accepted guidance for the exact failed work, never an Artifact field. */
+  recovery?: {
+    readonly workId: string
+    readonly unit: string
+    readonly instruction: string
+    readonly issues: readonly StageValidationIssue[]
+  }
 }
 
 /**

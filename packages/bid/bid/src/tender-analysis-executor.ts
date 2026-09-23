@@ -10,6 +10,7 @@ import {
   type ModelStageExecutionOptions,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
+import { renderBidRecoveryContext } from './bid-recovery.ts'
 import {
   attachTenderAnalysisSubmissionRuntime,
   TENDER_ANALYSIS_PRIVATE_TOOLS,
@@ -180,7 +181,7 @@ export async function executeTenderAnalysis(
       }
     }
     options.run.signal.throwIfAborted()
-    await run(renderTenderAnalysisTask(agent, workspace, task, runtime.locators))
+    await run([renderTenderAnalysisTask(agent, workspace, task, runtime.locators), renderBidRecoveryContext(options.recovery)].filter(Boolean).join('\n'))
     let attempts = 0
     let latestIssues = runtime.lastIssues
     while (!runtime.completed) {
@@ -198,14 +199,14 @@ export async function executeTenderAnalysis(
         total: options.maxRepairAttempts,
         details: issues.slice(0, 5).map(issue => `${issue.code}：${issue.message}`),
       })
-      await run(renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.repairContext()))
+      await run([renderTenderAnalysisRepairTask(agent, workspace, task, issues, runtime.repairContext()), renderBidRecoveryContext(options.recovery)].filter(Boolean).join('\n'))
     }
     await waitForModelStageIdle(agent, options.run.signal)
     if (!runtime.completed) {
       throw new BidStageExecutionError([{
         code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE',
         message: `S2 完整结果未提交或未通过校验。最近问题：${latestIssues.map(issue => issue.code).join(', ') || '无'}。`,
-      }])
+      }, ...latestIssues])
     }
     options.run.reportProgress({ phase: 'validating', summary: '招标信息提取已通过校验，正在提交阶段结果' })
     return artifacts

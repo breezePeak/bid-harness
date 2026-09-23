@@ -18,6 +18,7 @@ import {
   renderStageRepairIssues,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
+import { renderBidRecoveryContext } from './bid-recovery.ts'
 import {
   type OutlineArtifact,
   type OutlineQualityIssue,
@@ -157,10 +158,12 @@ function renderOutlineRevisionFeedback(feedback: string): string {
  * @param sectionIds 选中章节或分支。
  * @param feedback 用户反馈。
  * @param signal 当前 Host 操作取消信号。
+ * @param recovery Host 接受的当前局部目录修复指令。
  * @returns 只修改选中子树的编辑操作；调用方经 mutateOutlineDraft 校验后提交。
  */
 export async function generateScopedOutlineOperations(
   agent: Agent, draft: OutlineDraftView, sectionIds: readonly string[], feedback: string, signal: AbortSignal,
+  recovery?: ModelStageExecutionOptions['recovery'],
 ): Promise<OutlineEditOperation[]> {
   const selected = outlineSectionScope(draft.outline, sectionIds)
   const subagents = agent.ctx.get('subagents')
@@ -169,6 +172,7 @@ export async function generateScopedOutlineOperations(
     parent: agent, signal, label: '局部目录重生成', maxDepth: 1, toolFilter: { allow: [] },
     prompt: [{ type: 'text', text: [
       renderOutlineRevisionFeedback(feedback),
+      renderBidRecoveryContext(recovery),
       `当前 Draft：${JSON.stringify(draft)}`,
       `只允许修改以下章节及其子树：${JSON.stringify(sectionIds)}。保留选中根的 ID、父节点和位置；不得修改范围外节点。拆分叶子使用 split_section，合并同级叶子使用 merge_sections。`,
       '不得写文件。最终只返回原始 JSON 编辑操作数组，新增 ID 由 Host 分配。操作必须符合：',
@@ -506,11 +510,26 @@ export async function executeOutlineGeneration(
       throw new Error(`S3 ${request.label}需要独立上下文的 spawn provider。`)
     }
     await options.run.scheduler.waitUntilRunnable(options.run.signal)
+    const diagnosticPath = `outline/diagnostics/${options.run.work.workId}-${createHash('sha256').update(request.artifact).digest('hex').slice(0, 8)}.json`
+    let failedCandidate = ''
+    if (options.recovery?.unit === request.artifact) {
+      try {
+        const raw = await read(diagnosticPath)
+        const diagnostic = raw === undefined ? undefined : JSON.parse(raw) as { inputFingerprint?: string; candidate?: unknown }
+        if (diagnostic?.inputFingerprint === options.run.work.inputFingerprint && diagnostic.candidate !== undefined) {
+          failedCandidate = `\nHost 保存的当前 work 失败候选：${JSON.stringify(diagnostic.candidate)}`
+        }
+      } catch { /* 损坏诊断不能代替正式候选；原任务仍可重新生成。 */ }
+    }
     const child = await subagents.start('spawn', {
       parent: agent,
       signal: options.run.signal,
       label: request.label,
-      prompt: [{ type: 'text', text: request.prompt }],
+      prompt: [{ type: 'text', text: [request.prompt,
+        options.recovery?.unit === request.artifact || options.recovery?.unit === options.run.work.workId
+          ? renderBidRecoveryContext(options.recovery) : '',
+        failedCandidate,
+      ].filter(Boolean).join('\n') }],
       outputSchema: request.outputSchema,
       toolFilter: { allow: [] },
       maxDepth: 1,
@@ -519,15 +538,34 @@ export async function executeOutlineGeneration(
     try {
       const result = await child.result
       if (result.stopReason !== 'completed') throw new Error(`${request.label} Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`)
-      if (result.structured === undefined) throw new Error(`${request.label} Subagent 未返回结构化结果。`)
-      return request.parse(result.structured)
-    } catch (error) {
-      if (options.run.signal.aborted || error instanceof BidStageExecutionError) throw error
-      throw new BidStageExecutionError([{
-        code: request.errorCode,
-        artifact: request.artifact,
-        message: error instanceof Error ? error.message : String(error),
+      if (result.structured === undefined) throw new BidStageExecutionError([{
+        code: request.errorCode, artifact: request.artifact, message: `${request.label} Subagent 未返回结构化结果。`,
       }])
+      try {
+        return request.parse(result.structured)
+      } catch (error: unknown) {
+        const encoded = JSON.stringify(result.structured)
+        if (encoded.length <= 80_000) {
+          await write(diagnosticPath, {
+            inputFingerprint: options.run.work.inputFingerprint,
+            unit: request.artifact,
+            candidate: result.structured,
+          })
+        } else {
+          await write(diagnosticPath, {
+            inputFingerprint: options.run.work.inputFingerprint,
+            unit: request.artifact,
+            candidateSha256: createHash('sha256').update(encoded).digest('hex'),
+            candidateBytes: Buffer.byteLength(encoded),
+          })
+        }
+        throw new BidStageExecutionError([{
+          code: request.errorCode, artifact: request.artifact,
+          message: error instanceof Error ? error.message : String(error),
+        }])
+      }
+    } catch (error) {
+      throw error
     } finally {
       await child.dispose()
     }
@@ -683,6 +721,8 @@ export async function executeOutlineGeneration(
       relative(workspace.root, path(output)).replaceAll('\\', '/'),
       relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
     ), prompt) + '\n当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification；只有 read-only 下首次写入被沙箱拒绝后，才按错误提示做一次严格升级重试。'
+      + (options.recovery !== undefined && (outputs.includes(options.recovery.unit) || options.recovery.unit === options.run.work.workId)
+        ? `\n${renderBidRecoveryContext(options.recovery)}` : '')
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const protocol = installMainAgentProtocol(agent, {
       privateTools: [],

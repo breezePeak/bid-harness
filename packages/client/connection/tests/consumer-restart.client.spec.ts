@@ -23,7 +23,8 @@ describe('connection consumer lifecycle', () => {
     let generation = 0
     const consumer = ctx.inject(['connection'], (scope) => {
       const current = ++generation
-      const loop = scope.connection.start({ onConnected: () => { connected.push(current) } })
+      const connectionScope = scope as Context & { connection: ConnectionHandle }
+      const loop = connectionScope.connection.start({ onConnected: () => { connected.push(current) } })
       loops.push(loop)
       scope.effect(() => () => { loop.stop() }, 'test: consumer stream')
     })

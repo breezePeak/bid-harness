@@ -6,11 +6,12 @@ const PROVIDER_PAYLOAD = /(?:provider\s+(?:payload|response)|raw\s+(?:payload|re
 /**
  * Remove credentials and provider payloads from one browser-visible diagnostic.
  * @param value - Untrusted diagnostic text.
+ * @param maxChars - Maximum sanitized characters retained.
  * @returns Length-bounded browser-safe text.
  */
-export function sanitizeBidErrorText(value: string): string {
+export function sanitizeBidErrorText(value: string, maxChars = 2_000): string {
   const sanitized = value.replace(SECRET, '$1[REDACTED]').replace(PROVIDER_PAYLOAD, 'provider response: [REDACTED]').trim()
-  return sanitized.slice(0, 2_000) || 'Bid Run 执行失败。'
+  return sanitized.slice(0, maxChars) || 'Bid Run 执行失败。'
 }
 
 /**
@@ -27,11 +28,13 @@ export function summarizeBidValidationIssues(issues: readonly StageValidationIss
  * Convert an execution failure into the only durable, browser-safe error shape.
  * @param error - Untrusted execution failure.
  * @param issues - Structured validation issues to sanitize when present.
+ * @param recovery - Host-classified repair eligibility when available.
  * @returns Durable error payload safe for browser projection.
  */
 export function safeBidRunError(
   error: unknown,
   issues?: readonly StageValidationIssue[],
+  recovery?: BidTaskFailure['recovery'],
 ): BidTaskFailure {
   const candidate = error as { code?: unknown; message?: unknown }
   const code = typeof candidate.code === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.code)
@@ -43,6 +46,12 @@ export function safeBidRunError(
   return {
     code,
     message,
+    ...(recovery === undefined ? {} : { recovery: {
+      kind: recovery.kind,
+      unit: sanitizeBidErrorText(recovery.unit),
+      reason: sanitizeBidErrorText(recovery.reason),
+      ...(recovery.candidateSha256 === undefined ? {} : { candidateSha256: recovery.candidateSha256 }),
+    } }),
     ...(issues === undefined ? {} : {
       issues: issues.map(issue => ({
         code: sanitizeBidErrorText(issue.code),

@@ -18,6 +18,27 @@ export { renderGoalRoundPrompt } from './prompt.ts'
 export const name = 'goal-round-driver'
 export const inject = ['agents', 'goals', 'sessions']
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    goalRoundDriver: GoalRoundDriverControl
+  }
+}
+
+/** Host control of automatic goal admission for an exact live agent. */
+export interface GoalRoundDriverControl {
+  /**
+   * Register a synchronous, read-only admission gate.
+   * @param gate - Returns wait while Host work prevents another round.
+   * @returns Registration disposer.
+   */
+  registerGate(gate: (agent: Agent, goal: GoalView) => 'wait' | undefined): () => void
+  /**
+   * Recheck the existing serial driver after external state changes.
+   * @param agent - Exact live Agent whose goal may advance.
+   */
+  request(agent: Agent): void
+}
+
 /** Identity reserved before a goal continuation enters the agent inbox. */
 interface RoundIdentity {
   readonly goalId: GoalRef['id']
@@ -75,6 +96,21 @@ function renderThrown(value: unknown): string {
 /** Install automatic same-session continuation and its race fences. */
 export function apply(ctx: Context): void {
   const states = new Map<Agent, DriverState>()
+  const gates = new Set<(agent: Agent, goal: GoalView) => 'wait' | undefined>()
+
+  /** Gate failures deny this round and remove automatic authority. */
+  function shouldWait(state: DriverState, goal: GoalView): boolean {
+    for (const gate of gates) {
+      try {
+        if (gate(state.agent, goal) === 'wait') return true
+      } catch (_error: unknown) {
+        ctx.logger.warn(`goal-round-driver: admission gate failed for agent "${state.agent.id}"`)
+        disarm(state)
+        return true
+      }
+    }
+    return false
+  }
 
   /** Create state for an exact currently live agent. */
   function stateFor(agent: Agent): DriverState {
@@ -163,6 +199,7 @@ export function apply(ctx: Context): void {
 
     const goal = currentGoal(state)
     if (goal === undefined || goal.phase !== 'active' || goal.activation !== 'armed') return
+    if (shouldWait(state, goal)) return
     if (goal.roundsStarted >= goal.maxGoalRounds) {
       ctx.goals.block(agent, goalRef(goal), {
         code: 'round-limit',
@@ -239,6 +276,18 @@ export function apply(ctx: Context): void {
       retire()
     })
   }
+
+  const control: GoalRoundDriverControl = {
+    registerGate(gate) {
+      gates.add(gate)
+      return () => { gates.delete(gate) }
+    },
+    request(agent) {
+      if (ctx.agents.get(agent.id) !== agent) return
+      requestDrive(stateFor(agent))
+    },
+  }
+  ctx.provide('goalRoundDriver', control)
 
   // One composite effect keeps the step fence installed until this
   // plugin's own scheduling tasks settle.
@@ -346,6 +395,17 @@ export function apply(ctx: Context): void {
       && source.round === goal.roundsStarted + 1
     }
 
+    /** Drop only this reservation and keep other claimed work for a later turn. */
+    function deferRound(state: DriverState, messages: UserMessage[], submitted: UserMessage): PreStepDecision {
+      const attempt = state.attempt
+      if (attempt !== undefined && attempt.messageId === submitted.id) {
+        state.attempt = undefined
+        state.agent.inbox.remove(attempt.messageId)
+      }
+      restoreOtherClaimed(state.agent, messages, submitted.id)
+      return { kind: 'enter', messages: [] }
+    }
+
     ctx.on('agent/pre-step', async ({ agent, messages, signal }, next): Promise<PreStepDecision> => {
       const submitted = messages.find((message): message is UserMessage & { source: GoalMessageSource } =>
         isGoalRoundSource(message.source))
@@ -369,6 +429,8 @@ export function apply(ctx: Context): void {
         requestDrive(state)
         return { kind: 'reject' }
       }
+      const before = currentGoal(state)
+      if (before !== undefined && shouldWait(state, before)) return deferRound(state, messages, submitted)
       let decision: PreStepDecision
       try {
         decision = await next()
@@ -384,6 +446,10 @@ export function apply(ctx: Context): void {
       if (signal.aborted) {
         if (decision.kind === 'enter') restoreOtherClaimed(agent, decision.messages, submitted.id)
         return decision
+      }
+      const after = currentGoal(state)
+      if (after !== undefined && shouldWait(state, after)) {
+        return deferRound(state, decision.kind === 'enter' ? decision.messages : messages, submitted)
       }
       if (decision.kind === 'reject') {
         state.attempt = undefined
@@ -440,6 +506,7 @@ export function apply(ctx: Context): void {
       }
       await Promise.allSettled(waits)
       states.clear()
+      gates.clear()
     }
   }, 'goal-round-driver lifecycle')
 }

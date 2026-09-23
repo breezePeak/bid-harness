@@ -1051,11 +1051,18 @@ describe('evidence-mapping Agent executor', () => {
     }))
     const fixture = mappingFixture(workspace, material)
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxConcurrency: 3, maxRepairAttempts: 0,
+      maxConcurrency: 3, maxRepairAttempts: 0, recovery: {
+        workId: 'test-work', unit: `MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}`,
+        instruction: '只补齐技术偏离表的任务依据。', issues: [{ code: 'EVIDENCE_MAPPING_PARTIAL',
+          artifact: `MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}`, message: '任务依据不完整' }],
+      },
     })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
     const start = fixture.starts.find(item => promptText(item.request.request).includes(`"task_id":"MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}"`))
     if (start === undefined) throw new Error('missing technical deviation Mapping Child')
+    expect(promptText(start.request.request)).toContain('只补齐技术偏离表的任务依据。')
+    expect(fixture.starts.filter(item => item !== start).every(item =>
+      !promptText(item.request.request).includes('只补齐技术偏离表的任务依据。'))).toBe(true)
     const childId = start.request.childId!
     const invoke = (name: string, args: unknown) => fixture.invokeSubmissionTool(childId, name, args)
 

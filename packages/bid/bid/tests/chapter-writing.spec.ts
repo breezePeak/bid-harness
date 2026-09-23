@@ -1765,7 +1765,11 @@ describe('chapter-writing executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, { 'SEC-3': ['SEC-1'] }, false)
-    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 2 })
+    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, maxConcurrency: 2, recovery: { workId: 'test-work', unit: 'SEC-1',
+        instruction: '补齐本章的实施责任分工。', issues: [{ code: 'CHAPTER_WRITING_CONTENT_INVALID',
+          artifact: 'SEC-1', message: '责任分工缺失' }] },
+    })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
@@ -1781,6 +1785,8 @@ describe('chapter-writing executor', () => {
       expect.stringContaining('"id":"SEC-1"'),
       expect.stringContaining('"id":"SEC-2"'),
     ])
+    expect(promptText(fixture.starts[0]!.request)).toContain('补齐本章的实施责任分工。')
+    expect(promptText(fixture.starts[1]!.request)).not.toContain('补齐本章的实施责任分工。')
     for (const prompt of fixture.starts.map(item => promptText(item.request))) {
       expect(prompt).not.toContain('source_refs')
       expect(prompt).not.toContain('analyzed_tender_files')
@@ -1823,6 +1829,7 @@ describe('chapter-writing executor', () => {
     }
     const reviewerCalls = fixture.subagents.start.mock.calls.filter(call => call[1].toolFilter?.allow?.length === 0)
     expect(reviewerCalls).toHaveLength(3)
+    expect(reviewerCalls.filter(call => promptText(call[1]).includes('补齐本章的实施责任分工。'))).toHaveLength(1)
     expect(reviewerCalls.every(call => call[1].maxDepth === 1)).toBe(true)
     expect(promptText(writerCalls[0]![1])).toContain('不得添加带“示例”的伪数据行')
     expect(promptText(reviewerCalls[0]![1])).toContain('不得要求 Writer 虚构数据或添加示例记录')

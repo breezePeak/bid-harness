@@ -110,6 +110,12 @@ export interface BidTaskFailure {
   readonly code?: string | undefined
   readonly message: string
   readonly issues?: readonly StageValidationIssue[] | undefined
+  readonly recovery?: {
+    readonly kind: 'retry' | 'repair' | 'blocked'
+    readonly unit: string
+    readonly reason: string
+    readonly candidateSha256?: string | undefined
+  } | undefined
 }
 
 /** Persisted execution data for one running attempt. */

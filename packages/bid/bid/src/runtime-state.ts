@@ -38,6 +38,8 @@ const bidTaskFailureSchema = z.object({
   code: z.string().optional(),
   message: z.string(),
   issues: z.array(stageValidationIssueSchema).readonly().optional(),
+  recovery: z.object({ kind: z.enum(['retry', 'repair', 'blocked']), unit: z.string().min(1), reason: z.string().min(1),
+    candidateSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict().optional(),
 }).strict()
 
 /** Durable execution-data schema for one Bid Run. */
@@ -254,6 +256,7 @@ function cloneFailure(failure: BidTaskFailure): BidTaskFailure {
   return {
     ...failure,
     ...failure.issues === undefined ? {} : { issues: failure.issues.map(cloneIssue) },
+    ...failure.recovery === undefined ? {} : { recovery: { ...failure.recovery } },
   }
 }
 
@@ -446,19 +449,19 @@ export function reduceBidTaskState(state: BidTaskState, event: SessionEvent): Bi
         : state
     case 'bid.run.completed':
       return state
-    case 'bid.workflow.failed':
-      return event.data.stage === state.stage
-        ? markFailed(event.data.stage, { message: event.data.reason, ...event.data.issues === undefined ? {} : { issues: event.data.issues } })
-        : state
     // Legacy events remain readable without retaining their parallel status vocabulary.
     case 'bid.stage.started': {
       return event.data.stage === state.stage ? startRun(state, placeholderRun(event.data.stage)) : state
     }
     case 'bid.stage.attention_required':
       return event.data.stage === state.stage ? waitForUser(event.data.stage, event.data.reason, event.data.issues) : state
+    case 'bid.workflow.failed':
     case 'bid.stage.failed':
       return event.data.stage === state.stage
-        ? markFailed(event.data.stage, { message: event.data.reason, ...event.data.issues === undefined ? {} : { issues: event.data.issues } })
+        ? markFailed(event.data.stage, {
+          message: event.data.reason,
+          ...event.data.issues === undefined ? {} : { issues: event.data.issues },
+        })
         : state
     case 'bid.stage.reset':
       return BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.stage)

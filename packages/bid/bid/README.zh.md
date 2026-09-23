@@ -33,6 +33,8 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 `stopRun` 同时取消发起停止的会话回复和项目后台 Run，保留待处理的用户消息；后台执行收敛并保存挂起状态后返回。主会话空闲时也可停止后台 Run。
 
+S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到同一主会话；S1 和独立 S6 不取得该目标。后台阶段正常运行或等待用户正式确认时，Goal Round 暂缓且不消耗轮数。S2～S5 有可修复的挂起任务时，主 Agent 读取 `bid_stage_inspect(view="recovery")` 的当前失败与目标身份，再调用 `bid_recover_task` 提交有界改进要求；Host 在项目锁内验证并记录请求，原执行子代理按原提交和校验流程继续。同一 work 或写作请求最多自动接管两次，问题与检查点无进展、用户停止或输入和基础设施故障转入既有人工处理。Goal 完成只跟随 S5 正式完成，不触发 Word 导出。
+
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
 `BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 `running` 时，Host 在项目锁内将其确定性改为 `suspended(host_restart)`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。

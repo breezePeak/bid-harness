@@ -21,6 +21,7 @@ import {
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
 import type { BidRunResumeIdentity } from './control-plane-contract.ts'
 import { safeBidRunError, summarizeBidValidationIssues } from './safe-error.ts'
+import { safeRecoverableBidFailure } from './bid-recovery.ts'
 
 function signalAborted(signal: AbortSignal): boolean { return signal.aborted }
 
@@ -440,20 +441,27 @@ export class BidOrchestrator {
         return 'waiting_user'
       }
       if (error instanceof BidStageExecutionError) {
-        await this.runs.suspend('retry_exhausted', safeBidRunError(error, error.issues))
+        await this.runs.suspend('retry_exhausted', stage === 'file_intake'
+          ? safeBidRunError(error, error.issues) : safeRecoverableBidFailure(work, error, error.issues))
         return 'failed'
       }
-      await this.runs.suspend('executor_error', safeBidRunError(error))
+      await this.runs.suspend('executor_error', stage === 'file_intake'
+        ? safeBidRunError(error) : safeRecoverableBidFailure(work, error))
       return 'failed'
     }
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
     const validation = await this.validate(stage, artifacts, run)
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
     if (!validation.ok) {
-      await this.runs.suspend('retry_exhausted', {
+      const failure = {
         code: 'BID_STAGE_VALIDATION_FAILED',
         message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : '当前阶段结果未通过校验。',
         issues: validation.issues,
+      }
+      await this.runs.suspend('retry_exhausted', {
+        ...failure,
+        recovery: stage === 'file_intake' || stage === 'docx_export' ? undefined
+          : safeRecoverableBidFailure(work, failure, validation.issues, true).recovery,
       })
       return 'failed'
     }
@@ -494,8 +502,10 @@ export class BidOrchestrator {
     let result: StageValidationResult
     try {
       result = await this.validator.validate(stage, artifacts, run)
-    } catch {
-      const issues = [{ code: 'VALIDATOR_FAILED', message: 'The stage validator could not complete.' }]
+    } catch (error: unknown) {
+      const issues = [{ code: 'VALIDATOR_FAILED', message: stage === 'file_intake' || stage === 'docx_export'
+        ? 'The stage validator could not complete.'
+        : `The stage validator could not complete: ${safeBidRunError(error).message}` }]
       return { ok: false, issues }
     }
     return result

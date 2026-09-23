@@ -31,6 +31,8 @@
 
 整个 agent 进入 idle 时，持久 goal phase 和 revision 具有权威性。phase 为 active、已启用续行且仍有容量的 goal 会预留下一 Round；完成、暂停、阻塞和编辑都会阻止续行。驱动器不会通过关联 goal 消息与 `turn/end` 来对前一段活动分类，因此提供方错误和 token 上限不属于提示词级 goal 结果。
 
+宿主可通过 `ctx.goalRoundDriver.registerGate()` 注册同步、只读的准入判断，并在条件变化后调用 `request(agent)`。返回 `wait` 会暂缓预留或已领取的自动提示词，不消耗 Round、不暂停 Goal，也不丢弃同批其他消息；驱动器在检查点和下游 `agent/pre-step` 返回后复核。准入判断抛错时驱动器停用该 Agent 的自动续行。
+
 ## 生命周期与持久性
 
 `goal/changed` 会产生持久性义务。排队工作前，驱动器会等待 `ctx.sessions.flush()`，并在等待后重新检查 goal revision 与竞争输入。通过 `agent/error` 到达的 flush 失败会停用续行，避免另一 Round 启动。
