@@ -1,0 +1,476 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`T01 旧项目黄金基线 > complete 项目保留章节、资料、计划、Child 与导出身份 1`] = `
+{
+  "chapters": [
+    {
+      "content_path": "chapters/sections/0001.md",
+      "content_sha256": "fee72f16d256cbce50b500a19aad0615058813499ee0c2c1f034cfccfed856a5",
+      "review_path": "chapters/reviews/0001.json",
+      "section_id": "SEC-1",
+    },
+    {
+      "content_path": "chapters/sections/0002.md",
+      "content_sha256": "670c919016bb5253627f5d1d6dfa6f8c2d8dfe369d97dd03b8561afc786ed10b",
+      "review_path": "chapters/reviews/0002.json",
+      "section_id": "SEC-2",
+    },
+    {
+      "content_path": "chapters/sections/0003.md",
+      "content_sha256": "aa5dc55211d6c14b0bcfb25b93b6d279952ce2e337c4cb7f52bddabd20252a30",
+      "review_path": "chapters/reviews/0003.json",
+      "section_id": "SEC-3",
+    },
+    {
+      "content_path": "chapters/sections/0004.md",
+      "content_sha256": "5bc5d40804cd5da852a47b8cbaef5368423b7a0de893f8bb590a94b22240847f",
+      "review_path": "chapters/reviews/0004.json",
+      "section_id": "SEC-4",
+    },
+    {
+      "content_path": "chapters/sections/0005.md",
+      "content_sha256": "da7565695549640eec5c8f8d0cabf66c900c5fad82a22100181de52d40e1d0b9",
+      "review_path": "chapters/reviews/0005.json",
+      "section_id": "SEC-5",
+    },
+  ],
+  "evidence": [
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料1",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-1",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料2",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-2",
+    },
+    {
+      "local_materials": [],
+      "missing_topics": [
+        "缺少第三章实施案例",
+      ],
+      "section_id": "SEC-3",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料4",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-4",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料5",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-5",
+    },
+  ],
+  "execution": [
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-1",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-1",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-1",
+      "status": "completed",
+    },
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-2",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-2",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-2",
+      "status": "completed",
+    },
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-3",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-3",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-3",
+      "status": "completed",
+    },
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-4",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-4",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-4",
+      "status": "completed",
+    },
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-5",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-5",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-5",
+      "status": "completed",
+    },
+  ],
+  "export_pending_sections": 0,
+  "export_sha256": "41ad6c8a6e42aaae3ff80305b2c37bf987ebc2e2b4f3d5d499db41cb6d23b565",
+  "outline": [
+    {
+      "id": "GROUP-A",
+      "order": 1,
+      "parent_id": null,
+      "title": "设计",
+      "writable": false,
+    },
+    {
+      "id": "GROUP-B",
+      "order": 2,
+      "parent_id": null,
+      "title": "交付",
+      "writable": false,
+    },
+    {
+      "id": "SEC-1",
+      "order": 1,
+      "parent_id": "GROUP-A",
+      "title": "章节1",
+      "writable": true,
+    },
+    {
+      "id": "SEC-2",
+      "order": 2,
+      "parent_id": "GROUP-A",
+      "title": "章节2",
+      "writable": true,
+    },
+    {
+      "id": "SEC-3",
+      "order": 3,
+      "parent_id": "GROUP-A",
+      "title": "章节3",
+      "writable": true,
+    },
+    {
+      "id": "SEC-4",
+      "order": 1,
+      "parent_id": "GROUP-B",
+      "title": "章节4",
+      "writable": true,
+    },
+    {
+      "id": "SEC-5",
+      "order": 2,
+      "parent_id": "GROUP-B",
+      "title": "章节5",
+      "writable": true,
+    },
+  ],
+  "plan": [
+    {
+      "acceptance_ids": [
+        "AC-000002",
+      ],
+      "section_id": "SEC-1",
+      "task": "编写章节1",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000003",
+      ],
+      "section_id": "SEC-2",
+      "task": "编写章节2",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000004",
+      ],
+      "section_id": "SEC-3",
+      "task": "编写章节3",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000005",
+      ],
+      "section_id": "SEC-4",
+      "task": "编写章节4",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000006",
+      ],
+      "section_id": "SEC-5",
+      "task": "编写章节5",
+    },
+  ],
+}
+`;
+
+exports[`T01 旧项目黄金基线 > partial 项目保留章节、资料、计划、Child 与导出身份 1`] = `
+{
+  "chapters": [
+    {
+      "content_path": "chapters/sections/0001.md",
+      "content_sha256": "fee72f16d256cbce50b500a19aad0615058813499ee0c2c1f034cfccfed856a5",
+      "review_path": "chapters/reviews/0001.json",
+      "section_id": "SEC-1",
+    },
+    {
+      "content_path": "chapters/sections/0002.md",
+      "content_sha256": "670c919016bb5253627f5d1d6dfa6f8c2d8dfe369d97dd03b8561afc786ed10b",
+      "review_path": "chapters/reviews/0002.json",
+      "section_id": "SEC-2",
+    },
+  ],
+  "evidence": [
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料1",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-1",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料2",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-2",
+    },
+    {
+      "local_materials": [],
+      "missing_topics": [
+        "缺少第三章实施案例",
+      ],
+      "section_id": "SEC-3",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料4",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-4",
+    },
+    {
+      "local_materials": [
+        {
+          "chunk": "chunk_0001",
+          "file_id": "d50393cdc2687904b7da45909f3a85b05e9cf8973d94927e8faf17186d49c358",
+          "source_kind": "reference",
+          "summary": "资料5",
+          "usage": "reference",
+        },
+      ],
+      "missing_topics": [],
+      "section_id": "SEC-5",
+    },
+  ],
+  "execution": [
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-1",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-1",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-1",
+      "status": "completed",
+    },
+    {
+      "children": [
+        {
+          "child_session_id": "writer-SEC-2",
+          "role": "writer",
+        },
+        {
+          "child_session_id": "reviewer-SEC-2",
+          "role": "reviewer",
+        },
+      ],
+      "section_id": "SEC-2",
+      "status": "completed",
+    },
+    {
+      "children": [],
+      "section_id": "SEC-3",
+      "status": "pending",
+    },
+    {
+      "children": [],
+      "section_id": "SEC-4",
+      "status": "pending",
+    },
+    {
+      "children": [],
+      "section_id": "SEC-5",
+      "status": "pending",
+    },
+  ],
+  "export_pending_sections": 3,
+  "export_sha256": "d1a5143d5b320c6d6f8602d4704913c49a2b5da6c4bdf0d0628cdce3d52b211d",
+  "outline": [
+    {
+      "id": "GROUP-A",
+      "order": 1,
+      "parent_id": null,
+      "title": "设计",
+      "writable": false,
+    },
+    {
+      "id": "GROUP-B",
+      "order": 2,
+      "parent_id": null,
+      "title": "交付",
+      "writable": false,
+    },
+    {
+      "id": "SEC-1",
+      "order": 1,
+      "parent_id": "GROUP-A",
+      "title": "章节1",
+      "writable": true,
+    },
+    {
+      "id": "SEC-2",
+      "order": 2,
+      "parent_id": "GROUP-A",
+      "title": "章节2",
+      "writable": true,
+    },
+    {
+      "id": "SEC-3",
+      "order": 3,
+      "parent_id": "GROUP-A",
+      "title": "章节3",
+      "writable": true,
+    },
+    {
+      "id": "SEC-4",
+      "order": 1,
+      "parent_id": "GROUP-B",
+      "title": "章节4",
+      "writable": true,
+    },
+    {
+      "id": "SEC-5",
+      "order": 2,
+      "parent_id": "GROUP-B",
+      "title": "章节5",
+      "writable": true,
+    },
+  ],
+  "plan": [
+    {
+      "acceptance_ids": [
+        "AC-000002",
+      ],
+      "section_id": "SEC-1",
+      "task": "编写章节1",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000003",
+      ],
+      "section_id": "SEC-2",
+      "task": "编写章节2",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000004",
+      ],
+      "section_id": "SEC-3",
+      "task": "编写章节3",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000005",
+      ],
+      "section_id": "SEC-4",
+      "task": "编写章节4",
+    },
+    {
+      "acceptance_ids": [
+        "AC-000006",
+      ],
+      "section_id": "SEC-5",
+      "task": "编写章节5",
+    },
+  ],
+}
+`;
