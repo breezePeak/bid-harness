@@ -57,11 +57,15 @@ S5 流程图默认由原 Writer 查看最终渲染 PNG；只有真实画面变�
 
 Word 模板上传、模板库选择、格式确认、独立格式建议和导出等写操作按项目互斥，同项目各会话均可操作，与 S1—S5 的启动和执行并行；列表、预览和页数测算使用只读快照。S6 当前导出模板只是本次预览、测算和导出的显式参数，不会隐式改写 S5 页数基准；“设为页数基准模板”是独立操作。导出不取得阶段锁、不写阶段检查点；阶段重置会删除章节和输出，因此与 Word 写入双向互斥。每次导出在同一发布事务登记 DOCX、Markdown 快照和流程图；自定义输出目录的阶段重置只删除这些已登记的项目文件。导出仅从确认目录与正文文件取内容，不依赖章节 Manifest、执行记录或审核报告，不在导出阶段重新审查正文。读取期间目录或正文变化时拒绝本次快照；正文及父节点概述均缺失时拒绝生成空文档。输出使用带时间标识的 Markdown 与 DOCX 文件，保留阶段状态及审核详情。
 
+### 公共能力契约与项目读取
+
+`bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。Host 另持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 只声明实际输入前提并核对结果引用。当前仅建立契约与只读入口，不开放跨阶段能力写入。`bid_project_inspect` 按对象分页读取招标理解、目录、资料映射、写作计划、正文和执行记录；缺失产物返回 `available=false`，正文片段返回完整性和下一偏移量，正式与候选来源明确区分。旧 `bid_stage_inspect` 继续提供阶段快照。
+
 ## Bid Agent behavior
 
 ### 全阶段 Main Agent 交互
 
-S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合只挂载当前阶段工具，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
+S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合挂载当前阶段工具及项目级只读检查，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
 
 S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；空闲 Agent 不被唤醒，下次用户消息会一并取得该持久 inbox 消息。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 

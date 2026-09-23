@@ -392,7 +392,12 @@ describe('Workspace 项目与独立 Session', () => {
       })).resolves.toBeUndefined()
 
       expect(ctx.tools.schemas(agent).filter(tool => tool.name.startsWith('bid_')).map(tool => tool.name))
-        .toEqual(['bid_stage_inspect'])
+        .toEqual(['bid_stage_inspect', 'bid_project_inspect'])
+      const project = await ctx.tools.execute({
+        agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline', page_size: 1 } },
+        callId: CallId(`project-${stage}-${seedStatus}`), signal: new AbortController().signal,
+      })
+      expect(project).toMatchObject({ isError: false, value: { available: true, total: 1 } })
       const inspected = await ctx.tools.execute({
         agent,
         name: 'bid_stage_inspect',

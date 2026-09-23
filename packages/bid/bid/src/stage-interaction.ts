@@ -30,6 +30,7 @@ import { readCurrentWritingPlan } from './writing-entry-state.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { readChapterLocation } from './chapter-storage.ts'
+import { bidProjectInspectSchema } from './bid-project-inspect.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
 import { readRevisionQueue } from './chapter-revision-queue.ts'
@@ -53,6 +54,7 @@ const recoveryArtifactPaths = new Set([
 
 /** 在工具执行入口重新验证阶段操作参数，CAS 必须来自最近一次 inspect。 */
 export const stageInteractionSchema = z.union([
+  z.object({ action: z.literal('bid_project_inspect'), query: bidProjectInspectSchema }).strict(),
   z.object({
     action: z.literal('bid_stage_inspect'),
     view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
@@ -93,6 +95,7 @@ const names = [
   'bid_pause_stage',
   'bid_resume_stage',
   'bid_set_flowchart_visual_review',
+  'bid_project_inspect',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -647,7 +650,7 @@ export function installStageInteractionTools(
             : stage === 'tender_analysis' ? names.slice(0, 1)
               : stage === 'outline_generation' ? names.slice(0, 3)
                 : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
-      const installed = [...available, ...(recoveryAvailable ? [recoveryTool] : [])]
+      const installed = [...available, 'bid_project_inspect', ...(recoveryAvailable ? [recoveryTool] : [])]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
@@ -655,10 +658,11 @@ export function installStageInteractionTools(
       try {
         if (task.status === 'waiting_user') {
           disposers.push(tools.restrict({ allow: bound?.type === 'bid.goal.bound'
-            ? ['get_goal', 'update_goal', ...(recoveryAvailable ? ['bid_stage_inspect', recoveryTool] : [])] : [] }))
+            ? ['get_goal', 'update_goal', 'bid_project_inspect', ...(recoveryAvailable ? ['bid_stage_inspect', recoveryTool] : [])]
+            : ['bid_project_inspect'] }))
         }
         for (const name of installed) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
+          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
             ? {} : { ...cas }
           const required = Object.keys(properties)
@@ -674,6 +678,16 @@ export function installStageInteractionTools(
           if (name === 'bid_stage_inspect') {
             properties.view = { type: 'string', enum: ['summary', 'task_contract_context', 'recovery'] }
             properties.reference = chapterReference
+          }
+          if (name === 'bid_project_inspect') {
+            properties.query = { type: 'object', properties: {
+              object: { type: 'string', enum: ['tender', 'outline', 'evidence', 'writing_plan', 'chapters', 'execution', 'task', 'recovery'] },
+              part: { type: 'string', enum: ['project', 'requirements', 'scoring', 'compliance'] },
+              source: { type: 'string', enum: ['committed', 'candidate'] },
+              section_ids: strings, page: { type: 'integer' }, page_size: { type: 'integer' },
+              offset: { type: 'integer' }, max_chars: { type: 'integer' },
+            }, required: ['object'], additionalProperties: false }
+            required.push('query')
           }
           if (name === recoveryTool) {
             parameters = { oneOf: [{ type: 'object', properties: {
@@ -789,16 +803,17 @@ export function installStageInteractionTools(
             name,
             description: name === recoveryTool ? '仅对 bid_stage_inspect(view=recovery) 返回的当前失败目标提交改进处理办法；Host 验证后异步恢复原任务。'
               : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
-                : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
-                  : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
-                    : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                      : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                        : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                          : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
-                            : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
-                              : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                                : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                                  : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
+                  : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
+                    : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
+                      : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
+                        : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                          : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                            : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
+                              : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
+                                : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                                  : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                                    : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
@@ -827,7 +842,7 @@ export function installStageInteractionTools(
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       if (claimState.get(subject)?.goalRound
-        && !['get_goal', 'update_goal', 'bid_stage_inspect', recoveryTool].includes(exec.name)) return 'BID_GOAL_RECOVERY_TOOL_REQUIRED'
+        && !['get_goal', 'update_goal', 'bid_stage_inspect', 'bid_project_inspect', recoveryTool].includes(exec.name)) return 'BID_GOAL_RECOVERY_TOOL_REQUIRED'
       const args = typeof exec.arguments === 'object' && exec.arguments !== null
         ? exec.arguments as Record<string, unknown> : undefined
       if (claimState.get(subject)?.goalRound && exec.name === 'bid_stage_inspect'

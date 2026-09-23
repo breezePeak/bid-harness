@@ -90,6 +90,7 @@ import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
+import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
   createNativeVisioExport,
@@ -377,6 +378,17 @@ export { parseChapterWritingCompletionState } from './chapter-writing-completion
 export type { ChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
+export {
+  bidCapabilityInputSchema, bidCapabilityResultSchema, bidCapabilityScopeSchema,
+  bidCapabilityStepSchema, bidCapabilityStepScopeSchema, bidCapabilityTaskSchema,
+} from './bid-capability-contract.ts'
+export type {
+  BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityId, BidCapabilityResult,
+  BidCapabilityScope, BidCapabilityStepScope,
+} from './bid-capability-contract.ts'
+export { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult, verifyCapabilityTaskScope } from './bid-capability-registry.ts'
+export { bidProjectInspectSchema, inspectBidProject } from './bid-project-inspect.ts'
+export type { BidProjectInspectRequest, BidProjectInspectResult } from './bid-project-inspect.ts'
 export {
   REVISION_QUEUE_PATH,
   REVISION_QUEUE_SCHEMA_VERSION,
@@ -3097,6 +3109,10 @@ export class BidHostRuntime extends TypertRemoteService {
     const request = stageInteractionSchema.parse(input)
     if (!isBidMainSession(session)) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
     const key = projectKey(session)
+    if (request.action === 'bid_project_inspect') {
+      const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+      return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
+    }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
     if (request.action === 'bid_recover_task') {
