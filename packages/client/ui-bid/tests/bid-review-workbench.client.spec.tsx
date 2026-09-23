@@ -40,7 +40,7 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
     actions: store.actions,
     sessionId: 'bid' as SessionId,
     useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
-    useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'running' } }),
+    useProjection: () => ({ allowedActions: [], task: { stage: 'chapter_writing', status: 'running' } }),
     renderSlot: (name: string) => <div data-slot={name} />,
     getWorkbench: async () => workbench,
     getChapter: async () => chapter,
@@ -203,7 +203,7 @@ describe('BidReviewWorkbench', () => {
     const markdown = '# 1.1 实施方案\n\n保留首段。\n\n修改第一段。\n\n修改第二段。\n\n保留末段。\n'
     render(<BidReviewWorkbench {...props({
       actions: store.actions, getChapter: async () => ({ ...chapter, markdown }),
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('修改第一段。')
     const second = screen.getByText('修改第二段。')
@@ -236,7 +236,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it.each(['pending', 'failed', 'completed'] as const)('S5 %s 仍保留已有正文', async (status) => {
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status } }) })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], task: { stage: 'chapter_writing', status } }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
   })
   it('成功刷新后清除之前的请求错误', async () => {
@@ -429,7 +429,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       actions: store.actions, getChapter,
       getWorkbench: async () => ({ ...workbench, outline: [root, branch, { ...workbench.outline[1]!, parent_id: 'BRANCH' }] }),
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     expect(getChapter).toHaveBeenNthCalledWith(1, 'SEC-1')
@@ -496,7 +496,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('S5 失败时不渲染顶部报错横幅与重试按钮', () => {
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }) })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], task: { stage: 'chapter_writing', status: 'failed', failureReason: 'writer failed' } }) })} />)
     expect(screen.queryByText(/章节写作失败/)).toBeNull()
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
   })
@@ -505,7 +505,7 @@ describe('BidReviewWorkbench', () => {
     const openWordExport = vi.fn()
       .mockResolvedValue(undefined)
     render(<BidReviewWorkbench {...props({
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
       openWordExport,
     })} />)
 
@@ -521,7 +521,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('keeps legacy completed S6 projects in the S5 review workbench', async () => {
-    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], runtime: { stage: 'docx_export', status: 'completed' } }) })} />)
+    render(<BidReviewWorkbench {...props({ useProjection: () => ({ allowedActions: [], task: { stage: 'docx_export', status: 'completed' } }) })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
   })
 
@@ -536,7 +536,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
     const range = document.createRange()
@@ -570,7 +570,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
     const last = screen.getByText('重复段落。', { selector: 'p:nth-of-type(3)' })
@@ -600,7 +600,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
     fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
@@ -623,7 +623,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const leafButton = await screen.findByRole('button', { name: '1.1 实施方案' })
     const treeRow = leafButton.closest('div[class*="treeRow"]')!
@@ -644,7 +644,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const rootButton = await screen.findByRole('button', { name: /技术方案/ })
     const rootRow = rootButton.closest('div[class*="treeRow"]')!
@@ -657,7 +657,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
     fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
@@ -673,7 +673,7 @@ describe('BidReviewWorkbench', () => {
     const getChapter = vi.fn(async () => chapter)
     render(<BidReviewWorkbench {...props({
       addRevisionIssue, getChapter,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     expect(await screen.findByText('章节正文')).toBeTruthy()
     const callsBefore = getChapter.mock.calls.length
@@ -695,7 +695,7 @@ describe('BidReviewWorkbench', () => {
     })
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
     fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
@@ -716,7 +716,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
       actions: { setReference: vi.fn(), clearReference: vi.fn(), notifyRevisionQueueChanged, setSelectedSectionId: vi.fn() },
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
     fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
@@ -735,7 +735,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const duplicates = await screen.findAllByText('重复段落。')
     const second = duplicates[1]!
@@ -763,7 +763,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async (_req: BidAddRevisionIssueRequest) => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const title = await screen.findByRole('heading', { name: '实施方案' })
     fireEvent.contextMenu(title, { clientX: 100, clientY: 100 })
@@ -776,7 +776,7 @@ describe('BidReviewWorkbench', () => {
 
   it('addRevisionIssue 未注入时不显示"添加审批意见"菜单项且无临时按钮', async () => {
     render(<BidReviewWorkbench {...props({
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     await screen.findByText('章节正文')
     expect(screen.queryByRole('button', { name: '对本章添加审批意见' })).toBeNull()
@@ -799,7 +799,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
     const last = screen.getByText('末段内容。')
@@ -816,7 +816,7 @@ describe('BidReviewWorkbench', () => {
     const addRevisionIssue = vi.fn(async () => ({ schema_version: 1 as const, revision: 1, issues: [] }))
     render(<BidReviewWorkbench {...props({
       addRevisionIssue,
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const text = await screen.findByText('章节正文')
     window.getSelection()!.removeAllRanges()
@@ -831,7 +831,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       actions: { setReference, clearReference: vi.fn(), notifyRevisionQueueChanged: vi.fn(), setSelectedSectionId: vi.fn() },
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
     const range = document.createRange()
@@ -853,7 +853,7 @@ describe('BidReviewWorkbench', () => {
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
       addRevisionIssue: vi.fn(),
-      useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+      useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
     })} />)
     const first = await screen.findByText('首段内容。')
     const range = document.createRange()
@@ -872,7 +872,7 @@ describe('BidReviewWorkbench', () => {
   describe('批量审核修改全局唯一性保证', () => {
     it('正文详情工作台内部不挂载私有悬浮面板，由会话全局唯一渲染', async () => {
       render(<BidReviewWorkbench {...props({
-        useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+        useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
       })} />)
 
       expect(await screen.findByText('实施方案')).toBeTruthy()
@@ -981,7 +981,7 @@ describe('BidReviewWorkbench', () => {
         })
         render(<BidReviewWorkbench {...props({
           getWorkbench,
-          useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+          useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
         })} />)
         await act(async () => { await vi.advanceTimersByTimeAsync(0) })
         expect(screen.getByText('修订进度 1/8')).toBeTruthy()
@@ -1009,7 +1009,7 @@ describe('BidReviewWorkbench', () => {
         }))
         render(<BidReviewWorkbench {...props({
           getWorkbench,
-          useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+          useProjection: () => ({ allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' } }),
         })} />)
         await act(async () => { await vi.advanceTimersByTimeAsync(0) })
         const initialCalls = getWorkbench.mock.calls.length

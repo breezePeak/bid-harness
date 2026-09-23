@@ -10,7 +10,7 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
   const result = await runLoaderSmoke({
     label: 'Bid 项目接管源码装配', tempDirPrefix: 'dsh-bid-project-session-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-project-session-driver.ts', import.meta.url)),
-    configPath: fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url)),
+    configPath: fileURLToPath(new URL('../bid-project-session.cordis.snapshot.yml', import.meta.url)),
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
@@ -23,8 +23,8 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       expect(header.parentSession).toBeUndefined()
       expect(header.seedLength).toBeUndefined()
       expect(events.length).toBeGreaterThan(0)
-      expect(events.every(event => event.type === 'bid.project.resumed')).toBe(true)
-      expect(events.map(event => ({ type: event.type, data: event.data }))).toMatchInlineSnapshot(`
+      expect(events.map(event => event.type)).toEqual(['bid.project.resumed', 'bid.writing_entry.changed'])
+      expect(events.filter(event => event.type === 'bid.project.resumed').map(event => ({ type: event.type, data: event.data }))).toMatchInlineSnapshot(`
         [
           {
             "data": {
@@ -81,8 +81,8 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
         "executions": 0,
         "formatRestored": true,
         "headingNumbering": {
-          "lists": 2,
-          "paragraphs": 2,
+          "lists": 1,
+          "paragraphs": 1,
           "styles": [
             "Heading1",
             "Heading2",
@@ -97,6 +97,17 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
           "run": null,
           "stage": "docx_export",
           "status": "ready",
+        },
+        "operation": {
+          "oneId": true,
+          "projectionStatus": "completed",
+          "resultMatches": true,
+          "steps": [
+            "running:collecting",
+            "running:exporting",
+            "running:finalizing",
+            "completed:finalizing",
+          ],
         },
         "previewIsFixedSample": true,
         "task": {
@@ -114,12 +125,12 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       ],
       "parentSession": null,
       "previousMessageCount": 3,
+      "seedLength": null,
       "task": {
         "run": null,
         "stage": "evidence_mapping",
         "status": "waiting_user",
       },
-      "seedLength": null,
     }
   `)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

@@ -1,4 +1,5 @@
 import { writeInputs, writeWritingPlan, writingPlanFixture, outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile, unlink, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +27,7 @@ import type { BoundChapterCandidate, ChapterMetadata } from '../src/chapter-writ
 import type { ChapterReview } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterCandidateSha256 } from '../src/chapter-writing-review-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
+import { renderFlowchartImage } from '../src/flowchart-image.ts'
 import { validateChapterWriting } from '../src/chapter-writing-validator.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { resolveFrameworkDraftMaterials } from '../src/outline-framework.ts'
@@ -274,6 +276,7 @@ interface TestWriterCandidate {
     flowcharts?: Array<{
       key: string
       title: string
+      purpose?: string
       direction?: 'TB' | 'LR'
       nodes: Array<{ key: string; type: 'start' | 'end' | 'process' | 'decision' | 'document' | 'subprocess'; text: string }>
       edges: Array<{ from: string; to: string; label?: string }>
@@ -710,6 +713,68 @@ function fixtureAgent(
 }
 
 describe('chapter-writing executor', () => {
+  it('流程图 metadata 改变而最终 PNG 未变时只回看一次', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-same-png-')))
+    const outline = await writeInputs(workspace)
+    let current: ReturnType<typeof candidateFrom> | undefined
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      if (!request.prompt.some(block => block.type === 'image')) {
+        const candidate = candidateFrom(request)
+        if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+        current = {
+          ...candidate, markdown: `${candidate.markdown}\n\n{{flowchart:route}}`,
+          metadata: { ...candidate.metadata, flowcharts: [{
+            key: 'route', title: '执行流程', purpose: '初始说明',
+            nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+            edges: [{ from: 'start', to: 'end' }],
+          }] },
+        }
+      } else {
+        current = structuredClone(current!)
+        current.metadata.flowcharts![0]!.purpose = '已核对说明'
+      }
+      return { stopReason: 'completed', output: [], structured: current }
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(1)
+    expect(fixture.savedImages).toHaveLength(1)
+    const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8')))
+    const finalPng = (await renderFlowchartImage(metadata.flowcharts[0]!)).png
+    expect(createHash('sha256').update(finalPng).digest('hex'))
+      .toBe(createHash('sha256').update(fixture.savedImages[0]!.data).digest('hex'))
+    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
+  })
+
+  it('流程图视觉确认不占零次正文修复预算', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-zero-repair-')))
+    const outline = await writeInputs(workspace)
+    let current: ReturnType<typeof candidateFrom> | undefined
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      if (request.prompt.some(block => block.type === 'image')) {
+        return { stopReason: 'completed', output: [], structured: current }
+      }
+      const candidate = candidateFrom(request)
+      if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+      current = {
+        ...candidate, markdown: `${candidate.markdown}\n\n{{flowchart:route}}`,
+        metadata: { ...candidate.metadata, flowcharts: [{
+          key: 'route', title: '执行流程',
+          nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+          edges: [{ from: 'start', to: 'end' }],
+        }] },
+      }
+      return { stopReason: 'completed', output: [], structured: current }
+    })
+
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(1)
+  })
+
   it('把真实流程图 PNG 发回同一 Writer，修改后重新渲染并由原会话确认', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-visual-')))
     const outline = await writeInputs(workspace)
@@ -747,7 +812,7 @@ describe('chapter-writing executor', () => {
     })
 
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 2,
+      maxRepairAttempts: 0,
       maxConcurrency: 1,
     })
 
@@ -798,7 +863,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.resolveModelInfo).toHaveBeenCalledWith('test', 'vision', expect.any(AbortSignal))
   })
 
-  it('流程图持续变化时耗尽既有 Writer 修复预算并停止视觉重试', async () => {
+  it('流程图持续改变真实画面时在独立视觉轮次上限停止', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-limit-')))
     const outline = await writeInputs(workspace)
     let version = 0
@@ -824,12 +889,44 @@ describe('chapter-writing executor', () => {
     })
 
     await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 1,
+      maxRepairAttempts: 0,
       maxConcurrency: 1,
     })).rejects.toThrow('CHAPTER_FLOWCHART_VISUAL_REVIEW_LIMIT')
-    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(1)
+    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(4)
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(log.sections.find(section => section.section_id === 'SEC-1')?.attempts.at(-1)?.issues[0]?.message)
+      .toContain('不同真实渲染结果')
     expect(fixture.subagents.start.mock.calls.some(call => call[1]?.label?.startsWith('1.1'))).toBe(false)
     expect(fixture.subagents.start.mock.calls.every(call => call[1]?.label?.endsWith('- 审查'))).toBe(true)
+  })
+
+  it('skip 允许 text-only Writer 完成含流程图章节且保留正文 Reviewer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-skip-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      const candidate = candidateFrom(request)
+      if (writerSectionId(request) !== 'SEC-1') return { stopReason: 'completed', output: [], structured: candidate }
+      return { stopReason: 'completed', output: [], structured: {
+        ...candidate, markdown: `${candidate.markdown}\n\n{{flowchart:route}}`,
+        metadata: { ...candidate.metadata, flowcharts: [{
+          key: 'route', title: '执行流程',
+          nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+          edges: [{ from: 'start', to: 'end' }],
+        }] },
+      } }
+    })
+    fixture.resolveModelInfo.mockResolvedValue({ inputModalities: ['text'] })
+    const control: ChapterWritingControl = {
+      drain: () => [], pending: () => false, subscribe: () => () => {},
+      flowchartVisualReviewPolicy: () => 'skip',
+    }
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, control,
+    })
+    expect(fixture.resolveModelInfo).not.toHaveBeenCalled()
+    expect(fixture.savedImages).toHaveLength(0)
+    expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(0)
+    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
   })
 
   it('外部资质是唯一原因时跳过 Writer 修订并保留黄色关注结论', async () => {

@@ -13,6 +13,7 @@ import {
   writingEntryViewSchema,
   type WritingEntryView,
 } from './writing-entry-contract.ts'
+import { BID_DOCX_EXPORT_PROJECTION_KEY, docxExportOperationSchema, reduceDocxExportOperation, type DocxExportOperation } from './docx-export-operation.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
@@ -20,6 +21,8 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     [BID_RUNTIME_PROJECTION_KEY]: BidClientProjection
     /** Client-visible S5 writing entry view. */
     [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
+    /** Latest independent Word export. */
+    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
   }
 
   interface SessionProjectionStateMap {
@@ -27,8 +30,25 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     [BID_RUNTIME_PROJECTION_KEY]: BidTaskState
     /** Replayable S5 writing entry view derived from bid.writing_entry.changed events. */
     [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
+    /** Replayable independent Word export. */
+    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
   }
 
+}
+/**
+ * 注册可从 Session 日志恢复的独立 Word 导出投影。
+ * @param registry 持有事件驱动和客户端投递的投影注册表。
+ * @returns 注册项的释放函数。
+ */
+export function registerBidDocxExportProjection(registry: SessionProjectionRegistry): () => void {
+  return registry.register({
+    key: BID_DOCX_EXPORT_PROJECTION_KEY,
+    stateSchema: docxExportOperationSchema.nullable(),
+    init: () => null,
+    apply: reduceDocxExportOperation,
+    wire: { viewSchema: docxExportOperationSchema.nullable(), view: state => state },
+    stateVersion: 1,
+  })
 }
 
 const clientProjectionSchema = z.object({

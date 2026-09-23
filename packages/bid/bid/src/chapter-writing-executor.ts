@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { z, ZodError } from 'zod'
@@ -93,7 +94,7 @@ import {
   webMaterialIdentity,
 } from './evidence-mapping-artifacts.ts'
 import { validateFlowchartAnchors } from './flowchart.ts'
-import { renderFlowchartImage } from './flowchart-image.ts'
+import { renderFlowchartImage, type RenderedFlowchartImage } from './flowchart-image.ts'
 import { missingTableCaptionLines } from './docx-numbering.ts'
 import {
   type ModelStageExecutionOptions,
@@ -146,10 +147,17 @@ export const DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY = 3
 /** Maximum whole-document repair rounds after chapter-level Writer/Reviewer attempts. */
 export const DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS = 3
 
+/** Maximum distinct rendered flowchart images shown during one visual confirmation. */
+export const DEFAULT_CHAPTER_FLOWCHART_VISUAL_REVIEW_ROUNDS = 4
+
+/** Visual confirmation policy for the current S5 work. */
+export type FlowchartVisualReviewPolicy = 'required' | 'skip'
+
 /** A validated Host command applied by the currently running S5 scheduler. */
 export type ChapterWritingCommand =
   | { readonly kind: 'writing_plan'; readonly plan: WritingPlan; readonly commandId?: string }
   | { readonly kind: 'revision'; readonly request: BidChapterRevisionRequest; readonly commandId?: string }
+  | { readonly kind: 'flowchart_visual_review_policy'; readonly policy: FlowchartVisualReviewPolicy; readonly commandId?: string }
 
 /** Operation-local command channel; the Host remains the sole producer. */
 export interface ChapterWritingControl {
@@ -161,6 +169,8 @@ export interface ChapterWritingControl {
   subscribe(listener: () => void): () => void
   /** Atomically save drained command effects and mark those commands applied. */
   commit?(commands: readonly ChapterWritingCommand[], write: (lease: BidCommitLease) => Promise<void>): Promise<void>
+  /** Read the latest durable visual policy, including applied commands. */
+  flowchartVisualReviewPolicy?(): FlowchartVisualReviewPolicy
 }
 
 /** Host-owned S5 repair and concurrency limits. */
@@ -542,14 +552,25 @@ export function renderChapterSubagentRepairTask(
   ].join('\n')
 }
 
-function flowchartSignature(candidate: AcceptedChapterCandidate): string {
-  return JSON.stringify(candidate.metadata.flowcharts)
+function hashRenderedFlowchartImages(rendered: readonly RenderedFlowchartImage[]): string {
+  const hash = createHash('sha256')
+  for (const image of rendered) {
+    const length = Buffer.allocUnsafe(8)
+    length.writeBigUInt64BE(BigInt(image.png.length))
+    hash.update(length).update(image.png)
+  }
+  return `sha256:${hash.digest('hex')}`
+}
+
+async function renderChapterFlowchartImages(candidate: AcceptedChapterCandidate): Promise<RenderedFlowchartImage[]> {
+  return Promise.all(candidate.metadata.flowcharts.map(flowchart => renderFlowchartImage(flowchart)))
 }
 
 async function renderChapterFlowchartVisualFollowup(
   agent: Agent,
   candidate: AcceptedChapterCandidate,
   writerCandidate: unknown,
+  rendered: readonly RenderedFlowchartImage[],
 ): Promise<ContentBlock[]> {
   const attachments = agent.ctx.get('attachments')
   if (attachments === undefined) {
@@ -561,7 +582,6 @@ async function renderChapterFlowchartVisualFollowup(
   if (candidate.metadata.flowcharts.length > attachments.imageLimits.maxImagesPerMessage) {
     throw new Error(`S5 流程图视觉复核失败：本章 ${String(candidate.metadata.flowcharts.length)} 张流程图超过单消息图片上限 ${String(attachments.imageLimits.maxImagesPerMessage)}。`)
   }
-  const rendered = await Promise.all(candidate.metadata.flowcharts.map(flowchart => renderFlowchartImage(flowchart)))
   const refs = await attachments.saveImages(rendered.map((image, index) => ({
     data: new Uint8Array(image.png),
     mediaType: 'image/png' as const,
@@ -2185,6 +2205,7 @@ async function runChapterWriting(
         invalidateSection(request.reference.section_id)
         continue
       }
+      if (command.kind === 'flowchart_visual_review_policy') continue
       const next = parseWritingPlan(command.plan)
       if (next.confirmed_outline_sha256 !== outlineHash) throw new Error('chapter-writing-plan-outline-mismatch')
       const issues = validateWritingPlan(next, outline)
@@ -2537,7 +2558,8 @@ async function runChapterWriting(
         }
       }
       let pendingVisualPrompt: ContentBlock[] | undefined
-      let renderedFlowchartSignature: string | undefined
+      let presentedRenderedHash: string | undefined
+      let visualReviewRounds = 0
       const preserved = effectiveRevision === undefined && batchTask === undefined ? checkpoint?.drafts.get(sectionId) : undefined
       let firstAttempt = 0
       if (preserved !== undefined) {
@@ -2578,6 +2600,11 @@ async function runChapterWriting(
             : effectiveRevision !== undefined
               ? `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
               : contextPrompt
+        if (pendingVisualPrompt !== undefined && options.control?.flowchartVisualReviewPolicy?.() === 'skip') {
+          pendingVisualPrompt = undefined
+          presentedRenderedHash = undefined
+          visualReviewRounds = 0
+        }
         const visualPrompt = pendingVisualPrompt
         pendingVisualPrompt = undefined
         const prompt = visualPrompt ?? (attempt === 0
@@ -2683,36 +2710,40 @@ async function runChapterWriting(
             }
           }
           if (candidate !== undefined && issues.length === 0 && candidate.metadata.flowcharts.length > 0) {
-            const signature = flowchartSignature(candidate)
-            if (signature !== renderedFlowchartSignature) {
-              if (attempt === maxWriterAttempts - 1) {
-                issues.push({
-                  code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_LIMIT',
-                  message: `流程图在 ${String(maxWriterAttempts)} 次 Writer 尝试内仍未完成对最终真实渲染图的视觉确认。`,
-                  path: 'metadata.flowcharts',
-                })
-                stopAfterVisualIssue = true
-              } else {
-                rejectedCandidate = projectChapterWriterCandidate(candidate, references)
-                try {
-                  await run.assertImageInput()
-                  pendingVisualPrompt = await renderChapterFlowchartVisualFollowup(agent, candidate, rejectedCandidate)
-                  renderedFlowchartSignature = signature
+            if ((options.control?.flowchartVisualReviewPolicy?.() ?? 'required') === 'required') {
+              try {
+                const rendered = await renderChapterFlowchartImages(candidate)
+                const renderedHash = hashRenderedFlowchartImages(rendered)
+                if (renderedHash === presentedRenderedHash) {
+                  visualReviewRounds = 0
+                } else if (visualReviewRounds >= DEFAULT_CHAPTER_FLOWCHART_VISUAL_REVIEW_ROUNDS) {
                   issues.push({
-                    code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_REQUIRED',
-                    message: 'Host 已把真实流程图 PNG 发回同一 Writer，等待视觉确认后的完整候选。',
-                    path: 'metadata.flowcharts',
-                  })
-                } catch (error: unknown) {
-                  issues.push({
-                    code: error instanceof ChapterWriterImageInputError
-                      ? 'CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED'
-                      : 'CHAPTER_FLOWCHART_VISUAL_REVIEW_UNAVAILABLE',
-                    message: error instanceof Error ? error.message : 'S5 流程图视觉复核不可用。',
+                    code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_LIMIT',
+                    message: `流程图在 ${String(DEFAULT_CHAPTER_FLOWCHART_VISUAL_REVIEW_ROUNDS)} 次不同真实渲染结果复核后仍未稳定。`,
                     path: 'metadata.flowcharts',
                   })
                   stopAfterVisualIssue = true
+                } else {
+                  rejectedCandidate = projectChapterWriterCandidate(candidate, references)
+                  await run.assertImageInput()
+                  pendingVisualPrompt = await renderChapterFlowchartVisualFollowup(agent, candidate, rejectedCandidate, rendered)
+                  presentedRenderedHash = renderedHash
+                  visualReviewRounds += 1
+                  issues.push({
+                    code: 'CHAPTER_FLOWCHART_VISUAL_REVIEW_REQUIRED',
+                    message: 'Host 已把当前真实流程图 PNG 发回同一 Writer，等待视觉确认后的完整候选。',
+                    path: 'metadata.flowcharts',
+                  })
                 }
+              } catch (error: unknown) {
+                issues.push({
+                  code: error instanceof ChapterWriterImageInputError
+                    ? 'CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED'
+                    : 'CHAPTER_FLOWCHART_VISUAL_REVIEW_UNAVAILABLE',
+                  message: error instanceof Error ? error.message : 'S5 流程图视觉复核不可用。',
+                  path: 'metadata.flowcharts',
+                })
+                stopAfterVisualIssue = true
               }
             }
           }
@@ -2809,6 +2840,10 @@ async function runChapterWriting(
         if (stopAfterReview) break
         if (retryInfrastructure) {
           infrastructureRetries += 1
+          continue
+        }
+        if (pendingVisualPrompt !== undefined) {
+          infrastructureRetries = 0
           continue
         }
         attempt += 1

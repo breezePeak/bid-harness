@@ -92,10 +92,13 @@ function fixture(conflicts: FormatConflict[] = []) {
     }),
     generate: vi.fn(async () => ({ path: 'output/bid.docx' })),
     download: vi.fn(async () => {}),
+    showTask: vi.fn(),
   }
   const props = {
     sessionId: 'bid', useSessions: (selector: (state: unknown) => unknown) => selector({ byId: { bid: { agentPreset: 'bid' } } }),
-    useProjection: () => ({ allowedActions: ['export_docx'], runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    useProjection: (key: string) => key === 'bid.docx_export' ? null : {
+      allowedActions: ['export_docx'], task: { stage: 'chapter_writing', status: 'completed' },
+    },
     ...actions,
   } as ConvViewProps & BidWordExportInjected
   return { props, actions, getView: () => view, getLibrary: () => library, templateId }
@@ -260,9 +263,44 @@ describe('Word 导出页面', () => {
     render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
-    await screen.findByText('Word 导出完成')
+    await waitFor(() => { expect(actions.download).toHaveBeenCalledOnce() })
     expect(actions.generate).toHaveBeenCalledOnce()
     expect(actions.download).toHaveBeenCalledOnce()
+  })
+
+  it('恢复导出中投影时只查看同一任务，卸载后不触发自动下载', async () => {
+    const { props, actions, templateId } = fixture()
+    const running = { operationId: 'export-1', templateId, startedAt: 1, updatedAt: 2,
+      status: 'running', phase: 'exporting', message: '正在生成 Word' }
+    const view = render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? running : props.useProjection(key as never)}/> )
+    await screen.findByTitle('Word 效果预览')
+    fireEvent.click(screen.getByRole('button', { name: '导出中 · 查看任务' }))
+    expect(actions.showTask).toHaveBeenCalledOnce()
+    expect(actions.generate).not.toHaveBeenCalled()
+    view.unmount()
+
+    let complete!: (value: { path: string }) => void
+    vi.mocked(actions.generate).mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+    const next = render(<BidWordExport {...props}/> )
+    await screen.findByTitle('Word 效果预览')
+    fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
+    expect(actions.generate).toHaveBeenCalledOnce()
+    next.unmount()
+    complete({ path: 'output/bid.docx' })
+    await Promise.resolve()
+    expect(actions.download).not.toHaveBeenCalled()
+  })
+
+  it('恢复完成结果时下载绑定原导出模板', async () => {
+    const { props, actions, templateId } = fixture()
+    const completed = { operationId: 'export-1', templateId, startedAt: 1, updatedAt: 2,
+      status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx', warnings: [] }
+    render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? completed : props.useProjection(key as never)}/> )
+    await screen.findByTitle('Word 效果预览')
+    fireEvent.click(screen.getByRole('radio', { name: /系统默认模板/u }))
+    await waitFor(() => { expect(actions.getFormat).toHaveBeenLastCalledWith(null) })
+    fireEvent.click(screen.getByRole('button', { name: '下载本次 Word' }))
+    expect(actions.download).toHaveBeenLastCalledWith(templateId)
   })
 
   it('切换导出模板时把同一模板 ID 传给预览、测算和导出且不改变 S5 基准', async () => {
@@ -286,7 +324,7 @@ describe('Word 导出页面', () => {
       expect(actions.estimatePages).toHaveBeenCalledWith(secondId)
     })
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
-    await screen.findByText('Word 导出完成')
+    await waitFor(() => { expect(actions.download).toHaveBeenCalledOnce() })
     expect(actions.generate).toHaveBeenLastCalledWith(secondId)
     expect(actions.download).toHaveBeenLastCalledWith(secondId)
     expect(actions.setEstimateTemplate).not.toHaveBeenCalled()
@@ -297,18 +335,16 @@ describe('Word 导出页面', () => {
     const { props, actions } = fixture()
     const message = 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。'
     vi.mocked(actions.generate).mockResolvedValue({ path: 'output/bid.docx', warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT', message }] })
-    render(<BidWordExport {...props} useProjection={() => ({
-      workflow: { stage: 'chapter_writing', gate: 'ready' },
-      run: null,
+    render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? null : ({
       allowedActions: ['send_message', 'export_docx'],
-      runtime: { stage: 'chapter_writing', status: 'running' },
+      task: { stage: 'chapter_writing', status: 'running' },
     })}/>)
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByRole('status').textContent).toContain('按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。')
     const button = screen.getByRole('button', { name: '导出 Word' })
     expect(button).toHaveProperty('disabled', false)
     fireEvent.click(button)
-    await screen.findByText(message)
+    await waitFor(() => { expect(actions.download).toHaveBeenCalledOnce() })
     expect(actions.generate).toHaveBeenCalledOnce()
     expect(actions.download).toHaveBeenCalledOnce()
   })
@@ -403,7 +439,7 @@ describe('Word 导出页面', () => {
     const exportButton = screen.getByRole('button', { name: '导出 Word' })
     expect(exportButton).toHaveProperty('disabled', false)
     fireEvent.click(exportButton)
-    await screen.findByText('Word 导出完成')
+    await waitFor(() => { expect(actions.download).toHaveBeenCalledOnce() })
     expect(actions.generate).toHaveBeenCalledOnce()
   })
 
@@ -441,12 +477,17 @@ describe('Word 导出页面', () => {
       path: 'output/bid.docx',
       warnings: [{ code: 'DOCX_EXPORT_MODE_FALLBACK', message: downgradeMsg }],
     })
-    render(<BidWordExport {...props}/>)
+    const rendered = render(<BidWordExport {...props}/>)
     await screen.findByTitle('Word 效果预览')
 
     const exportButton = screen.getByRole('button', { name: '导出 Word' })
     fireEvent.click(exportButton)
 
+    await waitFor(() => { expect(actions.download).toHaveBeenCalledOnce() })
+    const completed = { operationId: 'export-1', templateId: 'a'.repeat(64), startedAt: 1, updatedAt: 2,
+      status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx',
+      warnings: [{ code: 'DOCX_EXPORT_MODE_FALLBACK', message: downgradeMsg }] }
+    rendered.rerender(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? completed : props.useProjection(key as never)}/> )
     const feedback = await screen.findByText(downgradeMsg)
     expect(feedback.closest('header')).not.toBeNull()
     expect(feedback.className).toContain('exportFeedbackSuccess')
@@ -462,8 +503,7 @@ describe('Word 导出页面', () => {
     fireEvent.click(exportButton)
 
     const feedback = await screen.findByText('生成 Word 异常：IO 错误')
-    expect(feedback.closest('header')).not.toBeNull()
-    expect(feedback.className).toContain('exportFeedbackError')
+    expect(feedback.getAttribute('role')).toBe('alert')
   })
 
   it('导出校验失败时展示首个正文问题及其错误码', async () => {
@@ -480,8 +520,7 @@ describe('Word 导出页面', () => {
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
 
     const feedback = await screen.findByText('技术偏离表必须使用六列标准表头，请修订正文后重新导出 Word。 (DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID)')
-    expect(feedback.closest('header')).not.toBeNull()
-    expect(feedback.className).toContain('exportFeedbackError')
+    expect(feedback.getAttribute('role')).toBe('alert')
     expect(screen.queryByText('当前已保存正文无法导出，请检查正文完整性。 (BID_DOCX_EXPORT_FAILED)')).toBeNull()
   })
 })

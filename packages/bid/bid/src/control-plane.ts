@@ -91,6 +91,8 @@ export type { TenderAnalysisConfirmationView, TenderAnalysisEditOperation } from
 export type { TenderProjectArtifact, TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 export { BID_WRITING_ENTRY_PROJECTION_KEY } from './writing-entry-contract.ts'
 export type { WritingEntryView, WritingEntryIntent, WritingEntryExpected, WritingEntryStop } from './writing-entry-contract.ts'
+export { BID_DOCX_EXPORT_PROJECTION_KEY } from './docx-export-operation.ts'
+export type { DocxExportOperation } from './docx-export-operation.ts'
 export type {
   BidRevisionIssueStatus,
   BidRevisionIssueReference,

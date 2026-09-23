@@ -15,6 +15,7 @@ import type {
 } from './control-plane-contract.ts'
 import type { LegacyBidControlState, LegacyBidRuntimeState } from './runtime-state.ts'
 import type { WritingEntryView } from './writing-entry-contract.ts'
+import type { DocxExportOperation } from './docx-export-operation.ts'
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
@@ -38,6 +39,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.user_confirmation.required',
   'bid.user_confirmation.received',
   'bid.writing_entry.changed',
+  'bid.docx_export.changed',
   'bid.schema.warning',
 ] as const
 
@@ -184,6 +186,13 @@ declare module '@deepseek-ai/dsh-session/types' {
       | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
     /** S5 写作入口状态变更；广播安全摘要，不包含答案原文。 */
     'bid.writing_entry.changed': { view: WritingEntryView }
+    /**
+     * Independent Word export milestone; contains only bounded task metadata.
+     * @mode emit
+     * @param operation Latest export state, separate from the main Bid task.
+     * @dshScopeScan unsupported
+     */
+    'bid.docx_export.changed': { operation: DocxExportOperation }
     /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
     'bid.schema.warning': BidSchemaWarning
   }

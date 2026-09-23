@@ -29,9 +29,11 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ## Control plane types
 
+独立 Word 导出以 `bid.docx_export.changed` 记录有界里程碑，并由同名 Session 投影恢复最新任务；运行、完成和失败属于导出记录，不改变 `bid.runtime` 主任务。导出与 S5 可并行，同一会话的重复请求复用执行句柄；宿主重启后，失去句柄的运行态在详情读取时结算为中断失败。
+
 本包导出固定的 `BidStage`、`BidTaskStatus` 和唯一判别联合 `BidTaskState`。只有 `running` 与 `suspended` 分支携带 Run 执行数据；browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 直接向客户端暴露同一状态结构。
 
-The seven `bid.*` records declaration-merge into the existing `@deepseek-ai/dsh-session` `SessionEventMap` and remain log-only. They record stage transitions, workspace artifact references, failure reasons, and user confirmations without storing document or generated-content bodies.
+`bid.*` 事件通过声明合并进入 `@deepseek-ai/dsh-session` 的 `SessionEventMap`，只保存阶段变化、产物引用、失败、用户确认及独立导出的有界任务信息，不保存正文或生成内容。
 
 ## Control plane runtime
 
@@ -50,6 +52,8 @@ The browser sends one ordered, same-origin binary S1 request whose body contains
 S2 的 Main Agent 只用 `grep`、`read`、按需 `view_pdf_page` 和一个 `submit_tender_analysis` 私有工具提取 Project、Requirements、Scoring 与 Compliance 语义；模型一次提交四个完整数组及其 `T1`、`chunk_*`、`anchor_text` 来源，不提交业务 ID、revision 或正式 Artifact 字段。Host 从真实 chunk 正文生成 `raw_text`、文件 ID、路径和行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分大项保留完整规则且不包含响应点字段。S3 把 Host 读取的 Scoring 直接注入一个无文件工具的 Child，通过结构化输出生成响应点并在同轮自检；Host 校验 Schema、评分归属、非空性和连续顺序后写入 Candidate，再分配稳定 `RP-*` 身份。S3 适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
 S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。Writer 能修复的 `required` 失败进入有界定向修订，`preferred` 失败和外部资料缺口只保留在报告中。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
+
+S5 流程图默认由原 Writer 查看最终渲染 PNG；只有真实画面变化才再次回看，最多展示四次不同画面，这些轮次不占正文修复预算。用户可在 S5 运行或挂起时通过 `bid_set_flowchart_visual_review(policy="skip" | "required")` 设置当前 work 的后续视觉检查策略，命令保存在 `runs/<workId>/commands.json`，恢复原 Run 后继续生效。`skip` 不请求图片输入，仍执行流程图结构、正文锚点和 Reviewer 校验；新 work 默认 `required`。
 
 Word 模板上传、模板库选择、格式确认、独立格式建议和导出等写操作按项目互斥，同项目各会话均可操作，与 S1—S5 的启动和执行并行；列表、预览和页数测算使用只读快照。S6 当前导出模板只是本次预览、测算和导出的显式参数，不会隐式改写 S5 页数基准；“设为页数基准模板”是独立操作。导出不取得阶段锁、不写阶段检查点；阶段重置会删除章节和输出，因此与 Word 写入双向互斥。每次导出在同一发布事务登记 DOCX、Markdown 快照和流程图；自定义输出目录的阶段重置只删除这些已登记的项目文件。导出仅从确认目录与正文文件取内容，不依赖章节 Manifest、执行记录或审核报告，不在导出阶段重新审查正文。读取期间目录或正文变化时拒绝本次快照；正文及父节点概述均缺失时拒绝生成空文档。输出使用带时间标识的 Markdown 与 DOCX 文件，保留阶段状态及审核详情。
 

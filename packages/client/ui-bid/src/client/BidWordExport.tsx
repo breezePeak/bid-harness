@@ -1,6 +1,7 @@
 /** 项目 Word 模板选择、独立冲突确认、分页预估和导出页。 */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { BID_DOCX_EXPORT_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type {
   BidDocxExportResult,
   BidPageEstimate,
@@ -44,6 +45,7 @@ export interface BidWordExportInjected {
   setEstimateTemplate: (templateId: DocxTemplateId | null, revision: number) => Promise<DocxTemplateLibraryView>
   generate: (templateId: DocxTemplateId | null) => Promise<Extract<BidDocxExportResult, { ok: true }>['value']>
   download: (templateId: DocxTemplateId | null) => Promise<void>
+  showTask: () => void
 }
 
 const displayValue = (value: FormatValue): string => typeof value === 'boolean' ? value ? '是' : '否' : String(value)
@@ -65,12 +67,15 @@ const exportErrorMessage = (reason: unknown): string => {
 /** 项目级模板库、冲突确认和样式预览。 */
 export function BidWordExport({
   sessionId, useSessions, useProjection, getLibrary, getFormat, saveFormat,
-  uploadTemplate, preview, estimatePages, setEstimateTemplate: _setEstimateTemplate, generate, download,
+  uploadTemplate, preview, estimatePages, setEstimateTemplate: _setEstimateTemplate, generate, download, showTask,
 }: ConvViewProps & BidWordExportInjected) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
+  const docxExport = useProjection(BID_DOCX_EXPORT_PROJECTION_KEY)
   const [library, setLibrary] = useState<DocxTemplateLibraryView | null>(null)
   const [selectedId, setSelectedId] = useState<DocxTemplateId | null>(null)
+  const selectedIdRef = useRef<DocxTemplateId | null>(null)
+  selectedIdRef.current = selectedId
   const [view, setView] = useState<DocxFormatView | null>(null)
   const [estimates, setEstimates] = useState<ReadonlyMap<string, BidPageEstimate>>(() => new Map())
   const [previewHtml, setPreviewHtml] = useState('')
@@ -82,7 +87,13 @@ export function BidWordExport({
   const [formatDraft, setFormatDraft] = useState<FormatValues>({})
   const [savingFormat, setSavingFormat] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [exportFeedback, setExportFeedback] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
+  const mounted = useRef(true)
+  const isMounted = (): boolean => mounted.current
+  const submitting = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   const editFormatButton = useRef<HTMLButtonElement | null>(null)
   const ready = projection?.allowedActions.includes('export_docx') ?? (projection?.task.status === 'completed' && ['chapter_writing',
     'docx_export'].includes(projection.task.stage))
@@ -184,38 +195,58 @@ export function BidWordExport({
     <header className={css.header}>
       <div className={css.headerTitleRow}>
         <strong>导出 Word</strong>
-        {exportFeedback && (
+        {docxExport?.status === 'completed' && (
           <span
             role="status"
-            className={exportFeedback.status === 'success' ? css.exportFeedbackSuccess : css.exportFeedbackError}
+            className={css.exportFeedbackSuccess}
           >
-            {exportFeedback.text}
+            {docxExport.warnings.map(warning => warning.message).join('；') || docxExport.message}
+          </span>
+        )}
+        {docxExport?.status === 'failed' && (
+          <span role="alert" className={css.exportFeedbackError}>
+            {docxExport.error}
           </span>
         )}
       </div>
-      <Button variant="primary" size="sm" disabled={!ready || !view || !formatVisible || Boolean(busy) || uploading} onClick={() => {
+      <Button variant="primary" size="sm" disabled={docxExport?.status !== 'running' && (!ready || !view || !formatVisible || Boolean(busy) || uploading)} onClick={() => {
+        if (docxExport?.status === 'running') { showTask(); return }
+        if (submitting.current) return
         if (unresolved.length) {
           const message = `当前模板仍有 ${String(unresolved.length)} 项格式差异，请先确认或修改。`
           setError(message)
-          setExportFeedback({ status: 'error', text: message })
           editFormatButton.current?.focus()
           return
         }
-        setExportFeedback(null)
-        perform('正在导出 Word…', async () => {
+        const templateId = selectedId
+        submitting.current = true
+        setError('')
+        void (async () => {
           try {
-            const result = await generate(selectedId)
-            await download(selectedId)
-            setView(await getFormat(selectedId))
-            const message = result.warnings?.map(warning => warning.message).join('；') || 'Word 导出完成'
-            setStatus(message)
-            setExportFeedback({ status: 'success', text: message })
+            await generate(templateId)
+            if (!isMounted()) return
+            await download(templateId)
+            if (!isMounted()) return
+            const next = await getFormat(templateId)
+            if (isMounted() && selectedIdRef.current === templateId) setView(next)
           } catch (reason: unknown) {
-            const message = exportErrorMessage(reason)
-            setExportFeedback({ status: 'error', text: message })
+            if (isMounted()) setError(exportErrorMessage(reason))
+          } finally {
+            submitting.current = false
           }
+        })()
+      }}>{docxExport?.status === 'running' ? '导出中 · 查看任务' : '导出 Word'}</Button>
+      {docxExport?.status === 'completed' && <Button size="sm" onClick={() => {
+        void download(docxExport.templateId).catch((reason: unknown) => {
+          if (mounted.current) setError(exportErrorMessage(reason))
         })
-      }}>导出 Word</Button>
+      }}>下载本次 Word</Button>}
+      {docxExport?.status !== 'completed' && view?.state.lastExport && <Button size="sm" onClick={() => {
+        const templateId = selectedId
+        void download(templateId).catch((reason: unknown) => {
+          if (mounted.current) setError(exportErrorMessage(reason))
+        })
+      }}>下载上次 Word</Button>}
     </header>
     <div className={css.columns}>
       <div className={css.left}>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
-import { applyOutlineEdits, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_DOCX_EXPORT_PROJECTION_KEY, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, BidTaskStatus, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -27,7 +27,7 @@ import { TenderAnalysisReview } from './TenderAnalysisReview.tsx'
 import { BidRevisionFloatingPanel } from './BidRevisionFloatingPanel.tsx'
 import { createBidConfirmationModeStore, type BidConfirmationMode } from './confirmation-mode.ts'
 import { isBidMainSessionSummary } from './session-authority.ts'
-import { buildBidStagePlan } from './bid-stage-plan.ts'
+import { buildBidStagePlan, buildDocxExportPlan } from './bid-stage-plan.ts'
 import css from './BidStagePanel.module.css'
 
 /** Full props for the Bid input-dock entry. */
@@ -373,6 +373,7 @@ export function BidStagePanel({
   const mainAgentRunning = sessionSummary?.running === true
   const projection = useProjection(BID_RUNTIME_PROJECTION_KEY)
   const writingEntry = useProjection(BID_WRITING_ENTRY_PROJECTION_KEY)
+  const docxExport = useProjection(BID_DOCX_EXPORT_PROJECTION_KEY)
   const [selectedFiles, setSelectedFiles] = useState<readonly SelectedFile[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate | null>(null)
   const [docxLibrary, setDocxLibrary] = useState<Awaited<ReturnType<typeof getDocxLibrary>> | null>(null)
@@ -611,9 +612,9 @@ export function BidStagePanel({
 
   useEffect(() => {
     setDetailsAvailable(null, false, canConfirmAnalysis)
-    reviewReady.current = null
     return () => { setDetailsAvailable(null) }
   }, [sessionId, canConfirmAnalysis, setDetailsAvailable])
+  useEffect(() => { reviewReady.current = null }, [sessionId, canConfirmAnalysis])
 
   useEffect(() => {
     if (reviewStateKey === null) {
@@ -917,7 +918,7 @@ export function BidStagePanel({
   const dotState = progressSyncFailed
     ? 'warning'
     : statusDot(projection.task.status)
-  const displayStage = projection.task.stage === 'docx_export' ? 'chapter_writing' : projection.task.stage
+  const displayStage = projection.task.stage
   const mappingActivelyRunning = projection.task.status === 'running' && mappingReadState === 'ready'
   const mappingRunningLabel = projection.task.status === 'suspended'
     ? 'mapping.tasks.interrupted'
@@ -1106,6 +1107,20 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
+  const exportPlan = docxExport !== null && docxExport !== undefined ? (
+    <div>
+      <PlanListPanel
+        items={buildDocxExportPlan(docxExport, t)}
+        running={docxExport.status === 'running'}
+        labels={{ ...planLabels, title: 'S6 · 导出 Word' }}
+        testId="bid-docx-export-plan"
+      />
+      <p role={docxExport.status === 'failed' ? 'alert' : 'status'} className={css.agentStatus}>
+        {docxExport.status === 'failed' ? docxExport.error : docxExport.message}
+        {docxExport.status === 'failed' && <Button size="sm" onClick={() => { selectReviewView('bid-word-export') }}>重试导出</Button>}
+      </p>
+    </div>
+  ) : null
   const mappingSyncNotice = mappingProgressObservable && mappingReadState === 'stale' ? (
     <p className={css.agentStatus} role="status">
       {t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')}
@@ -1113,6 +1128,7 @@ export function BidStagePanel({
   ) : null
   if (projection.task.status === 'running') return <>
     {runPlan}
+    {exportPlan}
     {mappingSyncNotice}
     {floatingRevision}
   </>
@@ -1123,7 +1139,7 @@ export function BidStagePanel({
   const stagePanel = (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
-        <div className={css.statusRow}>
+        {!(projection.task.status === 'completed' && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')) && <div className={css.statusRow}>
           {dotState === undefined
             ? <IconChecklistOutline14 className={css.lead} />
             : <StateDot state={dotState} />}
@@ -1159,7 +1175,7 @@ export function BidStagePanel({
               ? t('status.sync_unavailable')
               : t(statusKey(projection.task.status))}
           </span>
-        </div>
+        </div>}
 
         {mappingSyncNotice}
 
@@ -1568,5 +1584,5 @@ export function BidStagePanel({
       {floatingRevision}
     </section>
   )
-  return <>{runPlan}{stagePanel}</>
+  return <>{runPlan}{exportPlan}{stagePanel}</>
 }

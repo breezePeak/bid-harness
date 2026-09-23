@@ -64,6 +64,7 @@ import {
   executeChapterWriting,
   type ChapterWritingCommand,
   type ChapterWritingControl,
+  type FlowchartVisualReviewPolicy,
 } from './chapter-writing-executor.ts'
 import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
@@ -152,7 +153,8 @@ import { parseScoringResponsePointCatalog } from './scoring-response-point-artif
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type StageSchedulerControl } from './model-stage-repair.ts'
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
-import { registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
+import { registerBidDocxExportProjection, registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
+import { reduceDocxExportOperation, type DocxExportOperation } from './docx-export-operation.ts'
 import { BID_INITIAL_TASK_STATE, buildBidStageTask, getBidClientProjection, getBidStagePolicy, reduceBidTaskState, suspendForHostRestart } from './runtime-state.ts'
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { sanitizeBidErrorText, summarizeBidValidationIssues } from './safe-error.ts'
@@ -400,6 +402,7 @@ export type {
   UpdateRevisionIssueInput,
 } from './chapter-revision-queue.ts'
 export {
+  DEFAULT_CHAPTER_FLOWCHART_VISUAL_REVIEW_ROUNDS,
   DEFAULT_CHAPTER_WRITING_COMPLETION_REPAIR_ROUNDS,
   DEFAULT_CHAPTER_WRITING_MAX_CONCURRENCY,
   buildChapterWorklist,
@@ -412,7 +415,7 @@ export {
   renderChapterSubagentTask,
   validateChapterCandidate,
 } from './chapter-writing-executor.ts'
-export type { ChapterWritingExecutionOptions } from './chapter-writing-executor.ts'
+export type { ChapterWritingExecutionOptions, FlowchartVisualReviewPolicy } from './chapter-writing-executor.ts'
 export { validateChapterWriting } from './chapter-writing-validator.ts'
 export { TECHNICAL_DEVIATION_HEADERS, parseTechnicalDeviationTable, validateTechnicalDeviationTable } from './technical-deviation-table.ts'
 export {
@@ -438,7 +441,7 @@ export {
   WORD_FINALIZER_UNAVAILABLE,
   type WordDocumentFinalizer,
 } from './native-word.ts'
-export { registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
+export { registerBidDocxExportProjection, registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
 export * from './writing-entry-contract.ts'
 export * from './writing-entry-state.ts'
 export { bidProjectTaskState, readBidProjectState, writeBidProjectState, checkpointBidProjectState } from './project-state.ts'
@@ -1028,6 +1031,15 @@ class HostChapterWritingControl implements ChapterWritingControl {
     return this.commands.splice(0)
   }
 
+  flowchartVisualReviewPolicy(): FlowchartVisualReviewPolicy {
+    for (let index = this.records.length - 1; index >= 0; index -= 1) {
+      const command = this.records[index]?.command as ChapterWritingCommand | undefined
+      if (command?.kind === 'flowchart_visual_review_policy'
+        && (command.policy === 'required' || command.policy === 'skip')) return command.policy
+    }
+    return 'required'
+  }
+
   pending(): boolean {
     return this.commands.length > 0
   }
@@ -1612,6 +1624,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly config: Config
   private readonly inFlight = new Map<BidProjectKey, ActiveBidOperation>()
   private readonly docxInFlight = new Set<BidProjectKey>()
+  private readonly docxExports = new Map<SessionId, Promise<BidDocxExportResult>>()
   private readonly pendingRunDecisions = new Map<string, Promise<void>>()
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
   private readonly processingWritingPlans = new Map<BidProjectKey, ActiveWritingPlanProcessing>()
@@ -1653,6 +1666,23 @@ export class BidHostRuntime extends TypertRemoteService {
     } finally {
       this.docxInFlight.delete(key)
     }
+  }
+
+  /** Settle a persisted export whose execution handle disappeared with its Host. */
+  private async reconcileDocxExport(session: Session): Promise<void> {
+    const operation = session.events.reduce<DocxExportOperation | null>(reduceDocxExportOperation, null)
+    if (operation?.status !== 'running' || this.docxExports.has(session.id)) return
+    session.append('bid.docx_export.changed', { operation: {
+      operationId: operation.operationId,
+      templateId: operation.templateId,
+      startedAt: operation.startedAt,
+      updatedAt: Date.now(),
+      status: 'failed',
+      phase: operation.phase,
+      message: 'Word 导出已中断',
+      error: '宿主进程已重启，Word 导出未完成，请重试。',
+    } })
+    await this.ctx.sessions.flush(session)
   }
 
   private async syncEvidenceMappingProjection(
@@ -2629,6 +2659,10 @@ export class BidHostRuntime extends TypertRemoteService {
       () => registerBidWritingEntryProjection(ctx.sessionProjections),
       'bid: writing entry projection',
     )
+    ctx.effect(
+      () => registerBidDocxExportProjection(ctx.sessionProjections),
+      'bid: Word export projection',
+    )
     ctx.on('session/prompt-admission', ({ session }) => {
       if (!isBidHostSession(session)) return
       const projection = getBidClientProjection(bidSessionTaskState(session))
@@ -3198,6 +3232,15 @@ export class BidHostRuntime extends TypertRemoteService {
     if (active !== undefined) {
       const activeRuntime = bidSessionTaskState(active.session)
       if (activeRuntime.stage === 'chapter_writing' && activeRuntime.status === 'running') {
+        if (request.action === 'bid_set_flowchart_visual_review') {
+          await active.writingControl.enqueue({ kind: 'flowchart_visual_review_policy', policy: request.policy })
+          return {
+            ok: true, policy: request.policy,
+            message: request.policy === 'skip'
+              ? '已设置当前 S5 work 后续跳过流程图视觉检查。'
+              : '已恢复当前 S5 work 的流程图视觉检查。',
+          }
+        }
         if (request.action === 'bid_confirm_writing_plan') {
           const committed = await this.commitWritingPlan(agent, active.workspace, request)
           if (!committed.ok) return committed
@@ -3221,6 +3264,40 @@ export class BidHostRuntime extends TypertRemoteService {
         }
         await current.done
       }
+    }
+    if (request.action === 'bid_set_flowchart_visual_review') {
+      const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+      const saved = await readBidProjectState(workspace)
+      if (saved?.status !== 'suspended' || saved.stage !== 'chapter_writing'
+        || saved.run.work.kind !== 'stage_execution') {
+        throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前没有可设置流程图视觉检查策略的 S5 work。')
+      }
+      const operation = this.beginOperation(session)
+      try {
+        await this.prepareOperation(operation)
+        const currentTask = operation.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+        if (currentTask.status !== 'suspended' || currentTask.stage !== 'chapter_writing'
+          || currentTask.run.work.kind !== 'stage_execution'
+          || currentTask.run.runId !== saved.run.runId
+          || currentTask.run.work.workId !== saved.run.work.workId) {
+          throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'The suspended Bid Run changed before the visual policy was saved.')
+        }
+        const workId = currentTask.run.work.workId
+        const records = await readBidChapterCommandJournal(workspace, workId)
+        const record: BidChapterCommandRecord = {
+          id: randomUUID(), status: 'pending',
+          command: { kind: 'flowchart_visual_review_policy', policy: request.policy },
+        }
+        await this.mutateProject(operation, lease => writeBidChapterCommandJournal(
+          workspace, workId, [...records, record], lease,
+        ))
+        return {
+          ok: true, policy: request.policy, workId,
+          message: request.policy === 'skip'
+            ? '已设置当前 S5 work 后续跳过流程图视觉检查。'
+            : '已恢复当前 S5 work 的流程图视觉检查。',
+        }
+      } finally { await this.finishOperation(session, operation) }
     }
     if (request.action === 'bid_confirm_writing_plan') {
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
@@ -5083,6 +5160,8 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!isBidMainSession(session)) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
     }
+    const existing = this.docxExports.get(session.id)
+    if (existing !== undefined) return existing
     const failure = (error: unknown): BidDocxExportResult => {
       if (error instanceof BidStageExecutionError) {
         return docxExportRejected('BID_DOCX_EXPORT_FAILED', '当前已保存正文无法导出，请检查正文完整性。', error.issues)
@@ -5092,6 +5171,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const generate = async (
       workspace: BidWorkspace,
       task: BidTaskState,
+      publish: (phase: DocxExportOperation['phase'], message: string) => Promise<void>,
     ): Promise<BidDocxExportResult> => {
       const projection = getBidClientProjection(task)
       if (!projection.allowedActions.includes('export_docx')) {
@@ -5100,6 +5180,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const partialExport = projection.task.stage === 'chapter_writing'
         && projection.task.status !== 'completed'
       const destination = `${workspace.config.outputDirectory}/bid-${String(Date.now())}-${randomBytes(3).toString('hex')}.docx`
+      await publish('collecting', '正在收集目录和已保存正文')
       const snapshot = await collectDocxExportSnapshot(workspace, undefined, templateId)
       if (!partialExport && snapshot.technicalDeviation.status === 'pending') {
         throw new BidStageExecutionError([{
@@ -5111,6 +5192,7 @@ export class BidHostRuntime extends TypertRemoteService {
         ? { mode: 'fill', table: snapshot.technicalDeviation.table }
         : snapshot.technicalDeviation.status === 'pending' ? { mode: 'clear' } : undefined
       const source = destination.slice(0, -'.docx'.length) + '.md'
+      await publish('exporting', '正在生成 Word')
       await workspace.exportDocxMarkdown(
         snapshot.markdown,
         destination,
@@ -5122,6 +5204,7 @@ export class BidHostRuntime extends TypertRemoteService {
         createDocxVisualReviewer(this.ctx, session),
       )
       const artifacts: StageArtifact[] = [{ stage: 'docx_export', type: 'docx', path: destination }]
+      await publish('finalizing', '正在校验 Word 并整理结果')
       const validation = await validateDocxExport(workspace, 'docx_export', artifacts)
       if (!validation.ok) return docxExportRejected('BID_DOCX_EXPORT_FAILED', '生成的 Word 文件结构无效。', validation.issues)
       const formatView = await readDocxFormat(workspace, templateId)
@@ -5143,18 +5226,55 @@ export class BidHostRuntime extends TypertRemoteService {
       }, ...technicalDeviationWarnings, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
-    try {
-      return await this.withDocxOperation(session, async (workspace) => {
-        const saved = await readBidProjectState(workspace)
-        const active = this.inFlight.get(projectKey(session))
-        const task = active === undefined
-          ? saved === undefined
-            ? bidSessionTaskState(session)
-            : bidProjectTaskState(saved)
-          : bidSessionTaskState(active.session)
-        return generate(workspace, task)
-      })
-    } catch (error: unknown) { return failure(error) }
+    const pending = this.withDocxOperation(session, async (workspace) => {
+      const saved = await readBidProjectState(workspace)
+      const active = this.inFlight.get(projectKey(session))
+      const task = active === undefined
+        ? saved === undefined
+          ? bidSessionTaskState(session)
+          : bidProjectTaskState(saved)
+        : bidSessionTaskState(active.session)
+      const projection = getBidClientProjection(task)
+      if (!projection.allowedActions.includes('export_docx')) {
+        return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
+      }
+      const startedAt = Date.now()
+      const base = { operationId: randomBytes(16).toString('hex'), templateId, startedAt }
+      let current: DocxExportOperation = {
+        ...base, updatedAt: startedAt, status: 'running', phase: 'collecting', message: '正在收集目录和已保存正文',
+      }
+      const publishOperation = async (operation: DocxExportOperation): Promise<void> => {
+        current = operation
+        session.append('bid.docx_export.changed', { operation })
+        await this.ctx.sessions.flush(session)
+      }
+      const publish = async (phase: DocxExportOperation['phase'], message: string): Promise<void> => {
+        await publishOperation({ ...base, updatedAt: Date.now(), status: 'running', phase, message })
+      }
+      try {
+        const result = await generate(workspace, task, publish)
+        if (!result.ok) {
+          await publishOperation({ ...base, updatedAt: Date.now(), status: 'failed', phase: current.phase,
+            message: 'Word 导出失败', error: result.error.message.slice(0, 500) })
+        } else {
+          await publishOperation({ ...base, updatedAt: Date.now(), status: 'completed', phase: 'finalizing',
+            message: 'Word 导出完成', path: result.value.path,
+            warnings: (result.value.warnings ?? []).slice(0, 20).map(warning => ({
+              code: warning.code.slice(0, 100), message: warning.message.slice(0, 500),
+            })) })
+        }
+        return result
+      } catch (error: unknown) {
+        const result = failure(error)
+        if (current.operationId === base.operationId && !result.ok) {
+          await publishOperation({ ...base, updatedAt: Date.now(), status: 'failed', phase: current.phase,
+            message: 'Word 导出失败', error: result.error.message.slice(0, 500) })
+        }
+        return result
+      }
+    })
+    this.docxExports.set(session.id, pending)
+    try { return await pending } catch (error: unknown) { return failure(error) } finally { this.docxExports.delete(session.id) }
   }
 
   /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
@@ -6183,6 +6303,7 @@ export class BidHostRuntime extends TypertRemoteService {
   @Remote('getDetails')
   async getDetails(session: Session): Promise<BidDetailsView> {
     if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
+    await this.reconcileDocxExport(session)
     const task = bidSessionTaskState(session)
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
     const body = task.stage === 'chapter_writing' || task.stage === 'docx_export'

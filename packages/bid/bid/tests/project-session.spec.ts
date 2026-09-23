@@ -34,6 +34,8 @@ import { isBidMainSession } from '../src/stage-interaction.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
+import type { ChapterWritingControl } from '../src/chapter-writing-executor.ts'
+import type { BidRunContext } from '../src/run-coordinator.ts'
 import { writeRevisionQueue, type RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
 import { writeRevisionBatch, type RevisionBatchArtifact } from '../src/chapter-revision-batch.ts'
 import { buildRevisionComparisonPath, createRevisionComparisonArtifact } from '../src/chapter-revision-comparison.ts'
@@ -1000,8 +1002,67 @@ describe('Workspace 项目与独立 Session', () => {
     expect(second.value.path).not.toBe(first.value.path)
     expect((await readFile(join(workspace.projectRoot, first.value.path))).readUInt32LE(0)).toBe(0x04034b50)
     expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
+    const exportEvents = agent.session.events.filter(event => event.type === 'bid.docx_export.changed')
+    expect(exportEvents.map(event => event.data.operation.status)).toEqual([
+      'running', 'running', 'running', 'completed',
+      'running', 'running', 'running', 'completed',
+    ])
+    expect(exportEvents[3]?.data.operation).toMatchObject({ phase: 'finalizing', path: first.value.path })
+    expect(exportEvents[7]?.data.operation).toMatchObject({ phase: 'finalizing', path: second.value.path })
     expect(await readBidProjectState(workspace)).toEqual(projectBefore)
     expect(stageReservation).not.toHaveBeenCalled()
+  })
+
+  it('同会话并发点击共享当前导出，刷新时投影保持同一个任务', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('concurrent-export')
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const original = BidWorkspace.prototype.exportDocxMarkdown
+    const render = vi.spyOn(BidWorkspace.prototype, 'exportDocxMarkdown').mockImplementation(async function (this: BidWorkspace, ...args) {
+      entered.resolve()
+      await release.promise
+      return original.apply(this, args)
+    })
+    try {
+      const first = ctx.bid.exportDocx(agent.session, null)
+      await entered.promise
+      const running = agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')
+      expect(running?.data.operation).toMatchObject({ status: 'running', phase: 'exporting' })
+      const second = ctx.bid.exportDocx(agent.session, null)
+      expect(agent.session.events.filter(event => event.type === 'bid.docx_export.changed')).toHaveLength(2)
+      release.resolve()
+      const [a, b] = await Promise.all([first, second])
+      expect(a).toEqual(b)
+      expect(render).toHaveBeenCalledOnce()
+      expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation)
+        .toMatchObject({ status: 'completed' })
+    } finally { release.resolve(); render.mockRestore() }
+  })
+
+  it('导出校验返回拒绝时发布失败态，宿主恢复时结算遗留运行态', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('failed-export')
+    const render = vi.spyOn(BidWorkspace.prototype, 'exportDocxMarkdown').mockResolvedValue('output/missing.docx')
+    try {
+      const result = await ctx.bid.exportDocx(agent.session, null)
+      expect(result).toMatchObject({ ok: false, error: { code: 'BID_DOCX_EXPORT_FAILED' } })
+      expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation)
+        .toMatchObject({ status: 'failed', phase: 'finalizing', error: '生成的 Word 文件结构无效。' })
+    } finally { render.mockRestore() }
+
+    agent.session.append('bid.docx_export.changed', { operation: {
+      operationId: 'interrupted-export', templateId: null, startedAt: 1, updatedAt: 2,
+      status: 'running', phase: 'exporting', message: '正在生成 Word',
+    } })
+    await ctx.bid.getDetails(agent.session)
+    expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation)
+      .toMatchObject({ operationId: 'interrupted-export', status: 'failed', error: '宿主进程已重启，Word 导出未完成，请重试。' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
   })
 
   it('Word 操作与 S5 启动及运行并行，同项目其他会话可配置和导出', async () => {
@@ -2120,6 +2181,72 @@ describe('Workspace 项目与独立 Session', () => {
       command: { kind: 'revision', request: { instruction: '补充交付验收责任。' } },
     }])
     expect(executor.execute).not.toHaveBeenCalled()
+  })
+
+  it('挂起 S5 的视觉 skip 写入原 work，原生继续复用命令日志', async () => {
+    const { ctx, workspace, fresh, executor, host } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
+    const agent = await fresh('suspended-s5-visual-policy')
+    const before = await readBidProjectState(workspace)
+    if (before?.status !== 'suspended') throw new Error('测试项目没有挂起 S5 Run')
+    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_set_flowchart_visual_review')
+
+    const result = await ctx.tools.execute({
+      agent, name: 'bid_set_flowchart_visual_review', arguments: { policy: 'skip' },
+      callId: CallId('suspended-s5-visual-policy'), signal: new AbortController().signal,
+    })
+    if (result.isError) throw new Error(JSON.stringify(result))
+    expect(result.value).toMatchObject({ ok: true, policy: 'skip', workId: before.run.work.workId })
+    const saved = await readBidProjectState(workspace)
+    expect(saved).toMatchObject({
+      stage: 'chapter_writing', status: 'suspended',
+      run: { runId: before.run.runId, work: { workId: before.run.work.workId } },
+    })
+    expect(executor.execute).not.toHaveBeenCalled()
+    expect(await readBidChapterCommandJournal(workspace, before.run.work.workId)).toMatchObject([{
+      status: 'pending', command: { kind: 'flowchart_visual_review_policy', policy: 'skip' },
+    }])
+
+    executor.canExecute = stage => stage === 'chapter_writing'
+    const gate = Promise.withResolvers<Awaited<ReturnType<BidStageExecutorPort['execute']>>>()
+    executor.execute.mockImplementation(async () => gate.promise)
+    const admitted = Promise.withResolvers<BidRunContext>()
+    const resumed = ctx.bid.resumeCurrentRun(agent.session, before.run.runId, saved!.revision, run => admitted.resolve(run))
+    try {
+      const run = await admitted.promise
+      expect(run.work.workId).toBe(before.run.work.workId)
+      const active = [...host.inFlight.values()][0] as {
+        writingControl: ChapterWritingControl & {
+          bind(workspace: BidWorkspace, workId: string, commits: typeof run.commits): Promise<void>
+          flowchartVisualReviewPolicy(): 'required' | 'skip'
+        }
+      }
+      await active.writingControl.bind(workspace, run.work.workId, run.commits)
+      expect(active.writingControl.flowchartVisualReviewPolicy()).toBe('skip')
+      const commands = active.writingControl.drain()
+      expect(commands).toMatchObject([{ kind: 'flowchart_visual_review_policy', policy: 'skip' }])
+      await active.writingControl.commit!(commands, async () => {})
+      expect(await readBidChapterCommandJournal(workspace, before.run.work.workId)).toMatchObject([{
+        status: 'applied', command: { kind: 'flowchart_visual_review_policy', policy: 'skip' },
+      }])
+      expect(active.writingControl.flowchartVisualReviewPolicy()).toBe('skip')
+      const running = await ctx.tools.execute({
+        agent, name: 'bid_set_flowchart_visual_review', arguments: { policy: 'required' },
+        callId: CallId('running-s5-visual-policy'), signal: new AbortController().signal,
+      })
+      if (running.isError) throw new Error(JSON.stringify(running))
+      expect(running.value).toMatchObject({ ok: true, policy: 'required' })
+      expect(active.writingControl.flowchartVisualReviewPolicy()).toBe('required')
+      expect(await readBidChapterCommandJournal(workspace, before.run.work.workId)).toMatchObject([
+        { status: 'applied', command: { kind: 'flowchart_visual_review_policy', policy: 'skip' } },
+        { status: 'pending', command: { kind: 'flowchart_visual_review_policy', policy: 'required' } },
+      ])
+      expect(host.inFlight.size).toBe(1)
+    } finally {
+      gate.resolve([])
+      await resumed
+    }
   })
 
   it('同一真实目录的 Session 共用锁，不同 Workspace 可并行执行', async () => {

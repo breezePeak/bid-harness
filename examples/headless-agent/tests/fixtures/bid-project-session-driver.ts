@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { BID_INITIAL_TASK_STATE, BidWorkspace, checkpointBidProjectState, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
+import { BID_DOCX_EXPORT_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { seedConversation, seedProjectArtifacts, summarizeDocxHeadingNumbering } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
 
@@ -48,6 +49,8 @@ try {
   const beforeGenerate = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
   const generated = await ctx.bid.exportDocx(exporting, null)
   if (!generated.ok) throw new Error(generated.error.message)
+  const exportEvents = exporting.events.filter(event => event.type === 'bid.docx_export.changed')
+  const operation = ctx.sessionProjections.snapshot(exporting).values[BID_DOCX_EXPORT_PROJECTION_KEY]
   const docx = await readFile(join(exportWorkspace.projectRoot, generated.value.path))
   const exportedState = await readFile(exportWorkspace.projectStatePath, 'utf8')
   const completed = await createFresh('export-session-b', exportRoot)
@@ -64,6 +67,12 @@ try {
     fileCount: (await workspace.readManifest()).files.length,
     previousMessageCount: a.deriveMessages().length,
     export: {
+      operation: {
+        steps: exportEvents.map(event => `${event.data.operation.status}:${event.data.operation.phase}`),
+        oneId: new Set(exportEvents.map(event => event.data.operation.operationId)).size === 1,
+        resultMatches: operation?.status === 'completed' && operation.path === generated.value.path,
+        projectionStatus: operation?.status,
+      },
       automaticExport, beforeGenerate, formatRestored: JSON.stringify(restoredFormat.state.resolved) === JSON.stringify(startingFormat.state.resolved), previewIsFixedSample: preview.previewHtml?.includes('这是一段正文示例'),
       details: {
         tender: completedDetails.tender?.project.project_name,

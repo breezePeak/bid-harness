@@ -14,7 +14,7 @@ Models 页面是模型输入能力的唯一配置入口。Pi-AI 模型编辑 `in
 
 S2 的私有 `view_pdf_page` 只接受本次执行中 `role=tender`、`parseStatus=success` 的 locator 和单个 PDF 页码。Host 使用 PDF.js 把指定原页直接渲染为 PNG、写入现有附件存储，并向同一个 S2 Main Agent 返回文本信封与 `ImageBlock`。文本定位仍优先使用 grep/read；图片不产生 OCR 文本，也不成为扫描 PDF 的伪造 source anchor。
 
-S5 在候选通过结构、引用和 anchor 校验后，将 FlowchartSpec 真实渲染为 PNG，并把图片作为富内容 followup 发回提交该候选的同一个 continuable Writer。Writer 修改的仍是完整 candidate 和结构化 FlowchartSpec；Host 根据新 spec 再渲染。相同 spec 的重新提交表示视觉确认，spec 持续变化则继续占用既有 `maxRepairAttempts` 预算，耗尽后留下明确问题。独立 Chapter Reviewer 只审查经过视觉确认的候选，不承担图片识别。
+S5 在候选通过结构、引用和 anchor 校验后，默认将 FlowchartSpec 真实渲染为 PNG，并把图片作为富内容 followup 发回提交该候选的同一个 continuable Writer。Writer 修改的仍是完整 candidate 和结构化 FlowchartSpec；Host 比较按顺序组合的最终 PNG 摘要，画面不变即完成视觉确认，画面变化最多展示四次，视觉轮次不占用正文 `maxRepairAttempts`。当前 S5 work 的 `flowchart_visual_review_policy` 命令保存在 `runs/<workId>/commands.json`，最后一条策略在挂起恢复后仍生效；`skip` 只绕过 PNG 回看，结构、anchor 与正文 Reviewer 继续执行。独立 Chapter Reviewer 不承担图片识别。
 
 所有图片入口按实际 Writer 或 Main Agent 路由查询 `inputModalities`。明确不支持图片或无法解析路由时，操作给出可诊断问题并要求用户在 Models 页面选择支持图片的模型；任何阶段都不静默切换 Provider 或 Model。
 
@@ -34,8 +34,8 @@ S5 在候选通过结构、引用和 anchor 校验后，将 FlowchartSpec 真实
 
 章节引用、普通聊天、queue、steer 和纯图片提交共享一条富内容发送链路；失败不会提前清除引用或图片草稿。自定义视觉模型可以从 Models 页面声明图片输入，但错误声明仍会由实际 Provider 拒绝。
 
-S2 单页查看与 S5 流程图视觉修复都会增加附件存储和当前模型请求成本。S5 的视觉确认与正文修复共享同一个有界尝试预算；预算不足、附件服务缺失、图片数量超限或 text-only 路由都会阻止候选假装通过。
+S2 单页查看与 S5 流程图视觉修复都会增加附件存储和当前模型请求成本。S5 的视觉确认最多展示四次不同的真实 PNG，与正文修复预算独立。策略为 `required` 时，附件服务缺失、图片数量超限或 text-only 路由都会阻止候选假装通过；`skip` 时不请求图片能力。
 
 ## Verification
 
-客户端测试覆盖引用消息的图片透传、image-only、queue/steer、失败保留，以及两种模型编辑器的显式能力和恢复继承。Bid 测试覆盖 PDF 页真实 PNG、越界与 locator 拒绝、ImageBlock 输出、S2 私有工具限制，以及同一 Writer 的真实流程图 followup、修改后重渲染、text-only 拒绝和视觉预算耗尽。
+客户端测试覆盖引用消息的图片透传、image-only、queue/steer、失败保留，以及两种模型编辑器的显式能力和恢复继承。Bid 测试覆盖 PDF 页真实 PNG、越界与 locator 拒绝、ImageBlock 输出、S2 私有工具限制，以及同一 Writer 的真实流程图 followup、PNG 未变确认、可见修改后重渲染、text-only 拒绝、独立视觉轮次和跳过策略的挂起恢复。

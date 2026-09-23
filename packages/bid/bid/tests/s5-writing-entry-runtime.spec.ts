@@ -133,6 +133,33 @@ async function waitForView(
 }
 
 describe('S5 写作入口运行时与完整工具链测试', () => {
+  it('运行中的 S5 只暴露带 policy 参数的流程图视觉策略工具', async () => {
+    const { ctx, createMainAgent } = await setupS5Fixture()
+    const agent = await createMainAgent('flowchart-policy-tool')
+    const hash = '0'.repeat(64)
+    const now = Date.now()
+    agent.session.append('bid.project.resumed', {
+      state: {
+        stage: 'chapter_writing', status: 'running',
+        run: {
+          runId: 'flowchart-policy-run', epoch: 1, baseProjectRevision: 1,
+          work: {
+            kind: 'stage_execution', workId: 'flowchart-policy-work', stage: 'chapter_writing',
+            requestRef: 'requests/flowchart-policy-work.json', requestSha256: hash, inputFingerprint: hash,
+          },
+          startedAt: now, updatedAt: now,
+        },
+      },
+      revision: 2,
+    })
+    const tools = ctx.tools.schemas(agent)
+    const policy = tools.find(tool => tool.name === 'bid_set_flowchart_visual_review')
+    expect(policy?.parameters).toEqual({
+      type: 'object', properties: { policy: { type: 'string', enum: ['required', 'skip'] } },
+      required: ['policy'], additionalProperties: false,
+    })
+  })
+
   it('01 验证：生产入口投影已自动在 sessionProjections 注册，初始为 null，append 后真实更新', async () => {
     const { ctx, createMainAgent } = await setupS5Fixture()
     const agent = await createMainAgent('reg-agent')

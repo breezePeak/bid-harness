@@ -1,4 +1,4 @@
-import type { BidClientProjection, BidStage } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidClientProjection, BidStage, DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
 import type { PlanListItem } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { BidKey } from './locales.ts'
 
@@ -69,6 +69,17 @@ export function buildBidStagePlan(
   const matched = steps.findIndex(step => step.phases.includes(phase))
   const finished = projection.task.status === 'waiting_user' || projection.task.status === 'completed'
   const active = finished ? steps.length : matched < 0 ? 0 : matched
+  return steps.map((step, index) => ({
+    key: step.key,
+    content: t(step.label),
+    status: index < active ? 'completed' : index === active ? 'in_progress' : 'pending',
+  }))
+}
+
+/** Project the independent export onto the same S6 steps as a stage run. */
+export function buildDocxExportPlan(operation: DocxExportOperation, t: TranslateBid): readonly PlanListItem[] {
+  const steps = STAGE_STEPS.docx_export
+  const active = operation.status === 'completed' ? steps.length : steps.findIndex(step => step.key === operation.phase)
   return steps.map((step, index) => ({
     key: step.key,
     content: t(step.label),

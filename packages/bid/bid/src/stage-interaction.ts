@@ -49,6 +49,7 @@ export const stageInteractionSchema = z.union([
   }).strict(),
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
+  z.object({ action: z.literal('bid_set_flowchart_visual_review'), policy: z.enum(['required', 'skip']) }).strict(),
   z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
@@ -78,6 +79,7 @@ const names = [
   'bid_execute_revision_batch',
   'bid_pause_stage',
   'bid_resume_stage',
+  'bid_set_flowchart_visual_review',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -455,6 +457,7 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'compl
     '先理解用户是在提问、解释已有正文，还是明确要求改变写作计划；不得用关键词、引用或发送方式替代语义判断。',
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
+    ...(status === 'running' ? ['用户明确说“不要视觉检查”“不用视觉检查”“跳过流程图视觉检查”时，调用 bid_set_flowchart_visual_review(policy="skip")；明确说“恢复视觉检查”“继续检查流程图”时，调用 bid_set_flowchart_visual_review(policy="required")。这是执行策略，不得写入 Writing Plan，不得调用 bid_confirm_writing_plan.patch；工具成功前不得声称策略已生效。'] : []),
     '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
     '当存在 pending revision issues 且用户明确要求开始处理（如"开始处理这些建议""把这些都改掉""现在修""执行上面的意见"等）时：'
       + '1. 调用 bid_stage_inspect 读取待处理审批意见；'
@@ -503,12 +506,15 @@ function renderIdleStageInteractionPrompt(
   ].join('\n')
 }
 
-function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, reason?: string): string {
+function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, workKind: string, reason?: string): string {
   return [
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
     '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
     '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
+    stage === 'chapter_writing' && workKind === 'stage_execution'
+      ? '用户在挂起状态下同时提出执行策略变化（如“继续，不用视觉检查”）时，先调用 bid_set_flowchart_visual_review 持久化策略；Run 的 continue/restart/stop 仍由原生 run_recovery 问题处理。不得只口头回复“已记录”。'
+      : undefined,
   ].filter(line => line !== undefined).join('\n')
 }
 
@@ -557,10 +563,10 @@ export function installStageInteractionTools(
         ? [names[0]]
         : suspended !== undefined
           ? task.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
-            ? [names[0], names[4], names[5]]
+            ? [names[0], names[4], names[5], names[10]]
             : [names[0]]
           : task.status !== 'waiting_user'
-            ? task.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(task.status === 'running' ? names.slice(8, 10) : [])]
+            ? task.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(task.status === 'running' ? [...names.slice(8, 10), names[10]] : [])]
               : task.stage === 'docx_export' && task.status === 'completed' ? [names[0], names[5], names[6], names[7]]
                 : task.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
             : stage === 'tender_analysis' ? names.slice(0, 1)
@@ -576,7 +582,7 @@ export function installStageInteractionTools(
         }
         for (const name of available) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_confirm_writing_plan'
-            || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage'
+            || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review'
             ? {} : { ...cas }
           const required = Object.keys(properties)
           let parameters: JsonSchemaNode | undefined
@@ -591,6 +597,10 @@ export function installStageInteractionTools(
           if (name === 'bid_stage_inspect') {
             properties.view = { type: 'string', enum: ['summary', 'task_contract_context'] }
             properties.reference = chapterReference
+          }
+          if (name === 'bid_set_flowchart_visual_review') {
+            properties.policy = { type: 'string', enum: ['required', 'skip'] }
+            required.push('policy')
           }
           if (name === 'bid_revise_chapter') {
             properties.instruction = text
@@ -691,6 +701,7 @@ export function installStageInteractionTools(
           const definition: ToolDefinition = {
             name,
             description: name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
+              : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
               : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                 : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
                   : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
@@ -771,6 +782,7 @@ export function installStageInteractionTools(
         task.stage,
         suspended.runId,
         resumed?.type === 'bid.project.resumed' ? resumed.data.revision : suspended.baseProjectRevision,
+        suspended.work.kind,
         suspended.error?.message,
       ) : task.status === 'waiting_user' ? renderStageInteractionPrompt(task.stage)
         : (task.stage === 'chapter_writing' && (task.status === 'running' || task.status === 'completed')

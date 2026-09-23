@@ -2,13 +2,13 @@
 
 English | [中文](README.zh.md)
 
-Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行或取消中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；插件不注册 Bid Run Chat Node，也不写入 `todo/write`。挂起、失败、等待和完成状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
+Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行或取消中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；独立 Word 导出从 `bid.docx_export` 投影显示 S6，切换页签仍可见。插件不注册 Bid Run Chat Node，也不写入 `todo/write`。S5 完成后隐藏阶段状态行，审核与修订控件仍可用；挂起、失败和等待状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，正常同步不追加独立提示行。读取失败仍显示错误说明，后续轮询继续重试。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
-面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍按已完成 S5 展示。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
+面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍保留审核、修订和导出能力。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
 批量审核历史中的已完成意见可打开对应 task 的 Markdown 前后快照，固定左侧显示修改后、右侧显示修改前。顶层 Markdown block 组成共享双列行，新增或删除的缺失侧保留自然等高空单元格；两列共用正文阅读区的单一垂直滚动位置。旧记录缺少快照时只提示无法还原，章节标题仍提供普通正文定位。
 
@@ -18,9 +18,9 @@ S2–S4 reset clears downstream artifacts, publishes `ready`, and immediately dr
 
 ## Word 导出页面
 
-正文工作台的“导出 Word”打开同级详情页签，正文详情仍可切换。页签首次打开后随项目保存，新会话和刷新可恢复已保存配置。S5 运行或失败时，页面说明当前文件只包含已完成并保存的章节；同项目任意会话均可上传模板、确认格式、预览和导出，不暂停正在执行的 Writer 或 Reviewer，也不阻止 S5 启动。上传、保存和预览不完成 S6，切换页签不重复解析或生成。修改配置后提示预览及文件需要更新，生成失败保留上一份下载。
+正文工作台的“导出 Word”只打开同级详情页签，正文详情仍可切换。页签首次打开后随项目保存，新会话和刷新可恢复已保存配置；真实生成才创建可重放的 S6 导出记录。同一会话的重复请求共用执行中的导出，页面卸载不取消生成，恢复后从投影显示进度或结果。S5 运行或失败时，页面说明当前文件只包含已保存的章节；同项目任意会话均可上传模板、确认格式、预览和导出，不暂停正在执行的 Writer 或 Reviewer，也不阻止 S5 启动。上传、保存和预览不完成 S6，切换页签不重复解析或生成。修改配置后提示预览及文件需要更新，生成失败保留上一份下载。
 
-预览标注“样式预览，分页以 Word 为准”，缺失的标题、列表、表格、图片与题注采用明确标记的样例，不写入正文。样式映射按用途筛选候选，首行缩进可选择字符或毫米，文字颜色和正斜体可逐组编辑。生成按钮旁显示进度、错误和待确认角色；用户选择模板样式或点击“未确认项使用默认方案”后才能生成。模型建议必须由用户应用；模型不可用时仍能手动编辑并生成。
+预览标注“样式预览，分页以 Word 为准”，缺失的标题、列表、表格、图片与题注采用明确标记的样例，不写入正文。样式映射按用途筛选候选，首行缩进可选择字符或毫米，文字颜色和正斜体可逐组编辑。导出页显示当前任务结果或错误，聊天 dock 显示三个真实步骤；用户确认模板内格式差异后才能生成。模型建议必须由用户应用；模型不可用时仍能手动编辑并生成。
 
 ## Model Experience
 

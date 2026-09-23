@@ -4,11 +4,14 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
   BID_RUNTIME_PROJECTION_KEY,
+  registerBidDocxExportProjection,
   getBidClientProjection,
   registerBidRuntimeProjection,
   type BidRunData,
   type BidTaskState,
 } from '@deepseek-ai/dsh-bid'
+import { BID_DOCX_EXPORT_PROJECTION_KEY } from '../src/docx-export-operation.ts'
+import { docxExportOperationSchema } from '../src/docx-export-operation.ts'
 
 const run: BidRunData = {
   runId: 'run-1', epoch: 1, baseProjectRevision: 1,
@@ -20,6 +23,27 @@ const run: BidRunData = {
 }
 
 describe('Bid client projection', () => {
+  it('独立导出事件可重放，且拒绝缺少结果的完成态', async () => {
+    const ctx = new Context()
+    const sessions = await ctx.plugin(SessionStore)
+    const projections = await ctx.plugin(SessionProjectionRegistry)
+    const disposeProjection = registerBidDocxExportProjection(ctx.sessionProjections)
+    try {
+      const session = ctx.sessions.create()
+      const running = { operationId: 'export-1', templateId: null, startedAt: 1, updatedAt: 2,
+        status: 'running' as const, phase: 'collecting' as const, message: '正在收集' }
+      session.append('bid.docx_export.changed', { operation: running })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_DOCX_EXPORT_PROJECTION_KEY]).toEqual(running)
+      session.append('bid.docx_export.changed', { operation: { ...running, status: 'failed', error: '导出中断' } })
+      expect(ctx.sessionProjections.snapshot(session).values[BID_DOCX_EXPORT_PROJECTION_KEY]).toMatchObject({ status: 'failed', error: '导出中断' })
+      expect(docxExportOperationSchema.safeParse({ ...running, status: 'completed' }).success).toBe(false)
+      expect(docxExportOperationSchema.safeParse({ ...running, status: 'failed' }).success).toBe(false)
+    } finally {
+      disposeProjection()
+      await projections.dispose()
+      await sessions.dispose()
+    }
+  })
   it('只投影 task，并在唯一状态变化时刷新', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)

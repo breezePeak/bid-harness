@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { BidClientProjection, BidStage } from '@deepseek-ai/dsh-bid/control-plane'
-import { buildBidStagePlan } from '../src/client/bid-stage-plan.ts'
+import type { BidClientProjection, BidStage, DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
+import { buildBidStagePlan, buildDocxExportPlan } from '../src/client/bid-stage-plan.ts'
 import { zh } from '../src/client/locales.ts'
 
 const t = (key: keyof typeof zh): string => zh[key]
@@ -20,6 +20,15 @@ function projection(stage: BidStage, phase?: string): Pick<BidClientProjection, 
 }
 
 describe('buildBidStagePlan', () => {
+  it('独立 S6 事件沿用三个步骤，并在完成后全部结算', () => {
+    const base = { operationId: 'export-1', templateId: null, startedAt: 1, updatedAt: 2, message: '正在生成' }
+    const running: DocxExportOperation = { ...base, status: 'running', phase: 'exporting' }
+    expect(buildDocxExportPlan(running, t).map(item => item.status))
+      .toEqual(['completed', 'in_progress', 'pending'])
+    const completed: DocxExportOperation = { ...base, status: 'completed', phase: 'finalizing', path: 'output/a.docx', warnings: [] }
+    expect(buildDocxExportPlan(completed, t).map(item => item.status))
+      .toEqual(['completed', 'completed', 'completed'])
+  })
   it.each(['waiting_user', 'completed'] as const)('S4 %s 保留全部完成的计划', (status) => {
     const current = projection('evidence_mapping', 'reviewing')
     expect(buildBidStagePlan({ task: { ...current.task, status, run: null } }, t).map(item => item.status))
@@ -41,7 +50,7 @@ describe('buildBidStagePlan', () => {
     ['outline_generation', 'reviewing', '目录质量复核'],
     ['evidence_mapping', 'mapping', '逐章节资料研究与映射'],
     ['chapter_writing', 'finalizing', '全局合规复核'],
-    ['docx_export', 'exporting', '生成并检查 Word 文档'],
+    ['docx_export', 'exporting', '生成 Word'],
   ] as const)('maps %s phase %s to its active stage step', (stage, phase, activeContent) => {
     const items = buildBidStagePlan(projection(stage, phase), t)
     expect(items.find(item => item.status === 'in_progress')?.content).toBe(activeContent)

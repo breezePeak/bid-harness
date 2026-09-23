@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyOutlineEdits, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type BidRunData, type BidStage, type BidTaskState, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
+import { applyOutlineEdits, BID_DOCX_EXPORT_PROJECTION_KEY, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type BidRunData, type BidStage, type BidTaskState, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -126,9 +126,10 @@ function projection(patch: ProjectionFixturePatch = {}): BidClientProjection {
 
 function props(
   value: BidClientProjection | undefined,
-  patch: Partial<BidStagePanelProps> & { writingEntry?: unknown } = {},
+  patch: Partial<BidStagePanelProps> & { writingEntry?: unknown; docxExport?: unknown } = {},
 ): BidStagePanelProps {
   const useProjection = (key: string, selector?: (item: unknown) => unknown) => {
+    if (key === BID_DOCX_EXPORT_PROJECTION_KEY) return selector === undefined ? patch.docxExport ?? null : selector(patch.docxExport ?? null)
     if (key === BID_WRITING_ENTRY_PROJECTION_KEY) {
       const entry = patch.writingEntry ?? {
         expected: { project_revision: 0, request_id: null, attempt_id: null, stop_id: null, plan_version: null },
@@ -1088,13 +1089,44 @@ describe('BidStagePanel', () => {
       composer: { enabled: false, reason: 'bid.completed' },
     }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
     expect(setReviewViewAvailable).toHaveBeenLastCalledWith(true)
-    expect(screen.getByText('正文编写')).toBeTruthy()
+    expect(screen.queryByText('正文编写')).toBeNull()
 
     view.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'tender_analysis', status: 'running' },
       composer: { enabled: false, reason: 'bid.stage_running' },
     }), { setComposerBlock, selectReviewView, setReviewViewAvailable })} />)
     expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
+  })
+
+  it('S5 完成后只显示独立 S6 任务，S5 修改时保留两个真实计划', async () => {
+    const exportOperation = { operationId: 'export-1', templateId: null, startedAt: 1, updatedAt: 2,
+      status: 'running', phase: 'exporting', message: '正在生成 Word' }
+    const complete = projection({ runtime: { stage: 'chapter_writing', status: 'completed' },
+      allowedActions: ['send_message', 'export_docx', 'revise_chapter'] })
+    const view = render(<BidStagePanel {...props(complete, { docxExport: exportOperation })}/> )
+    expect(screen.getByTestId('bid-docx-export-plan').textContent).toContain('S6 · 导出 Word')
+    expect(screen.queryByText('正文编写')).toBeNull()
+    expect(screen.queryByText('已完成')).toBeNull()
+
+    view.rerender(<BidStagePanel {...props(projection({ runtime: { stage: 'chapter_writing', status: 'running' },
+      allowedActions: ['send_message', 'export_docx'] }), { docxExport: exportOperation })}/> )
+    expect(screen.getByTestId('bid-stage-plan')).toBeTruthy()
+    expect(screen.getByTestId('bid-docx-export-plan')).toBeTruthy()
+  })
+
+  it('导出进度和完成事件不抢回正文页签', async () => {
+    const selectReviewView = vi.fn()
+    const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' },
+      allowedActions: ['send_message', 'export_docx', 'revise_chapter'] })
+    const base = { operationId: 'export-1', templateId: null, startedAt: 1, updatedAt: 2,
+      phase: 'exporting', message: '正在生成 Word' }
+    const view = render(<BidStagePanel {...props(main, { selectReviewView, docxExport: { ...base, status: 'running' } })}/> )
+    await waitFor(() => { expect(selectReviewView).toHaveBeenCalledOnce() })
+    view.rerender(<BidStagePanel {...props(main, { selectReviewView, docxExport: {
+      ...base, status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx', warnings: [],
+    } })}/> )
+    await screen.findByText('Word 导出完成')
+    expect(selectReviewView).toHaveBeenCalledOnce()
   })
 
   it('dispatches confirmation without changing projected runtime', async () => {

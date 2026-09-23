@@ -500,6 +500,9 @@ export function apply(ctx: ClientContext): void {
         const link = document.createElement('a'); link.href = url; link.download = file.name; link.click()
         window.setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
       },
+      showTask: () => {
+        ctx.sessions.scope(sessionId)?.get('conversation')?.selectView('bid-review')
+      },
     }
   }
   ctx.slots.register({ name: 'conversation.view', id: 'bid-word-export', order: 11, label: () => '导出 Word', embeddedChat: false, inject: wordRemote }, BidWordExport)
