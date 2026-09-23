@@ -8,6 +8,8 @@ import { outlineEditOperationSchema } from './outline-confirmation-edits.ts'
 import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
 import { tenderAnalysisEditOperationSchema } from './tender-analysis-confirmation.ts'
 import { writingPlanInputSchema } from './writing-requirements.ts'
+import { chapterBlockAssignmentSchema } from './chapter-content-reuse.ts'
+import { outlineBusinessBindingSchema } from './outline-confirmation-edits.ts'
 
 const sectionIds = z.array(z.string().trim().min(1)).min(1).refine(
   ids => new Set(ids).size === ids.length, 'section_ids must be unique',
@@ -41,10 +43,16 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('outline.generate'), input: z.object({}).strict() }).strict(),
   z.object({ capability: z.literal('outline.update'), input: z.object({
     operations: z.array(outlineEditOperationSchema).min(1),
+    business_bindings: z.array(outlineBusinessBindingSchema).default([]),
+    content_assignments: z.array(chapterBlockAssignmentSchema).default([]),
+    allow_content_deletion: z.boolean().default(false),
+    defer_content_migration: z.boolean().default(false),
   }).strict() }).strict(),
   z.object({ capability: z.literal('outline.refine'), input: z.object({ feedback: instruction }).strict() }).strict(),
   z.object({ capability: z.literal('chapter.reorganize'), input: z.object({
     instruction, source_section_ids: sectionIds,
+    assignments: z.array(chapterBlockAssignmentSchema).min(1).optional(),
+    allow_content_deletion: z.boolean().default(false),
   }).strict() }).strict(),
   z.object({ capability: z.literal('evidence.research'), input: z.object({
     mode: z.enum(['replace', 'supplement']), reason: instruction,
@@ -99,6 +107,8 @@ export interface BidCapabilityExecutionContext {
   readonly baselineHashes: ReadonlyMap<string, string>
   readonly allowedWrites: ReadonlySet<string>
   readonly stepId: string
+  readonly rootWorkId: string
+  readonly authorization: { readonly session_id: string; readonly message_id: string }
   readonly inputSha256: string
   readonly inputAnswer?: AskUserQuestionAnswerItem
 }

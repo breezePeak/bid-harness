@@ -7,7 +7,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { type ObjectJsonSchema, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
-import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { applyOutlineEdits, outlineBusinessBindingSchema, outlineEditOperationSchema,
+  parseOutlineEditOperations, type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'
@@ -194,6 +195,50 @@ export async function generateScopedOutlineOperations(
     const changes = outlineRegenerationChanges(draft.outline, candidate)
     if (changes.some(change => change.type === 'add' ? !candidateScope.has(change.section_id) : !selected.has(change.section_id))) throw new Error('BID_OUTLINE_SCOPE_VIOLATION')
     return operations
+  } finally { await run.dispose() }
+}
+
+/**
+ * 结构操作完成后，让独立子会话按 Host 分配的真实章节 ID 重新分配业务引用。
+ * @param agent 当前执行 Agent。
+ * @param candidate 已分配新 ID 的候选目录。
+ * @param sectionIds 本次可修改的章节范围。
+ * @param facts 当前招标事实和响应点的有界摘要。
+ * @param feedback 用户本次局部深化目标。
+ * @param signal 当前 Run 的取消信号。
+ * @returns 供 Host 校验的章节业务归属候选。
+ */
+export async function generateScopedOutlineBusinessBindings(
+  agent: Agent, candidate: OutlineArtifact, sectionIds: readonly string[], facts: unknown,
+  feedback: string, signal: AbortSignal,
+): Promise<OutlineBusinessBinding[]> {
+  const selected = outlineSectionScope(candidate, sectionIds)
+  const subagents = agent.ctx.get('subagents')
+  if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
+    throw new Error('局部目录业务归属需要独立上下文的 spawn provider。')
+  }
+  const run = await subagents.start('spawn', {
+    parent: agent, signal, label: '局部目录业务归属', maxDepth: 1, toolFilter: { allow: [] },
+    prompt: [{ type: 'text', text: [
+      `用户目标：${feedback}`,
+      `当前候选目录：${JSON.stringify(candidate)}`,
+      `本次可修改章节：${JSON.stringify([...selected])}`,
+      `真实招标要求、评分、合规与响应点：${JSON.stringify(facts)}`,
+      '只为业务归属需要改变的可写叶节返回完整 requirement_ids、scoring_ids、scoring_response_point_ids、compliance_ids。',
+      '拆分时按章节真实职责分配父章要求；不得给每个子章机械复制全部父章 ID。不得创造不存在的 ID。',
+      '不得写文件。最终只返回原始 JSON 数组，格式为：',
+      JSON.stringify(zodJsonSchema(z.array(outlineBusinessBindingSchema))),
+    ].join('\n') }],
+  })
+  try {
+    const result = await run.result
+    signal.throwIfAborted()
+    if (result.stopReason !== 'completed') throw new Error(`BID_OUTLINE_BINDING_FAILED: ${result.stopReason}`)
+    const output = z.array(outlineBusinessBindingSchema).parse(JSON.parse(
+      result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
+    ) as unknown)
+    if (output.some(binding => !selected.has(binding.section_id))) throw new Error('BID_OUTLINE_BINDING_SCOPE_INVALID')
+    return output
   } finally { await run.dispose() }
 }
 

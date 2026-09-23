@@ -78,7 +78,7 @@ function updateLevels(sections: readonly OutlineSection[]): void {
  * @param source Current canonical outline.
  * @param operations Ordered browser edit operations.
  * @param allocateSectionId Optional allocator for newly inserted sections.
- * @returns Edited outline with canonical business references preserved.
+ * @returns 保留已有章节业务引用的目录；拆分产生的子章等待显式业务绑定。
  */
 export function applyOutlineEdits(
   source: OutlineArtifact,
@@ -133,6 +133,8 @@ export function applyOutlineEdits(
         if (byId.has(id)) throw new Error(`duplicate outline section ${id}`)
         const child: OutlineSection = {
           ...section, ...input, must_answer: [...input.must_answer], id, parent_id: section.id, order: index + 1, level: section.level + 1,
+          requirement_ids: [], scoring_ids: [], compliance_ids: [],
+          scoring_response_point_ids: [], scoring_response_points: [],
         }
         sections.push(child)
         byId.set(id, child)

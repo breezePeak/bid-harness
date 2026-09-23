@@ -1554,6 +1554,7 @@ async function executeOutlineConfirmationCandidate(
         confirmed_outline_sha256: outlineArtifactSha256(outline),
         confirmed_draft_revision: draft.revision,
         confirmed_draft_sha256: draft.draft_outline_sha256,
+        authorization: { source: 'user_confirmation' },
       }))
     }
   })
@@ -3752,6 +3753,7 @@ export class BidHostRuntime extends TypertRemoteService {
             expected_revision: request.expected_revision,
             expected_draft_sha256: request.expected_draft_sha256,
             operations: parseOutlineEditOperations(request.operations),
+            ...(request.business_bindings === undefined ? {} : { business_bindings: request.business_bindings }),
           }, lease)
           if (!mutation.ok) throw Object.assign(new Error('BID_OUTLINE_MUTATION_REJECTED'), { mutation })
         }).catch((error: unknown) => {

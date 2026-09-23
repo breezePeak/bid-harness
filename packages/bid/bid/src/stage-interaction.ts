@@ -8,7 +8,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
-import { buildOutlineView, outlineEditOperationSchema } from './outline-confirmation-edits.ts'
+import { buildOutlineView, outlineBusinessBindingSchema, outlineEditOperationSchema } from './outline-confirmation-edits.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { getOrCreateOutlineDraft } from './outline-draft-store.ts'
 import { parseEvidenceMapArtifact, parseEvidenceMappingPlan } from './evidence-mapping-artifacts.ts'
@@ -65,7 +65,9 @@ export const stageInteractionSchema = z.union([
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
   z.object({ action: z.literal('bid_set_flowchart_visual_review'), policy: z.enum(['required', 'skip']) }).strict(),
-  z.object({ action: z.literal('bid_outline_apply_operations'), ...identity, operations: z.array(outlineEditOperationSchema).min(1) }).strict(),
+  z.object({ action: z.literal('bid_outline_apply_operations'), ...identity,
+    operations: z.array(outlineEditOperationSchema).min(1),
+    business_bindings: z.array(outlineBusinessBindingSchema).optional() }).strict(),
   z.object({ action: z.literal('bid_outline_regenerate_scope'), ...identity, section_ids: scope, feedback: z.string().trim().min(1) }).strict(),
   z.object({ action: z.literal('bid_evidence_remap'), ...identity, section_ids: scope, reason: z.string().optional(), mode: z.enum(['replace', 'supplement']).default('replace') }).strict(),
   initialWritingPlanInputSchema.extend({ action: z.literal('bid_confirm_writing_plan') }).strict(),

@@ -12,7 +12,8 @@ import {
 } from './bid-capability-contract.ts'
 import { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult,
   verifyCapabilityTaskScope } from './bid-capability-registry.ts'
-import { parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
+import { parseConfirmedOutlineArtifact, parseOutlineDraft } from './outline-confirmation-artifacts.ts'
+import { readChapterLocation } from './chapter-storage.ts'
 import { readCapabilityPublicationReceipt, readCapabilityStepReceipt, publishCapabilityChanges, publishCapabilityStepChanges,
   type CapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import type { BidRunContext } from './run-coordinator.ts'
@@ -76,7 +77,8 @@ export type CapabilityTaskCheckpoint = z.infer<typeof capabilityTaskCheckpointSc
 /** 能力适配器只能在 Host 授权的候选文件中写入。 */
 export interface CapabilityTaskDispatcher {
   /** 返回当前能力可写的精确项目相对路径。 */
-  allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace): Promise<ReadonlySet<string>>
+  allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace,
+    stepId: string): Promise<ReadonlySet<string>>
   /** 在候选项目执行一个业务能力；返回真实变更结果和精确删除文件。 */
   execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{
     readonly result: BidCapabilityResult
@@ -274,12 +276,18 @@ async function verifyRequestInputs(workspace: BidWorkspace, run: BidRunContext, 
 }
 
 async function readOutline(workspace: BidWorkspace) {
-  const path = within(workspace.projectRoot, 'outline/confirmed-outline.json')
-  await assertNoLinkedPath(workspace.root, path)
-  try { return parseConfirmedOutlineArtifact(JSON.parse(await readFile(path, 'utf8'))) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
+  for (const relative of ['outline/confirmed-outline.json', 'outline/draft.json', 'outline/outline.json']) {
+    const path = within(workspace.projectRoot, relative)
+    await assertNoLinkedPath(workspace.root, path)
+    try {
+      const raw: unknown = JSON.parse(await readFile(path, 'utf8'))
+      return relative === 'outline/draft.json' ? parseOutlineDraft(raw).outline : parseConfirmedOutlineArtifact(raw)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
   }
+  return undefined
 }
 
 /**
@@ -466,7 +474,7 @@ export async function executeCapabilityTask(
     }
     const scope = outline === undefined ? { sectionIds: null, paragraphs: null }
       : resolveCapabilityStepScope(request.task.scope, saved.step.scope, outline, previous)
-    const writes = await dispatcher.allowedWrites(saved.step.call, scope.sectionIds, working)
+    const writes = await dispatcher.allowedWrites(saved.step.call, scope.sectionIds, working, saved.step_id)
     const baseline = new Map<string, string>()
     for (const path of writes) {
       const digest = await fileHash(working, path)
@@ -478,6 +486,23 @@ export async function executeCapabilityTask(
       const digest = await fileHash(working, path)
       if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${path}`)
       inputSources.set(path, digest)
+    }
+    if (saved.step.call.capability === 'outline.update' || saved.step.call.capability === 'outline.refine') {
+      for (const path of ['outline/confirmed-outline.json', 'outline/draft.json']) {
+        const digest = await fileHash(working, path)
+        if (digest !== undefined) inputSources.set(path, digest)
+      }
+    }
+    if (saved.step.call.capability === 'chapter.reorganize') {
+      for (const id of saved.step.call.input.source_section_ids) {
+        const location = await readChapterLocation(working, id)
+        if (location === null) throw new Error(`BID_CHAPTER_REUSE_SOURCE_MISSING: ${id}`)
+        for (const path of [location.contentPath, location.metadataPath]) {
+          const digest = await fileHash(working, path)
+          if (digest === undefined) throw new Error(`BID_CHAPTER_REUSE_SOURCE_MISSING: ${path}`)
+          inputSources.set(path, digest)
+        }
+      }
     }
     const stepInputSha256 = bidInputFingerprint({ call: saved.step.call, scope: saved.step.scope,
       previous: previous?.result ?? null, sources: [...inputSources], answer: inputAnswer ?? null })
@@ -515,15 +540,33 @@ export async function executeCapabilityTask(
     const candidateRun = { ...run, work: stepWork, commits: run.commits.forPublication({
       workspaceRoot: stepWorking.root, projectRoot: stepWorking.projectRoot,
     }) }
+    const authorizedNewDescendants = new Set<string>()
     const context: BidCapabilityExecutionContext = {
       canonical, working: stepWorking, agent, run: candidateRun, sectionIds: scope.sectionIds,
+      authorizedNewDescendants,
       stepDirectory: stepPaths.root, inputSources, baselineHashes: baseline, allowedWrites: writes,
       stepId: saved.step_id, inputSha256: stepInputSha256,
+      rootWorkId: run.work.workId, authorization: saved.authorization,
       ...(inputAnswer === undefined ? {} : { inputAnswer }),
     }
     const execution = await dispatcher.execute(saved.step.call, context)
     const currentOutline = await readOutline(stepWorking)
     const knownIds = new Set(currentOutline?.sections.map(section => section.id) ?? [])
+    if (scope.sectionIds !== null && currentOutline !== undefined) {
+      const beforeIds = new Set(outline?.sections.map(section => section.id) ?? [])
+      const byId = new Map(currentOutline.sections.map(section => [section.id, section]))
+      for (const section of currentOutline.sections.filter(item => !beforeIds.has(item.id))) {
+        let parentId = section.parent_id
+        const visited = new Set<string>()
+        while (parentId !== null && !scope.sectionIds.has(parentId)) {
+          if (visited.has(parentId)) throw new Error('BID_CAPABILITY_NEW_SECTION_CYCLE')
+          visited.add(parentId)
+          parentId = byId.get(parentId)?.parent_id ?? null
+        }
+        if (parentId === null) throw new Error(`BID_CAPABILITY_NEW_SECTION_SCOPE_INVALID: ${section.id}`)
+        authorizedNewDescendants.add(section.id)
+      }
+    }
     const result = await validateCapabilityResult(context, execution.result, knownIds)
     await dispatcher.validate(saved.step.call, context, result)
     if (result.needs_input) {
