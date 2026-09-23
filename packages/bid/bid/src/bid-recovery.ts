@@ -107,8 +107,8 @@ export function bidRunRecoveryEligibility(session: Session, goalId: string): {
     && event.data.goalId === goalId && event.data.target.kind === 'run'
     && event.data.target.workId === run.work.workId).length
   const target = { kind: 'run' as const, runId: run.runId, workId: run.work.workId }
-  if (run.cause === 'user_stop' || run.cause === 'host_restart') {
-    return { eligible: false, reason: '用户停止或 Host 重启需用户明确继续。', attempts, target }
+  if (run.cause === 'user_stop' || run.cause === 'host_restart' || run.cause === 'awaiting_input') {
+    return { eligible: false, reason: '用户停止、Host 重启或等待输入需用户明确继续。', attempts, target }
   }
   if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked') {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', attempts, target }

@@ -60,7 +60,7 @@ export const bidRunDataSchema = z.object({
   }).strict(),
   resumeOf: z.object({
     runId: z.string().min(1),
-    cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
+    cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
   }).strict().optional(),
   progress: bidRunProgressSchema.optional(),
   startedAt: z.number().int().nonnegative(),
@@ -78,7 +78,7 @@ export const bidTaskStateSchema: z.ZodType<BidTaskState> = z.discriminatedUnion(
   z.object({
     stage: z.enum(BID_STAGES), status: z.literal('suspended'),
     run: bidRunDataSchema.extend({
-      cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
+      cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
       error: bidTaskFailureSchema.optional(),
     }),
   }).strict(),
@@ -108,7 +108,7 @@ export const legacyBidRuntimeSchema = z.object({
 const legacyBidRunSchema = bidRunDataSchema.extend({
   stage: z.enum(BID_STAGES),
   status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
-  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
+  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']).optional(),
   error: bidTaskFailureSchema.optional(),
 }).strict()
 

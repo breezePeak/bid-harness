@@ -37,7 +37,9 @@ S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到�
 
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
-`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 `running` 时，Host 在项目锁内将其确定性改为 `suspended(host_restart)`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的未完成 `running` 时，Host 在项目锁内将其改为 `suspended(host_restart)`，不自动执行；能力 Work 已有可验证的正式提交凭据时只补完成结算。恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+
+`capability_task` 用一个 Work 和一个 Run 顺序执行已注册适配器的能力步骤。Host 将真实用户消息、初始计划、输入摘要和任务前状态保存为不可变请求；`runs/<workId>/task-checkpoint.json` 保存已开始步骤、结果与后续授权的计划补丁。每步只在独立候选目录执行，Host 核对目标 ID 与精确文件清单后合并到 Work 候选；最终业务文件与 `requests/<workId>/result.json` 凭据同批发布。恢复先核对凭据和正式文件，已提交的 Work 只补 Run 结算及公开会话通知。`awaiting_input` 保留原 Work，并以持久化原生问题取得补充文本；用户停止使 Run 提交权限退休并等待 Child 收敛。适配器由 `BidHostRuntime.registerCapabilityTaskDispatcher()` 注册，`runCapabilityTask()` 仅接受当前公开主 Agent 与真实用户消息授权。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 

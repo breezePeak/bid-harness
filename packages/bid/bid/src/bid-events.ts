@@ -1,6 +1,7 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
+import type { AskUserQuestionAnswerItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   BidRunData,
   BidRunDecision,
@@ -43,6 +44,8 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.schema.warning',
   'bid.goal.bound',
   'bid.goal.recovery.requested',
+  'bid.capability.input.required',
+  'bid.capability.input.received',
 ] as const
 
 /** One Bid Harness event type persisted in the shared DSH session log. */
@@ -175,6 +178,24 @@ declare module '@deepseek-ai/dsh-session/types' {
       decisionType: BidRunDecisionType | 'stage_start'
       decision: BidRunDecision
     }
+    /**
+     * 能力步骤因资料或授权缺口等待主会话的原生问题。
+     * @param workId 原能力任务 Work。
+     * @param stepId 等待输入的步骤。
+     * @param questionId 与检查点绑定的原生问题身份。
+     * @param question 实际展示给用户的问题。
+     * @dshScopeScan unsupported
+     */
+    'bid.capability.input.required': { workId: string; stepId: string; questionId: string; question: AskUserQuestionItem }
+    /**
+     * 原生问题的用户回答；执行器只读取此日志事件提供的输入。
+     * @param workId 原能力任务 Work。
+     * @param stepId 已获得输入的步骤。
+     * @param questionId 被回答的问题身份。
+     * @param answer 用户选择和有界自由文本。
+     * @dshScopeScan unsupported
+     */
+    'bid.capability.input.received': { workId: string; stepId: string; questionId: string; answer: AskUserQuestionAnswerItem }
     /** A stage is waiting for an explicit user decision. */
     'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
     /**
@@ -189,31 +210,28 @@ declare module '@deepseek-ai/dsh-session/types' {
     /** S5 写作入口状态变更；广播安全摘要，不包含答案原文。 */
     'bid.writing_entry.changed': { view: WritingEntryView }
     /**
-     * Independent Word export milestone; contains only bounded task metadata.
-     * @mode emit
-     * @param operation Latest export state, separate from the main Bid task.
+     * 独立 Word 导出进度，仅保存有界任务信息。
+     * @param operation 与主 Bid 任务分离的最新导出状态。
      * @dshScopeScan unsupported
      */
     'bid.docx_export.changed': { operation: DocxExportOperation }
     /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
     'bid.schema.warning': BidSchemaWarning
     /**
-     * Host-bound native Goal for one S2 entry; later stages reuse its identity.
-     * @mode emit
-     * @param goalId Native Goal identity.
-     * @param ownerSessionId Main Session identity.
-     * @param initialS2WorkId Admitted S2 work identity.
+     * Host 在 S2 接纳时绑定原生 Goal，后续阶段沿用其身份。
+     * @param goalId 原生 Goal 身份。
+     * @param ownerSessionId 公开主会话身份。
+     * @param initialS2WorkId 已接纳的 S2 Work 身份。
      */
     'bid.goal.bound': { goalId: string; ownerSessionId: string; initialS2WorkId: string }
     /**
-     * One accepted, durable recovery instruction for the exact failed work.
-     * @mode emit
-     * @param goalId Native Goal authorizing this recovery.
-     * @param ownerSessionId Main Session identity.
-     * @param target Exact failed Run or writing request.
-     * @param unit Failed business unit.
-     * @param instruction Bounded sanitized repair instruction.
-     * @param progressFingerprint Business problem and checkpoint before recovery.
+     * 对精确失败工作接纳的一条持久恢复指令。
+     * @param goalId 授权本次恢复的原生 Goal。
+     * @param ownerSessionId 公开主会话身份。
+     * @param target 精确失败的 Run 或写作请求。
+     * @param unit 失败的业务单元。
+     * @param instruction 有界且已脱敏的修复指令。
+     * @param progressFingerprint 恢复前的问题及检查点摘要。
      */
     'bid.goal.recovery.requested': {
       goalId: string

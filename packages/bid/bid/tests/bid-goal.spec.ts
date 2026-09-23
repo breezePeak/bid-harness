@@ -23,6 +23,7 @@ import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 
 interface Operation { runs: BidRunCoordinator }
 interface HostInternals {
+  inFlight: Map<string, unknown>
   beginOperation(session: Session): Operation
   prepareOperation(operation: Operation): Promise<unknown>
   finishOperation(session: Session, operation: Operation): Promise<void>
@@ -50,14 +51,15 @@ async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true) 
     await ctx.plugin(GoalRoundDriver)
   }
   const workspace = new BidWorkspace(root)
-  await checkpointBidProjectState(workspace, { stage, status: 'ready', run: null })
+  await checkpointBidProjectState(workspace, { stage, status: 'waiting_user', run: null })
+  await ctx.plugin(BidHostRuntime)
   const handle = await ctx.agentLoop.createAgent(ctx, {
     sessionId: SessionId(`bid-goal-${stage}`),
     agentOptions: { provider: 'mock', model: 'mock' },
     meta: { cwd: root, agentPreset: 'bid' },
   })
-  await ctx.plugin(BidHostRuntime)
   const host = ctx.bid as unknown as HostInternals
+  await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
   return { ctx, host, agent: handle.agent, workspace }
 }
 
@@ -149,7 +151,7 @@ it('disarms automatic recovery if the new S2 binding cannot be flushed', async (
     ? Promise.reject(new Error('binding unavailable')) : originalFlush(session))
   try {
     await operation.runs.start(work('tender_analysis'))
-    await vi.waitFor(() => expect(ctx.goals.get(agent)?.activation).toBe('disarmed'))
+    await vi.waitFor(() => { expect(ctx.goals.get(agent)?.activation).toBe('disarmed') })
     expect(ctx.goals.get(agent)?.roundsStarted).toBe(0)
   } finally {
     flush.mockRestore()
@@ -171,14 +173,14 @@ it('removes recovery authority on native Goal pause and clear', async () => {
   }]))
   await host.finishOperation(agent.session, operation)
   try {
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
+    expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
     const goal = ctx.goals.get(agent)!
     const paused = ctx.goals.pause(agent, goal)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_recover_task')
+    expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_recover_task')
     const resumed = ctx.goals.resume(agent, paused)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
+    expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
     ctx.goals.clear(agent, resumed)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_recover_task')
+    expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_recover_task')
     expect(agent.session.events.filter(event => event.type === 'bid.goal.bound')).toHaveLength(1)
   } finally { disposeGate() }
 })
@@ -209,8 +211,8 @@ it('accepts the exact failed Run once, returns after its durable checkpoint, and
     },
   })
   try {
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
-    const call = (id: string) => ctx.tools.execute({ agent, name: 'bid_recover_task',
+    expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
+    const call = (id: string) => agent.ctx.tools.execute({ agent, name: 'bid_recover_task',
       arguments: { target: 'run', run_id: failed.runId, instruction: '补齐项目字段并按原提交工具提交。' },
       callId: CallId(id), signal: new AbortController().signal })
     const [first, second] = await Promise.all([call('recover-1'), call('recover-2')])

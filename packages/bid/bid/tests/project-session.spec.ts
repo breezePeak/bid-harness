@@ -46,6 +46,9 @@ import {
   DOCX_TEMPLATE_SIZE_HEADER,
 } from '../src/docx-format-contract.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
+import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 
 interface HostExecution {
@@ -268,6 +271,128 @@ async function fixture(options: {
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('Host 以单一 Run 接纳能力任务并在公开主会话留下完成凭据通知', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-host-main')
+    const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节' }], source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const dispatcher: CapabilityTaskDispatcher = {
+      allowedWrites: async () => new Set(['chapters/local-review.json']),
+      execute: async (_call, context) => {
+        await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { ok: true })
+        return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+          change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
+      },
+      validate: async () => {},
+    }
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
+    try {
+      const result = await ctx.bid.runCapabilityTask(agent, {
+        goal: '审核当前章节', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+          call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
+      }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
+      expect(result).toMatchObject({ stage: 'chapter_writing', status: 'completed', run: null })
+      const starts = agent.session.events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.work.kind === 'capability_task')
+      expect(starts).toHaveLength(1)
+      const workId = starts[0]?.type === 'bid.run.started' ? starts[0].data.run.work.workId : undefined
+      expect(agent.session.events.find(event => event.type === 'bid.run.notice'
+        && event.data.workId === workId)).toMatchObject({ data: {
+        kind: 'completed', resultRef: `requests/${workId}/result.json`,
+      } })
+      expect(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8')).toContain('"ok": true')
+      expect(await readFile(join(workspace.projectRoot, 'requests', workId ?? '', 'result.json'), 'utf8'))
+        .toContain('chapters/local-review.json')
+    } finally { unregister() }
+  })
+
+  it('能力任务等待原生补充输入后续行原 Work', async () => {
+    const { ctx, workspace, fresh, host } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-native-input-main')
+    const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节并补齐问题' }], source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const reply = Promise.withResolvers<AskUserQuestionAnswer>()
+    let question: AskUserQuestionItem | undefined
+    const provider = ctx.userQuestions.registerProvider({ ask: async ({ questions }) => {
+      question = questions[0]
+      return reply.promise
+    } })
+    const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
+      if (context.inputAnswer === undefined) return { result: { target_section_ids: [], changed_artifacts: [],
+        change_summary: '需要确认审核重点', warnings: [], missing_topics: ['请明确审核重点'], needs_input: true } }
+      await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), {
+        answer: context.inputAnswer.custom,
+      })
+      return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+        change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
+    })
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({
+      allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
+    })
+    try {
+      await expect(ctx.bid.runCapabilityTask(agent, {
+        goal: '审核当前章节并补齐问题', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+          call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
+      }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json']))
+        .resolves.toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
+      await vi.waitFor(() => { expect(question?.id).toContain('capability:') })
+      reply.resolve({ answers: [{ id: question?.id ?? '', selected: [], custom: '重点核对质量控制' }] })
+      await vi.waitFor(() => {
+        expect(agent.session.events.filter(event => event.type === 'bid.capability.input.received')).toHaveLength(1)
+        expect(agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'))
+          .toHaveLength(1)
+        expect(host.inFlight.size).toBe(0)
+      }, { timeout: 10_000 })
+      expect(execute).toHaveBeenCalledTimes(2)
+      expect(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
+        .toContain('重点核对质量控制')
+    } finally {
+      reply.resolve({ answers: [{ id: question?.id ?? '', selected: ['稍后补充'] }] })
+      unregister()
+      provider()
+    }
+  })
+
+  it('正式文件已发布而 Run 未结算时，Host 恢复只补状态和一次通知', async () => {
+    const { workspace, fresh, host } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-committed-restart-main')
+    const message = createUserMessage({ content: [{ type: 'text', text: '审核已有正文' }], source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
+      goal: '审核已有正文', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+        call: { capability: 'chapter.review', input: { reason: '审核已有正文' } } }],
+    }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+    const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
+      await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { ok: true })
+      return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+        change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
+    })
+    await executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
+      allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
+    }, agent, agent.session)
+    const crashed: BidRunData = { runId: 'capability-crash-run', epoch: 1, baseProjectRevision: 1, work,
+      startedAt: Date.now(), updatedAt: Date.now() }
+    await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status: 'running', run: crashed })
+    const runtimeHost = host as HostExecution & {
+      prepareOperation(operation: unknown): Promise<BidTaskState>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const operation = host.beginOperation(agent.session)
+    try {
+      await expect(runtimeHost.prepareOperation(operation)).resolves.toMatchObject({ status: 'completed' })
+      expect(execute).toHaveBeenCalledOnce()
+      expect(agent.session.events.filter(event => event.type === 'bid.run.notice'
+        && event.data.workId === work.workId)).toHaveLength(1)
+    } finally { await runtimeHost.finishOperation(agent.session, operation) }
+  })
+
   it('上传入口把 S1 Work 交给与恢复入口相同的默认编排器', async () => {
     const { ctx, fresh, host } = await fixture()
     const agent = await fresh('shared-capability-route')
@@ -281,7 +406,8 @@ describe('Workspace 项目与独立 Session', () => {
     }])
     expect(result).toMatchObject({ ok: true, value: next })
     expect(route).toHaveBeenCalledOnce()
-    expect(route.mock.calls[0]?.[0].id).toBe(agent.id)
+    expect(route.mock.calls[0]?.[0].id).not.toBe(agent.id)
+    expect(route.mock.calls[0]?.[0].session.header.parentSession).toBe(agent.session.id)
     expect(route.mock.calls[0]?.[1]).toBeInstanceOf(BidWorkspace)
   })
 

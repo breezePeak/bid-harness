@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import type { BidRunContext } from './run-coordinator.ts'
+import type { AskUserQuestionAnswerItem } from '@deepseek-ai/dsh-user-questions/types'
 import { outlineEditOperationSchema } from './outline-confirmation-edits.ts'
 import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
 import { tenderAnalysisEditOperationSchema } from './tender-analysis-confirmation.ts'
@@ -99,6 +100,7 @@ export interface BidCapabilityExecutionContext {
   readonly allowedWrites: ReadonlySet<string>
   readonly stepId: string
   readonly inputSha256: string
+  readonly inputAnswer?: AskUserQuestionAnswerItem
 }
 
 export type BidCapabilityId = z.infer<typeof bidCapabilityInputSchema>['capability']
@@ -106,3 +108,5 @@ export type BidCapabilityScope = z.infer<typeof bidCapabilityScopeSchema>
 export type BidCapabilityStepScope = z.infer<typeof bidCapabilityStepScopeSchema>
 export type BidCapabilityCall = z.infer<typeof bidCapabilityInputSchema>
 export type BidCapabilityResult = z.infer<typeof bidCapabilityResultSchema>
+export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
+export type BidCapabilityStep = z.infer<typeof bidCapabilityStepSchema>

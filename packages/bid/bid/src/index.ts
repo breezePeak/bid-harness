@@ -89,6 +89,11 @@ import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterRevi
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
 import { defaultBidCapabilityForStage, executeDefaultBidCapability, validateDefaultBidCapability } from './bid-capability-registry.ts'
+import { askCapabilityTaskInput, executeCapabilityTask, readCapabilityAwaitingInput,
+  persistCapabilityTaskRequest, capabilityTaskRequestSchema,
+  type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
+import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
+import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
@@ -160,7 +165,7 @@ import { BID_INITIAL_TASK_STATE, buildBidStageTask, getBidClientProjection, getB
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 import { bidProjectTaskState, checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
-import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
+import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
 import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
 import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
@@ -218,6 +223,7 @@ import type {
   BidReviewMaterialView,
   BidRevisionTaskStatus,
   BidRunNotice,
+  BidRunData,
   BidRunDecision,
   BidRunDecisionType,
   BidStage,
@@ -1243,6 +1249,7 @@ async function readHostWork(
   descriptor: import('./control-plane-contract.ts').BidWorkDescriptor,
 ): Promise<unknown> {
   const payload = await readBidWorkRequest(workspace, descriptor)
+  if (descriptor.kind === 'capability_task') return payload
   if (bidInputFingerprint(await hostWorkInputIdentity(workspace, descriptor.stage, payload))
     !== descriptor.inputFingerprint) throw new Error('BID_WORK_INPUT_FINGERPRINT_MISMATCH')
   return payload
@@ -1649,6 +1656,9 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly docxInFlight = new Set<BidProjectKey>()
   private readonly docxExports = new Map<SessionId, Promise<BidDocxExportResult>>()
   private readonly pendingRunDecisions = new Map<string, Promise<void>>()
+  private readonly pendingCapabilityInputs = new Map<string, Promise<void>>()
+  private readonly pendingCapabilityInputControllers = new Map<string, AbortController>()
+  private capabilityTaskDispatcher: CapabilityTaskDispatcher | undefined
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
@@ -1674,6 +1684,19 @@ export class BidHostRuntime extends TypertRemoteService {
 
   private isContextActive(): boolean {
     return this.ctx.fiber.state === FiberState.ACTIVE
+  }
+
+  /**
+   * 安装能力步骤执行器；后续能力适配器共用此单一 Run 入口。
+   * @param dispatcher 负责授权文件、执行和业务校验的适配器。
+   * @returns 仅移除当前注册实例的 disposer。
+   */
+  registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => void {
+    if (this.capabilityTaskDispatcher !== undefined) throw new Error('BID_CAPABILITY_DISPATCHER_ALREADY_REGISTERED')
+    this.capabilityTaskDispatcher = dispatcher
+    return () => {
+      if (this.capabilityTaskDispatcher === dispatcher) this.capabilityTaskDispatcher = undefined
+    }
   }
 
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
@@ -1978,32 +2001,62 @@ export class BidHostRuntime extends TypertRemoteService {
     let state = saved
     if (state === undefined) state = await checkpointBidProjectState(operation.workspace, BID_INITIAL_TASK_STATE)
     else if (state.status === 'running') {
-      const interruptedState = suspendForHostRestart(state)
-      if (interruptedState.status !== 'suspended') throw new Error('BID_HOST_RESTART_STATE_INVALID')
-      const interrupted = interruptedState.run
-      state = await checkpointBidProjectState(operation.workspace, interruptedState)
-      const notice: BidRunNotice = {
-        noticeId: `run:${interrupted.runId}:suspended`,
-        supersedesTurn: null,
-        runId: interrupted.runId,
-        stage: state.stage,
-        kind: 'interrupted',
-        severity: 'error',
-        message: '当前阶段已中断，已保存已完成进度。',
+      const unfinished = state.run
+      const committed = unfinished.work.kind === 'capability_task'
+        ? await this.readCommittedCapabilityTask(operation.workspace, unfinished.work) : null
+      if (committed !== null) {
+        state = await checkpointBidProjectState(operation.workspace, committed.return_state)
+        if (!operation.session.events.some(event => event.type === 'bid.run.completed'
+          && event.data.run.runId === unfinished.runId)) {
+          operation.session.append('bid.run.completed', { run: { ...unfinished, updatedAt: Date.now() } })
+        }
+        this.appendCapabilityCompletionNotice(operation.session, unfinished)
+      } else {
+        const interruptedState = suspendForHostRestart(state)
+        if (interruptedState.status !== 'suspended') throw new Error('BID_HOST_RESTART_STATE_INVALID')
+        const interrupted = interruptedState.run
+        state = await checkpointBidProjectState(operation.workspace, interruptedState)
+        const notice: BidRunNotice = {
+          noticeId: `run:${interrupted.runId}:suspended`,
+          supersedesTurn: null,
+          runId: interrupted.runId,
+          stage: state.stage,
+          kind: 'interrupted',
+          severity: 'error',
+          message: '当前阶段已中断，已保存已完成进度。',
+        }
+        operation.session.append('bid.run.notice', notice)
+        this.injectHostExecutionUpdate(operation.session, {
+          stage: state.stage,
+          status: 'suspended',
+          cause: interrupted.cause,
+          message: notice.message,
+        })
       }
-      operation.session.append('bid.run.notice', notice)
-      this.injectHostExecutionUpdate(operation.session, {
-        stage: state.stage,
-        status: 'suspended',
-        cause: interrupted.cause,
-        message: notice.message,
-      })
+    }
+    const lastStarted = operation.session.events.findLast(event => event.type === 'bid.run.started')
+    if (state.status !== 'running' && state.status !== 'suspended'
+      && lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
+      && !operation.session.events.some(event => event.type === 'bid.run.notice'
+        && event.data.noticeId === `work:${lastStarted.data.run.work.workId}:completed`)) {
+      const request = await this.readCommittedCapabilityTask(operation.workspace, lastStarted.data.run.work)
+      if (request !== null && isDeepStrictEqual(request.return_state, bidProjectTaskState(state))) {
+        this.appendCapabilityCompletionNotice(operation.session, lastStarted.data.run)
+      }
     }
     operation.projectRevision = state.revision
     operation.session.append('bid.project.resumed', { state: bidProjectTaskState(state), revision: state.revision })
     operation.ready = true
     await this.publishProjectState(operation, state)
     return bidProjectTaskState(state)
+  }
+
+  private async readCommittedCapabilityTask(
+    workspace: BidWorkspace, work: BidWorkDescriptor,
+  ): Promise<CapabilityTaskRequest | null> {
+    await reconcileBidPublications(workspace.root, workspace.projectRoot)
+    const receipt = await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)
+    return receipt === null ? null : capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
   }
 
   /** 只广播控制状态；每个 Session 保留独立的聊天、工具及模型上下文。 */
@@ -2093,6 +2146,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = bidSessionTaskState(session)
     if (task.status !== 'suspended') return undefined
     const { run } = task
+    if (run.cause === 'awaiting_input') return undefined
     const decisionKey = runDecisionKey(session, task.stage, run.runId, 'run_recovery')
     const options = task.stage === 'file_intake'
       ? [{ label: RUN_DECISION_OPTIONS.continue }, { label: RUN_DECISION_OPTIONS.stop }]
@@ -2116,7 +2170,12 @@ export class BidHostRuntime extends TypertRemoteService {
     const { session } = agent
     if (!isBidMainSession(session)) return
     const current = this.currentRunDecision(session)
-    if (current === undefined) return
+    if (current === undefined) {
+      const task = bidSessionTaskState(session)
+      if (task.status === 'suspended' && task.run.cause === 'awaiting_input'
+        && task.run.work.kind === 'capability_task') this.ensureCapabilityInput(agent)
+      return
+    }
     if (this.bidGoalBridge?.canRecover(session)) {
       this.cancelRunDecisions(session)
       return
@@ -2132,6 +2191,48 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = this.askRunDecision(agent, request, controller)
     this.pendingRunDecisions.set(request.decisionKey, task)
     void task
+  }
+
+  /** 同一悬挂 Run 仅开放一个持久化问题；答案保存后续行原 Work。 */
+  private ensureCapabilityInput(agent: Agent): void {
+    if (!this.isContextActive()) return
+    const task = bidSessionTaskState(agent.session)
+    if (task.status !== 'suspended' || task.run.cause !== 'awaiting_input'
+      || task.run.work.kind !== 'capability_task') return
+    const key = task.run.runId
+    if (this.pendingCapabilityInputs.has(key)) return
+    const controller = new AbortController()
+    this.pendingCapabilityInputControllers.set(key, controller)
+    const pending = this.askAndResumeCapabilityInput(agent, task.run, controller).catch((error: unknown) => {
+      if (!controller.signal.aborted) this.ctx.logger.warn(`Bid 能力输入提问未完成：${sanitizeBidErrorText(String(error))}`)
+    }).finally(() => {
+      this.pendingCapabilityInputs.delete(key)
+      this.pendingCapabilityInputControllers.delete(key)
+    })
+    this.pendingCapabilityInputs.set(key, pending)
+    void pending
+  }
+
+  private async askAndResumeCapabilityInput(
+    agent: Agent, suspended: Extract<BidTaskState, { status: 'suspended' }>['run'], controller: AbortController,
+  ): Promise<void> {
+    const workspace = new BidWorkspace(projectKey(agent.session), workspaceConfig(this.config))
+    const outcome = await readCapabilityAwaitingInput(workspace, suspended.work.workId, suspended.work.requestSha256)
+    if (outcome === null) throw new Error('BID_CAPABILITY_AWAITING_STEP_MISSING')
+    const answered = await askCapabilityTaskInput(agent.session, suspended.work.workId, outcome,
+      async (question) => {
+        const reply = await this.ctx.userQuestions.ask({ agent, questions: [question], signal: controller.signal })
+        const item = reply.answers.find(answer => answer.id === question.id)
+        if (item === undefined) throw new Error('BID_CAPABILITY_INPUT_ANSWER_MISSING')
+        return item
+      }, async () => { await this.ctx.sessions.flush(agent.session) })
+    if (!answered || controller.signal.aborted || !this.isContextActive()) return
+    const current = bidSessionTaskState(agent.session)
+    if (current.status !== 'suspended' || current.run.runId !== suspended.runId
+      || current.run.cause !== 'awaiting_input') return
+    const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
+    if (resumed?.type !== 'bid.project.resumed') throw new Error('BID_CAPABILITY_RESUME_REVISION_MISSING')
+    await this.resumeCurrentRun(agent.session, suspended.runId, resumed.data.revision)
   }
 
   private cancelRunDecisions(session: Session): void {
@@ -4586,6 +4687,8 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!isBidMainSession(session)) return Promise.resolve()
     this.bidGoalBridge?.pause(session)
     const key = projectKey(session)
+    const task = bidSessionTaskState(session)
+    if (task.status === 'suspended') this.pendingCapabilityInputControllers.get(task.run.runId)?.abort(new Error('BID_CAPABILITY_USER_STOP'))
     const existing = this.writingEntryStops.get(key)
     if (existing?.state === 'pending') {
       return existing.done
@@ -4986,6 +5089,81 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 接纳一个由真实用户消息授权的能力序列。
+   * @param agent 公开主会话的 Agent。
+   * @param task 有序能力步骤与任务范围。
+   * @param authorization 用户消息身份。
+   * @param inputPaths 本次任务读取的正式输入文件。
+   * @returns Run 结算后的项目状态。
+   */
+  async runCapabilityTask(
+    agent: Agent, task: BidCapabilityTask,
+    authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
+  ): Promise<BidTaskState> {
+    const session = agent.session
+    assertBidMainSession(session)
+    if (this.ctx.agents.get(session.id) !== agent || this.capabilityTaskDispatcher === undefined) {
+      throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+    }
+    const operation = this.beginOperation(session)
+    let admitted = false
+    try {
+      const current = await this.prepareOperation(operation)
+      if (current.status !== 'ready' && current.status !== 'waiting_user' && current.status !== 'completed') {
+        throw new Error('BID_CAPABILITY_TASK_STATE_NOT_READY')
+      }
+      const selected = bidCapabilityTaskSchema.parse(task)
+      const work = await persistCapabilityTaskRequest(operation.workspace, session, current.stage, selected,
+        authorization, inputPaths, current)
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, work))
+      const execution = await this.executionAgent(operation, current.stage)
+      const run = await operation.runs.start(work)
+      admitted = true
+      return await this.executeAdmittedCapabilityTask(execution, operation, run, request)
+    } finally {
+      await this.finishOperation(session, operation, admitted)
+    }
+  }
+
+  private async executeAdmittedCapabilityTask(
+    agent: Agent, operation: ActiveBidOperation, run: BidRunContext, request: CapabilityTaskRequest,
+  ): Promise<BidTaskState> {
+    try {
+      const dispatcher = this.capabilityTaskDispatcher
+      if (dispatcher === undefined) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+      const outcome = await run.activities.track(() => executeCapabilityTask(
+        operation.workspace, run, dispatcher, agent, operation.session,
+      ))
+      if (outcome.status === 'awaiting_input') {
+        await operation.runs.suspend('awaiting_input')
+        return bidSessionTaskState(operation.session)
+      }
+      await operation.runs.complete(run, () => {
+        this.appendCapabilityCompletionNotice(operation.session, run)
+        operation.session.append('bid.task.changed', { state: request.return_state })
+      })
+      return bidSessionTaskState(operation.session)
+    } catch (error: unknown) {
+      if (operation.runs.current === run) await operation.runs.suspend(
+        run.signal.aborted ? 'user_stop' : 'executor_error', safeRecoverableBidFailure(run.work, error),
+      )
+      return bidSessionTaskState(operation.session)
+    }
+  }
+
+  private appendCapabilityCompletionNotice(session: Session, run: Pick<BidRunData, 'runId' | 'work'>): void {
+    const workId = run.work.workId
+    const noticeId = `work:${workId}:completed`
+    if (session.events.some(event => event.type === 'bid.run.notice' && event.data.noticeId === noticeId)) return
+    const resultRef = `requests/${workId}/result.json`
+    session.append('bid.run.notice', {
+      noticeId, supersedesTurn: null, runId: run.runId, stage: run.work.stage,
+      kind: 'completed', severity: 'info', workId, resultRef,
+      message: `能力任务已完成；结果凭据：${resultRef}`,
+    })
+  }
+
+  /**
    * Resume one exact suspended Run after checking its project revision and durable checkpoints.
    * @param session - Bid Session that owns the suspended Run.
    * @param suspendedRunId - Exact suspended attempt selected by the client.
@@ -4994,6 +5172,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param recovery - Bound Goal request revalidated and recorded inside the project lock.
    * @returns State reached when the resumed work next settles.
    */
+
   async resumeCurrentRun(
     session: Session,
     suspendedRunId: string,
@@ -5067,6 +5246,12 @@ export class BidHostRuntime extends TypertRemoteService {
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidTaskState> {
     const payload = await readHostWork(operation.workspace, suspended.work)
+    if (suspended.work.kind === 'capability_task') {
+      if (this.capabilityTaskDispatcher === undefined) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+      const run = await operation.runs.start(suspended.work, { runId: suspended.runId, cause: suspended.cause })
+      onAccepted?.(run)
+      return this.executeAdmittedCapabilityTask(agent, operation, run, capabilityTaskRequestSchema.parse(payload))
+    }
     const run = await operation.runs.start(suspended.work, {
       runId: suspended.runId,
       cause: suspended.cause,
@@ -5191,6 +5376,8 @@ export class BidHostRuntime extends TypertRemoteService {
           case 'stage_execution':
           case 'file_intake':
             throw new Error('BID_DEDICATED_WORK_KIND_REQUIRED')
+          case 'capability_task':
+            throw new Error('BID_CAPABILITY_DISPATCH_ALREADY_SELECTED')
         }
       })
       if (confirmedArtifacts !== undefined) {
