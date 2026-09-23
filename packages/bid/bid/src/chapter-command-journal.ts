@@ -7,7 +7,7 @@ import { assertNoLinkedPath } from './workspace-path.ts'
 
 const commandSchema = z.object({
   id: z.uuid(),
-  status: z.enum(['pending', 'applied']),
+  status: z.enum(['pending', 'applied', 'canceled']),
   command: z.unknown(),
 }).strict()
 const journalSchema = z.object({ schema_version: recordOnlySchemaVersion(1), commands: z.array(commandSchema) }).strict()

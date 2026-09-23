@@ -51,6 +51,7 @@ import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
+import { readPendingCapabilityRequests } from '../src/bid-capability-queue.ts'
 
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
@@ -577,6 +578,47 @@ describe('Workspace 项目与独立 Session', () => {
     expect(result.value).toMatchObject({ accepted: true, state: { stage: 'chapter_writing', status: 'completed' },
       changed_artifacts: expect.arrayContaining(['analysis/requirements.json']) })
   })
+
+  it('运行中的 S4 将跨阶段修改登记到原 Work，收敛后执行一次', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('queued-capability-main')
+    const gate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => gate.promise)
+    const retry = resumeRun(ctx, agent.session)
+    await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ status: 'running' }) })
+    const running = runtime(agent.session)
+    if (running.status !== 'running') throw new Error('应有当前 Run')
+    await vi.waitFor(() => {
+      const active = [...host.inFlight.values()][0] as { runs: BidRunCoordinator } | undefined
+      expect(active?.runs.current).toBeDefined()
+    })
+    const message = createUserMessage({ content: [{ type: 'text', text: '更正第一条招标要求' }],
+      source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const queued = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
+      goal: '更正第一条招标要求', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+        call: { capability: 'tender.update', input: { operations: [{ type: 'update_requirement',
+          requirement_id: 'REQ-1', fields: { normalized_requirement: '明确实施边界' } }] } } }],
+    } }, callId: CallId('queued-capability-main'), signal: new AbortController().signal })
+    expect(queued.isError, JSON.stringify(queued)).toBe(false)
+    expect(queued.value).toMatchObject({ accepted: true, queued: true })
+    expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toHaveLength(1)
+    gate.resolve([])
+    const settled = await retry
+    expect(settled).toMatchObject({ ok: true })
+    expect(await readBidProjectState(workspace)).toMatchObject({ status: 'waiting_user' })
+    await vi.waitFor(async () => {
+      const requirements = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')) as {
+        requirements: Array<{ normalized_requirement: string }>
+      }
+      expect(requirements.requirements[0]?.normalized_requirement).toBe('明确实施边界')
+    }, { timeout: 10_000 })
+    expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toEqual([])
+    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) }, { timeout: 10_000 })
+  }, 20_000)
 
   it('S4 reset 后 inspect 从 S3 已确认目录恢复章节摘要但不伪造 Draft', async () => {
     const { ctx, workspace, fresh } = await fixture()

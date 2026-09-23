@@ -96,6 +96,8 @@ import { askCapabilityTaskInput, executeCapabilityTask, readCapabilityAwaitingIn
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
+import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
+  pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
@@ -901,6 +903,7 @@ interface ActiveBidOperation {
   executionHandle?: AgentHandle
   executionStage?: BidStage
   defaultWritingRunAdmitted?: boolean
+  lastAdmittedWorkId?: string
   readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
   readonly runs: BidRunCoordinator
@@ -1031,9 +1034,13 @@ class HostChapterWritingControl implements ChapterWritingControl {
     this.workId = workId
     this.commits = commits
     this.records = await readBidChapterCommandJournal(workspace, workId)
-    this.commands.splice(0, this.commands.length, ...this.records.flatMap(record => record.status === 'pending'
-      ? [{ ...(record.command as ChapterWritingCommand), commandId: record.id }]
-      : []))
+    this.commands.splice(0, this.commands.length, ...this.records.flatMap((record) => {
+      if (record.status !== 'pending' || typeof record.command !== 'object' || record.command === null
+        || !('kind' in record.command)) return []
+      const kind = record.command.kind
+      return kind === 'writing_plan' || kind === 'revision' || kind === 'flowchart_visual_review_policy'
+        ? [{ ...(record.command as ChapterWritingCommand), commandId: record.id }] : []
+    }))
   }
 
   async enqueue(command: ChapterWritingCommand): Promise<void> {
@@ -1043,7 +1050,7 @@ class HostChapterWritingControl implements ChapterWritingControl {
     if (workspace === undefined || workId === undefined || commits === undefined) throw new Error('BID_CHAPTER_COMMAND_JOURNAL_UNBOUND')
     const record: BidChapterCommandRecord = { id: randomUUID(), status: 'pending', command }
     this.writes = this.writes.then(async () => {
-      const records = [...this.records, record]
+      const records = [...await readBidChapterCommandJournal(workspace, workId), record]
       await writeBidChapterCommandJournal(workspace, workId, records, commits)
       this.records = records
     })
@@ -1084,8 +1091,10 @@ class HostChapterWritingControl implements ChapterWritingControl {
     if (workspace === undefined || workId === undefined || commits === undefined) throw new Error('BID_CHAPTER_COMMAND_JOURNAL_UNBOUND')
     const ids = new Set(commands.flatMap(command => command.commandId === undefined ? [] : [command.commandId]))
     this.writes = this.writes.then(async () => {
-      const records = this.records.map(record => ids.has(record.id) ? { ...record, status: 'applied' as const } : record)
+      let records: BidChapterCommandRecord[] = []
       await commits.publish(async (lease) => {
+        records = (await readBidChapterCommandJournal(workspace, workId))
+          .map(record => ids.has(record.id) ? { ...record, status: 'applied' as const } : record)
         await write(lease)
         await writeBidChapterCommandJournal(workspace, workId, records, lease)
       })
@@ -1664,6 +1673,8 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly pendingCapabilityInputControllers = new Map<string, AbortController>()
   private capabilityTaskDispatcher: CapabilityTaskDispatcher | undefined
   private readonly builtInCapabilityDispatcher: CapabilityTaskDispatcher
+  private readonly queuedDrains = new Set<BidProjectKey>()
+  private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
@@ -1839,6 +1850,7 @@ export class BidHostRuntime extends TypertRemoteService {
           // Admission diagnostics must never turn a durably admitted Run into a failed Run.
           this.ctx.logger.warn('Bid Run admission diagnostics unavailable.')
         }
+        current.lastAdmittedWorkId = run.work.workId
         if (run.work.kind === 'stage_execution' && run.work.stage === 'tender_analysis') {
           this.bidGoalBridge?.onS2Admitted(current.session, run)
         }
@@ -1991,6 +2003,14 @@ export class BidHostRuntime extends TypertRemoteService {
         if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
         operation.settle()
         const settledTask = bidSessionTaskState(operation.session)
+        if (operation.lastAdmittedWorkId !== undefined && settledTask.status !== 'suspended') {
+          void this.drainPersistedCapabilityRequests(operation.session)
+            .catch((error: unknown) => {
+              this.ctx.logger.warn(`Bid 排队能力任务调度失败：${sanitizeBidErrorText(
+                error instanceof Error ? error.message : String(error),
+              )}`)
+            })
+        }
         if (operation.defaultWritingRunAdmitted && settledTask.stage === 'chapter_writing'
           && settledTask.status === 'completed') {
           this.bidGoalBridge?.complete(operation.session)
@@ -2880,6 +2900,14 @@ export class BidHostRuntime extends TypertRemoteService {
     installStageInteractionTools(ctx,
       (agent, request, signal) => this.executeStageInteraction(agent, request, signal),
       session => isBidMainSession(session) && this.inFlight.get(projectKey(session))?.interaction === true)
+    ctx.on('agent/session-start', ({ agent }) => {
+      if (!isBidMainSession(agent.session)) return
+      void this.drainPersistedCapabilityRequests(agent.session).catch((error: unknown) => {
+        this.ctx.logger.warn(`Bid 排队能力任务恢复失败：${sanitizeBidErrorText(
+          error instanceof Error ? error.message : String(error),
+        )}`)
+      })
+    }, { global: true })
     ctx.inject(['goals', 'goalRoundDriver'], (goalCtx) => {
       const bridge = new BidGoalBridge(goalCtx, (session) => {
         if (this.inFlight.has(projectKey(session))) return false
@@ -3225,25 +3253,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
     }
     if (request.action === 'bid_run_task') {
-      const message = session.events.findLast(event => event.type === 'user/message'
-        && event.data.source.kind === 'user')
-      if (message?.type !== 'user/message') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
-      const first = request.task.steps[0]
-      if (first === undefined) throw new Error('BID_CAPABILITY_EMPTY_TASK')
-      const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
-        ? 'manifest.json' : path)
-      const authorization = {
-        session_id: String(session.id), message_id: String(message.data.id),
-      }
-      const state = await this.runCapabilityTask(agent, request.task, authorization, inputs)
-      const canonical = new BidWorkspace(key, workspaceConfig(this.config))
-      const work = await findCapabilityTaskRequest(canonical, authorization)
-      if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
-      const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
-      return { accepted: true, work_id: work.workId, state,
-        result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
-        changed_artifacts: receipt?.files.map(file => file.path) ?? [],
-        removed_artifacts: receipt?.removed_paths ?? [] }
+      return this.runCapabilityTaskFromTool(agent, request.task)
     }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
@@ -4205,6 +4215,8 @@ export class BidHostRuntime extends TypertRemoteService {
         ? { stage, status: 'waiting_user', run: null }
         : { stage, status: 'ready', run: null }
       await this.mutateProject(operation, async (lease) => {
+        const canceled = await cancelCapabilityRequestsForReset(workspace, paths, lease)
+        if (canceled > 0) this.ctx.logger.info(`Bid 重置取消 ${canceled} 项输入已失效的排队能力任务。`)
         const invalidatedExports = await invalidateDocxLastExports(workspace, lease)
         const registeredExports = await clearDocxExportArtifacts(workspace, lease)
         const outputPaths = [...new Set(workspace.config.outputDirectory === DEFAULT_BID_CONFIG.outputDirectory
@@ -5121,6 +5133,107 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 公开工具在运行期保存排队请求；空闲时执行并返回实际发布身份。
+   * @param agent 当前公开主 Agent。
+   * @param task 已解析的能力计划。
+   * @returns 接纳、排队或正式发布状态。
+   */
+  private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
+    const session = agent.session
+    assertBidMainSession(session)
+    const message = session.events.findLast(event => event.type === 'user/message'
+      && event.data.source.kind === 'user')
+    if (message?.type !== 'user/message') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+    const first = task.steps[0]
+    if (first === undefined) throw new Error('BID_CAPABILITY_EMPTY_TASK')
+    const authorization = { session_id: String(session.id), message_id: String(message.data.id) }
+    const key = projectKey(session)
+    const active = this.inFlight.get(key)
+    const currentRun = active?.runs.current
+    if (active !== undefined && currentRun !== undefined) {
+      const queued = await enqueueCapabilityRequest(active.workspace, currentRun, task, authorization)
+      return { accepted: true, queued: true, ...queued,
+        message: '能力任务已在当前 Work 命令日志登记；当前 Run 收敛后按顺序执行。' }
+    }
+    if (active !== undefined) await active.done
+    const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
+      ? 'manifest.json' : path)
+    const state = await this.runCapabilityTask(agent, task, authorization, inputs)
+    const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+    const work = await findCapabilityTaskRequest(canonical, authorization)
+    if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
+    const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
+    return { accepted: true, queued: false, work_id: work.workId, state,
+      result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
+      changed_artifacts: receipt?.files.map(file => file.path) ?? [],
+      removed_artifacts: receipt?.removed_paths ?? [] }
+  }
+
+  /** 当前 Work 收敛后只消费登记过的请求，后续步骤取得独立 Run。 */
+  private async drainQueuedCapabilityRequests(session: Session, originWorkId: string): Promise<void> {
+    if (!isBidMainSession(session)) return
+    const key = projectKey(session)
+    const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+    for (const pending of await readPendingCapabilityRequests(workspace, originWorkId)) {
+      if (this.inFlight.has(key)) return
+      const state = await readBidProjectState(workspace)
+      if (state === undefined || state.status === 'running' || state.status === 'suspended'
+        || state.status === 'failed') return
+      const agent = this.ctx.agents.get(session.id)
+      if (agent?.session !== session || pending.request.authorization.session_id !== String(session.id)) return
+      const first = pending.request.task.steps[0]
+      if (first === undefined) throw new Error('BID_CAPABILITY_QUEUE_EMPTY_TASK')
+      const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
+        ? 'manifest.json' : path)
+      const existing = await findCapabilityTaskRequest(workspace, pending.request.authorization)
+      if (existing !== null) {
+        const started = session.events.some(event => event.type === 'bid.run.started'
+          && event.data.run.work.workId === existing.workId)
+        if (started) {
+          const completed = session.events.some(event => event.type === 'bid.run.completed'
+            && event.data.run.work.workId === existing.workId)
+          if (!completed) return
+          const operation = this.beginOperation(session)
+          try {
+            const current = await this.prepareOperation(operation)
+            await this.mutateProject(operation, lease => markCapabilityRequestAppliedWithLease(
+              workspace, originWorkId, pending.recordId, lease), current)
+          } finally {
+            await this.finishOperation(session, operation)
+          }
+          continue
+        }
+      }
+      await this.runCapabilityTask(agent, pending.request.task, pending.request.authorization, inputs,
+        run => markCapabilityRequestApplied(workspace, originWorkId, pending.recordId, run))
+    }
+  }
+
+  /** 在项目空闲边界按持久命令日志恢复队列；同一项目只运行一个调度器。 */
+  private async drainPersistedCapabilityRequests(session: Session): Promise<void> {
+    if (!isBidMainSession(session)) return
+    const key = projectKey(session)
+    if (this.queuedDrains.has(key)) {
+      this.queuedDrainRequested.add(key)
+      return
+    }
+    this.queuedDrains.add(key)
+    try {
+      do {
+        this.queuedDrainRequested.delete(key)
+        if (this.inFlight.has(key)) return
+        const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+        for (const workId of await pendingCapabilityWorkIds(workspace)) {
+          await this.drainQueuedCapabilityRequests(session, workId)
+          if (this.inFlight.has(key)) return
+        }
+      } while (this.queuedDrainRequested.has(key))
+    } finally {
+      this.queuedDrains.delete(key)
+    }
+  }
+
+  /**
    * 接纳一个由真实用户消息授权的能力序列。
    * @param agent 公开主会话的 Agent。
    * @param task 有序能力步骤与任务范围。
@@ -5131,6 +5244,7 @@ export class BidHostRuntime extends TypertRemoteService {
   async runCapabilityTask(
     agent: Agent, task: BidCapabilityTask,
     authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
+    onAdmitted?: (run: BidRunContext) => Promise<void>,
   ): Promise<BidTaskState> {
     const session = agent.session
     assertBidMainSession(session)
@@ -5151,6 +5265,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const execution = await this.executionAgent(operation, current.stage)
       const run = await operation.runs.start(work)
       admitted = true
+      if (onAdmitted !== undefined) await onAdmitted(run)
       return await this.executeAdmittedCapabilityTask(execution, operation, run, request)
     } finally {
       await this.finishOperation(session, operation, admitted)
