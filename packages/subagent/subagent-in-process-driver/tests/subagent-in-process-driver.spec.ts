@@ -122,6 +122,7 @@ describe('startInProcessRun', () => {
       session: parent.session,
       ctx: {
         get: () => undefined,
+        serial: ctx.serial.bind(ctx),
         agents: {
           create: async (options: Parameters<typeof ctx.agents.create>[0]) => {
             const handle = await ctx.agents.create(options)
@@ -360,6 +361,7 @@ describe('startInProcessRun', () => {
         // The driver's synchronous inheritance capture probes both policy
         // services opportunistically; this stub composes neither.
         get: () => undefined,
+        serial: ctx.serial.bind(ctx),
         agents: {
           create: async (options: Parameters<typeof ctx.agents.create>[0]) => {
             const handle = await ctx.agents.create(options)
