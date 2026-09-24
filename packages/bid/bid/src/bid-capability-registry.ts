@@ -28,7 +28,7 @@ export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
   readonly requires: readonly string[]
   readonly result: 'artifacts' | 'review' | 'export'
 }>> = {
-  'tender.analyze': { requires: ['manifest'], result: 'artifacts' },
+  'tender.analyze': { requires: ['manifest.json'], result: 'artifacts' },
   'tender.update': { requires: ['analysis/project.json', 'analysis/requirements.json',
     'analysis/scoring-origin.json', 'analysis/compliance.json'], result: 'artifacts' },
   'outline.generate': { requires: ['manifest.json', 'analysis/project.json', 'analysis/requirements.json',
