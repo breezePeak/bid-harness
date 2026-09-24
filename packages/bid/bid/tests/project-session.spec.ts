@@ -490,6 +490,64 @@ describe('Workspace 项目与独立 Session', () => {
     } finally { unregister() }
   })
 
+  it('首个能力步骤已合并后重建 Host 与 Session，只重试未完成步骤', async () => {
+    const first = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(first.workspace)
+    await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await first.fresh('capability-step-restart')
+    const message = createUserMessage({ content: [{ type: 'text', text: '先审章节再审全书' }], source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    await first.ctx.sessions.flush(agent.session)
+    const calls: string[] = []
+    let interrupt = true
+    const dispatcher: CapabilityTaskDispatcher = {
+      allowedWrites: async call => new Set([call.capability === 'chapter.review'
+        ? 'chapters/local-review.json' : 'chapters/document-review.json']),
+      execute: async (call, context) => {
+        calls.push(call.capability)
+        if (call.capability === 'document.review' && interrupt) {
+          interrupt = false
+          throw new Error('整书审核前中断')
+        }
+        const path = call.capability === 'chapter.review'
+          ? 'chapters/local-review.json' : 'chapters/document-review.json'
+        await context.run.commits.writeJson(join(context.working.projectRoot, path), { capability: call.capability })
+        return { result: { target_section_ids: [], changed_artifacts: [path],
+          change_summary: `完成 ${call.capability}`, warnings: [], missing_topics: [], needs_input: false } }
+      },
+      validate: async () => {},
+    }
+    first.ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
+    const result = await first.ctx.bid.runCapabilityTask(agent, { goal: '先审章节再审全书',
+      scope: { kind: 'project' }, steps: [
+        { scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
+        { scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
+      ] }, { session_id: String(agent.session.id), message_id: String(message.id) },
+    ['chapters/execution-log.json'])
+    expect(result).toMatchObject({ status: 'suspended' })
+    expect(calls).toEqual(['chapter.review', 'document.review'])
+    await expect(readFile(join(first.workspace.projectRoot, 'chapters/local-review.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    await first.ctx.fiber.dispose()
+
+    const second = await fixture({ root: first.workspace.root, withPersistence: true })
+    const unregister = second.ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
+    try {
+      const restored = await second.fresh('capability-step-restart')
+      const suspended = await readBidProjectState(second.workspace)
+      if (suspended?.status !== 'suspended') throw new Error('未恢复待续行 Work')
+      expect(await second.ctx.bid.resumeCurrentRun(restored.session, suspended.run.runId, suspended.revision))
+        .toMatchObject({ status: 'completed' })
+      expect(calls).toEqual(['chapter.review', 'document.review', 'document.review'])
+      expect(await readFile(join(second.workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
+        .toContain('chapter.review')
+      expect(await readFile(join(second.workspace.projectRoot, 'chapters/document-review.json'), 'utf8'))
+        .toContain('document.review')
+      expect(restored.session.events.filter(event => event.type === 'bid.run.notice'
+        && event.data.workId === suspended.run.work.workId && event.data.kind === 'completed')).toHaveLength(1)
+    } finally { unregister() }
+  })
+
   it('上传入口把 S1 Work 交给与恢复入口相同的默认编排器', async () => {
     const { ctx, fresh, host } = await fixture()
     const agent = await fresh('shared-capability-route')

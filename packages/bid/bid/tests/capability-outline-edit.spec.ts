@@ -18,6 +18,7 @@ import { chapterReuseSeedsSchema, indexChapterContentBlocks } from '../src/chapt
 import { executeCapabilityChapterReorganize, executeCapabilityOutlineUpdate,
   outlineReassignmentSchema } from '../src/outline-capability-update.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseOutlineDraft } from '../src/outline-confirmation-artifacts.ts'
 import { parseOutlineArtifact } from '../src/outline-generation-artifacts.ts'
 import { parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
@@ -290,7 +291,11 @@ describe('目录能力候选', () => {
       .toMatchObject({ pending_source_section_ids: [] })
   })
 
-  it('同一 Work 连续深化目录并迁移正文，只发布精确文件和完成凭据', async () => {
+  it.each([
+    { name: '连续执行', interrupt: 'none' },
+    { name: '目录候选合并后迁移前中断再恢复', interrupt: 'before_reorganize' },
+    { name: '原文迁移候选合并后审核前中断再恢复', interrupt: 'before_review' },
+  ])('同一 Work $name，只发布精确文件和完成凭据', async ({ interrupt }) => {
     const { workspace } = await fixture()
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -304,6 +309,8 @@ describe('目录能力候选', () => {
           input: { feedback: '拆成准备和实施两个子章' } } },
         { scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
           input: { instruction: '保留并分配旧章所有正文块', source_section_ids: ['SEC-1'], allow_content_deletion: false } } },
+        ...interrupt === 'before_review' ? [{ scope: { source: 'task' as const },
+          call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }] : [],
       ] }
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const descriptor = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
@@ -334,23 +341,59 @@ describe('目录能力候选', () => {
           dispose: async () => {} }
       })
       const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
+      let interrupted = false
       const dispatcher: CapabilityTaskDispatcher = {
         allowedWrites: async (call, ids, working, stepId) => {
+          if (call.capability === 'chapter.review') return new Set(['chapters/local-review.json'])
           if (call.capability !== 'outline.refine' && call.capability !== 'chapter.reorganize') {
             throw new Error('unexpected capability')
           }
           return allowedOutlineCapabilityWrites(call, working, stepId, ids)
         },
         execute: async (call, context) => {
+          if (call.capability === 'chapter.review') {
+            if (interrupt === 'before_review' && !interrupted) {
+              interrupted = true
+              throw new Error('原文迁移候选已合并，审核前中断')
+            }
+            await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'),
+              { reviewed: true })
+            return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+              change_summary: '已审核原文迁移结果', warnings: [], missing_topics: [], needs_input: false } }
+          }
           if (call.capability !== 'outline.refine' && call.capability !== 'chapter.reorganize') {
             throw new Error('unexpected capability')
           }
+          if (interrupt === 'before_reorganize' && call.capability === 'chapter.reorganize' && !interrupted) {
+            interrupted = true
+            throw new Error('目录候选已合并，正文迁移前中断')
+          }
           return executeOutlineCapability(call, context)
         },
-        validate: async (_call, context, result) => validateOutlineCapability(context, result),
+        validate: async (call, context, result) => {
+          if (call.capability !== 'chapter.review') await validateOutlineCapability(context, result)
+        },
       }
       const run = createTestBidRunContext({ work: descriptor })
-      const outcome = await executeCapabilityTask(workspace, run, dispatcher, agent, session)
+      if (interrupt !== 'none') {
+        await expect(executeCapabilityTask(workspace, run, dispatcher, agent, session))
+          .rejects.toThrow(interrupt === 'before_reorganize'
+            ? '目录候选已合并，正文迁移前中断' : '原文迁移候选已合并，审核前中断')
+        expect(start).toHaveBeenCalledTimes(interrupt === 'before_reorganize' ? 2 : 3)
+        const formal = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+        expect(children.some(id => formal.sections.some(section => section.id === id))).toBe(false)
+        expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
+        const candidate = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
+        const staged = parseOutlineArtifact(await readJson(candidate, 'outline/confirmed-outline.json'))
+        expect(children.every(id => staged.sections.some(section => section.id === id))).toBe(true)
+        if (interrupt === 'before_review') {
+          const stagedSeeds = chapterReuseSeedsSchema.parse(await readJson(candidate, 'chapters/reuse-seeds.json'))
+          expect((await Promise.all(stagedSeeds.seeds.map(seed => readFile(join(candidate.projectRoot,
+            seed.content_path), 'utf8')))).join('')).toBe(original)
+        }
+      }
+      const outcome = await executeCapabilityTask(workspace,
+        interrupt === 'none' ? run : createTestBidRunContext({ work: descriptor }), dispatcher, agent, session)
       expect(outcome.status).toBe('completed')
       expect(start).toHaveBeenCalledTimes(3)
       const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
