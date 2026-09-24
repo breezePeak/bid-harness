@@ -6,7 +6,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ensureTechnicalDeviationSection, normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
 import { applyOutlineRepair } from '../src/outline-generation-repair.ts'
-import { missingOutlineResponsePoints } from '../src/outline-shared-validator.ts'
+import { missingOutlineResponsePoints, validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
 import { outlineArtifactSha256 } from '../src/outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist, sectionVisibleRequirements } from '../src/section-evidence-context.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -475,6 +475,22 @@ describe('S3 候选错误分流', () => {
 })
 
 describe('S3 需求、合规、框架与结构局部修复', () => {
+  it('按 parent_id 派生目录层级，未知父节点仍由结构校验拒绝', async () => {
+    const workspace = await fixture()
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0]!.level = 2
+    outline.sections[1]!.level = 3
+    outline.sections[2]!.level = 3
+    const normalized = normalizeOutlineCandidate(outline, catalog, scoringArtifact)
+    expect(normalized.sections.map(section => section.level)).toEqual([1, 2, 2])
+    const invalid = structuredClone(outline)
+    invalid.sections[1]!.parent_id = 'MISSING'
+    const issues: StageValidationIssue[] = []
+    validateOutlineSharedStructure(normalizeOutlineCandidate(invalid, catalog, scoringArtifact).sections, issues)
+    expect(issues.map(issue => issue.code)).toContain('OUTLINE_SHARED_SECTION_PARENT_UNKNOWN')
+  })
+
   it('将已拆分父节修为结构章时显式清空父节作答要求，保留子节内容', async () => {
     const workspace = await fixture()
     const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
@@ -532,6 +548,8 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
       if (prompt.includes('局部关联与结构修复')) {
         for (const text of [requirements.requirements[0]!.raw_text, scoring.scoring_items[0]!.raw_text, compliance.compliance_items[0]!.raw_text, 'framework_refs']) expect(prompt).toContain(text)
         expect(prompt).toContain('writable=false 和 must_answer=[]')
+        expect(prompt).toContain('level 由 Host 根据 parent_id 派生')
+        expect(prompt).toContain('update_section 修改 scoring_response_point_ids 时')
         await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(operations))
       } else {
         expect(prompt).toContain('Blueprint Quality Review')
@@ -823,6 +841,9 @@ describe('outline-generation Blueprint Quality Review', () => {
       expect(prompt).toContain('说明实施阶段和进度保障')
     }
     expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('已有全局 Compliance 不因缺少章节而算遗漏')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('不为此新增可写章节或分配给技术叶子')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('结构父节 writable=false 时 must_answer 必须保持 []')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('同一操作必须提交该可写章节完整且具体的 must_answer')
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(researchDrivenOutline))
   })
 
@@ -952,6 +973,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const workspace = await fixture()
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as unknown as Agent, workspace, buildBidStageTask('outline_generation'))
     expect(task).toContain('索引重复引用不能替代正文拆分')
+    expect(task).toContain('第二章仍可为 level=1')
   })
 
   it('allows one response point to be covered by multiple writable sections', () => {

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
@@ -40,6 +41,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await ctx.plugin(LlmRuntime)
       await ctx.plugin(FileSettingsProvider, { dshHome: savedHome, watch: false })
       await ctx.plugin(LocalCredentialProvider, { dshHome: savedHome, watch: false })
+      await ctx.plugin(LocalAttachmentStore, { dshHome: root })
       if (provider === 'deepseek-official') {
         await ctx.plugin(DeepSeek, { ...(process.env.DEEPSEEK_BASE_URL === undefined ? {} : { baseURL: process.env.DEEPSEEK_BASE_URL }) })
       } else await ctx.plugin(PiAi, {})

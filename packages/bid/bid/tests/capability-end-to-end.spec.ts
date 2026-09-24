@@ -13,7 +13,7 @@ import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
-import { collectDocxExportSnapshot } from '../src/docx-export.ts'
+import { collectDocxExportSnapshot, executeDocxExport } from '../src/docx-export.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 
 const disposals: Array<() => Promise<void>> = []
@@ -110,3 +110,46 @@ it('移动已有章节后保持身份和正文文件，导出按新目录顺序�
   const exportSnapshot = await collectDocxExportSnapshot(workspace)
   expect(exportSnapshot.markdown.indexOf('章节3')).toBeLessThan(exportSnapshot.markdown.indexOf('章节1'))
 })
+
+it('同一完成项目连续更正要求和移动章节后再次导出，正文文件保持原值', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-capability-repeat-export-'))
+  const workspace = new BidWorkspace(root)
+  const ctx = new Context()
+  disposals.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  await ctx.plugin(SessionStore)
+  await seedCapabilityProject(workspace, 'complete')
+  const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'))
+  const first = await executeDocxExport(workspace, createTestBidRunContext(), 'output/before.docx')
+  expect(first).toHaveLength(1)
+  const before = (await collectDocxExportSnapshot(workspace)).markdown
+  const session = ctx.sessions.create()
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const agent = { id: 'deterministic-main' } as Parameters<typeof executeCapabilityTask>[3]
+  const run = async (goal: string, capability: 'tender.update' | 'outline.update', input: unknown) => {
+    const message = createUserMessage({ content: [{ type: 'text', text: goal }], source: { kind: 'user' } })
+    session.append('user/message', message, { surfaceOp: 'append' })
+    const task = bidCapabilityTaskSchema.parse({ goal, scope: { kind: 'project' }, steps: [{
+      scope: { source: 'task' }, call: { capability, input },
+    }] })
+    const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+      { session_id: String(session.id), message_id: String(message.id) }, BID_CAPABILITIES[capability].requires,
+      { stage: 'chapter_writing', status: 'completed', run: null })
+    return executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session)
+  }
+  expect(await run('更正第三章要求的理解', 'tender.update', { operations: [{ type: 'update_requirement',
+    requirement_id: 'REQ-3', fields: { normalized_requirement: '第三章应说明实施检查' } }] }))
+    .toMatchObject({ status: 'completed' })
+  expect(await run('把第三章移到第一章前，不改正文', 'outline.update', { operations: [{
+    type: 'move_section', section_id: 'SEC-3', parent_id: 'GROUP-A', order: 1,
+  }] })).toMatchObject({ status: 'completed' })
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'))).toEqual(original)
+  const after = (await collectDocxExportSnapshot(workspace)).markdown
+  expect(after).not.toBe(before)
+  expect(after.indexOf('章节3')).toBeLessThan(after.indexOf('章节1'))
+  const second = await executeDocxExport(workspace, createTestBidRunContext(), 'output/after.docx')
+  expect(second).toHaveLength(1)
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'))).toEqual(original)
+  expect(await readFile(join(workspace.outputRoot, 'before.docx'))).not.toHaveLength(0)
+  expect(await readFile(join(workspace.outputRoot, 'after.docx'))).not.toHaveLength(0)
+}, 30_000)

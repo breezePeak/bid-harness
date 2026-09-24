@@ -34,7 +34,7 @@ export const outlineAssociationRepairOperationSchema = z.union([
   z.object({ type: z.literal('update_global_compliance'), global_compliance_ids: outlineSectionSchema.shape.compliance_ids }).strict(),
   z.object({ type: z.literal('repair_structure'), section_index: z.number().int().nonnegative(),
     id: outlineSectionSchema.shape.id.optional(), parent_id: outlineSectionSchema.shape.parent_id.optional(),
-    order: outlineSectionSchema.shape.order.optional(), level: outlineSectionSchema.shape.level.optional(),
+    order: outlineSectionSchema.shape.order.optional(),
     writable: outlineSectionSchema.shape.writable.optional(), must_answer: outlineSectionSchema.shape.must_answer.optional(),
   }).strict().refine(operation => Object.keys(operation).length > 2),
 ])

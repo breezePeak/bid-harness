@@ -100,5 +100,17 @@ export function normalizeOutlineCandidate(
     }
   })
   if (issues.length > 0) throw new z.ZodError(issues)
-  return parseOutlineArtifact({ ...candidate, sections })
+  const byId = new Map(sections.map(section => [section.id, section]))
+  const level = (id: string, visited: Set<string>): number | undefined => {
+    if (visited.has(id)) return undefined
+    const section = byId.get(id)
+    if (section === undefined) return undefined
+    if (section.parent_id === null) return 1
+    visited.add(id)
+    const parentLevel = level(section.parent_id, visited)
+    return parentLevel === undefined ? undefined : parentLevel + 1
+  }
+  return parseOutlineArtifact({ ...candidate, sections: byId.size !== sections.length ? sections : sections.map(section => ({
+    ...section, level: level(section.id, new Set()) ?? section.level,
+  })) })
 }

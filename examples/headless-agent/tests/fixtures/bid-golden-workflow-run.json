@@ -1,0 +1,147 @@
+{
+  "provider": "pp",
+  "model": "gpt-6-luna",
+  "input": {
+    "tender": "# 访问控制系统建设项目\n\n本项目采购访问控制技术方案，工作范围为角色权限、最小权限审批和操作审计。技术要求：建立角色权限、最小权限审批和操作审计机制，并提交权限矩阵与审计记录；技术标说明实施方法、职责分工和成果核验。\n\n技术评分：访问控制实施方案完整、职责清晰、成果可核验，得 10 分。\n\n投标资格材料：投标人须另行提供信息安全管理体系认证证书复印件；该材料只用于资格核验。",
+    "reference": "# 访问控制实施参考\n\n权限管理员依据岗位职责形成角色和权限矩阵。申请人提交权限用途与期限，审批人核对最小权限，管理员据批准结果配置、变更或撤销权限。审计人员定期核对操作记录与异常事件，并将权限矩阵和审计记录作为交付成果。"
+  },
+  "status": "passed",
+  "phase": "docx_export",
+  "confirmation": "测试代行 S2 评分选择、S3/S4 目录确认及 S5 写作计划确认",
+  "imported": [
+    {
+      "id": "b16abdfbfa3fbb9c7842dc6bc1c313420b24f5a98f78254d5897f4664610d504",
+      "role": "tender",
+      "parseStatus": "success"
+    },
+    {
+      "id": "4d4e1a11f83eb501ad3931071e41cfecc38d16ee640cbf339a8ffabc609f9181",
+      "role": "reference_bid",
+      "parseStatus": "success"
+    }
+  ],
+  "s2": {
+    "artifacts": [
+      "analysis/project.json",
+      "analysis/requirements.json",
+      "analysis/scoring-origin.json",
+      "analysis/compliance.json"
+    ],
+    "requirements": 2,
+    "selected_scoring_ids": [
+      "SC-001"
+    ]
+  },
+  "s3": {
+    "artifacts": [
+      "analysis/scoring-response-points.json",
+      "outline/outline.json",
+      "outline/quality-report.json"
+    ],
+    "sections": [
+      "技术偏离表",
+      "访问控制实施方案",
+      "建设范围与总体方案",
+      "角色权限与权限矩阵",
+      "最小权限审批机制",
+      "操作审计与审计记录",
+      "实施安排与职责分工",
+      "成果核验与验收"
+    ]
+  },
+  "s4": {
+    "artifacts": [
+      "analysis/evidence-map.json",
+      "analysis/web-evidence-sources.json",
+      "outline/outline.json",
+      "outline/quality-report.json"
+    ],
+    "sections": [
+      "技术偏离表",
+      "访问控制实施方案",
+      "建设范围与总体方案",
+      "角色权限与权限矩阵",
+      "最小权限审批机制",
+      "操作审计与审计记录",
+      "实施安排与职责分工",
+      "成果核验与验收"
+    ]
+  },
+  "s5": {
+    "artifacts": [
+      "chapters/execution-plan.json",
+      "chapters/execution-log.json",
+      "chapters/manifest.json",
+      "chapters/global-compliance-review.json",
+      "chapters/completion-review.json"
+    ],
+    "chapters": [
+      {
+        "section_id": "dsh-technical-deviation-table",
+        "content_path": "chapters/sections/0001.md"
+      },
+      {
+        "section_id": "sec-2-1",
+        "content_path": "chapters/sections/0002.md"
+      },
+      {
+        "section_id": "sec-2-2",
+        "content_path": "chapters/sections/0003.md"
+      },
+      {
+        "section_id": "sec-2-3",
+        "content_path": "chapters/sections/0004.md"
+      },
+      {
+        "section_id": "sec-2-4",
+        "content_path": "chapters/sections/0005.md"
+      },
+      {
+        "section_id": "sec-2-5",
+        "content_path": "chapters/sections/0006.md"
+      },
+      {
+        "section_id": "sec-2-6",
+        "content_path": "chapters/sections/0007.md"
+      }
+    ]
+  },
+  "export": {
+    "path": "output/bid.docx",
+    "bytes": 116760
+  },
+  "verification": {
+    "date": "2026-09-24",
+    "command": "node --max-old-space-size=6144 node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts examples/headless-agent/tests/bid-golden-workflow.e2e.ts --maxWorkers 1 --pool threads",
+    "duration_seconds": 1262.15,
+    "exit_code": 0,
+    "docx_sha256": "17fe316e0a0afb78351c6c23f226c9863a37046e0e0e590367437cd77117553a",
+    "docx_text_characters": 7472,
+    "docx_contains_access_control": true,
+    "docx_contains_certificate_copy": false,
+    "docx_contains_internal_requirement_id": false
+  },
+  "prior_failures_and_corrections": [
+    {
+      "phase": "S2 评分确认",
+      "failure": "首次测试跳过评分确认，未生成 analysis/scoring.json。",
+      "correction": "测试在 S3 前使用已保存的评分选择和 createConfirmedTenderScoring 生成正式评分文件。"
+    },
+    {
+      "phase": "S3 目录生成",
+      "failure": "模型把章序写成 level，或让结构父节保留 must_answer、修改 RP 归属却未提供写作要求。",
+      "correction": "Host 按 parent_id 派生 level；局部修复与质量复核指令明确 must_answer 配套要求，并保留全局合规事项的归属。"
+    },
+    {
+      "phase": "S5 章节写作",
+      "failure": "模型生成的流程图需要视觉复核，首次测试配置缺少附件存储。",
+      "correction": "测试配置挂载本地附件存储。"
+    },
+    {
+      "phase": "S4 最终复核",
+      "failure": "一次 Vitest 子进程在给出最终结果前意外退出。",
+      "correction": "通过轮次使用单线程和较大的 Node 堆，期间不并行运行重型检查。"
+    }
+  ],
+  "scope_limit": "测试代行 S2 评分、S3/S4 目录及 S5 写作计划确认；Host 交互准入由确定性测试覆盖。"
+}
