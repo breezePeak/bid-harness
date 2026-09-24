@@ -1,8 +1,19 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it, vi } from 'vitest'
-import { askCapabilityTaskInput, executeCapabilityTask, type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { BidWorkspace } from '../src/index.ts'
+import { askCapabilityTaskInput, executeCapabilityTask, persistCapabilityTaskRequest,
+  type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
+import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
+import { chapterContentSha256 } from '../src/chapter-revision.ts'
+import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { capabilityRecoveryFixture, recoveryDispatcher } from './capability-recovery-fixture.ts'
+import { seedCapabilityProject } from './capability-fixture.ts'
 
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(disposals.splice(0).map(dispose => dispose())) })
@@ -90,4 +101,38 @@ it('等待输入的步骤在重试时保持原问题，只有用户回答后继�
     .toMatchObject({ status: 'completed' })
   expect(calls).toBe(3)
   expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/unrelated.md'), 'utf8')).toBe('范围外正文\n')
+})
+
+it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-capability-stale-paragraph-'))
+  const ctx = new Context()
+  disposals.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  const workspace = new BidWorkspace(root)
+  await seedCapabilityProject(workspace, 'complete')
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const path = join(workspace.projectRoot, 'chapters/sections/0001.md')
+  const markdown = await readFile(path, 'utf8')
+  const text = '流程一：收集输入。'
+  const start = markdown.indexOf(text)
+  const reference = { scope: 'paragraphs' as const, section_id: 'SEC-1',
+    content_sha256: chapterContentSha256(markdown), start, end: start + text.length, text }
+  const message = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+    goal: '缩短选中段落', scope: { kind: 'paragraphs', reference },
+    steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.revise',
+      input: { instruction: '缩短选中段落', reference } } }],
+  }, { session_id: String(session.id), message_id: String(message.id) },
+  BID_CAPABILITIES['chapter.revise'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  const revised = markdown.replace(text, '流程一：先收集输入。')
+  await writeFile(path, revised)
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const agent = { id: 'stale-paragraph-agent' } as Parameters<typeof executeCapabilityTask>[3]
+  await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session))
+    .rejects.toThrow('BID_CHAPTER_REVISION_CONFLICT')
+  expect(await readFile(path, 'utf8')).toBe(revised)
+  await expect(readFile(join(workspace.projectRoot, `requests/${work.workId}/result.json`)))
+    .rejects.toMatchObject({ code: 'ENOENT' })
 })
