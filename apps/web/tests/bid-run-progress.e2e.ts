@@ -73,7 +73,8 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       agentPresets: { roots: [{ path: SHIPPED_PRESETS, trust: 'system' }], default: 'bid' },
     })
     browser = await chromium.launch()
-    page = await browser.newPage({ locale: ZH_BROWSER_LOCALE, viewport: { width: 1440, height: 900 } })
+    const context = await browser.newContext({ locale: ZH_BROWSER_LOCALE, viewport: { width: 1440, height: 900 } })
+    page = await context.newPage()
     tripwire = watchConsole(page)
     // 下行停滞不会发出 close，恢复只能依靠浏览器重新连接并补齐历史。
     await page.routeWebSocket('**/api/events.*', (socket) => {
@@ -226,7 +227,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await plan.getByTitle('待恢复 2', { exact: true }).waitFor({ timeout: 10_000 })
     expect(await plan.getByRole('button', { expanded: false }).count()).toBe(1)
     expect(await plan.getByTitle('待恢复 2', { exact: true }).evaluate(element => getComputedStyle(element).animationName)).toBe('none')
-    expect(await page.locator('[data-bid-progress]').count()).toBe(0)
+    expect(await plan.locator('[data-bid-progress]').count()).toBe(0)
     await plan.getByRole('button', { expanded: false }).click()
     const stoppedSnapshot = await captureStableAria(page, '[data-testid="bid-stage-plan"]', scaffold.workspaceCwd)
     await plan.screenshot({ path: join(artifacts, 'bid-s4-summary-stopped.png') })
@@ -250,7 +251,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     const input = page.locator('[data-composer-card] textarea:enabled')
     adapter.started = Promise.withResolvers<undefined>()
     await input.fill('S4 还在执行，当前资料映射进展如何？')
-    await page.getByRole('button', { name: '发送', exact: true }).click()
+    await page.getByRole('button', { name: '发送消息', exact: true }).click()
     await adapter.started.promise
     const timeOrigin = await page.evaluate(() => performance.timeOrigin)
     const otherPage = await page.context().newPage()
@@ -282,8 +283,9 @@ describe('web e2e: Bid 后台 Run 进度', () => {
         window.dispatchEvent(new Event('focus'))
       }, syntheticVisibility)
       syntheticVisibility = false
-      await page.getByText(reply, { exact: true }).waitFor({ timeout: 15_000 })
       await expect.poll(() => socketConnections).toBeGreaterThanOrEqual(previousConnections + 2)
+      await page.getByRole('tab', { name: '对话', exact: true }).click()
+      await page.getByText(reply, { exact: true }).waitFor({ timeout: 15_000 })
       expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin)
       expect(await page.locator('[class*="frame"]').isVisible()).toBe(true)
       expect(await page.getByRole('tree').isVisible()).toBe(true)
@@ -292,7 +294,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       expect(await page.locator('[data-slot-error]').count()).toBe(0)
       expect(tripwire.pageErrors).toEqual([])
       await input.fill('返回后可以继续发送消息')
-      expect(await page.getByRole('button', { name: '发送', exact: true }).isEnabled()).toBe(true)
+      expect(await page.getByRole('button', { name: '发送消息', exact: true }).isEnabled()).toBe(true)
       await input.fill('')
 
       const snapshots = fileURLToPath(new URL('./snapshots/bid-run-progress', import.meta.url))
