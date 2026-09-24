@@ -2305,7 +2305,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
-  it('能力研究同步当前目录确认，并只返回受影响章节及真实文件', async () => {
+  it('局部补资料保持当前目录不变，只返回受影响章节及真实文件', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-remap-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     const initial = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
@@ -2316,6 +2316,8 @@ describe('evidence-mapping Agent executor', () => {
     const published = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
     await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(published))
     await rm(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'))
+    const beforeOutline = await readFile(outlinePath, 'utf8')
+    const beforeConfirmed = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
     const before = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
       'analysis/evidence-map.json'), 'utf8')))
     fixture.starts.length = 0
@@ -2342,7 +2344,9 @@ describe('evidence-mapping Agent executor', () => {
     await validateEvidenceCapability(context, result)
     expect(result.target_section_ids).toEqual(['SEC-2'])
     expect(result.changed_artifacts).toContain('analysis/evidence-map.json')
-    expect(result.changed_artifacts).toContain('outline/confirmed-outline.json')
+    expect(result.changed_artifacts).not.toContain('outline/confirmed-outline.json')
+    expect(await readFile(outlinePath, 'utf8')).toBe(beforeOutline)
+    expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(beforeConfirmed)
     const sources = await allowedEvidenceCapabilitySourceWrites(workspace)
     expect([...sources]).toHaveLength(2)
     expect(result.changed_artifacts).toEqual(expect.arrayContaining([...sources]))
@@ -2353,7 +2357,7 @@ describe('evidence-mapping Agent executor', () => {
     const confirmed = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
       'outline/confirmed-outline.json'), 'utf8')))
     expect(confirmed.sections.find(section => section.id === 'SEC-2')?.purpose)
-      .toBe('按新要求说明第二章的实施方案与验收。')
+      .toBe(published.sections.find(section => section.id === 'SEC-2')?.purpose)
   })
 
   it('局部联网预检不可用时保留本地研究并明确资料缺口', async () => {

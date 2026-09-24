@@ -1,5 +1,7 @@
 /** 局部资料能力复用 S4 remap，并只发布真实改变的资料与章节索引。 */
 import type { BidWorkspace } from './index.ts'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityFileHash, readCapabilityJson } from './bid-capability-files.ts'
 import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
@@ -76,6 +78,7 @@ export async function executeEvidenceCapability(
     }
   }
   const beforeMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
+  const originalOutlineText = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
   const beforeLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
   const beforePaths = new Set([...fixedPaths, ...await sourcePaths(workspace)])
   const hashes = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
@@ -99,6 +102,16 @@ export async function executeEvidenceCapability(
     })
   }
   const researchedOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json'))
+  if (!call.input.allow_outline_refinement) {
+    const identity = (value: typeof outline) => ({ ...value, sections: value.sections.map(section => ({
+      id: section.id, parent_id: section.parent_id, order: section.order, title: section.title,
+      writable: section.writable,
+    })) })
+    if (JSON.stringify(identity(outline)) !== JSON.stringify(identity(researchedOutline))) {
+      throw new Error('BID_EVIDENCE_RESEARCH_OUTLINE_SCOPE_INVALID')
+    }
+    await context.run.commits.writeText(join(workspace.projectRoot, 'outline/outline.json'), originalOutlineText)
+  }
   const afterMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
   const afterLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
   const targetSet = new Set(targetIds)
@@ -117,7 +130,9 @@ export async function executeEvidenceCapability(
       throw new Error(`BID_EVIDENCE_RESEARCH_SOURCE_CHANGED: ${path}`)
     }
   }
-  await adoptCapabilityResearchedOutline(context, researchedOutline, targetSet)
+  if (call.input.allow_outline_refinement) {
+    await adoptCapabilityResearchedOutline(context, researchedOutline, targetSet)
+  }
   const currentOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
   if (validateSectionEvidenceCoverage(currentOutline, afterMap).length > 0) {
     throw new Error('BID_EVIDENCE_RESEARCH_COVERAGE_INVALID')
