@@ -30,6 +30,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import type { BidRunProgressInput } from '../src/control-plane-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 
 const executeOutlineGeneration = (
   agent: Agent,
@@ -306,6 +307,52 @@ function modelAgent(
 function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneration>>): string[] {
   return result.ok ? [] : result.issues.map(issue => issue.code)
 }
+
+it('公共目录生成能力通过内建分派器复核现有完整候选', async () => {
+  const workspace = await fixture()
+  const formal = withTechnicalDeviation(reviewedOutline)
+  await publishOutline(workspace, formal, [])
+  await publishDraft(workspace, formal)
+  const { agent } = modelAgent(workspace, async () => { throw new Error('完整候选不应再次调用模型') })
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const call = { capability: 'outline.generate' as const, input: {} }
+  expect(() => dispatcher.allowedWrites(call, new Set(['SEC-SCHEDULE']), workspace, 'outline-step'))
+    .toThrow('BID_GENERATION_PROJECT_SCOPE_REQUIRED')
+  const writes = await dispatcher.allowedWrites(call, null, workspace, 'outline-step')
+  expect(writes.has('outline/outline.json')).toBe(true)
+  const context = { canonical: workspace, working: workspace, agent,
+    run: createTestBidRunContext(), sectionIds: null,
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+    allowedWrites: writes, stepId: 'outline-step', rootWorkId: 'outline-task',
+    authorization: { session_id: 'main', message_id: 'outline-request' }, inputSha256: '0'.repeat(64) }
+  const result = await dispatcher.execute(call, context)
+  await dispatcher.validate(call, context, result.result)
+  expect(result.result.target_section_ids).toEqual(formal.sections.map(section => section.id))
+  expect(result.result.changed_artifacts).toEqual(['outline/generation-inputs.json'])
+})
+
+it('公共目录生成能力从正式分析输入生成并校验初步目录', async () => {
+  const workspace = await fixture()
+  const { agent } = modelAgent(workspace, async () => {}, { structuredOutputs: [
+    reviewedOutline, { operations: [], issues: [] },
+  ] })
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const call = { capability: 'outline.generate' as const, input: {} }
+  const context = { canonical: workspace, working: workspace, agent,
+    run: createTestBidRunContext(), sectionIds: null,
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+    allowedWrites: await dispatcher.allowedWrites(call, null, workspace, 'outline-step'),
+    stepId: 'outline-step', rootWorkId: 'outline-task',
+    authorization: { session_id: 'main', message_id: 'outline-request' }, inputSha256: '0'.repeat(64) }
+  const result = await dispatcher.execute(call, context)
+  await dispatcher.validate(call, context, result.result)
+  expect(result.result.target_section_ids).toContain('SEC-SCHEDULE')
+  expect(result.result.changed_artifacts).toContain('outline/outline.json')
+  expect(result.result.changed_artifacts).toContain('outline/draft.json')
+  expect(result.result.changed_artifacts).toContain('outline/quality-report.json')
+})
 
 describe('S3 候选错误分流', () => {
   const defects = ['rp', 'scoring', 'required', 'json'] as const

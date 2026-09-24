@@ -16,6 +16,8 @@ import { allowedTenderUpdateCapabilityWrites, executeTenderUpdateCapability,
   validateTenderUpdateCapability } from './bid-tender-update-capability.ts'
 import { allowedDocumentReviewWrites, executeDocumentReviewCapability,
   validateDocumentReviewCapability } from './bid-document-review-capability.ts'
+import { allowedGenerationWrites, executeGenerationCapability,
+  validateGenerationCapability } from './bid-generation-capability.ts'
 
 /** 与阶段执行器一致的 Host 配置，来源于已验证的 cordis.yml。 */
 export interface CapabilityDispatcherSettings {
@@ -52,6 +54,8 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     allowedWrites(call, sectionIds, working, stepId) {
       switch (call.capability) {
+        case 'tender.analyze':
+        case 'outline.generate': return Promise.resolve(allowedGenerationWrites(call, sectionIds))
         case 'tender.update': return Promise.resolve(allowedTenderUpdateCapabilityWrites())
         case 'outline.update':
         case 'outline.refine':
@@ -83,6 +87,8 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     execute(call, context) {
       switch (call.capability) {
+        case 'tender.analyze':
+        case 'outline.generate': return executeGenerationCapability(call, context, settings.modelStageRepairAttempts)
         case 'tender.update': return executeTenderUpdateCapability(call, context)
         case 'outline.update':
         case 'outline.refine':
@@ -106,6 +112,8 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     async validate(call, context: BidCapabilityExecutionContext, result) {
       switch (call.capability) {
+        case 'tender.analyze':
+        case 'outline.generate': return validateGenerationCapability(call, context)
         case 'tender.update': return validateTenderUpdateCapability(context)
         case 'outline.update':
         case 'outline.refine':
