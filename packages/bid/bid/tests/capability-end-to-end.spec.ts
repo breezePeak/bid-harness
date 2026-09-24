@@ -12,8 +12,10 @@ import { readCapabilityPublicationReceipt } from '../src/bid-capability-changes.
 import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
+import { indexChapterContentBlocks } from '../src/chapter-content-reuse.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { collectDocxExportSnapshot, executeDocxExport } from '../src/docx-export.ts'
+import { parseWritingPlan } from '../src/writing-requirements.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 
 const disposals: Array<() => Promise<void>> = []
@@ -111,7 +113,7 @@ it('移动已有章节后保持身份和正文文件，导出按新目录顺序�
   expect(exportSnapshot.markdown.indexOf('章节3')).toBeLessThan(exportSnapshot.markdown.indexOf('章节1'))
 })
 
-it('同一完成项目连续更正要求和移动章节后再次导出，正文文件保持原值', async () => {
+it('同一完成项目连续更正要求、移动合并章节和局部约束后再次导出，范围外正文保持原值', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-capability-repeat-export-'))
   const workspace = new BidWorkspace(root)
   const ctx = new Context()
@@ -143,6 +145,47 @@ it('同一完成项目连续更正要求和移动章节后再次导出，正文�
   expect(await run('把第三章移到第一章前，不改正文', 'outline.update', { operations: [{
     type: 'move_section', section_id: 'SEC-3', parent_id: 'GROUP-A', order: 1,
   }] })).toMatchObject({ status: 'completed' })
+  const firstBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+  const secondBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
+  const assignments = [
+    ...indexChapterContentBlocks('SEC-1', firstBody),
+    ...indexChapterContentBlocks('SEC-2', secondBody),
+  ].map(block => ({ block_id: block.block_id, source_section_id: block.source_section_id,
+    source_sha256: block.source_sha256, block_sha256: block.sha256,
+    target_section_ids: ['SEC-1'], disposition: 'move' }))
+  expect(await run('合并第一章和第二章，保留全部原文', 'outline.update', {
+    operations: [{ type: 'merge_sections', section_ids: ['SEC-1', 'SEC-2'],
+      title: '合并后的实施方案', purpose: '完整说明实施和交付' }], content_assignments: assignments,
+  })).toMatchObject({ status: 'completed' })
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8'))
+    .toBe(firstBody + secondBody)
+  const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+  const priorPlan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+  const planMessage = createUserMessage({ content: [{ type: 'text', text: '仅第三章增加实施检查步骤' }],
+    source: { kind: 'user' } })
+  const planEvent = session.append('user/message', planMessage, { surfaceOp: 'append' })
+  const ref = { session_id: String(session.id), message_id: String(planMessage.id), seq: planEvent.seq }
+  const planTask = bidCapabilityTaskSchema.parse({ goal: '仅第三章增加实施检查步骤',
+    scope: { kind: 'sections', section_ids: ['SEC-3'] }, steps: [{ scope: { source: 'task' },
+      call: { capability: 'writing.plan', input: { update_kind: 'patch',
+        base_plan_version: priorPlan.plan_version, user_message_refs: [ref],
+        summary: '第三章增加实施检查步骤', affected_section_ids: ['SEC-3'], sections: [{
+          section_id: 'SEC-3', add_user_message_refs: [ref],
+          writing_instructions: ['说明实施检查步骤及核验成果。'],
+          acceptance_criteria: { add: [{ description: '说明实施检查步骤及核验成果。',
+            priority: 'required', evaluator: { kind: 'semantic' } }], update: [], delete: [] },
+        }],
+      } } }] })
+  const planWork = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', planTask,
+    { session_id: String(session.id), message_id: String(planMessage.id) },
+    BID_CAPABILITIES['writing.plan'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  expect(await executeCapabilityTask(workspace, createTestBidRunContext({ work: planWork }), dispatcher, agent, session))
+    .toMatchObject({ status: 'completed' })
+  const updatedPlan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+  expect(updatedPlan.sections.find(section => section.section_id === 'SEC-3')?.writing_instructions)
+    .toContain('说明实施检查步骤及核验成果。')
+  expect(updatedPlan.sections.find(section => section.section_id === 'SEC-4'))
+    .toEqual(priorPlan.sections.find(section => section.section_id === 'SEC-4'))
   expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'))).toEqual(original)
   const after = (await collectDocxExportSnapshot(workspace)).markdown
   expect(after).not.toBe(before)
