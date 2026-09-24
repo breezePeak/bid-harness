@@ -9,6 +9,7 @@ import { BidWorkspace } from '../src/index.ts'
 import { askCapabilityTaskInput, executeCapabilityTask, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
+import { resolveMappingCorpusLocations } from '../src/evidence-mapping-corpus.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
@@ -73,6 +74,42 @@ it('已登记输入文件在断点后丢失时拒绝恢复且不执行剩余步�
   expect(calls).toEqual(['chapter.review', 'document.review'])
   expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/unrelated.md'), 'utf8')).toBe('范围外正文\n')
   await expect(readFile(join(fixture.workspace.projectRoot, 'chapters/local-review.json')))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('资料任务登记后来源分块丢失时预检给出具体来源错误', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-capability-missing-chunk-'))
+  const ctx = new Context()
+  disposals.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  const workspace = new BidWorkspace(root)
+  await seedCapabilityProject(workspace, 'complete')
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'),
+    '{"stage":"evidence_mapping","sources":[]}\n')
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const message = createUserMessage({ content: [{ type: 'text', text: '仅补第三章资料' }], source: { kind: 'user' } })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+    goal: '仅补第三章资料', scope: { kind: 'sections', section_ids: ['SEC-3'] },
+    steps: [{ scope: { source: 'task' }, call: { capability: 'evidence.research',
+      input: { mode: 'supplement', reason: '补充第三章资料', allow_outline_refinement: false } } }],
+  }, { session_id: String(session.id), message_id: String(message.id) },
+  BID_CAPABILITIES['evidence.research'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  const source = (await workspace.readManifest()).files.find(file => file.role === 'reference'
+    && file.parseStatus === 'success')
+  if (source?.chunksPath === null || source?.chunksPath === undefined
+    || source.chunkIndexPath === null) throw new Error('缺少测试资料分块')
+  const index = JSON.parse(await readFile(join(workspace.projectRoot, source.chunkIndexPath), 'utf8')) as {
+    chunks: Array<{ path: string }>
+  }
+  const chunk = index.chunks[0]?.path
+  if (chunk === undefined) throw new Error('缺少测试资料分块')
+  const untouched = await readFile(join(workspace.projectRoot, 'chapters/sections/0004.md'))
+  await rm(join(workspace.projectRoot, source.chunksPath, chunk))
+  await expect(resolveMappingCorpusLocations(workspace, await workspace.readManifest()))
+    .rejects.toThrow('EVIDENCE_MAPPING_CORPUS_INVALID')
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0004.md'))).toEqual(untouched)
+  await expect(readFile(join(workspace.projectRoot, `requests/${work.workId}/result.json`)))
     .rejects.toMatchObject({ code: 'ENOENT' })
 })
 
