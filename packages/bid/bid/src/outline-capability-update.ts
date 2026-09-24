@@ -471,6 +471,7 @@ export async function executeCapabilityChapterReorganize(
  * @param workspace 当前 Work 候选项目。
  * @param stepId Host 固定的步骤身份。
  * @returns 允许的精确项目相对文件集合。
+ * @param sectionIds 允许修改的章节身份集合。
  */
 export async function capabilityOutlineAllowedWrites(
   call: OutlineCapabilityCall, workspace: BidWorkspace, stepId: string,

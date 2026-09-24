@@ -81,6 +81,9 @@ export type BidOrchestratorErrorCode =
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
+/**
+ * 阶段开始前的能力准入钩子。
+ */
 export type BidBeforeStageStart = (
   stage: BidStage,
   resumeOf?: BidRunResumeIdentity,

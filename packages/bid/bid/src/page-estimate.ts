@@ -371,6 +371,7 @@ export async function estimateReviewPages(
  * @param workspace 当前 Bid 项目。
  * @param outline 当前确认目录。
  * @returns 未取整总页数、分支页数及实际格式身份。
+ * @param options 页数估算输入。
  */
 export async function estimateChapterWritingPages(
   workspace: BidWorkspace,

@@ -35,7 +35,12 @@ const resetRequestMetaSchema = z.object({
   schema_version: recordOnlySchemaVersion(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
 }).passthrough()
 
-/** Find only request and private-run roots owned by the selected stage or a later stage. */
+/**
+ * Find only request and private-run roots owned by the selected stage or a later stage.
+ * @param workspace 项目工作区。
+ * @param stage 需要重置的阶段。
+ * @returns 阶段重置时需要清理的工作路径。
+ */
 export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStage): Promise<string[]> {
   const stageIndex = BID_STAGES.indexOf(stage)
   const requestsRoot = within(workspace.projectRoot, 'requests')

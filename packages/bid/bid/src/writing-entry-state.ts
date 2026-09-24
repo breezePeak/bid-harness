@@ -8,6 +8,9 @@ import {
 } from './writing-entry-contract.ts'
 import { parseWritingPlan, type WritingPlan } from './writing-requirements.ts'
 
+/**
+ * 写作入口只需读取的工作区路径。
+ */
 export interface BidWorkspaceLike {
   readonly root: string
   readonly projectRoot: string

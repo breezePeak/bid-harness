@@ -41,7 +41,11 @@ export type WebEvidenceSource = z.infer<typeof sourceSchema>
 /** S4 与 S5 共用的 Web 正文快照清单。 */
 export type WebEvidenceSourcesArtifact = z.infer<typeof ledgerSchema>
 
-/** 按 Source 身份防御性合并 ledger 条目；同一 Source 保留首次登记的元数据。 */
+/**
+ * 按 Source 身份防御性合并 ledger 条目；同一 Source 保留首次登记的元数据。
+ * @param values 待去重的资料来源。
+ * @returns 去重后的 Web 资料来源。
+ */
 export function uniqueWebEvidenceSources(values: readonly WebEvidenceSource[]): WebEvidenceSource[] {
   const sources = new Map<string, WebEvidenceSource>()
   for (const source of values) {

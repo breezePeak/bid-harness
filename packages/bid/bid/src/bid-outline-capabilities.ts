@@ -44,6 +44,7 @@ async function optionalJson(workspace: BidWorkspace, path: string): Promise<unkn
  * @param workspace 当前 Work 候选。
  * @param stepId Host 分配的步骤身份。
  * @returns 精确允许文件集合。
+ * @param sectionIds - 已授权的章节身份集合；null 表示未指定章节。
  */
 export function allowedOutlineCapabilityWrites(
   call: OutlineCall, workspace: BidWorkspace, stepId: string,

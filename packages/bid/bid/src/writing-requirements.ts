@@ -147,6 +147,9 @@ const writingRequestAnswerSchema = z.object({
   }
 })
 
+/**
+ * 写作计划处理进度的磁盘结构。
+ */
 export const writingPlanProcessingSchema = z.object({
   message_id: z.string().min(1),
   state: z.enum(['queued', 'running', 'failed']),
@@ -157,6 +160,9 @@ export const writingPlanProcessingSchema = z.object({
   }
 })
 
+/**
+ * 已校验的写作计划处理进度。
+ */
 export type WritingPlanProcessing = z.infer<typeof writingPlanProcessingSchema>
 
 /** 已发出 S5 原生询问的项目记录；在线 Promise 不写入此文件。 */

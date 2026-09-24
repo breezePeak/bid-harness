@@ -40,13 +40,21 @@ export type BidProjectState = BidTaskState & {
 
 type ProjectWorkspace = { readonly root: string; readonly projectStatePath: string }
 
-/** Return the authoritative task portion of a persisted project record. */
+/**
+ * Return the authoritative task portion of a persisted project record.
+ * @param state 项目持久化状态。
+ * @returns 项目中的能力任务状态。
+ */
 export function bidProjectTaskState(state: BidProjectState): BidTaskState {
   const { schema_version: _schemaVersion, revision: _revision, updated_at: _updatedAt, ...task } = state
   return bidTaskStateSchema.parse(task)
 }
 
-/** Parse the current single-state format, then normalize the legacy v3 structure. */
+/**
+ * Parse the current single-state format, then normalize the legacy v3 structure.
+ * @param value 待解析的磁盘数据。
+ * @returns 已校验的项目状态。
+ */
 export function parseBidProjectState(value: unknown): BidProjectState {
   const metadata = projectMetadataSchema.safeParse(value)
   if (metadata.success) {

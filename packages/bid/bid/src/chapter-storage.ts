@@ -25,7 +25,12 @@ export interface ChapterStoragePlan {
   readonly nextStorageSerial: number
 }
 
-/** @param sectionId 章节身份。 @param storageSerial Host 分配的序号。 @returns 固定的三个项目内路径。 */
+/**
+ * 为章节分配稳定的正文、元数据和审核记录路径。
+ * @param sectionId 章节身份。
+ * @param storageSerial Host 分配的持久序号。
+ * @returns 章节的固定存储路径。
+ */
 export function chapterLocation(sectionId: string, storageSerial: number): ChapterLocation {
   if (!Number.isInteger(storageSerial) || storageSerial < 1 || storageSerial > MAX_SERIAL) {
     throw new Error(`BID_CHAPTER_STORAGE_CAPACITY: ${sectionId}`)

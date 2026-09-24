@@ -40,12 +40,11 @@ interface GuideModuleLink {
 }
 
 /**
- * Per-locale guide-module facts: the guide collection and the module links
- * appended to the guide sidebar.
+ * Guide collection and module links appended to the sidebar.
  */
 interface GuideModules {
   /** Guide sidebar collection for the locale. */
-  guide: 'zh-guide' | 'en-guide'
+  guide: 'zh-guide'
   /** Development module link. */
   develop: GuideModuleLink
   /** Reference module link. */
@@ -53,19 +52,13 @@ interface GuideModules {
 }
 
 /**
- * Guide-module facts keyed by locale, giving every module label and collection
- * one home shared by the navigation bar and the guide sidebar.
+ * Guide-module facts shared by the navigation bar and sidebar.
  */
 const guideModules = {
   root: {
     guide: localeCollections.root[0],
     develop: { label: '开发', collection: localeCollections.root[1] },
     reference: { label: '参考', collection: localeCollections.root[2] },
-  },
-  en: {
-    guide: localeCollections.en[0],
-    develop: { label: 'Development', collection: localeCollections.en[1] },
-    reference: { label: 'Reference', collection: localeCollections.en[2] },
   },
 } satisfies Record<DocsLocale, GuideModules>
 
@@ -95,10 +88,9 @@ function guideSidebar(locale: DocsLocale): DefaultTheme.SidebarItem[] {
  */
 function moduleNav(locale: DocsLocale): DefaultTheme.NavItem[] {
   const { develop, reference } = guideModules[locale]
-  const routePrefix = locale === 'root' ? '' : '/en'
   return [
-    { text: develop.label, link: landingLink(locale, develop.collection), activeMatch: `^${routePrefix}/develop/` },
-    { text: reference.label, link: landingLink(locale, reference.collection), activeMatch: `^${routePrefix}/reference/` },
+    { text: develop.label, link: landingLink(locale, develop.collection), activeMatch: '^/develop/' },
+    { text: reference.label, link: landingLink(locale, reference.collection), activeMatch: '^/reference/' },
   ]
 }
 
@@ -333,36 +325,7 @@ export default withMermaid({
         darkModeSwitchTitle: '切换到深色主题',
         sidebarMenuLabel: '菜单',
         returnToTopLabel: '返回顶部',
-        langMenuLabel: '切换语言',
         skipToContentLabel: '跳至内容',
-      },
-    },
-    en: {
-      label: 'English',
-      lang: 'en-US',
-      link: '/en/',
-      themeConfig: {
-        siteTitle: siteTitle('Preview'),
-        nav: [
-          { text: 'Guide', link: landingLink('en', guideModules.en.guide), activeMatch: '^/en/guide/' },
-          ...moduleNav('en'),
-        ],
-        sidebar: {
-          '/en/guide/': guideSidebar('en'),
-          '/en/develop/': sidebar('en', 'en-develop'),
-          '/en/reference/': sidebar('en', 'en-reference'),
-        },
-        editLink: {
-          pattern: ({ frontmatter }: PageData) => {
-            const data: unknown = frontmatter
-            const editSource: unknown = typeof data === 'object' && data !== null ? Reflect.get(data, 'editSource') : undefined
-            if (typeof editSource !== 'string') throw new Error('Projected documentation page has no editSource frontmatter.')
-            return `https://github.com/deepseek-ai/deepseek-harness/edit/master/${editSource}`
-          },
-          text: 'Edit this page on GitHub',
-        },
-        outline: { label: 'On this page' },
-        docFooter: { prev: 'Previous', next: 'Next' },
       },
     },
   },

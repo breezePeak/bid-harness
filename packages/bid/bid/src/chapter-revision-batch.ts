@@ -123,7 +123,10 @@ export type RevisionBatchErrorCode =
   | 'BID_REVISION_BATCH_CYCLE'
   | 'BID_REVISION_BATCH_STALE_HASH'
 
-/** 生成新的 batch_id。 */
+/**
+ * 生成新的 batch_id。
+ * @returns 新批次的唯一身份。
+ */
 export function createRevisionBatchId(): string {
   return `BATCH-${randomUUID()}`
 }
@@ -194,6 +197,7 @@ function migrateLegacyRevisionBatch(legacy: z.infer<typeof legacyRevisionBatchAr
 /**
  * 解析 batch artifact；基于真实结构平滑迁移 legacy 快照。
  * @param value 已解码的 JSON 值。
+ * @returns 已校验或从旧格式迁移的批次记录。
  */
 export function parseRevisionBatchArtifact(value: unknown): RevisionBatchArtifact {
   if (isLegacyRevisionBatchShape(value)) {
@@ -207,6 +211,7 @@ export function parseRevisionBatchArtifact(value: unknown): RevisionBatchArtifac
  * 读取指定 batch_id 的批次 artifact；文件不存在时返回 null。
  * @param workspace 项目工作区。
  * @param batchId 批次 ID。
+ * @returns 批次记录；文件不存在时为 null。
  */
 export async function readRevisionBatch(
   workspace: RevisionQueueWorkspace,
@@ -372,6 +377,7 @@ export function recoverOrphanRevisionIssues(
  * @param input 模型提交的规划输入。
  * @param queue 当前队列快照。
  * @param sectionHashes 当前各章节正文的 sha256 映射。
+ * @returns 已覆盖的意见、合法任务及过期意见身份。
  */
 export function validateRevisionBatchPlan(
   input: PlanRevisionBatchInput,
@@ -816,6 +822,7 @@ export interface RevisionBatchTaskStatusWriter {
  * 创建绑定到指定批次的串行化状态写器；不串行 Writer/Reviewer，只串行 task 状态 artifact 写入。
  * @param workspace 项目工作区。
  * @param batchId 批次 ID。
+ * @returns 同一批次状态写入的串行化句柄。
  */
 export function createRevisionBatchTaskStatusWriter(
   workspace: RevisionQueueWorkspace,
@@ -863,6 +870,7 @@ export interface IssueSettlementResult {
  * @param taskIssueIds 该 task 包含的 issue ID 列表。
  * @param checks Reviewer 返回的逐条完成度判定。
  * @param now 当前时间戳。
+ * @returns 更新后的意见队列和批次任务结算状态。
  */
 export function settleRevisionBatchIssues(
   queue: RevisionQueueArtifact,

@@ -368,6 +368,9 @@ interface EvidenceMappingInputs {
   frameworks: readonly OutlineFrameworkStructure[]
 }
 
+/**
+ * 资料映射执行过程的持久化记录。
+ */
 export type EvidenceMappingExecutionLog = z.infer<typeof evidenceMappingExecutionLogSchema>
 
 /** Aggregated calls for one S4 research tool in an acceptance report. */
@@ -499,7 +502,11 @@ const evidenceMappingExecutionLogSchema = z.object({
   }).strict()),
 }).strict()
 
-/** Parse an S4 execution log using the current schema and tool names. */
+/**
+ * Parse an S4 execution log using the current schema and tool names.
+ * @param raw 待解析的持久化数据。
+ * @returns 已校验的资料映射执行日志。
+ */
 export function parseEvidenceMappingExecutionLog(raw: unknown): EvidenceMappingExecutionLog {
   return evidenceMappingExecutionLogSchema.parse(raw)
 }

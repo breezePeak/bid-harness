@@ -281,6 +281,7 @@ export class Session implements SessionFace {
    * Start a local display row before attachment or reference preparation awaits.
    * @param clientSubmissionId - identity shared with the Host user message.
    * @param content - prompt content captured at local handoff.
+   * @param mode 消息发送模式。
    */
   beginOutgoing(
     clientSubmissionId: string,

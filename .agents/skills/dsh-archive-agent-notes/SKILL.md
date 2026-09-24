@@ -53,9 +53,9 @@ For rejected notes:
 
 ## Archive one implemented record
 
-1. Move `foo.md` from `implemented/<kind>/` to `archived/<kind>/`; `implemented` is deliberately absent from the archive path. If the record already has legacy translation or sidecar files, move those files unchanged with it.
+1. Move `foo.md` from `implemented/<kind>/` to `archived/<kind>/`; `implemented` is deliberately absent from the archive path. If an English or Chinese Markdown sibling exists, move that body unchanged with it.
 2. Make no body edits. Insert only `Archived: YYYY-MM-DD` immediately below `Status: implemented` in the note.
-3. Do not create translation or consistency files. Existing legacy files remain unchanged and are sealed with the record.
+3. Do not create translation or consistency files. Each existing Markdown body is sealed independently.
 4. Search for inbound links from active prose. Redirect them to current authority, retarget them to the archived path only when the historical snapshot is intentionally cited, or delete them. Never verify or repair links out of the archived note.
 5. Run `pnpm run verify-archived-agent-notes --write`. Its append-only mode first proves every existing seal still matches, then adds only the new record hashes. Run the normal verifier afterward.
 

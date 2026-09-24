@@ -95,7 +95,12 @@ export function createBidSchemaWarning(
   }
 }
 
-/** Append one schema warning per artifact/version/value tuple in a Session. */
+/**
+ * Append one schema warning per artifact/version/value tuple in a Session.
+ * @param session 接收告警的当前会话。
+ * @param warning 已解析的 schema 告警；不存在时不写事件。
+ * @returns 是否新写入一条告警事件。
+ */
 export function appendBidSchemaWarning(
   session: Session,
   warning: BidSchemaWarning | undefined,

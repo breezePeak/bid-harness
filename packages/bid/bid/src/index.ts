@@ -4330,6 +4330,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * Ask the Main Agent for manual S5 writing requirements.
    * @param session - live Bid Session waiting before chapter writing.
+   * @param intent - whether to ensure or retry the writing request.
    * @returns the unchanged waiting state after the request is durably queued.
    */
   @Remote('requestWritingRequirements')
@@ -5750,7 +5751,12 @@ export class BidHostRuntime extends TypertRemoteService {
     return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, templateId, request))
   }
 
-  /** 修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。 */
+  /** 修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。
+   * @param session - 当前标书会话。
+   * @param templateId - 页数测算模板；null 表示默认格式。
+   * @param revision - 要修改的配置版本。
+   * @returns 保存后的模板库视图。
+   */
   @Remote('setEstimateDocxTemplate')
   async setEstimateDocxTemplate(
     session: Session,
@@ -5959,7 +5965,11 @@ export class BidHostRuntime extends TypertRemoteService {
     try { return await pending } catch (error: unknown) { return failure(error) } finally { this.docxExports.delete(session.id) }
   }
 
-  /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
+  /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。
+   * @param session - 当前标书会话。
+   * @param templateId - 待测算模板；null 表示默认格式。
+   * @returns 页数估算及其配置基准。
+   */
   @Remote('estimateDocxPages')
   async estimateDocxPages(session: Session, templateId: DocxTemplateId | null): Promise<import('./control-plane-contract.ts').BidPageEstimate> {
     if (!isBidMainSession(session)) throw new Error('Word 页数测算需要标书项目会话。')
@@ -7040,6 +7050,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.
    * @param session - Bid Session that owns the S4 execution log.
+   * @param observed - caller projection used to reject stale observations.
    * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
    */
   @Remote('getEvidenceMappingProgress')

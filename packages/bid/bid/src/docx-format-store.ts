@@ -215,7 +215,11 @@ async function writeRegistry(workspace: BidWorkspace, registry: DocxTemplateRegi
   await writeFileAtomic(path, `${JSON.stringify(registrySchema.parse(registry))}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
-/** 读取模板 Registry，并把旧单模板配置一次迁移到独立模板配置。 */
+/**
+ * 读取模板 Registry，并把旧单模板配置一次迁移到独立模板配置。
+ * @param workspace 项目工作区。
+ * @returns 模板注册表。
+ */
 export async function readDocxTemplateRegistry(workspace: BidWorkspace): Promise<DocxTemplateRegistry> {
   const path = registryPath(workspace)
   await assertNoLinkedPath(workspace.root, path)
@@ -248,7 +252,11 @@ export async function readDocxTemplateRegistry(workspace: BidWorkspace): Promise
   return parsed.data
 }
 
-/** 读取模板列表及每份模板自己的格式版本和冲突数量。 */
+/**
+ * 读取模板列表及每份模板自己的格式版本和冲突数量。
+ * @param workspace 项目工作区。
+ * @returns 可展示的模板库。
+ */
 export async function readDocxTemplateLibrary(workspace: BidWorkspace): Promise<DocxTemplateLibraryView> {
   const registry = await readDocxTemplateRegistry(workspace)
   const templates = await Promise.all(registry.templates.map(async (template) => {
@@ -430,7 +438,13 @@ async function resolveAndWrite(
   return decorateView(workspace, templateId, view)
 }
 
-/** 保存一份模板自己的完整用户格式覆盖；任意已定义字段均可反复修改。 */
+/**
+ * 保存一份模板自己的完整用户格式覆盖；任意已定义字段均可反复修改。
+ * @param workspace 项目工作区。
+ * @param templateId 目标模板身份。
+ * @param request 用户提交的格式设置。
+ * @returns 保存后的格式视图。
+ */
 export async function saveDocxFormat(
   workspace: BidWorkspace,
   templateId: DocxTemplateId | null,
@@ -445,7 +459,12 @@ export async function saveDocxFormat(
     revision: current.state.revision + 1, opened: true, userConfirmed: confirmed })
 }
 
-/** 保存 DOCX 原文件并为新模板创建独立格式状态；相同摘要复用已有模板。 */
+/**
+ * 保存 DOCX 原文件并为新模板创建独立格式状态；相同摘要复用已有模板。
+ * @param workspace 项目工作区。
+ * @param upload 用户上传的模板。
+ * @returns 上传后的模板视图。
+ */
 export async function saveDocxTemplate(
   workspace: BidWorkspace,
   upload: { revision: number; name: string; bytes: Uint8Array },
@@ -491,7 +510,14 @@ export async function saveDocxTemplate(
   return decorateView(workspace, hash, view)
 }
 
-/** 保存一份模板自己的模型格式解释。 */
+/**
+ * 保存一份模板自己的模型格式解释。
+ * @param workspace 项目工作区。
+ * @param templateId 目标模板身份。
+ * @param revision 预期修订号。
+ * @param suggestion 模型生成的格式解释。
+ * @returns 保存后的格式视图。
+ */
 export async function saveDocxFormatInterpretation(
   workspace: BidWorkspace,
   templateId: DocxTemplateId,
@@ -505,7 +531,13 @@ export async function saveDocxFormatInterpretation(
     modelInterpreted: interpretationSchema.parse(suggestion) })
 }
 
-/** 显式选择 S5 页数基准；选择不改变任何模板自己的格式状态。 */
+/**
+ * 显式选择 S5 页数基准；选择不改变任何模板自己的格式状态。
+ * @param workspace 项目工作区。
+ * @param templateId 目标模板身份。
+ * @param revision 预期修订号。
+ * @returns 更新后的模板库。
+ */
 export async function setEstimateDocxTemplate(
   workspace: BidWorkspace,
   templateId: DocxTemplateId | null,
@@ -520,7 +552,13 @@ export async function setEstimateDocxTemplate(
   return readDocxTemplateLibrary(workspace)
 }
 
-/** 标识正文、图片和 resolved 格式快照。 */
+/**
+ * 标识正文、图片和 resolved 格式快照。
+ * @param markdown 章节正文。
+ * @param view 当前格式视图。
+ * @param assetHash 相关资源摘要。
+ * @returns 正文、格式和资源的稳定摘要。
+ */
 export function docxFingerprint(markdown: string, view: DocxFormatCoreView, assetHash: string): string {
   return createHash('sha256').update(markdown).update(assetHash).update(JSON.stringify(Object.entries(view.state.resolved).sort(([a],
     [b]) => a.localeCompare(b)))).digest('hex')

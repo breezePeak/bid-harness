@@ -45,7 +45,11 @@ export class BidGoalBridge {
     })
   }
 
-  /** Bind only after the S2 running checkpoint admitted its actual work. */
+  /**
+   * Bind only after the S2 running checkpoint admitted its actual work.
+   * @param session 进入 S2 的主会话。
+   * @param run 刚通过运行检查点的 S2 执行。
+   */
   onS2Admitted(session: Session, run: BidRunContext): void {
     if (this.closed || !isBidMainSession(session)
       || run.work.kind !== 'stage_execution' || run.work.stage !== 'tender_analysis') return
@@ -93,7 +97,10 @@ export class BidGoalBridge {
     }
   }
 
-  /** Ask the existing serial driver to reconsider one live main Session. */
+  /**
+   * Ask the existing serial driver to reconsider one live main Session.
+   * @param session 需要重新检查 Goal 准入的主会话。
+   */
   request(session: Session): void {
     if (this.closed || this.pending.has(session)) return
     const agent = this.ctx.agents.get(session.id)
@@ -102,7 +109,11 @@ export class BidGoalBridge {
     }
   }
 
-  /** Current native authority plus the shared durable recovery decision. */
+  /**
+   * Current native authority plus the shared durable recovery decision.
+   * @param session 待检查的主会话。
+   * @returns 绑定 Goal 是否仍授权恢复工作。
+   */
   canRecover(session: Session): boolean {
     const agent = this.ctx.agents.get(session.id)
     const bound = bidGoalBinding(session)
@@ -113,17 +124,27 @@ export class BidGoalBridge {
         || bidWritingPlanRecoveryEligibility(session, goal.id).eligible)
   }
 
-  /** Whether a native change was made by the Host rather than by the user. */
+  /**
+   * Whether a native change was made by the Host rather than by the user.
+   * @param session 待检查的主会话。
+   * @returns 当前 Goal 变更是否由 Host 发起。
+   */
   isInternalChange(session: Session): boolean { return this.internalChanges.has(session) }
 
-  /** Withdraw a bound Goal's automatic authority before a stop or reset drains work. */
+  /**
+   * Withdraw a bound Goal's automatic authority before a stop or reset drains work.
+   * @param session 需要撤销自动续行权限的主会话。
+   */
   pause(session: Session): void {
     this.change(session, (goal) => {
       if (goal.view.phase === 'active') this.ctx.goals.pause(goal.agent, { id: goal.view.id, revision: goal.view.revision })
     })
   }
 
-  /** A successful explicit reset may rearm its retained Goal. */
+  /**
+   * A successful explicit reset may rearm its retained Goal.
+   * @param session 已完成显式重置的主会话。
+   */
   resumeAfterReset(session: Session): void {
     this.change(session, (goal) => {
       if (goal.view.phase !== 'complete' && (goal.view.phase !== 'active' || goal.view.activation === 'disarmed')) {
@@ -132,14 +153,20 @@ export class BidGoalBridge {
     })
   }
 
-  /** Host completion follows only the committed S5 result. */
+  /**
+   * Host completion follows only the committed S5 result.
+   * @param session S5 已正式完成的主会话。
+   */
   complete(session: Session): void {
     this.change(session, (goal) => {
       if (goal.view.phase !== 'complete') this.ctx.goals.complete(goal.agent, { id: goal.view.id, revision: goal.view.revision })
     })
   }
 
-  /** An explicit rewind to S1 ends the old generation's automatic authority. */
+  /**
+   * An explicit rewind to S1 ends the old generation's automatic authority.
+   * @param session 已重置到 S1 的主会话。
+   */
   clearAfterS1Reset(session: Session): void {
     this.change(session, (goal) => {
       this.ctx.goals.clear(goal.agent, { id: goal.view.id, revision: goal.view.revision })
