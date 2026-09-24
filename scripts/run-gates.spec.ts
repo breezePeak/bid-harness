@@ -136,6 +136,12 @@ describe('gate graph validation', () => {
     },
   )
 
+  it('waits for source-writing tests before building in check-all', () => {
+    const gates = withPnpmEntrypoint(() => gatesForMode('check-all'))
+    expect(gates.find(subject => subject.id === 'build')?.after).toContain('test')
+    expect(gates.find(subject => subject.id === 'build')?.needs).toBeUndefined()
+  })
+
   it('keeps native Windows coverage blocking while retaining the observational inventory', () => {
     const complete = withPnpmEntrypoint(() => gatesForMode('ci-windows-complete'))
     const observational = withPnpmEntrypoint(() => gatesForMode('ci-windows-observational'))
