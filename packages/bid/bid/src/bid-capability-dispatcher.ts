@@ -14,6 +14,8 @@ import { allowedWritingPlanCapabilityWrites, executeWritingPlanCapability,
   validateWritingPlanCapability } from './bid-writing-plan-capability.ts'
 import { allowedTenderUpdateCapabilityWrites, executeTenderUpdateCapability,
   validateTenderUpdateCapability } from './bid-tender-update-capability.ts'
+import { allowedDocumentReviewWrites, executeDocumentReviewCapability,
+  validateDocumentReviewCapability } from './bid-document-review-capability.ts'
 
 /** 与阶段执行器一致的 Host 配置，来源于已验证的 cordis.yml。 */
 export interface CapabilityDispatcherSettings {
@@ -56,6 +58,10 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'chapter.reorganize': return allowedOutlineCapabilityWrites(call, working, stepId, sectionIds)
         case 'evidence.research': return Promise.resolve(allowedEvidenceCapabilityWrites())
         case 'writing.plan': return Promise.resolve(allowedWritingPlanCapabilityWrites())
+        case 'document.review': {
+          if (sectionIds !== null) throw new Error('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
+          return Promise.resolve(allowedDocumentReviewWrites())
+        }
         case 'chapter.write':
         case 'chapter.review': return allowedWritingCapabilityWrites(working, sectionIds)
         case 'chapter.revise': {
@@ -87,6 +93,7 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
           webSearchEnabled: settings.webSearchEnabled,
         })
         case 'writing.plan': return executeWritingPlanCapability(call, context)
+        case 'document.review': return executeDocumentReviewCapability(context, settings.modelStageRepairAttempts)
         case 'chapter.write':
         case 'chapter.revise':
         case 'chapter.review': return executeWritingCapability(call, context, {
@@ -105,6 +112,7 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'chapter.reorganize': return validateOutlineCapability(context, result)
         case 'evidence.research': return validateEvidenceCapability(context, result)
         case 'writing.plan': return validateWritingPlanCapability(context)
+        case 'document.review': return validateDocumentReviewCapability(context)
         case 'chapter.write':
         case 'chapter.revise':
         case 'chapter.review': return validateWritingCapability(context, result.target_section_ids)

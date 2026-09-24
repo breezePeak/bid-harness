@@ -62,6 +62,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { validateWritingCapability } from '../src/bid-writing-capability.ts'
+import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 
 const executeChapterWriting = (
   agent: Agent,
@@ -1402,6 +1403,45 @@ describe('chapter-writing executor', () => {
     await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
     expect(await readFile(ledgerPath, 'utf8')).toBe(ledgerText)
     expect(await readFile(evidencePath, 'utf8')).toBe(evidenceText)
+  })
+
+  it('整书能力重新审核当前正文但不启动 Writer 或修改正文', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-document-review-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: {
+        ...candidateFrom(request), markdown: '本章按招标要求说明实施方法、责任分工与成果核验标准。',
+      },
+    }))
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'))
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+    const bodies = await Promise.all(manifest.chapters.map(async entry =>
+      [entry.content_path, await readFile(join(workspace.projectRoot, entry.content_path), 'utf8')] as const))
+    const next = fixtureAgent(workspace, outline)
+    const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+      evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    const call = { capability: 'document.review' as const, input: { reason: '重新审核当前整书' } }
+    expect(await dispatcher.allowedWrites(call, null, workspace, 'document-review')).toEqual(new Set([
+      'chapters/global-compliance-review.json', 'chapters/completion-review.json',
+    ]))
+    expect(() => dispatcher.allowedWrites(call, new Set(['SEC-1']), workspace, 'document-review'))
+      .toThrow('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
+    const context = {
+      canonical: workspace, working: workspace, agent: next.agent,
+      run: createTestBidRunContext(), sectionIds: null,
+      stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+      allowedWrites: new Set(['chapters/global-compliance-review.json', 'chapters/completion-review.json']),
+      stepId: 'document-review', rootWorkId: 'document-review',
+      authorization: { session_id: 'main', message_id: 'review-request' }, inputSha256: '0'.repeat(64),
+    }
+    const result = await dispatcher.execute(call, context)
+    await dispatcher.validate(call, context, result.result)
+    expect(result.result.target_section_ids).toEqual(outline.sections.filter(section => section.writable).map(section => section.id))
+    expect(result.result.changed_artifacts.every(path => path.endsWith('review.json'))).toBe(true)
+    expect(next.followup).toHaveBeenCalled()
+    expect(next.starts).toHaveLength(0)
+    for (const [path, before] of bodies) expect(await readFile(join(workspace.projectRoot, path), 'utf8')).toBe(before)
   })
 
   it('required 确定性条件未满足且修订预算耗尽时完成阶段并保留风险', async () => {

@@ -132,6 +132,7 @@ import { evaluateHostAcceptanceCriteria, type HostAcceptanceResult } from './acc
 import { findBidInternalIdentifiers } from './customer-facing-prose.ts'
 import type { BidCommitLease, BidCommitScope, BidRunContext } from './run-coordinator.ts'
 import { buildWebEvidenceChunkIndex, parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
+import { buildBidStageTask } from './runtime-state.ts'
 
 const PLAN_PATH = 'chapters/execution-plan.json'
 const LOG_PATH = 'chapters/execution-log.json'
@@ -1519,10 +1520,11 @@ async function writeGlobalComplianceReview(
   run: BidRunContext,
   writingPlan?: WritingPlan,
   recovery?: ModelStageExecutionOptions['recovery'],
+  forceReview = false,
 ): Promise<void> {
   let saved: GlobalComplianceReviewArtifact | undefined
   try { saved = parseGlobalComplianceReviewArtifact(await readJson(workspace, GLOBAL_REVIEW_PATH)) } catch { /* 缺失或旧版本结果不参与当前核验。 */ }
-  const retained = retainedGlobalReviewItems(saved, outline, outlineHash, compliance, chapters, manifest)
+  const retained = forceReview ? [] : retainedGlobalReviewItems(saved, outline, outlineHash, compliance, chapters, manifest)
   if (outline.global_compliance_ids.length === 0) {
     await writeJson(join(workspace.projectRoot, GLOBAL_REVIEW_PATH), {
       schema_version: GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
@@ -1635,12 +1637,46 @@ export async function executeChapterWriting(
   }
 }
 
+/**
+ * 对已完成正文重新执行文档级合规与整书验收，不启动章节 Writer 或修复轮次。
+ * @param agent 当前 Work 的 Execution Agent。
+ * @param workspace 当前步骤候选项目。
+ * @param run 当前步骤的提交与取消身份。
+ * @param maxRepairAttempts 模型协议的有界修复次数。
+ * @returns 两份当前正文绑定的审核产物。
+ */
+export async function executeDocumentReview(
+  agent: Agent, workspace: BidWorkspace, run: BidRunContext, maxRepairAttempts: number,
+): Promise<StageArtifact[]> {
+  await waitForModelStageIdle(agent, run.signal)
+  const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+  const outlineHash = outlineArtifactSha256(outline)
+  const compliance = parseTenderComplianceArtifact(await readJson(workspace, 'analysis/compliance.json'))
+  const writingPlan = parseWritingPlan(await readJson(workspace, 'chapters/writing-plan.json'))
+  if (writingPlan.confirmed_outline_sha256 !== outlineHash
+    || validateWritingPlan(writingPlan, outline).length > 0) throw new Error('BID_DOCUMENT_REVIEW_WRITING_PLAN_INVALID')
+  const locations = await readChapterLocations(workspace)
+  const chapters: GlobalComplianceChapter[] = await Promise.all(buildChapterWorklist(outline).map(async (section) => {
+    const location = locations.get(section.id)
+    if (location === undefined) throw new Error(`BID_DOCUMENT_REVIEW_CHAPTER_MISSING: ${section.id}`)
+    const markdown = await readFile(join(workspace.projectRoot, location.contentPath), 'utf8')
+    return { section_id: section.id, title: section.title, markdown,
+      candidate_sha256: chapterCandidateSha256(markdown) }
+  }))
+  await writeGlobalComplianceReview(agent, workspace, outline, outlineHash, compliance, chapters,
+    await workspace.readManifest(), maxRepairAttempts, run, writingPlan, undefined, true)
+  return reviewWritingPlanCompletion(agent, workspace, buildBidStageTask('chapter_writing'), {
+    maxRepairAttempts, maxConcurrency: 1, maxCompletionRepairRounds: 0, run,
+  }, [{ stage: 'chapter_writing', type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }], true)
+}
+
 async function reviewWritingPlanCompletion(
   agent: Agent,
   workspace: BidWorkspace,
   task: BidStageTask,
   options: ChapterWritingExecutionOptions,
   artifacts: StageArtifact[],
+  forceReview = false,
 ): Promise<StageArtifact[]> {
   options.run.reportProgress({ phase: 'finalizing', summary: '正在进行正文整体质量验收' })
   const completedArtifacts = (): StageArtifact[] => artifacts.some(item => item.path === COMPLETION_REVIEW_PATH)
@@ -1710,7 +1746,7 @@ async function reviewWritingPlanCompletion(
     const saved = parseChapterWritingCompletionState(await readJson(workspace, COMPLETION_REVIEW_PATH))
     const formatRevision = measured.estimate?.format.revision ?? null
     const formatTemplateId = measured.estimate?.format.template_id ?? null
-    if (saved.completion?.plan_version === writingPlan.plan_version
+    if (!forceReview && saved.completion?.plan_version === writingPlan.plan_version
       && saved.completion.format_revision === formatRevision
       && saved.completion.format_template_id === formatTemplateId
       && saved.completion.document_sha256 === current.documentSha256) return completedArtifacts()
