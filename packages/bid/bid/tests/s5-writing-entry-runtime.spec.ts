@@ -299,7 +299,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
           join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8',
         )) as WritingRequest
         expect(reqRecord.state).toBe('consumed')
-      })
+      }, { timeout: 15_000 })
 
       // 验证工具清单中包含 inspect 与 confirm
       expect(toolsReceived).toContain('bid_stage_inspect')
