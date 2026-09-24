@@ -53,6 +53,29 @@ it('输入来源在断点后变化则拒绝恢复，保留已完成候选和正�
     .rejects.toMatchObject({ code: 'ENOENT' })
 })
 
+it('已登记输入文件在断点后丢失时拒绝恢复且不执行剩余步骤', async () => {
+  const fixture = await capabilityRecoveryFixture()
+  disposals.push(fixture.dispose)
+  const calls: string[] = []
+  let interrupt = true
+  const adapter = recoveryDispatcher(async (call) => {
+    calls.push(call.capability)
+    if (call.capability === 'document.review' && interrupt) {
+      interrupt = false
+      throw new Error('输入删除前中断')
+    }
+  })
+  await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .rejects.toThrow('输入删除前中断')
+  await rm(join(fixture.workspace.projectRoot, 'chapters/execution-log.json'))
+  await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .rejects.toThrow('BID_CAPABILITY_INPUT_CHANGED')
+  expect(calls).toEqual(['chapter.review', 'document.review'])
+  expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/unrelated.md'), 'utf8')).toBe('范围外正文\n')
+  await expect(readFile(join(fixture.workspace.projectRoot, 'chapters/local-review.json')))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 it('执行器试图改写范围外正文时拒绝发布', async () => {
   const fixture = await capabilityRecoveryFixture()
   disposals.push(fixture.dispose)
