@@ -183,7 +183,7 @@ export async function cancelCapabilityRequestsForReset(
     const pending = await readPendingCapabilityRequests(workspace, workId)
     const invalid = new Set(pending.filter(({ request }) => request.task.steps.some(step =>
       BID_CAPABILITIES[step.call.capability].requires.some(input => removes(within(workspace.projectRoot,
-        input === 'manifest' ? 'manifest.json' : input))))).map(item => item.recordId))
+        input))))).map(item => item.recordId))
     if (invalid.size === 0) continue
     await withBidCommandJournalLock(workspace, workId, async () => {
       const records = await readBidChapterCommandJournal(workspace, workId)

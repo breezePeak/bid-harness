@@ -497,10 +497,9 @@ export async function executeCapabilityTask(
     }
     const inputSources = new Map<string, string>()
     for (const required of BID_CAPABILITIES[saved.step.call.capability].requires) {
-      const path = required === 'manifest' ? 'manifest.json' : required
-      const digest = await fileHash(working, path)
-      if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${path}`)
-      inputSources.set(path, digest)
+      const digest = await fileHash(working, required)
+      if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${required}`)
+      inputSources.set(required, digest)
     }
     if (saved.step.call.capability === 'outline.update' || saved.step.call.capability === 'outline.refine') {
       for (const path of ['outline/confirmed-outline.json', 'outline/draft.json']) {

@@ -8,7 +8,7 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
-import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { seedProjectArtifacts } from './fixtures/project-session.ts'
@@ -36,6 +36,12 @@ it('招标分析任务接纳时登记真实 Manifest 输入', async () => {
       payload: { input_sources: Array<{ path: string; sha256: string }> }
     }
     expect(request.payload.input_sources).toEqual([{ path: 'manifest.json', sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) }])
+    const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+      evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    const agent = { id: 'tender-admission-agent', whenIdle: async () => {}, ctx: { get: (name: string) =>
+      name === 'fs' || name === 'tools' ? {} : undefined } } as unknown as Agent
+    const outcome = await executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session)
+    expect(outcome).toMatchObject({ status: 'completed' })
   } finally { await ctx.fiber.dispose() }
 })
 

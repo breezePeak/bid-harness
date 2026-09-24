@@ -46,6 +46,9 @@ it('重置删除必需输入时取消已登记请求，其他请求保留', asyn
   }] }
   await enqueueCapabilityRequest(workspace, run, task,
     { session_id: 'user-session', message_id: 'message-1' })
+  await enqueueCapabilityRequest(workspace, run, { goal: '分析招标文件', scope: { kind: 'project' },
+    steps: [{ scope: { source: 'task' }, call: { capability: 'tender.analyze', input: {} } }],
+  }, { session_id: 'user-session', message_id: 'message-2' })
   await run.commits.publish(async (lease) => {
     expect(await cancelCapabilityRequestsForReset(workspace,
       [join(workspace.projectRoot, 'chapters')], lease)).toBe(0)
@@ -54,6 +57,11 @@ it('重置删除必需输入时取消已登记请求，其他请求保留', asyn
   await run.commits.publish(async (lease) => {
     expect(await cancelCapabilityRequestsForReset(workspace,
       [join(workspace.projectRoot, 'analysis')], lease)).toBe(1)
+  })
+  expect(await pendingCapabilityWorkIds(workspace)).toEqual([run.work.workId])
+  await run.commits.publish(async (lease) => {
+    expect(await cancelCapabilityRequestsForReset(workspace,
+      [join(workspace.projectRoot, 'manifest.json')], lease)).toBe(1)
   })
   expect(await pendingCapabilityWorkIds(workspace)).toEqual([])
 })

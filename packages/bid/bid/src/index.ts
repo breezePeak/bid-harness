@@ -5234,8 +5234,7 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     if (active !== undefined) await active.done
     const executionTask = exportStep === null ? task : { ...task, steps: task.steps.slice(0, -1) }
-    const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
-      ? 'manifest.json' : path)
+    const inputs = BID_CAPABILITIES[first.call.capability].requires
     const state = executionTask.steps.length === 0 ? bidSessionTaskState(session)
       : await this.runCapabilityTask(agent, executionTask, authorization, inputs)
     if (state.status === 'failed' || state.status === 'suspended') {
@@ -5295,8 +5294,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const exportStep = this.capabilityExportStep(pending.request.task)
       const executionTask = exportStep === null ? pending.request.task
         : { ...pending.request.task, steps: pending.request.task.steps.slice(0, -1) }
-      const inputs = BID_CAPABILITIES[first.call.capability].requires.map(path => path === 'manifest'
-        ? 'manifest.json' : path)
+      const inputs = BID_CAPABILITIES[first.call.capability].requires
       const existing = executionTask.steps.length === 0 ? null
         : await findCapabilityTaskRequest(workspace, pending.request.authorization)
       if (existing !== null) {
