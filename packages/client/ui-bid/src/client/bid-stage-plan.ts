@@ -59,7 +59,11 @@ function stepsFor(stage: BidStage, phase: string): readonly StagePlanStep[] {
   return [...steps.slice(0, insertAfter), repair, ...steps.slice(insertAfter)]
 }
 
-/** Project the latest Host milestone onto the stage's ordered display steps. */
+/** 将 Host 的最新阶段进度映射为界面步骤。
+ * @param projection 当前项目任务投影。
+ * @param t Bid 文案翻译函数。
+ * @returns 按阶段顺序排列的步骤状态。
+ */
 export function buildBidStagePlan(
   projection: Pick<BidClientProjection, 'task'>,
   t: TranslateBid,
@@ -76,7 +80,11 @@ export function buildBidStagePlan(
   }))
 }
 
-/** Project the independent export onto the same S6 steps as a stage run. */
+/** 将独立导出进度映射为原 S6 的界面步骤。
+ * @param operation 当前导出操作。
+ * @param t Bid 文案翻译函数。
+ * @returns 按导出顺序排列的步骤状态。
+ */
 export function buildDocxExportPlan(operation: DocxExportOperation, t: TranslateBid): readonly PlanListItem[] {
   const steps = STAGE_STEPS.docx_export
   const active = operation.status === 'completed' ? steps.length : steps.findIndex(step => step.key === operation.phase)
@@ -87,7 +95,11 @@ export function buildDocxExportPlan(operation: DocxExportOperation, t: Translate
   }))
 }
 
-/** 显示 Host 检查点中的实际能力步骤；失败和等待输入保留在当前步骤。 */
+/** 显示 Host 检查点中的实际能力步骤；失败和等待输入保留在当前步骤。
+ * @param plan 当前局部任务计划。
+ * @param t Bid 文案翻译函数。
+ * @returns 按执行顺序排列的能力步骤状态。
+ */
 export function buildCapabilityTaskPlan(plan: BidCapabilityPlanView, t: TranslateBid): readonly PlanListItem[] {
   return plan.steps.map((step) => {
     const key = `capability.${step.capability}` as BidKey
