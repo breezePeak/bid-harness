@@ -48,6 +48,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_outline_apply_operations",
         "bid_outline_regenerate_scope",
         "bid_project_inspect",
+        "bid_project_inspect",
         "bid_run_task",
       ],
       "capabilityUpdates": 1,
@@ -58,6 +59,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       "confirmations": 0,
       "disposed": null,
       "failures": 1,
+      "planOnlyNoWork": true,
       "rawWriteBlocked": true,
       "readOnlyNoWork": true,
       "revision": 3,
@@ -104,6 +106,10 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         {
           "admitted": true,
           "input": "先讨论第一条要求，暂不修改",
+        },
+        {
+          "admitted": true,
+          "input": "先讨论把实施流程拆成小节的方案，暂不修改",
         },
         {
           "admitted": true,

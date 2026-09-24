@@ -1,5 +1,5 @@
 /** 阶段交互的真实 Main Agent 工具循环；只脚本化外部模型回复。 */
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -135,6 +135,24 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   ])
   const readOnlyNoWork = await readFile(requirementsPath, 'utf8') === beforeReadOnly
     && agent.session.events.filter(event => event.type === 'bid.run.started').length === runsBeforeReadOnly
+  const beforePlanOnly = await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8')
+  const runsBeforePlanOnly = agent.session.events.filter(event => event.type === 'bid.run.started').length
+  const requestsPath = join(workspace.root, '.bid-harness/requests')
+  const requestIds = async (): Promise<string[]> => {
+    try { return await readdir(requestsPath) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+  }
+  const requestsBeforePlanOnly = await requestIds()
+  await send('先讨论把实施流程拆成小节的方案，暂不修改', [
+    call('bid_project_inspect', { query: { object: 'outline' } }),
+    answer('可以按准备、执行和验收拆分；目前只提出方案，等待修改指令。'),
+  ])
+  const planOnlyNoWork = await readFile(join(workspace.projectRoot, 'outline/draft.json'), 'utf8') === beforePlanOnly
+    && await readFile(outlinePath, 'utf8') === original
+    && JSON.stringify(await requestIds()) === JSON.stringify(requestsBeforePlanOnly)
+    && agent.session.events.filter(event => event.type === 'bid.run.started').length === runsBeforePlanOnly
   await send('把第一条要求的理解改为明确实施边界', [
     call('bid_run_task', { task: { goal: '更正第一条要求的理解', scope: { kind: 'project' },
       steps: [{ scope: { source: 'task' }, call: { capability: 'tender.update', input: {
@@ -175,7 +193,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
-    readOnlyNoWork, capabilityUpdates,
+    readOnlyNoWork, planOnlyNoWork, capabilityUpdates,
     updatedRequirement: updatedRequirements.requirements.find(item => item.id === 'REQ-1')?.normalized_requirement,
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }
