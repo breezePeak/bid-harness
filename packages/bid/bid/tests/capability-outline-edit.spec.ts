@@ -15,6 +15,7 @@ import { validateCapabilityResult } from '../src/bid-capability-registry.ts'
 import { allowedOutlineCapabilityWrites, executeOutlineCapability,
   validateOutlineCapability } from '../src/bid-outline-capabilities.ts'
 import { chapterReuseSeedsSchema, indexChapterContentBlocks } from '../src/chapter-content-reuse.ts'
+import { collectDocxExportSnapshot } from '../src/docx-export.ts'
 import { executeCapabilityChapterReorganize, executeCapabilityOutlineUpdate,
   outlineReassignmentSchema } from '../src/outline-capability-update.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
@@ -153,6 +154,10 @@ describe('目录能力候选', () => {
     expect(chartMeta.flowcharts.map(chart => chart.key)).toEqual(['process-flow'])
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')).toBe(untouched)
     expect(result.deletedBlockIds).toEqual([])
+    const exported = (await collectDocxExportSnapshot(workspace)).markdown
+    for (const text of ['流程一：收集输入。', '流程二：校验结果。', '流程三：交付成果。']) {
+      expect(exported.split(text)).toHaveLength(2)
+    }
   })
 
   it('合并两个同级正文，保留表格、流程图及业务覆盖，不继承旧审核', async () => {
@@ -190,6 +195,9 @@ describe('目录能力候选', () => {
     expect(manifest.chapters.some(entry => entry.section_id === 'SEC-1')).toBe(false)
     expect(log.sections.find(section => section.section_id === 'SEC-1')?.status).toBe('pending')
     expect(result.deletedBlockIds).toEqual([])
+    const exported = (await collectDocxExportSnapshot(workspace)).markdown
+    expect(exported.split('流程一：收集输入。')).toHaveLength(2)
+    expect(exported.split('回答主题2。')).toHaveLength(2)
   })
 
   it('只改标题时保持别章正文、完成记录和验收条件 ID', async () => {
