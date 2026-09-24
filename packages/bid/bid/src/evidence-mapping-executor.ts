@@ -1610,6 +1610,13 @@ async function completeMappingSubmission(
     assertStructureCurrent(state, task)
     assertTopicDispositionsLockable(state.structureAssessment, state, task)
   }
+  if (task.coverage_candidates !== undefined
+    && !state.taskOperations.some(change => change.operation.coverage_override !== undefined)) {
+    const issue = { code: 'EVIDENCE_MAPPING_NEW_LEAF_COVERAGE_UNDECIDED',
+      message: '拆分后的新叶节必须通过 update_section_task.coverage_override 明确分配当前候选业务 ID；若本节不承担某类业务，显式提交空数组。' }
+    state.lastIncompleteIssues = [issue]
+    return { response: { completed: false, missing_section_ids: [], issues: toolIssues([issue]) } }
+  }
   const result = parseEvidenceMappingPartialResult({
     task_id: task.task_id,
     section_mappings: expected.map(id => state.mappings.get(id) ?? state.baselineMappings.get(id)),
@@ -2503,6 +2510,9 @@ export function renderEvidenceMappingSubagentTask(
     `current_coverage_ownership：${JSON.stringify(coverageOwnership)}`,
     '相关 Requirements / Scoring / Response Points 是当前 Child 可读取、研究和引用的业务上下文；current_coverage_ownership 才是 update_section_task 可以写入的 coverage 范围，两者不是同一概念。',
     'update_section_task.basis.requirement_ids 和 coverage_override.requirement_ids 只能使用 current_coverage_ownership.requirement_ids 中的 ID。',
+    ...(task.coverage_candidates === undefined ? [] : [
+      '当前是拆分后的新叶节研究任务。current_coverage_ownership 是旧叶节留下的候选业务 ID；本节原有 ID 为空不表示可以忽略这些要求。调用 update_section_task 时必须显式提供完整的 coverage_override 三组数组，按本节真实职责承接相关 Requirement、Scoring 和 Response Point。覆盖多个新叶节的宽泛要求可以由多个相关子节共同承接；不得机械复制全部 ID，也不得在所有子节都留下空覆盖。不属于本节的类别显式传空数组。',
+    ]),
     ...(coverageOwnership.requirement_ids.length === 0 ? [
       'current_coverage_ownership.requirement_ids=[] 时，不得猜测 Requirement ID，不得使用 kind=tender_requirement；依据当前章节职责完善 Blueprint 时使用 kind=section_responsibility，并传 requirement_ids=[]。',
     ] : []),
@@ -2569,6 +2579,10 @@ function renderEvidenceMappingRepairChecklist(
     if (!state.locked) steps.push('完成有效目录判断后调用 lock_section_outline；锁定成功前不得提交 Mapping。')
   } else if (!state.locked) {
     steps.push('先调用 lock_section_outline；锁定成功前不得提交 Mapping。')
+  }
+  if (task.coverage_candidates !== undefined
+    && !state.taskOperations.some(change => change.operation.coverage_override !== undefined)) {
+    steps.push('新叶节还没有业务归属决定；调用 update_section_task，显式提交 coverage_override 的三组 ID，未归属本节的类别传空数组。')
   }
   if (missingMappings.length > 0) {
     const mappingTool = task.phase === 'final_check' ? 'replace_section_mapping' : 'submit_section_mapping'

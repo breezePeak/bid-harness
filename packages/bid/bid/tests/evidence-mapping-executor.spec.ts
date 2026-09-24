@@ -1916,6 +1916,7 @@ describe('evidence-mapping Agent executor', () => {
     }
     await execution
     expect(promptText(fixture.starts[2]!.request.request)).toContain(`"local_material_refs":["M1:${material.chunk}"]`)
+    expect(promptText(fixture.starts[2]!.request.request)).toContain('必须显式提供完整的 coverage_override 三组数组')
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
       statistics: {
         initial_leaf_count: number
