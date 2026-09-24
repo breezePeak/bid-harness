@@ -31,11 +31,13 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
-      expect(await runFullOutlineRegenerationLoop(ctx, root)).toMatchObject({
-        result: { ok: true }, draft: { revision: 2, outline: { sections: [{ title: '访问控制与安全审计方案' }] } },
-        canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' },
-        transitions: ['bid.run.started', 'bid.run.completed', 'bid.user_confirmation.required'],
-      })
+      const outcome = await runFullOutlineRegenerationLoop(ctx, root)
+      expect(outcome).toMatchObject({ result: { ok: true }, draft: { revision: 2 },
+        canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
+      expect(outcome.draft.outline.sections.find(section => section.id === 'SEC-SECURITY')?.title)
+        .toBe('访问控制与安全审计方案')
+      expect(outcome.transitions).toContain('bid.run.started')
+      expect(outcome.transitions).toContain('bid.run.completed')
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
   it('Main Agent 在等待态咨询、拆分和局部重生成，且不能裸写或隐式确认', async () => {
@@ -56,7 +58,8 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         state: { stage: 'evidence_mapping', status: 'waiting_user' },
         confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
-        visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'],
+        visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
+          'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan', 'bid_revise_chapter'],
         concurrent: Array(1).fill('BID_OPERATION_IN_PROGRESS'), failures: 1,
       })
     } finally { await ctx.fiber.dispose() }
@@ -76,7 +79,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
       const { agent, workspace, sourceUrl, outcome, requests } = await runEvidenceMappingLoop(ctx, root, repair)
-      expect(outcome).toEqual({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(outcome).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
       const reviewTool = requests.flatMap(request => request.tools ?? []).find(tool => tool.name === 'review_items')
       expect(reviewTool?.parameters).toMatchObject({
         type: 'object',

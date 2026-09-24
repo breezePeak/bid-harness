@@ -115,10 +115,17 @@ export interface BidCapabilityExecutionContext {
   readonly inputAnswer?: AskUserQuestionAnswerItem
 }
 
+/** 已注册适配器接受的能力标识。 */
 export type BidCapabilityId = z.infer<typeof bidCapabilityInputSchema>['capability']
+/** 用户任务允许修改的项目或章节范围。 */
 export type BidCapabilityScope = z.infer<typeof bidCapabilityScopeSchema>
+/** 步骤从任务范围或前一步结果解析出的实际范围。 */
 export type BidCapabilityStepScope = z.infer<typeof bidCapabilityStepScopeSchema>
+/** 单次能力调用的标识与输入。 */
 export type BidCapabilityCall = z.infer<typeof bidCapabilityInputSchema>
+/** 适配器完成后的结构化结果。 */
 export type BidCapabilityResult = z.infer<typeof bidCapabilityResultSchema>
+/** 同一 Work 内有序执行的用户能力计划。 */
 export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
+/** 计划中的一项能力调用与范围。 */
 export type BidCapabilityStep = z.infer<typeof bidCapabilityStepSchema>

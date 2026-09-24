@@ -31,7 +31,7 @@ import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { readChapterLocation } from './chapter-storage.ts'
 import { bidProjectInspectSchema } from './bid-project-inspect.ts'
-import { bidCapabilityTaskSchema } from './bid-capability-contract.ts'
+import { bidCapabilityStepSchema, bidCapabilityTaskSchema } from './bid-capability-contract.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { chapterRevisionReferenceSchema, chapterRevisionRequestSchema, validateChapterRevisionReference } from './chapter-revision.ts'
@@ -58,6 +58,8 @@ const recoveryArtifactPaths = new Set([
 export const stageInteractionSchema = z.union([
   z.object({ action: z.literal('bid_project_inspect'), query: bidProjectInspectSchema }).strict(),
   z.object({ action: z.literal('bid_run_task'), task: bidCapabilityTaskSchema }).strict(),
+  z.object({ action: z.literal('bid_plan_task'), work_id: z.string().min(1),
+    from_index: z.number().int().nonnegative(), steps: z.array(bidCapabilityStepSchema) }).strict(),
   z.object({
     action: z.literal('bid_stage_inspect'),
     view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
@@ -102,6 +104,7 @@ const names = [
   'bid_set_flowchart_visual_review',
   'bid_project_inspect',
   'bid_run_task',
+  'bid_plan_task',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -664,19 +667,16 @@ export function installStageInteractionTools(
             : stage === 'tender_analysis' ? names.slice(0, 1)
               : stage === 'outline_generation' ? names.slice(0, 3)
                 : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
-      const installed = [...available, 'bid_project_inspect', 'bid_run_task', ...(recoveryAvailable ? [recoveryTool] : [])]
+      const installed = [...new Set([...available, 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
+        'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
+        'bid_confirm_writing_plan', 'bid_revise_chapter', ...(recoveryAvailable ? [recoveryTool] : [])])]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
-        if (task.status === 'waiting_user') {
-          disposers.push(tools.restrict({ allow: bound?.type === 'bid.goal.bound'
-            ? ['get_goal', 'update_goal', 'bid_project_inspect', 'bid_run_task', ...(recoveryAvailable ? ['bid_stage_inspect', recoveryTool] : [])]
-            : ['bid_project_inspect', 'bid_run_task'] }))
-        }
         for (const name of installed) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_confirm_writing_plan'
+          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
             ? {} : { ...cas }
           const required = Object.keys(properties)
@@ -706,6 +706,12 @@ export function installStageInteractionTools(
           if (name === 'bid_run_task') {
             properties.task = zodJsonSchema(bidCapabilityTaskSchema)
             required.push('task')
+          }
+          if (name === 'bid_plan_task') {
+            properties.work_id = text
+            properties.from_index = { type: 'integer' }
+            properties.steps = { type: 'array', items: zodJsonSchema(bidCapabilityStepSchema) }
+            required.push('work_id', 'from_index', 'steps')
           }
           if (name === recoveryTool) {
             parameters = { oneOf: [{ type: 'object', properties: {
@@ -823,16 +829,17 @@ export function installStageInteractionTools(
               : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                 : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                   : name === 'bid_run_task' ? '用当前真实用户消息授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
-                    : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
-                      : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
-                        : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                          : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                            : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                              : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
-                                : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
-                                  : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                                    : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                                      : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                    : name === 'bid_plan_task' ? '用后续真实用户消息替换当前能力 Work 尚未开始的步骤后缀；已完成、运行中和等待输入的步骤不可改。'
+                      : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
+                        : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
+                          : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
+                            : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                              : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                                : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
+                                  : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
+                                    : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                                      : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                                        : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
@@ -842,6 +849,10 @@ export function installStageInteractionTools(
             presentCall: () => ({ card: 'generic', title: name }),
           }
           disposers.push(tools.register(definition))
+        }
+        if (task.status === 'waiting_user') {
+          disposers.push(tools.restrict({ allow: bound?.type === 'bid.goal.bound'
+            ? ['get_goal', 'update_goal'] : [] }))
         }
       } catch (error) {
         for (const dispose of disposers.reverse()) dispose()

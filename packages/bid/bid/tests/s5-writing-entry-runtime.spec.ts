@@ -352,7 +352,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
   })
 
   it('R03: CAS 冲突 — 旧 expected 被拒绝，新 expected 被接受', async () => {
-    const { ctx, createMainAgent } = await setupS5Fixture()
+    const { ctx, createMainAgent, host } = await setupS5Fixture()
     const questionDeferred = Promise.withResolvers<AskUserQuestionAnswer>()
     let receivedQuestion: AskUserQuestionItem | undefined
 
@@ -383,6 +383,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
       })
 
       const dismissedView = await waitForView(ctx, agent, v => v.phase === 'dismissed')
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       const acceptedResult = await ctx.bid.requestWritingRequirements(agent.session, {
         mode: 'reopen',
         expected: dismissedView.expected,
@@ -490,7 +491,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
   })
 
   it('R07: 答案保存失败移到锁外恢复 — 无 BID_OPERATION_IN_PROGRESS，真实投影显示 failed 且 can_retry_answer 为真，重试成功', async () => {
-    const { ctx, workspace, createMainAgent } = await setupS5Fixture()
+    const { ctx, workspace, createMainAgent, host } = await setupS5Fixture()
     const questionDeferred = Promise.withResolvers<AskUserQuestionAnswer>()
     let receivedQuestion: AskUserQuestionItem | undefined
 
@@ -526,6 +527,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
 
       // 验证未抛死锁，且真实投影展示 failed，允许重试
       const failedView = await waitForView(ctx, agent, v => v.phase === 'failed' && v.can_retry_answer === true)
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       expect(failedView.answer_save_status).toBe('unconfirmed')
       expect(failedView.error?.code).toBe('BID_WRITING_ANSWER_SAVE_FAILED')
 

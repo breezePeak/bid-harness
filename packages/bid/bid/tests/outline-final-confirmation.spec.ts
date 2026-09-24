@@ -93,6 +93,8 @@ async function fixture() {
       wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '' } satisfies Config,
     inFlight: new Map(),
     writingEntryStops: new Map(),
+    pendingRunDecisions: new Map(),
+    pendingRunDecisionControllers: new Map(),
     automaticOrchestrator: () => new BidOrchestrator(session, { canExecute: () => false, execute: async () => [] },
       { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) }, undefined,
       (fromStage, toStage) => prepareBidStageContextTransition(session, workspace, fromStage, toStage)),

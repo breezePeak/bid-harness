@@ -7,6 +7,7 @@ describe('browser-safe Bid control-plane export', () => {
       'BID_BINARY_UPLOAD_PATH',
       'BID_CLIENT_ACTIONS',
       'BID_DOCUMENT_ROLES',
+      'BID_DOCX_EXPORT_PROJECTION_KEY',
       'BID_RUNTIME_PROJECTION_KEY',
       'BID_STAGES',
       'BID_TASK_STATUSES',

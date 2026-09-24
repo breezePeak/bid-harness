@@ -34,6 +34,7 @@ export const bidProjectInspectSchema = z.discriminatedUnion('object', [
   z.object({ object: z.literal('recovery'), ...source }).strict(),
 ])
 
+/** 主 Agent 请求读取的项目对象、范围及分页参数。 */
 export type BidProjectInspectRequest = z.input<typeof bidProjectInspectSchema>
 
 /** 缺失对象返回显式状态；页码和截断状态不冒充完整资料。 */

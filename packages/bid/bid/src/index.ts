@@ -53,7 +53,7 @@ import { assertBidMainSession, inspectBidStage, installStageInteractionTools, is
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseConfirmedOutlineArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
-import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
+import { getOrCreateOutlineDraft, readCapabilityOutlineBaseline, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import {
@@ -88,14 +88,13 @@ import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
-import { BID_CAPABILITIES, defaultBidCapabilityForStage, executeDefaultBidCapability,
-  validateDefaultBidCapability } from './bid-capability-registry.ts'
-import { askCapabilityTaskInput, executeCapabilityTask, readCapabilityAwaitingInput,
+import { BID_CAPABILITIES, defaultBidCapabilityForStage } from './bid-capability-registry.ts'
+import { askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps, readCapabilityAwaitingInput,
   persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
-import { createBidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
+import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
@@ -1674,7 +1673,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly pendingCapabilityInputs = new Map<string, Promise<void>>()
   private readonly pendingCapabilityInputControllers = new Map<string, AbortController>()
   private capabilityTaskDispatcher: CapabilityTaskDispatcher | undefined
-  private readonly builtInCapabilityDispatcher: CapabilityTaskDispatcher
+  private readonly builtInCapabilityDispatcher: BidCapabilityDispatcher
   private readonly queuedDrains = new Set<BidProjectKey>()
   private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
@@ -3257,6 +3256,87 @@ export class BidHostRuntime extends TypertRemoteService {
     if (request.action === 'bid_run_task') {
       return this.runCapabilityTaskFromTool(agent, request.task)
     }
+    if (request.action === 'bid_plan_task') {
+      if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+      const message = session.events.findLast(event => event.type === 'user/message'
+        && event.data.source.kind === 'user')
+      if (message?.type !== 'user/message') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+      const operation = this.beginOperation(session)
+      try {
+        const state = await this.prepareOperation(operation)
+        if (state.status !== 'suspended' || state.run.work.kind !== 'capability_task'
+          || state.run.work.workId !== request.work_id || state.run.cause === 'awaiting_input') {
+          throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+        }
+        const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, state.run.work))
+        const workingPaths = await prepareBidWorkingTree(operation.workspace, state.run.work)
+        const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
+        const authorization = { session_id: String(session.id), message_id: String(message.data.id) }
+        let stepCount = 0
+        await this.mutateProject(operation, async (lease) => {
+          const checkpoint = await patchCapabilityTaskSteps({ work: state.run.work,
+            commits: { writeJson: (path, value) => lease.writeJson(path, value) } },
+          operation.workspace, working, saved, session, authorization, request.from_index, request.steps)
+          stepCount = checkpoint.steps.length
+        }, state)
+        return { accepted: true, work_id: request.work_id, steps: stepCount,
+          message: '已保存未执行步骤；当前 Work 仍处于挂起状态，等待明确恢复。' }
+      } finally { await this.finishOperation(session, operation) }
+    }
+    if (request.action === 'bid_outline_apply_operations'
+      || request.action === 'bid_outline_regenerate_scope' || request.action === 'bid_evidence_remap') {
+      const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+      const persisted = await readBidProjectState(workspace)
+      const state = persisted === undefined ? bidSessionTaskState(session) : bidProjectTaskState(persisted)
+      const native = state.status === 'waiting_user' && (request.action === 'bid_evidence_remap'
+        ? state.stage === 'evidence_mapping'
+        : state.stage === 'outline_generation' || state.stage === 'evidence_mapping')
+      if (!native) {
+        const baseline = await readCapabilityOutlineBaseline(workspace)
+        if (request.expected_revision !== baseline.revision
+          || request.expected_draft_sha256 !== baseline.draft_outline_sha256) {
+          return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: baseline } }
+        }
+        const task = request.action === 'bid_outline_apply_operations' ? {
+          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+            call: { capability: 'outline.update', input: { operations: request.operations,
+              business_bindings: request.business_bindings ?? [] } } }],
+        } : request.action === 'bid_outline_regenerate_scope' ? {
+          goal: '按用户要求深化选中目录', scope: { kind: 'sections', section_ids: request.section_ids },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'outline.refine',
+            input: { feedback: request.feedback } } }],
+        } : {
+          goal: '按用户要求更新选中资料', scope: { kind: 'sections', section_ids: request.section_ids },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'evidence.research',
+            input: { mode: request.mode, reason: request.reason ?? '重新核对该范围的资料',
+              allow_outline_refinement: false } } }],
+        }
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse(task))
+      }
+    }
+    if (request.action === 'bid_confirm_writing_plan') {
+      const state = bidSessionTaskState(session)
+      if (state.stage !== 'chapter_writing') {
+        const { action: _action, ...input } = request
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
+          goal: '按用户要求更新写作计划', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+            call: { capability: 'writing.plan', input } }],
+        }))
+      }
+    }
+    if (request.action === 'bid_revise_chapter') {
+      const state = bidSessionTaskState(session)
+      if (state.stage !== 'chapter_writing' && state.stage !== 'docx_export') {
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
+          goal: request.instruction,
+          scope: request.reference.scope === 'paragraphs'
+            ? { kind: 'paragraphs', reference: request.reference }
+            : { kind: 'sections', section_ids: [request.reference.section_id] },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.revise',
+            input: { instruction: request.instruction, reference: request.reference } } }],
+        }))
+      }
+    }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
     if (request.action === 'bid_recover_task') {
@@ -4016,12 +4096,10 @@ export class BidHostRuntime extends TypertRemoteService {
             undefined,
             createDocxVisualReviewer(this.ctx, operation.session, run.signal),
           )
-          const capability = defaultBidCapabilityForStage(task.stage)
-          if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${task.stage}`)
-          if (capability === 'chapter.write') {
+          if (defaultBidCapabilityForStage(task.stage) === 'chapter.write') {
             await operation.writingControl.bind(workspace, run.work.workId, run.commits)
           }
-          return executeDefaultBidCapability(capability, task, {
+          return this.builtInCapabilityDispatcher.executeDefault(task, {
             agent, workspace, run,
             maxRepairAttempts: this.config.modelStageRepairAttempts,
             evidenceMappingMaxConcurrency: this.config.evidenceMappingMaxConcurrency,
@@ -4038,11 +4116,7 @@ export class BidHostRuntime extends TypertRemoteService {
           switch (stage) {
             case 'file_intake': return validateFileIntake(workspace, importedFiles, stage, artifacts, intake?.incoming ?? intakeFiles)
             case 'docx_export': return validateDocxExport(workspace, stage, artifacts)
-            default: {
-              const capability = defaultBidCapabilityForStage(stage)
-              if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${stage}`)
-              return validateDefaultBidCapability(capability, workspace, stage, artifacts)
-            }
+            default: return this.builtInCapabilityDispatcher.validateDefault(stage, workspace, artifacts)
           }
         },
       },

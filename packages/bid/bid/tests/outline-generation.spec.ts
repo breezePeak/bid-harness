@@ -1273,7 +1273,8 @@ describe('S3 确定性规范化与局部续修', () => {
     expect(added.sections.slice(0, 3)).toEqual(reviewedOutline.sections)
     expect(missingOutlineResponsePoints(added, catalog)).toEqual([])
     const split = applyOutlineRepair(reviewedOutline, [{ type: 'split_section', section_id: 'SEC-SCHEDULE', children: [
-      { title: '阶段计划', purpose: '说明阶段计划', must_answer: ['明确各阶段里程碑'], scoring_response_point_ids: ['RP-000001'] },
+      { title: '阶段计划', purpose: '说明阶段计划', must_answer: ['明确各阶段里程碑'],
+        requirement_ids: ['REQ-SCHEDULE'], scoring_response_point_ids: ['RP-000001'] },
       { title: '延期防控', purpose: '说明延期防控', must_answer: ['明确延期预警、责任人与纠偏措施'], scoring_response_point_ids: ['RP-000011'] },
     ] }], catalog, scoringArtifact)
     expect(split.sections.slice(0, 2)).toEqual(reviewedOutline.sections.slice(0, 2))

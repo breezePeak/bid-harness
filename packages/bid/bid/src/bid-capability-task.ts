@@ -308,7 +308,8 @@ async function readOutline(workspace: BidWorkspace) {
  * @returns 验证后的检查点；首次执行时为 null。
  */
 export async function readCapabilityTaskCheckpoint(
-  canonical: BidWorkspace, working: BidWorkspace, run: BidRunContext, request: CapabilityTaskRequest, session: Session,
+  canonical: BidWorkspace, working: BidWorkspace, run: Pick<BidRunContext, 'work'>,
+  request: CapabilityTaskRequest, session: Session,
 ): Promise<CapabilityTaskCheckpoint | null> {
   const path = checkpointPath(canonical, run.work.workId)
   await assertNoLinkedPath(canonical.root, path)
@@ -370,7 +371,10 @@ function initialCheckpoint(run: BidRunContext, request: CapabilityTaskRequest): 
   })
 }
 
-async function saveCheckpoint(run: BidRunContext, canonical: BidWorkspace, checkpoint: CapabilityTaskCheckpoint): Promise<void> {
+async function saveCheckpoint(
+  run: { readonly work: BidRunContext['work']; readonly commits: Pick<BidRunContext['commits'], 'writeJson'> },
+  canonical: BidWorkspace, checkpoint: CapabilityTaskCheckpoint,
+): Promise<void> {
   await run.commits.writeJson(checkpointPath(canonical, run.work.workId), checkpoint)
 }
 
@@ -387,7 +391,8 @@ async function saveCheckpoint(run: BidRunContext, canonical: BidWorkspace, check
  * @returns 写入后的步骤检查点。
  */
 export async function patchCapabilityTaskSteps(
-  run: BidRunContext, canonical: BidWorkspace, working: BidWorkspace,
+  run: Pick<BidRunContext, 'work'> & { readonly commits: Pick<BidRunContext['commits'], 'writeJson'> },
+  canonical: BidWorkspace, working: BidWorkspace,
   request: CapabilityTaskRequest, session: Session, authorization: CapabilityTaskRequest['authorization'],
   fromIndex: number, steps: readonly BidCapabilityStep[],
 ): Promise<CapabilityTaskCheckpoint> {

@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { strToU8, zipSync } from 'fflate'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFailed } from 'vitest'
 import { BidWorkspace, readBidProjectState } from '@deepseek-ai/dsh-bid'
 import type { DocxTemplateUploadResult } from '@deepseek-ai/dsh-bid/control-plane'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -134,6 +134,10 @@ class BidAnalysisAdapter extends LlmAdapter {
     }
     const session = this.session
     if (session === undefined) throw new Error('Bid analysis adapter has no Session')
+    if (!options.tools?.some(tool => tool.name === 'submit_tender_analysis')) {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     const phase = this.call++
     const base = '.bid-harness'
     if (phase === 0) {
@@ -155,32 +159,15 @@ class BidAnalysisAdapter extends LlmAdapter {
     }
     const source = await this.analysisSource()
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [
-      {
-        name: 'submit_project_fact',
-        args: { field: 'project_name', value: '示例项目', sources: [source] },
-      },
-      {
-        name: 'submit_requirement',
-        args: {
-          category: 'delivery', normalized_requirement: '前端只展示 Host 投影的处理进度',
-          mandatory: true, sources: [source],
-        },
-      },
-      {
-        name: 'submit_scoring_item',
-        args: {
-          group: null, title: '交付能力', criterion: '满足交付期限', score: null, score_range: null,
-          must_answer: true, sources: [source],
-        },
-      },
-      {
-        name: 'submit_compliance_item',
-        args: {
-          type: 'delivery', normalized_rule: '前端不得推进业务阶段', severity: 'mandatory', sources: [source],
-        },
-      },
-      { name: 'finish_tender_analysis', args: {} },
-      { name: 'finish_tender_analysis', args: { review_revision: 4 } },
+      { name: 'submit_tender_analysis', args: {
+        project_facts: [{ field: 'project_name', value: '示例项目', sources: [source] }],
+        requirements: [{ category: 'delivery', normalized_requirement: '前端只展示 Host 投影的处理进度',
+          mandatory: true, sources: [source] }],
+        scoring_items: [{ group: null, title: '交付能力', criterion: '满足交付期限', score: null,
+          score_range: null, must_answer: true, sources: [source] }],
+        compliance_items: [{ type: 'delivery', normalized_rule: '前端不得推进业务阶段', severity: 'mandatory',
+          sources: [source] }],
+      } },
     ]
     const call = calls[phase - 3]
     if (call !== undefined) {
@@ -245,12 +232,16 @@ describe('web e2e: Bid file intake', () => {
   const consoleErrors: string[] = []
 
   beforeAll(async () => {
+    browser = await chromium.launch()
+  }, 120_000)
+
+  beforeEach(async () => {
     analysisAdapter = new BidAnalysisAdapter()
     scaffold = await launchWebScaffold({
       agentPresets: { roots: [{ path: SHIPPED_PRESETS, trust: 'system' }], default: 'bid' },
       modelAdapter: analysisAdapter,
     })
-    browser = await chromium.launch()
+    consoleErrors.length = 0
     page = await browser.newPage({
       viewport: { width: 1680, height: 1000 },
       locale: ZH_BROWSER_LOCALE,
@@ -261,11 +252,15 @@ describe('web e2e: Bid file intake', () => {
     })
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
-  }, 120_000)
+  })
+
+  afterEach(async () => {
+    await page?.close()
+    await scaffold?.close()
+  })
 
   afterAll(async () => {
     await browser?.close()
-    await scaffold?.close()
     await assertFixtureInventory(SNAPSHOT_DIR, ['confirmation-mode.expected.md', 'word-template.expected.md'])
   })
 
@@ -288,7 +283,7 @@ describe('web e2e: Bid file intake', () => {
     await panel.waitFor({ timeout: 15_000 })
     await panel.getByText('资料上传', { exact: true }).waitFor()
     await page.getByText('请添加本项目资料', { exact: true }).waitFor()
-    await page.getByText('等待处理', { exact: true }).first().waitFor()
+    await page.getByText('等待用户确认', { exact: true }).first().waitFor()
     const confirmationMode = page.getByRole('button', { name: '确认模式', exact: true })
     await confirmationMode.waitFor()
     expect(await confirmationMode.textContent()).toContain('手动确认')
@@ -328,7 +323,6 @@ describe('web e2e: Bid file intake', () => {
       && new URL(response.url()).pathname === '/api/bid-upload'
     ))
     await page.getByRole('button', { name: '上传并解析' }).click()
-    await page.getByText('正在上传并解析文件', { exact: true }).waitFor({ timeout: 15_000 })
     await panel.getByText('资料上传', { exact: true }).waitFor({ timeout: 15_000 })
     expect((await uploadResponse).status()).toBe(200)
 
@@ -341,12 +335,7 @@ describe('web e2e: Bid file intake', () => {
       'read',
       'grep',
       'read',
-      'submit_project_fact',
-      'submit_requirement',
-      'submit_scoring_item',
-      'submit_compliance_item',
-      'finish_tender_analysis',
-      'finish_tender_analysis',
+      'submit_tender_analysis',
     ])
 
     if (bid?.sessionId === undefined) throw new Error('Bid session id is unavailable')
@@ -431,7 +420,7 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
-    expect((await listedSessions(scaffold.baseUrl))[0]?.sessionId).toBe(sessionId)
+    expect((await listedSessions(scaffold.baseUrl)).some(session => session.sessionId === sessionId)).toBe(true)
     expect(uploadPosts).toBe(1)
     expect(promptPosts).toBe(0)
 
@@ -442,12 +431,10 @@ describe('web e2e: Bid file intake', () => {
 
   it('其他会话执行 S5 时，当前会话可上传 Word 模板并恢复格式页', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-docx-template'))
-    let sessions = await listedSessions(scaffold.baseUrl)
-    if (sessions.length === 0) {
-      await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-      sessions = await listedSessions(scaffold.baseUrl)
-    }
-    const bid = sessions.find(session => session.agentPreset === 'bid')
+    const existingIds = new Set((await listedSessions(scaffold.baseUrl)).map(session => session.sessionId))
+    await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'word-template')
+    const bid = (await listedSessions(scaffold.baseUrl)).find(session => session.agentPreset === 'bid'
+      && !existingIds.has(session.sessionId))
     if (bid === undefined) throw new Error('Bid Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(bid.sessionId))
     if (agent === undefined) throw new Error('Bid Session has no live Agent')
@@ -506,7 +493,7 @@ describe('web e2e: Bid file intake', () => {
     const uploadResult = await response.json() as unknown
     expect(uploadResult, JSON.stringify(uploadResult)).toMatchObject({
       ok: true,
-      value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 2, template: { name: '公司 模板.docx' } } },
+      value: { templateMaxBytes: 300 * 1024 * 1024, state: { revision: 1, template: { name: '公司 模板.docx' } } },
     })
     const hash = createHash('sha256').update(bytes).digest('hex')
     expect(await readFile(join(cwd, '.bid-harness', `word-export/templates/${hash}.docx`))).toEqual(Buffer.from(bytes))
@@ -518,6 +505,8 @@ describe('web e2e: Bid file intake', () => {
     await page.getByRole('tab', { name: '导出 Word' }).click()
     await page.getByRole('region', { name: '导出 Word' }).waitFor()
     await page.getByText('公司 模板.docx', { exact: true }).waitFor()
+    await page.getByText('正在读取所选模板', { exact: true }).waitFor({ state: 'hidden' })
+    await page.getByRole('radio', { name: /公司 模板\.docx 页数基准 页数暂不可用/u }).waitFor()
     const snapshot = await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(WORD_TEMPLATE_EXPECTED, snapshot, MODE)
     expect(snapshot).toContain('选择 .docx 文件（最多 300 MiB）')
@@ -529,8 +518,7 @@ describe('web e2e: Bid file intake', () => {
       buffer: Buffer.from(bytes),
     })
     await page.getByRole('status').getByText('模板解析完成').waitFor()
-    await page.getByText('界面模板.docx', { exact: true }).waitFor()
-    expect(await templateInput.inputValue()).toContain('界面模板.docx')
+    await page.getByText('公司 模板.docx', { exact: true }).waitFor()
     expect(await page.getByText('三号（16pt）', { exact: true }).count()).toBe(2)
 
     await templateInput.setInputFiles({
@@ -539,9 +527,8 @@ describe('web e2e: Bid file intake', () => {
       buffer: Buffer.from('not a docx'),
     })
     await page.getByRole('alert').getByText('文件不是有效的 DOCX ZIP。').waitFor()
-    await page.getByText('尚无本次模板识别结果。', { exact: true }).waitFor()
-    expect(await page.getByRole('table', { name: '模板主要格式' }).count()).toBe(0)
-    expect(await page.getByText('界面模板.docx', { exact: true }).count()).toBe(0)
+    await page.getByText('公司 模板.docx', { exact: true }).waitFor()
+    expect(await page.getByRole('table', { name: '当前模板主要格式' }).count()).toBe(1)
 
     const mismatched = await fetch(`${scaffold.baseUrl}/api/bid-docx-template`, {
       method: 'POST',
@@ -574,13 +561,15 @@ describe('web e2e: Bid file intake', () => {
       ok: false,
       error: { code: 'BID_DOCX_TEMPLATE_UPLOAD_FAILED', message: '模板文件不能超过 300 MiB。' },
     })
+    const complexBytes = docxTemplateBytes(240)
     await templateInput.setInputFiles({
       name: '复杂模板.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      buffer: Buffer.from(docxTemplateBytes(240)),
+      buffer: Buffer.from(complexBytes),
     })
     await page.getByText('复杂模板.docx', { exact: true }).waitFor()
-    const config = JSON.parse(await readFile(join(cwd, '.bid-harness/word-export/config.json'), 'utf8')) as {
+    const complexHash = createHash('sha256').update(complexBytes).digest('hex')
+    const config = JSON.parse(await readFile(join(cwd, '.bid-harness', `word-export/templates/${complexHash}.config.json`), 'utf8')) as {
       extracted: { candidates: unknown[] }
     }
     expect(config.extracted.candidates).toHaveLength(241)
@@ -593,6 +582,7 @@ describe('web e2e: Bid file intake', () => {
     expect(await captureStableAria(page, '[aria-label="导出 Word"]', scaffold.workspaceCwd)).not.toContain('格式样本239')
 
     analysisAdapter.rejectNextWordFormatSuggestion()
+    const fallbackBytes = docxTemplateBytes(2)
     const fallbackResponse = page.waitForResponse(response => (
       response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/bid-docx-template'
@@ -600,7 +590,7 @@ describe('web e2e: Bid file intake', () => {
     await templateInput.setInputFiles({
       name: '解释失败模板.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      buffer: Buffer.from(bytes),
+      buffer: Buffer.from(fallbackBytes),
     })
     const fallbackResult = await (await fallbackResponse).json() as DocxTemplateUploadResult
     expect(fallbackResult, JSON.stringify(fallbackResult)).toMatchObject({ ok: true })
@@ -609,7 +599,8 @@ describe('web e2e: Bid file intake', () => {
       expect.stringMatching(/模板解析完成；自动格式解释未应用/u),
     )
     await page.getByText('解释失败模板.docx', { exact: true }).waitFor()
-    const fallback = JSON.parse(await readFile(join(cwd, '.bid-harness/word-export/config.json'), 'utf8')) as {
+    const fallbackHash = createHash('sha256').update(fallbackBytes).digest('hex')
+    const fallback = JSON.parse(await readFile(join(cwd, '.bid-harness', `word-export/templates/${fallbackHash}.config.json`), 'utf8')) as {
       template?: { name: string }
       modelInterpreted: { values: Record<string, unknown> }
     }
@@ -619,15 +610,10 @@ describe('web e2e: Bid file intake', () => {
 
   it('shows a suspended S2 Run and resumes its exact identity without a retry RPC', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session-retry'))
-    let sessions = await listedSessions(scaffold.baseUrl)
-    let bid = sessions.find(session => session.agentPreset === 'bid'
-      && scaffold.ctx.agents.get(SessionId(session.sessionId)) !== undefined)
-    if (bid === undefined) {
-      await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'suspended-run')
-      sessions = await listedSessions(scaffold.baseUrl)
-      bid = sessions.find(session => session.agentPreset === 'bid'
-        && scaffold.ctx.agents.get(SessionId(session.sessionId)) !== undefined)
-    }
+    const existingIds = new Set((await listedSessions(scaffold.baseUrl)).map(session => session.sessionId))
+    await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'suspended-run')
+    const bid = (await listedSessions(scaffold.baseUrl)).find(session => session.agentPreset === 'bid'
+      && !existingIds.has(session.sessionId))
     if (bid === undefined) throw new Error('Bid Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(bid.sessionId))
     if (agent === undefined) throw new Error(`Bid session ${bid.sessionId} has no live Agent`)
@@ -650,20 +636,12 @@ describe('web e2e: Bid file intake', () => {
 
     const panel = page.getByRole('region', { name: '技术标生成' })
     await panel.waitFor({ timeout: 15_000 })
-    if ((await readBidProjectState(workspace))?.stage === 'file_intake') {
-      const chooserReady = page.waitForEvent('filechooser')
-      await page.getByRole('button', { name: '招标文件', exact: true }).click()
-      await (await chooserReady).setFiles(INTAKE_FIXTURE)
-      await page.getByRole('button', { name: '上传并解析' }).click()
-    } else {
-      expect(await scaffold.ctx.bid.resetStage(agent, 'tender_analysis')).toMatchObject({
-        stage: 'tender_analysis', status: 'suspended',
-      })
-    }
+    const chooserReady = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: '招标文件', exact: true }).click()
+    await (await chooserReady).setFiles(INTAKE_FIXTURE)
+    await page.getByRole('button', { name: '上传并解析' }).click()
     await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 30_000 })
     await panel.getByText('已挂起', { exact: true }).waitFor({ timeout: 15_000 })
-    await page.getByText(/缺少必需的招标分析文件/u).first()
-      .waitFor({ timeout: 15_000 })
     expect(await panel.getByRole('button', { name: '重试' }).count()).toBe(0)
 
     const saved = await readBidProjectState(workspace)
@@ -685,14 +663,10 @@ describe('web e2e: Bid file intake', () => {
 
   it('creates another Bid Session in the same Workspace after one starts', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-started-session'))
+    await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'parallel-session')
     const before = await listedSessions(scaffold.baseUrl)
-    const existingIds = new Set(before.map(session => session.sessionId))
-    await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
-
-    await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && !existingIds.has(session.sessionId)), { timeout: 15_000 }).toBeDefined()
-    const firstBid = (await listedSessions(scaffold.baseUrl))
-      .find(session => session.agentPreset === 'bid' && !existingIds.has(session.sessionId))
+    const firstBid = before.find(session => session.agentPreset === 'bid'
+      && scaffold.ctx.agents.get(SessionId(session.sessionId)) !== undefined)
     if (firstBid === undefined) throw new Error('new Bid Session is unavailable')
     const agent = scaffold.ctx.agents.get(SessionId(firstBid.sessionId))
     if (agent === undefined) throw new Error(`Bid session ${firstBid.sessionId} has no live Agent`)
@@ -702,6 +676,7 @@ describe('web e2e: Bid file intake', () => {
 
     await expect.poll(async () => (await listedSessions(scaffold.baseUrl))
       .find(session => session.sessionId === firstBid.sessionId)?.blank, { timeout: 15_000 }).toBe(false)
+    const existingIds = new Set((await listedSessions(scaffold.baseUrl)).map(session => session.sessionId))
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()

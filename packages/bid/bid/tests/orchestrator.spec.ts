@@ -24,6 +24,19 @@ async function session() {
 }
 
 describe('BidOrchestrator', () => {
+  it('accepts an explicit S1 upload from the initial waiting state', async () => {
+    const current = await session()
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
+    const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute },
+      { validate: async () => ({ ok: true }) })
+
+    await expect(orchestrator.runCurrentProgramStage()).resolves.toMatchObject({
+      stage: 'tender_analysis', status: 'ready',
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute.mock.calls[0]![0].stage).toBe('file_intake')
+  })
+
   it('finishes the linear workflow at S5 and leaves S6 for on-demand export', async () => {
     expect(BID_STAGES).toEqual(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export'])
     expect(BID_STAGES.map(stage => getBidStagePolicy(stage).userGate)).toEqual(['none', 'after_validation', 'after_validation', 'after_validation', 'before_execution', 'none'])

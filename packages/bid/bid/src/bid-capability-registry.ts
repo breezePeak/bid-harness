@@ -56,6 +56,7 @@ export const DEFAULT_BID_STAGE_CAPABILITIES = {
   chapter_writing: 'chapter.write',
 } as const satisfies Partial<Record<BidStage, BidCapabilityId>>
 
+/** 默认路线使用的已有阶段执行能力。 */
 export type DefaultBidCapabilityId = typeof DEFAULT_BID_STAGE_CAPABILITIES[keyof typeof DEFAULT_BID_STAGE_CAPABILITIES]
 
 /** 默认执行所需的 Host 配置和已授权运行身份。 */
@@ -72,12 +73,20 @@ export interface DefaultBidCapabilityContext {
   readonly recovery?: ModelStageExecutionOptions['recovery']
 }
 
-/** 从默认阶段查找业务能力，不把内部 StageTask 当作公共能力授权。 */
+/** 从默认阶段查找业务能力，不把内部 StageTask 当作公共能力授权。
+ * @param stage 当前默认路线阶段。
+ * @returns 对应能力；S1 和独立导出没有模型能力。
+ */
 export function defaultBidCapabilityForStage(stage: BidStage): DefaultBidCapabilityId | undefined {
   return DEFAULT_BID_STAGE_CAPABILITIES[stage as keyof typeof DEFAULT_BID_STAGE_CAPABILITIES]
 }
 
-/** 用现有执行器运行默认能力；S5 的章节审核仍由原执行器统一调度。 */
+/** 用现有执行器运行默认能力；S5 的章节审核仍由原执行器统一调度。
+ * @param capability 阶段对应的能力。
+ * @param task 已有阶段任务。
+ * @param context Host 配置和 Run 身份。
+ * @returns 经执行器生成的阶段产物清单。
+ */
 export function executeDefaultBidCapability(
   capability: DefaultBidCapabilityId,
   task: BidStageTask,
@@ -107,7 +116,13 @@ export function executeDefaultBidCapability(
   }
 }
 
-/** 使用能力对应的现有整阶段 Validator 核对默认路线的完整产物。 */
+/** 使用能力对应的现有整阶段 Validator 核对默认路线的完整产物。
+ * @param capability 阶段对应的能力。
+ * @param workspace 当前项目工作区。
+ * @param stage 当前默认路线阶段。
+ * @param artifacts 执行器提交的阶段产物。
+ * @returns 整阶段校验结果。
+ */
 export function validateDefaultBidCapability(
   capability: DefaultBidCapabilityId, workspace: BidWorkspace, stage: BidStage, artifacts: StageArtifact[],
 ): Promise<StageValidationResult> {

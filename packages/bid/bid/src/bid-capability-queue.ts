@@ -146,7 +146,12 @@ export async function markCapabilityRequestApplied(
     () => markCapabilityRequestAppliedWithLease(workspace, originWorkId, recordId, lease)))
 }
 
-/** 在已有项目 mutation 内确认先前接纳的 Work，避免重启后再启动一个 Run。 */
+/** 在已有项目 mutation 内确认先前接纳的 Work，避免重启后再启动一个 Run。
+ * @param workspace 当前项目。
+ * @param originWorkId 保存命令日志的 Work。
+ * @param recordId 待结算的命令身份。
+ * @param lease 当前项目写入租约。
+ */
 export async function markCapabilityRequestAppliedWithLease(
   workspace: BidWorkspace, originWorkId: string, recordId: string, lease: BidCommitLease,
 ): Promise<void> {
@@ -161,7 +166,12 @@ export async function markCapabilityRequestAppliedWithLease(
   await writeBidChapterCommandJournal(workspace, originWorkId, next, lease)
 }
 
-/** 重置时取消依赖已删除输入的排队任务，并保留日志中的取消证据。 */
+/** 重置时取消依赖已删除输入的排队任务，并保留日志中的取消证据。
+ * @param workspace 当前项目。
+ * @param removedPaths 重置删除的真实路径。
+ * @param lease 当前项目写入租约。
+ * @returns 被取消的排队任务数。
+ */
 export async function cancelCapabilityRequestsForReset(
   workspace: BidWorkspace, removedPaths: readonly string[], lease: BidCommitLease,
 ): Promise<number> {

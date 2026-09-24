@@ -186,13 +186,14 @@ export class BidOrchestrator {
   /**
    * Execute the current program-owned stage once without driving its successor.
    * @returns the log-derived state after the stage records completion or failure.
-   * @throws {@link BidOrchestratorError} unless the current stage is an idle ready program stage.
+   * @throws {@link BidOrchestratorError} unless the current stage can accept a program action.
    */
   runCurrentProgramStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (policy.executor !== 'program' || state.status !== 'ready') {
+    if (policy.executor !== 'program' || (state.status !== 'ready'
+      && !(state.stage === 'file_intake' && state.status === 'waiting_user'))) {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,

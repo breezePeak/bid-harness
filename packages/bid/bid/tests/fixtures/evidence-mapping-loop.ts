@@ -39,7 +39,7 @@ function finalText(text: string): StreamChunk[] {
 type ScriptStep = StreamChunk[] | ((options: GenerateOptions) => StreamChunk[])
 
 /** @param options 模型实际可见的工具结果。 @returns 针对当前待审引用的固定复核回复。 */
-export function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
+function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
   for (const message of [...options.messages].reverse()) {
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
@@ -59,6 +59,7 @@ export function reviewPendingMappingItems(options: GenerateOptions): StreamChunk
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
   readonly requests: GenerateOptions[] = []
+  readonly reviewScript: ScriptStep[] = []
   constructor(
     private readonly parentId: SessionId,
     private readonly parentScript: ScriptStep[],
@@ -77,7 +78,10 @@ class ScriptedAdapter extends LlmAdapter {
       yield* finalText('等待 Host 下发目录深化任务。')
       return
     }
-    const response = (options.sessionId === this.parentId ? this.parentScript : this.childScript).shift()
+    const script = options.sessionId === this.parentId ? this.parentScript
+      : this.reviewScript.length > 0 && options.system?.includes('技术标目录质量复核 Subagent')
+        ? this.reviewScript : this.childScript
+    const response = script.shift()
     if (response === undefined && this.interactive) {
       yield* finalText('等待用户确认。')
       return
@@ -469,7 +473,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 
   const outcome = await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
-  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests, parentScript, childScript }
+  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests,
+    parentScript, childScript, reviewScript: adapter.reviewScript }
 }
 
 /**

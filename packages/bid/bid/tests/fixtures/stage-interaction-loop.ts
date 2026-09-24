@@ -30,7 +30,7 @@ function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
 
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */
 export async function runFullOutlineRegenerationLoop(ctx: Context, root: string) {
-  const { agent, workspace, childScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  const { agent, workspace, childScript, reviewScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   await checkpointBidProjectState(workspace, agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE))
   await ctx.plugin(SessionProjectionRegistry)
   if (ctx.get('userQuestions') === undefined) await ctx.plugin(UserQuestionService)
@@ -43,14 +43,15 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
   const draft = await getOrCreateOutlineDraft(workspace)
   const candidate = { ...draft.outline, sections: draft.outline.sections.map(section => ({ ...section, title: `${section.title}方案` })) }
   const original = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
-  const quality = await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')
   const changeSet = { schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256,
     changes: outlineRegenerationChanges(draft.outline, candidate).map(change => ({ ...change, reason: '明确方案标题' })) }
   childScript.push(
     options => call('write', { file_path: visibleTarget(options, /本轮初稿唯一输出：([^。\r\n]+)/u), content: JSON.stringify(candidate) }),
     options => call('write', { file_path: visibleTarget(options, /同时写入 ([^，\r\n]+)/u), content: JSON.stringify(changeSet) }),
     answer('目录已重生成。'),
-    call('submit_outline_quality_review', { issues: (JSON.parse(quality) as { issues: unknown[] }).issues }),
+  )
+  reviewScript.push(
+    call('structured_output', { operations: [], issues: [] }),
     answer('目录已复核。'),
   )
   const start = agent.session.events.length
@@ -114,6 +115,10 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const sectionId = initial.outline.sections[0]!.id
   await send('第一章拆成实施准备、实施过程、验收移交', [call('bid_outline_apply_operations', {
     ...await identity(), operations: [{ type: 'split_section', section_id: sectionId, children: ['实施准备', '实施过程', '验收移交'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
+    business_bindings: [{ section_id: 'SEC-001', requirement_ids: initial.outline.sections[0]!.requirement_ids,
+      scoring_ids: initial.outline.sections[0]!.scoring_ids,
+      scoring_response_point_ids: initial.outline.sections[0]!.scoring_response_point_ids ?? [],
+      compliance_ids: initial.outline.sections[0]!.compliance_ids }],
   }), answer('已更新，请重新确认。')])
   const split = await getOrCreateOutlineDraft(workspace)
   const target = split.outline.sections.find(item => item.parent_id === sectionId)!

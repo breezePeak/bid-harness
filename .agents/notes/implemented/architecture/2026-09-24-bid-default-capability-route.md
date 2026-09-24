@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`bid-capability-registry.ts` 为默认 S2–S5 提供固定能力映射和薄适配器，直接调用现有执行器及整阶段 Validator。S5 的 Writer、Reviewer 与整书审核仍由原章节执行器调度。上传与恢复都使用 Host 的 `automaticOrchestrator()`，S1 文件入库在同一个编排器内使用原 Work 和校验；其后的模型工作使用 Execution Agent。`BidOrchestrator` 独占 Run 结算、阶段确认、后继阶段和 S5 等待用户边界。
+`bid-capability-registry.ts` 为默认 S2–S5 提供固定能力映射和薄适配器，直接调用现有执行器及整阶段 Validator。Host 的 `bid-capability-dispatcher.ts` 同时提供默认阶段分派和局部能力步骤分派。S5 的 Writer、Reviewer 与整书审核仍由原章节执行器调度。上传与恢复都使用 Host 的 `automaticOrchestrator()`，S1 文件入库在同一个编排器内使用原 Work 和校验；其后的模型工作使用 Execution Agent。`BidOrchestrator` 独占 Run 结算、阶段确认、后继阶段和 S5 等待用户边界。
 
 默认路线的 `BidStageTask` 只为现有执行器提供内部参数。公共能力是否可调用由能力 ID、任务授权和真实输入决定，不能据此内部阶段标签放权。独立 DOCX 导出继续使用既有入口。
 

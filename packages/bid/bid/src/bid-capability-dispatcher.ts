@@ -1,6 +1,10 @@
 /** Host 内建能力分派器把公共调用交给现有业务适配器与精确文件许可。 */
 import type { CapabilityTaskDispatcher } from './bid-capability-task.ts'
 import type { BidCapabilityExecutionContext } from './bid-capability-contract.ts'
+import type { BidStage, BidStageTask, StageArtifact, StageValidationResult } from './control-plane-contract.ts'
+import type { BidWorkspace } from './index.ts'
+import { defaultBidCapabilityForStage, executeDefaultBidCapability, validateDefaultBidCapability,
+  type DefaultBidCapabilityContext } from './bid-capability-registry.ts'
 import { allowedOutlineCapabilityWrites, executeOutlineCapability, validateOutlineCapability } from './bid-outline-capabilities.ts'
 import { allowedEvidenceCapabilitySourceWrites, allowedEvidenceCapabilityWrites,
   executeEvidenceCapability, validateEvidenceCapability } from './bid-evidence-capability.ts'
@@ -19,13 +23,31 @@ export interface CapabilityDispatcherSettings {
   readonly webSearchEnabled: boolean
 }
 
+/** 默认整本阶段与局部任务共用的 Host 分派入口。 */
+export interface BidCapabilityDispatcher extends CapabilityTaskDispatcher {
+  /** 将默认阶段交给其固定能力执行器；确认和 Run 结算仍归 Orchestrator。 */
+  executeDefault(task: BidStageTask, context: DefaultBidCapabilityContext): Promise<StageArtifact[]>
+  /** 校验默认阶段的完整产物。 */
+  validateDefault(stage: BidStage, workspace: BidWorkspace, artifacts: StageArtifact[]): Promise<StageValidationResult>
+}
+
 /**
  * 以已注册能力适配器执行一个 Work 的有序步骤。
  * @param settings 当前 Host 的并发、修复与 Web 配置。
  * @returns 具备文件许可、执行和候选校验的分派器。
  */
-export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSettings): CapabilityTaskDispatcher {
+export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSettings): BidCapabilityDispatcher {
   return {
+    executeDefault(task, context) {
+      const capability = defaultBidCapabilityForStage(task.stage)
+      if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${task.stage}`)
+      return executeDefaultBidCapability(capability, task, context)
+    },
+    validateDefault(stage, workspace, artifacts) {
+      const capability = defaultBidCapabilityForStage(stage)
+      if (capability === undefined) throw new Error(`BID_DEFAULT_CAPABILITY_UNAVAILABLE: ${stage}`)
+      return validateDefaultBidCapability(capability, workspace, stage, artifacts)
+    },
     allowedWrites(call, sectionIds, working, stepId) {
       switch (call.capability) {
         case 'tender.update': return Promise.resolve(allowedTenderUpdateCapabilityWrites())
