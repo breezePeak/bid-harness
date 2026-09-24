@@ -565,7 +565,7 @@ export async function executeCapabilityTask(
     const stepWorkId = `${saved.step_id}-${stepInputSha256.slice(0, 12)}`
     const stepWork = { ...run.work, workId: stepWorkId, inputFingerprint: stepInputSha256,
       requestRef: `requests/${stepWorkId}.json` }
-    const stepPaths = await prepareBidWorkingTree(working, stepWork)
+    const stepPaths = await prepareBidWorkingTree(working, stepWork, { reset: true })
     const stepWorking = new BidWorkspace(stepPaths.root, canonical.config)
     const candidateRun = { ...run, work: stepWork, commits: run.commits.forPublication({
       workspaceRoot: stepWorking.root, projectRoot: stepWorking.projectRoot,

@@ -10,7 +10,7 @@ Status: implemented
 
 `capability_task` 是单一 Work kind。不可变请求绑定真实用户消息、任务目标、根范围、初始步骤、正式输入摘要和任务前状态；Host 生成 Work 与步骤 ID。`BidRunCoordinator` 为整个序列只接纳一个有效根 Run，步骤共用该 Run 的取消、Child 收敛与提交权限。`runs/<workId>/task-checkpoint.json` 记录完成结果、运行中步骤、等待输入和由后续真实用户消息授权的计划补丁；补丁只能替换尚未开始的后缀，不改请求 SHA。
 
-每一步使用独立候选目录。Host 按当前确认目录、任务根范围及前一步的真实 `target_section_ids` 解析作用域；适配器只能声明预先允许的精确文件。业务 Validator 核对结果后，步骤文件和步骤回执同批合并到 Work 候选。最终发布只替换已核对的文件，并在同一 PublicationBatch 写入 `requests/<workId>/result.json`。该凭据保存请求 SHA 与文件摘要，不复制正文。
+每一步使用独立候选目录。Host 按当前确认目录、任务根范围及前一步的真实 `target_section_ids` 解析作用域；适配器只能声明预先允许的精确文件。业务 Validator 核对结果后，步骤文件和步骤回执同批合并到 Work 候选。没有步骤回执时，重试从 Work 候选重新生成该步骤目录，避免把未发布的文件当作新基线。最终发布只替换已核对的文件，并在同一 PublicationBatch 写入 `requests/<workId>/result.json`。该凭据保存请求 SHA 与文件摘要，不复制正文。
 
 重启首先前滚已有发布事务，再校验正式凭据及文件。正式提交已完成时，Host 只补任务前状态、Run 完成事件和公开主会话的有界结果通知；没有提交凭据时从检查点与候选回执恢复，完成步骤不能只凭内存标记跳过。能力需要补充业务输入时，Run 以 `awaiting_input` 挂起，原生问题及真实自由文本答案进入 Session 日志；Goal 自动恢复不处理这一原因。
 
