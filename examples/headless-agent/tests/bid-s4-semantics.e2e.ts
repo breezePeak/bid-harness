@@ -165,6 +165,9 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         if (event.type === 'tool/call' && phase !== 'assessment') toolCounts[phase]++
       }, { global: true })
       const workspace = new BidWorkspace(root)
+      if (resumeRoot !== undefined && !existsSync(join(workspace.projectRoot, 'analysis/evidence-map.json'))) {
+        throw new Error('DSH_BID_EVAL_RESUME_ROOT 只用于已完成 S4 的语义评估重放。')
+      }
       const original = resumeRoot === undefined ? await prepare(workspace, scenario)
         : parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
       const agent = ctx.agentLoop.create(SessionId(`semantic-${scenario.id}`), { provider, model: String(report.model) }, { cwd: root })
