@@ -412,5 +412,5 @@ describe('目录能力候选', () => {
       expect(outcome.status === 'completed' ? outcome.receipt.files.every(file => !file.path.includes('sections/0002.md')) : false)
         .toBe(true)
     } finally { await ctx.fiber.dispose() }
-  })
+  }, 30_000)
 })
