@@ -363,6 +363,57 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
+  it('能力步骤运行中停止后不发布结果且保留用户停止边界', async () => {
+    const { ctx, workspace, fresh, host } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-stop-main')
+    const message = createUserMessage({ content: [{ type: 'text', text: '重新审核章节' }], source: { kind: 'user' } })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const started = Promise.withResolvers<undefined>()
+    const released = Promise.withResolvers<undefined>()
+    let stepRun: BidRunContext | undefined
+    const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
+      stepRun = context.run
+      started.resolve(undefined)
+      await released.promise
+      await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { ok: true })
+      return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+        change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
+    })
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({
+      allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
+    })
+    try {
+      const running = ctx.bid.runCapabilityTask(agent, { goal: '重新审核章节', scope: { kind: 'project' },
+        steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '重新审核章节' } } }],
+      }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
+      await started.promise
+      expect((await readBidProjectState(workspace))?.status).toBe('running')
+      const stopping = ctx.bid.stopRun(agent.session)
+      await vi.waitFor(() => { expect(stepRun?.signal.aborted).toBe(true) })
+      released.resolve(undefined)
+      await stopping
+      await running
+      expect(await readBidProjectState(workspace)).toMatchObject({ status: 'suspended', run: { cause: 'user_stop' } })
+      await expect(readFile(join(workspace.projectRoot, 'chapters/local-review.json')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.notice'
+        && event.data.kind === 'completed')).toHaveLength(0)
+      expect(execute).toHaveBeenCalledOnce()
+      expect(host.inFlight.size).toBe(0)
+    } finally { released.resolve(undefined); unregister() }
+    await ctx.sessions.flush(agent.session)
+    await ctx.fiber.dispose()
+    const restarted = await fixture({ root: workspace.root, withPersistence: true })
+    const restored = await restarted.fresh('capability-stop-main')
+    expect(await readBidProjectState(restarted.workspace)).toMatchObject({ status: 'suspended',
+      run: { cause: 'user_stop' } })
+    expect(restored.session.events.filter(event => event.type === 'bid.run.notice'
+      && event.data.kind === 'completed')).toHaveLength(0)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
   it('正式文件已发布而 Run 未结算时，Host 恢复只补状态和一次通知', async () => {
     const { workspace, fresh, host } = await fixture()
     await seedProjectArtifacts(workspace)
