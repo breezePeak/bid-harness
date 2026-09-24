@@ -136,3 +136,40 @@ it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer
   await expect(readFile(join(workspace.projectRoot, `requests/${work.workId}/result.json`)))
     .rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+it('接纳后目标章节被移除时，旧任务拒绝改写相邻章节', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-capability-removed-target-'))
+  const ctx = new Context()
+  disposals.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  const workspace = new BidWorkspace(root)
+  await seedCapabilityProject(workspace, 'complete')
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const message = createUserMessage({ content: [{ type: 'text', text: '修改第一章标题' }], source: { kind: 'user' } })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+    goal: '修改第一章标题', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+      operations: [{ type: 'update_section', section_id: 'SEC-1', title: '新标题' }],
+      business_bindings: [], content_assignments: [], allow_content_deletion: false,
+      defer_content_migration: false,
+    } } }],
+  }, { session_id: String(session.id), message_id: String(message.id) },
+  BID_CAPABILITIES['outline.update'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  const body = join(workspace.projectRoot, 'chapters/sections/0002.md')
+  const before = await readFile(body, 'utf8')
+  for (const name of ['outline/outline.json', 'outline/confirmed-outline.json']) {
+    const path = join(workspace.projectRoot, name)
+    const outline = JSON.parse(await readFile(path, 'utf8')) as { sections: Array<{ id: string }> }
+    await writeFile(path, `${JSON.stringify({ ...outline, sections: outline.sections.filter(section => section.id !== 'SEC-1') })}\n`)
+  }
+  const dispatcher = recoveryDispatcher()
+  const execute = vi.spyOn(dispatcher, 'execute')
+  await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher,
+    { id: 'removed-target-agent' } as Parameters<typeof executeCapabilityTask>[3], session))
+    .rejects.toThrow('BID_CAPABILITY_INPUT_CHANGED')
+  expect(execute).not.toHaveBeenCalled()
+  expect(await readFile(body, 'utf8')).toBe(before)
+  await expect(readFile(join(workspace.projectRoot, `requests/${work.workId}/result.json`)))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+})
