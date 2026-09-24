@@ -1765,7 +1765,9 @@ async function reviewWritingPlanCompletion(
     stoppedReason?: NonNullable<ChapterWritingCompletionState['stopped_reason']>,
   ): Promise<StageArtifact[]> => {
     recovery = {
-      ...recovery,
+      schema_version: recovery.schema_version,
+      confirmed_outline_sha256: recovery.confirmed_outline_sha256,
+      rounds: recovery.rounds,
       ...(stoppedReason === undefined ? {} : { stopped_reason: stoppedReason }),
       completion: {
         plan_version: writingPlan.plan_version,

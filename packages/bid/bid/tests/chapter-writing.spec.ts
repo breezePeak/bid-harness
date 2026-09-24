@@ -1418,6 +1418,9 @@ describe('chapter-writing executor', () => {
       join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
     const bodies = await Promise.all(manifest.chapters.map(async entry =>
       [entry.content_path, await readFile(join(workspace.projectRoot, entry.content_path), 'utf8')] as const))
+    const completionPath = join(workspace.projectRoot, 'chapters/completion-review.json')
+    const previousCompletion = parseChapterWritingCompletionState(JSON.parse(await readFile(completionPath, 'utf8')))
+    await writeFile(completionPath, `${JSON.stringify({ ...previousCompletion, stopped_reason: 'round_limit' })}\n`)
     const next = fixtureAgent(workspace, outline)
     const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
       evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
@@ -1442,6 +1445,8 @@ describe('chapter-writing executor', () => {
     expect(next.followup).toHaveBeenCalled()
     expect(next.starts).toHaveLength(0)
     for (const [path, before] of bodies) expect(await readFile(join(workspace.projectRoot, path), 'utf8')).toBe(before)
+    const completion = parseChapterWritingCompletionState(JSON.parse(await readFile(completionPath, 'utf8')))
+    expect(completion.stopped_reason).toBeUndefined()
   })
 
   it('required 确定性条件未满足且修订预算耗尽时完成阶段并保留风险', async () => {
