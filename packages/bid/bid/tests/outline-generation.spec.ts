@@ -475,6 +475,19 @@ describe('S3 候选错误分流', () => {
 })
 
 describe('S3 需求、合规、框架与结构局部修复', () => {
+  it('将已拆分父节修为结构章时显式清空父节作答要求，保留子节内容', async () => {
+    const workspace = await fixture()
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'] }
+    const repaired = applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
+      writable: false, must_answer: [] }], catalog, scoringArtifact)
+    expect(repaired.sections[0]).toMatchObject({ writable: false, must_answer: [] })
+    expect(repaired.sections.slice(1)).toEqual(outline.sections.slice(1))
+    expect(() => applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
+      writable: false }], catalog, scoringArtifact)).toThrow('结构章节的 must_answer 必须为空')
+  })
+
   it('新增与拆分章节可明确分配需求、合规、框架和评分，不扩大浏览器操作权限', async () => {
     const workspace = await fixture()
     const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
@@ -518,6 +531,7 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
       if (prompt.includes('局部关联与结构修复')) {
         for (const text of [requirements.requirements[0]!.raw_text, scoring.scoring_items[0]!.raw_text, compliance.compliance_items[0]!.raw_text, 'framework_refs']) expect(prompt).toContain(text)
+        expect(prompt).toContain('writable=false 和 must_answer=[]')
         await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(operations))
       } else {
         expect(prompt).toContain('Blueprint Quality Review')
@@ -808,6 +822,7 @@ describe('outline-generation Blueprint Quality Review', () => {
       expect(prompt).toContain('RP-000001')
       expect(prompt).toContain('说明实施阶段和进度保障')
     }
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('已有全局 Compliance 不因缺少章节而算遗漏')
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(researchDrivenOutline))
   })
 

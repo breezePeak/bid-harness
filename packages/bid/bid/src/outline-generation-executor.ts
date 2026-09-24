@@ -351,6 +351,7 @@ function renderStructuredQualityReviewTask(
     `<outline-framework-structures>\n${JSON.stringify(input.frameworks)}\n</outline-framework-structures>`,
     `<reference-bid-structures>\n${JSON.stringify(input.referenceBids)}\n</reference-bid-structures>`,
     '逐项检查技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否在合适的可写叶子中真实覆盖，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
+    '只需材料核验的投标资格、企业证书和行政递交事项由 global_compliance_ids 覆盖，不为此新增可写章节；已有全局 Compliance 不因缺少章节而算遗漏。',
     '在本轮完成全部检查，把必须修正的问题一次性放入 operations，并自检应用这些操作后的完整目录；不要返回整本新目录。无需修正时返回 operations: []。措辞润色和可选补充放入 advisory issues，不要作为必须修改的操作。',
     'issues 只允许 severity=advisory，用于仍可交给用户判断的非阻断建议；阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
     '每条建议只返回 severity 和 message，message 用中文说明具体业务问题；不要生成问题代码或编号。',
@@ -455,7 +456,7 @@ export function renderOutlineGenerationRepairTask(
     ...(context.associations === undefined ? [] : [
       '权威需求原文、合规规则、合法框架文件与标题路径（只读）：' + JSON.stringify(context.associations),
       '全部正式评分原文（只读）：' + JSON.stringify(context.scoring),
-      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。结构错误使用 move/add/delete/split/merge 或 repair_structure；repair_structure 仅修改声明节点的结构字段，只有重复 ID 才能换编号。',
+      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。结构错误使用 move/add/delete/split/merge 或 repair_structure；把有子节的父节改为不可写时，同一 repair_structure 操作须提交 writable=false 和 must_answer=[]，并确认原有作答要求已由子节承担；只有重复 ID 才能换编号。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
