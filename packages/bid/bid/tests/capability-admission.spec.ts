@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -14,9 +14,10 @@ import { seedCapabilityProject } from './capability-fixture.ts'
 const settings = { modelStageRepairAttempts: 1, evidenceMappingMaxConcurrency: 1,
   chapterWritingMaxConcurrency: 1, webSearchEnabled: false }
 
-it.each(['outline_generation', 'evidence_mapping', 'chapter_writing'] as const)(
+it.each(['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export'] as const)(
   '%s 阶段仍可按真实用户消息修改招标理解', async (stage) => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-admission-')))
+    const root = await mkdtemp(join(tmpdir(), 'dsh-capability-admission-'))
+    const workspace = new BidWorkspace(root)
     await seedCapabilityProject(workspace, 'complete')
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -41,6 +42,6 @@ it.each(['outline_generation', 'evidence_mapping', 'chapter_writing'] as const)(
         requirements: Array<{ normalized_requirement: string }>
       }
       expect(requirements.requirements[0]?.normalized_requirement).toBe('明确实施边界')
-    } finally { await ctx.fiber.dispose() }
+    } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
   },
 )
