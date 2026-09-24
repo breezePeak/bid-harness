@@ -72,7 +72,9 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(savedExport['word/document.xml']).toEqual(exported['word/document.xml'])
       expect(await readFile(join(projectRoot, 'output/saved.md'), 'utf8')).toBe(await readFile(join(projectRoot, 'output/bid.md'), 'utf8'))
       const exportSnapshot = JSON.stringify(exported['word/document.xml'], null, 2) + '\n'
-      expect(exportSnapshot).toContain('管理事项、台账记录内容')
+      expect(exportSnapshot).toContain('访问控制与安全审计管理台账')
+      expect(exportSnapshot).toContain('管理事项')
+      expect(exportSnapshot).toContain('台账记录内容')
       expect(exportSnapshot).toContain('w:numPr')
       expect(await readFile(join(projectRoot, 'output/bid.md'), 'utf8')).toContain(markdown.trim())
       const globalReview = parseGlobalComplianceReviewArtifact(JSON.parse(
@@ -104,8 +106,8 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
   })
   expect(JSON.parse(result.stdout)).toEqual({
     evidence_unchanged: true,
-    waiting: { stage: 'chapter_writing', status: 'waiting_user' },
-    runtime: { stage: 'chapter_writing', status: 'completed' },
+    waiting: { stage: 'chapter_writing', status: 'waiting_user', run: null },
+    runtime: { stage: 'chapter_writing', status: 'completed', run: null },
     allowed_actions: ['send_message', 'export_docx', 'revise_chapter'],
     artifacts: [
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },

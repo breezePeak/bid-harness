@@ -1,6 +1,5 @@
 {
   "map": {
-    "schema_version": 11,
     "section_mappings": [
       {
         "local_materials": [],
@@ -61,9 +60,10 @@
       "deployment_constraints": [],
       "cross_reference_targets": [],
       "unresolved_topics": []
-    }
+    },
+    "flowcharts": []
   },
-  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n",
+  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n",
   "globalReview": {
     "schema_version": 1,
     "scope": "technical_bid",
@@ -82,14 +82,14 @@
         "checked_chapters": [
           {
             "section_id": "SEC-SECURITY",
-            "candidate_sha256": "031862c6779dbc5e0298b9e96797a28dddf6e3f095f13007d6f326f37c3ecf42"
+            "candidate_sha256": "98ab5c935901a7e45b222a1a323c69010eedc707b397bc659b68810dac7698bf"
           }
         ],
         "evidence": [
           {
             "kind": "chapter_quote",
             "section_id": "SEC-SECURITY",
-            "quote": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |"
+            "quote": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |"
           }
         ],
         "affected_section_ids": [],
@@ -105,8 +105,8 @@
       "plan_version": 1,
       "format_revision": 0,
       "format_template_id": null,
-      "pages": 0.2908768841953244,
-      "document_sha256": "14fbfde5eff7e5e58f978e22bd01ae3ef288bd703671d0388b6c546ff4e49260",
+      "pages": 0.25218882570629114,
+      "document_sha256": "332bdac3e2421dd7bdccd84a48f6f00018ecd0ade2caa49ee3e52bbc5ce55c0d",
       "reason": "章节与整书 required 条件均已满足。",
       "document_acceptance_results": [
         {

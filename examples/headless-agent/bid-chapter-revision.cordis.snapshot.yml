@@ -19,4 +19,5 @@
   config:
     providerName: spawn
 - name: '@deepseek-ai/dsh-session-projection'
+- name: '@deepseek-ai/dsh-user-questions'
 - name: '@deepseek-ai/dsh-bid'
