@@ -332,6 +332,7 @@ export async function readCapabilityTaskCheckpoint(
     expected = [...expected.slice(0, patch.from_index),
       ...patch.steps.map(step => ({ step, authorization: patch.authorization }))]
   }
+  bidCapabilityTaskSchema.parse({ ...request.task, steps: expected.map(item => item.step) })
   if (checkpoint.steps.length !== expected.length) throw new Error('BID_CAPABILITY_CHECKPOINT_PLAN_MISMATCH')
   for (const [index, { step, authorization }] of expected.entries()) {
     const saved = checkpoint.steps[index]
@@ -424,6 +425,7 @@ export async function patchCapabilityTaskSteps(
   const updated = capabilityTaskCheckpointSchema.parse({ ...checkpoint,
     steps: [...checkpoint.steps.slice(0, fromIndex), ...replacement],
     plan_patches: [...checkpoint.plan_patches, patch] })
+  bidCapabilityTaskSchema.parse({ ...request.task, steps: updated.steps.map(record => record.step) })
   await saveCheckpoint(run, canonical, updated)
   return updated
 }

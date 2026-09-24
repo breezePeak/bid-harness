@@ -76,12 +76,22 @@ export const bidCapabilityStepSchema = z.object({
   call: bidCapabilityInputSchema,
 }).strict()
 
-/** 模型只选择有序能力及业务范围；身份和文件路径由 Host 填充。 */
+/** 模型只选择有序能力及业务范围；段落范围仅能执行匹配原选区的单步修订。 */
 export const bidCapabilityTaskSchema = z.object({
   goal: instruction,
   scope: bidCapabilityScopeSchema,
   steps: z.array(bidCapabilityStepSchema).min(1),
-}).strict()
+}).strict().refine((task) => {
+  if (task.scope.kind !== 'paragraphs') return true
+  if (task.steps.length !== 1) return false
+  const step = task.steps[0]
+  if (step?.scope.source !== 'task' || step.call.capability !== 'chapter.revise') return false
+  const actual = step.call.input.reference
+  const expected = task.scope.reference
+  return actual.scope === 'paragraphs' && actual.section_id === expected.section_id
+    && actual.content_sha256 === expected.content_sha256 && actual.start === expected.start
+    && actual.end === expected.end && actual.text === expected.text
+}, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
 
 /** Host 核对过产物后形成的步骤结果。 */
 export const bidCapabilityResultSchema = z.object({

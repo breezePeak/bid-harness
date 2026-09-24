@@ -13,6 +13,8 @@ import type { BidCapabilityCall } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readBidWorkRequest } from '../src/work-descriptor.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
+import { chapterContentSha256 } from '../src/chapter-revision.ts'
+import { seedCapabilityProject } from './capability-fixture.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -62,6 +64,63 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('段落任务的后续计划补丁不能换成整章写作', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-capability-paragraph-patch-'))
+    roots.push(root)
+    const workspace = new BidWorkspace(root)
+    await seedCapabilityProject(workspace, 'complete')
+    const markdown = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const text = '流程一：收集输入。'
+    const start = markdown.indexOf(text)
+    const reference = { scope: 'paragraphs' as const, section_id: 'SEC-1',
+      content_sha256: chapterContentSha256(markdown), start, end: start + text.length, text }
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    try {
+      const session = ctx.sessions.create()
+      const original = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
+      session.append('user/message', original, { surfaceOp: 'append' })
+      const task = { goal: '缩短选中段落', scope: { kind: 'paragraphs' as const, reference }, steps: [{
+        scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
+          input: { instruction: '缩短选中段落', reference } },
+      }] }
+      const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+        { session_id: String(session.id), message_id: String(original.id) },
+        ['chapters/sections/0001.md'], { stage: 'chapter_writing', status: 'completed', run: null })
+      const run = createTestBidRunContext({ work })
+      const noExecution: CapabilityTaskDispatcher = {
+        allowedWrites: async () => { throw new Error('计划待补丁') },
+        execute: async () => { throw new Error('不应执行') }, validate: async () => {},
+      }
+      const agent = { id: 'paragraph-agent' } as Parameters<typeof executeCapabilityTask>[3]
+      await expect(executeCapabilityTask(workspace, run, noExecution, agent, session)).rejects.toThrow('计划待补丁')
+      const next = createUserMessage({ content: [{ type: 'text', text: '改成整章写作' }], source: { kind: 'user' } })
+      session.append('user/message', next, { surfaceOp: 'append' })
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
+      await expect(patchCapabilityTaskSteps(run, workspace, working, request, session,
+        { session_id: String(session.id), message_id: String(next.id) }, 0,
+        [{ scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } }]))
+        .rejects.toThrow('BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
+      const checkpointPath = join(workspace.projectRoot, `runs/${work.workId}/task-checkpoint.json`)
+      const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+        steps: Array<{ step: { call: { capability: string } }; authorization: { session_id: string; message_id: string } }>
+        plan_patches: unknown[]
+      }
+      expect(checkpoint.steps.map(step => step.step.call.capability)).toEqual(['chapter.revise'])
+      expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(markdown)
+      const replacement = { scope: { source: 'task' }, call: { capability: 'chapter.write',
+        input: { instruction: '重写整章' } } }
+      const nextAuthorization = { session_id: String(session.id), message_id: String(next.id) }
+      checkpoint.steps[0] = { ...checkpoint.steps[0]!, step: replacement, authorization: nextAuthorization }
+      checkpoint.plan_patches.push({ from_index: 0, authorization: nextAuthorization, steps: [replacement] })
+      await writeFile(checkpointPath, `${JSON.stringify(checkpoint)}\n`)
+      await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), noExecution, agent, session))
+        .rejects.toThrow('BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
+      expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(markdown)
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('后续真实消息只能替换尚未开始的步骤', async () => {
     const { ctx, workspace, session, descriptor, run, agent } = await fixture()
     try {

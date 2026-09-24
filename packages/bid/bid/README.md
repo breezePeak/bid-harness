@@ -67,7 +67,7 @@ Word 模板上传、模板库选择、格式确认、独立格式建议和导出
 
 ### 公共能力契约与项目读取
 
-`bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。Host 另持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 声明实际输入前提、核对结果引用，并将默认 S2–S5 路线映射到现有执行器与整阶段 Validator。上传后续行和恢复续行共用 `automaticOrchestrator()` 的能力分发；阶段确认、恢复和后继阶段仍由 `BidOrchestrator` 处理。其他跨阶段写入能力尚未开放。`bid_project_inspect` 按对象分页读取招标理解、目录、资料映射、写作计划、正文和执行记录；缺失产物返回 `available=false`，正文片段返回完整性和下一偏移量，正式与候选来源明确区分。旧 `bid_stage_inspect` 继续提供阶段快照。
+`bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。段落范围只接纳引用同一选区的单步 `chapter.revise`；后续计划补丁不能扩大该范围。Host 持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 声明实际输入前提、核对结果引用，并将默认 S2–S5 路线映射到现有执行器与整阶段 Validator。上传后续行和恢复续行共用 `automaticOrchestrator()` 的能力分发；阶段确认、恢复和后继阶段仍由 `BidOrchestrator` 处理。主 Agent 在各阶段可用 `bid_project_inspect` 分页读取招标理解、目录、资料映射、写作计划、正文和执行记录，用 `bid_run_task` 提交授权的局部能力任务；运行中跨能力写入先持久化排队。旧 `bid_stage_inspect` 继续提供阶段快照。
 
 ## Bid Agent behavior
 

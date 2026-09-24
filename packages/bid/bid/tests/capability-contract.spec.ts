@@ -38,6 +38,26 @@ describe('公共能力契约', () => {
     expect(() => bidCapabilityScopeSchema.parse({ kind: 'paragraphs', reference: { section_id: 'A' } })).toThrow()
   })
 
+  it('段落授权只接受同一选区的单步章节修订', () => {
+    const reference = { scope: 'paragraphs' as const, section_id: 'A',
+      content_sha256: 'a'.repeat(64), start: 0, end: 2, text: '正文' }
+    const scope = { kind: 'paragraphs' as const, reference }
+    const revise = { scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
+      input: { instruction: '缩短这句', reference } } }
+    expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [revise] })).not.toThrow()
+    expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [
+      { scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } },
+    ] })).toThrow()
+    expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [
+      { ...revise, call: { ...revise.call, input: { ...revise.call.input,
+        reference: { ...reference, section_id: 'B' } } } },
+    ] })).toThrow()
+    expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [revise, revise] })).toThrow()
+    expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [
+      { ...revise, scope: { source: 'section_ids', section_ids: ['A'] } },
+    ] })).toThrow()
+  })
+
   it('previous_targets 只能引用已完成的前一步目标，且不能越权', () => {
     const task = { kind: 'sections' as const, section_ids: ['A'] }
     expect(() => resolveCapabilityStepScope(task, { source: 'previous_targets' }, outline,
