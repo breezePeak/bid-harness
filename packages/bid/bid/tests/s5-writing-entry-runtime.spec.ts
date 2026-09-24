@@ -293,11 +293,13 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
         expect(planRaw).toContain('严格响应招标文件技术规范')
       }, { timeout: 15_000 })
 
-      // 断言 writing-request 状态变为 consumed
-      const reqRecord = JSON.parse(await readFile(
-        join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8',
-      )) as WritingRequest
-      expect(reqRecord.state).toBe('consumed')
+      // 计划文件先于请求标记写入；等待同一次提交完成后再检查状态。
+      await vi.waitFor(async () => {
+        const reqRecord = JSON.parse(await readFile(
+          join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8',
+        )) as WritingRequest
+        expect(reqRecord.state).toBe('consumed')
+      })
 
       // 验证工具清单中包含 inspect 与 confirm
       expect(toolsReceived).toContain('bid_stage_inspect')
