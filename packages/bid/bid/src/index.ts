@@ -5372,6 +5372,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param task 有序能力步骤与任务范围。
    * @param authorization 用户消息身份。
    * @param inputPaths 本次任务读取的正式输入文件。
+   * @param onAdmitted Run 落盘后调用的可选接纳回调。
    * @returns Run 结算后的项目状态。
    */
   async runCapabilityTask(

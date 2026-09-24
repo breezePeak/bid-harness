@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { executeCapabilityTask, type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { askCapabilityTaskInput, executeCapabilityTask, type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { capabilityRecoveryFixture, recoveryDispatcher } from './capability-recovery-fixture.ts'
 
 const disposals: Array<() => Promise<void>> = []
@@ -56,5 +56,38 @@ it('执行器试图改写范围外正文时拒绝发布', async () => {
   }
   await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
     .rejects.toThrow('BID_CAPABILITY_RESULT_ARTIFACT_NOT_ALLOWED')
+  expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/unrelated.md'), 'utf8')).toBe('范围外正文\n')
+})
+
+it('等待输入的步骤在重试时保持原问题，只有用户回答后继续', async () => {
+  const fixture = await capabilityRecoveryFixture()
+  disposals.push(fixture.dispose)
+  let calls = 0
+  const adapter = recoveryDispatcher()
+  const execute = adapter.execute.bind(adapter)
+  adapter.execute = async (call, context) => {
+    calls += 1
+    if (call.capability === 'chapter.review' && calls === 1) {
+      return { result: { target_section_ids: [], changed_artifacts: [], change_summary: '需要补充材料',
+        warnings: [], missing_topics: ['请提供审核依据'], needs_input: true } }
+    }
+    return execute(call, context)
+  }
+  const first = await executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session)
+  expect(first.status).toBe('awaiting_input')
+  if (first.status !== 'awaiting_input') throw new Error('缺少等待输入步骤')
+  expect(calls).toBe(1)
+  expect(await executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .toEqual(first)
+  expect(calls).toBe(1)
+  expect(await askCapabilityTaskInput(fixture.session, fixture.work.workId, first,
+    async question => ({ id: question.id, selected: ['稍后补充'] }), async () => {})).toBe(false)
+  expect(await executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .toEqual(first)
+  expect(await askCapabilityTaskInput(fixture.session, fixture.work.workId, first,
+    async question => ({ id: question.id, selected: [], custom: '依据已提供' }), async () => {})).toBe(true)
+  expect(await executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .toMatchObject({ status: 'completed' })
+  expect(calls).toBe(3)
   expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/unrelated.md'), 'utf8')).toBe('范围外正文\n')
 })
