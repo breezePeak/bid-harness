@@ -170,7 +170,7 @@ async function configureReplayRuntime(ctx: Context, options: ReplayBidS4Options)
  * @param options 已解析的回放配置。
  * @returns 报告文件绝对路径。
  */
-export async function replayBidS4(options: ReplayBidS4Options): Promise<string> {
+async function replayBidS4(options: ReplayBidS4Options): Promise<string> {
   const source = new BidWorkspace(options.workspace)
   const workspace = await prepareBidS4ReplayWorkspace(source, options.output)
   const ctx = new Context()
