@@ -1929,9 +1929,10 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'evidence_mapping'
     executeStage.mockImplementationOnce(() => stageGate.promise)
     const retry = resumeRun(ctx, agent.session)
-    await vi.waitFor(() => {
+    await vi.waitFor(async () => {
       expect(host.inFlight.size).toBe(1)
       expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
+      expect((await readBidProjectState(workspace))?.status).toBe('running')
     })
     const beforeSteer = await readBidProjectState(workspace)
     if (beforeSteer?.status !== 'running') throw new Error('S4 Run 未进入运行态')
