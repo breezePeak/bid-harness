@@ -1,8 +1,8 @@
 /** 局部章节能力复用 S5 Writer/Reviewer 调度，并核对完整索引与精确变更。 */
-import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash } from './bid-capability-files.ts'
 import { buildChapterWorklist, executeChapterWriting } from './chapter-writing-executor.ts'
 import { parseChapterWritingManifest, parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -27,15 +27,6 @@ export interface WritingCapabilitySettings {
   readonly webSearchEnabled: boolean
 }
 
-async function fileHash(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
@@ -43,7 +34,7 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
 }
 
 async function sourcePaths(workspace: BidWorkspace): Promise<Set<string>> {
-  if (await fileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) return new Set()
+  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) return new Set()
   const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
   return new Set(ledger.sources.flatMap(source => [source.snapshot_path, webEvidenceChunkIndexPath(source.source_id)]))
 }
@@ -118,7 +109,7 @@ export async function executeWritingCapability(
   }
   const beforePaths = new Set([...paths, 'chapters/execution-plan.json', 'chapters/execution-log.json',
     'chapters/manifest.json', 'analysis/web-evidence-sources.json', ...await sourcePaths(workspace)])
-  const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await fileHash(workspace, path)] as const)))
+  const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const seedBySectionId = new Map<string, string>()
   if (call.capability !== 'chapter.review') {
     const log = before.get('chapters/execution-log.json') === undefined ? undefined
@@ -128,7 +119,7 @@ export async function executeWritingCapability(
     for (const id of ids) {
       if (log?.sections.find(section => section.section_id === id)?.status === 'completed') continue
       const location = storage.locations.get(id)
-      if (location === undefined || await fileHash(workspace, location.contentPath) === undefined) continue
+      if (location === undefined || await capabilityFileHash(workspace, location.contentPath) === undefined) continue
       seedBySectionId.set(id, await readFile(within(workspace.projectRoot, location.contentPath), 'utf8'))
     }
   }
@@ -151,13 +142,13 @@ export async function executeWritingCapability(
       await readFile(within(workspace.projectRoot, contentPath), 'utf8'))
   }
   for (const path of await sourcePaths(workspace)) {
-    if (before.get(path) !== undefined && before.get(path) !== await fileHash(workspace, path)) {
+    if (before.get(path) !== undefined && before.get(path) !== await capabilityFileHash(workspace, path)) {
       throw new Error(`BID_CHAPTER_WRITING_SOURCE_CHANGED: ${path}`)
     }
   }
   if (call.capability === 'chapter.review') {
     for (const path of paths) {
-      if (!path.includes('/reviews/') && before.get(path) !== await fileHash(workspace, path)) {
+      if (!path.includes('/reviews/') && before.get(path) !== await capabilityFileHash(workspace, path)) {
         throw new Error(`BID_CHAPTER_REVIEW_BODY_CHANGED: ${path}`)
       }
     }
@@ -166,7 +157,7 @@ export async function executeWritingCapability(
   const afterPaths = new Set([...beforePaths, ...await sourcePaths(workspace)])
   const changed: string[] = []
   for (const path of afterPaths) {
-    const digest = await fileHash(workspace, path)
+    const digest = await capabilityFileHash(workspace, path)
     if (digest !== undefined && digest !== before.get(path)) changed.push(path)
   }
   const manifest = parseChapterWritingManifest(await readJson(workspace, 'chapters/manifest.json'))

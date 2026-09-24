@@ -1,8 +1,6 @@
 /** 整书审核能力复用 S5 的全局合规与完成度协议，只发布审核记录。 */
-import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash, readCapabilityJson } from './bid-capability-files.ts'
 import { executeDocumentReview } from './chapter-writing-executor.ts'
 import { parseChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
@@ -10,26 +8,13 @@ import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { validateWritingCapability } from './bid-writing-capability.ts'
-import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 const REVIEW_PATHS = ['chapters/global-compliance-review.json', 'chapters/completion-review.json'] as const
 
-async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  return JSON.parse(await readFile(absolute, 'utf8')) as unknown
-}
-
-async function digest(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
-/** @returns 整书审核仅可写的两份项目相对路径。 */
+/**
+ * 整书审核只能更新文档级报告。
+ * @returns 两份审核报告的项目相对路径。
+ */
 export function allowedDocumentReviewWrites(): ReadonlySet<string> { return new Set(REVIEW_PATHS) }
 
 /**
@@ -43,16 +28,16 @@ export async function executeDocumentReviewCapability(
 ): Promise<{ readonly result: BidCapabilityResult }> {
   if (context.sectionIds !== null) throw new Error('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
   const workspace = context.working
-  const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+  const outline = parseConfirmedOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
   const ids = buildWritableSectionWorklist(outline).map(section => section.id)
   await validateWritingCapability(context, ids)
-  const before = new Map(await Promise.all(REVIEW_PATHS.map(async path => [path, await digest(workspace, path)] as const)))
+  const before = new Map(await Promise.all(REVIEW_PATHS.map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   await executeDocumentReview(context.agent, workspace, context.run, maxRepairAttempts)
   await validateDocumentReviewCapability(context)
   const changed: string[] = []
-  for (const path of REVIEW_PATHS) if (before.get(path) !== await digest(workspace, path)) changed.push(path)
-  const global = parseGlobalComplianceReviewArtifact(await readJson(workspace, REVIEW_PATHS[0]))
-  const completion = parseChapterWritingCompletionState(await readJson(workspace, REVIEW_PATHS[1]))
+  for (const path of REVIEW_PATHS) if (before.get(path) !== await capabilityFileHash(workspace, path)) changed.push(path)
+  const global = parseGlobalComplianceReviewArtifact(await readCapabilityJson(workspace, REVIEW_PATHS[0]))
+  const completion = parseChapterWritingCompletionState(await readCapabilityJson(workspace, REVIEW_PATHS[1]))
   const warnings = global.items.filter(item => item.status === 'fail' || item.status === 'pending')
     .map(item => `${item.compliance_id}: ${item.issue ?? item.status}`)
   const missingTopics = completion.completion?.document_acceptance_results
@@ -62,7 +47,10 @@ export async function executeDocumentReviewCapability(
     missing_topics: missingTopics, needs_input: false } }
 }
 
-/** @param context 当前候选与现有完整章节产物。 */
+/**
+ * 用完整章节 Validator 核对新审核记录与当前正文身份。
+ * @param context 当前候选与现有完整章节产物。
+ */
 export async function validateDocumentReviewCapability(
   context: Pick<BidCapabilityExecutionContext, 'working'>,
 ): Promise<void> {

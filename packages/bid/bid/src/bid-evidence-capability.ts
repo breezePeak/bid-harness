@@ -1,8 +1,7 @@
 /** 局部资料能力复用 S4 remap，并只发布真实改变的资料与章节索引。 */
-import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash, readCapabilityJson } from './bid-capability-files.ts'
 import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
@@ -14,7 +13,6 @@ import { buildWritableSectionWorklist, outlineSectionScope, validateSectionEvide
 import { adoptCapabilityResearchedOutline, OUTLINE_CAPABILITY_INDEX_PATHS } from './outline-capability-update.ts'
 import { buildBidStageTask } from './runtime-state.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
-import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 type EvidenceCall = Extract<BidCapabilityCall, { capability: 'evidence.research' }>
 
@@ -30,24 +28,9 @@ const fixedPaths = new Set<string>([
   'outline/quality-report.json', 'analysis/web-evidence-sources.json',
 ])
 
-async function fileHash(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
-async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  return JSON.parse(await readFile(absolute, 'utf8')) as unknown
-}
-
 async function sourcePaths(workspace: BidWorkspace): Promise<Set<string>> {
-  if (await fileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) return new Set()
-  const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) return new Set()
+  const ledger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
   return new Set(ledger.sources.flatMap(source => [source.snapshot_path, webEvidenceChunkIndexPath(source.source_id)]))
 }
 
@@ -79,23 +62,23 @@ export async function executeEvidenceCapability(
   call: EvidenceCall, context: BidCapabilityExecutionContext, settings: EvidenceCapabilitySettings,
 ): Promise<{ readonly result: BidCapabilityResult }> {
   const workspace = context.working
-  const outline = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
+  const outline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json'))
   const selected = context.sectionIds === null
     ? new Set(outline.sections.map(section => section.id))
     : outlineSectionScope(outline, [...context.sectionIds])
   const targetIds = buildWritableSectionWorklist(outline).filter(section => selected.has(section.id)).map(section => section.id)
   if (targetIds.length === 0) throw new Error('BID_EVIDENCE_RESEARCH_SCOPE_EMPTY')
   if (call.input.allow_outline_refinement) {
-    const canonical = parseOutlineArtifact(await readJson(context.canonical, 'outline/confirmed-outline.json'))
-    const current = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const canonical = parseOutlineArtifact(await readCapabilityJson(context.canonical, 'outline/confirmed-outline.json'))
+    const current = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
     if (JSON.stringify(canonical) === JSON.stringify(current)) {
       throw new Error('BID_EVIDENCE_RESEARCH_REQUIRES_OUTLINE_STEP')
     }
   }
-  const beforeMap = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
-  const beforeLedger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  const beforeMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
+  const beforeLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
   const beforePaths = new Set([...fixedPaths, ...await sourcePaths(workspace)])
-  const hashes = new Map(await Promise.all([...beforePaths].map(async path => [path, await fileHash(workspace, path)] as const)))
+  const hashes = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const remap = {
     section_ids: targetIds, mode: call.input.mode, reason: call.input.reason,
     previous_outline: outline,
@@ -115,9 +98,9 @@ export async function executeEvidenceCapability(
       ...settings, webSearchEnabled: false, run: context.run, remap,
     })
   }
-  const researchedOutline = parseOutlineArtifact(await readJson(workspace, 'outline/outline.json'))
-  const afterMap = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
-  const afterLedger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+  const researchedOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json'))
+  const afterMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
+  const afterLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
   const targetSet = new Set(targetIds)
   const oldRows = new Map(beforeMap.section_mappings.map(row => [row.section_id, row]))
   if (afterMap.section_mappings.length !== beforeMap.section_mappings.length
@@ -130,19 +113,19 @@ export async function executeEvidenceCapability(
   }
   for (const path of await sourcePaths(workspace)) {
     const old = hashes.get(path)
-    if (old !== undefined && old !== await fileHash(workspace, path)) {
+    if (old !== undefined && old !== await capabilityFileHash(workspace, path)) {
       throw new Error(`BID_EVIDENCE_RESEARCH_SOURCE_CHANGED: ${path}`)
     }
   }
   await adoptCapabilityResearchedOutline(context, researchedOutline, targetSet)
-  const currentOutline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+  const currentOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
   if (validateSectionEvidenceCoverage(currentOutline, afterMap).length > 0) {
     throw new Error('BID_EVIDENCE_RESEARCH_COVERAGE_INVALID')
   }
   const afterPaths = new Set([...fixedPaths, ...await sourcePaths(workspace)])
   const changed: string[] = []
   for (const path of afterPaths) {
-    const digest = await fileHash(workspace, path)
+    const digest = await capabilityFileHash(workspace, path)
     if (digest !== undefined && digest !== hashes.get(path)) changed.push(path)
   }
   const missing = afterMap.section_mappings.filter(row => targetSet.has(row.section_id))
@@ -169,9 +152,9 @@ export async function validateEvidenceCapability(
     { stage: 'evidence_mapping', type: 'outline', path: 'outline/outline.json' },
     { stage: 'evidence_mapping', type: 'outline_quality_report', path: 'outline/quality-report.json' },
   ], {
-    evidence: parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json')),
-    outline: parseOutlineArtifact(await readJson(workspace, 'outline/outline.json')),
-    quality: parseOutlineQualityReport(await readJson(workspace, 'outline/quality-report.json')),
+    evidence: parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json')),
+    outline: parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json')),
+    quality: parseOutlineQualityReport(await readCapabilityJson(workspace, 'outline/quality-report.json')),
     draftReviewSectionIds: result.target_section_ids,
   })
   if (!validation.ok) throw new Error(`BID_EVIDENCE_RESEARCH_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)

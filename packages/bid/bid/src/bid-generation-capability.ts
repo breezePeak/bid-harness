@@ -1,8 +1,7 @@
 /** 初次招标分析与目录生成能力复用默认路线的现有执行器。 */
-import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash } from './bid-capability-files.ts'
 import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis } from './tender-analysis-validator.ts'
 import { executeOutlineGeneration } from './outline-generation-executor.ts'
@@ -33,15 +32,6 @@ const OUTLINE_ARTIFACTS = [
   { stage: 'outline_generation', type: 'outline_quality_report', path: 'outline/quality-report.json' },
 ] as const
 
-async function digest(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
 /**
  * 首次生成写入整个项目，章节范围不得授权该能力。
  * @param call 初次分析或目录生成能力。
@@ -67,7 +57,7 @@ export async function executeGenerationCapability(
 ): Promise<{ readonly result: BidCapabilityResult }> {
   const workspace = context.working
   const writes = allowedGenerationWrites(call, context.sectionIds)
-  const before = new Map(await Promise.all([...writes].map(async path => [path, await digest(workspace, path)] as const)))
+  const before = new Map(await Promise.all([...writes].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const options = { run: context.run, maxRepairAttempts }
   if (call.capability === 'tender.analyze') {
     await executeTenderAnalysis(context.agent, workspace, buildBidStageTask('tender_analysis'), options)
@@ -76,7 +66,7 @@ export async function executeGenerationCapability(
   }
   await validateGenerationCapability(call, context)
   const changed: string[] = []
-  for (const path of writes) if (await digest(workspace, path) !== before.get(path)) changed.push(path)
+  for (const path of writes) if (await capabilityFileHash(workspace, path) !== before.get(path)) changed.push(path)
   const targetIds: string[] = []
   if (call.capability === 'outline.generate') {
     const path = within(workspace.projectRoot, 'outline/outline.json')

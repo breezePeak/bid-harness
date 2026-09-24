@@ -1,8 +1,8 @@
 /** 招标理解的后期修改保留原始来源，并记录需要复核的下游章节。 */
-import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash } from './bid-capability-files.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { applyTenderAnalysisEdits, createConfirmedTenderScoring, createTenderScoringSelection,
   parseTenderAnalysisEditOperations, parseTenderScoringSelection,
@@ -25,15 +25,6 @@ async function optionalJson(workspace: BidWorkspace, path: string): Promise<unkn
   const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   try { return JSON.parse(await readFile(absolute, 'utf8')) as unknown } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
-async function fileHash(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
@@ -162,7 +153,7 @@ export async function executeTenderUpdateCapability(
       : ['outline/outline.json', 'outline/confirmed-outline.json', 'analysis/evidence-map.json',
         'chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json'],
   }
-  const priorHashes = new Map(await Promise.all(PATHS.map(async path => [path, await fileHash(workspace, path)] as const)))
+  const priorHashes = new Map(await Promise.all(PATHS.map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   await context.run.commits.publish(async (lease) => {
     await lease.writeJson(within(workspace.projectRoot, 'analysis/project.json'), after.project)
     await lease.writeJson(within(workspace.projectRoot, 'analysis/requirements.json'), after.requirements)
@@ -176,7 +167,7 @@ export async function executeTenderUpdateCapability(
     await lease.writeJson(within(workspace.projectRoot, 'analysis/tender-update-impact.json'), impact)
   })
   const changed: string[] = []
-  for (const path of PATHS) if (priorHashes.get(path) !== await fileHash(workspace, path)) changed.push(path)
+  for (const path of PATHS) if (priorHashes.get(path) !== await capabilityFileHash(workspace, path)) changed.push(path)
   return { result: { target_section_ids: affected, changed_artifacts: changed,
     change_summary: `招标理解已更新；${String(affected.length)} 个章节需要复核`, warnings: affected.length > 0
       ? ['受影响章节的目录、资料、写作与验收需要后续能力复核；现有正文已保留。'] : [],

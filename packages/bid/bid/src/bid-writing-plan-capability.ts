@@ -1,9 +1,9 @@
 /** Writing Plan 能力在 Work 候选中复用 S5 的用户原话、patch 和 AC 身份规则。 */
-import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
+import { capabilityFileHash } from './bid-capability-files.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
@@ -21,15 +21,6 @@ async function optionalJson(workspace: BidWorkspace, path: string): Promise<unkn
   const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   try { return JSON.parse(await readFile(absolute, 'utf8')) as unknown } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
-async function fileHash(workspace: BidWorkspace, path: string): Promise<string | undefined> {
-  const absolute = within(workspace.projectRoot, path)
-  await assertNoLinkedPath(workspace.root, absolute)
-  try { return createHash('sha256').update(await readFile(absolute)).digest('hex') } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
@@ -118,7 +109,7 @@ export async function executeWritingPlanCapability(
   const planIssues = validateWritingPlan(plan, outline)
   if (planIssues.length > 0) throw new Error(`BID_WRITING_PLAN_INVALID: ${planIssues.join('；')}`)
   const before = new Map(await Promise.all([...allowedWritingPlanCapabilityWrites()]
-    .map(async path => [path, await fileHash(workspace, path)] as const)))
+    .map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   await context.run.commits.publish(async (lease) => {
     await lease.writeJson(within(workspace.projectRoot, PLAN_PATH), plan)
     if (marker !== undefined) await lease.writeJson(within(workspace.projectRoot, REQUEST_PATH), {
@@ -128,7 +119,7 @@ export async function executeWritingPlanCapability(
   })
   const changed: string[] = []
   for (const path of allowedWritingPlanCapabilityWrites()) {
-    if (before.get(path) !== await fileHash(workspace, path)) changed.push(path)
+    if (before.get(path) !== await capabilityFileHash(workspace, path)) changed.push(path)
   }
   return { result: { target_section_ids: affected, changed_artifacts: changed,
     change_summary: `写作计划已更新至 v${String(plan.plan_version)}，影响 ${String(affected.length)} 个章节`,
