@@ -126,6 +126,29 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   await send('实施准备这一节重新规划一下', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+  const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
+  const beforeReadOnly = await readFile(requirementsPath, 'utf8')
+  const runsBeforeReadOnly = agent.session.events.filter(event => event.type === 'bid.run.started').length
+  await send('先讨论第一条要求，暂不修改', [
+    call('bid_project_inspect', { query: { object: 'tender', part: 'requirements' } }),
+    answer('已读取第一条要求，等待明确修改指令。'),
+  ])
+  const readOnlyNoWork = await readFile(requirementsPath, 'utf8') === beforeReadOnly
+    && agent.session.events.filter(event => event.type === 'bid.run.started').length === runsBeforeReadOnly
+  await send('把第一条要求的理解改为明确实施边界', [
+    call('bid_run_task', { task: { goal: '更正第一条要求的理解', scope: { kind: 'project' },
+      steps: [{ scope: { source: 'task' }, call: { capability: 'tender.update', input: {
+        operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
+          fields: { normalized_requirement: '明确实施边界' } }],
+      } } }],
+    } }),
+    answer('已更正招标理解。'),
+  ])
+  const updatedRequirements = JSON.parse(await readFile(requirementsPath, 'utf8')) as {
+    requirements: Array<{ id: string; normalized_requirement: string }>
+  }
+  const capabilityUpdates = agent.session.events.filter(event => event.type === 'bid.run.started'
+    && event.data.run.work.kind === 'capability_task').length
   const finalDraft = await getOrCreateOutlineDraft(workspace)
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('局部资料研究覆盖了其他章节的研究基线')
   const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
@@ -152,6 +175,8 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
+    readOnlyNoWork, capabilityUpdates,
+    updatedRequirement: updatedRequirements.requirements.find(item => item.id === 'REQ-1')?.normalized_requirement,
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }
 }

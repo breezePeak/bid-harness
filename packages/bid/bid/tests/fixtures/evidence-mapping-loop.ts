@@ -283,6 +283,9 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
   const scoring = { schema_version: 1 as const, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '安全', raw_text: '安全审计', criterion: '方案完整', score: 5, score_range: null, must_answer: true, source_refs: [sourceRef] }] }
   await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'),
+    JSON.stringify({ schema_version: 1, selected_scoring_ids: ['SCORE-1'] }))
   await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明访问控制' }] })))
   await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
