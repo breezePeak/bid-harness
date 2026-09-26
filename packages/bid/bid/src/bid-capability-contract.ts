@@ -80,6 +80,7 @@ export const bidCapabilityStepSchema = z.object({
 export const bidCapabilityTaskSchema = z.object({
   goal: instruction,
   scope: bidCapabilityScopeSchema,
+  allow_pending_content: z.boolean().optional().describe('仅用户明确要求只改目录或暂缓正文时设为 true；执行中的临时迁移延后不属于此授权。'),
   steps: z.array(bidCapabilityStepSchema).min(1),
 }).strict().refine((task) => {
   if (task.scope.kind !== 'paragraphs') return true
@@ -137,5 +138,23 @@ export type BidCapabilityCall = z.infer<typeof bidCapabilityInputSchema>
 export type BidCapabilityResult = z.infer<typeof bidCapabilityResultSchema>
 /** 同一 Work 内有序执行的用户能力计划。 */
 export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
+
+/**
+ * 接纳新任务或修改后续计划时拒绝缺少正文迁移及复核的计划；读取历史请求不调用。
+ * @param task 已解析的任务。
+ * @throws 未明确暂缓正文且目录步骤缺少后续迁移和复核时拒绝。
+ */
+export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask): void {
+  if (task.allow_pending_content === true) return
+  for (const [index, step] of task.steps.entries()) {
+    if (step.call.capability !== 'outline.update' || !step.call.input.defer_content_migration) continue
+    const following = task.steps.slice(index + 1)
+    const migration = following.findIndex(item => item.call.capability === 'chapter.reorganize')
+    if (migration >= 0 && following.slice(migration + 1).some(item =>
+      item.call.capability === 'chapter.write' || item.call.capability === 'chapter.review')) continue
+    throw new Error('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED: 暂缓迁移只是中间步骤；请在同一任务补齐 chapter.reorganize 和 chapter.write 或 chapter.review。只有用户明确只改目录或暂缓正文时才可设置 allow_pending_content=true。')
+  }
+}
+
 /** 计划中的一项能力调用与范围。 */
 export type BidCapabilityStep = z.infer<typeof bidCapabilityStepSchema>

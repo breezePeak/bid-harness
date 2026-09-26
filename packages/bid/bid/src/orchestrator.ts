@@ -230,13 +230,13 @@ export class BidOrchestrator {
   }
 
   /**
-   * Execute a ready before-execution stage after its Host-owned plan has been confirmed.
+   * 执行已保存写作计划且处于 ready 的 S5。
    * @returns State after the confirmed stage settles.
    */
   runConfirmedStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'ready' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
+    if (state.status !== 'ready' || state.stage !== 'chapter_writing') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,

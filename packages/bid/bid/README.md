@@ -81,11 +81,13 @@ S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Age
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
+用户确认修改建议后，Main Agent 在同一回合提交包含必要目录、资料、正文和复核步骤的任务。`outline.update.defer_content_migration` 只允许将迁移延后到同一任务的 `chapter.reorganize`，随后必须安排 `chapter.write` 或 `chapter.review`；缺少后续步骤时接纳入口返回可修正的错误。仅用户明确只改目录或暂缓正文时，任务才设置 `allow_pending_content=true`。Host 发布前拒绝本次新增的未迁移正文，保留正式产物及候选检查点，不将中间目录结果报告为完整修改。
+
 普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。系统异常挂起后不提出恢复选项，用户在聊天中明确要求继续时，Main Agent 调用 `bid_resume_current_run`，Host 核对 Run 身份和项目 revision 后继续原 Work。用户主动停止后的继续、当前阶段重跑和停止仍由 DSH 原生用户提问处理。
 
-S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，再由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问“开始正文编写前，是否还有其他整体写作要求？”，并提供“没有，开始编写”及自定义输入；刷新或换 Session 不会重复询问，也不会启动 Writer。回答持久化后，Main Agent 读取 `task_contract_context.writing_request` 制定首次 Writing Plan；Host 将自定义回答原文加入顶层 `user_requirements`，不伪造 `user_message_refs`，并通过 `bid_confirm_writing_plan` 保存 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
+S4 最终目录确认后，Host 在同一项目操作中直接进入 S5，不再询问整体写作意见。首次启动前根据最终确认目录保存 schema v3 默认 Writing Plan，覆盖全部可写叶节，用户消息引用、用户要求和动态验收条件为空；已有当前目录的有效计划则继续复用。计划在创建 S5 Work 前保存，使执行输入指纹包含实际计划。该流程不依赖浏览器是否打开，也不受手动／自动确认模式影响。
 
-全自动模式只在 `chapter_writing/waiting_user` 调用 `auto_start_chapter_writing`。Host 读取最终确认目录，生成覆盖全部可写叶节且 `user_message_refs`、`user_requirements` 均为空的 schema v3 默认 Writing Plan，运行 `validateWritingPlan()` 后原子写入，并由 `ready` 直接进入正文执行。该路径不创建询问标记、不伪造用户原话。确认模式只由客户端 Session store 持有；Host 仍拒绝在 `failed` 或其他阶段状态调用自动启动。
+S5 重置后的空入口由客户端调用 `auto_start_chapter_writing` 生成默认计划并启动。显式停止或已保存的写作要求仍遵守各自恢复操作，不自动覆盖；运行中新增要求继续通过 `bid_confirm_writing_plan` 更新计划。决定依据见[S4 确认后直接写作](../../../.agents/notes/implemented/feature/2026-09-26-s5-start-after-outline-confirmation.md)。
 
 S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的新要求才调用 `bid_confirm_writing_plan`。Host 把新计划送入当前调度器，不取消无关 Writer 或 Reviewer：未开始章节读取新契约，已完成的受影响章节进入定向修复，运行中的受影响章节递增输入 epoch 并丢弃迟到旧结果。`chapters/applied-writing-plan.json` 记录执行日志采用的计划版本；模型决定 `revision.affected_section_ids`，程序只扩展真实强依赖下游。正文引用作为结构化上下文进入 Main Agent；引用本身不等于修订，只有明确修改才调用 `bid_revise_chapter`。
 

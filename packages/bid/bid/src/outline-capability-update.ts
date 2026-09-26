@@ -29,6 +29,16 @@ const pendingReorganizationSchema = z.object({
   schema_version: z.literal(1), pending_source_section_ids: z.array(z.string().min(1)),
 }).strict()
 
+/**
+ * 读取尚未分配的旧章节正文身份。
+ * @param workspace 正式项目或任务候选。
+ * @returns 没有迁移记录时返回空集合。
+ */
+export async function readPendingChapterReorganization(workspace: BidWorkspace): Promise<readonly string[]> {
+  const raw = await optionalJson(workspace, 'chapters/pending-reorganization.json')
+  return raw === undefined ? [] : pendingReorganizationSchema.parse(raw).pending_source_section_ids
+}
+
 /** 保留退役章节的计划、资料和审核归属，供后续业务重新分配。 */
 export const outlineReassignmentSchema = z.object({
   schema_version: z.literal(1),

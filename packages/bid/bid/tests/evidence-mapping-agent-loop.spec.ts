@@ -60,7 +60,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
         visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan', 'bid_revise_chapter'],
-        concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 1,
+        concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 2, incompletePlanRejected: true,
         readOnlyNoWork: true, planOnlyNoWork: true, capabilityUpdates: 1, updatedRequirement: '明确实施边界',
       })
     } finally { await ctx.fiber.dispose() }

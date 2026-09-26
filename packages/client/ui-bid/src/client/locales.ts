@@ -98,7 +98,7 @@ export const zh = {
   'mapping.sync_failed_cached': '进度同步暂时失败，当前显示上次成功读取的数据。',
   'prompt.outline_generation': '正在生成技术标目录',
   'prompt.outline_confirmation': '请确认技术标目录',
-  'prompt.writing_requirements': '请先说明并确认整体写作要求',
+  'prompt.writing_requirements': '正在准备正文编写',
   'outline.updated': '已更新，请重新确认。',
   'prompt.later_stage': '技术标正在生成',
   'action.choose': '添加项目资料',

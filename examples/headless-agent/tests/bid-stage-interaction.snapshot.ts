@@ -51,6 +51,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_project_inspect",
         "bid_run_task",
         "bid_run_task",
+        "bid_run_task",
       ],
       "capabilitySplit": [
         {
@@ -72,7 +73,8 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       ],
       "confirmations": 0,
       "disposed": null,
-      "failures": 1,
+      "failures": 2,
+      "incompletePlanRejected": true,
       "planOnlyNoWork": true,
       "rawWriteBlocked": true,
       "readOnlyNoWork": true,

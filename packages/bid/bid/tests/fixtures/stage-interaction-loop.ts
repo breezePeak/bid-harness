@@ -192,15 +192,18 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       scoring_ids: target.scoring_ids, scoring_response_point_ids: target.scoring_response_point_ids ?? [],
       compliance_ids: target.compliance_ids }]))
   })
+  const splitTask = { goal: '拆分实施准备目录',
+    scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ scope: { source: 'task' },
+      call: { capability: 'outline.update', input: {
+        operations: [{ type: 'split_section', section_id: target.id,
+          children: ['人员准备', '资源核查'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
+        defer_content_migration: true,
+      } } }],
+  }
   await send('将实施准备拆为人员准备和资源核查两个小节，只调整目录', [
-    call('bid_run_task', { task: { goal: '拆分实施准备目录',
-      scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ scope: { source: 'task' },
-        call: { capability: 'outline.update', input: {
-          operations: [{ type: 'split_section', section_id: target.id,
-            children: ['人员准备', '资源核查'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
-          defer_content_migration: true,
-        } } }],
-    } }), answer('正在拆分目录并分配业务要求。'),
+    call('bid_run_task', { task: splitTask }),
+    call('bid_run_task', { task: { ...splitTask, allow_pending_content: true } }),
+    answer('正在拆分目录并分配业务要求。'),
   ])
   const capabilityDraft = await getOrCreateOutlineDraft(workspace)
   const splitChildren = capabilityDraft.outline.sections.filter(section => section.parent_id === target.id)
@@ -209,6 +212,8 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   if (childScript.length !== 0 || splitChildren.length !== 2) throw new Error('目录能力未完成拆分与业务分配')
   const calls = agent.session.events.slice(before).filter(event => event.type === 'tool/call').map(event => event.data.name)
   const failures = agent.session.events.slice(before).filter(event => event.type === 'tool/result').filter(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError))
+  const incompletePlanRejected = JSON.stringify(failures).includes('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+  if (!incompletePlanRejected) throw new Error('工具接纳了缺少正文后续步骤的计划')
   const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   const visibleTools = ctx.tools.schemas(agent).map(tool => tool.name)
   const confirmations = agent.session.events.slice(before).filter(event => event.type === 'bid.user_confirmation.received' || event.type === 'bid.stage.completed').length
@@ -216,7 +221,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
-    readOnlyNoWork, planOnlyNoWork, capabilityUpdates, capabilitySplit,
+    readOnlyNoWork, planOnlyNoWork, capabilityUpdates, capabilitySplit, incompletePlanRejected,
     updatedRequirement: updatedRequirements.requirements.find(item => item.id === 'REQ-1')?.normalized_requirement,
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }

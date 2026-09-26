@@ -106,7 +106,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
   })
   expect(JSON.parse(result.stdout)).toEqual({
     evidence_unchanged: true,
-    waiting: { stage: 'chapter_writing', status: 'waiting_user', run: null },
+    askedForRequirements: false,
     runtime: { stage: 'chapter_writing', status: 'completed', run: null },
     allowed_actions: ['send_message', 'export_docx', 'revise_chapter'],
     artifacts: [

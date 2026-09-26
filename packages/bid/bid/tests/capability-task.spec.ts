@@ -7,11 +7,11 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
 import { askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
-  patchCapabilityTaskSteps, persistCapabilityTaskRequest,
+  findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
-import type { BidCapabilityCall } from '../src/bid-capability-contract.ts'
+import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
-import { readBidWorkRequest } from '../src/work-descriptor.ts'
+import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
@@ -64,6 +64,31 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('历史不完整计划可读取，但新任务接纳拒绝相同的步骤遗漏', async () => {
+    const { ctx, workspace, session, descriptor, authorization } = await fixture()
+    try {
+      const previous = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const task = bidCapabilityTaskSchema.parse({ goal: '拆分背景与目标', scope: { kind: 'project' }, steps: [{
+        scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+          operations: [{ type: 'split_section', section_id: 'A', children: [
+            { title: '背景', purpose: '背景', must_answer: ['背景'] },
+            { title: '目标', purpose: '目标', must_answer: ['目标'] },
+          ] }], defer_content_migration: true,
+        } },
+      }] })
+      const historicalAuthorization = { ...authorization, message_id: 'historical-message' }
+      const historical = await persistBidWorkRequest(workspace, 'capability_task', 'chapter_writing',
+        { ...previous, task, authorization: historicalAuthorization }, previous.input_sources)
+      await expect(findCapabilityTaskRequest(workspace, historicalAuthorization)).resolves.toEqual(historical)
+      const message = createUserMessage({ content: [{ type: 'text', text: '执行拆分并修改正文' }], source: { kind: 'user' } })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const next = { session_id: String(session.id), message_id: String(message.id) }
+      await expect(persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, next,
+        [], previous.return_state)).rejects.toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+      await expect(findCapabilityTaskRequest(workspace, next)).resolves.toBeNull()
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('段落任务的后续计划补丁不能换成整章写作', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-capability-paragraph-patch-'))
     roots.push(root)

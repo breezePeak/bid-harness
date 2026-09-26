@@ -370,7 +370,7 @@ describe('BidStagePanel', () => {
     expect(confirmOutline).toHaveBeenCalledOnce()
   })
 
-  it('S5 手动模式请求写作要求，自动模式直接启动且不处理失败或等待开始', async () => {
+  it('S5 两种确认模式均直接启动，失败或等待开始时不自动重试', async () => {
     const manualMode = confirmationStore()
     const requestWritingRequirements = vi.fn(async () => {})
     const autoStartChapterWriting = vi.fn(async () => {})
@@ -382,16 +382,17 @@ describe('BidStagePanel', () => {
     const manual = render(<BidStagePanel {...props(waiting, {
       ...manualMode, requestWritingRequirements, autoStartChapterWriting,
     })} />)
-    await waitFor(() => { expect(requestWritingRequirements).toHaveBeenCalledOnce() })
-    expect(autoStartChapterWriting).not.toHaveBeenCalled()
+    await waitFor(() => { expect(requestWritingRequirements).not.toHaveBeenCalled() })
+    expect(autoStartChapterWriting).toHaveBeenCalledOnce()
     manual.unmount()
+    autoStartChapterWriting.mockClear()
 
     const automaticMode = confirmationStore('automatic')
     const automatic = render(<BidStagePanel {...props(waiting, {
       ...automaticMode, requestWritingRequirements, autoStartChapterWriting,
     })} />)
     await waitFor(() => { expect(autoStartChapterWriting).toHaveBeenCalledOnce() })
-    expect(requestWritingRequirements).toHaveBeenCalledOnce()
+    expect(requestWritingRequirements).not.toHaveBeenCalled()
     automatic.rerender(<BidStagePanel {...props(projection({
       runtime: { stage: 'chapter_writing', status: 'failed', failureReason: '正文失败' },
       allowedActions: ['send_message'],

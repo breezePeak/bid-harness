@@ -322,6 +322,8 @@ describe('目录能力候选', () => {
   })
 
   it.each([
+    { name: '拒绝遗留本次未迁移正文', interrupt: 'missing_followup' },
+    { name: '按用户要求只改目录', interrupt: 'user_deferred' },
     { name: '连续执行', interrupt: 'none' },
     { name: '目录候选合并后迁移前中断再恢复', interrupt: 'before_reorganize' },
     { name: '原文迁移候选合并后审核前中断再恢复', interrupt: 'before_review' },
@@ -334,14 +336,16 @@ describe('目录能力候选', () => {
       const message = createUserMessage({ content: [{ type: 'text', text: '把第一章拆成准备和实施并迁移正文' }],
         source: { kind: 'user' } })
       session.append('user/message', message, { surfaceOp: 'append' })
-      const task = { goal: '拆分并迁移第一章', scope: { kind: 'sections' as const, section_ids: ['SEC-1'] }, steps: [
-        { scope: { source: 'task' as const }, call: { capability: 'outline.refine' as const,
-          input: { feedback: '拆成准备和实施两个子章' } } },
-        { scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
-          input: { instruction: '保留并分配旧章所有正文块', source_section_ids: ['SEC-1'], allow_content_deletion: false } } },
-        ...interrupt === 'before_review' ? [{ scope: { source: 'task' as const },
-          call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }] : [],
-      ] }
+      const deferred = interrupt === 'missing_followup' || interrupt === 'user_deferred'
+      const task = { goal: '拆分并迁移第一章', allow_pending_content: interrupt === 'user_deferred',
+        scope: { kind: 'sections' as const, section_ids: ['SEC-1'] }, steps: [
+          { scope: { source: 'task' as const }, call: { capability: 'outline.refine' as const,
+            input: { feedback: '拆成准备和实施两个子章' } } },
+          ...deferred ? [] : [{ scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
+            input: { instruction: '保留并分配旧章所有正文块', source_section_ids: ['SEC-1'], allow_content_deletion: false } } }],
+          ...interrupt === 'before_review' ? [{ scope: { source: 'task' as const },
+            call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }] : [],
+        ] }
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const descriptor = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
         authorization, ['outline/confirmed-outline.json', 'analysis/requirements.json'],
@@ -405,6 +409,23 @@ describe('目录能力候选', () => {
         },
       }
       const run = createTestBidRunContext({ work: descriptor })
+      if (deferred) {
+        const execution = executeCapabilityTask(workspace, run, dispatcher, agent, session)
+        if (interrupt === 'missing_followup') {
+          await expect(execution).rejects.toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+          const formal = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+          expect(children.some(id => formal.sections.some(section => section.id === id))).toBe(false)
+          await expect(readFile(join(workspace.projectRoot, `requests/${descriptor.workId}/result.json`)))
+            .rejects.toMatchObject({ code: 'ENOENT' })
+        } else {
+          await expect(execution).resolves.toMatchObject({ status: 'completed' })
+          expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
+            .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
+        }
+        expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
+        expect(start).toHaveBeenCalledTimes(2)
+        return
+      }
       if (interrupt !== 'none') {
         await expect(executeCapabilityTask(workspace, run, dispatcher, agent, session))
           .rejects.toThrow(interrupt === 'before_reorganize'

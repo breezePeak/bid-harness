@@ -731,17 +731,15 @@ export function BidStagePanel({
   }, [canConfirmAnalysis, getTenderAnalysisForConfirmation, t])
 
   const tenderAutomaticKey = `${sessionId}:tender_analysis`
-  const chapterManualKey = `${sessionId}:chapter_writing:manual`
   const chapterAutomaticKey = `${sessionId}:chapter_writing:automatic`
   useEffect(() => {
     if (projection?.task.stage !== 'tender_analysis' || projection.task.status !== 'waiting_user') {
       actions.clearAttempted(tenderAutomaticKey)
     }
     if (projection?.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user') {
-      actions.clearAttempted(chapterManualKey)
       actions.clearAttempted(chapterAutomaticKey)
     }
-  }, [actions, chapterAutomaticKey, chapterManualKey, projection?.task.stage, projection?.task.status, tenderAutomaticKey])
+  }, [actions, chapterAutomaticKey, projection?.task.stage, projection?.task.status, tenderAutomaticKey])
 
   useEffect(() => {
     if (confirmationMode !== 'automatic' || !canConfirm || confirmOutline === undefined || draft === null
@@ -765,21 +763,13 @@ export function BidStagePanel({
     if (!hasProjection || projection.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user'
       || requestPending !== null) return
     if (writingEntry === null || writingEntry === undefined || writingEntry.phase !== 'empty') return
-    const automatic = confirmationMode === 'automatic'
-    const key = automatic ? chapterAutomaticKey : chapterManualKey
-    const action = automatic
-      ? autoStartChapterWriting
-      : requestWritingRequirements ? () => requestWritingRequirements({ mode: 'ensure' }) : undefined
-    const admitted = projection.allowedActions.includes(
-      automatic ? 'auto_start_chapter_writing' : 'request_writing_requirements',
-    )
-    if (!admitted || action === undefined || automaticAttempts.includes(key)) return
-    actions.markAttempted(key)
-    invoke(automatic ? 'auto_start' : 'request_requirements', action)
+    if (!projection.allowedActions.includes('auto_start_chapter_writing')
+      || autoStartChapterWriting === undefined || automaticAttempts.includes(chapterAutomaticKey)) return
+    actions.markAttempted(chapterAutomaticKey)
+    invoke('auto_start', autoStartChapterWriting)
   }, [
-    actions, automaticAttempts, autoStartChapterWriting, chapterAutomaticKey, chapterManualKey,
-    confirmationMode, hasProjection, invoke, projection, requestPending, requestWritingRequirements,
-    writingEntry,
+    actions, automaticAttempts, autoStartChapterWriting, chapterAutomaticKey,
+    hasProjection, invoke, projection, requestPending, writingEntry,
   ])
 
   if (!hasProjection) return null
@@ -1453,18 +1443,6 @@ export function BidStagePanel({
             <>
               {projection.task.status === 'waiting_user' && writingEntry.phase === 'empty' && (
                 <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={requestPending !== null || requestWritingRequirements === undefined}
-                    onClick={() => {
-                      invoke('request_requirements', async () => {
-                        await requestWritingRequirements?.({ mode: 'ensure' })
-                      })
-                    }}
-                  >
-                    {requestPending === 'request_requirements' ? t('status.running') : t('action.request_requirements')}
-                  </Button>
                   <Button
                     size="sm"
                     variant="primary"

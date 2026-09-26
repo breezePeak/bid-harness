@@ -86,8 +86,6 @@
 {"type":"bid.stage.completed","data":{"stage":"outline_generation","status":"completed","artifacts":[]}}
 {"type":"bid.stage.started","data":{"stage":"evidence_mapping","status":"running"}}
 {"type":"bid.stage.completed","data":{"stage":"evidence_mapping","status":"completed","artifacts":[]}}
-{"type":"bid.user_confirmation.required","data":{"stage":"chapter_writing","status":"waiting_user"}}
-{"type":"bid.user_confirmation.received","data":{"stage":"chapter_writing","confirmed":true}}
 {"type":"bid.run.started","data":{"run":{"runId":"{{sessionId}}","interactionSessionId":"{{sessionId}}","work":{"kind":"stage_execution","workId":"embedded-{{sessionId}}","stage":"chapter_writing","requestRef":"requests/embedded-chapter_writing.json","requestSha256":"0000000000000000000000000000000000000000000000000000000000000000","inputFingerprint":"0000000000000000000000000000000000000000000000000000000000000000"},"epoch":1,"baseProjectRevision":0,"controlRevision":0,"startedAt":0,"updatedAt":0}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"stage":"chapter_writing","progress":{"phase":"starting","summary":"正在开始 chapter_writing 阶段","updatedAt":0}}}
 {"type":"bid.run.completed","data":{"run":{"runId":"{{sessionId}}","interactionSessionId":"{{sessionId}}","work":{"kind":"stage_execution","workId":"embedded-{{sessionId}}","stage":"chapter_writing","requestRef":"requests/embedded-chapter_writing.json","requestSha256":"0000000000000000000000000000000000000000000000000000000000000000","inputFingerprint":"0000000000000000000000000000000000000000000000000000000000000000"},"epoch":1,"baseProjectRevision":0,"controlRevision":0,"startedAt":0,"updatedAt":0,"progress":{"phase":"starting","summary":"正在开始 chapter_writing 阶段","updatedAt":0}}}}

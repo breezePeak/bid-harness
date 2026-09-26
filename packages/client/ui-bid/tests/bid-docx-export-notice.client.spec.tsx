@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ConversationMatch, ConversationNodeContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import type {} from '@deepseek-ai/dsh-bid'
 import type { DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidDocxExportNotice } from '../src/client/BidDocxExportNotice.tsx'
@@ -15,6 +16,28 @@ const completed = {
   ...base, status: 'completed' as const, message: 'Word 导出完成', path: 'output/bid.docx',
   filePath: 'E:\\project\\.bid-harness\\output\\bid.docx', warnings: [],
 }
+
+const runtimeProps = {
+  sessionId: 'bid-export-test' as Parameters<typeof BidDocxExportNotice>[0]['sessionId'],
+  useSession: vi.fn(),
+  useSessions: vi.fn(),
+  useWorkspaces: vi.fn(),
+  useProjection: vi.fn(),
+  useTurnData: vi.fn(),
+  useInput: vi.fn(),
+  inputActions: {
+    setDraft: vi.fn(),
+    addImages: () => false,
+    removeImage: vi.fn(),
+    pruneImages: vi.fn(),
+    submit: vi.fn(),
+  },
+  openFile: vi.fn(),
+  inspectCall: vi.fn(),
+  forkAt: vi.fn(),
+  renderMessageImages: () => null,
+  fileMentions: () => undefined,
+} satisfies Omit<Parameters<typeof BidDocxExportNotice>[0], 'node' | 'showExport'>
 
 afterEach(cleanup)
 
@@ -37,7 +60,7 @@ describe('Word 导出聊天结果', () => {
       matches: [start], start, state, current: new Map(),
     })
     expect(node).toMatchObject({ id: '12', anchorSeq: 12, data: completed })
-    render(<BidDocxExportNotice node={node as never} showExport={vi.fn()} />)
+    render(<BidDocxExportNotice {...runtimeProps} node={node as never} showExport={vi.fn()} />)
     expect(screen.getByRole('status').textContent).toContain('Word 导出完成')
     expect(screen.getByRole('status').textContent).toContain(completed.filePath)
   })
@@ -47,7 +70,7 @@ describe('Word 导出聊天结果', () => {
     expect(bidDocxExportNoticeDefinition.match(event(failed))).toEqual({ id: '12', role: 'start' })
     expect(bidDocxExportNoticeDefinition.match(event({ ...completed, updatedAt: 3 }, 13)))
       .toEqual({ id: '13', role: 'start' })
-    render(<BidDocxExportNotice node={{ data: failed } as never} showExport={vi.fn()} />)
+    render(<BidDocxExportNotice {...runtimeProps} node={{ data: failed } as never} showExport={vi.fn()} />)
     expect(screen.getByRole('alert').textContent).toContain('Word 导出失败，未完成')
     expect(screen.getByRole('alert').textContent).toContain(failed.error)
     expect(screen.queryByText(/bid\.docx/u)).toBeNull()
@@ -56,7 +79,7 @@ describe('Word 导出聊天结果', () => {
   it('旧日志缺少绝对路径时标明相对基准并提供导出页入口', () => {
     const showExport = vi.fn()
     const { filePath: _filePath, ...historical } = completed
-    render(<BidDocxExportNotice node={{ data: historical } as never} showExport={showExport} />)
+    render(<BidDocxExportNotice {...runtimeProps} node={{ data: historical } as never} showExport={showExport} />)
     expect(screen.getByRole('status').textContent).toContain('项目数据目录内的 output/bid.docx')
     fireEvent.click(screen.getByRole('button', { name: '前往导出页查看当前文件' }))
     expect(showExport).toHaveBeenCalledOnce()

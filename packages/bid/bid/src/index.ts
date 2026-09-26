@@ -93,7 +93,7 @@ import { askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps
   persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
-import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
+import { bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
@@ -4158,8 +4158,17 @@ export class BidHostRuntime extends TypertRemoteService {
         toStage,
       ),
       operation.runs,
-      async stage => stage === 'file_intake' && intake !== undefined
-        ? intake.work : persistHostWork(workspace, 'stage_execution', stage, { stage }),
+      async (stage) => {
+        if (stage === 'file_intake' && intake !== undefined) return intake.work
+        if (stage === 'chapter_writing' && !await hasCurrentWritingPlan(workspace)) {
+          const current = await confirmedOutline(workspace)
+          const plan = createAutomaticWritingPlan(current.outline, current.sha256)
+          const planPath = within(workspace.projectRoot, WRITING_PLAN_PATH)
+          await assertNoLinkedPath(workspace.root, planPath)
+          await this.mutateProject(operation, lease => lease.writeJson(planPath, plan))
+        }
+        return persistHostWork(workspace, 'stage_execution', stage, { stage })
+      },
       this.createBeforeStageStart(operation, workspace),
     )
   }
@@ -5246,6 +5255,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns 接纳、排队或正式发布状态。
    */
   private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
+    validateCapabilityTaskContentFollowup(task)
     const session = agent.session
     assertBidMainSession(session)
     const message = session.events.findLast(event => event.type === 'user/message'

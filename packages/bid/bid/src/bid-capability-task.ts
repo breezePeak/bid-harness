@@ -6,7 +6,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import { BidWorkspace } from './index.ts'
 import {
-  bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema,
+  bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup,
   type BidCapabilityCall, type BidCapabilityExecutionContext, type BidCapabilityResult,
   type BidCapabilityStep, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
@@ -24,6 +24,7 @@ import { prepareBidWorkingTree } from './working-tree.ts'
 import { reconcileBidPublications } from './publication-batch.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
+import { readPendingChapterReorganization } from './outline-capability-update.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const messageReferenceSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
@@ -223,6 +224,7 @@ export async function persistCapabilityTaskRequest(
     }
     return existing
   }
+  validateCapabilityTaskContentFollowup(task)
   const inputSources = await Promise.all([...new Set(inputPaths)].sort().map(async (path) => {
     const digest = await fileHash(workspace, path)
     if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${path}`)
@@ -425,7 +427,9 @@ export async function patchCapabilityTaskSteps(
   const updated = capabilityTaskCheckpointSchema.parse({ ...checkpoint,
     steps: [...checkpoint.steps.slice(0, fromIndex), ...replacement],
     plan_patches: [...checkpoint.plan_patches, patch] })
-  bidCapabilityTaskSchema.parse({ ...request.task, steps: updated.steps.map(record => record.step) })
+  validateCapabilityTaskContentFollowup(
+    bidCapabilityTaskSchema.parse({ ...request.task, steps: updated.steps.map(record => record.step) }),
+  )
   await saveCheckpoint(run, canonical, updated)
   return updated
 }
@@ -635,6 +639,13 @@ export async function executeCapabilityTask(
     previous = { status: 'completed', result }
     run.reportProgress({ phase: 'executing', summary: `已完成能力步骤 ${String(index + 1)}/${String(checkpoint.steps.length)}`,
       completed: index + 1, total: checkpoint.steps.length })
+  }
+  if (request.task.allow_pending_content !== true) {
+    const existing = new Set(await readPendingChapterReorganization(canonical))
+    const pending = (await readPendingChapterReorganization(working)).filter(id => !existing.has(id))
+    if (pending.length > 0) {
+      throw new Error(`BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED: ${pending.join(', ')} 的正文尚未迁移，请补齐同一任务的迁移和复核步骤。`)
+    }
   }
   const receipt = await publishCapabilityChanges(run, canonical, working, [...changed], [...removed])
   return { status: 'completed', receipt,

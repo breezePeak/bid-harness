@@ -8,7 +8,7 @@ import type { BidRunContext } from './run-coordinator.ts'
 import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { isBidMainSession } from './stage-interaction.ts'
 
-const OBJECTIVE = '完成当前技术标的 S2 招标信息提取、S3 初步目录、S4 资料映射与目录深化、S5 正文编写及既定审核。正常阶段由 Host 和现有 subagent 执行；遇到可恢复失败时读取真实诊断，保留已完成成果，仅通过受控恢复工具改进失败任务的处理办法。到正式确认或整体写作要求边界等待用户。S1 文件处理、S6 Word 导出不属于本目标；不修改上游事实、正式确认和验收规则。'
+const OBJECTIVE = '完成当前技术标的 S2 招标信息提取、S3 初步目录、S4 资料映射与目录深化、S5 正文编写及既定审核。正常阶段由 Host 和现有 subagent 执行；遇到可恢复失败时读取真实诊断，保留已完成成果，仅通过受控恢复工具改进失败任务的处理办法。到正式确认时等待用户；S4 确认后直接开始 S5。S1 文件处理、S6 Word 导出不属于本目标；不修改上游事实、正式确认和验收规则。'
 
 /**
  * The latest durable binding is the only Goal authorized for this Session.

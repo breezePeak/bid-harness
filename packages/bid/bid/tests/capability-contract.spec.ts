@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BidWorkspace, type OutlineArtifact } from '../src/index.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
-import { bidCapabilityInputSchema, bidCapabilityScopeSchema, bidCapabilityTaskSchema,
+import { bidCapabilityInputSchema, bidCapabilityScopeSchema, bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup,
   type BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult,
   verifyCapabilityTaskScope } from '../src/bid-capability-registry.ts'
@@ -19,6 +19,34 @@ const outline = { sections: [
 ] } as OutlineArtifact
 
 describe('公共能力契约', () => {
+  it('暂缓正文迁移要求同一任务继续迁移并复核，只有明确暂缓可省略', () => {
+    const outlineStep = { scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+      operations: [{ type: 'split_section', section_id: 'A', children: [
+        { title: '背景', purpose: '背景', must_answer: ['背景'] },
+        { title: '目标', purpose: '目标', must_answer: ['目标'] },
+      ] }], defer_content_migration: true,
+    } } }
+    const reorganize = { scope: { source: 'task' }, call: { capability: 'chapter.reorganize',
+      input: { instruction: '分配原文', source_section_ids: ['A'] } } }
+    const review = { scope: { source: 'previous_targets' }, call: { capability: 'chapter.review',
+      input: { reason: '复核拆分结果' } } }
+    const task = { goal: '拆分为背景与目标并完成正文', scope: { kind: 'sections', section_ids: ['A'] },
+      steps: [outlineStep] }
+    const validate = (input: unknown) => {
+      const value = bidCapabilityTaskSchema.parse(input)
+      validateCapabilityTaskContentFollowup(value)
+      return value
+    }
+    expect(() => bidCapabilityTaskSchema.parse(task)).not.toThrow()
+    expect(() => validate(task)).toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+    expect(() => validate({ ...task, steps: [outlineStep, reorganize] }))
+      .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+    expect(() => validate({ ...task, steps: [outlineStep, review, reorganize] }))
+      .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+    expect(() => validate({ ...task, steps: [outlineStep, reorganize, review] })).not.toThrow()
+    expect(() => validate({ ...task, allow_pending_content: true })).not.toThrow()
+  })
+
   it('能力目录闭合，业务输入拒绝任意对象和模型指定路径', () => {
     expect(Object.keys(BID_CAPABILITIES)).toHaveLength(13)
     expect(bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A' } }).capability)

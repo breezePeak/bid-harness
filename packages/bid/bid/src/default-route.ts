@@ -25,5 +25,5 @@ export function defaultBidUserGate(stage: BidStage): BidStagePolicy['userGate'] 
   if (stage === 'tender_analysis' || stage === 'outline_generation' || stage === 'evidence_mapping') {
     return 'after_validation'
   }
-  return stage === 'chapter_writing' ? 'before_execution' : 'none'
+  return 'none'
 }

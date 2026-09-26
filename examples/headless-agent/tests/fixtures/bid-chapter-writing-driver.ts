@@ -24,9 +24,9 @@ try {
     { canExecute: stage => stage === 'chapter_writing', execute: async () => artifacts },
     { validate: (stage, output) => validateChapterWriting(workspace, stage, output) },
   )
-  const waiting = await orchestrator.drive()
-  agent.session.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
-  const runtime = await orchestrator.runConfirmedStage()
+  const runtime = await orchestrator.drive()
+  const askedForRequirements = agent.session.events.some(event =>
+    event.type === 'bid.user_confirmation.required' && event.data.stage === 'chapter_writing')
   await executeDocxExport(workspace, createTestBidRunContext())
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
@@ -39,7 +39,7 @@ try {
   }
   await writeFile(logPath, JSON.stringify(log))
   await executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx')
-  process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, waiting, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
+  process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, askedForRequirements, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()
 }
